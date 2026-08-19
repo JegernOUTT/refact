@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from "react";
-import { Flex, Text, Button, Badge } from "@radix-ui/themes";
+import { Flex, Text } from "@radix-ui/themes";
 import { LoaderCircle } from "lucide-react";
-import { Dialog, Icon } from "../ui";
+import { Badge, Button, Dialog, Icon } from "../ui";
 import { Callout } from "../Callout";
 import {
   createChatWithId,
@@ -243,7 +243,9 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
           <Dialog.Title>
             <Flex align="center" gap="2">
               <Text>{title}</Text>
-              <Badge color="blue">task_planner</Badge>
+              <Badge tone="accent" size="sm">
+                task_planner
+              </Badge>
             </Flex>
           </Dialog.Title>
 
@@ -276,11 +278,16 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
 
           <Flex gap="3" mt="4" justify="end">
             <Dialog.Close asChild>
-              <Button variant="soft" color="gray" disabled={isLoading}>
+              <Button variant="soft" size="md" disabled={isLoading}>
                 Cancel
               </Button>
             </Dialog.Close>
-            <Button onClick={() => void handleApply()} disabled={isLoading}>
+            <Button
+              variant="primary"
+              size="md"
+              onClick={() => void handleApply()}
+              disabled={isLoading}
+            >
               {isLoading ? loadingLabel : buttonLabel}
             </Button>
           </Flex>

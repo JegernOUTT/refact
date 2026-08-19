@@ -1,20 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  Flex,
-  Text,
-  Button,
-  ScrollArea,
-  Separator,
-  Badge,
-  IconButton,
-  Code,
-} from "@radix-ui/themes";
+import { Flex, Text, ScrollArea, Separator, Code } from "@radix-ui/themes";
 import {
   ExclamationTriangleIcon,
   CheckCircledIcon,
-  EyeOpenIcon,
-  Cross2Icon,
 } from "@radix-ui/react-icons";
+import { Eye, X } from "lucide-react";
 import {
   useGetProjectInformationQuery,
   useSaveProjectInformationMutation,
@@ -27,7 +17,15 @@ import {
 import { useAppDispatch } from "../../hooks";
 import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import { setIncludeProjectInfo } from "../../features/Chat/Thread/actions";
-import { Dialog, Slider, Surface, Switch } from "../ui";
+import {
+  Badge,
+  Button,
+  Dialog,
+  IconButton,
+  Slider,
+  Surface,
+  Switch,
+} from "../ui";
 
 type Props = {
   chatId: string;
@@ -144,19 +142,29 @@ const ContentPreviewDialog: React.FC<ContentPreviewProps> = ({
             <Dialog.Title style={{ margin: 0 }}>
               {block.path ?? block.title}
             </Dialog.Title>
-            <IconButton variant="ghost" onClick={onClose}>
-              <Cross2Icon />
-            </IconButton>
+            <IconButton
+              icon={X}
+              aria-label="Close preview"
+              size="sm"
+              variant="ghost"
+              onClick={onClose}
+            />
           </Flex>
 
           <Flex gap="2" mb="3" wrap="wrap">
-            <Badge color="blue">
+            <Badge tone="accent" size="sm">
               {isTruncated
                 ? `${originalTokens.toLocaleString()} → ${truncatedTokens.toLocaleString()} tokens`
                 : `~${truncatedTokens.toLocaleString()} tokens`}
             </Badge>
-            {isTruncated && <Badge color="orange">Truncated</Badge>}
-            <Badge color="gray">{block.section}</Badge>
+            {isTruncated && (
+              <Badge tone="warning" size="sm">
+                Truncated
+              </Badge>
+            )}
+            <Badge tone="muted" size="sm">
+              {block.section}
+            </Badge>
           </Flex>
 
           <ScrollArea style={{ maxHeight: "calc(80vh - 150px)" }}>
@@ -176,7 +184,7 @@ const ContentPreviewDialog: React.FC<ContentPreviewProps> = ({
           </ScrollArea>
 
           <Flex justify="end" mt="3">
-            <Button type="button" variant="soft" onClick={onClose}>
+            <Button type="button" variant="soft" size="md" onClick={onClose}>
               Close
             </Button>
           </Flex>
@@ -242,7 +250,7 @@ const SectionRow: React.FC<SectionRowProps> = ({
             {meta.label}
           </Text>
         </Flex>
-        <Badge color={config.enabled ? "blue" : "gray"} size="1">
+        <Badge tone={config.enabled ? "accent" : "muted"} size="xs">
           ~{tokens.toLocaleString()} tokens
         </Badge>
       </Flex>
@@ -274,13 +282,13 @@ const SectionRow: React.FC<SectionRowProps> = ({
                 allSectionBlocks.length === 1 &&
                 onPreviewBlock && (
                   <IconButton
-                    size="1"
+                    icon={Eye}
+                    aria-label="View content"
+                    size="sm"
                     variant="ghost"
                     onClick={() => onPreviewBlock(allSectionBlocks[0])}
                     title="View content"
-                  >
-                    <EyeOpenIcon />
-                  </IconButton>
+                  />
                 )}
             </Flex>
           )}
@@ -342,14 +350,14 @@ const SectionRow: React.FC<SectionRowProps> = ({
                   </Text>
                   {onPreviewBlock && (
                     <IconButton
-                      size="1"
+                      icon={Eye}
+                      aria-label="View content"
+                      size="sm"
                       variant="ghost"
                       onClick={() => onPreviewBlock(block)}
                       title="View content"
                       style={{ flexShrink: 0 }}
-                    >
-                      <EyeOpenIcon />
-                    </IconButton>
+                    />
                   )}
                 </Flex>
               ))}
@@ -558,7 +566,7 @@ export const ProjectInformationDialog: React.FC<Props> = ({
               />
               <Text weight="medium">Include project information</Text>
             </Flex>
-            <Badge color="blue" size="2">
+            <Badge tone="accent" size="sm">
               Total: ~{totalTokens.toLocaleString()} tokens
               {isPreviewing && " (updating...)"}
             </Badge>
@@ -613,18 +621,20 @@ export const ProjectInformationDialog: React.FC<Props> = ({
             <Button
               type="button"
               variant="soft"
-              color="gray"
+              size="md"
               onClick={handleReset}
             >
               Reset to Defaults
             </Button>
             <Dialog.Close asChild>
-              <Button type="button" variant="soft" color="gray">
+              <Button type="button" variant="soft" size="md">
                 Cancel
               </Button>
             </Dialog.Close>
             <Button
               type="button"
+              variant="primary"
+              size="md"
               onClick={() => void handleSave()}
               disabled={isSaving}
             >

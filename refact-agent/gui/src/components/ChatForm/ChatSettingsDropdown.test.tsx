@@ -140,6 +140,7 @@ describe("ChatSettingsDropdown", () => {
     });
 
     await user.click(await screen.findByRole("button", { name: /openai\/o1/ }));
+    await user.click(screen.getByRole("button", { name: /Token limits/ }));
     expect(screen.getByText("Auto-compression cap")).toBeInTheDocument();
     expect(
       screen.getByText(/selected model's maximum context window/i),

@@ -66,7 +66,7 @@ export const TrajectoryPopoverContent: React.FC<
       align="end"
       sideOffset={8}
       className={styles.popoverContent}
-      maxWidth="min(360px, calc(100vw - var(--rf-space-4)))"
+      maxWidth="min(360px, calc(100vw - 2 * var(--rf-space-3)))"
       maxHeight="min(520px, calc(100dvh - var(--rf-space-5)))"
     >
       <Tabs value={activeTab} onValueChange={handleTabChange}>

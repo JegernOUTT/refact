@@ -8,12 +8,6 @@ export interface ChatPage {
   name: "chat";
 }
 
-export interface ChatThreadHistoryPage {
-  name: "thread history page";
-  // causes a bug with other pages
-  chatId: string;
-}
-
 export interface LoginPage {
   name: "login page";
 }
@@ -132,7 +126,6 @@ export interface IntegrationsSetupPage {
 export type Page =
   | ChatPage
   | HistoryList
-  | ChatThreadHistoryPage
   | IntegrationsSetupPage
   | ProvidersPage
   | LoginPage

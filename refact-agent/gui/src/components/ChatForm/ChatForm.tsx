@@ -101,10 +101,7 @@ import { addCheckboxValuesToInput } from "./utils";
 import { stripUnfilledPlaceholders } from "../ComboBox/argumentPlaceholders";
 import { useCommandCompletionAndPreviewFiles } from "./useCommandCompletionAndPreviewFiles";
 import { useAppSelector, useAppDispatch } from "../../hooks";
-import {
-  clearError,
-  getErrorMessage,
-} from "../../features/Errors/errorsSlice";
+import { clearError, getErrorMessage } from "../../features/Errors/errorsSlice";
 import { useAttachedFiles, useCheckboxes } from "./useCheckBoxes";
 import { useInputValue } from "./useInputValue";
 import {

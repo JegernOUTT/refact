@@ -55,9 +55,7 @@ describe("DropzoneProvider", () => {
     fireEvent.drop(dropzone, {
       dataTransfer: {
         files: [file],
-        items: [
-          { kind: "file", type: file.type, getAsFile: () => file },
-        ],
+        items: [{ kind: "file", type: file.type, getAsFile: () => file }],
         types: ["Files"],
       },
     });

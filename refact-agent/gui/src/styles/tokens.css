@@ -54,9 +54,9 @@
   --rf-row-gap: var(--rf-space-1);
   --rf-section-gap: var(--rf-space-3);
   --rf-card-pad: var(--rf-panel-pad);
-  --rf-text-1: 11.5px;
-  --rf-text-2: 12.5px;
-  --rf-text-3: 13.5px;
+  --rf-text-1: 12px;
+  --rf-text-2: 13px;
+  --rf-text-3: 14px;
   --rf-text-4: 15px;
   --rf-text-5: 19px;
   --rf-font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -116,7 +116,10 @@
   --rf-control-h: 30px;
   --rf-control-h-sm: 26px;
   --rf-control-h-lg: 36px;
+  --rf-control-h-icon-sm: 28px;
   --rf-icon: 15px;
+  --rf-icon-md: var(--rf-icon);
+  --rf-icon-xs: 12px;
   --rf-icon-sm: 13px;
   --rf-icon-lg: 18px;
   --rf-hairline: 1px;

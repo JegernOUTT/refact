@@ -104,7 +104,9 @@ describe("CodeReviewTool", () => {
       screen.getByText("Concurrent writes can overwrite a newer cache entry."),
     ).toBeInTheDocument();
     expect(screen.getByText("execution-reproduced")).toBeInTheDocument();
-    expect(screen.getAllByText("correctness-reviewer").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("correctness-reviewer").length).toBeGreaterThan(
+      0,
+    );
     expect(screen.queryByText("Review narrative")).not.toBeInTheDocument();
   });
 

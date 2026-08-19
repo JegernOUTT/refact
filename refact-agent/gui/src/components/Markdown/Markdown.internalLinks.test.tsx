@@ -49,7 +49,9 @@ function snapshotWithLink(chatId: string): ChatEventEnvelope {
 describe("Markdown internal links", () => {
   it("renders markdown images through the image viewer", async () => {
     const { user } = render(
-      <Markdown>![Architecture](https://example.com/architecture.png)</Markdown>,
+      <Markdown>
+        ![Architecture](https://example.com/architecture.png)
+      </Markdown>,
     );
 
     const trigger = screen.getByRole("button", {

@@ -62,7 +62,8 @@ export function isSupportedImageFile(file: File): boolean {
 export function isSupportedTextFile(file: File): boolean {
   if (file.type.toLowerCase().startsWith("text/")) return true;
   const dotIndex = file.name.lastIndexOf(".");
-  const extension = dotIndex >= 0 ? file.name.slice(dotIndex).toLowerCase() : "";
+  const extension =
+    dotIndex >= 0 ? file.name.slice(dotIndex).toLowerCase() : "";
   return TEXT_FILE_EXTENSIONS.has(extension);
 }
 

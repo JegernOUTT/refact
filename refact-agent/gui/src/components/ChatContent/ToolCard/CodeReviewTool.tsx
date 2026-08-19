@@ -81,9 +81,7 @@ export const CodeReviewTool: React.FC<CodeReviewToolProps> = ({ toolCall }) => {
                 <Markdown>{content}</Markdown>
               </Box>
             ) : (
-              <ShikiCodeBlock showLineNumbers={false}>
-                {content}
-              </ShikiCodeBlock>
+              <ShikiCodeBlock showLineNumbers={false}>{content}</ShikiCodeBlock>
             )}
           </Box>
         </Box>

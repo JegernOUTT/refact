@@ -120,19 +120,41 @@
 }
 
 .usageBar {
-  height: 4px;
   width: 100%;
+  height: var(--rf-space-1);
   overflow: hidden;
   border-radius: var(--rf-radius-pill);
-  background: var(--rf-surface-glass);
+  background: var(--rf-surface-2);
+  appearance: none;
 }
 
-.usageBarFill {
-  height: 100%;
-  width: var(--provider-usage-pct, 0%);
+.usageBar::-webkit-progress-bar {
   border-radius: var(--rf-radius-pill);
-  background: var(--provider-usage-color, var(--rf-color-success));
-  transition: width var(--rf-dur-med) var(--rf-ease-standard);
+  background: var(--rf-surface-2);
+}
+
+.usageBar::-webkit-progress-value,
+.usageBar::-moz-progress-bar {
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-color-success);
+}
+
+.customModelDialog {
+  display: flex;
+  max-height: calc(100dvh - 2 * var(--rf-space-3));
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.customModelFields {
+  composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+}
+
+.customModelActions {
+  flex: 0 0 auto;
 }
 
 .formSection {

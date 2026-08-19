@@ -288,6 +288,7 @@ describe("TaskProgressWidget goal projection", () => {
       makeRuntime({ goal: makeGoal(), expanded: true, goalExpanded: true }),
     );
 
+    await user.click(screen.getByRole("button", { name: "Edit" }));
     const input = screen.getByLabelText("Goal text");
     await user.clear(input);
     await user.type(input, "Ship the shiny frog pond");

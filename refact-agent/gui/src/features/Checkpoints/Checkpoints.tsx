@@ -50,15 +50,15 @@ export const Checkpoints = () => {
       }}
     >
       <Dialog.Content className={styles.CheckpointsDialog}>
-        <Dialog.Description>
-          Restores chat and your project&apos;s files back to a snapshot taken
-          at this point
-        </Dialog.Description>
         <Dialog.Title>
           {errorLog.length >= 1
             ? "Oops... Something went wrong"
             : checkpointsTitle}
         </Dialog.Title>
+        <Dialog.Description>
+          Restores chat and your project&apos;s files back to a snapshot taken
+          at this point
+        </Dialog.Description>
         <ScrollArea scrollbars="vertical" className={styles.fileScroll}>
           <div className={classNames(styles.fileList, "rf-stagger")}>
             {wereFilesChanged &&

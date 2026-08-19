@@ -3,7 +3,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--rf-color-fg);
-  background: transparent;
+  background: color-mix(in oklab, var(--rf-surface-glass) 62%, transparent);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
 }
@@ -26,25 +26,18 @@
   --chat-input-padding: var(--rf-space-3);
 }
 
-.textareaWrapper :global(.rt-TextAreaRoot),
-.textareaWrapper :global(.rt-TextAreaRoot.rt-variant-surface) {
-  background: transparent !important;
-  border: 0 !important;
-  box-shadow: none !important;
-  --text-area-background-color: transparent !important;
-  --color-surface: transparent !important;
-}
-
-.textareaWrapper :global(.rt-TextAreaInput) {
+.textareaWrapper textarea {
   min-height: 100px;
   padding: var(--chat-input-padding);
+  background: transparent;
+  border: 0;
+  box-shadow: none;
 }
 
-.textareaWrapper :global(.rt-TextAreaInput),
-.textareaWrapper :global(.rt-TextAreaInput:focus),
-.textareaWrapper :global(.rt-TextAreaInput:focus-visible) {
-  outline: none !important;
-  box-shadow: none !important;
+.textareaWrapper textarea:focus,
+.textareaWrapper textarea:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 
 .controls {
@@ -105,12 +98,4 @@
   flex-wrap: wrap;
   gap: var(--rf-space-1);
   color: var(--rf-color-muted);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .root,
-  .controls,
-  .attachments {
-    transition-duration: 0ms;
-  }
 }

@@ -79,7 +79,10 @@ export const CreateWorktreeModal: React.FC<CreateWorktreeModalProps> = ({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <Dialog.Content className={styles.createDialog} maxWidth="420px">
-        <div {...dialogNonInteractiveCloseHandlers(() => onOpenChange(false))}>
+        <div
+          className={styles.dialogContentWrapper}
+          {...dialogNonInteractiveCloseHandlers(() => onOpenChange(false))}
+        >
           <Dialog.Title>Create worktree</Dialog.Title>
           <Dialog.Description>
             Create a new git worktree and attach it to this chat.

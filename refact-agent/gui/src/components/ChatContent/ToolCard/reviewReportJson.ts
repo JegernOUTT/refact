@@ -122,7 +122,11 @@ const stageStatuses: readonly PipelineStageStatus[] = [
   "completed",
   "failed",
 ];
-const agentStatuses: readonly ReviewAgentStatus[] = ["ran", "skipped", "failed"];
+const agentStatuses: readonly ReviewAgentStatus[] = [
+  "ran",
+  "skipped",
+  "failed",
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -209,7 +213,9 @@ function normalizeStage(value: unknown): ReviewPipelineStage | null {
   };
 }
 
-function normalizeMechanicalCheck(value: unknown): ReviewMechanicalCheck | null {
+function normalizeMechanicalCheck(
+  value: unknown,
+): ReviewMechanicalCheck | null {
   if (!isRecord(value)) return null;
   return {
     name: stringValue(value.name),
@@ -270,7 +276,8 @@ export function extractReviewReport(content: string): ReviewReport | null {
   );
   const match = blocks.at(-1);
   if (!match) return null;
-  if (content.slice(match.index + match[0].length).trim().length > 0) return null;
+  if (content.slice(match.index + match[0].length).trim().length > 0)
+    return null;
   try {
     const parsed: unknown = JSON.parse(match[1]);
     if (

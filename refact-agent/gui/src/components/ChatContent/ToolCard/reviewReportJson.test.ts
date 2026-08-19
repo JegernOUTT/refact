@@ -83,9 +83,7 @@ describe("review report helpers", () => {
       "downgraded",
     ]);
     expect(tierLabel("execution_reproduced")).toBe("execution-reproduced");
-    expect(tierLabel("needs_human_validation")).toBe(
-      "needs human validation",
-    );
+    expect(tierLabel("needs_human_validation")).toBe("needs human validation");
     expect(tierLabel("corroborated")).toBe("corroborated");
   });
 

@@ -20,8 +20,10 @@ function rule(css: string, selector: string): string {
 
 describe("chat bottom dock clearance styles", () => {
   it("uses one measured variable for transcript and floating consumers", () => {
-    expect(rule(chatCss, ".transcriptArea")).toContain(
-      "padding-bottom: var(--rf-composer-clearance, 0px)",
+    // The transcript area must not reserve composer clearance anywhere in
+    // Chat.module.css; the in-scroller spacer is the single source.
+    expect(chatCss).not.toContain(
+      "padding-bottom: var(--rf-composer-clearance",
     );
     expect(rule(contentCss, ".floatingLinks")).toContain(
       "bottom: var(--rf-composer-clearance, 0px)",

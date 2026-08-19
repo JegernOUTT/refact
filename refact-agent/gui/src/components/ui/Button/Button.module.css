@@ -74,14 +74,14 @@
 }
 
 .button.iconOnly {
-  width: max(var(--rf-control-h), 28px);
-  min-width: max(var(--rf-control-h), 28px);
+  width: max(var(--rf-control-h), var(--rf-control-h-icon-sm));
+  min-width: max(var(--rf-control-h), var(--rf-control-h-icon-sm));
   padding: 0;
 }
 
 .button.size-sm.iconOnly {
-  width: 28px;
-  min-width: 28px;
+  width: var(--rf-control-h-icon-sm);
+  min-width: var(--rf-control-h-icon-sm);
 }
 
 .button.size-lg.iconOnly {
@@ -105,9 +105,9 @@
 }
 
 .iconButton.size-sm {
-  width: 28px;
-  min-width: 28px;
-  height: 28px;
+  width: var(--rf-control-h-icon-sm);
+  min-width: var(--rf-control-h-icon-sm);
+  height: var(--rf-control-h-icon-sm);
 }
 
 .iconButton.size-md {

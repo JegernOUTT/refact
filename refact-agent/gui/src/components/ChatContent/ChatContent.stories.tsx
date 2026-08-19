@@ -22,6 +22,7 @@ import {
   MARKDOWN_ISSUE,
 } from "../../__fixtures__";
 import { http, HttpResponse } from "msw";
+import { Flex } from "@radix-ui/themes";
 import { CHAT_LINKS_URL } from "../../services/refact/consts";
 import {
   goodCaps,
@@ -33,6 +34,9 @@ import {
   noTools,
   ToolConfirmation,
 } from "../../__fixtures__/msw";
+import { ChatStoryHarness } from "../../__stories__/ChatStoryHarness";
+import { makeChatThread } from "../../__stories__/chatStoryState";
+import type { QueuedItem } from "../../features/Chat/Thread/types";
 
 const MockedStore: React.FC<{
   messages?: ChatMessages;
@@ -87,7 +91,9 @@ const MockedStore: React.FC<{
     <Provider store={store}>
       <Theme>
         <AbortControllerProvider>
-          <ChatContent onRetry={() => ({})} onStopStreaming={() => ({})} />
+          <Flex direction="column" align="stretch" height="100dvh">
+            <ChatContent onRetry={() => ({})} onStopStreaming={() => ({})} />
+          </Flex>
         </AbortControllerProvider>
       </Theme>
     </Provider>
@@ -154,9 +160,17 @@ export const AssistantMarkdown: Story = {
   },
 };
 
+// User ask (index 0) plus the chrome tool call/result pair (indices 3-4)
+// from the multimodal fixture: the smallest conversation that renders
+// image thumbnails inside a tool card.
+const TOOL_IMAGE_MESSAGES = CHAT_WITH_MULTI_MODAL.messages
+  .slice(0, 1)
+  .concat(CHAT_WITH_MULTI_MODAL.messages.slice(3, 5));
+
 export const ToolImages: Story = {
   args: {
     ...meta.args,
+    messages: TOOL_IMAGE_MESSAGES,
   },
 };
 
@@ -266,4 +280,43 @@ export const ToolWaiting: Story = {
       ],
     },
   },
+};
+
+const queuedItems = [
+  {
+    client_request_id: "queued-documentation",
+    priority: false,
+    command_type: "chat",
+    preview: "Document the new composer states",
+    content: "Document the new composer states and include screenshots.",
+  },
+  {
+    client_request_id: "queued-review",
+    priority: true,
+    command_type: "chat",
+    preview: "Review the queued-message behavior",
+    content: "Review queued-message behavior before publishing.",
+  },
+] satisfies QueuedItem[];
+
+export const WithQueuedMessages: Story = {
+  render: () => (
+    <ChatStoryHarness
+      thread={makeChatThread({
+        messages: [
+          { role: "user", content: "Prepare the composer documentation." },
+          {
+            role: "assistant",
+            content: "I’ll prepare the documentation and then review it.",
+          },
+        ],
+      })}
+      runtime={{ queued_items: queuedItems, streaming: true }}
+    >
+      <ChatContent
+        onRetry={() => undefined}
+        onStopStreaming={() => undefined}
+      />
+    </ChatStoryHarness>
+  ),
 };

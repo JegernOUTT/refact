@@ -39,7 +39,7 @@
   overflow-wrap: anywhere;
   background: var(--rf-surface-1);
   border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-chip);
+  border-radius: var(--rf-radius-card);
 }
 
 .previewStats {
@@ -75,5 +75,5 @@
   background: color-mix(in oklab, var(--rf-color-danger) 10%, transparent);
   border: var(--rf-hairline) solid
     color-mix(in oklab, var(--rf-color-danger) 40%, transparent);
-  border-radius: var(--rf-radius-chip);
+  border-radius: var(--rf-radius-card);
 }

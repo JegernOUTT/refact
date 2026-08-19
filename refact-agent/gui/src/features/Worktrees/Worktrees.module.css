@@ -130,7 +130,7 @@
 }
 
 .menu {
-  gap: var(--rf-space-2);
+  gap: var(--rf-space-3);
 }
 
 .section,
@@ -204,6 +204,8 @@
   gap: var(--rf-space-1);
   max-height: min(200px, calc(100dvh - var(--rf-space-6) * 4));
   overflow-y: auto;
+  padding-bottom: var(--rf-space-2);
+  scroll-padding-bottom: var(--rf-space-2);
 }
 
 .item {
@@ -357,11 +359,12 @@
   overflow: visible;
 }
 
-.createDialog > div {
+.dialogContentWrapper {
   display: flex;
   min-width: 0;
   max-width: 100%;
   flex-direction: column;
+  gap: var(--rf-space-3);
 }
 
 .field {
@@ -421,7 +424,7 @@
 .modalActions {
   display: flex;
   justify-content: flex-end;
-  gap: var(--rf-space-2);
+  gap: var(--rf-space-3);
   margin-top: var(--rf-space-4);
 }
 

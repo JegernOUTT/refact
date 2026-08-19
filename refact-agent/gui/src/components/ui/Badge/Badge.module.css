@@ -39,8 +39,8 @@
 }
 
 .size-xs > svg {
-  width: var(--rf-icon-xs, 12px);
-  height: var(--rf-icon-xs, 12px);
+  width: var(--rf-icon-xs);
+  height: var(--rf-icon-xs);
 }
 
 .size-sm {
@@ -63,8 +63,8 @@
 }
 
 .size-md > svg {
-  width: var(--rf-icon-md, var(--rf-icon-sm));
-  height: var(--rf-icon-md, var(--rf-icon-sm));
+  width: var(--rf-icon-md);
+  height: var(--rf-icon-md);
 }
 
 .variant-soft {

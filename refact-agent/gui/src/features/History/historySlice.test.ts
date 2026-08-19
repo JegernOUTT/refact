@@ -587,6 +587,44 @@ describe("error handling reducers", () => {
   });
 });
 
+describe("restoreChatEntry", () => {
+  it("restores a removed chat entry", () => {
+    const chat = createHistoryItem("chat1", "Restored Chat");
+    const state: HistoryState = {
+      chats: {},
+      isLoading: false,
+      loadError: null,
+      pagination: defaultPagination,
+    };
+
+    const result = historySlice.reducer(
+      state,
+      historySlice.actions.restoreChatEntry(chat),
+    );
+
+    expect(result.chats.chat1).toEqual(chat);
+  });
+
+  it("does not overwrite an existing chat entry", () => {
+    const existing = createHistoryItem("chat1", "Current Chat");
+    const state: HistoryState = {
+      chats: { chat1: existing },
+      isLoading: false,
+      loadError: null,
+      pagination: defaultPagination,
+    };
+
+    const result = historySlice.reducer(
+      state,
+      historySlice.actions.restoreChatEntry(
+        createHistoryItem("chat1", "Stale Chat"),
+      ),
+    );
+
+    expect(result.chats).toEqual({ chat1: existing });
+  });
+});
+
 describe("session_state handling", () => {
   it("hydrateHistoryFromMeta includes session_state", () => {
     const state: HistoryState = {

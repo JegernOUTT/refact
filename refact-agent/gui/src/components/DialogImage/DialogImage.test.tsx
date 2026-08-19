@@ -25,7 +25,9 @@ describe("DialogImage", () => {
     fireEvent.mouseDown(viewport, { button: 0, clientX: 10, clientY: 20 });
     fireEvent.mouseMove(window, { clientX: 35, clientY: 50 });
     fireEvent.mouseUp(window);
-    expect(image).toHaveStyle({ transform: "translate(25px, 30px) scale(1.25)" });
+    expect(image).toHaveStyle({
+      transform: "translate(25px, 30px) scale(1.25)",
+    });
 
     await user.click(screen.getByRole("button", { name: "Reset image view" }));
     expect(image).toHaveStyle({ transform: "translate(0px, 0px) scale(1)" });

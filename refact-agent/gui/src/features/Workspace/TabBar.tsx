@@ -1,11 +1,5 @@
 import classNames from "classnames";
-import {
-  FileText,
-  Layers,
-  Menu as MenuIcon,
-  Palette,
-  X,
-} from "lucide-react";
+import { FileText, Layers, Menu as MenuIcon, Palette, X } from "lucide-react";
 import {
   ComponentProps,
   DragEvent,

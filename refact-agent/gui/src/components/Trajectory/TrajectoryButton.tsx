@@ -1,8 +1,8 @@
 import React, { useState } from "react";
 import { HoverCard, Popover, Text } from "../LongTailPrimitives";
-import { ArchiveIcon } from "@radix-ui/react-icons";
+import { Archive } from "lucide-react";
+import { IconButton } from "../ui";
 import { TrajectoryPopoverContent } from "./TrajectoryPopover";
-import styles from "./TrajectoryButton.module.css";
 
 type TrajectoryButtonProps = {
   forceOpen?: boolean;
@@ -32,15 +32,14 @@ export const TrajectoryButton: React.FC<TrajectoryButtonProps> = ({
       <HoverCard.Root openDelay={300}>
         <HoverCard.Trigger asChild>
           <Popover.Trigger asChild>
-            <button
-              type="button"
-              className={styles.iconButton}
+            <IconButton
               data-testid="trajectory-button"
               aria-label="Compress or Handoff"
               disabled={disabled}
-            >
-              <ArchiveIcon />
-            </button>
+              icon={Archive}
+              size="sm"
+              variant="ghost"
+            />
           </Popover.Trigger>
         </HoverCard.Trigger>
         <HoverCard.Content size="1" side="bottom">

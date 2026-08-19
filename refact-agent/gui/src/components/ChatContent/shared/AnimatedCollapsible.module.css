@@ -134,8 +134,7 @@
   display: grid;
   gap: var(--rf-space-2);
   min-width: 0;
-  padding: var(--rf-space-2) 0 var(--rf-space-2)
-    var(--rf-collapsible-body-offset);
+  padding: 0 0 var(--rf-space-2) var(--rf-collapsible-body-offset);
   color: var(--rf-color-muted);
   font-size: var(--rf-text-2);
   line-height: var(--rf-line);

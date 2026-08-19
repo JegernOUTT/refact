@@ -13,6 +13,7 @@ import {
   type AddCustomModelRequest,
   type AvailableModel,
 } from "../../../../services/refact";
+import layoutStyles from "../ProviderForm.module.css";
 import styles from "./ModelCard.module.css";
 
 export type AddCustomModelModalProps = {
@@ -225,11 +226,16 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <Dialog.Content maxWidth="450px">
+      <Dialog.Content
+        className={layoutStyles.customModelDialog}
+        maxWidth="450px"
+      >
         <Dialog.Title>{title}</Dialog.Title>
         <Dialog.Description>{description}</Dialog.Description>
 
-        <div className={styles.modalStack}>
+        <div
+          className={`${styles.modalStack} ${layoutStyles.customModelFields}`}
+        >
           <FieldStack
             label="Model ID"
             required
@@ -361,7 +367,9 @@ export const AddCustomModelModal: FC<AddCustomModelModalProps> = ({
           {saveError ? <FieldError>{saveError}</FieldError> : null}
         </div>
 
-        <div className={styles.modalActions}>
+        <div
+          className={`${styles.modalActions} ${layoutStyles.customModelActions}`}
+        >
           <Dialog.Close asChild>
             <Button variant="soft" disabled={isLoading}>
               Cancel

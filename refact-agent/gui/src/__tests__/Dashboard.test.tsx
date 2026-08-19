@@ -1,12 +1,15 @@
 import { http, HttpResponse } from "msw";
 import { QueryStatus } from "@reduxjs/toolkit/query";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "../utils/test-utils";
+import { render, screen, waitFor } from "../utils/test-utils";
 import { emptyTasks, server } from "../utils/mockServer";
 import { Dashboard } from "../features/Dashboard/Dashboard";
 import { useSidebarSubscription } from "../hooks/useSidebarSubscription";
 import { updateConfig } from "../features/Config/configSlice";
 import { tasksApi, type TaskMeta } from "../services/refact/tasks";
+import { RecentItem } from "../features/Dashboard/components/ChatsSection/RecentItem";
+import type { HistoryTreeNode } from "../features/History/historySlice";
 
 const CONFIG_STATE = {
   config: {
@@ -72,6 +75,37 @@ const predefinedChat = {
   tasks_done: 0,
   tasks_failed: 0,
 };
+
+const recentItemNode: HistoryTreeNode = {
+  id: "chat-delete-test",
+  title: "Chat to delete",
+  createdAt: "2024-01-01T00:00:00Z",
+  updatedAt: "2024-01-01T00:00:00Z",
+  model: "gpt-4",
+  mode: "agent",
+  tool_use: "agent",
+  messages: [],
+  boost_reasoning: false,
+  include_project_info: true,
+  increase_max_tokens: false,
+  last_user_message_id: "",
+  children: [],
+  bubbleChildren: [],
+};
+
+function renderRecentItem(onDelete: (id: string) => void) {
+  return render(
+    <RecentItem
+      node={recentItemNode}
+      breakpoint="wide"
+      depth={0}
+      isExpanded={false}
+      onToggleExpand={vi.fn()}
+      onClick={vi.fn()}
+      onDelete={onDelete}
+    />,
+  );
+}
 
 function envelope(seq: number, event: Record<string, unknown>) {
   return {
@@ -538,5 +572,43 @@ describe("Dashboard progressive sidebar readiness", () => {
     expect(screen.getByText("Failed to load chats")).toBeInTheDocument();
     expect(screen.getByText("trajectory boom")).toBeInTheDocument();
     expect(screen.queryByText(/No chats yet/i)).not.toBeInTheDocument();
+  });
+});
+
+describe("Dashboard recent chat deletion", () => {
+  it("requires confirmation before deleting a chat", async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn();
+    renderRecentItem(onDelete);
+
+    await user.click(
+      screen.getByRole("button", { name: "Delete Chat to delete" }),
+    );
+
+    expect(await screen.findByText("Destructive action")).toBeInTheDocument();
+    expect(onDelete).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+
+    expect(onDelete).toHaveBeenCalledOnce();
+    expect(onDelete).toHaveBeenCalledWith("chat-delete-test");
+  });
+
+  it("closes delete confirmation without deleting when cancelled", async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn();
+    renderRecentItem(onDelete);
+
+    await user.click(
+      screen.getByRole("button", { name: "Delete Chat to delete" }),
+    );
+    expect(await screen.findByText("Destructive action")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("Destructive action")).not.toBeInTheDocument();
+    });
+    expect(onDelete).not.toHaveBeenCalled();
   });
 });

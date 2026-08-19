@@ -250,7 +250,11 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
   }
 
   return (
-    <Surface className={styles.ToolConfirmationCard} variant="surface-1">
+    <Surface
+      className={styles.ToolConfirmationCard}
+      variant="surface-1"
+      style={{ padding: "var(--rf-panel-pad)" }}
+    >
       <div className={styles.ToolConfirmationLayout}>
         <div className={styles.ToolConfirmationContent}>
           <div className={styles.ToolConfirmationHeading}>
@@ -259,8 +263,14 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
           </div>
           <div className={styles.ToolList}>
             {resolvedReasons.map((r) => (
-              <div className={styles.ToolItem} key={r.tool_call_id}>
-                <Badge tone={r.type === "denial" ? "danger" : "warning"}>
+              <div
+                className={styles.ToolItem}
+                key={`${r.type}-${r.tool_call_id}`}
+              >
+                <Badge
+                  tone={r.type === "denial" ? "danger" : "warning"}
+                  size="md"
+                >
                   {r.toolName}
                 </Badge>
                 {r.command && r.command !== r.toolName && (
@@ -292,7 +302,9 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
                   }}
                   color="indigo"
                 >
-                  {linksToShellSettings ? "Shell settings" : "Configuration Page"}
+                  {linksToShellSettings
+                    ? "Shell settings"
+                    : "Configuration Page"}
                 </Link>
               </p>
             )}
@@ -329,7 +341,11 @@ const CacheGuardConfirmation: React.FC<CacheGuardConfirmationProps> = ({
   const estimatedUsd = extractEstimatedUsd(details);
 
   return (
-    <Surface className={styles.ToolConfirmationCard} variant="surface-1">
+    <Surface
+      className={styles.ToolConfirmationCard}
+      variant="surface-1"
+      style={{ padding: "var(--rf-panel-pad)" }}
+    >
       <div className={styles.ToolConfirmationLayout}>
         <div className={styles.ToolConfirmationContent}>
           <div className={styles.ToolConfirmationHeading}>
@@ -403,7 +419,11 @@ const PatchConfirmation: React.FC<PatchConfirmationProps> = ({
   }, [pauseReasons, toolCallsById]);
 
   return (
-    <Surface className={styles.ToolConfirmationCard} variant="surface-1">
+    <Surface
+      className={styles.ToolConfirmationCard}
+      variant="surface-1"
+      style={{ padding: "var(--rf-panel-pad)" }}
+    >
       <div className={styles.ToolConfirmationLayout}>
         <div className={styles.ToolConfirmationContent}>
           <div className={styles.ToolConfirmationHeading}>

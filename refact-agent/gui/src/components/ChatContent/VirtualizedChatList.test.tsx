@@ -342,6 +342,37 @@ describe("VirtualizedChatList", () => {
     expect(screen.queryByTitle("Follow stream")).not.toBeInTheDocument();
   });
 
+  test("shows the follow button when an idle chat scrolls away from bottom", () => {
+    render(
+      <div style={{ height: 400 }}>
+        <VirtualizedChatList
+          items={items}
+          isStreaming={false}
+          renderItem={(item) => <div>{item.text}</div>}
+        />
+      </div>,
+    );
+
+    const scroller = screen.getByTestId("chat-virtuoso-scroller");
+    Object.defineProperties(scroller, {
+      scrollTop: { configurable: true, value: 1600, writable: true },
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 2000 },
+    });
+    fireEvent.scroll(scroller);
+
+    scroller.scrollTop = 800;
+    fireEvent.scroll(scroller);
+    getVirtuosoCalls().at(-1)?.atBottomStateChange?.(false);
+
+    expect(screen.getByTitle("Follow stream")).toBeInTheDocument();
+
+    scroller.scrollTop = 1600;
+    fireEvent.scroll(scroller);
+
+    expect(screen.queryByTitle("Follow stream")).not.toBeInTheDocument();
+  });
+
   test("keeps following when dynamic height temporarily reports not at bottom", () => {
     render(
       <div style={{ height: 400 }}>

@@ -177,22 +177,18 @@ describe("Delete a Chat form history", () => {
 
     const itemTitleToDelete = "Test title";
 
-    const restoreButtonText = await app.findByText(itemTitleToDelete);
+    await app.findByText(itemTitleToDelete);
 
-    // Find the delete button - uses aria-label="Delete chat"
-    let container = restoreButtonText.parentElement;
-    while (
-      container &&
-      !container.querySelector('[aria-label="Delete chat"]')
-    ) {
-      container = container.parentElement;
-    }
-    const deleteButton = container?.querySelector('[aria-label="Delete chat"]');
+    const deleteTrigger = await app.findByRole("button", {
+      name: `Delete ${itemTitleToDelete}`,
+    });
+    await user.click(deleteTrigger);
 
-    expect(deleteButton).not.toBeNull();
-
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    await user.click(deleteButton!);
+    await app.findByText("Destructive action");
+    const confirmDeleteButton = await app.findByRole("button", {
+      name: "Delete",
+    });
+    await user.click(confirmDeleteButton);
 
     // Wait for the deletion to be processed
     await waitFor(() => {

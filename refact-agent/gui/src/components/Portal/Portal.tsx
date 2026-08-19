@@ -1,19 +1,27 @@
-import React from "react";
+import React, { useContext } from "react";
 import { createPortal } from "react-dom";
-import { useConfig } from "../../hooks";
-import { Theme } from "../Theme";
+import { Theme as RadixTheme } from "@radix-ui/themes";
+import { ThemePropsContext } from "../Theme/ThemePropsContext";
 
-export type PortalProps = React.ComponentPropsWithoutRef<typeof Theme> & {
+export type PortalProps = React.ComponentPropsWithoutRef<typeof RadixTheme> & {
   element?: HTMLElement;
 };
 
 export const Portal = React.forwardRef<HTMLDivElement, PortalProps>(
   ({ children, element = document.body, ...props }, ref) => {
-    const config = useConfig();
+    const resolved = useContext(ThemePropsContext);
+
     return createPortal(
-      <Theme {...config.themeProps} {...props} ref={ref}>
+      <RadixTheme
+        {...resolved?.themeProps}
+        {...props}
+        ref={ref}
+        appearance={resolved?.appearance}
+        data-host={resolved?.host}
+        data-appearance={resolved?.appearance}
+      >
         {children}
-      </Theme>,
+      </RadixTheme>,
       element,
     );
   },

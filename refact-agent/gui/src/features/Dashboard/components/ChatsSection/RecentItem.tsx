@@ -23,6 +23,7 @@ import {
   dashboardToneFromMode,
 } from "../DashboardPrimitives";
 import { Icon, StatusDot } from "../../../../components/ui";
+import { DeletePopover } from "../../../../components/DeletePopover/DeletePopover";
 import { getStatusFromSessionState } from "../../../../utils/sessionStatus";
 import { DotTrail } from "../DotTrail/DotTrail";
 import type { HistoryTreeNode } from "../../../History/historySlice";
@@ -351,14 +352,6 @@ export const RecentItem: React.FC<RecentItemProps> = ({
     [editValue, node.id, node.title, onRename],
   );
 
-  const handleDelete = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation();
-      onDelete?.(node.id);
-    },
-    [node.id, onDelete],
-  );
-
   const handleRowKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (isEditing) return;
@@ -510,16 +503,20 @@ export const RecentItem: React.FC<RecentItemProps> = ({
                 </Tooltip>
               )}
               {onDelete && (
-                <Tooltip content="Delete">
-                  <button
-                    type="button"
-                    className={styles.actionButton}
-                    onClick={handleDelete}
-                    aria-label="Delete chat"
-                  >
-                    <Icon icon={X} size="sm" tone="danger" />
-                  </button>
-                </Tooltip>
+                <div
+                  onClick={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => event.stopPropagation()}
+                >
+                  <DeletePopover
+                    size="sm"
+                    triggerClassName={styles.actionButton}
+                    itemName={node.title || "New Chat"}
+                    deleteBy={node.id}
+                    isDisabled={false}
+                    isDeleting={false}
+                    handleDelete={(id) => onDelete(id)}
+                  />
+                </div>
               )}
             </>
           )}

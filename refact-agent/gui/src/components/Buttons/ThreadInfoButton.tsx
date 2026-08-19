@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Flex, Popover, Text } from "@radix-ui/themes";
+import { Box, Flex, Text } from "@radix-ui/themes";
 import { Check, Copy, Info } from "lucide-react";
-import { Button, IconButton } from "../ui";
+import { Button, IconButton, Popover } from "../ui";
 import { useCopyToClipboard } from "../../hooks";
 import {
   useGetTrajectoryPathQuery,
@@ -172,8 +172,8 @@ export const ThreadInfoButton: React.FC<ThreadInfoButtonProps> = ({
     (trajectoryRequested && isFetchingTrajectory);
 
   return (
-    <Popover.Root open={open && !isDisabled} onOpenChange={handleOpenChange}>
-      <Popover.Trigger>
+    <Popover open={open && !isDisabled} onOpenChange={handleOpenChange}>
+      <Popover.Trigger asChild>
         <IconButton
           aria-label="Thread info"
           data-testid="thread-info-button"
@@ -190,7 +190,12 @@ export const ThreadInfoButton: React.FC<ThreadInfoButtonProps> = ({
         className={styles.popoverContent}
         data-testid="thread-info-popover"
       >
-        <Flex direction="column" gap="3" minWidth="280px" maxWidth="420px">
+        <Flex
+          direction="column"
+          gap="3"
+          minWidth="min(280px, calc(100vw - 2 * var(--rf-space-3)))"
+          maxWidth="420px"
+        >
           <Flex direction="column" gap="1">
             <Text size="1" color="gray">
               Thread id
@@ -251,7 +256,7 @@ export const ThreadInfoButton: React.FC<ThreadInfoButtonProps> = ({
           </Flex>
         </Flex>
       </Popover.Content>
-    </Popover.Root>
+    </Popover>
   );
 };
 

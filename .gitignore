@@ -29,6 +29,7 @@ __pycache__/
 _*
 !__fixtures__
 !__tests__
+!__stories__
 
 # Include python init files, ignored by _*
 !**/__init__.py

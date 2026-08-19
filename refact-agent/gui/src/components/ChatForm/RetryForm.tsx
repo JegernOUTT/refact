@@ -132,6 +132,16 @@ export const RetryForm: React.FC<{
     };
   }, [closeAndReset]);
 
+  useEffect(() => {
+    const reduced = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    formRef.current?.scrollIntoView({
+      block: "nearest",
+      behavior: reduced ? "auto" : "smooth",
+    });
+  }, []);
+
   const handleRetry = useCallback(() => {
     const trimmedText = textValue.trim();
     if (imageValue.length === 0 && trimmedText.length > 0) {

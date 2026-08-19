@@ -20,7 +20,6 @@
 
 .trigger:hover:not(.disabled) {
   background: var(--rf-surface-1);
-  transform: translateY(-1px) scale(1);
 }
 
 .trigger:active:not(.disabled) {
@@ -63,8 +62,8 @@
 }
 
 .content {
-  width: min(440px, calc(100vw - var(--rf-space-4)));
-  max-width: min(440px, calc(100vw - var(--rf-space-4)));
+  width: min(440px, calc(100vw - 2 * var(--rf-space-3)));
+  max-width: min(440px, calc(100vw - 2 * var(--rf-space-3)));
 }
 
 .settingsLayout {
@@ -91,11 +90,54 @@
   min-width: 0;
 }
 
+.tokenLimits {
+  display: grid;
+  min-width: 0;
+}
+
+.tokenLimitsTrigger {
+  display: flex;
+  width: 100%;
+  min-height: var(--rf-control-h-sm);
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-fg);
+  font: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-ctl);
+  cursor: pointer;
+}
+
+.tokenLimitsTrigger:hover {
+  background: var(--rf-surface-1);
+}
+
+.tokenLimitsTrigger:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.tokenLimitsChevron {
+  flex: 0 0 auto;
+  transition: transform var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.tokenLimitsTrigger[aria-expanded="true"] .tokenLimitsChevron {
+  transform: rotate(180deg);
+}
+
+.tokenLimitsBody {
+  display: grid;
+  min-width: 0;
+}
+
 .section {
   display: grid;
   min-width: 0;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-2) var(--rf-space-2);
+  padding: var(--rf-space-2) 0;
 }
 
 .section:first-child {
@@ -284,6 +326,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .trigger,
+  .tokenLimitsChevron,
   .effortButton {
     transition: none;
   }

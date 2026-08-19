@@ -467,7 +467,8 @@ describe("WorktreeControl", () => {
       path.resolve(__dirname, "Worktrees.module.css"),
       "utf8",
     );
-    const dialogInner = css.match(/\.createDialog > div \{[^}]+\}/)?.[0] ?? "";
+    const dialogInner =
+      css.match(/\.dialogContentWrapper \{[^}]+\}/)?.[0] ?? "";
     const branchPicker =
       css.match(/\.branchPicker,\n\.branchPicker input \{[^}]+\}/)?.[0] ?? "";
 

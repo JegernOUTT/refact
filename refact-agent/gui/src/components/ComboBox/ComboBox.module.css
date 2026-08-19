@@ -55,7 +55,8 @@
   flex-direction: column !important;
   gap: var(--rf-space-1);
   overflow: hidden;
-  padding: var(--rf-space-1) !important;
+  /* dense completion list: compact panel pad */
+  padding: var(--rf-panel-pad-compact) !important;
 }
 
 .item {

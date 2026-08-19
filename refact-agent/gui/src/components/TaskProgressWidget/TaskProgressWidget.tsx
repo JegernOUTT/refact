@@ -31,6 +31,7 @@ import { Box, Flex, Separator, Text } from "../LongTailPrimitives";
 import { Badge, Button, Icon, IconButton } from "../ui";
 import { Chevron } from "../Collapsible";
 import { CircularProgress } from "../CircularProgress/CircularProgress";
+import { Markdown } from "../Markdown";
 import { StatusDot, type StatusDotState } from "../StatusDot";
 import {
   addBuddyCrashBreadcrumb,
@@ -362,6 +363,7 @@ const GoalSection: React.FC<GoalSectionProps> = ({
     });
   }, [goalMaxMinutes, goalMaxTokens, goalMaxTurns]);
 
+  const [editingGoal, setEditingGoal] = useState(false);
   const trimmedDraft = draft.trim();
   const hasGoal = goal !== null;
   const canSave =
@@ -375,6 +377,7 @@ const GoalSection: React.FC<GoalSectionProps> = ({
     if (!canSave) return;
     if (hasGoal) {
       onUpdateText(trimmedDraft);
+      setEditingGoal(false);
       return;
     }
     onCreate(
@@ -434,16 +437,22 @@ const GoalSection: React.FC<GoalSectionProps> = ({
         <Collapsible.Content>
           <Flex direction="column" gap="3" className={styles.goalBody}>
             <Flex direction="column" gap="2">
-              <label className={styles.goalLabel} htmlFor="task-goal-input">
-                Goal text
-              </label>
-              <textarea
-                className={styles.goalInput}
-                id="task-goal-input"
-                value={draft}
-                onChange={(event) => setDraft(event.currentTarget.value)}
-                placeholder="Set a goal for this thread"
-              />
+              {goal && !editingGoal ? (
+                <Markdown>{goal.content}</Markdown>
+              ) : (
+                <>
+                  <label className={styles.goalLabel} htmlFor="task-goal-input">
+                    Goal text
+                  </label>
+                  <textarea
+                    className={styles.goalInput}
+                    id="task-goal-input"
+                    value={draft}
+                    onChange={(event) => setDraft(event.currentTarget.value)}
+                    placeholder="Set a goal for this thread"
+                  />
+                </>
+              )}
               <GoalBudgetEditor
                 draft={budgetDraft}
                 showApply={hasGoal}
@@ -456,14 +465,38 @@ const GoalSection: React.FC<GoalSectionProps> = ({
                     ? formatGoalBudgetLine(goal)
                     : "Save to start tracking a goal"}
                 </Text>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={!canSave}
-                  onClick={handleSave}
-                >
-                  Save
-                </Button>
+                {goal && !editingGoal ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setEditingGoal(true)}
+                  >
+                    Edit
+                  </Button>
+                ) : (
+                  <>
+                    {goal ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setDraft(goal.content);
+                          setEditingGoal(false);
+                        }}
+                      >
+                        Cancel
+                      </Button>
+                    ) : null}
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={!canSave}
+                      onClick={handleSave}
+                    >
+                      Save
+                    </Button>
+                  </>
+                )}
               </Flex>
             </Flex>
 

@@ -1,6 +1,6 @@
 import React, { forwardRef } from "react";
 import { Flex } from "@radix-ui/themes";
-import { FileText, LogOut, Puzzle, Send, X } from "lucide-react";
+import { LogOut, Puzzle, Send, X } from "lucide-react";
 import classNames from "classnames";
 import { Button, ButtonGroup, IconButton, Tooltip } from "../ui";
 import styles from "./button.module.css";
@@ -56,18 +56,6 @@ export const AgentIntegrationsButton = forwardRef<
 ));
 
 AgentIntegrationsButton.displayName = "AgentIntegrationsButton";
-
-export const ThreadHistoryButton: React.FC<KitIconButtonProps> = ({
-  "aria-label": ariaLabel = "Thread history",
-  ...props
-}) => (
-  <IconButton
-    aria-label={ariaLabel}
-    icon={FileText}
-    variant="ghost"
-    {...props}
-  />
-);
 
 export function BackToSideBarButton(props: PlainButtonProps) {
   return (

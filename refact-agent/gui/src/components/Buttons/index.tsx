@@ -1,6 +1,5 @@
 export {
   PaperPlaneButton,
-  ThreadHistoryButton,
   BackToSideBarButton,
   RightButton,
   RightButtonGroup,

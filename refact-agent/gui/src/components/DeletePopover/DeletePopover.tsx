@@ -10,6 +10,8 @@ export type DeletePopoverProps = {
   itemName: string;
   deleteBy: string;
   handleDelete: (deleteBy: string) => void;
+  size?: "sm" | "md";
+  triggerClassName?: string;
 };
 
 export const DeletePopover: FC<DeletePopoverProps> = ({
@@ -18,18 +20,20 @@ export const DeletePopover: FC<DeletePopoverProps> = ({
   handleDelete,
   isDeleting,
   isDisabled,
+  size = "md",
+  triggerClassName,
 }) => {
   return (
     <Popover>
       <Popover.Trigger asChild>
         <IconButton
-          aria-label="Delete configuration data"
+          aria-label={`Delete ${itemName}`}
           icon={Trash2}
           variant="danger"
           type="button"
-          size="md"
-          title="Delete configuration data"
-          className={classNames({
+          size={size}
+          title={`Delete ${itemName}`}
+          className={classNames(triggerClassName, {
             [styles.disabledButton]: isDeleting || isDisabled,
           })}
           disabled={isDeleting || isDisabled}
@@ -40,7 +44,7 @@ export const DeletePopover: FC<DeletePopoverProps> = ({
           <div className={styles.copy}>
             <h4 className={styles.title}>Destructive action</h4>
             <p className={styles.description}>
-              Do you really want to delete {itemName}&apos;s configuration data?
+              Do you really want to delete {itemName}?
             </p>
           </div>
 

@@ -1,7 +1,7 @@
 import React, { useCallback, useState } from "react";
-import { Flex, Text, Button, Badge } from "@radix-ui/themes";
+import { Flex, Text } from "@radix-ui/themes";
 import { LoaderCircle } from "lucide-react";
-import { Dialog, Icon } from "../ui";
+import { Badge, Button, Dialog, Icon } from "../ui";
 import { Callout } from "../Callout";
 import { useApplyModeTransitionMutation } from "../../services/refact/trajectory";
 import { trajectoriesApi } from "../../services/refact/trajectories";
@@ -217,14 +217,16 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
             <Flex align="center" gap="2">
               <Text>{isSelf ? "Restart Mode" : "Switch Mode"}</Text>
               {isSelf ? (
-                <Badge color="green">
+                <Badge tone="success" size="sm">
                   {displayTargetModeTitle || displayTargetMode}
                 </Badge>
               ) : (
                 <>
-                  <Badge color="gray">{displayCurrentMode}</Badge>
+                  <Badge tone="muted" size="sm">
+                    {displayCurrentMode}
+                  </Badge>
                   <Text color="gray">→</Text>
-                  <Badge color="blue">
+                  <Badge tone="accent" size="sm">
                     {displayTargetModeTitle || displayTargetMode}
                   </Badge>
                 </>
@@ -266,11 +268,16 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
 
           <Flex gap="3" mt="4" justify="end">
             <Dialog.Close asChild>
-              <Button variant="soft" color="gray" disabled={isBusy}>
+              <Button variant="soft" size="md" disabled={isBusy}>
                 Cancel
               </Button>
             </Dialog.Close>
-            <Button onClick={() => void handleApply()} disabled={isBusy}>
+            <Button
+              variant="primary"
+              size="md"
+              onClick={() => void handleApply()}
+              disabled={isBusy}
+            >
               {isBusy
                 ? isSelf
                   ? "Restarting..."

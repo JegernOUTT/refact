@@ -380,7 +380,9 @@ const pruneContextChatByTab = (
   for (const [tabId, group] of Object.entries(state.groups)) {
     if (!group || state.contextChatByTab?.[tabId]) continue;
     const groupSurfaces = collectTabIds(group.root);
-    if (!groupSurfaces.some((key) => isFileSurface(key) || isDesignSurface(key)))
+    if (
+      !groupSurfaces.some((key) => isFileSurface(key) || isDesignSurface(key))
+    )
       continue;
     const chatId =
       chatIdFromSurface(focusedSurfaceKey(group)) ??

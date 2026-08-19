@@ -6,14 +6,72 @@ import { TOOLS, CHAT_LINKS_URL } from "../services/refact/consts";
 import { STUB_TOOL_RESPONSE } from "./tools_response";
 import type { LinksForChatResponse } from "../services/refact/links";
 import { ToolConfirmationResponse } from "../services/refact";
+import type { ChatModesResponse } from "../services/refact/chatModes";
+
+const CHAT_MODES_RESPONSE: ChatModesResponse = {
+  modes: [
+    {
+      id: "agent",
+      title: "Agent",
+      description: "Autonomous coding with project tools and checkpoints",
+      tools_count: 12,
+      thread_defaults: {
+        include_project_info: true,
+        checkpoints_enabled: true,
+        auto_approve_editing_tools: false,
+        auto_approve_dangerous_commands: false,
+      },
+      ui: { order: 1, tags: ["editing", "tools"] },
+    },
+    {
+      id: "ask",
+      title: "Ask",
+      description: "Discuss the codebase without making edits",
+      tools_count: 2,
+      thread_defaults: {
+        include_project_info: true,
+        checkpoints_enabled: false,
+        auto_approve_editing_tools: false,
+        auto_approve_dangerous_commands: false,
+      },
+      ui: { order: 2, tags: ["chat"] },
+    },
+  ],
+  errors: [],
+};
 
 export const goodPing: HttpHandler = http.get("*/v1/ping", () => {
   return HttpResponse.text("pong");
 });
 
+export const goodVoiceStatus: HttpHandler = http.get(
+  "*/v1/voice/status",
+  () => {
+    return HttpResponse.json({
+      enabled: false,
+      model_loaded: false,
+      model_name: "",
+      is_downloading: false,
+      download_progress: 0,
+    });
+  },
+);
+
+export const emptyWorktrees: HttpHandler = http.get("*/v1/worktrees", () => {
+  return HttpResponse.json({
+    project_hash: "test",
+    source_workspace_root: "/tmp/refact-test",
+    worktrees: [],
+  });
+});
+
 export const goodCaps: HttpHandler = http.get("*/v1/caps", () => {
   return HttpResponse.json(STUB_CAPS_RESPONSE);
 });
+
+export const goodChatModes: HttpHandler = http.get("*/v1/chat-modes", () =>
+  HttpResponse.json(CHAT_MODES_RESPONSE),
+);
 
 export const goodCapsWithKnowledgeFeature: HttpHandler = http.get(
   "*/v1/caps",

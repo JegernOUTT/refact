@@ -26,6 +26,7 @@ const MIN_MEASURED_LIST_HEIGHT = 1;
 const DEFAULT_ITEM_HEIGHT = 240;
 const VIRTUOSO_MIN_OVERSCAN_ITEM_COUNT = { top: 20, bottom: 20 };
 const VIRTUOSO_OVERSCAN = { main: 400, reverse: 400 };
+const FOLLOW_BUTTON_DISTANCE_THRESHOLD_PX = 200;
 
 function canScrollInWheelDirection(
   element: HTMLElement,
@@ -83,6 +84,7 @@ export function VirtualizedChatList<T extends { key: string }>({
   const autoFollowRef = useRef(true);
   const userScrolledUpRef = useRef(false);
   const lastScrollTopRef = useRef(0);
+  const distanceFromBottomRef = useRef(0);
   const lastItemsSignatureRef = useRef<string | null>(null);
   const lastUserInputTsRef = useRef(0);
   const pointerDownRef = useRef(false);
@@ -156,7 +158,11 @@ export function VirtualizedChatList<T extends { key: string }>({
         userScrolledUpRef.current = false;
       }
     }
-    setShowFollowButton(!bottom && userScrolledUpRef.current);
+    setShowFollowButton(
+      !bottom &&
+        (userScrolledUpRef.current ||
+          distanceFromBottomRef.current > FOLLOW_BUTTON_DISTANCE_THRESHOLD_PX),
+    );
   }, []);
 
   const pinToBottomIfFollowing = useCallback(() => {
@@ -169,9 +175,9 @@ export function VirtualizedChatList<T extends { key: string }>({
     lastScrollTopRef.current = scroller.scrollTop;
   }, []);
 
-  // The scrollable tail includes the composer-clearance spacer and the
-  // viewport is inset while the composer is expanded. Both change without a
-  // data change (dock growth, expand/collapse transitions, window resize).
+  // The scrollable tail includes the composer-clearance spacer, whose height
+  // changes without a data change (dock growth, expand/collapse transitions,
+  // window resize).
   // While follow is armed, re-pin to the true bottom so the glass panel
   // never covers the streaming tail; observing the scroller makes the pin
   // track CSS transitions frame-by-frame, keeping the text gliding in sync
@@ -404,7 +410,11 @@ export function VirtualizedChatList<T extends { key: string }>({
       };
 
       const handleScroll: React.UIEventHandler<HTMLDivElement> = (event) => {
-        const nextScrollTop = event.currentTarget.scrollTop;
+        const scroller = event.currentTarget;
+        const nextScrollTop = scroller.scrollTop;
+        const distanceFromBottom =
+          scroller.scrollHeight - scroller.clientHeight - nextScrollTop;
+        distanceFromBottomRef.current = distanceFromBottom;
         const now = performance.now();
         const recentUserIntent =
           pointerDownRef.current ||
@@ -434,6 +444,10 @@ export function VirtualizedChatList<T extends { key: string }>({
         // item remeasurement can increase scrollTop without any user gesture,
         // and mistaking those for active scrolling would re-arm auto-follow
         // and cause visible scroll jumps while reading.
+        setShowFollowButton(
+          userScrolledUpRef.current ||
+            distanceFromBottom > FOLLOW_BUTTON_DISTANCE_THRESHOLD_PX,
+        );
         lastScrollTopRef.current = nextScrollTop;
         onScroll?.(event);
       };

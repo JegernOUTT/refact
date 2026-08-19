@@ -2,17 +2,6 @@
   position: relative;
 }
 
-.transcriptArea {
-  padding-bottom: var(--rf-composer-clearance, 0px);
-  transition: padding-bottom var(--rf-dur-med) var(--rf-ease-standard);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .transcriptArea {
-    transition: none;
-  }
-}
-
 .bottomDock {
   position: absolute;
   z-index: var(--rf-z-dropdown);

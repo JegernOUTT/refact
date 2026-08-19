@@ -45,7 +45,6 @@ import { AbortControllerProvider } from "../contexts/AbortControllers";
 import { Toolbar } from "../components/Toolbar";
 import { Tab } from "../components/Toolbar/Toolbar";
 import { PageWrapper } from "../components/PageWrapper";
-import { ThreadHistory } from "./ThreadHistory";
 
 import { LoginPage } from "./Login";
 import { selectOpenTasksFromRoot, TaskList, TaskWorkspace } from "./Tasks";
@@ -272,8 +271,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
     if (desiredPage === renderedPage) return;
     if (
       desiredPage.name === renderedPage.name &&
-      desiredPage.name !== "task workspace" &&
-      desiredPage.name !== "thread history page"
+      desiredPage.name !== "task workspace"
     ) {
       setRenderedPage(desiredPage);
       return;
@@ -607,15 +605,6 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
                 onBack={goBack}
                 host={config.host}
                 tabbed={config.tabbed}
-              />
-            )}
-            {!pageSwitching && renderedPage.name === "thread history page" && (
-              <ThreadHistory
-                backFromThreadHistory={goBack}
-                tabbed={config.tabbed}
-                host={config.host}
-                onCloseThreadHistory={goBack}
-                chatId={renderedPage.chatId}
               />
             )}
             {!pageSwitching && renderedPage.name === "tasks list" && (

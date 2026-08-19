@@ -177,7 +177,7 @@ export const DiffWarningCallout: React.FC<Omit<CalloutProps, "type">> = ({
     >
       <Flex direction="column" gap="1">
         {warningMessages.map((msg, i) => (
-          <span key={msg}>{i === 0 ? `Warning: ${msg}` : msg}</span>
+          <span key={`${msg}-${i}`}>{i === 0 ? `Warning: ${msg}` : msg}</span>
         ))}
         {children}
       </Flex>

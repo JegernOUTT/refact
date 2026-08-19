@@ -196,6 +196,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
   // Model data
   const currentModelName = caps.currentModel || "Select model";
   const [isOpen, setIsOpen] = useState(false);
+  const [areTokenLimitsOpen, setAreTokenLimitsOpen] = useState(false);
   const handleOpenChange = useCallback(
     (open: boolean) => {
       setIsOpen(open);
@@ -454,136 +455,6 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
           <div className={styles.settingsFooter}>
             <Separator size="4" />
 
-            {selectedModelDetail && (
-              <>
-                <div className={styles.section}>
-                  <div className={styles.settingsRow}>
-                    <Text
-                      size="1"
-                      color="gray"
-                      weight="medium"
-                      className={styles.sectionHeader}
-                    >
-                      Max tokens
-                    </Text>
-                    <Text size="1" weight="medium">
-                      {displayMaxTokens ?? `${defaultMaxTokens} (default)`}
-                    </Text>
-                  </div>
-                  <div
-                    className={classNames(
-                      styles.sliderContainer,
-                      styles.sliderTrack,
-                      threadMaxTokens != null && styles.sliderTrackWithReset,
-                    )}
-                  >
-                    <Text size="1" color="gray">
-                      1K
-                    </Text>
-                    <Slider
-                      min={MIN_OUTPUT_TOKENS}
-                      max={maxOutputTokens}
-                      step={MIN_OUTPUT_TOKENS}
-                      value={[clampedMaxTokens]}
-                      onValueChange={(values) => setLocalMaxTokens(values[0])}
-                      onValueCommit={(values) => {
-                        dispatch(setMaxTokens({ chatId, value: values[0] }));
-                        setLocalMaxTokens(null);
-                      }}
-                      disabled={isInteractionDisabled}
-                      className={styles.slider}
-                    />
-                    <Text size="1" color="gray">
-                      {formatTokens(maxOutputTokens)}
-                    </Text>
-                    {threadMaxTokens != null && (
-                      <button
-                        type="button"
-                        className={styles.resetButton}
-                        onClick={handleMaxTokensReset}
-                        disabled={isInteractionDisabled}
-                        aria-label="Reset max tokens"
-                      >
-                        <Cross1Icon />
-                      </button>
-                    )}
-                  </div>
-                </div>
-                <Separator size="4" />
-                <div className={styles.section}>
-                  <div className={styles.settingsRow}>
-                    <Text
-                      size="1"
-                      color="gray"
-                      weight="medium"
-                      className={styles.sectionHeader}
-                    >
-                      Auto-compression cap
-                    </Text>
-                    <Text size="1" weight="medium">
-                      {displayAutoCompressionCap == null
-                        ? `${formatTokens(
-                            maxCompressionTokens,
-                          )} (model maximum)`
-                        : clampedAutoCompressionCap}
-                    </Text>
-                  </div>
-                  <Text size="1" color="gray" className={styles.helperText}>
-                    Reset or unset uses the selected model&apos;s maximum
-                    context window.
-                  </Text>
-                  <div
-                    className={classNames(
-                      styles.sliderContainer,
-                      styles.sliderTrack,
-                      threadAutoCompressionCap != null &&
-                        styles.sliderTrackWithReset,
-                    )}
-                  >
-                    <Text size="1" color="gray">
-                      1K
-                    </Text>
-                    <Slider
-                      min={MIN_COMPRESSION_TOKENS}
-                      max={maxCompressionTokens}
-                      step={MIN_COMPRESSION_TOKENS}
-                      value={[clampedAutoCompressionCap]}
-                      onValueChange={(values) =>
-                        setLocalAutoCompressionCap(values[0])
-                      }
-                      onValueCommit={(values) => {
-                        dispatch(
-                          setAutoCompressionCap({
-                            chatId,
-                            value: values[0],
-                          }),
-                        );
-                        setLocalAutoCompressionCap(null);
-                      }}
-                      disabled={isInteractionDisabled}
-                      className={styles.slider}
-                      aria-label="Auto-compression cap"
-                    />
-                    <Text size="1" color="gray">
-                      {formatTokens(maxCompressionTokens)}
-                    </Text>
-                    {threadAutoCompressionCap != null && (
-                      <button
-                        type="button"
-                        className={styles.resetButton}
-                        onClick={handleAutoCompressionCapReset}
-                        disabled={isInteractionDisabled}
-                        aria-label="Reset auto-compression cap"
-                      >
-                        <Cross1Icon />
-                      </button>
-                    )}
-                  </div>
-                </div>
-                {supportsBoostReasoning && <Separator size="4" />}
-              </>
-            )}
-
             {supportsBoostReasoning && (
               <div className={styles.section}>
                 <div className={styles.settingsRow}>
@@ -686,6 +557,169 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                   </>
                 )}
               </div>
+            )}
+
+            {selectedModelDetail && (
+              <>
+                {supportsBoostReasoning && <Separator size="4" />}
+                <div className={styles.tokenLimits}>
+                  <button
+                    type="button"
+                    className={styles.tokenLimitsTrigger}
+                    aria-expanded={areTokenLimitsOpen}
+                    onClick={() => setAreTokenLimitsOpen((open) => !open)}
+                  >
+                    <Text size="1" weight="medium">
+                      Token limits
+                    </Text>
+                    <Icon
+                      icon={ChevronDown}
+                      size="sm"
+                      tone="muted"
+                      className={styles.tokenLimitsChevron}
+                    />
+                  </button>
+
+                  {areTokenLimitsOpen && (
+                    <div className={styles.tokenLimitsBody}>
+                      <div className={styles.section}>
+                        <div className={styles.settingsRow}>
+                          <Text
+                            size="1"
+                            color="gray"
+                            weight="medium"
+                            className={styles.sectionHeader}
+                          >
+                            Max tokens
+                          </Text>
+                          <Text size="1" weight="medium">
+                            {displayMaxTokens ??
+                              `${defaultMaxTokens} (default)`}
+                          </Text>
+                        </div>
+                        <div
+                          className={classNames(
+                            styles.sliderContainer,
+                            styles.sliderTrack,
+                            threadMaxTokens != null &&
+                              styles.sliderTrackWithReset,
+                          )}
+                        >
+                          <Text size="1" color="gray">
+                            1K
+                          </Text>
+                          <Slider
+                            min={MIN_OUTPUT_TOKENS}
+                            max={maxOutputTokens}
+                            step={MIN_OUTPUT_TOKENS}
+                            value={[clampedMaxTokens]}
+                            onValueChange={(values) =>
+                              setLocalMaxTokens(values[0])
+                            }
+                            onValueCommit={(values) => {
+                              dispatch(
+                                setMaxTokens({ chatId, value: values[0] }),
+                              );
+                              setLocalMaxTokens(null);
+                            }}
+                            disabled={isInteractionDisabled}
+                            className={styles.slider}
+                          />
+                          <Text size="1" color="gray">
+                            {formatTokens(maxOutputTokens)}
+                          </Text>
+                          {threadMaxTokens != null && (
+                            <button
+                              type="button"
+                              className={styles.resetButton}
+                              onClick={handleMaxTokensReset}
+                              disabled={isInteractionDisabled}
+                              aria-label="Reset max tokens"
+                            >
+                              <Cross1Icon />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <Separator size="4" />
+                      <div className={styles.section}>
+                        <div className={styles.settingsRow}>
+                          <Text
+                            size="1"
+                            color="gray"
+                            weight="medium"
+                            className={styles.sectionHeader}
+                          >
+                            Auto-compression cap
+                          </Text>
+                          <Text size="1" weight="medium">
+                            {displayAutoCompressionCap == null
+                              ? `${formatTokens(
+                                  maxCompressionTokens,
+                                )} (model maximum)`
+                              : clampedAutoCompressionCap}
+                          </Text>
+                        </div>
+                        <Text
+                          size="1"
+                          color="gray"
+                          className={styles.helperText}
+                        >
+                          Reset or unset uses the selected model&apos;s maximum
+                          context window.
+                        </Text>
+                        <div
+                          className={classNames(
+                            styles.sliderContainer,
+                            styles.sliderTrack,
+                            threadAutoCompressionCap != null &&
+                              styles.sliderTrackWithReset,
+                          )}
+                        >
+                          <Text size="1" color="gray">
+                            1K
+                          </Text>
+                          <Slider
+                            min={MIN_COMPRESSION_TOKENS}
+                            max={maxCompressionTokens}
+                            step={MIN_COMPRESSION_TOKENS}
+                            value={[clampedAutoCompressionCap]}
+                            onValueChange={(values) =>
+                              setLocalAutoCompressionCap(values[0])
+                            }
+                            onValueCommit={(values) => {
+                              dispatch(
+                                setAutoCompressionCap({
+                                  chatId,
+                                  value: values[0],
+                                }),
+                              );
+                              setLocalAutoCompressionCap(null);
+                            }}
+                            disabled={isInteractionDisabled}
+                            className={styles.slider}
+                            aria-label="Auto-compression cap"
+                          />
+                          <Text size="1" color="gray">
+                            {formatTokens(maxCompressionTokens)}
+                          </Text>
+                          {threadAutoCompressionCap != null && (
+                            <button
+                              type="button"
+                              className={styles.resetButton}
+                              onClick={handleAutoCompressionCapReset}
+                              disabled={isInteractionDisabled}
+                              aria-label="Reset auto-compression cap"
+                            >
+                              <Cross1Icon />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </>
             )}
           </div>
         </div>

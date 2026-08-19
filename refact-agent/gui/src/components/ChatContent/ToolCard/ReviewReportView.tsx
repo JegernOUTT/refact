@@ -139,7 +139,9 @@ function FindingCard({ finding }: { finding: ReviewFinding }) {
                   {finding.evidence.map((evidence, index) => (
                     <EvidenceRow
                       evidence={evidence}
-                      key={`${evidence.kind}-${evidence.path ?? "none"}-${index}`}
+                      key={`${evidence.kind}-${
+                        evidence.path ?? "none"
+                      }-${index}`}
                     />
                   ))}
                 </ul>
@@ -279,9 +281,9 @@ export const ReviewReportView: React.FC<{ report: ReviewReport }> = ({
   const mechanicalFailed =
     report.pipeline?.stopped_reason === "mechanical_checks_failed";
   const failedChecks = mechanicalFailed
-    ? (report.pipeline?.mechanical?.checks.filter(
+    ? report.pipeline?.mechanical?.checks.filter(
         (check) => check.exit_status !== 0,
-      ) ?? [])
+      ) ?? []
     : [];
   const shownChecks = report.checks_performed.slice(0, CHECK_LIMIT);
   const hiddenChecks = report.checks_performed.length - shownChecks.length;
@@ -303,9 +305,7 @@ export const ReviewReportView: React.FC<{ report: ReviewReport }> = ({
             <span className={styles.mono}>Base: {report.scope.diff_base}</span>
           )}
         </div>
-        <p className={styles.verdict}>
-          Verdict: {verdict || "no findings"}
-        </p>
+        <p className={styles.verdict}>Verdict: {verdict || "no findings"}</p>
         {report.summary && <p className={styles.summary}>{report.summary}</p>}
       </Surface>
 

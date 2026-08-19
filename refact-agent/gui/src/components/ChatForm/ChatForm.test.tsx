@@ -503,9 +503,11 @@ describe("ChatForm", () => {
 
     await waitFor(() => {
       expect(
-        app.store.getState().chat.threads[
-          app.store.getState().chat.current_thread_id
-        ]?.attached_images.map((image) => image.type),
+        app.store
+          .getState()
+          .chat.threads[
+            app.store.getState().chat.current_thread_id
+          ]?.attached_images.map((image) => image.type),
       ).toEqual(["image/webp", "image/gif"]);
     });
   });

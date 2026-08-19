@@ -46,7 +46,6 @@ src/
 │   ├── Privacy/      # Zone cards, destination access, audit matrix, inspector, shield, result cards
 │   ├── Statistics/   # Usage charts
 │   ├── Tasks/        # Task management
-│   ├── ThreadHistory/# Thread history view
 ├── components/       # Reusable UI (50+ dirs)
 │   ├── ChatContent/  # Message rendering (ChatContent, ToolsContent, DiffContent)
 │   ├── ChatForm/     # Input form + ToolConfirmation
@@ -360,6 +359,7 @@ Refact UI rules are contributor contracts. Any change that introduces a new desi
 - Overlay implementations must provide viewport clamping, focus trap/restore, Escape handling, and Portal-into-theme-root behavior.
 - Overlay blur uses `--rf-blur-overlay` and must have a reduced-transparency fallback; JetBrains host mode disables blur.
 - The stabilized UI kit overlay set is exported from `src/components/ui`: `Dialog`, `Menu`, `Popover`, `Sheet`, and `Tooltip`. They share `open`, `defaultOpen`, `onOpenChange`, anchored `side`/`align`/`sideOffset`/`collisionPadding` where applicable, `modal` where applicable, and content `maxWidth`/`maxHeight` props.
+- Dense list popovers (for example, @-command completion) may use `--rf-panel-pad-compact` for content padding; all other overlay content uses `--rf-space-3`.
 - Overlay content clamps with `width: min(ideal, calc(100vw - 2 * var(--rf-space-3)))` and `max-height: min(ideal, calc(100dvh - var(--rf-space-5)))`; vertical overflow stays inside the overlay and horizontal overflow must use explicit `.scrollX` islands.
 - Portaled transient overlays opened from inside `Dialog` or `Sheet` use modal-layer context and the modal overlay tokens so they remain above their owning modal without lifting unrelated page overlays above every modal.
 - `Popover` is responsive by default and renders as a bottom `Sheet` below the narrow viewport threshold; callers may set `responsive={false}` or `forceSheet` for deterministic behavior.
@@ -379,17 +379,17 @@ Refact UI rules are contributor contracts. Any change that introduces a new desi
 
 ### Sizing contract
 
-| Item        | Values                                                                 |
-| ----------- | ---------------------------------------------------------------------- |
-| Controls    | default `30px`, small `26px`, large `36px`                             |
-| Switches    | track `36×20px`, thumb `16px`, inset `2px`, visual travel `18px`       |
-| Icons       | default `15px`, small `13px`, large `18px`, tap target at least `28px` |
-| Spacing     | scale tokens documented below                                          |
-| Radii       | chip `6px`, control `8px`, card/popover `10px`, pill `999px`           |
-| Lines/rings | hairline `1px`, focus ring `2px`                                       |
-| Type        | `11.5 / 12.5 / 13.5 / 15 / 19px`                                       |
-| Layout      | nav `220px` with `180px` min, content max `640px`                      |
-| Overlays    | popover `210–360px`, dialog `340px`, tooltip max `280px`               |
+| Item        | Values                                                                                                             |
+| ----------- | ------------------------------------------------------------------------------------------------------------------ |
+| Controls    | default `30px`, small `26px`, large `36px`; icon-only small `28px` via `--rf-control-h-icon-sm` (tap-target floor) |
+| Switches    | track `36×20px`, thumb `16px`, inset `2px`, visual travel `18px`                                                   |
+| Icons       | default `15px`, small `13px`, large `18px`, tap target at least `28px`                                             |
+| Spacing     | scale tokens documented below                                                                                      |
+| Radii       | chip `6px`, control `8px`, card/popover `10px`, pill `999px`                                                       |
+| Lines/rings | hairline `1px`, focus ring `2px`                                                                                   |
+| Type        | `12 / 13 / 14 / 15 / 19px`                                                                                         |
+| Layout      | nav `220px` with `180px` min, content max `640px`                                                                  |
+| Overlays    | popover `210–360px`, dialog `340px`, tooltip max `280px`                                                           |
 
 Canonical spacing rhythm:
 

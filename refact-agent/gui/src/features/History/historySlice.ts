@@ -25,6 +25,7 @@ import {
 import type { WorktreeMeta } from "../../services/refact/worktrees";
 import { AppDispatch, RootState } from "../../app/store";
 import { ideToolCallResponse } from "../../hooks/useEventBusForIDE";
+import { setError } from "../Errors/errorsSlice";
 
 export type ChatHistoryItem = Omit<ChatThread, "new_chat_suggested"> & {
   createdAt: string;
@@ -501,6 +502,12 @@ export const historySlice = createSlice({
       state.chats = rest;
     },
 
+    restoreChatEntry: (state, action: PayloadAction<ChatHistoryItem>) => {
+      if (!(action.payload.id in state.chats)) {
+        state.chats[action.payload.id] = action.payload;
+      }
+    },
+
     upsertChatStub: (
       state,
       action: PayloadAction<{
@@ -727,6 +734,7 @@ export const {
   replaceSnapshotHistory,
   setPagination,
   deleteChatById,
+  restoreChatEntry,
   upsertChatStub,
   updateChatTitleById,
   updateChatMetaById,
@@ -802,10 +810,27 @@ startHistoryListening({
 
 startHistoryListening({
   actionCreator: deleteChatById,
-  effect: (action, listenerApi) => {
-    void listenerApi.dispatch(
-      trajectoriesApi.endpoints.deleteTrajectory.initiate(action.payload),
-    );
+  effect: async (action, listenerApi) => {
+    const originalChats = listenerApi.getOriginalState().history.chats;
+    const deletedChat =
+      action.payload in originalChats
+        ? originalChats[action.payload]
+        : undefined;
+    try {
+      await listenerApi
+        .dispatch(
+          trajectoriesApi.endpoints.deleteTrajectory.initiate(action.payload),
+        )
+        .unwrap();
+    } catch {
+      listenerApi.dispatch(
+        setError("Failed to delete chat on the server — the list may resync."),
+      );
+      if (deletedChat) {
+        listenerApi.dispatch(restoreChatEntry(deletedChat));
+      }
+      listenerApi.dispatch(trajectoriesApi.util.invalidateTags(["Trajectory"]));
+    }
   },
 });
 

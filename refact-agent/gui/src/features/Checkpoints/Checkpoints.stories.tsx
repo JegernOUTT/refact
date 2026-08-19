@@ -3,6 +3,7 @@ import type { Meta, StoryObj } from "@storybook/react";
 import { setUpStore } from "../../app/store";
 import { Provider } from "react-redux";
 import { Theme } from "../../components/Theme";
+import { ChatThreadProvider } from "../Chat/Thread";
 import { Checkpoints } from "./Checkpoints";
 import { CheckpointsMeta } from "./checkpointsSlice";
 import {
@@ -13,6 +14,7 @@ import {
 const Template: React.FC<{ initialState?: CheckpointsMeta }> = ({
   initialState,
 }) => {
+  const checkpoints = initialState ?? STUB_PREVIEWED_CHECKPOINTS_STATE;
   const store = setUpStore({
     config: {
       apiKey: "foo",
@@ -22,13 +24,15 @@ const Template: React.FC<{ initialState?: CheckpointsMeta }> = ({
         appearance: "dark",
       },
     },
-    checkpoints: initialState ?? STUB_PREVIEWED_CHECKPOINTS_STATE,
+    checkpoints,
   });
 
   return (
     <Provider store={store}>
       <Theme>
-        <Checkpoints />
+        <ChatThreadProvider chatId={checkpoints.latestCheckpointResult.chat_id}>
+          <Checkpoints />
+        </ChatThreadProvider>
       </Theme>
     </Provider>
   );
@@ -55,6 +59,9 @@ export const WithNoChanges: Story = {
 
 export const DialogClosed: Story = {
   args: {
-    initialState: STUB_RESTORED_CHECKPOINTS_STATE_WITH_NO_CHANGES,
+    initialState: {
+      ...STUB_RESTORED_CHECKPOINTS_STATE_WITH_NO_CHANGES,
+      isVisible: false,
+    },
   },
 };

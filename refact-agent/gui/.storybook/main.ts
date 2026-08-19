@@ -58,8 +58,24 @@ const config: StorybookConfig = {
       lib: undefined,
     };
     const plugins = withoutDeclarationPlugins(config.plugins);
+    const optimizeDeps = {
+      ...config.optimizeDeps,
+      include: [
+        ...(config.optimizeDeps?.include ?? []),
+        "react",
+        "react-dom",
+        "react-dom/client",
+        "react/jsx-runtime",
+        "react-redux",
+        "@reduxjs/toolkit",
+        "redux-persist",
+        "@radix-ui/themes",
+        "classnames",
+        "lucide-react",
+      ],
+    };
 
-    return { ...config, build, plugins, server };
+    return { ...config, build, plugins, server, optimizeDeps };
   },
   staticDirs,
 };
