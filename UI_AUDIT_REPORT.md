@@ -501,7 +501,7 @@ yields **76 rows but only 74 unique story ids** — `chat-form--primary` (rows 3
 `ui-tabs--states` (rows 32 and 57) were each measured twice, at 1280 and again at 360. Three ledger
 ids also carry an abbreviated prefix (`tool-cards-agentic--subagent|set-tasks|patch-with-diff`); the
 live index names them `tool-cards-agentic-analysis--*`. Corrected baseline entering this session:
-**74 / 171 audited, 97 remaining.** Session 6 adds 10 → **84 / 171, 87 remaining.**
+**74 / 171 audited, 97 remaining.** Session 6 adds 15 → **89 / 171, 82 remaining.**
 
 ### Rig
 Rebuilt exactly per Part 4d: viewport 1280x900 @2x, WebSocket shim + console filter, and the
@@ -524,6 +524,12 @@ and `__t(n)` (text census: content, size/weight, colour, x/y/width) to cut per-s
 | 84 | `chat-transcript-elements--error-card` | 🔴 **N-63** · N-54 | `Review error` 98x26 ✓. Full text census: headline 14/500, body 14/400 @0.92, guidance **12/400** @0.48, raw detail **14/400** @0.48 — the muted raw string outranks the muted guidance. Category chip renders the literal Rust variant **`ProviderTransient`** (12/650, warning tone) |
 | 85 | `chat-transcript-elements--skill-cards` | 🔴 **N-65** · N-30 | `_actionButton_j2b83_26` **22 x 22** (2nd hardcoded-22 instance, → N-65); `_trigger_1hjpa_40` 1062x29 (N-30); `_toggle_1e58f_26` 1092x26 ✓. Row treatment splits three ways in one line: "Skill active:" 14/700 accent, skill name `storybook-authoring` **14/500** accent, "tools: …" 14/700 muted — the static label is heavier than the variable it introduces |
 | 86 | `chat-transcript-elements--user-with-images` | 🔴 **N-64** | `IMGS=1`, trigger `_trigger_14sym_1` **80 x 80** (clear of the tap floor), but `naturalWidth x naturalHeight = **1 x 1**` — a single base64 pixel stretched 80x. `bgimg=0`. Census otherwise clean |
+
+| 87 | `tool-cards-file-ops-basics--cat` | ✅ PASS | census clean; `_toggle_1e58f_26` **1102x26** ✓; fonts 12/400, 13/650, 14/400, 14/700 all on scale; `_body_1e58f_97` L31 = documented ToolCard body offset; n=66, `hscroll:false` |
+| 88 | `tool-cards-file-ops-basics--tree` | ⚠️ N-49 | `_path_1a3ab_1` renders **13.3px** (the `0.95em` relative size) — 3rd measured instance of N-49; everything else identical to #87 (same n=66, same control set) |
+| 89 | `tool-cards-file-ops-basics--regex-search` | ⚠️ N-49 | `_query_1e777_1` renders **13.3px** — 4th N-49 instance, second distinct class in the same folder; toggle 1102x26 ✓; n=67 |
+| 90 | `tool-cards-file-ops-basics--shell` | ✅ PASS | census fully clean. Exec metadata renders correctly and legibly: duration `0.2s` **14/700** @0.48, status `exited` **12/650** @0.48, process id `proc-runtime-versions` **12/650** @0.48; toggle 1102x26 ✓; n=71 |
+| 91 | `tool-cards-file-ops-basics--move-remove` | ✅ PASS (screenshot-verified) | Two tool rows **uniform 1102x26**, verbs `Move` / `Delete` at 14/700 with mono accent paths (`app.draft.json -> app.json`, `app.json.bak`); result line "The draft is now the active config…" renders; census clean; 3 interactives / 80 els |
 
 ### Session-6 notes
 - **Transcript land is in good shape.** Nine of ten stories have a fully clean off-scale census; every
