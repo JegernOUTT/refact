@@ -1,6 +1,7 @@
 import React from "react";
 import classNames from "classnames";
 import { X } from "lucide-react";
+import { Icon } from "../Icon";
 import styles from "./Chip.module.css";
 
 export interface ChipProps extends React.ComponentPropsWithoutRef<"span"> {
@@ -45,7 +46,7 @@ export function Chip({
           onClick={onRemove}
           type="button"
         >
-          <X size={15} />
+          <Icon icon={X} size="md" />
         </button>
       ) : null}
     </span>

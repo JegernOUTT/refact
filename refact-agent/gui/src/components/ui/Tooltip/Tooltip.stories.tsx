@@ -82,6 +82,8 @@ export const LightDark: Story = {
   play: ({ canvasElement }) => showFirstTooltip(canvasElement),
 };
 export const ReducedMotion: Story = {
+  // Pin the html attribute so the portaled overlay stops animating too.
+  parameters: { reducedMotion: "on" },
   render: () => <TooltipStory reducedMotion />,
   play: ({ canvasElement }) => showFirstTooltip(canvasElement),
 };

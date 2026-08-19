@@ -724,3 +724,30 @@ falls back to "Loading…".
 - `--rf-weight-*` and `--rf-line-1..5` tokens (N-39/L-04); zero `font-weight:` literals outside tokens.css; zero `var(--radius-*)` Radix leaks outside the Theme adapter (N-65).
 - `src/utils/displayNames.ts` `humanizeIdentifier` — the single lookup for internal identifiers reaching chrome (N-54).
 - Storybook preview imports the full global cascade and mirrors reduced-motion/appearance onto `<html>` so portaled overlays obey both (N-04/N-09).
+
+---
+
+## Part 8 — REVIEW ROUND (multi-agent review of the remediation, all findings fixed)
+
+A 90-finding multi-agent review ran over the remediation commits; every accepted finding was fixed in the same session. **Gates after fixes: lint 0 · types 0 · format 0 · full vitest 323 files / 3686 passed (+18 new tests).** Browser-verified: `font: var(--rf-weight-*)` shorthands compute correctly (Select 500/13px, SegmentedControl 650/13px @30px group).
+
+### Accepted & fixed
+- **Dialog partitioning was incomplete (rf-2c73eee6 HIGH + 4 siblings):** wrapped actions never pinned (the flagship story itself shipped the N-07 defect), all props beyond 4 were dropped, fragments bypassed partitioning entirely (caught by the NEW tests, not the reviewers), zero partition tests. Fixed: explicit `Dialog.Footer` part, trailing `Close|Footer` lifting, fragment flattening, full prop forwarding + style merge (Sheet parity), story migrated, **5 rendered partition tests**.
+- **Weight sweep missed `font:` shorthands (20 findings):** ~200 literals in 87 files swept (incl. 550/720 strays); **zero weight literals remain in any form outside tokens.css** — the AGENTS claim is now true.
+- **Goal matrix v3 (rf-73a028d5 verified):** `budget_exhausted`/`no_progress` now offer Stop; transferred/completed/stopped kill all controls; shared action-descriptor list deduplicates GoalControlIcons/GoalControls; `GOAL_STATUS_LABELS` deleted in favor of `humanizeIdentifier`; dead `_isStreaming` removed; scroll bounds named via `--tpw-*` component vars.
+- **ToolConfirmation:** empty-reasons vacuous-`every` guard (rf-2e3ca234), inline padding → CSS module, 5-parallel-array signature collapsed, dynamic `app/store` import → static leaf import + `selectConfig`.
+- **N-40 follow-through:** dispatch-time insert guard *only when caps resolved as non-multimodal* (my first guard draft silently dropped pre-caps attachments — caught by the restored original test), + 2 new caps-gate tests; test config needed `dev: true` (the documented engine-endpoint gate).
+- **Callout:** `preventRetry` off the base props (DOM leak), warning type now renders AlertTriangle/warning tone, ErrorCallout story targets the presentational View store-free.
+- **SegmentedControl:** `useId` fallback name restores native arrow-key grouping (rf-f675c58e), `size="sm"` renders 26 total again (rf-4ce0458d) with test assertions for both height rules, light story panel painted, redundant box-sizing removed.
+- **EditableTable:** textareas no longer clamped to 30px (rf-39ab2869 verified), `getInputProps` typed (`EditableTableInputAttributes` = input attrs + `data-*` Record; renamed to dodge a pre-existing internal interface collision), LightDark story is a real two-panel composition.
+- **ModelSelector:** disabled now disables search + rows; dead searchInputRef and redundant branch removed.
+- **Tokens/base:** `--rf-z-sticky: 500` defined (was referenced, never defined); JetBrains **light**-theme panel fallback (was dark #16181d under light text, rf-96725e27); typography `:where()` maps scoped under `.radix-themes` so the engine-injected toolbar is untouched (rf-34dd70f5).
+- **Infra:** `parameters.reducedMotion` per-story override reaches portals (RM overlay stories pinned); cssOrder test now cross-checks the entry/Theme/preview sheet lists for drift (rf-6b0bbacf); Dock narrow-sheet Close has a rendered regression test (rf-e5ff3ad1); `humanizeIdentifier` splits acronyms (HTTPRequest → "Http request", rf-ad504584) + tests; Chip remove glyph via kit Icon; Chip.stories on lucide; TasksSection ticks stuck-detection every 60s and closes the narrow Sheet on task navigation.
+
+### Declined / deferred (documented reasons)
+- **rf-3f8e3080/rf-fccb0f39** (Dock.test CSS-parsing "unnecessary"): CSS characterization tests are the documented house pattern (Toolbar/TaskWorkspace precedents) — declined.
+- **rf-4cd51519/rf-6b0bbacf** (Theme.tsx duplicate import list): kept intentionally for isolated mounts; drift risk now covered by the cssOrder sync test instead of removal.
+- **rf-2c6bf74f** (4 legacy humanizer impls unconsolidated): AGENTS wording softened to "route NEW identifier display through humanizeIdentifier; legacy humanizers consolidated opportunistically" — full consolidation deferred.
+- **rf-b6a97107** (~50 legacy box-sizing declarations): AGENTS wording now says new code must not add them; legacy removed opportunistically (done in every file touched this round).
+- **rf-5088b886** (TaskBoardLoader indirection, 0.35 confidence): pre-existing pattern, deferred.
+- **rf-4c8cb831** (isIconOnlyLabel heuristic → explicit API): public API change, deferred.

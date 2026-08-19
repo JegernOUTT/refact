@@ -21,7 +21,8 @@
   width: 100%;
   min-width: 0;
   color: var(--rf-color-fg);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .table thead,
@@ -58,9 +59,13 @@
   gap: var(--rf-space-1);
 }
 
-.cell input,
-.cell textarea {
+.cell input {
   height: var(--rf-control-h);
+  align-self: start;
+}
+
+.cell textarea {
+  min-height: var(--rf-control-h);
   align-self: start;
 }
 
@@ -91,7 +96,8 @@
 .stackedLabel {
   display: none;
   color: var(--rf-color-muted);
-  font: 650 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .error {

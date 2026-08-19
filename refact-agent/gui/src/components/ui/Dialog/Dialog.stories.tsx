@@ -19,11 +19,6 @@ function DialogStory({ reducedMotion = false }: { reducedMotion?: boolean }) {
           className={`${styles.panel} ${appearance === "light" ? "light" : ""}`}
           data-appearance={appearance}
           key={appearance}
-          style={
-            appearance === "light"
-              ? { background: "var(--rf-bg)", colorScheme: "light" }
-              : undefined
-          }
         >
           <div className={styles.header}>
             <h2 className={styles.title}>{appearance} dialog</h2>
@@ -60,13 +55,13 @@ function DialogStory({ reducedMotion = false }: { reducedMotion?: boolean }) {
                     </div>
                   </div>
                 </div>
-                <div className={styles.actions}>
+                <Dialog.Footer>
                   <Dialog.Close asChild>
                     <button className={styles.button} type="button">
                       Close
                     </button>
                   </Dialog.Close>
-                </div>
+                </Dialog.Footer>
               </Dialog.Content>
             </Dialog>
           </div>
@@ -101,6 +96,8 @@ export const LightDark: Story = {
   play: ({ canvasElement }) => openFirstDialog(canvasElement),
 };
 export const ReducedMotion: Story = {
+  // Pin the html attribute so the portaled overlay stops animating too.
+  parameters: { reducedMotion: "on" },
   render: () => <DialogStory reducedMotion />,
   play: ({ canvasElement }) => openFirstDialog(canvasElement),
 };

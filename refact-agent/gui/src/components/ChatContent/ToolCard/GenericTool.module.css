@@ -57,7 +57,8 @@
 
 .metricValue {
   color: var(--rf-color-fg);
-  font: 700 var(--rf-text-4) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-bold) var(--rf-text-4) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .chipRow,
@@ -90,7 +91,8 @@
 .itemTitle {
   overflow: hidden;
   color: var(--rf-color-fg);
-  font: 600 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

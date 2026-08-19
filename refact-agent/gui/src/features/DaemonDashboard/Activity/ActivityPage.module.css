@@ -197,7 +197,8 @@
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
   background: var(--rf-surface-2);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-mono);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-mono);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -219,7 +220,8 @@
   padding: var(--rf-space-3);
   overflow-y: auto;
   color: var(--rf-color-fg);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-mono);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-mono);
   white-space: pre;
 }
 

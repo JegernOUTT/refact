@@ -65,7 +65,8 @@
 .zoneName {
   overflow: hidden;
   color: var(--rf-color-fg);
-  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -84,7 +85,8 @@
 
 .zoneShellLabel {
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .chipRow {
@@ -107,7 +109,8 @@
 
 .emptyHint {
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .blockedBox {
@@ -163,7 +166,8 @@
   background: none;
   color: var(--rf-color-fg);
   cursor: pointer;
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   gap: var(--rf-space-3);
   text-align: start;
 }
@@ -189,7 +193,8 @@
   align-items: center;
   gap: var(--rf-space-3);
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .summaryPart {
@@ -217,7 +222,8 @@
 .panelHeading {
   margin: 0;
   color: var(--rf-color-muted);
-  font: 650 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
@@ -230,13 +236,15 @@
 
 .switchMeta {
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .noteLine {
   margin: 0;
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .auditBox {
@@ -262,7 +270,8 @@
   border-collapse: separate;
   border-spacing: 0;
   color: var(--rf-color-fg);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .matrix th,
@@ -306,7 +315,8 @@
   align-items: center;
   gap: var(--rf-space-1);
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .srOnly {

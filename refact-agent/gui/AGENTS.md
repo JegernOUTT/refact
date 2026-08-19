@@ -287,7 +287,7 @@ Auto-approve for patch-like tools when `automatic_patch === true`: `patch`, `tex
 ### Global CSS contract (cascade + base resets)
 
 - Global stylesheets (radix themes, `styles/tokens.css`, `styles/base.css`, glass/motion/responsive/scrollbar, theme-config, shared tokens) are imported FIRST in `src/lib/index.ts` and mirrored in `.storybook/preview.tsx`. Component CSS modules win equal-specificity battles against Radix defaults (e.g. `.rt-Box { display: block }` vs a module's `display: flex`) only because of this order; `src/lib/cssOrder.test.ts` locks it. Never make a global sheet reachable only through a component module.
-- `styles/base.css` owns the global `box-sizing: border-box` reset (KaTeX subtree exempted), the 13px ambient base, and zero-specificity `:where()` maps for bare `h1`-`h6`, `code/kbd/samp/pre`, and form controls. Do not re-add per-component `box-sizing` declarations.
+- `styles/base.css` owns the global `box-sizing: border-box` reset (KaTeX subtree exempted), the 13px ambient base, and theme-root-scoped `:where()` maps for bare `h1`-`h6`, `code/kbd/samp/pre`, and form controls. New code must not add per-component `box-sizing` declarations; ~50 legacy declarations remain and are removed opportunistically when their files are touched.
 
 ### Control-height recipe (the Button pattern)
 
@@ -301,7 +301,7 @@ Every interactive control uses **fixed `height` (or a `min-height` floor plus st
 
 ### Identifier display
 
-Internal identifiers (chat-mode ids, goal statuses, event kinds, engine error categories such as Rust `UserErrorCategory` variants) must never render verbatim in chrome; route them through `humanizeIdentifier` in `src/utils/displayNames.ts` (curated labels + sentence-case fallback).
+Internal identifiers (chat-mode ids, goal statuses, event kinds, engine error categories such as Rust `UserErrorCategory` variants) must never render verbatim in chrome; route NEW identifier display through `humanizeIdentifier` in `src/utils/displayNames.ts` (curated labels + acronym-aware sentence-case fallback). A few older per-feature humanizers still exist and are consolidated opportunistically.
 
 ### Responsive doctrine
 

@@ -1,14 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import classNames from "classnames";
-import { Pause, Play, Square, Target } from "lucide-react";
+import { Pause, Play, Square, Target, type LucideIcon } from "lucide-react";
 
 import { useChatActions, useAppDispatch, useAppSelector } from "../../hooks";
 import {
   selectCurrentTasksById,
   selectGoalById,
   selectHasTasksById,
-  selectIsStreamingById,
   selectTaskGoalExpandedById,
   selectTaskProgressById,
   selectTasksEverUsedById,
@@ -40,10 +39,7 @@ import {
 import { humanizeIdentifier } from "../../utils/displayNames";
 import styles from "./TaskProgressWidget.module.css";
 
-function getStatusDotState(
-  status: TodoStatus,
-  _isStreaming: boolean,
-): StatusDotState {
+function getStatusDotState(status: TodoStatus): StatusDotState {
   switch (status) {
     case "in_progress":
       return "in_progress";
@@ -62,17 +58,6 @@ const STATUS_TOOLTIPS: Record<TodoStatus, string> = {
   in_progress: "In progress",
   pending: "Pending",
   failed: "Failed",
-};
-
-const GOAL_STATUS_LABELS: Partial<Record<GoalStatus, string>> = {
-  active: "Active",
-  verifying: "Verifying",
-  paused: "Paused",
-  completed: "Completed",
-  stopped: "Stopped",
-  budget_exhausted: "Budget exhausted",
-  no_progress: "No progress",
-  transferred: "Transferred",
 };
 
 const GOAL_BUDGET_INPUT_MIN = 0;
@@ -216,6 +201,22 @@ function hasBudgetCommandLimits(budget: GoalBudgetCommand): boolean {
   return Object.keys(budget).length > 0;
 }
 
+type GoalControlAction = "pause" | "resume" | "stop";
+
+const GOAL_STOPPABLE_STATUSES: ReadonlySet<GoalStatus> = new Set<GoalStatus>([
+  "active",
+  "verifying",
+  "paused",
+  "budget_exhausted",
+  "no_progress",
+]);
+
+const GOAL_RESUMABLE_STATUSES: ReadonlySet<GoalStatus> = new Set<GoalStatus>([
+  "paused",
+  "budget_exhausted",
+  "no_progress",
+]);
+
 function goalControlAvailability(goal: GoalSnapshot): {
   canPause: boolean;
   canResume: boolean;
@@ -223,15 +224,57 @@ function goalControlAvailability(goal: GoalSnapshot): {
 } {
   return {
     canPause: goal.active && goal.status === "active",
-    canResume:
-      goal.status === "paused" ||
-      goal.status === "budget_exhausted" ||
-      goal.status === "no_progress",
-    canStop:
-      (goal.active &&
-        (goal.status === "active" || goal.status === "verifying")) ||
-      goal.status === "paused",
+    canResume: GOAL_RESUMABLE_STATUSES.has(goal.status),
+    canStop: GOAL_STOPPABLE_STATUSES.has(goal.status),
   };
+}
+
+type GoalControlDescriptor = {
+  key: GoalControlAction;
+  label: string;
+  icon: LucideIcon;
+  handler: () => void;
+  disabled: boolean;
+};
+
+/**
+ * Single source of truth for which goal controls exist, in which order, with
+ * which label/icon/disabled state. Both the icon-only and the labelled control
+ * rows consume this, keeping their own presentation markup.
+ */
+function goalControlActions(
+  goal: GoalSnapshot,
+  onControl: (action: GoalControlAction) => void,
+): GoalControlDescriptor[] {
+  const { canPause, canResume, canStop } = goalControlAvailability(goal);
+  if (!canPause && !canResume && !canStop) return [];
+
+  const primary: GoalControlDescriptor = canResume
+    ? {
+        key: "resume",
+        label: "Resume",
+        icon: Play,
+        handler: () => onControl("resume"),
+        disabled: false,
+      }
+    : {
+        key: "pause",
+        label: "Pause",
+        icon: Pause,
+        handler: () => onControl("pause"),
+        disabled: !canPause,
+      };
+
+  return [
+    primary,
+    {
+      key: "stop",
+      label: "Stop",
+      icon: Square,
+      handler: () => onControl("stop"),
+      disabled: !canStop,
+    },
+  ];
 }
 
 const GOAL_SUPPORTED_MODES = new Set([
@@ -255,14 +298,10 @@ function isGoalSupported(
 
 type StatusIconProps = {
   status: TodoStatus;
-  isStreaming?: boolean;
 };
 
-const StatusIcon: React.FC<StatusIconProps> = ({
-  status,
-  isStreaming = false,
-}) => {
-  const dotState = getStatusDotState(status, isStreaming);
+const StatusIcon: React.FC<StatusIconProps> = ({ status }) => {
+  const dotState = getStatusDotState(status);
   return (
     <StatusDot
       state={dotState}
@@ -274,10 +313,9 @@ const StatusIcon: React.FC<StatusIconProps> = ({
 
 type TaskRowProps = {
   task: TodoItem;
-  isStreaming: boolean;
 };
 
-const TaskRow: React.FC<TaskRowProps> = ({ task, isStreaming }) => {
+const TaskRow: React.FC<TaskRowProps> = ({ task }) => {
   const isActive = task.status === "in_progress";
 
   return (
@@ -286,7 +324,7 @@ const TaskRow: React.FC<TaskRowProps> = ({ task, isStreaming }) => {
       gap="2"
       className={classNames(styles.taskRow, { [styles.active]: isActive })}
     >
-      <StatusIcon status={task.status} isStreaming={isStreaming && isActive} />
+      <StatusIcon status={task.status} />
       <Text size="1" className={styles.taskText}>
         {task.content}
       </Text>
@@ -305,14 +343,14 @@ const GoalIndicator: React.FC<GoalIndicatorProps> = ({ goal }) => (
       Goal set
     </Text>
     <Badge tone={goalStatusTone(goal.status)} size="xs" variant="soft">
-      {GOAL_STATUS_LABELS[goal.status] ?? humanizeIdentifier(goal.status)}
+      {humanizeIdentifier(goal.status)}
     </Badge>
   </Flex>
 );
 
 type GoalControlIconsProps = {
   goal: GoalSnapshot;
-  onControl: (action: "pause" | "resume" | "stop") => void;
+  onControl: (action: GoalControlAction) => void;
   className?: string;
 };
 
@@ -321,9 +359,9 @@ const GoalControlIcons: React.FC<GoalControlIconsProps> = ({
   onControl,
   className,
 }) => {
-  const { canPause, canResume, canStop } = goalControlAvailability(goal);
+  const actions = goalControlActions(goal, onControl);
 
-  if (!canPause && !canResume && !canStop) return null;
+  if (actions.length === 0) return null;
 
   return (
     <Flex
@@ -331,32 +369,17 @@ const GoalControlIcons: React.FC<GoalControlIconsProps> = ({
       gap="1"
       className={classNames(styles.goalControlIcons, className)}
     >
-      {canResume ? (
+      {actions.map((action) => (
         <IconButton
-          aria-label="Resume goal"
-          icon={Play}
+          key={action.key}
+          aria-label={`${action.label} goal`}
+          icon={action.icon}
           size="sm"
-          variant="soft"
-          onClick={() => onControl("resume")}
+          variant={action.key === "stop" ? "danger" : "soft"}
+          disabled={action.disabled}
+          onClick={action.handler}
         />
-      ) : (
-        <IconButton
-          aria-label="Pause goal"
-          icon={Pause}
-          size="sm"
-          variant="soft"
-          disabled={!canPause}
-          onClick={() => onControl("pause")}
-        />
-      )}
-      <IconButton
-        aria-label="Stop goal"
-        icon={Square}
-        size="sm"
-        variant="danger"
-        disabled={!canStop}
-        onClick={() => onControl("stop")}
-      />
+      ))}
     </Flex>
   );
 };
@@ -368,7 +391,7 @@ type GoalSectionProps = {
   onCreate: (content: string, budget?: GoalBudgetCommand) => void;
   onUpdateText: (content: string) => void;
   onApplyBudget: (budget: GoalBudgetCommand) => void;
-  onControl: (action: "pause" | "resume" | "stop") => void;
+  onControl: (action: GoalControlAction) => void;
 };
 
 const GoalSection: React.FC<GoalSectionProps> = ({
@@ -452,8 +475,7 @@ const GoalSection: React.FC<GoalSectionProps> = ({
                     size="xs"
                     variant="soft"
                   >
-                    {GOAL_STATUS_LABELS[goal.status] ??
-                      humanizeIdentifier(goal.status)}
+                    {humanizeIdentifier(goal.status)}
                   </Badge>
                 ) : (
                   <Badge tone="muted" size="xs" variant="soft">
@@ -631,45 +653,28 @@ const GoalBudgetEditor: React.FC<GoalBudgetEditorProps> = ({
 
 type GoalControlsProps = {
   goal: GoalSnapshot;
-  onControl: (action: "pause" | "resume" | "stop") => void;
+  onControl: (action: GoalControlAction) => void;
 };
 
 const GoalControls: React.FC<GoalControlsProps> = ({ goal, onControl }) => {
-  const { canPause, canResume, canStop } = goalControlAvailability(goal);
+  const actions = goalControlActions(goal, onControl);
 
-  if (!canPause && !canResume && !canStop) return null;
+  if (actions.length === 0) return null;
 
   return (
     <Flex align="center" gap="2" wrap="wrap" className={styles.goalControls}>
-      {canResume ? (
+      {actions.map((action) => (
         <Button
+          key={action.key}
           size="sm"
-          variant="soft"
-          leftIcon={Play}
-          onClick={() => onControl("resume")}
+          variant={action.key === "stop" ? "danger" : "soft"}
+          leftIcon={action.icon}
+          disabled={action.disabled}
+          onClick={action.handler}
         >
-          Resume
+          {action.label}
         </Button>
-      ) : (
-        <Button
-          size="sm"
-          variant="soft"
-          leftIcon={Pause}
-          disabled={!canPause}
-          onClick={() => onControl("pause")}
-        >
-          Pause
-        </Button>
-      )}
-      <Button
-        size="sm"
-        variant="danger"
-        leftIcon={Square}
-        disabled={!canStop}
-        onClick={() => onControl("stop")}
-      >
-        Stop
-      </Button>
+      ))}
     </Flex>
   );
 };
@@ -783,9 +788,6 @@ export const TaskProgressWidget: React.FC = () => {
   const threadToolUse = useAppSelector((state) =>
     selectThreadToolUseById(state, chatId),
   );
-  const isStreaming = useAppSelector((state) =>
-    selectIsStreamingById(state, chatId),
-  );
   const { done, total, activeTitle } = useAppSelector((state) =>
     selectTaskProgressById(state, chatId),
   );
@@ -852,7 +854,7 @@ export const TaskProgressWidget: React.FC = () => {
   );
 
   const handleGoalControl = useCallback(
-    (action: "pause" | "resume" | "stop") => {
+    (action: GoalControlAction) => {
       void controlGoal(action);
     },
     [controlGoal],
@@ -876,13 +878,7 @@ export const TaskProgressWidget: React.FC = () => {
                     <>
                       <Flex gap="1" align="center">
                         {tasks.map((task) => (
-                          <StatusIcon
-                            key={task.id}
-                            status={task.status}
-                            isStreaming={
-                              task.status === "in_progress" && isStreaming
-                            }
-                          />
+                          <StatusIcon key={task.id} status={task.status} />
                         ))}
                       </Flex>
 
@@ -960,7 +956,7 @@ export const TaskProgressWidget: React.FC = () => {
                 <div className={styles.taskList}>
                   {tasks.map((task) => (
                     <div key={task.id} className={styles.taskRowEnter}>
-                      <TaskRow task={task} isStreaming={isStreaming} />
+                      <TaskRow task={task} />
                     </div>
                   ))}
                 </div>

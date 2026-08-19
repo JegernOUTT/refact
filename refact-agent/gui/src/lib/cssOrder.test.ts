@@ -54,4 +54,36 @@ describe("lib entry global CSS order", () => {
       imports.indexOf("@radix-ui/themes/styles.css"),
     );
   });
+
+  it("keeps Theme.tsx and .storybook/preview.tsx cascades in sync", () => {
+    // Three copies of the global sheet list exist on purpose (entry, Theme
+    // for isolated mounts, Storybook preview); this guards against drift.
+    const normalize = (source: string) =>
+      [...source.matchAll(/^import\s+"([^"]+\.css)";?$/gm)]
+        .map((m) => m[1].replace(/^(\.\.\/)+(src\/)?/, "").replace(/^\.\//, ""))
+        .filter((s) => !s.includes("web.css") && !s.includes("preview.css"));
+
+    const entrySheets = normalize(source).map((s) =>
+      s.replace("components/Theme/theme-config.css", "theme-config.css"),
+    );
+    const themeSheets = normalize(
+      fs.readFileSync(
+        path.join(__dirname, "../components/Theme/Theme.tsx"),
+        "utf8",
+      ),
+    ).map((s) =>
+      s.replace("shared/tokens.css", "components/shared/tokens.css"),
+    );
+    const previewSheets = normalize(
+      fs.readFileSync(
+        path.join(__dirname, "../../.storybook/preview.tsx"),
+        "utf8",
+      ),
+    ).map((s) =>
+      s.replace("components/Theme/theme-config.css", "theme-config.css"),
+    );
+
+    expect(themeSheets).toEqual(entrySheets);
+    expect(previewSheets).toEqual(entrySheets);
+  });
 });

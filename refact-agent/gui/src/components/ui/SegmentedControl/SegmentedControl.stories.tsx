@@ -46,7 +46,7 @@ function SegmentedDemo({ reducedMotion = false }: { reducedMotion?: boolean }) {
           />
         </section>
         <section
-          className={`${storyStyles.panel} ${storyStyles.narrowPanel}`}
+          className={`${storyStyles.panel} ${storyStyles.narrowPanel} light`}
           data-appearance="light"
         >
           <p className={storyStyles.description}>Light + narrow container.</p>

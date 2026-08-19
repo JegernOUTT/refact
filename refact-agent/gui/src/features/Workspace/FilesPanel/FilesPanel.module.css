@@ -33,14 +33,16 @@
   padding: var(--rf-space-2) var(--rf-space-3);
   border-bottom: var(--rf-hairline) solid var(--rf-border);
   color: var(--rf-color-muted);
-  font: 650 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
   text-transform: uppercase;
 }
 
 .explorerHeader > label {
   flex: 0 0 auto;
   color: var(--rf-color-muted);
-  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
   text-transform: none;
 }
 
@@ -80,7 +82,8 @@
   color: var(--rf-color-muted);
   background: transparent;
   border: 0;
-  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   text-align: left;
   cursor: pointer;
 }
@@ -135,7 +138,8 @@
 .treeNotice {
   padding: var(--rf-space-2) var(--rf-space-3);
   color: var(--rf-color-warning);
-  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .treeLoadError {
@@ -146,7 +150,8 @@
   padding: var(--rf-space-2) var(--rf-space-3);
   color: var(--rf-color-danger);
   border-bottom: var(--rf-hairline) solid var(--rf-border);
-  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .viewer {
@@ -194,7 +199,8 @@
   background: transparent;
   border: 0;
   border-radius: var(--rf-radius-chip);
-  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
@@ -218,7 +224,8 @@
   padding: var(--rf-space-1) var(--rf-space-3);
   color: var(--rf-color-muted);
   border-bottom: var(--rf-hairline) solid var(--rf-border);
-  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .truncatedBanner {
@@ -227,7 +234,8 @@
   color: var(--rf-color-warning);
   background: var(--rf-surface-2);
   border-bottom: var(--rf-hairline) solid var(--rf-border);
-  font: 600 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .codeScroll {
@@ -249,7 +257,8 @@
   display: grid;
   grid-template-columns: minmax(var(--rf-space-6), auto) 1fr;
   min-height: calc(var(--rf-text-2) * var(--rf-line));
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-mono);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-mono);
 }
 
 .codeLine[data-target-line="true"] {
@@ -303,7 +312,8 @@
   min-height: 0;
   padding: var(--rf-space-2) var(--rf-space-3);
   color: var(--rf-color-text);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-mono);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-mono);
   tab-size: 2;
   background: transparent;
   border: none;
@@ -330,7 +340,8 @@
   text-decoration: line-through;
   background: color-mix(in srgb, var(--rf-color-danger) 14%, transparent);
   box-shadow: inset var(--rf-focus-ring-w) 0 0 var(--rf-color-danger);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-mono);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-mono);
 }
 
 @media (prefers-reduced-motion: no-preference) {

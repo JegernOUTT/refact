@@ -10,7 +10,8 @@
   box-shadow: none;
   background: transparent;
   color: var(--rf-color-fg);
-  font: 400 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-3) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .textarea::placeholder {

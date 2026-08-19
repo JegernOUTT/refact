@@ -79,6 +79,7 @@
   --rf-z-popover: 200;
   --rf-z-tooltip: 300;
   --rf-z-fixed: 400;
+  --rf-z-sticky: 500;
   --rf-z-overlay: 600;
   --rf-z-modal: 700;
   --rf-z-popover-modal: 800;
@@ -280,6 +281,16 @@
   --rf-blur-overlay: 0px;
   --rf-surface-overlay: var(--color-panel-solid, #16181d);
   --rf-surface-glass: var(--color-panel-solid, #16181d);
+}
+
+/* A light JetBrains theme without --color-panel-solid must not fall back to
+   the dark panel colour under light foreground tokens. */
+.light[data-host="jetbrains"],
+[data-appearance="light"][data-host="jetbrains"],
+.light [data-host="jetbrains"],
+[data-appearance="light"] [data-host="jetbrains"] {
+  --rf-surface-overlay: var(--color-panel-solid, #fcfcfd);
+  --rf-surface-glass: var(--color-panel-solid, #fcfcfd);
 }
 
 @media (prefers-reduced-transparency: reduce) {

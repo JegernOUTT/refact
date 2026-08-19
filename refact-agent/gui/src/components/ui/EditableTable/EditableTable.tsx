@@ -18,8 +18,13 @@ export interface EditableTableColumn<T extends EditableTableRow> {
   getInputProps?: (params: {
     row: T;
     rowIndex: number;
-  }) => Record<string, unknown>;
+  }) => EditableTableInputAttributes;
 }
+
+/** Real input props plus the data-* attributes consumers use for wiring. */
+export type EditableTableInputAttributes =
+  React.InputHTMLAttributes<HTMLInputElement> &
+    Record<`data-${string}`, string | number | boolean | undefined>;
 
 export type EditableTableValidate<T extends EditableTableRow> = (params: {
   row: T;
@@ -194,10 +199,9 @@ export function EditableTable<T extends EditableTableRow>({
                         ? column.secret(row.value)
                         : column.secret ?? false;
 
-                    const inputProps = (column.getInputProps?.({
-                      row: row.value,
-                      rowIndex,
-                    }) ?? {}) as Partial<React.ComponentProps<"input">>;
+                    const inputProps =
+                      column.getInputProps?.({ row: row.value, rowIndex }) ??
+                      {};
 
                     return (
                       <td className={styles.cell} key={column.id}>

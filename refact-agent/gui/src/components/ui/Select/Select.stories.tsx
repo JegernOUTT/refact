@@ -66,7 +66,6 @@ function SelectDemo({
         <section
           className={`${storyStyles.panel} ${storyStyles.narrowPanel} light`}
           data-appearance="light"
-          style={{ background: "var(--rf-bg)", colorScheme: "light" }}
         >
           <p className={storyStyles.description}>Light + narrow container.</p>
           <Select defaultValue="small">
@@ -103,6 +102,8 @@ export const States: Story = {
 };
 
 export const ReducedMotion: Story = {
+  // Pin the html attribute so the portaled overlay stops animating too.
+  parameters: { reducedMotion: "on" },
   render: () => <SelectDemo defaultOpen reducedMotion />,
 };
 

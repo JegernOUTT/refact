@@ -144,6 +144,25 @@ describe("SegmentedControl", () => {
     expect(label).toContain("overflow: hidden;");
   });
 
+  it("keeps md on the fixed control ladder while sm renders shorter", async () => {
+    const css = await readFile(
+      path.resolve(__dirname, "SegmentedControl.module.css"),
+      "utf8",
+    );
+    const root = css.match(/\.root \{[^}]+\}/)?.[0] ?? "";
+    const sizeSm = css.match(/\.size-sm \{[^}]+\}/)?.[0] ?? "";
+    const sizeSmLabel =
+      css.match(/\.size-sm \.segment,\n\.size-sm \.label \{[^}]+\}/)?.[0] ?? "";
+
+    expect(root).toContain(
+      "height: calc(var(--rf-control-h-sm) + 2 * var(--rf-segment-padding));",
+    );
+    expect(sizeSm).toContain("height: var(--rf-control-h-sm);");
+    expect(sizeSmLabel).toContain(
+      "min-height: calc(var(--rf-control-h-sm) - 2 * var(--rf-segment-padding));",
+    );
+  });
+
   it("keeps text segments labelled by their visible text", () => {
     render(
       <SegmentedControl

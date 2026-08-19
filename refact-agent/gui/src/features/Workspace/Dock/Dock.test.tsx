@@ -135,6 +135,23 @@ describe("Dock", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
+  it("offers a visible close control inside the narrow Sheet (audit L-01)", async () => {
+    mockNarrow(true);
+    server.use(
+      http.get("*/v1/files/tree", () =>
+        HttpResponse.json({ path: "", entries: [], truncated: false }),
+      ),
+    );
+    const view = render(<Dock />);
+
+    const close = screen.getByRole("button", {
+      name: "Close workspace panel",
+    });
+    fireEvent.click(close);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(view.store.getState().workspace.dock?.open).toBe(false);
+  });
+
   it("keeps the narrow Sheet below the fixed toolbar without blocking toolbar input", () => {
     const sheetBlock = cssBlock(dockCss, ".sheet");
     const toolbarBlock = cssBlock(toolbarCss, ".toolbar");

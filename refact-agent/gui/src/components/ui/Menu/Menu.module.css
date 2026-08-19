@@ -47,7 +47,8 @@
   background: transparent;
   border: 0;
   border-radius: 0;
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   outline: none;
   user-select: none;
   transition:
@@ -68,7 +69,8 @@
 .label {
   padding: var(--rf-space-2);
   color: var(--rf-color-muted);
-  font: 600 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }

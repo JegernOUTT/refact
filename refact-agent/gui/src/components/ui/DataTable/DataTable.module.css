@@ -17,7 +17,8 @@
   border-spacing: 0;
   border-collapse: separate;
   color: var(--rf-color-fg);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .wide .table {
@@ -27,7 +28,8 @@
 .caption {
   margin-bottom: var(--rf-space-2);
   color: var(--rf-color-muted);
-  font: 550 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   text-align: start;
 }
 
@@ -130,7 +132,8 @@
 
 .cardLabel {
   color: var(--rf-color-muted);
-  font: 650 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .cardValue {

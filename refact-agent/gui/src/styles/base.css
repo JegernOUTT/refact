@@ -33,31 +33,34 @@
   line-height: var(--rf-line-2);
 }
 
-:where(h1) {
+/* Scoped to the theme root so third-party DOM outside the app (e.g. the
+   engine-injected browser toolbar) keeps its own typography. :where() keeps
+   the element part at zero specificity, so any owned class rule still wins. */
+.radix-themes :where(h1) {
   font-size: var(--rf-text-5);
   line-height: var(--rf-line-5);
 }
 
-:where(h2) {
+.radix-themes :where(h2) {
   font-size: var(--rf-text-4);
   line-height: var(--rf-line-4);
 }
 
-:where(h3) {
+.radix-themes :where(h3) {
   font-size: var(--rf-text-3);
   line-height: var(--rf-line-3);
 }
 
-:where(h4, h5, h6) {
+.radix-themes :where(h4, h5, h6) {
   font-size: var(--rf-text-2);
   line-height: var(--rf-line-2);
 }
 
-:where(code, kbd, samp, pre) {
+.radix-themes :where(code, kbd, samp, pre) {
   font-family: var(--rf-font-mono);
   font-size: var(--rf-text-2);
 }
 
-:where(button, input, select, textarea) {
+.radix-themes :where(button, input, select, textarea) {
   font: inherit;
 }

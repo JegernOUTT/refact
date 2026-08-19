@@ -50,6 +50,8 @@ export function SegmentedControl({
   value,
   ...props
 }: SegmentedControlProps) {
+  const fallbackName = React.useId();
+  const groupName = name ?? fallbackName;
   const hasOptions = options.length > 0;
   const activeIndex = hasOptions
     ? Math.max(
@@ -87,7 +89,7 @@ export function SegmentedControl({
               checked={option.value === value}
               className={styles.input}
               disabled={option.disabled}
-              name={name}
+              name={groupName}
               type="radio"
               value={option.value}
               onChange={() => onValueChange(option.value)}

@@ -91,14 +91,26 @@
   padding-top: var(--rf-space-1);
 }
 
+/* Dialog.Footer: an explicit actions row inside the pinned footer region. */
+.footerRow {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--rf-space-3);
+}
+
 .title {
   margin: 0;
   color: var(--rf-color-fg);
-  font: 600 var(--rf-text-4) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-4) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .description {
   margin: 0;
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }

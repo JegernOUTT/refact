@@ -1,24 +1,25 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { Provider } from "react-redux";
-import { setUpStore } from "../../app/store";
-import { ErrorCallout } from ".";
+import { ErrorCalloutView } from ".";
 
 const meta = {
   title: "Error Callout",
-  component: ErrorCallout,
-  decorators: [
-    (Story) => (
-      <Provider store={setUpStore()}>
-        <Story />
-      </Provider>
-    ),
-  ],
-} satisfies Meta<typeof ErrorCallout>;
+  component: ErrorCalloutView,
+  args: {
+    isAuthError: false,
+  },
+} satisfies Meta<typeof ErrorCalloutView>;
 
 export default meta;
 
-export const Default: StoryObj<typeof ErrorCallout> = {
+export const Default: StoryObj<typeof ErrorCalloutView> = {
   args: {
     children: "some bad happened",
+  },
+};
+
+export const AuthError: StoryObj<typeof ErrorCalloutView> = {
+  args: {
+    children: "unauthorized",
+    isAuthError: true,
   },
 };

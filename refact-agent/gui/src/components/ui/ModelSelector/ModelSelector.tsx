@@ -142,7 +142,6 @@ function ModelSelectorList({
   const emptyLabel = unsetLabel ?? "No model selected";
   const [query, setQuery] = React.useState("");
   const selectedRef = React.useRef<HTMLButtonElement>(null);
-  const searchInputRef = React.useRef<HTMLInputElement | null>(null);
   const normalizedQuery = normalize(query);
   const modelsWithSelection = React.useMemo(() => {
     if (value && !models.some((model) => model.value === value)) {
@@ -193,8 +192,8 @@ function ModelSelectorList({
       <label className={styles.searchBox}>
         <Icon icon={Search} size="sm" tone="muted" />
         <input
-          ref={searchInputRef}
           className={styles.searchInput}
+          disabled={disabled}
           placeholder="Search models"
           type="search"
           value={query}
@@ -205,6 +204,7 @@ function ModelSelectorList({
       <div className={styles.scrollArea} role="listbox" aria-label="Models">
         {allowUnset ? (
           <ModelRow
+            disabled={disabled}
             model={{ value: unsetValue, displayName: emptyLabel }}
             selected={value === null}
             selectedRef={value === null ? selectedRef : undefined}
@@ -220,6 +220,7 @@ function ModelSelectorList({
                 {group.models.map((model) => (
                   <ModelRow
                     key={model.value}
+                    disabled={disabled}
                     model={model}
                     selected={model.value === value}
                     selectedRef={
@@ -258,11 +259,18 @@ interface ModelRowProps {
   model: ModelOption;
   selected: boolean;
   selectedRef?: React.RefObject<HTMLButtonElement>;
+  disabled?: boolean;
   onSelect: () => void;
 }
 
-function ModelRow({ model, onSelect, selected, selectedRef }: ModelRowProps) {
-  const disabled = model.disabled === true;
+function ModelRow({
+  disabled: selectorDisabled,
+  model,
+  onSelect,
+  selected,
+  selectedRef,
+}: ModelRowProps) {
+  const disabled = model.disabled === true || selectorDisabled === true;
 
   return (
     <button
@@ -339,14 +347,9 @@ export function ModelSelector({
   const currentLabel = getCurrentLabel(models, value, allowUnset, unsetLabel);
   const handleSelect = React.useCallback(
     (nextValue: string) => {
-      if (nextValue === "" && allowUnset) {
-        onSelect("");
-        return;
-      }
-
       onSelect(nextValue);
     },
-    [allowUnset, onSelect],
+    [onSelect],
   );
 
   if (variant === "inline") {

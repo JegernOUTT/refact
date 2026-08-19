@@ -13,7 +13,6 @@ export type CalloutProps = Omit<
   type: "info" | "error" | "warning";
   onClick?: () => void;
   timeout?: number | null;
-  preventRetry?: boolean;
   preventClose?: boolean;
 };
 
@@ -70,8 +69,14 @@ export const Callout: React.FC<CalloutProps> = ({
     >
       <Flex direction="row" align="center" gap="4">
         <Icon
-          icon={type === "error" ? AlertTriangle : Info}
-          tone={type === "error" ? "danger" : "accent"}
+          icon={type === "info" ? Info : AlertTriangle}
+          tone={
+            type === "error"
+              ? "danger"
+              : type === "warning"
+                ? "warning"
+                : "accent"
+          }
         />
         <Flex direction="column" align="start" gap="1">
           <Text as="div" className={styles.callout_text} wrap="wrap">
@@ -89,6 +94,7 @@ export type ErrorCalloutViewProps = Omit<CalloutProps, "type"> & {
    * derives it from auth state so this file stays store-free.
    */
   isAuthError?: boolean;
+  preventRetry?: boolean;
 };
 
 export const ErrorCalloutView: React.FC<ErrorCalloutViewProps> = ({

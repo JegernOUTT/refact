@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { EditableTable } from "./EditableTable";
 import type { EditableTableColumn } from "./EditableTable";
+import storyStyles from "../Control.stories.module.css";
 import styles from "./EditableTable.stories.module.css";
 
 interface ParameterRow {
@@ -62,6 +63,29 @@ function EditableTableDemo() {
   );
 }
 
+function EditableTablePanel() {
+  const [rows, setRows] = useState<ParameterRow[]>([
+    { description: "City for the forecast", name: "city" },
+  ]);
+
+  return (
+    <EditableTable
+      addLabel="Add parameter"
+      columns={columns}
+      createRow={createRow}
+      value={rows}
+      validate={({ columnId, value }) => {
+        if (columnId === "name" && !isSnakeCase(value)) {
+          return "Use snake_case.";
+        }
+
+        return null;
+      }}
+      onChange={setRows}
+    />
+  );
+}
+
 const meta = {
   title: "UI/EditableTable",
   parameters: {
@@ -78,5 +102,19 @@ export const AddRemoveEnterValidation: Story = {
 };
 
 export const LightDark: Story = {
-  render: () => <EditableTableDemo />,
+  parameters: { layout: "fullscreen" },
+  render: () => (
+    <div className={storyStyles.storyShell}>
+      <section className={storyStyles.panel}>
+        <h3 className={storyStyles.title}>Dark</h3>
+        <p className={storyStyles.description}>Default appearance.</p>
+        <EditableTablePanel />
+      </section>
+      <section className={`${storyStyles.panel} light`} data-appearance="light">
+        <h3 className={storyStyles.title}>Light</h3>
+        <p className={storyStyles.description}>Flipped tokens.</p>
+        <EditableTablePanel />
+      </section>
+    </div>
+  ),
 };

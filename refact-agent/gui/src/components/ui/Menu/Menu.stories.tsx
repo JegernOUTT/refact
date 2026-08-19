@@ -79,6 +79,8 @@ type Story = StoryObj<typeof meta>;
 
 export const LightDark: Story = { render: () => <MenuStory /> };
 export const ReducedMotion: Story = {
+  // Pin the html attribute so the portaled overlay stops animating too.
+  parameters: { reducedMotion: "on" },
   render: () => <MenuStory reducedMotion />,
 };
 

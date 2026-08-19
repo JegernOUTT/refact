@@ -106,6 +106,8 @@ export const NarrowSheet: Story = {
   play: ({ canvasElement }) => openFirstPopover(canvasElement),
 };
 export const ReducedMotion: Story = {
+  // Pin the html attribute so the portaled overlay stops animating too.
+  parameters: { reducedMotion: "on" },
   render: () => <PopoverStory reducedMotion />,
   play: ({ canvasElement }) => openFirstPopover(canvasElement),
 };

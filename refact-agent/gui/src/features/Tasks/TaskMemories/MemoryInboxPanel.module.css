@@ -106,7 +106,7 @@
   background: transparent;
   color: var(--rf-color-muted);
   cursor: pointer;
-  font: 650 var(--rf-text-1) / 1 var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-1) / 1 var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

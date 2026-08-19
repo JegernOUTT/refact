@@ -100,6 +100,8 @@ export const Narrow: Story = {
   play: ({ canvasElement }) => openFirstSheet(canvasElement),
 };
 export const ReducedMotion: Story = {
+  // Pin the html attribute so the portaled overlay stops animating too.
+  parameters: { reducedMotion: "on" },
   render: () => <SheetStory reducedMotion />,
   play: ({ canvasElement }) => openFirstSheet(canvasElement),
 };

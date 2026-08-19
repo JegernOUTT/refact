@@ -80,7 +80,8 @@
   gap: var(--rf-space-2);
   margin: 0;
   color: var(--rf-color-fg);
-  font: 650 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-3) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .tableWrapper {

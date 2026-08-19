@@ -19,7 +19,8 @@
 
 .heading {
   color: var(--rf-color-muted);
-  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
   text-transform: uppercase;
 }
 
@@ -87,12 +88,14 @@
 
 .cardTitle {
   color: var(--rf-color-fg);
-  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .taskName {
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .state,
@@ -107,6 +110,7 @@
   gap: var(--rf-space-3);
   padding: var(--rf-space-4);
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   text-align: center;
 }

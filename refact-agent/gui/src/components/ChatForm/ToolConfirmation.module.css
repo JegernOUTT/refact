@@ -1,12 +1,12 @@
 .ToolConfirmationCard {
   width: 100%;
   flex-shrink: 0;
-  padding: var(--rf-space-4);
   transform: translateZ(0);
   will-change: transform;
 }
 
 .ToolConfirmationCard.ToolConfirmationCard {
+  padding: var(--rf-panel-pad);
   border-color: var(--rf-border);
   background: var(--rf-surface-glass);
   box-shadow: var(--rf-elev-panel);

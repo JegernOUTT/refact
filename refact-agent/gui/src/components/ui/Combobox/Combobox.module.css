@@ -35,7 +35,8 @@
   background: transparent;
   border: 0;
   outline: 0;
-  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .input::placeholder {
@@ -92,7 +93,8 @@
   background: transparent;
   border: 0;
   border-radius: 0;
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   outline: none;
   user-select: none;
   transition:
@@ -124,5 +126,6 @@
 .empty {
   padding: var(--rf-space-3);
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }

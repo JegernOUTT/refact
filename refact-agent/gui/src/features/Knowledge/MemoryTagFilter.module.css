@@ -34,7 +34,8 @@
   background: var(--rf-surface-1);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .searchInput:focus-visible {
@@ -63,7 +64,8 @@
   background: transparent;
   border: 0;
   border-radius: var(--rf-radius-ctl);
-  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   text-align: left;
   cursor: pointer;
 }
@@ -92,7 +94,8 @@
   margin: 0;
   padding: var(--rf-space-3);
   color: var(--rf-color-muted);
-  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   text-align: center;
 }
 
@@ -116,7 +119,8 @@
   background: var(--rf-color-accent-soft);
   border: var(--rf-hairline) solid var(--rf-color-accent);
   border-radius: var(--rf-radius-chip);
-  font: 600 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   cursor: pointer;
 }
 
@@ -144,7 +148,8 @@
   background: transparent;
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-chip);
-  font: 600 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   cursor: pointer;
 }
 

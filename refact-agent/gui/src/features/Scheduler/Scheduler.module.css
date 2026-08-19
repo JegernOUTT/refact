@@ -9,7 +9,8 @@
 .summary {
   margin: 0;
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .form,
@@ -91,7 +92,8 @@
   padding: var(--rf-space-1) var(--rf-space-3);
   background: transparent;
   color: var(--rf-color-muted);
-  font: 600 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
   cursor: pointer;
 }
 
@@ -198,7 +200,8 @@
   margin: 0;
   overflow-wrap: anywhere;
   color: var(--rf-color-fg);
-  font: 700 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-bold) var(--rf-text-3) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .jobBadges {

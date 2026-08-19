@@ -6,6 +6,7 @@ import { Markdown } from "../Markdown";
 import { Link } from "../Link";
 import styles from "./ToolConfirmation.module.css";
 import { push } from "../../features/Pages/pagesSlice";
+import { selectConfig } from "../../features/Config/configSlice";
 import {
   isAssistantMessage,
   ToolConfirmationPauseReason,
@@ -17,19 +18,24 @@ import {
   useThreadId,
 } from "../../features/Chat/Thread";
 import { PATCH_LIKE_FUNCTIONS } from "./constants";
+import { sendChatCommand } from "../../services/refact/chatCommands";
 import { Badge, Button, Icon, Surface } from "../ui";
 
 type ToolConfirmationProps = {
   pauseReasons: ToolConfirmationPauseReason[];
 };
 
-const getConfirmationMessage = (
-  toolNames: string[],
-  rules: string[],
-  types: string[],
-  confirmationToolNames: string[],
-  denialToolNames: string[],
-) => {
+const getConfirmationMessage = (resolvedReasons: ResolvedPauseReason[]) => {
+  const toolNames = resolvedReasons.map((r) => r.toolName);
+  const types = resolvedReasons.map((r) => r.type);
+  const rules = [...new Set(resolvedReasons.map((r) => r.rule))];
+  const confirmationToolNames = resolvedReasons
+    .filter((r) => r.type === "confirmation")
+    .map((r) => r.toolName);
+  const denialToolNames = resolvedReasons
+    .filter((r) => r.type === "denial")
+    .map((r) => r.toolName);
+
   const normalizedRules = rules.filter((r) => r.trim().length > 0);
   const ruleText = normalizedRules.map((r) => `\`${r}\``).join(", ");
   const ruleClause =
@@ -148,34 +154,6 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
     () => [...new Set(resolvedReasons.map((r) => r.tool_call_id))],
     [resolvedReasons],
   );
-  const toolNames = resolvedReasons.map((r) => r.toolName);
-  const types = resolvedReasons.map((r) => r.type);
-  const rules = [...new Set(resolvedReasons.map((r) => r.rule))];
-
-  const isPatchConfirmation = resolvedReasons.every((r) =>
-    PATCH_LIKE_FUNCTIONS.includes(r.toolName),
-  );
-
-  const maybeIntegrationPath = resolvedReasons.find(
-    (r) => r.integr_config_path !== null,
-  )?.integr_config_path;
-  const linksToShellSettings = resolvedReasons.some(isShellConfiguration);
-
-  const allConfirmation = resolvedReasons.every(
-    (r) => r.type === "confirmation",
-  );
-  const isCacheGuardConfirmation =
-    pauseReasons.length > 0 && pauseReasons.every(isCacheGuardReason);
-  const confirmationToolNames = resolvedReasons
-    .filter((r) => r.type === "confirmation")
-    .map((r) => r.toolName);
-  const denialToolNames = resolvedReasons
-    .filter((r) => r.type === "denial")
-    .map((r) => r.toolName);
-  const orderedReasons = [...resolvedReasons].sort((a, b) => {
-    if (a.type === b.type) return 0;
-    return a.type === "denial" ? -1 : 1;
-  });
 
   const { respondToTools } = useChatActions(chatId);
 
@@ -196,17 +174,13 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
   }, [respondToTools, toolCallIds]);
 
   const [isSettingAutoApprove, setIsSettingAutoApprove] = useState(false);
+  const config = useAppSelector(selectConfig);
 
   const handleAllowForThisChat = useCallback(async () => {
     setIsSettingAutoApprove(true);
     try {
-      const { sendChatCommand } = await import(
-        "../../services/refact/chatCommands"
-      );
-      const state = (await import("../../app/store")).store.getState();
-      const apiKey = state.config.apiKey;
       if (chatId) {
-        await sendChatCommand(chatId, state.config, apiKey ?? undefined, {
+        await sendChatCommand(chatId, config, config.apiKey ?? undefined, {
           type: "set_params",
           patch: { auto_approve_editing_tools: true },
         });
@@ -216,19 +190,33 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
     } finally {
       setIsSettingAutoApprove(false);
     }
-  }, [dispatch, chatId, confirmToolUsage]);
+  }, [dispatch, chatId, config, confirmToolUsage]);
 
   const handleReject = useCallback(() => {
     rejectToolUsage();
   }, [rejectToolUsage]);
 
-  const message = getConfirmationMessage(
-    toolNames,
-    rules,
-    types,
-    confirmationToolNames,
-    denialToolNames,
+  if (resolvedReasons.length === 0) return null;
+
+  const isPatchConfirmation = resolvedReasons.every((r) =>
+    PATCH_LIKE_FUNCTIONS.includes(r.toolName),
   );
+
+  const maybeIntegrationPath = resolvedReasons.find(
+    (r) => r.integr_config_path !== null,
+  )?.integr_config_path;
+  const linksToShellSettings = resolvedReasons.some(isShellConfiguration);
+
+  const allConfirmation = resolvedReasons.every(
+    (r) => r.type === "confirmation",
+  );
+  const isCacheGuardConfirmation = pauseReasons.every(isCacheGuardReason);
+  const orderedReasons = [...resolvedReasons].sort((a, b) => {
+    if (a.type === b.type) return 0;
+    return a.type === "denial" ? -1 : 1;
+  });
+
+  const message = getConfirmationMessage(resolvedReasons);
 
   if (isCacheGuardConfirmation) {
     return (
@@ -254,11 +242,7 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
   }
 
   return (
-    <Surface
-      className={styles.ToolConfirmationCard}
-      variant="surface-1"
-      style={{ padding: "var(--rf-panel-pad)" }}
-    >
+    <Surface className={styles.ToolConfirmationCard} variant="surface-1">
       <div className={styles.ToolConfirmationLayout}>
         <div className={styles.ToolConfirmationContent}>
           <div className={styles.ToolConfirmationHeading}>
@@ -353,11 +337,7 @@ const CacheGuardConfirmation: React.FC<CacheGuardConfirmationProps> = ({
   const estimatedUsd = extractEstimatedUsd(details);
 
   return (
-    <Surface
-      className={styles.ToolConfirmationCard}
-      variant="surface-1"
-      style={{ padding: "var(--rf-panel-pad)" }}
-    >
+    <Surface className={styles.ToolConfirmationCard} variant="surface-1">
       <div className={styles.ToolConfirmationLayout}>
         <div className={styles.ToolConfirmationContent}>
           <div className={styles.ToolConfirmationHeading}>
@@ -431,11 +411,7 @@ const PatchConfirmation: React.FC<PatchConfirmationProps> = ({
   }, [pauseReasons, toolCallsById]);
 
   return (
-    <Surface
-      className={styles.ToolConfirmationCard}
-      variant="surface-1"
-      style={{ padding: "var(--rf-panel-pad)" }}
-    >
+    <Surface className={styles.ToolConfirmationCard} variant="surface-1">
       <div className={styles.ToolConfirmationLayout}>
         <div className={styles.ToolConfirmationContent}>
           <div className={styles.ToolConfirmationHeading}>

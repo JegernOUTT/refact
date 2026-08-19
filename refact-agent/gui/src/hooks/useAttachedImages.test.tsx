@@ -66,4 +66,64 @@ describe("useAttachedImages", () => {
     expect(readAsDataURL).toHaveBeenCalledOnce();
     expect(canvasSpy).not.toHaveBeenCalledWith("canvas");
   });
+
+  const ATTACHED = [
+    {
+      name: "kept.png",
+      content: "data:image/png;base64,a2VwdA==",
+      type: "image/png",
+    },
+  ];
+
+  function renderWithImages(model: string, capsResolves: boolean) {
+    server.use(
+      http.get("*/v1/ping", () => HttpResponse.text("pong")),
+      http.get("*/v1/caps", () =>
+        capsResolves
+          ? HttpResponse.json(STUB_CAPS_RESPONSE)
+          : new Promise<never>(() => undefined),
+      ),
+      http.get("*/v1/chat-modes", () =>
+        HttpResponse.json({ modes: [], errors: [] }),
+      ),
+    );
+    const chat = createDefaultChatState();
+    const chatId = chat.current_thread_id;
+    chat.threads[chatId].thread.model = model;
+    chat.threads[chatId].attached_images = [...ATTACHED];
+    const store = setUpStore({
+      chat,
+      // dev:true is required for host:"web" to have a usable engine endpoint;
+      // without it the caps query is skipped entirely and never resolves.
+      config: { host: "web", themeProps: {}, lspPort: 8001, dev: true },
+    });
+    store.dispatch(setBackendStatus({ status: "online" }));
+    const wrapper = ({ children }: React.PropsWithChildren) => (
+      <Provider store={store}>
+        <ChatThreadProvider chatId={chatId}>{children}</ChatThreadProvider>
+      </Provider>
+    );
+    renderHook(() => useAttachedImages(), { wrapper });
+    return { store, chatId };
+  }
+
+  it("keeps attached images while caps are still loading (audit N-40)", async () => {
+    const { store, chatId } = renderWithImages("openai/gpt-4o", false);
+
+    // Give the reset effect a chance to (incorrectly) fire.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(store.getState().chat.threads[chatId]?.attached_images).toEqual(
+      ATTACHED,
+    );
+  });
+
+  it("clears attached images once resolved caps mark the model non-multimodal", async () => {
+    const { store, chatId } = renderWithImages("test", true);
+
+    await waitFor(() => {
+      expect(store.getState().chat.threads[chatId]?.attached_images).toEqual(
+        [],
+      );
+    });
+  });
 });

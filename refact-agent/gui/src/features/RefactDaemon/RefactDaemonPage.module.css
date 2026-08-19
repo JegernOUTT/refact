@@ -50,12 +50,14 @@
 
 .headingBlock h1 {
   color: var(--rf-color-fg);
-  font: 700 var(--rf-text-5) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-bold) var(--rf-text-5) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .headingBlock p {
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .eyebrow {
@@ -64,7 +66,8 @@
   align-items: center;
   gap: var(--rf-space-1);
   color: var(--rf-color-accent);
-  font: 650 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
   text-transform: uppercase;
 }
 
@@ -105,13 +108,15 @@
 
 .cardHeader h2 {
   color: var(--rf-color-fg);
-  font: 650 var(--rf-text-4) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-4) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .cardHeader p {
   min-width: 0;
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   overflow-wrap: anywhere;
 }
 
@@ -137,14 +142,16 @@
 
 .statItem dt {
   color: var(--rf-color-muted);
-  font: 650 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
   text-transform: uppercase;
 }
 
 .statItem dd {
   min-width: 0;
   color: var(--rf-color-fg);
-  font: 600 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   overflow-wrap: anywhere;
 }
 
@@ -162,7 +169,8 @@
 .cronPendingList {
   gap: var(--rf-space-1);
   color: var(--rf-color-muted);
-  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .cronPendingItem {
@@ -226,7 +234,8 @@
 .releaseList {
   margin: 0;
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .notice {
@@ -236,7 +245,8 @@
 
 .sectionLabel {
   color: var(--rf-color-fg);
-  font: 650 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
   text-transform: uppercase;
 }
 

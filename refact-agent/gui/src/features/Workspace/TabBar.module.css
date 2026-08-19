@@ -132,7 +132,8 @@
   background: transparent;
   border: var(--rf-hairline) solid transparent;
   border-radius: var(--rf-radius-card);
-  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   cursor: pointer;
 }
 

@@ -38,12 +38,14 @@
 
 .title {
   color: var(--rf-color-fg);
-  font: 700 var(--rf-text-5) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-bold) var(--rf-text-5) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .description {
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .nav {
@@ -65,7 +67,8 @@
   background: transparent;
   border: var(--rf-hairline) solid transparent;
   border-radius: var(--rf-radius-ctl);
-  font: 600 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   text-align: left;
   cursor: pointer;
 }

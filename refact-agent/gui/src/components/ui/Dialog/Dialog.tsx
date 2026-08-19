@@ -14,9 +14,14 @@ import styles from "./Dialog.module.css";
 export type DialogProps = ModalOverlayProps;
 export type DialogTriggerProps = DialogPrimitive.DialogTriggerProps;
 export type DialogCloseProps = DialogPrimitive.DialogCloseProps;
-export type DialogContentProps = ModalOverlayContentProps;
+export type DialogContentProps = ModalOverlayContentProps &
+  Omit<DialogPrimitive.DialogContentProps, keyof ModalOverlayContentProps>;
 export type DialogTitleProps = DialogPrimitive.DialogTitleProps;
 export type DialogDescriptionProps = DialogPrimitive.DialogDescriptionProps;
+export type DialogFooterProps = {
+  className?: string;
+  children?: React.ReactNode;
+} & React.HTMLAttributes<HTMLDivElement>;
 
 const DialogRoot: React.FC<DialogProps> = ({ modal = true, ...props }) => {
   return <DialogPrimitive.Root modal={modal} {...props} />;
@@ -50,20 +55,48 @@ const DialogDescription = React.forwardRef<
   );
 });
 
+/**
+ * Explicit pinned actions region. Wrap Cancel/confirm rows in Dialog.Footer
+ * so they stay outside the scrollable body — implicit detection only lifts a
+ * bare trailing Dialog.Close, and most consumers wrap their actions in a row.
+ */
+const DialogFooter = React.forwardRef<HTMLDivElement, DialogFooterProps>(
+  (props: DialogFooterProps, ref) => {
+    const { className, ...rest } = props;
+    return (
+      <div
+        ref={ref}
+        className={classNames(styles.footerRow, className)}
+        {...rest}
+      />
+    );
+  },
+);
+
 const isElementOfType = (
   node: React.ReactNode,
   types: readonly React.ElementType[],
 ) =>
   React.isValidElement(node) && types.includes(node.type as React.ElementType);
 
+/* Children.toArray does not enter fragments, so `<><Title/>…</>` would
+ * otherwise arrive as one opaque node and skip partitioning entirely. */
+const flattenChildren = (children: React.ReactNode): React.ReactNode[] =>
+  React.Children.toArray(children).flatMap((node) =>
+    React.isValidElement(node) && node.type === React.Fragment
+      ? flattenChildren((node.props as { children?: React.ReactNode }).children)
+      : [node],
+  );
+
 /**
  * Splits children into a pinned header (leading Title/Description run), a
- * scrollable body, and a pinned footer (trailing Dialog.Close run). Only
- * prefix/suffix runs are lifted, so document order is always preserved and
- * consumers that interleave their own markup keep rendering unchanged.
+ * scrollable body, and a pinned footer (trailing Dialog.Close/Dialog.Footer
+ * run). Only prefix/suffix runs are lifted, so document order is always
+ * preserved and consumers that interleave their own markup keep rendering
+ * unchanged.
  */
 const partitionDialogChildren = (children: React.ReactNode) => {
-  const nodes = React.Children.toArray(children);
+  const nodes = flattenChildren(children);
 
   let headerEnd = 0;
   while (
@@ -76,7 +109,7 @@ const partitionDialogChildren = (children: React.ReactNode) => {
   let footerStart = nodes.length;
   while (
     footerStart > headerEnd &&
-    isElementOfType(nodes[footerStart - 1], [DialogClose])
+    isElementOfType(nodes[footerStart - 1], [DialogClose, DialogFooter])
   ) {
     footerStart -= 1;
   }
@@ -89,7 +122,7 @@ const partitionDialogChildren = (children: React.ReactNode) => {
 };
 
 const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps>(
-  ({ className, maxWidth, maxHeight, children }, ref) => {
+  ({ className, maxWidth, maxHeight, style, children, ...props }, ref) => {
     const { header, body, footer } = partitionDialogChildren(children);
 
     return (
@@ -105,7 +138,8 @@ const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps>(
               "rf-popover-motion",
               className,
             )}
-            style={overlayStyle(maxWidth, maxHeight)}
+            style={{ ...overlayStyle(maxWidth, maxHeight), ...style }}
+            {...props}
           >
             <ModalOverlayProvider value>
               {header.length > 0 ? (
@@ -126,6 +160,7 @@ const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps>(
 DialogContent.displayName = "Dialog.Content";
 DialogTitle.displayName = "Dialog.Title";
 DialogDescription.displayName = "Dialog.Description";
+DialogFooter.displayName = "Dialog.Footer";
 
 export const Dialog = Object.assign(DialogRoot, {
   Trigger: DialogTrigger,
@@ -133,4 +168,5 @@ export const Dialog = Object.assign(DialogRoot, {
   Title: DialogTitle,
   Description: DialogDescription,
   Close: DialogClose,
+  Footer: DialogFooter,
 });

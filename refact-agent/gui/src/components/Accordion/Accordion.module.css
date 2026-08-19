@@ -41,7 +41,8 @@
   color: var(--rf-color-fg);
   background: transparent;
   border-radius: var(--rf-radius-ctl);
-  font: 650 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-3) / var(--rf-line)
+    var(--rf-font-ui);
   cursor: pointer;
   transition:
     background-color var(--rf-dur-fast) var(--rf-ease-standard),
@@ -62,7 +63,7 @@
   grid-template-rows: 0fr;
   overflow: hidden;
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-2) / 1.5 var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / 1.5 var(--rf-font-ui);
   transition: grid-template-rows var(--rf-dur-med) var(--rf-ease-standard);
 }
 

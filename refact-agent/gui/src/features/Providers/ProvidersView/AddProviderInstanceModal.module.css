@@ -31,7 +31,8 @@
 .trustFieldset legend {
   margin-bottom: var(--rf-space-1);
   color: var(--rf-color-fg);
-  font: 600 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .zoneList {

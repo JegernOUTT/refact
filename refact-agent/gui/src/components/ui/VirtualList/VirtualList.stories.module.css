@@ -17,10 +17,12 @@
 
 .title {
   color: var(--rf-color-fg);
-  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .meta {
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }

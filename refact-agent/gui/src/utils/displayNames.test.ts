@@ -20,6 +20,12 @@ describe("humanizeIdentifier", () => {
     expect(humanizeIdentifier("SomeNewCategory")).toBe("Some new category");
   });
 
+  it("splits leading and embedded acronyms", () => {
+    expect(humanizeIdentifier("HTTPRequest")).toBe("Http request");
+    expect(humanizeIdentifier("MCPError")).toBe("Mcp error");
+    expect(humanizeIdentifier("parseHTTPResponse")).toBe("Parse http response");
+  });
+
   it("sentence-cases kebab-case and camelCase", () => {
     expect(humanizeIdentifier("mode-switch")).toBe("Mode switch");
     expect(humanizeIdentifier("modeSwitch")).toBe("Mode switch");

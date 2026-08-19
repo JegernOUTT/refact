@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useAppSelector } from "./useAppSelector";
 import { useAppDispatch } from "./useAppDispatch";
 import {
@@ -42,8 +42,16 @@ export function useAttachedImages() {
     [dispatch, chatId],
   );
 
+  // Async file reads can complete after the model changed to a
+  // non-multimodal one; gate the insert at dispatch time so a late read
+  // cannot reinsert an image the reset effect already cleared. While caps
+  // are still loading the insert proceeds — the reset effect below cleans
+  // up if resolution reveals the model lacks multimodality.
+  const multimodalityBlockedRef = useRef(false);
+
   const insertImage = useCallback(
     (file: ImageFile) => {
+      if (multimodalityBlockedRef.current) return;
       dispatch(addThreadImage({ id: chatId, image: file }));
     },
     [dispatch, chatId],
@@ -108,6 +116,7 @@ export function useAttachedImages() {
     // flag is false-by-default and this effect used to wipe the user's
     // attached images on every caps refetch (audit N-40).
     if (!capsData) return;
+    multimodalityBlockedRef.current = !isMultimodalitySupportedForCurrentModel;
     if (!isMultimodalitySupportedForCurrentModel) {
       dispatch(resetThreadImages({ id: chatId }));
     }

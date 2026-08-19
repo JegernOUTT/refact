@@ -1,5 +1,10 @@
 .widget {
   background: transparent;
+  /* Scroll bounds for the widget subtrees live here, so the numbers have one
+     named home instead of being repeated as magic values below. */
+  --tpw-content-max: min(400px, 50vh);
+  --tpw-attempts-max: 200px;
+  --tpw-events-max: 180px;
 }
 
 .header {
@@ -78,7 +83,7 @@
 .content {
   composes: scrollbarThin from "../shared/scrollbar.module.css";
   padding: 0 var(--rf-space-3) var(--rf-space-3);
-  max-height: min(400px, 50vh);
+  max-height: var(--tpw-content-max);
   overflow-y: auto;
   transform-origin: top;
   animation: slideDown var(--rf-dur-med) var(--rf-ease-entrance);
@@ -118,7 +123,6 @@
 }
 
 .goalInput {
-  box-sizing: border-box;
   width: 100%;
   min-width: 0;
   min-height: calc(var(--rf-control-h-lg) * 2);
@@ -175,7 +179,6 @@
 }
 
 .goalBudgetInput {
-  box-sizing: border-box;
   width: 100%;
   min-width: 0;
   min-height: var(--rf-control-h);
@@ -207,7 +210,7 @@
 .attemptList {
   composes: scrollbarThin from "../shared/scrollbar.module.css";
   min-width: 0;
-  max-height: 200px;
+  max-height: var(--tpw-attempts-max);
   overflow-y: auto;
 }
 
@@ -245,7 +248,7 @@
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-1);
-  max-height: 180px;
+  max-height: var(--tpw-events-max);
   overflow-y: auto;
 }
 

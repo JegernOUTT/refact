@@ -35,5 +35,6 @@
 .emptyStateText {
   margin: 0;
   color: var(--rf-color-muted);
-  font: 500 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-3) / var(--rf-line)
+    var(--rf-font-ui);
 }

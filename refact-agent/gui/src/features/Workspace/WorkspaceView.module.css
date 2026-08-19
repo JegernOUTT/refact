@@ -62,7 +62,8 @@
 .unsplitDropHint {
   padding: var(--rf-space-2) var(--rf-space-4);
   color: var(--rf-color-accent);
-  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   background: var(--rf-surface-glass);
   border: var(--rf-hairline) solid var(--rf-color-accent);
   border-radius: var(--rf-radius-pill);

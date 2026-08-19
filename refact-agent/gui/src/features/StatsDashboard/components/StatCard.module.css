@@ -35,7 +35,8 @@
 
 .title {
   color: var(--rf-color-muted);
-  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .valueRow {
@@ -49,7 +50,7 @@
   min-width: 0;
   overflow: hidden;
   color: var(--rf-color-fg);
-  font: 750 var(--rf-text-5) / 1.05 var(--rf-font-ui);
+  font: var(--rf-weight-bold) var(--rf-text-5) / 1.05 var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

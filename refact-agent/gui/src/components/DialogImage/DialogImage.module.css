@@ -80,7 +80,8 @@
 .zoomInfo {
   min-width: calc(var(--rf-control-h) + var(--rf-space-3));
   color: var(--rf-color-muted);
-  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-mono);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-mono);
   text-align: center;
 }
 

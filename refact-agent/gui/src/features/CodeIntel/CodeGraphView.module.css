@@ -32,7 +32,8 @@
 .toolbarTitle,
 .detailTitle {
   color: var(--rf-color-fg);
-  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .toolbarDescription,

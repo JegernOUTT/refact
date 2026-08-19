@@ -41,7 +41,8 @@
   border-bottom: var(--rf-hairline) solid var(--rf-border-strong);
   color: var(--rf-color-muted);
   cursor: pointer;
-  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   user-select: none;
   white-space: nowrap;
 }

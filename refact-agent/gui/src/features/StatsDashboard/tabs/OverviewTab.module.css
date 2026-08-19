@@ -60,7 +60,8 @@
 .quotaName {
   overflow: hidden;
   color: var(--rf-color-fg);
-  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -109,7 +110,8 @@
   align-items: center;
   gap: var(--rf-space-2);
   color: var(--rf-color-fg);
-  font: 650 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-3) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .tableWrapper {
@@ -131,7 +133,8 @@
   padding: var(--rf-space-2) var(--rf-space-3);
   border-bottom: var(--rf-hairline) solid var(--rf-border-strong);
   color: var(--rf-color-muted);
-  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   white-space: nowrap;
 }
 

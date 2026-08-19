@@ -51,7 +51,8 @@
 .rowTitle {
   overflow: hidden;
   color: var(--rf-color-fg);
-  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -59,7 +60,8 @@
 .rowId {
   overflow: hidden;
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-mono);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -76,7 +78,8 @@
 .emptyText {
   padding: var(--rf-space-4) var(--rf-space-2);
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .kindTabs {
@@ -146,7 +149,8 @@
   min-width: 0;
   overflow: hidden;
   color: var(--rf-color-fg);
-  font: 650 var(--rf-text-3) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-3) / var(--rf-line)
+    var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -243,12 +247,14 @@
 
 .errorText {
   color: var(--rf-color-danger);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .mutedText {
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .callout {
@@ -264,7 +270,8 @@
   border-radius: var(--rf-radius-ctl);
   box-shadow: var(--rf-elev-panel);
   backdrop-filter: blur(var(--rf-blur-overlay));
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .dialogBody {
@@ -286,7 +293,8 @@
 
 .scopeLabel {
   color: var(--rf-color-muted);
-  font: 400 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .scopeOption {

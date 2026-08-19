@@ -72,7 +72,14 @@ const withDesignSystemModes: Decorator = (Story, context) => {
     ? storyAppearance
     : (context.globals.appearance as Appearance);
   const width = context.globals.width as CanvasWidth;
-  const reducedMotion = context.globals.reducedMotion as ReducedMotion;
+  // Reduced motion mirrors appearance: a story can pin it via parameters so
+  // the html[data-reduced-motion] contract reaches portaled overlays too.
+  const storyReducedMotion = (context.parameters as { reducedMotion?: unknown })
+    .reducedMotion;
+  const reducedMotion: ReducedMotion =
+    storyReducedMotion === "on" || storyReducedMotion === "off"
+      ? storyReducedMotion
+      : (context.globals.reducedMotion as ReducedMotion);
 
   return (
     <Theme appearance={appearance} accentColor="indigo" grayColor="slate">

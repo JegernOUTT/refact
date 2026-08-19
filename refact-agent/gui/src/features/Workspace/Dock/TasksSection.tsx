@@ -9,6 +9,7 @@ import {
 } from "../../../services/refact/tasks";
 import { push } from "../../Pages/pagesSlice";
 import { openTask } from "../../Tasks/tasksSlice";
+import { setDockOpen } from "../../Workspace/workspaceSlice";
 import styles from "./TasksSection.module.css";
 import {
   buildTaskDockEntries,
@@ -194,18 +195,28 @@ export function TasksSection() {
       ),
     [boardStates],
   );
+  // Stuck detection compares against wall-clock time; tick once a minute so
+  // a silent agent crosses the heartbeat threshold without a data change.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
   const entries = useMemo(
-    () => buildTaskDockEntries(activeTasks, boardsByTask, Date.now()),
-    [activeTasks, boardsByTask],
+    () => buildTaskDockEntries(activeTasks, boardsByTask, now),
+    [activeTasks, boardsByTask, now],
   );
   const boardsLoading = activeTasks.some(
     (task) => boardStates[task.id]?.loading !== false,
   );
   const handleOpenBoard = useCallback(() => {
+    // Navigation away must dismiss the narrow dock Sheet (workspace contract).
+    dispatch(setDockOpen(false));
     dispatch(push({ name: "tasks list" }));
   }, [dispatch]);
   const handleOpenTask = useCallback(
     (entry: TaskDockEntry) => {
+      dispatch(setDockOpen(false));
       dispatch(openTask({ id: entry.taskId, name: entry.taskName }));
       dispatch(push({ name: "task workspace", taskId: entry.taskId }));
     },

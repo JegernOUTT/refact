@@ -530,7 +530,7 @@ describe("TaskProgressWidget goal projection", () => {
   });
 
   test.each(["no_progress", "budget_exhausted"] as const)(
-    "%s goals allow resume but not stop",
+    "%s goals allow both resume and stop",
     (status) => {
       renderWidget(
         makeRuntime({
@@ -541,10 +541,33 @@ describe("TaskProgressWidget goal projection", () => {
       );
 
       expect(screen.getByRole("button", { name: "Resume" })).toBeEnabled();
-      expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
       expect(
         screen.queryByRole("button", { name: "Pause" }),
       ).not.toBeInTheDocument();
+    },
+  );
+
+  test.each(["no_progress", "budget_exhausted"] as const)(
+    "%s goals can be stopped from the collapsed header",
+    async (status) => {
+      const commands = captureCommands();
+      const { user } = renderWidget(
+        makeRuntime({ goal: makeGoal({ active: false, status }) }),
+      );
+
+      expect(
+        screen.queryByRole("button", { name: "Pause goal" }),
+      ).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Resume goal" })).toBeEnabled();
+
+      await user.click(screen.getByRole("button", { name: "Stop goal" }));
+
+      await waitFor(() => expect(commands).toHaveLength(1));
+      expect(commands[0]).toMatchObject({
+        type: "goal_control",
+        action: "stop",
+      });
     },
   );
 
@@ -562,5 +585,40 @@ describe("TaskProgressWidget goal projection", () => {
       screen.queryByRole("button", { name: "Resume" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+  });
+
+  test.each(["completed", "stopped", "transferred"] as const)(
+    "%s goals expose no controls at all",
+    (status) => {
+      renderWidget(
+        makeRuntime({
+          goal: makeGoal({ active: false, status }),
+          expanded: true,
+          goalExpanded: true,
+        }),
+      );
+
+      expect(
+        screen.queryByRole("button", { name: "Pause" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Resume" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Stop" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  test("active goals allow pause and stop but not resume", () => {
+    renderWidget(
+      makeRuntime({ goal: makeGoal(), expanded: true, goalExpanded: true }),
+    );
+
+    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "Resume" }),
+    ).not.toBeInTheDocument();
   });
 });

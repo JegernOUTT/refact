@@ -51,7 +51,8 @@
   background: var(--rf-surface-2);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-chip);
-  font: 500 var(--rf-text-1) / var(--rf-line) var(--rf-font-mono);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-mono);
 }
 
 .markdown :where(strong, .bold) {
@@ -71,7 +72,8 @@
   max-width: 100%;
   margin: var(--rf-space-2) 0;
   border-collapse: collapse;
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .table :where(th, td) {

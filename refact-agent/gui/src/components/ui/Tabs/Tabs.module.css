@@ -44,7 +44,8 @@
   background: transparent;
   border: 0;
   border-radius: var(--rf-radius-ctl);
-  font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
@@ -77,7 +78,8 @@
   min-width: 0;
   padding-top: var(--rf-space-3);
   color: var(--rf-color-fg);
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .content[hidden] {

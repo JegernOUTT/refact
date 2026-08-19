@@ -28,7 +28,8 @@
   border-radius: var(--rf-radius-card);
   box-shadow: var(--rf-elev-overlay);
   backdrop-filter: blur(var(--rf-blur-overlay));
-  font: 400 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .contentInModal {

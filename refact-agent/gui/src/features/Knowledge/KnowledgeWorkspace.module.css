@@ -77,7 +77,8 @@
   min-width: 0;
   overflow: hidden;
   color: var(--rf-color-muted);
-  font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-medium) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -100,7 +101,8 @@
 .controlLabel {
   flex-shrink: 0;
   color: var(--rf-color-muted);
-  font: 650 var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
@@ -130,7 +132,8 @@
   min-width: 0;
   overflow: hidden;
   color: var(--rf-color-fg);
-  font: 650 var(--rf-text-4) / var(--rf-line) var(--rf-font-ui);
+  font: var(--rf-weight-semibold) var(--rf-text-4) / var(--rf-line)
+    var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
