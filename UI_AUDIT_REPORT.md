@@ -544,3 +544,108 @@ and `__t(n)` (text census: content, size/weight, colour, x/y/width) to cut per-s
   22px buttons in unrelated stories look like two one-offs. One `grep` over `.module.css` turned them
   into a six-site systemic finding *and* retroactively explained N-34's unexplained `radius: 3px`
   (PlanBanner reaching for Radix `var(--radius-1)` instead of an `--rf-radius-*` token).
+
+---
+
+## Part 4f — SESSION-6 HANDOFF (read with Part 4b + 4d)
+
+### State
+**89 / 171 stories audited, 82 remaining.** Findings **N-01 .. N-65** (validated contiguous, no
+duplicates, no malformed rows). Session 6 added stories **77-91** and findings **N-61 .. N-65**,
+broadened **N-54** a second time, and corrected the running total (the previous "76" counted two
+stories twice; true unique count entering this session was 74).
+
+### Commits this session (local only, nothing pushed, zero source files touched)
+`2139715ec` stories 77-86 + N-61..N-65 + N-54 broadened + totals reconciled ·
+`b86be6339` stories 87-91.
+
+### Rig — what to rebuild, and one thing that does NOT work
+Everything in Part 4d still applies (viewport 1280x900 @2x, portal-aware `__els()` rooted at `body *`).
+Two helpers were added this session and are worth recreating first, they cut round trips a lot:
+- **`__p()`** — one call returning off-scale census (h/f/r/p) + alignment flags + control list +
+  font/weight set + `n` + `docW`/`vw` + an `hscroll` boolean.
+- **`__t(n)`** — text census: content, `size/weight`, colour, `x,y`, width for every text-bearing node.
+
+**Known-ineffective, do not waste time on it again:** overriding `console.log/warn/error/info/debug/
+group/groupCollapsed/trace` in an init script does **not** suppress MSW's request log from the tool's
+console capture (the capture is at the CDP level, below the JS console object). Every batch will carry
+~40-200 lines of `[MSW] GET /v1/ping` noise. The only real mitigation is **fewer, shorter batches** —
+the noise accumulates with wall-clock time, because the app polls `/v1/ping` every 5s. Do not try to
+route/abort `/v1/ping`: the plan history records that killing ping triggers the caps "death spiral"
+(offline -> `capsApi.util.resetApiState()` -> caps never refetch) and every model-dependent surface
+falls back to "Loading…".
+
+### Measurement rules now in force (cumulative)
+1. Never judge overlap/collision from an overlay screenshot — the red `WxH` labels sit above-left of
+   their element. (2 false positives historically.)
+2. Only same-pass measurements are comparable; late content settling toggles the scrollbar and shifts
+   absolute x by ~10px.
+3. **Take the screenshot.** Numbers alone cannot tell you a story is scrambled, blank, or illegible.
+   Session 6 initially ran measurement-only and had to be corrected mid-session; story 91 was only
+   confirmed sound by looking at it.
+4. Before filing an overflow/spill finding, walk the element's **parent chain** — Storybook's own
+   `sb-main-fullscreen > div` reports `scrollWidth > clientWidth` with `overflow-x: visible` on every
+   story and is not app UI.
+5. **Grep beats measurement for convention drift.** Two 22px buttons in unrelated stories look like two
+   one-offs; one `grep` over `.module.css` turned them into the six-site N-65 and retroactively
+   explained N-34's unexplained `radius: 3px`.
+
+### Highest-value leads for the next session
+- **N-61 is the most actionable finding in the ledger right now** — a 3-line fix in
+  `TaskProgressWidget.tsx:191` (`isTerminal` omits `transferred`/`no_progress`) removes an enabled
+  `Resume` from a goal another chat owns. Pair it with N-62 (add the 4 missing status stories).
+- The queue below is ordered by expected yield: agentic tool cards and the remaining dialogs are
+  product surfaces; the `--reduced-motion` suite (9 stories) is now measurable against portaled
+  overlays **for the first time** thanks to the Part 4d `__els()` fix, so N-09 can finally be settled.
+- **Still entirely outstanding: the 360x780 narrow pass and the light-theme pass.** Light-theme results
+  remain meaningless until N-03 is fixed.
+
+### Remaining queue (82)
+- `chat-composer-modeselect--` (1): trigger
+- `chat-composer-trajectorybutton--` (2): open-popover, trigger
+- `chat-form--` (2): streaming, with-queued-messages
+- `chat-form-retryform--` (1): with-images
+- `checkbox--` (1): primary
+- `collapsible--` (1): default
+- `combobox-v2--` (1): default
+- `components-chatlinks--` (1): default
+- `components-text-animated--` (1): primary
+- `design-system-emptystate--` (1): gallery
+- `design-system-errorstate--` (1): gallery
+- `design-system-loadingstate--` (1): gallery
+- `design-system-overview--` (1): overview
+- `design-system-skeleton--` (1): gallery
+- `features-checkpoints--` (3): default, dialog-closed, with-no-changes
+- `features-providers-addcustommodelmodal--` (1): open
+- `integrations-mcpimportdialog--` (1): open-with-pasted-json
+- `login--` (1): primary
+- `logo-animation--` (3): idle, streaming, waiting
+- `privacy-chat-shield--` (1): default
+- `reveal--` (1): primary
+- `scroll-area--` (1): primary
+- `scroll-area-anchor--` (3): in-the-middle, primary, short
+- `select--` (2): default, option-object
+- `spinner--` (1): primary
+- `textarea--` (1): primary
+- `tool-cards-agentic-analysis--` (5): chrome, delegate, engine-analysis, finish, sleep-ask
+- `tool-cards-file-ops-basics--` (4): generic-fallback, knowledge, web, web-search
+- `toolconfirmation--` (2): patch, with-denial
+- `ui-combobox--` (2): reduced-motion, states
+- `ui-datatable--` (2): light-dark, wide
+- `ui-editabletable--` (1): light-dark
+- `ui-field--` (3): controls, narrow-settings-page, settings-page
+- `ui-modelselector--` (6): custom-unset-label, disabled-rows-and-all-badges, inline-with-unset, light-and-dark, narrow-popover-sheet, panel-less-single-scroll
+- `ui-overlays-dialog--` (1): reduced-motion
+- `ui-overlays-menu--` (1): reduced-motion
+- `ui-overlays-popover--` (1): reduced-motion
+- `ui-overlays-sheet--` (3): light-dark, narrow, reduced-motion
+- `ui-overlays-tooltip--` (2): light-dark, reduced-motion
+- `ui-segmentedcontrol--` (1): reduced-motion
+- `ui-select--` (1): reduced-motion
+- `ui-slider--` (1): reduced-motion
+- `ui-switch--` (1): reduced-motion
+- `ui-tabs--` (1): reduced-motion
+- `ui-toolcard--` (1): light-and-dark
+- `ui-virtualizedgrid--` (3): responsive-grid, single-column, virtualized
+- `ui-virtuallist--` (2): large-list, light-dark
+- `usagecounter--` (3): anthropic-usage-counter, gpt-usage-counter, inline-usage-counter-in-chat-form
