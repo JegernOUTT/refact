@@ -302,15 +302,18 @@ Per-story protocol for continuation: navigate → wait `#storybook-root` content
 | 58 | `ui-overlays-popover--narrow-sheet` **@360x780** | **PASS** (closes S4-7) | converts to bottom Sheet: **336x159**, margins **12 / 12 / 12** symmetric, 93.3% of viewport, r10, overlay glass ✓ |
 | 59 | `chat-transcript-elements--compression-cards` | **PASS** | census fully clean; 5 metric labels 12/400 + 5 values 14/650; action icons 28x28 x3; Inspect 64x26 |
 
+| 60 | `ui-slider--states` | **PASS** | 3 tracks all `640x8` r999 `rgba(255,255,255,.043)`; ranges 6px accent (2px inset); thumbs all `20x20` r999; per-row `cy` exact (175.5/245/314.5); census clean. Thumb feeds N-51 |
+| 61 | `design-system-surface--gallery` | **FAIL — N-52** | 6 surfaces all `186.2x114`, uniform **12px** gaps, r10, pad12 ✓, correct plain->1/2/3->overlay->selected recipe ✓ — but surface-1 vs surface-2 differ by 0.008 alpha (~1.03:1, imperceptible), and all 7 labels render at UA **16px** |
+
 ---
 
 ## Part 4b - SESSION-4 HANDOFF (read this first on restart)
 
 ### Where the sweep stands
-**59 of 171 stories** audited at full rigor this session (progress was reset to 0 by user instruction; the earlier 45-story pass is superseded and its "clean" verdicts are NOT trusted).
+**61 of 171 stories** audited at full rigor this session (progress was reset to 0 by user instruction; the earlier 45-story pass is superseded and its "clean" verdicts are NOT trusted).
 
 ### Findings added this session
-`N-39` .. `N-50`, plus substantial upgrades to `N-03`, `N-04`, `N-08`, `N-41`, `N-44`.
+`N-39` .. `N-52`, plus substantial upgrades to `N-03`, `N-04`, `N-08`, `N-41`, `N-44`.
 
 **The three that matter most:**
 1. **N-44 / N-47 — the height-strategy root cause.** No global `box-sizing: border-box` reset exists (67 hand-written per-element declarations instead; only 4 of ~24 kit components opt in). Combined with four different height mechanisms across the kit, this single cause explains nearly every "wrong size" symptom in the whole ledger. `ui/Button` is the one correct pattern (fixed `height` + zero vertical padding) and is measurably immune.
@@ -337,7 +340,7 @@ Re-add via `add_init_script` before sweeping:
 - **Compare siblings, not just absolutes.** N-50's 11px drift and N-46's 56.6px stretch both passed the off-scale detector and were caught only by comparing neighbours.
 - **Verify suspicions with computed styles before filing.** 4 self-retractions this session came from trusting the screenshot over the DOM.
 
-### Queue for next session (112 stories remain)
+### Queue for next session (110 stories remain)
 1. Finish kit: `surface`, `emptystate`, `errorstate`, `loadingstate`, `skeleton`, `combobox` x2, `slider` x2, `tooltip` x2, `sheet` x3, `dialog` x2, `virtuallist` x2, `virtualizedgrid` x3, remaining `modelselector` x6, `toolcard--light-and-dark`, `design-system-overview`.
 2. Product: remaining `tool-cards-*` (16), `chat-transcript-elements` (9), `task-progress-widget` (5), `chat-dialogs-*`, `privacy-chat-shield`.
 3. **Entire light-theme pass still outstanding** (blocked in practice by N-03 - fix that first or results are meaningless).
