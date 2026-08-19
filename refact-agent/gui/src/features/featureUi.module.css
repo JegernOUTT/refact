@@ -34,7 +34,7 @@
 .heading {
   margin: 0;
   color: var(--rf-color-fg);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
   letter-spacing: -0.02em;
   line-height: 1.2;
 }

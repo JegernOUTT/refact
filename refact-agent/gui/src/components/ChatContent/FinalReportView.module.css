@@ -46,7 +46,7 @@
 .title {
   color: var(--rf-color-fg);
   font-size: var(--rf-text-3);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .section,
@@ -58,7 +58,7 @@
 .collapsibleTitle {
   color: var(--rf-color-muted);
   font-size: var(--rf-text-2);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .sectionTitle {
@@ -100,7 +100,7 @@
 .followupTitle {
   color: var(--rf-color-fg);
   font-size: var(--rf-text-2);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .followupInstructions {

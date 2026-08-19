@@ -23,7 +23,7 @@
   margin: 0;
   overflow: hidden;
   font-size: var(--rf-text-5);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -65,7 +65,7 @@
 .sectionTitle {
   margin: 0;
   font-size: var(--rf-text-3);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .resourceError {
@@ -99,14 +99,14 @@
   margin: var(--rf-space-1) 0 0;
   overflow: hidden;
   font-size: var(--rf-text-2);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .mono {
   font-family: var(--rf-font-mono);
-  font-weight: 400;
+  font-weight: var(--rf-weight-regular);
 }
 
 .list {

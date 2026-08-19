@@ -13,7 +13,7 @@
 }
 
 .stateResult {
-  font-weight: 500;
+  font-weight: var(--rf-weight-medium);
 }
 
 .interceptingElement {
@@ -30,7 +30,7 @@
   margin-block-end: var(--rf-space-1);
   color: var(--rf-color-muted);
   font-family: var(--rf-font-ui);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .interceptingElement code {
@@ -91,7 +91,7 @@
 
 .log[data-failed="true"] .timelineItem[data-final="true"] {
   color: var(--rf-color-danger);
-  font-weight: 700;
+  font-weight: var(--rf-weight-bold);
   background: var(--rf-surface-1);
   border-radius: var(--rf-radius-ctl);
 }

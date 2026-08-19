@@ -44,7 +44,7 @@
   border: var(--rf-hairline) solid currentColor;
   border-radius: var(--rf-radius-chip);
   font-size: var(--rf-text-1);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
   line-height: 1.45;
 }
 
@@ -105,7 +105,7 @@
   margin: var(--rf-space-2) 0 var(--rf-space-1) 0;
   color: var(--rf-color-fg);
   font-size: var(--rf-text-3);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .body ul {
@@ -149,6 +149,6 @@
 .statValue {
   color: var(--rf-color-fg);
   font-size: var(--rf-text-3);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
   font-variant-numeric: tabular-nums;
 }

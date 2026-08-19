@@ -4,7 +4,7 @@
 }
 
 .tokenValue {
-  font-weight: 400;
+  font-weight: var(--rf-weight-regular);
 }
 
 .animateValue {

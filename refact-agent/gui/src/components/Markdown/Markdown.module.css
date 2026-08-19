@@ -22,7 +22,7 @@
   margin: var(--rf-space-3) 0 var(--rf-space-2);
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
-  font-weight: 700;
+  font-weight: var(--rf-weight-bold);
   line-height: 1.25;
 }
 
@@ -55,7 +55,7 @@
 }
 
 .markdown :where(strong, .bold) {
-  font-weight: 700;
+  font-weight: var(--rf-weight-bold);
 }
 
 .puzzle_link {
@@ -82,7 +82,7 @@
 .table th {
   color: var(--rf-color-fg);
   background: var(--rf-surface-1);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .variant_chat {

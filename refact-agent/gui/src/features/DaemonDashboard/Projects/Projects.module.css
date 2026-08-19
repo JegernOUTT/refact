@@ -33,7 +33,7 @@
 
 .pageTitle {
   font-size: var(--rf-text-5);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .pageDescription,
@@ -77,7 +77,7 @@
 .cardTitle {
   overflow: hidden;
   font-size: var(--rf-text-4);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -180,7 +180,7 @@
   color: var(--rf-color-muted);
   background: transparent;
   font: inherit;
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   cursor: pointer;
 }
 
@@ -211,7 +211,7 @@
 
 .missingName {
   font-size: var(--rf-text-2);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   white-space: nowrap;
 }
 

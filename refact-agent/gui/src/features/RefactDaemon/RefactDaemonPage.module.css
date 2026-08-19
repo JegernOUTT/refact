@@ -231,7 +231,7 @@
 
 .notice {
   color: var(--rf-color-accent);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .sectionLabel {

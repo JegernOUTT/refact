@@ -152,7 +152,7 @@
   display: block;
   color: var(--rf-color-muted);
   font-size: var(--rf-text-1);
-  font-weight: 700;
+  font-weight: var(--rf-weight-bold);
   letter-spacing: 0.02em;
   text-transform: uppercase;
 }

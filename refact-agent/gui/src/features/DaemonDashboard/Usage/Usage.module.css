@@ -20,7 +20,7 @@
   margin: 0;
   overflow: hidden;
   font-size: var(--rf-text-5);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -98,7 +98,7 @@
   border-bottom: 1px solid var(--rf-border);
   color: var(--rf-color-muted);
   font-size: var(--rf-text-1);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   text-align: left;
 }
 
@@ -148,7 +148,7 @@
   overflow: hidden;
   color: var(--rf-color-fg);
   font-size: var(--rf-text-2);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

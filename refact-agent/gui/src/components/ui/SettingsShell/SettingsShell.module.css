@@ -93,7 +93,7 @@
   background: var(--rf-selected-bg);
   border-color: var(--rf-selected-border);
   box-shadow: inset 2px 0 0 var(--rf-color-accent);
-  font-weight: 700;
+  font-weight: var(--rf-weight-bold);
 }
 
 .navItem[aria-current="page"]:hover {

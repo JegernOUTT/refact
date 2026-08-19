@@ -46,7 +46,7 @@
 }
 
 .heading {
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   margin: var(--rf-space-2) 0 var(--rf-space-1) 0;
 }
 
@@ -92,7 +92,7 @@
 .th {
   padding: var(--rf-space-1) var(--rf-space-2);
   text-align: left;
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   border: 1px solid var(--rf-border);
 }
 

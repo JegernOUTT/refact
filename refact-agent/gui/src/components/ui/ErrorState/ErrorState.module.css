@@ -46,7 +46,7 @@
 .title {
   color: var(--rf-color-danger);
   font-size: var(--rf-text-4);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
   line-height: var(--rf-line);
 }
 

@@ -72,7 +72,7 @@
   overflow: hidden;
   color: var(--rf-color-fg);
   font-size: var(--rf-text-2);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

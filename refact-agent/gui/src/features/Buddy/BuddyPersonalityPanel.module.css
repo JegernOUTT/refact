@@ -49,7 +49,7 @@
 .sectionLabel {
   color: var(--rf-color-muted);
   font-size: 10px;
-  font-weight: 700;
+  font-weight: var(--rf-weight-bold);
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
@@ -100,7 +100,7 @@
 .meterValue {
   flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .meterBar {

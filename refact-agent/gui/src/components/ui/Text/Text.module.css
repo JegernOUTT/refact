@@ -25,15 +25,15 @@
 }
 
 .weight-regular {
-  font-weight: 400;
+  font-weight: var(--rf-weight-regular);
 }
 
 .weight-medium {
-  font-weight: 500;
+  font-weight: var(--rf-weight-medium);
 }
 
 .weight-bold {
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .color-gray {

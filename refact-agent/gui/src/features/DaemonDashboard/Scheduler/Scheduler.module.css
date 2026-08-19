@@ -25,7 +25,7 @@
 
 .pageHeader h2 {
   font-size: var(--rf-text-5);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .pageHeader p,
@@ -84,7 +84,7 @@
 
 .groupTitle {
   font-size: var(--rf-text-3);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .groupBadges {
@@ -139,7 +139,7 @@
 
 .jobHeadline strong {
   font-size: var(--rf-text-3);
-  font-weight: 500;
+  font-weight: var(--rf-weight-medium);
 }
 
 .jobSchedule {

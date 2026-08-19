@@ -8,7 +8,7 @@
 }
 
 .skillName {
-  font-weight: 500;
+  font-weight: var(--rf-weight-medium);
 }
 
 .body {

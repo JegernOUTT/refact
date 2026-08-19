@@ -160,7 +160,7 @@
 .objectLabel {
   max-width: 96px;
   overflow: hidden;
-  font-weight: 700;
+  font-weight: var(--rf-weight-bold);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -306,7 +306,7 @@
   border-radius: 9999px;
   background: rgba(17, 24, 39, 0.58);
   font-size: 10px;
-  font-weight: 700;
+  font-weight: var(--rf-weight-bold);
   backdrop-filter: blur(6px);
 }
 

@@ -36,7 +36,7 @@
     BlinkMacSystemFont,
     sans-serif;
   font-size: 11px;
-  font-weight: 620;
+  font-weight: var(--rf-weight-semibold);
   letter-spacing: 0.08px;
   line-height: 1.46;
   animation: bb-pop 0.32s cubic-bezier(0.34, 1.56, 0.64, 1) both;
@@ -69,7 +69,7 @@
   border-width: 1.4px;
   border-style: dashed;
   font-size: 10px;
-  font-weight: 560;
+  font-weight: var(--rf-weight-medium);
   animation: bb-fade-in 0.26s ease-out both;
 }
 
@@ -80,7 +80,7 @@
 .anchor[data-style="excite"] .skin,
 .anchor[data-style="alert"] .skin {
   border-width: 2.4px;
-  font-weight: 760;
+  font-weight: var(--rf-weight-bold);
   animation: bb-pop-overshoot 0.38s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
@@ -184,7 +184,7 @@
   color: var(--bb-accent);
   font-size: 10px;
   font-style: normal;
-  font-weight: 800;
+  font-weight: var(--rf-weight-bold);
   opacity: 0;
   animation: bb-note-drift 2.7s ease-out infinite;
 }
@@ -224,7 +224,7 @@
   background: var(--bb-accent-soft);
   color: var(--bb-ink);
   font-size: 8.5px;
-  font-weight: 800;
+  font-weight: var(--rf-weight-bold);
   letter-spacing: 0.4px;
   text-transform: uppercase;
 }
@@ -247,7 +247,7 @@
   color: var(--bb-ink);
   font-family: inherit;
   font-size: 9.5px;
-  font-weight: 750;
+  font-weight: var(--rf-weight-bold);
   letter-spacing: 0.1px;
   cursor: pointer;
   transition:

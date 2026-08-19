@@ -10,7 +10,7 @@
   background: transparent;
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
   line-height: 1;
   cursor: pointer;
   user-select: none;

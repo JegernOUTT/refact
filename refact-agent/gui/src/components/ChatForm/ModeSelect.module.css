@@ -65,7 +65,7 @@
 .triggerMeta {
   flex: 0 1 auto;
   color: var(--rf-color-muted);
-  font-weight: 450;
+  font-weight: var(--rf-weight-medium);
 }
 
 .chevron {
@@ -138,7 +138,7 @@
   padding: 0 var(--rf-space-2);
   color: var(--rf-color-accent);
   font-size: var(--rf-text-2);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .item:hover:not(:disabled):not(.itemDisabled),
@@ -196,7 +196,7 @@
   overflow: hidden;
   color: var(--rf-color-fg);
   font-size: var(--rf-text-2);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
   line-height: var(--rf-line);
   text-overflow: ellipsis;
   white-space: nowrap;

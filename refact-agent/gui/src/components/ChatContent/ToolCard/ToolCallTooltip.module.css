@@ -19,7 +19,7 @@
 }
 
 .toolName {
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   color: var(--rf-color-accent);
   white-space: nowrap;
 }

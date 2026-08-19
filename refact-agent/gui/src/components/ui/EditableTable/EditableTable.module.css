@@ -50,7 +50,7 @@
 .headerCell {
   color: var(--rf-color-muted);
   background: var(--rf-surface-1);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .cell {

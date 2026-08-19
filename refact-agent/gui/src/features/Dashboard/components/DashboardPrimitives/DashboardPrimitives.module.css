@@ -13,11 +13,11 @@
 }
 
 .weightMedium {
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .weightBold {
-  font-weight: 750;
+  font-weight: var(--rf-weight-bold);
 }
 
 .muted {

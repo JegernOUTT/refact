@@ -164,7 +164,7 @@
 
 .detailList dd {
   color: var(--rf-color-fg);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 @media (width <= 720px) {

@@ -20,5 +20,5 @@
   align-items: center;
   gap: var(--rf-space-1);
   color: var(--rf-color-success);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }

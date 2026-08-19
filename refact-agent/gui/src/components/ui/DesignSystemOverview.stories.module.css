@@ -22,7 +22,7 @@
 .title {
   margin: 0;
   font-size: var(--rf-text-5);
-  font-weight: 700;
+  font-weight: var(--rf-weight-bold);
 }
 
 .description {
@@ -41,7 +41,7 @@
 .sectionTitle {
   margin: 0;
   font-size: var(--rf-text-4);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .grid {
@@ -64,7 +64,7 @@
 .label {
   color: var(--rf-color-fg);
   font-size: var(--rf-text-2);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .value {
@@ -262,7 +262,7 @@
   background: var(--rf-color-accent-soft);
   color: var(--rf-color-fg);
   font-size: var(--rf-text-2);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .staggerList {

@@ -73,7 +73,7 @@
 .zoneNameInput {
   min-width: 0;
   max-width: 100%;
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .zoneShellRow {
@@ -177,7 +177,7 @@
   min-width: 0;
   align-items: center;
   gap: var(--rf-space-2);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

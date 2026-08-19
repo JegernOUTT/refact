@@ -29,7 +29,7 @@
   min-height: var(--rf-control-h-lg);
   padding-inline: var(--rf-space-2);
   font-size: var(--rf-text-4);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .brandMark {
@@ -106,7 +106,7 @@
 .header h1 {
   margin: 0;
   font-size: var(--rf-text-5);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .eyebrow {

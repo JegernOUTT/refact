@@ -60,7 +60,7 @@
 }
 
 .verdict {
-  font-weight: 700;
+  font-weight: var(--rf-weight-bold);
 }
 
 .summary {
@@ -180,7 +180,7 @@
 }
 
 .claim {
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .details,
@@ -192,7 +192,7 @@
 .details summary,
 .checks summary {
   cursor: pointer;
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .detailsBody {
@@ -212,7 +212,7 @@
 .detailLabel {
   color: var(--rf-color-fg);
   font-size: var(--rf-text-1);
-  font-weight: 700;
+  font-weight: var(--rf-weight-bold);
   text-transform: uppercase;
 }
 

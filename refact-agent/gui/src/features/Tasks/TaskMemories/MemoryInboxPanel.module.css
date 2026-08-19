@@ -327,7 +327,7 @@
 .frontmatterTable th {
   width: 1%;
   color: var(--rf-color-muted);
-  font-weight: 500;
+  font-weight: var(--rf-weight-medium);
   text-align: left;
   white-space: nowrap;
 }

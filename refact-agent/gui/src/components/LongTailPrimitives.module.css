@@ -19,11 +19,11 @@
 }
 
 .bold {
-  font-weight: 700;
+  font-weight: var(--rf-weight-bold);
 }
 
 .medium {
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .muted {

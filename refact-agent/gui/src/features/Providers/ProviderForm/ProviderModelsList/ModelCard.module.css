@@ -97,7 +97,7 @@
   padding-bottom: var(--rf-space-2);
   border-bottom: var(--rf-hairline) solid var(--rf-border);
   color: var(--rf-color-muted);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .providerRow {
@@ -118,7 +118,7 @@
 
 .providerCellPrimary {
   color: var(--rf-color-fg);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .providerCellCaps {

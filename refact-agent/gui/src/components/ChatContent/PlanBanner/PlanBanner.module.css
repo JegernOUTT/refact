@@ -103,7 +103,7 @@
 
 .body h3 {
   font-size: var(--rf-text-2);
-  font-weight: 700;
+  font-weight: var(--rf-weight-bold);
 }
 
 .actions {

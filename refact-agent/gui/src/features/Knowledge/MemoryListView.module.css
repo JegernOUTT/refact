@@ -145,7 +145,7 @@
 .metaLabel {
   flex-shrink: 0;
   color: var(--rf-color-muted);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .metaValue {

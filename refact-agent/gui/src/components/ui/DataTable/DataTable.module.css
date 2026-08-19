@@ -43,7 +43,7 @@
 
 .headerCell {
   color: var(--rf-color-muted);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
   background: var(--rf-surface-1);
 }
 

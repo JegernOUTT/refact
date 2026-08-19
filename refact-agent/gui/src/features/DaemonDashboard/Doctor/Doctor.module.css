@@ -24,7 +24,7 @@
 
 .pageHeader h2 {
   font-size: var(--rf-text-5);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .pageHeader p,
@@ -47,7 +47,7 @@
 
 .group h3 {
   font-size: var(--rf-text-4);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .findingList {
@@ -88,7 +88,7 @@
 
 .findingHeader strong {
   font-size: var(--rf-text-3);
-  font-weight: 500;
+  font-weight: var(--rf-weight-medium);
 }
 
 .findingAction {
@@ -133,7 +133,7 @@
 
 .breakdownTable th {
   padding-right: var(--rf-space-4);
-  font-weight: 500;
+  font-weight: var(--rf-weight-medium);
 }
 
 .breakdownNote {
@@ -181,7 +181,7 @@
   color: var(--rf-color-muted);
   cursor: pointer;
   font-size: var(--rf-text-3);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .infoDetails[open] .infoSummary {

@@ -3,7 +3,7 @@
   align-items: center;
   justify-content: center;
   font-family: var(--code-font-family);
-  font-weight: 900;
+  font-weight: var(--rf-weight-bold);
   color: var(--red-9);
   line-height: 1;
 }

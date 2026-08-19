@@ -57,7 +57,7 @@
   overflow: hidden;
   color: inherit;
   font-size: var(--rf-text-3);
-  font-weight: 700;
+  font-weight: var(--rf-weight-bold);
   line-height: var(--rf-line);
   text-overflow: ellipsis;
   white-space: nowrap;

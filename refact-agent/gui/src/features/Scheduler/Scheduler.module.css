@@ -231,11 +231,11 @@
   overflow-wrap: anywhere;
   color: var(--rf-color-fg);
   font-size: var(--rf-text-2);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .metaSecondary {
-  font-weight: 400;
+  font-weight: var(--rf-weight-regular);
 }
 
 .runHistory,

@@ -30,7 +30,7 @@
   color: var(--rf-color-fg);
   margin: 0 0 var(--rf-space-2) 0;
   line-height: 1.5;
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .intentBadge {
@@ -96,7 +96,7 @@
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .overlayTail {

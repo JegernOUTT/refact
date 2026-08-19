@@ -35,7 +35,7 @@
   gap: var(--rf-space-2);
   color: var(--rf-color-fg);
   font-size: var(--rf-text-3);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
   line-height: var(--rf-line);
 }
 

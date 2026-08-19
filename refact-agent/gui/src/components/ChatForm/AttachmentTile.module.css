@@ -91,7 +91,7 @@
 .extensionBadge {
   color: currentColor;
   font-size: 10px;
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
   line-height: var(--rf-line-tight);
   text-transform: uppercase;
 }

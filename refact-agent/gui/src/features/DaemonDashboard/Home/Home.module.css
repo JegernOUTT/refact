@@ -23,7 +23,7 @@
 .pageHeader h2,
 .heroContent h2 {
   font-size: var(--rf-text-5);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .heroContent h2 {
@@ -73,7 +73,7 @@
 .eyebrow {
   color: var(--rf-color-accent);
   font-size: var(--rf-text-1);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -164,7 +164,7 @@
 
 .widgetHeader h3 {
   font-size: var(--rf-text-4);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .widgetHeader p {
@@ -233,7 +233,7 @@
 
 .rowCopy strong {
   font-size: var(--rf-text-3);
-  font-weight: 500;
+  font-weight: var(--rf-weight-medium);
 }
 
 .rowMeta {

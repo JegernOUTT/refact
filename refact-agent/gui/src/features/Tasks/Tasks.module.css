@@ -90,7 +90,7 @@
 .kanbanCardTitle {
   color: var(--rf-fg);
   font-size: var(--rf-font-size-2);
-  font-weight: 500;
+  font-weight: var(--rf-weight-medium);
   line-height: var(--rf-line-height-tight);
   overflow: hidden;
   display: -webkit-box;
@@ -120,7 +120,7 @@
   cursor: pointer;
   font-family: var(--rf-font-ui);
   font-size: var(--rf-text-1);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
   line-height: 1;
 }
 
@@ -149,7 +149,7 @@
   overflow: hidden;
   color: var(--rf-fg);
   font-size: var(--rf-font-size-2);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   line-height: var(--rf-line-height-tight);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -224,7 +224,7 @@
   margin: 0;
   color: var(--rf-fg);
   font-size: var(--rf-font-size-5);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   line-height: var(--rf-line-height-tight);
 }
 
@@ -295,7 +295,7 @@
   overflow: hidden;
   color: var(--rf-fg);
   font-size: var(--rf-font-size-2);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
   line-height: var(--rf-line-height-tight);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -779,7 +779,7 @@
 .cardDetailMetaLabel {
   color: var(--rf-color-muted);
   font-size: var(--rf-font-size-1);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
   letter-spacing: 0.04em;
   line-height: var(--rf-line-height-tight);
   text-transform: uppercase;

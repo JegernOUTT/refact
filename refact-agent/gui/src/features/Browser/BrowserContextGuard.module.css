@@ -27,7 +27,7 @@
 
 .breakdownLabel {
   color: var(--rf-color-fg);
-  font-weight: 500;
+  font-weight: var(--rf-weight-medium);
 }
 
 .breakdownCount {
@@ -80,7 +80,7 @@
   color: var(--rf-color-fg);
   font-size: var(--rf-text-4);
   font-variant-numeric: tabular-nums;
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .actions {

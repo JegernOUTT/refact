@@ -67,7 +67,7 @@
 .usageTitle {
   color: var(--rf-color-fg);
   font-size: var(--rf-text-3);
-  font-weight: 600;
+  font-weight: var(--rf-weight-semibold);
 }
 
 .defaultDescription,
