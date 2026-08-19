@@ -47,6 +47,7 @@ eggs/
 .eggs/
 lib/
 lib64/
+!refact-agent/gui/src/lib/
 parts/
 sdist/
 var/
