@@ -1498,7 +1498,9 @@ mod tests {
             "printf observed"
         };
 
-        for tty in [false, true] {
+        let tty_modes: &[bool] = if cfg!(unix) { &[false, true] } else { &[false] };
+
+        for &tty in tty_modes {
             let result = ExecRegistry::new()
                 .spawn(
                     ExecSpawnRequest::foreground(shell_script(command))

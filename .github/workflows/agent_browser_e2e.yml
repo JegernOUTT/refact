@@ -61,7 +61,7 @@ jobs:
       - name: Install build tools and Google Chrome
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang mold lld wget
+          sudo apt-get install -y clang mold lld wget xvfb
           wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/google-chrome.deb
           sudo apt-get install -y /tmp/google-chrome.deb
 
@@ -80,9 +80,9 @@ jobs:
       - name: Run browser E2E suite
         env:
           REFACT_BROWSER_E2E: "1"
-        run: cargo test --test browser_e2e -- --ignored --test-threads=1 --skip html5_drag_and_drop_reaches_page_handler
+        run: xvfb-run -a cargo test --test browser_e2e -- --ignored --test-threads=1 --skip html5_drag_and_drop_reaches_page_handler
 
       - name: Run browser differentiators suite
         env:
           REFACT_BROWSER_E2E: "1"
-        run: cargo test --test browser_differentiators -- --ignored --test-threads=1
+        run: xvfb-run -a cargo test --test browser_differentiators -- --ignored --test-threads=1
