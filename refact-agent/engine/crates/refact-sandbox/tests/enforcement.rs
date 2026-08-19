@@ -111,9 +111,29 @@ fn hidden_landlock_output(spec: &ExecSandboxSpec, program: &str, args: &[String]
         .unwrap()
 }
 
+// Cross-architecture emulators cannot load the helper binary and report the loader's
+// 127 instead of running it. The helper itself never exits 127: a missing target
+// program is reported as SANDBOX_LAUNCHER_FAILURE_EXIT_CODE.
+#[cfg(target_os = "linux")]
+const LOADER_FAILURE_EXIT_CODE: i32 = 127;
+
+#[cfg(target_os = "linux")]
+fn hidden_launcher_can_exec() -> bool {
+    let spec = ExecSandboxSpec {
+        mode: SandboxMode::ReadOnly,
+        ro_paths: vec![PathBuf::from("/")],
+        rw_paths: Vec::new(),
+        allow_network: true,
+    };
+    hidden_landlock_output(&spec, "true", &[]).status.code() != Some(LOADER_FAILURE_EXIT_CODE)
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn landlock_hidden_launcher_refuses_network_isolation() {
+    if !hidden_launcher_can_exec() {
+        return;
+    }
     let spec = ExecSandboxSpec {
         mode: SandboxMode::ReadOnly,
         ro_paths: vec![PathBuf::from("/")],
