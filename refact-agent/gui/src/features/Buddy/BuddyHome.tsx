@@ -569,8 +569,8 @@ export const BuddyHome: React.FC = () => {
         await executeOpportunityAction(action, opportunity, actionIndex);
         return;
       }
+      dispatch(markBuddyNotificationSeen(heroSpeech.id));
       if (ctrl.action === "dismiss_suggestion" && heroSpeech.suggestionId) {
-        dispatch(markBuddyNotificationSeen(heroSpeech.id));
         dispatch(snoozeHomeNotifications(undefined));
       }
       await executeBuddyAction(ctrl, dispatch, {
@@ -579,6 +579,7 @@ export const BuddyHome: React.FC = () => {
           heroSpeech.source === "suggestion" ? "suggestion" : "runtime",
         sourceChatId: heroSpeech.chat_id,
         diagnostic: activeDiagnostic,
+        suggestionId: heroSpeech.suggestionId,
       });
     },
     [

@@ -5603,10 +5603,26 @@ fn buddy_worktree_suggestion_text_includes_counts() {
             .expect("suggestion");
     assert!(suggestion.description.contains("5 worktrees"));
     assert!(suggestion.description.contains("2 clean abandoned"));
-    assert!(suggestion
+    let actions = suggestion
         .controls
         .iter()
-        .any(|control| control.label == "Clean selected clean abandoned worktrees"));
+        .map(|control| control.action.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actions,
+        vec![
+            "review_worktree_cleanup",
+            "create_worktrees_pulse",
+            "dismiss_suggestion"
+        ]
+    );
+    assert!(
+        !suggestion
+            .controls
+            .iter()
+            .any(|control| control.label.starts_with("Clean ")),
+        "no control may promise cleanup it does not perform"
+    );
 }
 
 #[tokio::test]

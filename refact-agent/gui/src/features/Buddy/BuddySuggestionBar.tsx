@@ -78,6 +78,7 @@ const SuggestionCard: React.FC<SuggestionCardProps> = ({ suggestion }) => {
       await executeBuddyAction(ctrl, dispatch, {
         triggerText: `${suggestion.title}: ${suggestion.description}`,
         triggerSource: "suggestion",
+        suggestionId: suggestion.id,
       });
 
       if (ctrl.action === "accept_quest" || suggestion.quest) {

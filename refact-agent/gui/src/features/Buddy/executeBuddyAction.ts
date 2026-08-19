@@ -25,6 +25,52 @@ const LEGACY_SETUP_ACTION_TO_MODE = {
 
 type LegacySetupAction = keyof typeof LEGACY_SETUP_ACTION_TO_MODE;
 
+export interface BuddyActionContext {
+  triggerText: string;
+  triggerSource:
+    | "thread"
+    | "runtime"
+    | "diagnostic"
+    | "suggestion"
+    | "frontend";
+  sourceChatId?: string;
+  diagnostic?: DiagnosticContext | null;
+  suggestionId?: string;
+}
+
+const SUGGESTION_PRESERVING_ACTIONS = new Set([
+  "dismiss",
+  "dismiss_speech",
+  "dismiss_suggestion",
+  "dismiss_runtime_event",
+  "accept_quest",
+  "reroll_personality",
+]);
+
+/**
+ * Acting on a suggestion resolves it. Without this the underlying
+ * BuddySuggestion stays undismissed and the same bubble is rebuilt on the
+ * next render, so the user sees the nag again seconds after acting on it.
+ */
+export function buddyActionResolvesSuggestion(action: string): boolean {
+  if (SUGGESTION_PRESERVING_ACTIONS.has(action)) return false;
+  return !action.startsWith("care_");
+}
+
+export async function resolveBuddySuggestion(
+  suggestionId: string,
+  dispatch: AppDispatch,
+): Promise<void> {
+  dispatch(dismissBuddySuggestion(suggestionId));
+  try {
+    await dispatch(
+      buddyApi.endpoints.dismissBuddySuggestion.initiate(suggestionId),
+    ).unwrap();
+  } catch {
+    // local dismissal already hid the suggestion; server sync is best-effort
+  }
+}
+
 /**
  * Central executor for all Buddy control actions.
  *
@@ -35,17 +81,7 @@ type LegacySetupAction = keyof typeof LEGACY_SETUP_ACTION_TO_MODE;
 export async function executeBuddyAction(
   ctrl: BuddyControl,
   dispatch: AppDispatch,
-  investigation?: {
-    triggerText: string;
-    triggerSource:
-      | "thread"
-      | "runtime"
-      | "diagnostic"
-      | "suggestion"
-      | "frontend";
-    sourceChatId?: string;
-    diagnostic?: DiagnosticContext | null;
-  },
+  context?: BuddyActionContext,
 ): Promise<void> {
   switch (ctrl.action) {
     case "dismiss":
@@ -124,8 +160,15 @@ export async function executeBuddyAction(
 
     case "investigate_error": {
       dispatch(clearActiveSpeech());
-      if (!investigation) break;
-      await dispatch(startBuddyInvestigation(investigation));
+      if (!context) break;
+      await dispatch(
+        startBuddyInvestigation({
+          triggerText: context.triggerText,
+          triggerSource: context.triggerSource,
+          sourceChatId: context.sourceChatId,
+          diagnostic: context.diagnostic,
+        }),
+      );
       break;
     }
 
@@ -170,6 +213,10 @@ export async function executeBuddyAction(
 
     default:
       dispatch(clearActiveSpeech());
+  }
+
+  if (context?.suggestionId && buddyActionResolvesSuggestion(ctrl.action)) {
+    await resolveBuddySuggestion(context.suggestionId, dispatch);
   }
 }
 

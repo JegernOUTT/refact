@@ -1317,7 +1317,22 @@ export const BuddyChatCompanion: React.FC<Props> = ({ chatId }) => {
           pendingRef.current = false;
           setPending(false);
         }
+        return;
       }
+
+      completeBubbleInteraction();
+      dismissNotification(notification.id, notification.contentKey);
+      setActionError(null);
+      await executeBuddyAction(ctrl, dispatch, {
+        triggerText: notification.text,
+        triggerSource: notificationTriggerSource(notification.source),
+        sourceChatId: chatId,
+        diagnostic: notification.diagnostic,
+        suggestionId:
+          notification.source === "suggestion"
+            ? notification.sourceId
+            : undefined,
+      });
     },
     [
       notification,

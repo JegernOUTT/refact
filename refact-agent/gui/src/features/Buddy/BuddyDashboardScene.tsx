@@ -137,6 +137,7 @@ export const BuddyDashboardScene: React.FC = () => {
           sceneSpeech.source === "suggestion" ? "suggestion" : "runtime",
         sourceChatId: sceneSpeech.chat_id,
         diagnostic: activeDiagnostic,
+        suggestionId: sceneSpeech.suggestionId,
       });
     },
     [activeDiagnostic, dismissRuntimeSpeech, dispatch, sceneSpeech],

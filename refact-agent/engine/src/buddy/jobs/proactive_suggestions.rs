@@ -109,25 +109,11 @@ pub fn worktree_hygiene_suggestion_from_inventory(
         dismissed: false,
         controls: vec![
             BuddyControl {
-                id: "open-worktrees".to_string(),
-                label: "Open Worktrees view".to_string(),
-                action: "open_worktrees".to_string(),
-                action_param: None,
-                style: "primary".to_string(),
-            },
-            BuddyControl {
                 id: "review-worktree-cleanup".to_string(),
                 label: "Review cleanup candidates".to_string(),
                 action: "review_worktree_cleanup".to_string(),
                 action_param: None,
-                style: "secondary".to_string(),
-            },
-            BuddyControl {
-                id: "clean-selected-worktrees".to_string(),
-                label: "Clean selected clean abandoned worktrees".to_string(),
-                action: "open_worktree_cleanup".to_string(),
-                action_param: None,
-                style: "secondary".to_string(),
+                style: "primary".to_string(),
             },
             BuddyControl {
                 id: "worktree-pulse".to_string(),

@@ -9,6 +9,7 @@ import {
   waitFor,
 } from "../utils/test-utils";
 import {
+  buddyActionResolvesSuggestion,
   executeBuddyAction,
   executeBuddyNavigation,
   routeDraftByKind,
@@ -4483,6 +4484,71 @@ describe("executeBuddyAction setup controls", () => {
       expect(
         isActionWithType(dispatch.mock.calls[1][0], clearActiveSpeech.type),
       ).toBe(true);
+    }
+  });
+
+  test("acting on a suggestion resolves it so the same bubble cannot return", async () => {
+    const cases = [
+      "open_worktrees",
+      "review_worktree_cleanup",
+      "open_worktree_cleanup",
+      "create_worktrees_pulse",
+      "open_buddy",
+    ];
+
+    for (const action of cases) {
+      const { dispatch, innerDispatch } = makeThunkDispatch();
+      const control: BuddyControl = {
+        id: action,
+        label: action,
+        action,
+        style: "secondary",
+      };
+      await executeBuddyAction(control, dispatch as never, {
+        triggerText: "4 clean abandoned worktrees",
+        triggerSource: "suggestion",
+        suggestionId: "worktree-cleanup-1",
+      });
+      const actions = [
+        ...dispatch.mock.calls.map(([dispatched]) => dispatched),
+        ...innerDispatch.mock.calls.map(([dispatched]) => dispatched),
+      ];
+      const resolved = actions.some(
+        (dispatched) =>
+          isActionWithType(dispatched, dismissBuddySuggestion.type) &&
+          (dispatched as { payload?: unknown }).payload ===
+            "worktree-cleanup-1",
+      );
+      expect(resolved).toBe(true);
+    }
+  });
+
+  test("suggestion stays alive for care, quest and dismiss controls", () => {
+    const preserving = [
+      "dismiss",
+      "dismiss_speech",
+      "dismiss_suggestion",
+      "dismiss_runtime_event",
+      "accept_quest",
+      "reroll_personality",
+      "care_feed",
+      "care_play",
+    ];
+    for (const action of preserving) {
+      expect(buddyActionResolvesSuggestion(action)).toBe(false);
+    }
+
+    const resolving = [
+      "open_worktrees",
+      "review_worktree_cleanup",
+      "open_worktree_cleanup",
+      "create_worktrees_pulse",
+      "open_buddy",
+      "open_stats",
+      "investigate_error",
+    ];
+    for (const action of resolving) {
+      expect(buddyActionResolvesSuggestion(action)).toBe(true);
     }
   });
 });
