@@ -65,6 +65,9 @@ jobs:
           wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/google-chrome.deb
           sudo apt-get install -y /tmp/google-chrome.deb
 
+      - name: Allow the Chrome sandbox to use unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Restore cached cargo
         uses: swatinem/rust-cache@v2
         with:
