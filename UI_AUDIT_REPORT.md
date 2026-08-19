@@ -288,3 +288,55 @@ Per-story protocol for continuation: navigate → wait `#storybook-root` content
 | 53 | `task-progress-widget--active-goal` | **PASS (exemplary)** | 3 budget inputs all **387.7x30**, `cy=237.8` identical, gaps exactly **8 / 8**, and each label left edge matches its input left edge exactly (43 / 438.7 / 834.3). **Self-retraction**: suspected overlap was my overlay-label misread |
 
 **Session-4 self-retractions (kept for honesty):** DataTable "invisible row 3" (computed styles prove it is visible); DataTable "4 zero-height rows" (Storybook's own args table); TaskProgressWidget "overlapping budget inputs" (gaps are exactly 8/8).
+
+### Session-4 continued story log (stories 54-58)
+
+| # | story | verdict | key measurements |
+|---|---|---|---|
+| 54 | `ui-editabletable--add-remove-enter-validation` | **FAIL — N-50** | row 1 clean (both cells 30px, `cy=152.5`); row 2 Name `262.4x30 cy=199.5` vs Description **`381.6x52 cy=210.5`** — 11px baseline drift caused by a validation message stretching the grid row |
+| 55 | `ui-modelselector--popover-grouped` | **FAIL — N-41 root cause** | story ships CLOSED (no `play()`), so the popover it is named after has zero coverage until opened manually. Opened: popover **422x522** r10 overlay glass ✓ shadow ✓, chips uniform `2px 6px` r6 x15 ✓. Search field **357x24 @16px** vs **377x21 @14px** in the app host — same class, two sizes |
+| 56 | `chat-form--primary` **@360x780** | **PASS** | `scrollWidth 345 == clientWidth 345` (no h-scroll) ✓; glass `rgba(20,20,22,.82)`+blur14 preserved ✓; hide-ladder collapses 8 icon buttons + 3 pills down to textarea `299x31` + one 28px button ✓ |
+| 57 | `ui-tabs--states` **@360x780** | **N-08 CONFIRMED** | tablist `61->294` vs tabpanel `61->284`: `deltaLeft=0`, **`deltaRight=10`** — identical 10px at 360 AND 1280 => structural, not responsive. 4.5% of panel width at 360 vs 1.6% at desktop |
+| 58 | `ui-overlays-popover--narrow-sheet` **@360x780** | **PASS** (closes S4-7) | converts to bottom Sheet: **336x159**, margins **12 / 12 / 12** symmetric, 93.3% of viewport, r10, overlay glass ✓ |
+| 59 | `chat-transcript-elements--compression-cards` | **PASS** | census fully clean; 5 metric labels 12/400 + 5 values 14/650; action icons 28x28 x3; Inspect 64x26 |
+
+---
+
+## Part 4b - SESSION-4 HANDOFF (read this first on restart)
+
+### Where the sweep stands
+**59 of 171 stories** audited at full rigor this session (progress was reset to 0 by user instruction; the earlier 45-story pass is superseded and its "clean" verdicts are NOT trusted).
+
+### Findings added this session
+`N-39` .. `N-50`, plus substantial upgrades to `N-03`, `N-04`, `N-08`, `N-41`, `N-44`.
+
+**The three that matter most:**
+1. **N-44 / N-47 — the height-strategy root cause.** No global `box-sizing: border-box` reset exists (67 hand-written per-element declarations instead; only 4 of ~24 kit components opt in). Combined with four different height mechanisms across the kit, this single cause explains nearly every "wrong size" symptom in the whole ledger. `ui/Button` is the one correct pattern (fixed `height` + zero vertical padding) and is measurably immune.
+2. **N-08 — the user's original tab complaint, now proven structural.** Exactly 10px overhang at both 1280 and 360 => `2 x (4px list padding + 1px border)`. `SegmentedControl` gets the same layout right (640 = panel width), which proves it is a bug and not a design choice.
+3. **N-03 — light/dark token leakage.** Reproduced on 5 independent surfaces. Root cause identified in `styles/tokens.css`: the periwinkle palette (l.19-28) and the Radix-blue palette (l.227-232) are the dark/light variants of the SAME token names, so any surface resolving the wrong scope silently swaps its entire colour system. Worst measured case: an input border at **contrast ratio 1.00**.
+
+### Rig reconstruction (init scripts are LOST on every browser context reset)
+Re-add via `add_init_script` before sweeping:
+- `window.__a()` - alignment + off-scale census. Returns `{align, off:{h,f,r,p}, ov, docW, vw}`.
+- `window.__c(name)` - cross-component fingerprint: `ctrlH, radius, font, bg, border, shadow, icon, gap, pad`.
+- `window.__L()` - DevTools-style overlay: 8px minor / 32px major grid + per-element size labels.
+- **WebSocket shim stubbing `ws://.../storybook-server-channel`** - without it every navigation dumps ~20k tokens of story fixture into the tool output.
+- Console-noise filter (MSW logging still leaks through; two filter attempts failed - low priority).
+
+### Reference scales (verified against `styles/tokens.css` this session)
+- control heights **26 / 30 / 36** (+ `--rf-control-h-icon-sm: 28` documented tap floor)
+- type **12 / 13 / 14 / 15 / 19** (`--rf-text-1/2/3` = 12/13/14)
+- icons **13 / 15 / 18**; radii **6 / 8 / 10 / 999**; spacing **2 / 4 / 6 / 8 / 12 / 16 / 22 / 32**
+- overlay glass `rgba(28,28,31,.94)` + `blur(14px)` + `0 14px 40px rgba(0,0,0,.4)`; panel glass `rgba(20,20,22,.82)` + `blur(14px)`
+- accent `#7f93d8` (dark) / `#006adc` (light) - both legitimate, see N-03
+
+### Method notes that earned their keep
+- **Always open interactive surfaces.** `ui-modelselector--popover-grouped` and `ui-select--states` only revealed defects after a manual click; several stories ship closed with no `play()`.
+- **Compare siblings, not just absolutes.** N-50's 11px drift and N-46's 56.6px stretch both passed the off-scale detector and were caught only by comparing neighbours.
+- **Verify suspicions with computed styles before filing.** 4 self-retractions this session came from trusting the screenshot over the DOM.
+
+### Queue for next session (112 stories remain)
+1. Finish kit: `surface`, `emptystate`, `errorstate`, `loadingstate`, `skeleton`, `combobox` x2, `slider` x2, `tooltip` x2, `sheet` x3, `dialog` x2, `virtuallist` x2, `virtualizedgrid` x3, remaining `modelselector` x6, `toolcard--light-and-dark`, `design-system-overview`.
+2. Product: remaining `tool-cards-*` (16), `chat-transcript-elements` (9), `task-progress-widget` (5), `chat-dialogs-*`, `privacy-chat-shield`.
+3. **Entire light-theme pass still outstanding** (blocked in practice by N-03 - fix that first or results are meaningless).
+4. Reduced-motion stories (7) - check computed `transition-duration`/`animation`, not appearance.
