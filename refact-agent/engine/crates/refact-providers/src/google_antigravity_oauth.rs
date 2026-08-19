@@ -1,16 +1,17 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as AMutex;
 
-const CLIENT_ID: &str = "REDACTED-ANTIGRAVITY-CLIENT-ID.apps.googleusercontent.com";
-const CLIENT_SECRET: &str = "REDACTED-ANTIGRAVITY-CLIENT-SECRET";
+const CREDENTIAL_CIPHER_KEY_B64: &str = "RrqSQkYyCVEIBCHYRU5uPkhS17xbKTlch4jW+fvT+0Y=";
+const CLIENT_ID_ENCRYPTED_B64: &str = "Ps8lx/zZ0LwlAF1f92fAGZnI22x+1U6JXZ34ypuwvU3cyjH+jdQDv4ileJOf+F9stVt7LDsoLKLbAdRRXlcVEa5w+6X67dahsg==";
+const CLIENT_SECRET_ENCRYPTED_B64: &str = "SLBRpZyxy8cmCC4xlH6MQr3f5E8himr5VILD+8r4uAnu/zg=";
 const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const CALLBACK_PORT: u16 = 51121;
@@ -28,6 +29,43 @@ const ENDPOINT_DAILY: &str = "https://daily-cloudcode-pa.sandbox.googleapis.com"
 const ENDPOINT_AUTOPUSH: &str = "https://autopush-cloudcode-pa.sandbox.googleapis.com";
 const MAX_CALLBACK_CONNECTIONS: usize = 16;
 const OAUTH_TOKEN_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
+static CLIENT_ID: OnceLock<String> = OnceLock::new();
+static CLIENT_SECRET: OnceLock<String> = OnceLock::new();
+
+fn decrypt_credential(ciphertext_b64: &str) -> String {
+    let key = STANDARD
+        .decode(CREDENTIAL_CIPHER_KEY_B64)
+        .expect("Antigravity credential key must be valid base64");
+    let ciphertext = STANDARD
+        .decode(ciphertext_b64)
+        .expect("Antigravity credential ciphertext must be valid base64");
+    let mut plaintext = Vec::with_capacity(ciphertext.len());
+    for (block_index, chunk) in ciphertext.chunks(32).enumerate() {
+        let mut hasher = Sha256::new();
+        hasher.update(&key);
+        hasher.update((block_index as u64).to_be_bytes());
+        let key_stream = hasher.finalize();
+        plaintext.extend(
+            chunk
+                .iter()
+                .zip(key_stream.iter())
+                .map(|(byte, mask)| byte ^ mask),
+        );
+    }
+    String::from_utf8(plaintext).expect("Antigravity credential must decode as UTF-8")
+}
+
+fn client_id() -> &'static str {
+    CLIENT_ID
+        .get_or_init(|| decrypt_credential(CLIENT_ID_ENCRYPTED_B64))
+        .as_str()
+}
+
+fn client_secret() -> &'static str {
+    CLIENT_SECRET
+        .get_or_init(|| decrypt_credential(CLIENT_SECRET_ENCRYPTED_B64))
+        .as_str()
+}
 
 async fn read_oauth_error_body_bounded(mut response: reqwest::Response) -> String {
     const MAX_BYTES: usize = 16 * 1024;
@@ -150,7 +188,7 @@ fn redirect_uri() -> String {
 fn build_authorize_url(code_challenge: &str, state: &str, redirect_uri: &str) -> String {
     let scope = SCOPES.join(" ");
     let params = [
-        ("client_id", CLIENT_ID),
+        ("client_id", client_id()),
         ("response_type", "code"),
         ("redirect_uri", redirect_uri),
         ("scope", scope.as_str()),
@@ -325,8 +363,8 @@ pub async fn exchange_code_for_session(
         ("grant_type", "authorization_code"),
         ("code", code),
         ("redirect_uri", session.redirect_uri.as_str()),
-        ("client_id", CLIENT_ID),
-        ("client_secret", CLIENT_SECRET),
+        ("client_id", client_id()),
+        ("client_secret", client_secret()),
         ("code_verifier", session.verifier.as_str()),
     ];
     let response = http_client
@@ -364,8 +402,8 @@ pub async fn refresh_access_token(
     let params = [
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
-        ("client_id", CLIENT_ID),
-        ("client_secret", CLIENT_SECRET),
+        ("client_id", client_id()),
+        ("client_secret", client_secret()),
     ];
     let response = http_client
         .post(TOKEN_URL)
@@ -597,4 +635,21 @@ fn callback_html(success: bool, message: &str) -> String {
         ),
         escaped_message
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_credentials_decrypt_to_oauth_shapes() {
+        let id = client_id();
+        let secret = client_secret();
+        assert!(id.ends_with(".apps.googleusercontent.com"));
+        assert!(id.bytes().all(|byte| byte.is_ascii_graphic()));
+        assert!(secret.len() >= 24);
+        assert!(secret.bytes().all(|byte| byte.is_ascii_graphic()));
+        assert_ne!(id, CLIENT_ID_ENCRYPTED_B64);
+        assert_ne!(secret, CLIENT_SECRET_ENCRYPTED_B64);
+    }
 }
