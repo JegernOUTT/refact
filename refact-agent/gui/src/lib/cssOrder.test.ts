@@ -28,6 +28,7 @@ describe("lib entry global CSS order", () => {
     const globalSheets = [
       "@radix-ui/themes/styles.css",
       "../styles/tokens.css",
+      "../styles/base.css",
       "../styles/glass.css",
       "../styles/motion.css",
       "../styles/responsive.css",

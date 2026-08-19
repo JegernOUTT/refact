@@ -1,0 +1,63 @@
+/*
+ * Global base resets (audit N-44, N-48).
+ *
+ * Box model: one reset instead of the 67 hand-written per-component
+ * `box-sizing: border-box` declarations the codebase accumulated. Every
+ * kit control-height recipe (fixed `height` + zero vertical padding)
+ * assumes border-box; components that forgot the local declaration
+ * silently inflated (Badge 18->24, 22->32).
+ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/*
+ * KaTeX sizes fraction bars / sqrt rules with borders under content-box
+ * assumptions (upstream KaTeX/KaTeX#513); exempt its subtree.
+ */
+.katex,
+.katex * {
+  box-sizing: content-box;
+}
+
+/*
+ * Ambient typography: unstyled text previously fell to UA defaults that
+ * exist on no rung of the 12/13/14/15/19 scale (16px labels, 18.72px h3,
+ * 13.33px monospace). Pin the ambient base and map bare elements onto the
+ * scale with zero-specificity selectors so any owned rule still wins.
+ */
+.radix-themes {
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+}
+
+:where(h1) {
+  font-size: var(--rf-text-5);
+  line-height: var(--rf-line-5);
+}
+
+:where(h2) {
+  font-size: var(--rf-text-4);
+  line-height: var(--rf-line-4);
+}
+
+:where(h3) {
+  font-size: var(--rf-text-3);
+  line-height: var(--rf-line-3);
+}
+
+:where(h4, h5, h6) {
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+}
+
+:where(code, kbd, samp, pre) {
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-2);
+}
+
+:where(button, input, select, textarea) {
+  font: inherit;
+}

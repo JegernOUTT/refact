@@ -6,6 +6,7 @@
 // would float with the module graph and silently flip on unrelated refactors.
 import "@radix-ui/themes/styles.css";
 import "../styles/tokens.css";
+import "../styles/base.css";
 import "../styles/glass.css";
 import "../styles/motion.css";
 import "../styles/responsive.css";

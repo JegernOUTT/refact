@@ -2,6 +2,7 @@ import React, { useMemo } from "react";
 import { Theme as RadixTheme } from "@radix-ui/themes";
 import "@radix-ui/themes/styles.css";
 import "../../styles/tokens.css";
+import "../../styles/base.css";
 import "../../styles/glass.css";
 import "../../styles/motion.css";
 import "../../styles/responsive.css";

@@ -202,6 +202,7 @@
   }
 }
 
+/* The html[data-reduced-motion="on"] mirror below must stay in sync. */
 @media (prefers-reduced-motion: reduce) {
   .rf-enter,
   .rf-enter-rise,
@@ -228,6 +229,39 @@
     transform: translateY(var(--rf-motion-distance-none))
       scale(var(--rf-motion-scale-active));
   }
+}
+
+/*
+ * Attribute-driven mirror of the reduced-motion media block (audit N-09).
+ * Hosts that cannot flip the OS media query (IDE settings, the Storybook
+ * reduced-motion toolbar) set data-reduced-motion="on" on <html>; rooting
+ * at html reaches portaled overlay content that class-on-wrapper toggles
+ * miss (Radix portals mount at document.body).
+ */
+html[data-reduced-motion="on"] .rf-enter,
+html[data-reduced-motion="on"] .rf-enter-rise,
+html[data-reduced-motion="on"] .rf-enter-scale,
+html[data-reduced-motion="on"] .rf-grow-in,
+html[data-reduced-motion="on"] .rf-popover-motion,
+html[data-reduced-motion="on"] .rf-active-pulse,
+html[data-reduced-motion="on"] .rf-status-pulse,
+html[data-reduced-motion="on"] .rf-text-shimmer,
+html[data-reduced-motion="on"] .rf-spin,
+html[data-reduced-motion="on"] .rf-shimmer::after,
+html[data-reduced-motion="on"] .rf-stagger > * {
+  animation: none;
+  transition: none;
+}
+
+html[data-reduced-motion="on"] .rf-expand-grid,
+html[data-reduced-motion="on"] .rf-pressable {
+  transition: none;
+}
+
+html[data-reduced-motion="on"] .rf-pressable:hover,
+html[data-reduced-motion="on"] .rf-pressable:active {
+  transform: translateY(var(--rf-motion-distance-none))
+    scale(var(--rf-motion-scale-active));
 }
 
 @media (prefers-reduced-transparency: reduce) {
