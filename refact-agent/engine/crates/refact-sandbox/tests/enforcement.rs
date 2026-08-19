@@ -21,6 +21,10 @@ fn shell_touch(path: &Path) -> Vec<String> {
     ]
 }
 
+fn dir_outside_temp() -> Option<tempfile::TempDir> {
+    tempfile::tempdir_in(std::env::var_os("HOME")?).ok()
+}
+
 fn bwrap_spec(mode: SandboxMode, workspace: &Path, allow_network: bool) -> ExecSandboxSpec {
     ExecSandboxSpec {
         mode,
@@ -39,7 +43,9 @@ fn workspace_write_allows_workspace_and_denies_outside() {
         return;
     }
     let workspace = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+    let Some(outside) = dir_outside_temp() else {
+        return;
+    };
     let allowed = workspace.path().join("allowed");
     let denied = outside.path().join("denied");
     let spec = bwrap_spec(SandboxMode::WorkspaceWrite, workspace.path(), true);
@@ -60,7 +66,9 @@ fn read_only_denies_workspace_writes() {
         assert_eq!(provider.probe(), Enforcement::Unusable);
         return;
     }
-    let workspace = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+    let Some(workspace) = dir_outside_temp() else {
+        return;
+    };
     let denied = workspace.path().join("denied");
     let spec = bwrap_spec(SandboxMode::ReadOnly, workspace.path(), true);
 
@@ -111,9 +119,6 @@ fn hidden_landlock_output(spec: &ExecSandboxSpec, program: &str, args: &[String]
         .unwrap()
 }
 
-// Cross-architecture emulators cannot load the helper binary and report the loader's
-// 127 instead of running it. The helper itself never exits 127: a missing target
-// program is reported as SANDBOX_LAUNCHER_FAILURE_EXIT_CODE.
 #[cfg(target_os = "linux")]
 const LOADER_FAILURE_EXIT_CODE: i32 = 127;
 
@@ -187,7 +192,9 @@ fn landlock_workspace_write_allows_workspace_and_denies_outside() {
         return;
     }
     let workspace = tempfile::tempdir().unwrap();
-    let outside = tempfile::tempdir_in(std::env::var_os("HOME").unwrap()).unwrap();
+    let Some(outside) = dir_outside_temp() else {
+        return;
+    };
     let allowed = workspace.path().join("allowed");
     let denied = outside.path().join("denied");
     let spec = ExecSandboxSpec {
