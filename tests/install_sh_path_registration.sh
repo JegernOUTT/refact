@@ -47,11 +47,23 @@ run_install() {
     run_home=$1
     run_shell=$2
     shift 2
+    run_install_with_path "$run_home" "$run_shell" "$PATH" "$@"
+}
+
+run_install_with_path() {
+    run_home=$1
+    run_shell=$2
+    run_path=$3
+    shift 3
     env -i \
         HOME="$run_home" \
         SHELL="$run_shell" \
-        PATH="$PATH" \
+        PATH="$run_path" \
         bash "$install_sh" --binary "$fake_binary" "$@" >/dev/null 2>&1
+}
+
+link_target() {
+    readlink "$1" 2>/dev/null || printf ''
 }
 
 count_lines() {
@@ -186,6 +198,82 @@ if assert_single_block "crlf-idempotent" "$profile" "$export_body"; then
     pass_test "CRLF managed block remains idempotent"
 else
     fail_test "CRLF managed block idempotence"
+fi
+rm -rf "$sandbox"
+
+# Test 9: a directory already on PATH receives a symlink to the installed binary
+make_sandbox
+mkdir -p "$fake_home/.local/bin"
+run_install_with_path "$fake_home" "/bin/bash" "$fake_home/.local/bin:$PATH"
+managed_link="$fake_home/.local/bin/refact"
+if assert_installed "link into on-PATH dir" "$fake_home" &&
+    [ -L "$managed_link" ] &&
+    [ "$(link_target "$managed_link")" = "$fake_home/.refact/bin/refact" ]; then
+    pass_test "on-PATH dir receives a symlink to the installed binary"
+else
+    fail_test "on-PATH dir symlink"
+fi
+
+# Test 10: relinking is idempotent
+run_install_with_path "$fake_home" "/bin/bash" "$fake_home/.local/bin:$PATH"
+if [ -L "$managed_link" ] && [ "$(link_target "$managed_link")" = "$fake_home/.refact/bin/refact" ]; then
+    pass_test "symlink rerun is idempotent"
+else
+    fail_test "symlink rerun idempotence"
+fi
+rm -rf "$sandbox"
+
+# Test 11: a pre-existing real file is never clobbered
+make_sandbox
+mkdir -p "$fake_home/.local/bin"
+foreign_bin="$fake_home/.local/bin/refact"
+printf '#!/bin/sh\necho foreign\n' > "$foreign_bin"
+chmod 755 "$foreign_bin"
+run_install_with_path "$fake_home" "/bin/bash" "$fake_home/.local/bin:$PATH"
+if assert_installed "foreign binary conflict" "$fake_home" &&
+    [ ! -L "$foreign_bin" ] &&
+    grep -q "echo foreign" "$foreign_bin"; then
+    pass_test "pre-existing real file is left untouched"
+else
+    fail_test "pre-existing real file must not be replaced"
+fi
+rm -rf "$sandbox"
+
+# Test 12: a symlink escaping the install dir via .. is not treated as ours
+make_sandbox
+mkdir -p "$fake_home/.local/bin" "$fake_home/.refact/bin"
+traversal_link="$fake_home/.local/bin/refact"
+traversal_target="$fake_home/.refact/bin/../../evil"
+ln -s "$traversal_target" "$traversal_link"
+run_install_with_path "$fake_home" "/bin/bash" "$fake_home/.local/bin:$PATH"
+if [ -L "$traversal_link" ] && [ "$(link_target "$traversal_link")" = "$traversal_target" ]; then
+    pass_test "symlink escaping the install dir is treated as a conflict"
+else
+    fail_test "traversal symlink must not be claimed as installer-owned"
+fi
+rm -rf "$sandbox"
+
+# Test 13: a directory that exists but is not on PATH is never linked into
+make_sandbox
+mkdir -p "$fake_home/.local/bin"
+run_install_with_path "$fake_home" "/bin/bash" "/usr/bin:/bin"
+if assert_installed "off-PATH dir" "$fake_home" && [ ! -e "$fake_home/.local/bin/refact" ]; then
+    pass_test "directory not on PATH receives no symlink"
+else
+    fail_test "off-PATH directory must not be linked into"
+fi
+rm -rf "$sandbox"
+
+# Test 14: --no-modify-path suppresses linking as well as profile edits
+make_sandbox
+mkdir -p "$fake_home/.local/bin"
+run_install_with_path "$fake_home" "/bin/bash" "$fake_home/.local/bin:$PATH" --no-modify-path
+if assert_installed "no-modify-path link suppression" "$fake_home" &&
+    [ ! -e "$fake_home/.local/bin/refact" ] &&
+    [ ! -f "$fake_home/$bash_profile_name" ]; then
+    pass_test "--no-modify-path creates no symlink"
+else
+    fail_test "--no-modify-path must not create a symlink"
 fi
 rm -rf "$sandbox"
 

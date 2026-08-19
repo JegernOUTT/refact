@@ -211,7 +211,7 @@ Write-Host "Refact installed successfully at $InstallPath"
 if ($NoModifyPath) {
     Write-Host "PATH was not modified. Add $InstallDir to PATH to run refact from anywhere."
 } elseif ($pathChanged) {
-    Write-Host "Added $InstallDir to your user PATH. Restart your terminal before running refact."
+    Write-Host "Added $InstallDir to your user PATH and to this terminal session."
 } else {
     Write-Host "$InstallDir is already in your user PATH."
 }

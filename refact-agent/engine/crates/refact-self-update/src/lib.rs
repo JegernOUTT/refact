@@ -482,11 +482,14 @@ async fn install_release(
 ) -> Result<PathBuf, SelfUpdateError> {
     let exe_path = match exe_path {
         Some(path) => path,
-        None => std::env::current_exe().map_err(|error| {
-            SelfUpdateError::runtime(format!(
-                "failed to find current refact binary path: {error}"
-            ))
-        })?,
+        None => {
+            let path = std::env::current_exe().map_err(|error| {
+                SelfUpdateError::runtime(format!(
+                    "failed to find current refact binary path: {error}"
+                ))
+            })?;
+            std::fs::canonicalize(&path).unwrap_or(path)
+        }
     };
     let archive = source
         .download(&urls.archive_url, "release archive")

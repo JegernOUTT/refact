@@ -34,11 +34,13 @@ Install:
 curl -fsSL https://raw.githubusercontent.com/JegernOUTT/refact/main/install.sh | sh
 ```
 
-Then open a **new terminal** (or `source` the shell profile the installer reports) so `refact` is on your `PATH`, and run:
+Then run:
 
 ```sh
 refact ui
 ```
+
+The installer links `refact` into a directory that is already on your `PATH` (usually `~/.local/bin`), so this works in the same terminal. If no such directory is available, the installer prints the exact one-line command to activate it.
 
 **Windows PowerShell**
 
@@ -48,11 +50,13 @@ Install:
 irm https://raw.githubusercontent.com/JegernOUTT/refact/main/install.ps1 | iex
 ```
 
-Then open a **new terminal** so `refact.exe` is on your `PATH`, and run:
+Then run:
 
 ```powershell
 refact ui
 ```
+
+The installer updates both your user `PATH` and the current PowerShell session.
 
 > [!WARNING]
 > The resident **daemon** and **TUI** are an early preview and may be buggy or change without notice. The IDE plugins (VS Code/JetBrains) and core engine are the stable surfaces. Please report issues.

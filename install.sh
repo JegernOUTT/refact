@@ -13,6 +13,9 @@ modify_path=1
 install_dir="${HOME:-}/.refact/bin"
 modified_path_files=""
 path_update_warning=0
+link_dir=""
+link_path=""
+link_status="none"
 
 usage() {
     cat <<'EOF'
@@ -24,7 +27,8 @@ Usage:
 Options:
   --version <v>       Install a specific Refact version. VERSION env is also honored.
   --binary <path>     Install from a local refact binary instead of GitHub Releases.
-  --no-modify-path    Do not add ~/.refact/bin to shell startup files.
+  --no-modify-path    Do not add ~/.refact/bin to shell startup files and do not
+                      link refact into a directory already on PATH.
   -h, --help          Show this help.
 EOF
 }
@@ -325,6 +329,68 @@ update_shell_path() {
         *) upsert_path_block "$profile_file" "$export_line" ;;
     esac
 }
+path_contains_dir() {
+    wanted=${1%/}
+    case ":${PATH:-}:" in
+        *":$wanted:"*) return 0 ;;
+        *":$wanted/:"*) return 0 ;;
+    esac
+    return 1
+}
+
+select_link_dir() {
+    for candidate in "$HOME/.local/bin" "$HOME/bin"; do
+        if path_contains_dir "$candidate"; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+link_owned_by_installer() {
+    existing_target=$(readlink "$1" 2>/dev/null || printf '')
+    [ "$existing_target" = "$install_path" ]
+}
+
+link_into_path_dir() {
+    if [ "$modify_path" -eq 0 ] || [ "$os" = "windows" ]; then
+        return 0
+    fi
+
+    candidate_dir=$(select_link_dir) || return 0
+    if [ "$candidate_dir" = "$install_dir" ]; then
+        return 0
+    fi
+
+    candidate_path="$candidate_dir/$executable_name"
+    if [ -e "$candidate_path" ] || [ -L "$candidate_path" ]; then
+        if [ ! -L "$candidate_path" ] || ! link_owned_by_installer "$candidate_path"; then
+            link_dir=$candidate_dir
+            link_path=$candidate_path
+            link_status="conflict"
+            return 0
+        fi
+    fi
+
+    mkdir -p "$candidate_dir" 2>/dev/null || return 0
+
+    link_dir=$candidate_dir
+    link_path=$candidate_path
+
+    temp_link="$candidate_dir/.refact.link.$$"
+    if ln -s "$install_path" "$temp_link" 2>/dev/null; then
+        if mv "$temp_link" "$candidate_path" 2>/dev/null; then
+            link_status="linked"
+        else
+            rm -f "$temp_link" 2>/dev/null || true
+            link_status="failed"
+        fi
+    else
+        link_status="failed"
+    fi
+}
+
 
 install_from_release() {
     resolved_version=$(resolve_version)
@@ -383,20 +449,60 @@ else
     install_from_release
 fi
 
+link_into_path_dir
 update_shell_path
 
+refact_ready=0
+if path_contains_dir "$install_dir" ||
+    { [ "$link_status" = "linked" ] && path_contains_dir "$link_dir"; }; then
+    refact_ready=1
+fi
+
+registered_for_new_terminals=0
+if [ "$modify_path" -eq 1 ] && [ "$path_update_warning" -eq 0 ]; then
+    registered_for_new_terminals=1
+fi
+
 info "Refact installed successfully at $install_path"
+
+case "$link_status" in
+    linked)
+        info "Linked $link_path -> $install_path"
+        ;;
+    conflict)
+        info "Left $link_path untouched because this installer did not create it."
+        ;;
+    failed)
+        info "Could not link $link_path; run refact from $install_path instead."
+        ;;
+esac
+
 if [ "$modify_path" -eq 0 ]; then
     info "PATH was not modified. Add $install_dir to PATH to run refact from anywhere."
 elif [ "$path_update_warning" -eq 1 ]; then
     info "PATH was not changed because the selected shell profile contains malformed Refact installer markers."
 elif [ -n "$modified_path_files" ]; then
     info "Added $install_dir to PATH in: $modified_path_files"
-    info "Restart your terminal or source the updated shell file before running refact."
 else
     info "$install_dir is already configured in PATH startup files."
 fi
-info "Open Refact with:"
+
+if [ "$refact_ready" -eq 0 ]; then
+    activation_shell=$(basename "${SHELL:-sh}")
+    case "$activation_shell" in
+        fish) activation_line="fish_add_path \"\$HOME/.refact/bin\"; refact ui" ;;
+        *) activation_line="export PATH=\"\$HOME/.refact/bin:\$PATH\" && refact ui" ;;
+    esac
+    info "Run this in your current terminal:"
+    info "  $activation_line"
+    if [ "$registered_for_new_terminals" -eq 1 ]; then
+        info "New terminals pick it up automatically. Open Refact with:"
+    else
+        info "Or add $install_dir to PATH yourself, then open Refact with:"
+    fi
+else
+    info "Open Refact with:"
+fi
 info "  refact ui"
 info "Update Refact with:"
 info "  refact self-update"

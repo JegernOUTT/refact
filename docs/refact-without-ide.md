@@ -18,11 +18,13 @@ irm https://raw.githubusercontent.com/JegernOUTT/refact/main/install.ps1 | iex
 
 The installer writes the standalone binary to `~/.refact/bin/refact` (Unix/macOS) or `%USERPROFILE%\.refact\bin\refact.exe` (Windows) and adds that directory to your `PATH`. No dependencies, no runtime, no sudo — just the binary.
 
-Because `PATH` is updated in your shell startup files, open a **new terminal** (or `source` the profile the installer reports on Unix/macOS) before running `refact`. If you pass `--no-modify-path` (Unix/macOS) or `-NoModifyPath` (Windows), the installer leaves `PATH` untouched: add `~/.refact/bin` (or `%USERPROFILE%\.refact\bin`) to `PATH` yourself, or invoke the binary by its full path.
+On Unix/macOS the installer also links `refact` into the first directory that is already on your `PATH` (`~/.local/bin`, then `~/bin`), so the command works in the same terminal you ran the installer in. It only ever creates that link when the path is free or already points into `~/.refact/bin`; an unrelated `refact` there is reported and left alone. Because the link targets `~/.refact/bin/refact`, `refact self-update` keeps working through it. When no such directory exists, `PATH` is still registered in your shell startup files and the installer prints the exact one-line command to activate the current terminal. On Windows the installer updates both the user `PATH` and the current PowerShell session.
+
+If you pass `--no-modify-path` (Unix/macOS) or `-NoModifyPath` (Windows), the installer leaves `PATH` untouched and creates no link: add `~/.refact/bin` (or `%USERPROFILE%\.refact\bin`) to `PATH` yourself, or invoke the binary by its full path.
 
 Additional packaging channels (Homebrew, Winget, Scoop, npm) are coming — watch the [releases page](https://github.com/JegernOUTT/refact/releases) for availability.
 
-Verify it worked (in a new terminal):
+Verify it worked:
 
 ```sh
 refact version
