@@ -1520,7 +1520,7 @@ mod tests {
                 let ObservationStatus::Unavailable(reason) = result.observation else {
                     panic!("unsupported observer returned observed access");
                 };
-                let expected_reason = if cfg!(target_os = "macos") {
+                let expected_reason = if cfg!(target_os = "macos") && !tty {
                     "macOS syscall observation unavailable"
                 } else {
                     "backend unavailable"
