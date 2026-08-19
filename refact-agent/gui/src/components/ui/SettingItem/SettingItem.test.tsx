@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import path from "node:path";
+import { readFile } from "node:fs/promises";
 import { screen } from "@testing-library/react";
 
 import { render } from "../../../utils/test-utils";
@@ -43,5 +45,15 @@ describe("SettingItem", () => {
 
     expect(getSettingItem("Row item")?.className).toContain("row");
     expect(getSettingItem("Stack item")?.className).toContain("stack");
+  });
+
+  it("bounds width with absolute lengths so long setting lists stay cheap to lay out", async () => {
+    const css = await readFile(
+      path.resolve(__dirname, "SettingItem.module.css"),
+      "utf8",
+    );
+
+    expect(css).toContain("max-width: var(--rf-settings-measure);");
+    expect(css).not.toMatch(/max-width:\s*(min\(\s*)?100%/);
   });
 });

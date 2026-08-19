@@ -3,7 +3,7 @@
 
   display: grid;
   min-width: 0;
-  max-width: min(100%, var(--rf-settings-measure));
+  max-width: var(--rf-settings-measure);
   gap: var(--rf-row-gap);
   padding: var(--rf-row-pad) 0;
   color: var(--rf-color-fg);
@@ -26,7 +26,6 @@
 .control {
   display: grid;
   min-width: 0;
-  max-width: 100%;
   gap: var(--rf-space-1);
 }
 
@@ -42,7 +41,7 @@
 .stack .control {
   --rf-input-max: 100%;
 
-  max-width: 100%;
+  max-width: none;
   justify-self: stretch;
   justify-items: stretch;
 }
@@ -78,7 +77,7 @@
   .control {
     --rf-input-max: 100%;
 
-    max-width: 100%;
+    max-width: none;
     justify-self: stretch;
     justify-items: stretch;
   }
@@ -93,7 +92,7 @@
   .control {
     --rf-input-max: 100%;
 
-    max-width: 100%;
+    max-width: none;
     justify-self: stretch;
     justify-items: stretch;
   }
