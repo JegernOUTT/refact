@@ -57,6 +57,7 @@ const COVERED_STORY_FILES = [
   "../components/ChatForm/TaskPlannerDialog.stories.tsx",
   "../components/ChatForm/ToolConfirmation.stories.tsx",
   "../components/DeletePopover/DeletePopover.stories.tsx",
+  "../components/DialogImage/DialogImage.stories.tsx",
   "../components/IntegrationsView/MCPImportDialog.stories.tsx",
   "../components/TaskProgressWidget/TaskProgressWidget.stories.tsx",
   "../components/Trajectory/Trajectory.stories.tsx",

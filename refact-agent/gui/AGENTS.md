@@ -284,6 +284,25 @@ Auto-approve for patch-like tools when `automatic_patch === true`: `patch`, `tex
 
 **Rules**: Use Radix primitives (`Flex`, `Box`, `Text`, `Card`, `Button`). Use design tokens (`var(--space-3)`, `var(--accent-9)`). CSS Modules for custom styles. No inline styles, no magic numbers, no hardcoded colors, no global CSS.
 
+### Global CSS contract (cascade + base resets)
+
+- Global stylesheets (radix themes, `styles/tokens.css`, `styles/base.css`, glass/motion/responsive/scrollbar, theme-config, shared tokens) are imported FIRST in `src/lib/index.ts` and mirrored in `.storybook/preview.tsx`. Component CSS modules win equal-specificity battles against Radix defaults (e.g. `.rt-Box { display: block }` vs a module's `display: flex`) only because of this order; `src/lib/cssOrder.test.ts` locks it. Never make a global sheet reachable only through a component module.
+- `styles/base.css` owns the global `box-sizing: border-box` reset (KaTeX subtree exempted), the 13px ambient base, and zero-specificity `:where()` maps for bare `h1`-`h6`, `code/kbd/samp/pre`, and form controls. Do not re-add per-component `box-sizing` declarations.
+
+### Control-height recipe (the Button pattern)
+
+Every interactive control uses **fixed `height` (or a `min-height` floor plus stretch protection) + border-box + zero vertical padding**: `height: var(--rf-control-h-sm|h|h-lg)` for single-line controls; `min-height` alone is forbidden for stretchable controls because grid/flex parents inflate them off the 26/28/30/36 ladder (measured: Select 30→56.6, SegmentedControl 30→33.4). Badge sizes are 16/18/22 total; Chip floor is `var(--rf-control-h-icon-sm)` (28px, also the tap-target floor — undersized visuals get an expanded `::before` hit area). Small square icon actions (`.actionButton` convention) are 28×28 with `var(--rf-radius-chip)`.
+
+### Typography tokens
+
+- Weights come only from `--rf-weight-regular/medium/semibold/bold` (400/500/650/700); zero `font-weight:` literals outside `tokens.css`.
+- Line heights pair with sizes via `--rf-line-1..5` (18/20/21/22/28px) to avoid half-pixel line boxes; prefer them over the unitless `--rf-line` for new code.
+- Never use `em` font sizes or Radix `var(--radius-*)` / `var(--space-*)` tokens in module CSS — use `--rf-text-*` and `--rf-radius-*`/`--rf-space-*`.
+
+### Identifier display
+
+Internal identifiers (chat-mode ids, goal statuses, event kinds, engine error categories such as Rust `UserErrorCategory` variants) must never render verbatim in chrome; route them through `humanizeIdentifier` in `src/utils/displayNames.ts` (curated labels + sentence-case fallback).
+
 ### Responsive doctrine
 
 - App-level horizontal overflow safety belongs in `src/styles/responsive.css` and the app root only; do not add global `*`, `body`, or `html` overflow clamps.

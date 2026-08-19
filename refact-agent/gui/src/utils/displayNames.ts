@@ -7,7 +7,7 @@
  * of rendering it verbatim.
  */
 
-const CURATED: Record<string, string> = {
+const CURATED: Record<string, string | undefined> = {
   // chat modes
   agent: "Agent",
   ask: "Ask",
