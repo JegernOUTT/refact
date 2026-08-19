@@ -1252,9 +1252,7 @@ pub fn ensure_injection_into_tab(
     health
 }
 
-pub fn ensure_injection_into_all_tabs(
-    runtime: &BrowserRuntime,
-) -> Vec<(String, InjectionHealth)> {
+pub fn ensure_injection_into_all_tabs(runtime: &BrowserRuntime) -> Vec<(String, InjectionHealth)> {
     let mask_passwords = runtime.buffers.mask_passwords;
     let action_buffer = runtime.buffers.raw_recorder_events.clone();
     let tabs: Vec<Arc<headless_chrome::Tab>> = runtime
@@ -2450,7 +2448,10 @@ mod tests {
             "readAnnotations: readAnnotations",
             "clearAnnotations: clearAnnotations",
         ] {
-            assert!(OVERLAYS_SCRIPT.contains(contract), "overlays lack {contract}");
+            assert!(
+                OVERLAYS_SCRIPT.contains(contract),
+                "overlays lack {contract}"
+            );
         }
 
         assert!(OVERLAYS_SCRIPT.contains("if (e.key === 'Escape')"));
@@ -2561,7 +2562,8 @@ mod tests {
             .0;
         assert!(sweep.contains("if !visited.insert(target_id.clone())"));
         assert!(sweep.contains("url.starts_with(\"chrome://\") || url == \"about:blank\""));
-        assert!(sweep.contains("ensure_injection_into_tab(&tab, mask_passwords, action_buffer.clone())"));
+        assert!(sweep
+            .contains("ensure_injection_into_tab(&tab, mask_passwords, action_buffer.clone())"));
 
         let router = include_str!("../../../src/http/routers/v1/v1_browser.rs");
         assert!(router.contains("ensure_injection_into_all_tabs(&rt)"));

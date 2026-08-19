@@ -914,6 +914,7 @@ const privacyPolicyResponse: PrivacyPolicyResponse = {
       },
     ],
     subagents: { report_declassifies: true },
+    tool_access: { providers: {} },
   },
   destinations: [
     {

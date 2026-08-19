@@ -132,11 +132,7 @@ fn provider_display_name(base_provider: &str) -> Result<String, ScratchError> {
 fn oauth_supported_for_base(base_provider: &str) -> bool {
     matches!(
         base_provider,
-        "claude_code"
-            | "openai_codex"
-            | "github_copilot"
-            | "xai_oauth"
-            | "google_antigravity"
+        "claude_code" | "openai_codex" | "github_copilot" | "xai_oauth" | "google_antigravity"
     )
 }
 
@@ -2456,9 +2452,11 @@ pub async fn handle_v1_provider_oauth_start(
         }
         "google_antigravity" => {
             let (session_id, authorize_url, listener) =
-                crate::providers::google_antigravity_oauth::start_oauth_session(params.name.clone())
-                    .await
-                    .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
+                crate::providers::google_antigravity_oauth::start_oauth_session(
+                    params.name.clone(),
+                )
+                .await
+                .map_err(|e| ScratchError::new(StatusCode::SERVICE_UNAVAILABLE, e))?;
 
             let listener_handle =
                 crate::providers::google_antigravity_oauth::start_callback_listener(
@@ -3655,9 +3653,9 @@ async fn save_provider_oauth_tokens(
             >(tokens_value.clone())
             .ok()
             .map(|tokens| tokens.refresh_token),
-            "xai_oauth" => serde_yaml::from_value::<
-                crate::providers::xai_oauth_flow::OAuthTokens,
-            >(tokens_value.clone())
+            "xai_oauth" => serde_yaml::from_value::<crate::providers::xai_oauth_flow::OAuthTokens>(
+                tokens_value.clone(),
+            )
             .ok()
             .map(|tokens| tokens.refresh_token),
             "google_antigravity" => serde_yaml::from_value::<

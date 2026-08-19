@@ -18,6 +18,34 @@ type BuddyInnerOverflowReport = {
   clientWidth: number;
 };
 
+type BuddyTabPanelTarget = {
+  selector: string;
+  description: string;
+};
+
+const BUDDY_TAB_PANELS: (BuddyTabPanelTarget & { tab: string })[] = [
+  {
+    tab: "Personality",
+    selector: "[data-testid='buddy-personality-panel']",
+    description: "Buddy personality panel",
+  },
+  {
+    tab: "Activity",
+    selector: "[data-testid='buddy-activity-panel']",
+    description: "Buddy activity panel",
+  },
+  {
+    tab: "Pulse",
+    selector: "[data-testid='buddy-pulse-card']",
+    description: "Buddy pulse card",
+  },
+  {
+    tab: "Recent errors",
+    selector: "[data-testid='buddy-recent-errors-panel']",
+    description: "Buddy recent errors panel",
+  },
+];
+
 type EdgeMeasurement = {
   name: string;
   delta: number;
@@ -268,65 +296,63 @@ test.describe("no page-level horizontal scroll", () => {
         ).toEqual([]);
 
         if (route.path.includes("route=buddy")) {
-          const buddyInnerOverflow = await page.evaluate<
-            BuddyInnerOverflowReport[]
-          >(() => {
-            const targets = [
-              {
-                selector: "[data-testid='buddy-home-content']",
-                description: "Buddy content scroller",
-              },
-              {
-                selector: "[data-testid='buddy-home-hero']",
-                description: "Buddy hero band",
-              },
-              {
-                selector: "[data-testid='buddy-summary-strip']",
-                description: "Buddy summary strip",
-              },
-              {
-                selector: "[data-testid='buddy-opportunities-feed']",
-                description: "Buddy opportunities feed",
-              },
-              {
-                selector: "[data-testid='buddy-pulse-card']",
-                description: "Buddy pulse card",
-              },
-              {
-                selector: "[data-testid='buddy-personality-panel']",
-                description: "Buddy personality panel",
-              },
-              {
-                selector: "[data-testid='buddy-activity-panel']",
-                description: "Buddy activity panel",
-              },
-              {
-                selector: "[data-testid='buddy-recent-errors-panel']",
-                description: "Buddy recent errors panel",
-              },
-            ];
-            return targets.map(({ selector, description }) => {
-              const el = document.querySelector(selector);
-              if (!el) {
-                return {
-                  selector,
-                  description,
-                  missing: true,
-                  overflowing: false,
-                  scrollWidth: 0,
-                  clientWidth: 0,
-                };
-              }
-              return {
-                selector,
-                description,
-                missing: false,
-                overflowing: el.scrollWidth > el.clientWidth + 2,
-                scrollWidth: el.scrollWidth,
-                clientWidth: el.clientWidth,
-              };
-            });
-          });
+          const measureBuddyTargets = (targets: BuddyTabPanelTarget[]) =>
+            page.evaluate<BuddyInnerOverflowReport[], BuddyTabPanelTarget[]>(
+              (entries) =>
+                entries.map(({ selector, description }) => {
+                  const el = document.querySelector(selector);
+                  if (!el) {
+                    return {
+                      selector,
+                      description,
+                      missing: true,
+                      overflowing: false,
+                      scrollWidth: 0,
+                      clientWidth: 0,
+                    };
+                  }
+                  return {
+                    selector,
+                    description,
+                    missing: false,
+                    overflowing: el.scrollWidth > el.clientWidth + 2,
+                    scrollWidth: el.scrollWidth,
+                    clientWidth: el.clientWidth,
+                  };
+                }),
+              targets,
+            );
+
+          const buddyInnerOverflow = await measureBuddyTargets([
+            {
+              selector: "[data-testid='buddy-home-content']",
+              description: "Buddy content scroller",
+            },
+            {
+              selector: "[data-testid='buddy-home-hero']",
+              description: "Buddy hero band",
+            },
+            {
+              selector: "[data-testid='buddy-summary-strip']",
+              description: "Buddy summary strip",
+            },
+            {
+              selector: "[data-testid='buddy-opportunities-feed']",
+              description: "Buddy opportunities feed",
+            },
+          ]);
+
+          for (const panel of BUDDY_TAB_PANELS) {
+            await page
+              .getByRole("tab", { name: panel.tab, exact: true })
+              .click();
+            await page.locator(panel.selector).waitFor({ state: "visible" });
+            buddyInnerOverflow.push(
+              ...(await measureBuddyTargets([
+                { selector: panel.selector, description: panel.description },
+              ])),
+            );
+          }
 
           const buddyInnerOffenders = buddyInnerOverflow.filter(
             (entry) => entry.missing || entry.overflowing,
@@ -527,7 +553,11 @@ test.describe("Buddy route smoke", () => {
     await expect(page.getByTestId("buddy-world")).toBeVisible();
     await expect(page.getByTestId("buddy-summary-strip")).toBeVisible();
     await expect(page.getByTestId("buddy-opportunities-feed")).toBeVisible();
+
+    await page.getByRole("tab", { name: "Pulse", exact: true }).click();
     await expect(page.getByTestId("buddy-pulse-card")).toBeVisible();
+
+    await page.getByRole("tab", { name: "Activity", exact: true }).click();
     await expect(page.getByTestId("buddy-activity-panel")).toBeVisible();
 
     await page.getByText("buddy_*").click();
@@ -536,30 +566,39 @@ test.describe("Buddy route smoke", () => {
     ).toBeVisible();
     await expect(page.getByText("Refact e2e gate queued")).not.toBeVisible();
 
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    const measureClipped = (selectors: string[]) =>
+      page.evaluate<string[], string[]>((entries) => {
+        const viewportWidth = document.documentElement.clientWidth;
+        return entries.flatMap((selector) => {
+          const el = document.querySelector(selector);
+          if (!el) return [`${selector} missing`];
+          const rect = el.getBoundingClientRect();
+          const isClipped = rect.left < -1 || rect.right > viewportWidth + 1;
+          return isClipped
+            ? [
+                `${selector} rect=${rect.left},${rect.top},${rect.right},${rect.bottom}`,
+              ]
+            : [];
+        });
+      }, selectors);
+
+    const activityClipped = await measureClipped([
+      "[data-testid='buddy-activity-panel']",
+    ]);
+    expect(
+      activityClipped,
+      `horizontally clipped Buddy panels: ${activityClipped.join(" | ")}`,
+    ).toEqual([]);
+
+    await page.getByRole("tab", { name: "Settings", exact: true }).click();
     await expect(page.getByTestId("buddy-settings-panel")).toBeVisible();
 
-    const clipped = await page.evaluate<string[]>(() => {
-      const viewportWidth = document.documentElement.clientWidth;
-      return [
-        "[data-testid='buddy-settings-panel']",
-        "[data-testid='buddy-activity-panel']",
-      ].flatMap((selector) => {
-        const el = document.querySelector(selector);
-        if (!el) return [`${selector} missing`];
-        const rect = el.getBoundingClientRect();
-        const isClipped = rect.left < -1 || rect.right > viewportWidth + 1;
-        return isClipped
-          ? [
-              `${selector} rect=${rect.left},${rect.top},${rect.right},${rect.bottom}`,
-            ]
-          : [];
-      });
-    });
-
+    const settingsClipped = await measureClipped([
+      "[data-testid='buddy-settings-panel']",
+    ]);
     expect(
-      clipped,
-      `horizontally clipped Buddy panels: ${clipped.join(" | ")}`,
+      settingsClipped,
+      `horizontally clipped Buddy panels: ${settingsClipped.join(" | ")}`,
     ).toEqual([]);
   });
 });

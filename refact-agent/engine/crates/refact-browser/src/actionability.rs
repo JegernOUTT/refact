@@ -199,6 +199,12 @@ impl Deadline {
     pub fn expired<C: Clock>(self, clock: &C) -> bool {
         clock.now() >= self.at
     }
+
+    pub fn extended_by(self, extra: Duration) -> Self {
+        Self {
+            at: self.at.saturating_add(extra),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -717,16 +723,20 @@ impl<C: Clock> ActionabilityEngine<C> {
         let mut last_state = None;
         let mut receives_events = None;
         let deadline = Deadline::new(&self.clock, timeout);
-        if let Err(error) = self.perform_action_prechecks(mode, driver, &mut call_log) {
-            return Err(self.enrich_error(
-                error,
-                started_at,
-                attempts,
-                attached,
-                last_state,
-                receives_events,
-            ));
-        }
+        let handler_elapsed = match self.perform_action_prechecks(mode, driver, &mut call_log) {
+            Ok(elapsed) => elapsed,
+            Err(error) => {
+                return Err(self.enrich_error(
+                    error,
+                    started_at,
+                    attempts,
+                    attached,
+                    last_state,
+                    receives_events,
+                ));
+            }
+        };
+        let deadline = deadline.extended_by(handler_elapsed);
         call_log.push(format!("waiting for {locator}"));
 
         loop {
@@ -827,7 +837,8 @@ impl<C: Clock> ActionabilityEngine<C> {
         mode: ActionabilityExecutionMode,
         driver: &mut D,
         call_log: &mut CallLog,
-    ) -> Result<(), ActionabilityError> {
+    ) -> Result<Duration, ActionabilityError> {
+        let mut handler_elapsed = Duration::ZERO;
         call_log.push("checking pending navigation before locator handlers");
         if let Err(diagnostic) = driver.wait_for_navigation() {
             call_log.push(diagnostic.log_line());
@@ -844,7 +855,10 @@ impl<C: Clock> ActionabilityEngine<C> {
         match mode {
             ActionabilityExecutionMode::Standard => {
                 call_log.push("checking locator handlers");
-                if let Err(diagnostic) = driver.locator_handlers_checkpoint() {
+                let handler_started_at = self.clock.now();
+                let checkpoint = driver.locator_handlers_checkpoint();
+                handler_elapsed = self.clock.now().saturating_sub(handler_started_at);
+                if let Err(diagnostic) = checkpoint {
                     call_log.push(diagnostic.log_line());
                     return Err(ActionabilityError::Failed {
                         diagnostic,
@@ -874,7 +888,7 @@ impl<C: Clock> ActionabilityEngine<C> {
                 receives_events: None,
             });
         }
-        Ok(())
+        Ok(handler_elapsed)
     }
 
     fn enrich_error(
@@ -1614,27 +1628,28 @@ mod tests {
     }
 
     #[test]
-    fn prechecks_consume_the_callers_timeout_budget() {
+    fn locator_handler_time_does_not_consume_the_callers_action_budget() {
         let clock = MockClock::default();
         let engine = ActionabilityEngine::new(clock.clone(), ActionabilityTimeouts::default());
         let mut driver = MockDriver::new();
         driver.precheck_clock = Some(clock.clone());
         driver.precheck_advance = Duration::from_millis(30);
 
-        let error = engine
+        let success = engine
             .execute_with_timeout(
                 "button",
                 ActionKind::Click,
                 Duration::from_millis(25),
                 &mut driver,
             )
-            .unwrap_err();
+            .unwrap();
 
-        assert!(
-            matches!(error, ActionabilityError::Timeout { .. }),
-            "{error:?}"
+        assert_eq!(
+            driver.precheck_calls,
+            vec!["navigation", "handlers", "navigation"]
         );
-        assert_eq!(driver.action_calls, 0);
+        assert_eq!(driver.action_calls, 1);
+        assert_eq!(success.output, "done");
     }
 
     #[test]

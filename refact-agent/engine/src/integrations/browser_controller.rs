@@ -11662,11 +11662,26 @@ mod tests {
         let websocket_registry = WebSocketRegistry::default();
         let locator_handlers = populated_locator_handlers();
 
-        reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, 0, false, false)
-            .unwrap();
-        let repeated =
-            reset_sticky_registries(&[], &websocket_registry, &locator_handlers, 0, 0, false, false)
-                .unwrap();
+        reset_sticky_registries(
+            &[],
+            &websocket_registry,
+            &locator_handlers,
+            0,
+            0,
+            false,
+            false,
+        )
+        .unwrap();
+        let repeated = reset_sticky_registries(
+            &[],
+            &websocket_registry,
+            &locator_handlers,
+            0,
+            0,
+            false,
+            false,
+        )
+        .unwrap();
 
         assert_eq!(repeated, BrowserResetCounts::default());
         assert_eq!(

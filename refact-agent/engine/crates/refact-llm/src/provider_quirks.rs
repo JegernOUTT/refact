@@ -221,7 +221,7 @@ mod tests {
 
         assert_eq!(body["enable_thinking"], true);
         assert_eq!(body["thinking_budget"], 2048);
-        assert!(body.get("reasoning_effort").is_none());
+        assert!(!contains_key_recursively(&body, "reasoning_effort"));
     }
 
     #[test]
@@ -243,8 +243,8 @@ mod tests {
         apply_openai_chat_body_quirks(&mut body, &req, &settings());
 
         assert_eq!(body["reasoning_effort"], "high");
-        assert!(body.get("enable_thinking").is_none());
-        assert!(body.get("thinking_budget").is_none());
+        assert!(!contains_key_recursively(&body, "enable_thinking"));
+        assert!(!contains_key_recursively(&body, "thinking_budget"));
     }
 
     #[test]
@@ -256,7 +256,7 @@ mod tests {
         apply_openai_chat_body_quirks(&mut body, &req, &settings());
 
         assert_eq!(body["reasoning_effort"], "high");
-        assert!(body.get("thinking").is_none());
+        assert!(!contains_key_recursively(&body, "thinking"));
     }
 
     fn contains_key_recursively(value: &Value, key: &str) -> bool {

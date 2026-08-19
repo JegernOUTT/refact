@@ -31,6 +31,8 @@ test.describe("privacy surfaces", () => {
   }) => {
     await page.goto(privacySettingsPath);
 
+    await page.getByRole("button", { name: "Show matrix" }).click();
+
     const grid = page.getByRole("table", {
       name: "Zone destination permissions",
     });
@@ -43,9 +45,9 @@ test.describe("privacy surfaces", () => {
       grid.getByRole("columnheader", { name: /Build MCP/ }),
     ).toBeVisible();
 
-    await grid
-      .getByRole("button", { name: "Allow secrets to Build MCP" })
-      .click();
+    await page.getByRole("button", { name: /MCP servers/ }).click();
+    await page.getByRole("button", { name: /Build MCP/ }).click();
+    await page.getByLabel("Send secrets to Build MCP").click();
 
     await expect
       .poll(async () => {
@@ -78,6 +80,7 @@ test.describe("privacy surfaces", () => {
         },
       ],
       subagents: { report_declassifies: true },
+      tool_access: { providers: {} },
     });
   });
 

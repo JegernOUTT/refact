@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as AMutex;
 
-const CLIENT_ID: &str =
-    "REDACTED-ANTIGRAVITY-CLIENT-ID.apps.googleusercontent.com";
+const CLIENT_ID: &str = "REDACTED-ANTIGRAVITY-CLIENT-ID.apps.googleusercontent.com";
 const CLIENT_SECRET: &str = "REDACTED-ANTIGRAVITY-CLIENT-SECRET";
 const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -426,11 +425,8 @@ pub fn start_callback_listener(
             };
             connections_served += 1;
             let mut buf = vec![0u8; 8192];
-            let count = match tokio::time::timeout(
-                Duration::from_secs(5),
-                stream.read(&mut buf),
-            )
-            .await
+            let count = match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+                .await
             {
                 Ok(Ok(count)) => count,
                 Ok(Err(error)) => {

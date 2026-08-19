@@ -779,7 +779,11 @@ pub async fn handle_browser_annotate_start(
         )
     })?;
 
-    let result = eval_overlay(&tab, "startAnnotate()", "Failed to start annotation overlay")?;
+    let result = eval_overlay(
+        &tab,
+        "startAnnotate()",
+        "Failed to start annotation overlay",
+    )?;
     let status = result.as_str().unwrap_or("started").to_string();
 
     Ok(json_response(

@@ -347,22 +347,18 @@ pub fn start_callback_listener(
             };
             connections_served += 1;
             let mut buf = vec![0u8; 8192];
-            let count = match tokio::time::timeout(
-                Duration::from_secs(5),
-                stream.read(&mut buf),
-            )
-            .await
-            {
-                Ok(Ok(count)) => count,
-                Ok(Err(error)) => {
-                    tracing::debug!("xAI OAuth: failed to read callback request: {}", error);
-                    continue;
-                }
-                Err(_) => {
-                    tracing::debug!("xAI OAuth: callback request read timed out");
-                    continue;
-                }
-            };
+            let count =
+                match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
+                    Ok(Ok(count)) => count,
+                    Ok(Err(error)) => {
+                        tracing::debug!("xAI OAuth: failed to read callback request: {}", error);
+                        continue;
+                    }
+                    Err(_) => {
+                        tracing::debug!("xAI OAuth: callback request read timed out");
+                        continue;
+                    }
+                };
             if count == 0 {
                 continue;
             }

@@ -1799,7 +1799,12 @@ mod tests {
         let schema = chrome_input_schema();
         assert_eq!(
             schema.pointer("/properties/request/properties/page_context/enum"),
-            Some(&serde_json::json!(["snapshot", "screenshot", "both", "none"]))
+            Some(&serde_json::json!([
+                "snapshot",
+                "screenshot",
+                "both",
+                "none"
+            ]))
         );
         assert!(schema
             .pointer("/properties/request/properties/page_context/description")
@@ -1818,7 +1823,9 @@ mod tests {
         assert!(description.contains("screenshots are opt-in"));
         assert!(description
             .contains("you do NOT need an `accessibility_snapshot` step after navigating"));
-        assert!(description.contains("`snapshot` (the default) attaches the ref-annotated ARIA snapshot and NO image"));
+        assert!(description.contains(
+            "`snapshot` (the default) attaches the ref-annotated ARIA snapshot and NO image"
+        ));
         assert!(description.contains("`none` attaches only the page header"));
     }
 
@@ -1855,11 +1862,12 @@ mod tests {
     #[test]
     fn suppressed_report_screenshot_still_returns_the_explicit_step_screenshot() {
         const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-        let step = crate::integrations::browser_models::StepResult::success(0, "Screenshot captured")
-            .with_data(serde_json::json!({
-                "mime": "image/png",
-                "data": TINY_PNG_BASE64,
-            }));
+        let step =
+            crate::integrations::browser_models::StepResult::success(0, "Screenshot captured")
+                .with_data(serde_json::json!({
+                    "mime": "image/png",
+                    "data": TINY_PNG_BASE64,
+                }));
         let report: ExecutionReport = serde_json::from_value(serde_json::json!({
             "ok": true,
             "steps": [step],
@@ -2566,6 +2574,13 @@ fn execution_report_to_multimodal(
                     if let Ok(el) = MultimodalElement::new(resized_mime, resized) {
                         content.push(el);
                     }
+                }
+            }
+            for (mime, b64_data) in step_gallery_images(data) {
+                let (resized, resized_mime) =
+                    resize_screenshot_b64(&b64_data, &mime, image_policy)?;
+                if let Ok(el) = MultimodalElement::new(resized_mime, resized) {
+                    content.push(el);
                 }
             }
         }

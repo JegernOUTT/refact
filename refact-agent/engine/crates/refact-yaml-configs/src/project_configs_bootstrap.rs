@@ -505,7 +505,15 @@ tools:
         global_configs_try_create_all(config_dir).await.unwrap();
 
         let upgraded = fs::read_to_string(&buddy_path).await.unwrap();
-        assert!(upgraded.contains("schema_version: 17"));
+        let expected_version = {
+            let defaults = get_defaults_for_kind("modes");
+            let (_, content) = defaults
+                .iter()
+                .find(|(filename, _)| filename == "buddy.yaml")
+                .expect("missing embedded mode buddy.yaml");
+            extract_schema_version(content)
+        };
+        assert!(upgraded.contains(&format!("schema_version: {expected_version}")));
         assert!(upgraded.contains("  - buddy_speak"));
         assert!(upgraded.contains("  - buddy_runtime_event"));
         assert!(upgraded.contains("  - buddy_log_activity"));

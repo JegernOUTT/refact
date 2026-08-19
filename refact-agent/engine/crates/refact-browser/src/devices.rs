@@ -14,7 +14,15 @@ const DEVICE_ALIASES: &[(&str, &str)] = &[
 ];
 
 const LEGACY_PRESETS: &[(&str, &str, u32, u32, f64, bool, bool)] = &[
-    ("Refact Desktop", "Desktop Chrome", 1440, 900, 2.0, false, false),
+    (
+        "Refact Desktop",
+        "Desktop Chrome",
+        1440,
+        900,
+        2.0,
+        false,
+        false,
+    ),
     ("Refact Mobile", "Pixel 7", 390, 844, 3.0, true, true),
     ("Refact Tablet", "Galaxy Tab S4", 834, 1112, 2.0, true, true),
 ];
@@ -89,8 +97,8 @@ fn parse_registry(source: &str) -> Result<Vec<DeviceDescriptor>, String> {
 pub fn registry() -> &'static [DeviceDescriptor] {
     static REGISTRY: OnceLock<Vec<DeviceDescriptor>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
-        let mut devices =
-            parse_registry(DEVICE_DESCRIPTORS).expect("vendored device_descriptors.json must parse");
+        let mut devices = parse_registry(DEVICE_DESCRIPTORS)
+            .expect("vendored device_descriptors.json must parse");
         for (name, ua_source, width, height, device_scale_factor, is_mobile, has_touch) in
             LEGACY_PRESETS
         {

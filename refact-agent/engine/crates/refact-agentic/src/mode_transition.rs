@@ -1998,7 +1998,7 @@ Wave 0
         assert_eq!(budget.total_symbols, 300);
         assert_eq!(budget.files_symbols, 210);
         assert_eq!(budget.messages_symbols, 90);
-        assert_eq!(budget.max_images, 1);
+        assert_eq!(budget.max_images, MODE_TRANSITION_MAX_IMAGES);
     }
 
     #[test]

@@ -526,7 +526,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
     const handleTransitionCancel = (event: globalThis.TransitionEvent) => {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      const tabId = target.dataset.surfaceKey;
+      const tabId = target.dataset.tabSurfaceKey;
       if (!tabId) return;
       finalizeTabClose(tabId);
     };
@@ -815,7 +815,7 @@ export function TabBar({ placement = "workspace" }: TabBarProps) {
             return (
               <div
                 key={tab.id}
-                data-surface-key={tab.id}
+                data-tab-surface-key={tab.id}
                 ref={(node) => {
                   if (node) tabWrapEls.current.set(tab.id, node);
                   else tabWrapEls.current.delete(tab.id);

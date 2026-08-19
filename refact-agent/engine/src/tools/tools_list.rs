@@ -8,9 +8,7 @@ use crate::yaml_configs::customization_registry::{
     get_project_registry, should_expose_subagent_as_config_tool,
 };
 
-use super::tools_description::{
-    Tool, ToolDesc, ToolGroup, ToolGroupCategory, ToolSource, ToolSourceType,
-};
+use super::tools_description::{Tool, ToolDesc, ToolGroup, ToolGroupCategory, ToolSourceType};
 use super::tool_config_subagent::ToolConfigSubagent;
 
 /// When MCP tool count exceeds this threshold, lazy loading activates.
@@ -813,7 +811,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use crate::tools::tools_description::ToolSourceType;
+    use crate::tools::tools_description::{ToolSource, ToolSourceType};
     use crate::yaml_configs::customization_registry::RegistryCache;
     use crate::yaml_configs::customization_types::{
         ProjectRegistry, SubagentConfig, SubagentMessages, SubagentPrompts, SubchatConfig,

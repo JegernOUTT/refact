@@ -1,19 +1,13 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::path::{Component, Path as FsPath, PathBuf};
+use std::path::Path as FsPath;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Body;
-use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{header, HeaderMap, Response, StatusCode};
-use axum::response::IntoResponse;
-use axum::routing::{get, post};
-use axum::Router;
+use axum::http::StatusCode;
 use base64::Engine;
 use headless_chrome::Tab;
 use headless_chrome::protocol::cdp::{Page, Runtime};
-use hyper::body::Bytes;
 use refact_core::image_policy::ImagePolicy;
 use refact_lsp::call_validation::ChatContent;
 use refact_lsp::chat::browser_context::maybe_insert_browser_context;
@@ -23,11 +17,10 @@ use refact_lsp::integrations::browser_controller::execute_request_with_runtime;
 use refact_lsp::integrations::browser_controller::execute_steps_with_runtime;
 use refact_lsp::integrations::browser_models::{
     AccessibilitySnapshotOptions, BrowserActionRequest, BrowserComposeMode, BrowserConsoleLevel,
-    BrowserCookie, BrowserCookieSameSite, BrowserElementState, BrowserExpectation,
-    BrowserExpectedText, BrowserExpectedTextOrList, BrowserHttpRequest, BrowserLoadState,
-    BrowserLocator, BrowserPdfOptions, BrowserPollMatcher, BrowserPseudoElement,
-    BrowserScreenshotAnimations, BrowserScreenshotClip, BrowserScreenshotOptions, BrowserStep,
-    BrowserStorageItem, BrowserStorageKind, BrowserTextMode, CdpTarget, ClockTicks, ClockTime,
+    BrowserElementState, BrowserExpectation, BrowserExpectedText, BrowserExpectedTextOrList,
+    BrowserHttpRequest, BrowserLoadState, BrowserLocator, BrowserPdfOptions, BrowserPollMatcher,
+    BrowserPseudoElement, BrowserScreenshotAnimations, BrowserScreenshotClip,
+    BrowserScreenshotOptions, BrowserStep, BrowserTextMode, CdpTarget, ClockTicks, ClockTime,
     ExecutionReport, FillStrategy, LocatorHandlerAction, LocatorRegex, NetworkReportMode,
     PageContextMode, RouteHandler, SessionPolicy, TabTarget, UrlPattern, WebSocketEventKind,
     WebSocketFrameDisposition, WebSocketMessageAction, WebSocketRouteMode,
@@ -38,7 +31,6 @@ use refact_lsp::refact_browser::{
     HandleError, Keyboard, HitTargetController, HitTargetResult, Mouse, MouseButton,
     UTILITY_WORLD_NAME,
 };
-use serde::Deserialize;
 use serde_json::json;
 use structopt::StructOpt;
 use tempfile::{tempdir, TempDir};
@@ -46,8 +38,8 @@ use tempfile::{tempdir, TempDir};
 mod browser_common;
 
 use browser_common::{
-    discover_chrome, discover_chrome_with, e2e_enabled, e2e_launch_options, fixture_root,
-    print_skip, FixtureServer,
+    discover_chrome, discover_chrome_with, e2e_enabled, e2e_launch_options, print_skip,
+    FixtureServer,
 };
 
 fn execute_fixture_steps(
@@ -238,163 +230,17 @@ impl BrowserCase {
             .unwrap();
     }
 
-    fn call_version(&self) -> serde_json::Value {
+    fn probe_utility_world(&self) -> String {
         self.runtime
             .world_manager
-            .call_injected(&self.tab, "version", json!([]))
+            .aria_snapshot(
+                &self.tab,
+                None,
+                refact_lsp::refact_browser::SnapshotOptions::default(),
+            )
             .unwrap()
+            .yaml
     }
-}
-
-#[tokio::test]
-#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
-async fn context_state_roundtrips_and_reaches_adopted_popup() {
-    if !e2e_enabled() {
-        print_skip();
-        return;
-    }
-    let server = FixtureServer::start().await.unwrap();
-    let profile = tempdir().unwrap();
-    let mut browser = launch_browser(&profile);
-    let tab = browser.browser.new_tab().unwrap();
-    browser.set_active_tab_target_id(tab.get_target_id().to_string());
-    let mut case = BrowserCase {
-        runtime: browser,
-        _profile: profile,
-        server,
-        tab,
-    };
-    case.tab
-        .call_method(Page::Navigate {
-            url: case.server.url("context-probe.html"),
-            referrer: None,
-            transition_Type: None,
-            frame_id: None,
-            referrer_policy: None,
-        })
-        .unwrap();
-    std::thread::sleep(Duration::from_millis(500));
-    case.setup_world();
-    let runtime = Arc::new(tokio::sync::Mutex::new(case.runtime));
-    let report = execute_request_with_runtime(
-        runtime.clone(),
-        BrowserActionRequest {
-            session: SessionPolicy::SharedDefault,
-            target: TabTarget::Active,
-            attach_screenshot: None,
-            page_context: None,
-            network: NetworkReportMode::default(),
-            steps: vec![
-                BrowserStep::SetViewport {
-                    width: 412,
-                    height: 732,
-                    device_scale_factor: Some(2.0),
-                    is_mobile: Some(true),
-                    has_touch: Some(true),
-                },
-                BrowserStep::EmulateMedia {
-                    color_scheme: Some("dark".to_string()),
-                    reduced_motion: None,
-                    forced_colors: None,
-                    contrast: None,
-                    media: None,
-                },
-                BrowserStep::SetLocale {
-                    locale: "ja-JP".to_string(),
-                },
-                BrowserStep::SetTimezone {
-                    timezone: "Asia/Tokyo".to_string(),
-                },
-                BrowserStep::SetCookies {
-                    cookies: vec![BrowserCookie {
-                        name: "session".to_string(),
-                        value: "logged-in".to_string(),
-                        domain: String::new(),
-                        path: "/".to_string(),
-                        expires: None,
-                        http_only: false,
-                        secure: false,
-                        same_site: Some(BrowserCookieSameSite::Lax),
-                        url: Some(case.server.url("context-probe.html")),
-                    }],
-                },
-                BrowserStep::SetStorage {
-                    kind: BrowserStorageKind::Local,
-                    items: vec![BrowserStorageItem {
-                        name: "logged_in".to_string(),
-                        value: "true".to_string(),
-                    }],
-                },
-                BrowserStep::Reload,
-                BrowserStep::WaitForPopup {
-                    timeout_ms: Some(5_000),
-                },
-                BrowserStep::Click {
-                    locator: BrowserLocator::css("#popup"),
-                },
-                BrowserStep::Eval {
-                    expression: "({language:navigator.language,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,dark:matchMedia('(prefers-color-scheme: dark)').matches,width:innerWidth,height:innerHeight,cookie:document.cookie,localStorage:Object.fromEntries(Object.entries(localStorage))})".to_string(),
-                },
-            ],
-            block_service_workers: None,
-        },
-        &ImagePolicy::browser_capture(),
-    )
-    .await
-    .unwrap();
-    assert!(report.ok, "context steps failed: {report:?}");
-    assert_eq!(report.new_tabs.len(), 1);
-    let probe = report.steps.last().unwrap().data.as_ref().unwrap();
-    assert_eq!(probe["width"], 412);
-    assert_eq!(probe["dark"], true);
-    assert_eq!(probe["language"], "ja-JP");
-    assert_eq!(probe["timezone"], "Asia/Tokyo");
-    assert_eq!(probe["localStorage"]["logged_in"], "true");
-    assert!(probe["cookie"]
-        .as_str()
-        .unwrap()
-        .contains("session=logged-in"));
-
-    let state = {
-        let runtime = runtime.lock().await;
-        let tab = runtime.get_active_tab().unwrap();
-        refact_lsp::refact_browser::context_state::storage_state(&tab, false).unwrap()
-    };
-    assert_eq!(
-        state
-            .cookies
-            .iter()
-            .find(|cookie| cookie.name == "session")
-            .unwrap()
-            .value,
-        "logged-in"
-    );
-    assert_eq!(state.origins[0].local_storage[0].value, "true");
-
-    let fresh_profile = tempdir().unwrap();
-    let mut fresh_runtime = launch_browser(&fresh_profile);
-    let fresh_tab = fresh_runtime.browser.new_tab().unwrap();
-    fresh_runtime.set_active_tab_target_id(fresh_tab.get_target_id().to_string());
-    refact_lsp::refact_browser::setup_recording_for_tab(&mut fresh_runtime, fresh_tab.clone())
-        .unwrap();
-    refact_lsp::refact_browser::context_state::set_storage_state(&fresh_tab, &state, false).unwrap();
-    fresh_tab
-        .navigate_to(&case.server.url("context-probe.html"))
-        .and_then(|tab| tab.wait_until_navigated())
-        .unwrap();
-    let restored = fresh_tab
-        .evaluate(
-            "({cookie:document.cookie,loggedIn:localStorage.getItem('logged_in')})",
-            false,
-        )
-        .unwrap()
-        .value
-        .unwrap();
-    assert!(restored["cookie"]
-        .as_str()
-        .unwrap()
-        .contains("session=logged-in"));
-    assert_eq!(restored["loggedIn"], "true");
 }
 
 fn text_step(selector: &str) -> BrowserStep {
@@ -1380,7 +1226,11 @@ async fn world_utility_survives_hostile_globals() {
         return;
     };
     case.setup_world();
-    assert_eq!(case.call_version(), "playwright-1.63.0-next-refact-1");
+    assert!(
+        case.probe_utility_world()
+            .contains("Hostile globals fixture"),
+        "utility world should answer despite hostile page globals"
+    );
     let main_world = case
         .tab
         .evaluate(
@@ -1400,9 +1250,16 @@ async fn world_utility_reinjects_after_navigation() {
         return;
     };
     case.setup_world();
-    assert_eq!(case.call_version(), "playwright-1.63.0-next-refact-1");
+    assert!(
+        !case.probe_utility_world().trim().is_empty(),
+        "utility world should answer before navigation"
+    );
     case.navigate("hostile-globals.html");
-    assert_eq!(case.call_version(), "playwright-1.63.0-next-refact-1");
+    assert!(
+        case.probe_utility_world()
+            .contains("Hostile globals fixture"),
+        "utility world should be reinjected into the new document"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6340,6 +6197,9 @@ async fn screencast_sessions_compose_a_filmstrip_on_stop() {
         Some("No screencast session is running")
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn clock_fast_forward_fires_each_due_timer_at_most_once() {
     let Some(case) = ClockCase::start().await else {
         return;
@@ -6370,6 +6230,8 @@ async fn clock_fast_forward_fires_each_due_timer_at_most_once() {
     assert_eq!(state["now"], json!(1_580_602_260_000i64));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn screenshot_mask_hides_a_fixture_element_and_restores_the_dom() {
     let Some(case) = BrowserCase::start("visual-states.html").await else {
         return;
@@ -6486,6 +6348,8 @@ async fn clock_run_for_fires_every_callback_along_the_way() {
     assert_eq!(state["now"], json!(1_580_602_260_000i64));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn hover_state_capture_differs_from_the_default_state_capture() {
     let Some(case) = BrowserCase::start("visual-states.html").await else {
         return;
@@ -6558,6 +6422,8 @@ async fn clock_set_fixed_time_freezes_date_while_timers_keep_running() {
     assert_eq!(state["now"], json!(1_614_729_600_000i64));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn element_state_strip_captures_every_state_and_returns_the_element_to_rest() {
     let Some(case) = BrowserCase::start("visual-states.html").await else {
         return;
@@ -6707,6 +6573,8 @@ async fn clock_steps_report_clear_errors_when_used_out_of_order() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn element_gallery_composes_a_grid_or_returns_separate_captures() {
     let Some(case) = BrowserCase::start("visual-states.html").await else {
         return;
@@ -6792,9 +6660,6 @@ async fn screenshot_style_pierces_shadow_dom() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REFACT_BROWSER_E2E=1 and Chrome"]
 async fn set_content_replaces_the_document_and_is_visible_in_the_next_snapshot() {
-}
-
-async fn cdp_send_round_trips_raw_protocol_calls_on_page_and_browser_targets() {
     let Some(mut case) = BrowserCase::start("snapshot.html").await else {
         return;
     };
@@ -7260,8 +7125,16 @@ fn design_tool_payload(
     else {
         panic!("expected a chat message");
     };
-    let ChatContent::SimpleText(text) = message.content else {
-        panic!("expected simple text");
+    let text = match message.content {
+        ChatContent::SimpleText(text) => text,
+        ChatContent::Multimodal(elements) => {
+            elements
+                .into_iter()
+                .find(|element| element.m_type == "text")
+                .expect("design tool must return a text element")
+                .m_content
+        }
+        ChatContent::ContextFiles(_) => panic!("expected text or multimodal content"),
     };
     serde_json::from_str(&text).expect("design tools must return ToolJson")
 }

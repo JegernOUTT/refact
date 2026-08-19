@@ -751,7 +751,7 @@ mod tests {
             op.status,
             crate::buddy::memory_lifecycle::MemoryOpStatus::Pending
         );
-        assert!(op.requires_approval);
+        assert!(!op.requires_approval);
         assert_eq!(
             op.payload.source_id.as_deref().unwrap().split(':').next(),
             Some("trajectory-a")

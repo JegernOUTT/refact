@@ -158,7 +158,8 @@ impl LlmWireAdapter for GoogleCloudCodeAdapter {
                             .get("args")
                             .cloned()
                             .unwrap_or_else(|| json!({}));
-                        let arguments = serde_json::to_string(&args).unwrap_or_else(|_| "{}".into());
+                        let arguments =
+                            serde_json::to_string(&args).unwrap_or_else(|_| "{}".into());
                         tool_calls.push(json!({
                             "index": index,
                             "id": format!("call_{index}_{name}"),
