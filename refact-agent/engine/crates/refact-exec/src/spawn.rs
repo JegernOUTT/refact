@@ -1514,7 +1514,12 @@ mod tests {
                 let ObservationStatus::Unavailable(reason) = result.observation else {
                     panic!("unsupported observer returned observed access");
                 };
-                assert_eq!(reason, "backend unavailable");
+                let expected_reason = if cfg!(target_os = "macos") {
+                    "macOS syscall observation unavailable"
+                } else {
+                    "backend unavailable"
+                };
+                assert_eq!(reason, expected_reason);
             }
         }
     }
