@@ -11,7 +11,11 @@ import { initialize, mswLoader } from "msw-storybook-addon";
 
 initialize({
   onUnhandledRequest: (request, print) => {
-    if (request.url.startsWith("http://localhost:6006/src/")) {
+    const url = new URL(request.url);
+    const isSameOrigin = url.origin === window.location.origin;
+    const isApiPath =
+      url.pathname.startsWith("/v1/") || url.pathname.startsWith("/p/");
+    if (isSameOrigin && !isApiPath) {
       return;
     }
     print.warning();

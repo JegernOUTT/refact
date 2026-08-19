@@ -5,7 +5,7 @@ import { useTimeout } from "usehooks-ts";
 import classNames from "classnames";
 import { Icon, Surface } from "../ui";
 import styles from "./Callout.module.css";
-import { useAppSelector } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import { getIsAuthError } from "../../features/Errors/errorsSlice";
 
 export type CalloutProps = Omit<
