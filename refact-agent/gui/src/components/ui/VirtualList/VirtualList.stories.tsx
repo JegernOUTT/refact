@@ -15,13 +15,17 @@ const items: MemoryRow[] = Array.from({ length: 1_000 }, (_, index) => ({
   updated: `${(index % 28) + 1} days ago`,
 }));
 
-function VirtualListDemo() {
+function VirtualListDemo({ height = 420 }: { height?: number }) {
   return (
-    <div className={styles.frame}>
+    // Virtuoso needs a resolved height on its scroller; the story frame is a
+    // grid item inside a fullscreen canvas, so an explicit height keeps the
+    // list from collapsing to 0px and rendering blank (audit N-05).
+    <div className={styles.frame} style={{ height, minHeight: height }}>
       <VirtualList
         footer="End of virtualized results"
         getItemKey={(item) => item.id}
         header={`${items.length} memories`}
+        height={height}
         items={items}
         renderItem={(item) => (
           <article className={styles.row}>

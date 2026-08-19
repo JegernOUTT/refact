@@ -37,7 +37,7 @@ describe("ErrorMessageCard", () => {
     const { container } = render(<ErrorMessageCard errors={[error]} />);
 
     expect(screen.getByText("Provider is busy")).toBeInTheDocument();
-    expect(screen.getByText("ProviderTransient")).toBeInTheDocument();
+    expect(screen.getByText("Temporary provider issue")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Retry" }),
     ).not.toBeInTheDocument();

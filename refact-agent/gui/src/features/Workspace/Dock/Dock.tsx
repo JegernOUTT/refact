@@ -1,5 +1,5 @@
 import classNames from "classnames";
-import { Files, GitBranch, ListTodo } from "lucide-react";
+import { Files, GitBranch, ListTodo, X } from "lucide-react";
 import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
@@ -13,6 +13,7 @@ import {
 import {
   Badge,
   Icon,
+  IconButton,
   SegmentedControl,
   Sheet,
   useMediaQuery,
@@ -169,7 +170,7 @@ export function Dock() {
 
   useEffect(() => () => dragCleanupRef.current?.(), []);
 
-  const content = (
+  const content = (withClose: boolean) => (
     <>
       <div className={styles.switcher}>
         <SegmentedControl
@@ -182,6 +183,17 @@ export function Dock() {
           size="sm"
           value={activeSection}
         />
+        {withClose && (
+          <Sheet.Close asChild>
+            <IconButton
+              aria-label="Close workspace panel"
+              className={styles.sheetClose}
+              icon={X}
+              size="sm"
+              variant="ghost"
+            />
+          </Sheet.Close>
+        )}
       </div>
       <div
         key={activeSection}
@@ -213,7 +225,7 @@ export function Dock() {
           <Sheet.Description className={styles.srOnly}>
             Browse workspace files and sections.
           </Sheet.Description>
-          {content}
+          {content(true)}
         </Sheet.Content>
       </Sheet>
     );
@@ -229,7 +241,7 @@ export function Dock() {
       ref={dockRef}
       style={{ "--workspace-dock-w": `${dock.width}px` } as DockStyle}
     >
-      {content}
+      {content(false)}
       <div
         aria-label="Resize workspace dock"
         aria-orientation="vertical"

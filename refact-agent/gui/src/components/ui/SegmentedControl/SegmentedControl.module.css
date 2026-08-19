@@ -1,6 +1,6 @@
 .root {
   --rf-segment-padding: var(--rf-space-2xs);
-  --rf-segment-inline-padding: var(--rf-space-2);
+  --rf-segment-inline-padding: var(--rf-space-3);
   --rf-segment-icon-padding: var(--rf-space-1);
 
   position: relative;
@@ -10,10 +10,15 @@
   grid-auto-flow: column;
   max-width: 100%;
   min-width: 0;
+  /* Fixed height (26px items + 2px insets = 30) so grid/stretch parents
+     cannot inflate the control off the ladder — the N-47 Button recipe. */
+  height: calc(var(--rf-control-h-sm) + 2 * var(--rf-segment-padding));
   padding: var(--rf-segment-padding);
   background: var(--rf-surface-1);
-  border: var(--rf-hairline) solid var(--rf-border);
+  border: 0;
   border-radius: var(--rf-radius-ctl);
+  box-shadow: inset 0 0 0 var(--rf-hairline) var(--rf-border);
+  font-size: var(--rf-text-2);
 }
 
 .indicator {
@@ -26,7 +31,7 @@
   );
   background: var(--rf-surface-glass);
   border: 0;
-  border-radius: var(--rf-radius-ctl);
+  border-radius: var(--rf-radius-chip);
   box-shadow: inset 0 0 0 var(--rf-hairline) var(--rf-color-accent);
   pointer-events: none;
   transform: translateX(calc(var(--rf-segment-index, 0) * 100%));
@@ -37,6 +42,8 @@
   z-index: 1;
   display: flex;
   min-width: 0;
+  min-height: var(--rf-control-h-sm);
+  border-radius: var(--rf-radius-chip);
 }
 
 .input {
@@ -53,12 +60,13 @@
   box-sizing: border-box;
   min-width: 0;
   width: 100%;
+  min-height: var(--rf-control-h-sm);
   align-items: center;
   justify-content: center;
   overflow: hidden;
   padding: 0 var(--rf-segment-inline-padding);
   color: var(--rf-color-muted);
-  border-radius: var(--rf-radius-ctl);
+  border-radius: var(--rf-radius-chip);
   font: 650 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -98,12 +106,11 @@
 }
 
 .size-sm .label {
-  min-height: var(--rf-control-h-sm);
   font-size: var(--rf-text-1);
 }
 
 .size-md .label {
-  min-height: var(--rf-control-h-sm);
+  font-size: var(--rf-text-2);
 }
 
 .input:checked + .label {
@@ -112,7 +119,7 @@
 
 .input:focus-visible + .label {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: calc(-1 * var(--rf-hairline));
+  outline-offset: calc(-1 * var(--rf-focus-ring-w));
 }
 
 .input:disabled + .label {

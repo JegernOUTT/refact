@@ -1,6 +1,6 @@
 import React from "react";
 import classNames from "classnames";
-import { Cross2Icon } from "@radix-ui/react-icons";
+import { X } from "lucide-react";
 import styles from "./Chip.module.css";
 
 export interface ChipProps extends React.ComponentPropsWithoutRef<"span"> {
@@ -45,7 +45,7 @@ export function Chip({
           onClick={onRemove}
           type="button"
         >
-          <Cross2Icon />
+          <X size={15} />
         </button>
       ) : null}
     </span>

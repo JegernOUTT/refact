@@ -29,8 +29,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: var(--rf-control-h-icon-sm);
+  height: var(--rf-control-h-icon-sm);
   color: var(--rf-color-muted);
   border-radius: var(--rf-radius-chip);
   cursor: pointer;
@@ -45,8 +45,8 @@
 }
 
 .actionButton svg {
-  width: 13px;
-  height: 13px;
+  width: var(--rf-icon-sm);
+  height: var(--rf-icon-sm);
 }
 
 .copiedButton {

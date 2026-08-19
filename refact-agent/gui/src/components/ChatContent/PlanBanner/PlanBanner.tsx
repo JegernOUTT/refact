@@ -6,10 +6,9 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { CheckIcon, CopyIcon } from "@radix-ui/react-icons";
 import { Box, Button, Container, Flex, Text } from "@radix-ui/themes";
 import classNames from "classnames";
-import { ClipboardList } from "lucide-react";
+import { Check, ClipboardList, Copy } from "lucide-react";
 import { useAppSelector, useCopyToClipboard } from "../../../hooks";
 import { selectPlanBannerState } from "../../../features/Chat/Thread/selectors";
 import { Markdown } from "../../Markdown";
@@ -180,7 +179,11 @@ export const PlanBanner: React.FC<PlanBannerProps> = ({ threadId }) => {
                 title="Copy plan"
                 aria-label="Copy plan"
               >
-                {copied ? <CheckIcon /> : <CopyIcon />}
+                {copied ? (
+                  <Icon icon={Check} size="md" />
+                ) : (
+                  <Icon icon={Copy} size="md" />
+                )}
               </button>
               <Button
                 type="button"

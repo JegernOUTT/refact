@@ -7,11 +7,8 @@
 }
 
 .tableWrap {
+  composes: scrollX from global;
   min-width: 0;
-}
-
-.wide .tableWrap {
-  overflow-x: auto;
 }
 
 .table {
@@ -94,6 +91,9 @@
 .cards {
   display: none;
   min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--rf-space-3);
 }
 
@@ -101,6 +101,8 @@
 .emptyCard {
   display: grid;
   min-width: 0;
+  max-width: 100%;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--rf-space-2);
   padding: var(--rf-space-3);
   border: var(--rf-hairline) solid var(--rf-border);
@@ -111,6 +113,8 @@
 .cardField {
   display: grid;
   min-width: 0;
+  max-width: 100%;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--rf-space-1);
 }
 

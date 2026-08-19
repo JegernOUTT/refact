@@ -108,7 +108,7 @@ import {
   clearInformation,
   getInformationMessage,
 } from "../../features/Errors/informationSlice";
-import { ErrorCallout, InformationCallout } from "../Callout/Callout";
+import { ErrorCallout, InformationCallout } from "../Callout";
 import { ToolConfirmation } from "./ToolConfirmation";
 import { selectThreadConfirmationById } from "../../features/Chat/Thread";
 import { AttachImagesButton } from "../Dropzone";
@@ -652,22 +652,17 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       onFocusCapture={handleComposerFocusCapture}
     >
       {visibleError && (
-        <ErrorCallout mt="2" mb="2" timeout={3000} onClick={clearVisibleError}>
+        <ErrorCallout timeout={3000} onClick={clearVisibleError}>
           {visibleError}
         </ErrorCallout>
       )}
       {!globalError && !chatError && information && (
-        <InformationCallout
-          mt="2"
-          mb="2"
-          onClick={onClearInformation}
-          timeout={2000}
-        >
+        <InformationCallout onClick={onClearInformation} timeout={2000}>
           {information}
         </InformationCallout>
       )}
       {!isOnline && (
-        <Callout type="info" mb="2">
+        <Callout type="info">
           Oops, seems that connection was lost... Check your internet connection
         </Callout>
       )}

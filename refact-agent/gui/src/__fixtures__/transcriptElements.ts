@@ -1,4 +1,5 @@
 import type { ChatMessages } from "../services/refact";
+import { FIXTURE_IMAGE_DATA_URI } from "./images";
 
 const longParagraph =
   "This deliberately detailed request describes the expected behavior, edge cases, accessibility requirements, and visual states so the transcript has enough real text to exercise its collapsed presentation. ";
@@ -35,7 +36,7 @@ export const USER_WITH_IMAGES: ChatMessages = [
       {
         type: "image_url",
         image_url: {
-          url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+          url: FIXTURE_IMAGE_DATA_URI,
         },
       },
     ],

@@ -37,6 +37,7 @@ import {
   addBuddyCrashBreadcrumb,
   setBuddyCrashHotSlot,
 } from "../../features/Buddy/reportBuddyFrontendError";
+import { humanizeIdentifier } from "../../utils/displayNames";
 import styles from "./TaskProgressWidget.module.css";
 
 function getStatusDotState(
@@ -63,7 +64,7 @@ const STATUS_TOOLTIPS: Record<TodoStatus, string> = {
   failed: "Failed",
 };
 
-const GOAL_STATUS_LABELS: Record<GoalStatus, string> = {
+const GOAL_STATUS_LABELS: Partial<Record<GoalStatus, string>> = {
   active: "Active",
   verifying: "Verifying",
   paused: "Paused",
@@ -129,11 +130,29 @@ function formatGoalBudgetPart(
     : `${usage} ${label}`;
 }
 
-function formatGoalBudgetLine(goal: GoalSnapshot): string {
+function GoalBudgetProgress({ goal }: { goal: GoalSnapshot }) {
   const { budget, progress } = goal;
   const parts = [
-    formatGoalBudgetPart(progress.turns_used, budget.max_turns, "turns"),
-    formatGoalBudgetPart(progress.tokens_used, budget.max_tokens, "tokens"),
+    {
+      text: formatGoalBudgetPart(
+        progress.turns_used,
+        budget.max_turns,
+        "turns",
+      ),
+      saturated:
+        isPositiveGoalLimit(budget.max_turns) &&
+        progress.turns_used >= budget.max_turns,
+    },
+    {
+      text: formatGoalBudgetPart(
+        progress.tokens_used,
+        budget.max_tokens,
+        "tokens",
+      ),
+      saturated:
+        isPositiveGoalLimit(budget.max_tokens) &&
+        progress.tokens_used >= budget.max_tokens,
+    },
   ];
   const hasBudgetLimit = [
     budget.max_turns,
@@ -142,9 +161,23 @@ function formatGoalBudgetLine(goal: GoalSnapshot): string {
     budget.no_progress_turns,
   ].some(isPositiveGoalLimit);
 
-  return hasBudgetLimit
-    ? parts.join(" · ")
-    : [...parts, "No budget limits"].join(" · ");
+  return (
+    <>
+      {parts.map((part, index) => (
+        <React.Fragment key={part.text}>
+          {index > 0 ? " · " : null}
+          <span
+            className={
+              part.saturated ? styles.goalProgressSaturated : undefined
+            }
+          >
+            {part.text}
+          </span>
+        </React.Fragment>
+      ))}
+      {!hasBudgetLimit ? " · No budget limits" : null}
+    </>
+  );
 }
 
 function goalLimitDraftValue(value: number | null | undefined): string {
@@ -188,11 +221,16 @@ function goalControlAvailability(goal: GoalSnapshot): {
   canResume: boolean;
   canStop: boolean;
 } {
-  const isTerminal = goal.status === "completed" || goal.status === "stopped";
   return {
-    canPause: goal.active && !isTerminal && goal.status !== "paused",
-    canResume: !isTerminal && (goal.status === "paused" || !goal.active),
-    canStop: !isTerminal,
+    canPause: goal.active && goal.status === "active",
+    canResume:
+      goal.status === "paused" ||
+      goal.status === "budget_exhausted" ||
+      goal.status === "no_progress",
+    canStop:
+      (goal.active &&
+        (goal.status === "active" || goal.status === "verifying")) ||
+      goal.status === "paused",
   };
 }
 
@@ -267,7 +305,7 @@ const GoalIndicator: React.FC<GoalIndicatorProps> = ({ goal }) => (
       Goal set
     </Text>
     <Badge tone={goalStatusTone(goal.status)} size="xs" variant="soft">
-      {GOAL_STATUS_LABELS[goal.status]}
+      {GOAL_STATUS_LABELS[goal.status] ?? humanizeIdentifier(goal.status)}
     </Badge>
   </Flex>
 );
@@ -414,7 +452,8 @@ const GoalSection: React.FC<GoalSectionProps> = ({
                     size="xs"
                     variant="soft"
                   >
-                    {GOAL_STATUS_LABELS[goal.status]}
+                    {GOAL_STATUS_LABELS[goal.status] ??
+                      humanizeIdentifier(goal.status)}
                   </Badge>
                 ) : (
                   <Badge tone="muted" size="xs" variant="soft">
@@ -438,7 +477,14 @@ const GoalSection: React.FC<GoalSectionProps> = ({
           <Flex direction="column" gap="3" className={styles.goalBody}>
             <Flex direction="column" gap="2">
               {goal && !editingGoal ? (
-                <Markdown>{goal.content}</Markdown>
+                <>
+                  <Markdown>{goal.content}</Markdown>
+                  {goal.status === "transferred" && goal.transferred_to ? (
+                    <Text size="1" color="gray">
+                      Transferred to {goal.transferred_to}
+                    </Text>
+                  ) : null}
+                </>
               ) : (
                 <>
                   <label className={styles.goalLabel} htmlFor="task-goal-input">
@@ -461,9 +507,11 @@ const GoalSection: React.FC<GoalSectionProps> = ({
               />
               <Flex align="center" justify="end" gap="3" wrap="wrap">
                 <Text size="1" color="gray" className={styles.goalProgress}>
-                  {goal
-                    ? formatGoalBudgetLine(goal)
-                    : "Save to start tracking a goal"}
+                  {goal ? (
+                    <GoalBudgetProgress goal={goal} />
+                  ) : (
+                    "Save to start tracking a goal"
+                  )}
                 </Text>
                 {goal && !editingGoal ? (
                   <Button
@@ -652,10 +700,10 @@ const GoalAttempts: React.FC<GoalAttemptsProps> = ({ attempts }) => {
           >
             <Flex align="center" gap="2" wrap="wrap">
               <Badge tone="accent" size="xs" variant="soft">
-                {attempt.verdict}
+                {humanizeIdentifier(attempt.verdict)}
               </Badge>
               <Text size="1" color="gray">
-                {attempt.trigger}
+                {humanizeIdentifier(attempt.trigger)}
               </Text>
             </Flex>
             {attempt.gaps.length > 0 ? (
@@ -700,7 +748,7 @@ const GoalEvents: React.FC<GoalEventsProps> = ({ events }) => {
             key={`${event.at_ms}-${event.kind}-${event.text}`}
           >
             <Badge tone="muted" size="xs" variant="soft">
-              {event.kind}
+              {humanizeIdentifier(event.kind)}
             </Badge>
             <Text size="1" className={styles.eventText}>
               {event.text}

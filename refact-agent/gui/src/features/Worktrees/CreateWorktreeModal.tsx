@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Dialog, FieldText } from "../../components/ui";
+import React, { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { Button, Dialog, FieldError, FieldText } from "../../components/ui";
 import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import styles from "./Worktrees.module.css";
 
@@ -33,6 +33,7 @@ export const CreateWorktreeModal: React.FC<CreateWorktreeModalProps> = ({
   const [baseBranch, setBaseBranch] = useState(defaultBaseBranch);
   const [baseBranchPickerOpen, setBaseBranchPickerOpen] = useState(false);
   const [baseBranchSearchTouched, setBaseBranchSearchTouched] = useState(false);
+  const branchErrorId = useId();
 
   useEffect(() => {
     if (open) {
@@ -64,6 +65,13 @@ export const CreateWorktreeModal: React.FC<CreateWorktreeModalProps> = ({
   }, [baseBranch, branchName, onCreate]);
 
   const canCreate = !isCreating && baseBranch.trim().length > 0;
+  /*
+   * N-58: the create failure describes the branch name the user typed, so it
+   * belongs to that field: it renders under the owning FieldText, marks the
+   * input invalid and is wired with aria-describedby. FieldError supplies
+   * role="alert" so assistive tech announces it.
+   */
+  const branchError = error ?? undefined;
   const filteredBaseOptions = useMemo(() => {
     const query = baseBranchSearchTouched
       ? baseBranch.trim().toLowerCase()
@@ -97,7 +105,14 @@ export const CreateWorktreeModal: React.FC<CreateWorktreeModalProps> = ({
                 placeholder={defaultBranch}
                 onChange={setBranchName}
                 disabled={isCreating}
+                aria-invalid={branchError ? true : undefined}
+                aria-describedby={branchError ? branchErrorId : undefined}
               />
+              {branchError && (
+                <FieldError className={styles.fieldError} id={branchErrorId}>
+                  {branchError}
+                </FieldError>
+              )}
             </label>
 
             <div className={styles.field}>
@@ -148,8 +163,6 @@ export const CreateWorktreeModal: React.FC<CreateWorktreeModalProps> = ({
                 )}
               </div>
             </div>
-
-            {error && <p className={styles.errorText}>{error}</p>}
           </div>
 
           <div className={styles.modalActions}>

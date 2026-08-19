@@ -2,6 +2,11 @@
   max-width: min(420px, calc(100vw - (var(--rf-space-3) * 2)));
 }
 
+.infoStack {
+  min-width: min(280px, calc(100vw - 2 * var(--rf-space-3)));
+  max-width: min(420px, calc(100vw - (var(--rf-space-3) * 2)));
+}
+
 .valueText {
   display: flex;
   flex: 1 1 auto;

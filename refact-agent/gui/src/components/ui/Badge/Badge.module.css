@@ -59,7 +59,7 @@
   min-height: 22px;
   gap: var(--rf-space-1);
   padding: var(--rf-space-1) var(--rf-space-2);
-  font-size: var(--rf-text-2);
+  font-size: var(--rf-text-1);
 }
 
 .size-md > svg {

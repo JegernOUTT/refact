@@ -12,8 +12,15 @@ import {
   Tooltip,
 } from "../../components/ui";
 import { Checkbox } from "../../components/Checkbox";
-import { PlusIcon, ChevronDownIcon } from "@radix-ui/react-icons";
-import { FileText, GitBranch, ListChecks, Target, X } from "lucide-react";
+import {
+  ChevronDown,
+  FileText,
+  GitBranch,
+  ListChecks,
+  Plus,
+  Target,
+  X,
+} from "lucide-react";
 import { AgentStatusDot } from "./AgentStatusDot";
 import { ScrollArea } from "../../components/ScrollArea";
 import { ChatLoading } from "../../components/ChatContent/ChatLoading";
@@ -604,7 +611,7 @@ const ChatSwitcher: React.FC<ChatSwitcherProps> = ({
           <Text size="1" className={styles.chatSwitcherLabel}>
             {label}
           </Text>
-          <ChevronDownIcon className={styles.chatSwitcherChevron} />
+          <ChevronDown size={15} className={styles.chatSwitcherChevron} />
         </button>
       </Popover.Trigger>
       <Popover.Content
@@ -713,9 +720,9 @@ const NewChatModeButton: React.FC<NewChatModeButtonProps> = ({
           aria-label="New chat"
           title="New chat"
         >
-          <PlusIcon />
+          <Plus size={15} />
           <Text size="1">Chat</Text>
-          <ChevronDownIcon className={styles.chatSwitcherChevron} />
+          <ChevronDown size={15} className={styles.chatSwitcherChevron} />
         </button>
       </Popover.Trigger>
       <Popover.Content
@@ -1985,7 +1992,7 @@ export const TaskWorkspace: React.FC<TaskWorkspaceProps> = ({ taskId }) => {
               aria-label="New task planner"
               title="New task planner"
             >
-              <PlusIcon />
+              <Plus size={15} />
               <Text size="1">Planner</Text>
             </button>
             <NewChatModeButton

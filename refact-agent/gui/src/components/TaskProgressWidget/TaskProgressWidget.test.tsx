@@ -221,16 +221,42 @@ describe("TaskProgressWidget goal projection", () => {
       makeRuntime({ goal: makeGoal(), expanded: true, goalExpanded: true }),
     );
 
-    expect(
-      screen.getByText("2/5 turns · 1200/5000 tokens"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("2/5 turns")).toBeInTheDocument();
+    expect(screen.getByText("1200/5000 tokens")).toBeInTheDocument();
     expect(screen.queryByText("No budget limits")).not.toBeInTheDocument();
     expect(screen.getByText("Verifier attempts")).toBeInTheDocument();
-    expect(screen.getByText("needs_work")).toBeInTheDocument();
+    expect(screen.getByText("Needs work")).toBeInTheDocument();
+    expect(screen.getByText("Manual")).toBeInTheDocument();
     expect(screen.getByText("missing verifier coverage")).toBeInTheDocument();
     expect(screen.getByText("Add one more verifier test.")).toBeInTheDocument();
     expect(screen.getByText("Goal events")).toBeInTheDocument();
+    expect(screen.getByText("Nudge")).toBeInTheDocument();
     expect(screen.getByText("Asked for progress")).toBeInTheDocument();
+  });
+
+  test("emphasizes only saturated budget segments", () => {
+    renderWidget(
+      makeRuntime({
+        goal: makeGoal({
+          progress: {
+            turns_used: 5,
+            tokens_used: 1200,
+            started_at_ms: 1000,
+            no_progress_turns: 1,
+            last_nudge_at_ms: 2000,
+          },
+        }),
+        expanded: true,
+        goalExpanded: true,
+      }),
+    );
+
+    expect(screen.getByText("5/5 turns").className).toContain(
+      "goalProgressSaturated",
+    );
+    expect(screen.getByText("1200/5000 tokens").className).not.toContain(
+      "goalProgressSaturated",
+    );
   });
 
   test("expanded goal block renders omitted budget limits as unlimited", () => {
@@ -247,9 +273,9 @@ describe("TaskProgressWidget goal projection", () => {
       }),
     );
 
-    expect(
-      screen.getByText("2 turns · 1200 tokens · No budget limits"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("2 turns")).toBeInTheDocument();
+    expect(screen.getByText("1200 tokens")).toBeInTheDocument();
+    expect(container.textContent).toContain("No budget limits");
     expect(container.textContent).not.toContain("/0");
     expect(container.textContent).not.toContain("/undefined");
     expect(container.textContent).not.toContain("/null");
@@ -275,9 +301,9 @@ describe("TaskProgressWidget goal projection", () => {
       }),
     );
 
-    expect(
-      screen.getByText("2 turns · 1200 tokens · No budget limits"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("2 turns")).toBeInTheDocument();
+    expect(screen.getByText("1200 tokens")).toBeInTheDocument();
+    expect(container.textContent).toContain("No budget limits");
     expect(container.textContent).not.toContain("0/0");
     expect(container.textContent).not.toContain("/0");
   });
@@ -476,5 +502,65 @@ describe("TaskProgressWidget goal projection", () => {
     expect(
       screen.queryByRole("button", { name: "Stop goal" }),
     ).not.toBeInTheDocument();
+  });
+
+  test("transferred goals hide all controls and show the transfer owner", () => {
+    renderWidget(
+      makeRuntime({
+        goal: makeGoal({
+          active: false,
+          status: "transferred",
+          transferred_to: "other-chat",
+        }),
+        expanded: true,
+        goalExpanded: true,
+      }),
+    );
+
+    expect(screen.getByText("Transferred to other-chat")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Pause" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Resume" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Stop" }),
+    ).not.toBeInTheDocument();
+  });
+
+  test.each(["no_progress", "budget_exhausted"] as const)(
+    "%s goals allow resume but not stop",
+    (status) => {
+      renderWidget(
+        makeRuntime({
+          goal: makeGoal({ active: false, status }),
+          expanded: true,
+          goalExpanded: true,
+        }),
+      );
+
+      expect(screen.getByRole("button", { name: "Resume" })).toBeEnabled();
+      expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
+      expect(
+        screen.queryByRole("button", { name: "Pause" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  test("verifying goals allow stop but not pause or resume", () => {
+    renderWidget(
+      makeRuntime({
+        goal: makeGoal({ active: true, status: "verifying" }),
+        expanded: true,
+        goalExpanded: true,
+      }),
+    );
+
+    expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Resume" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
   });
 });

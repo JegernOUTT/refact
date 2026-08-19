@@ -1,6 +1,8 @@
 .reveal_button {
   width: 100%;
   min-width: 0;
+  box-sizing: border-box;
+  min-height: var(--rf-control-h-sm);
   padding: 0;
   color: inherit;
   background: transparent;
@@ -44,6 +46,10 @@
 }
 
 .reveal_text {
+  display: inline-flex;
+  box-sizing: border-box;
+  min-height: var(--rf-control-h-sm);
+  align-items: center;
   color: var(--rf-color-accent);
   font: 500 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
 }

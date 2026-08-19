@@ -58,10 +58,17 @@
   gap: var(--rf-space-1);
 }
 
+.cell input,
+.cell textarea {
+  height: var(--rf-control-h);
+  align-self: start;
+}
+
 .secretField {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
+  align-self: start;
   gap: var(--rf-space-1);
   min-width: 0;
 }

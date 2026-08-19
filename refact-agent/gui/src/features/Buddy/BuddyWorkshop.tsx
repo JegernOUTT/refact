@@ -1,13 +1,7 @@
 import React from "react";
 import classNames from "classnames";
 import { Text } from "../../components/ui";
-import {
-  GearIcon,
-  CubeIcon,
-  EraserIcon,
-  ListBulletIcon,
-  RocketIcon,
-} from "@radix-ui/react-icons";
+import { Eraser, List, Package, Rocket, Settings } from "lucide-react";
 import { useExecuteBuddyAction } from "./hooks/useExecuteBuddyAction";
 import type { BuddyAction } from "./types";
 import styles from "./BuddyWorkshop.module.css";
@@ -21,27 +15,27 @@ const WORKSHOP_ITEMS: {
 }[] = [
   {
     label: "Customize",
-    icon: <GearIcon width={ICON_SIZE} height={ICON_SIZE} />,
+    icon: <Settings size={ICON_SIZE} />,
     action: { kind: "open_page", page: { type: "customization" } },
   },
   {
     label: "Models",
-    icon: <RocketIcon width={ICON_SIZE} height={ICON_SIZE} />,
+    icon: <Rocket size={ICON_SIZE} />,
     action: { kind: "open_page", page: { type: "default_models" } },
   },
   {
     label: "Memories",
-    icon: <EraserIcon width={ICON_SIZE} height={ICON_SIZE} />,
+    icon: <Eraser size={ICON_SIZE} />,
     action: { kind: "open_page", page: { type: "knowledge_graph" } },
   },
   {
     label: "Tasks",
-    icon: <ListBulletIcon width={ICON_SIZE} height={ICON_SIZE} />,
+    icon: <List size={ICON_SIZE} />,
     action: { kind: "open_page", page: { type: "tasks_list" } },
   },
   {
     label: "Marketplace",
-    icon: <CubeIcon width={ICON_SIZE} height={ICON_SIZE} />,
+    icon: <Package size={ICON_SIZE} />,
     action: { kind: "open_page", page: { type: "marketplace_hub" } },
   },
 ];

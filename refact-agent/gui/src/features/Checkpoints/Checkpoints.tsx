@@ -115,9 +115,7 @@ export const Checkpoints = () => {
           </div>
         </ScrollArea>
         {errorLog.length > 0 && (
-          <ErrorCallout mx="0" preventRetry>
-            {errorLog.join("\n")}
-          </ErrorCallout>
+          <ErrorCallout preventRetry>{errorLog.join("\n")}</ErrorCallout>
         )}
 
         <div className={styles.restoreOptions}>

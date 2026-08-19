@@ -1,6 +1,6 @@
 .url {
   font-family: var(--rf-font-mono);
-  font-size: 0.95em;
+  font-size: var(--rf-text-2);
   color: var(--rf-color-accent);
 }
 

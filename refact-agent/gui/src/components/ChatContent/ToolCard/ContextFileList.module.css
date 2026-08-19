@@ -21,7 +21,7 @@
 .filename {
   color: var(--rf-color-accent);
   font-family: var(--rf-font-mono);
-  font-size: 0.9em;
+  font-size: var(--rf-text-1);
   cursor: pointer;
 }
 
@@ -31,7 +31,7 @@
 
 .filenamePlain {
   font-family: var(--rf-font-mono);
-  font-size: 0.9em;
+  font-size: var(--rf-text-1);
 }
 
 .content {

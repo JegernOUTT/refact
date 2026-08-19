@@ -28,3 +28,7 @@
   font-size: var(--rf-text-2);
   line-height: var(--rf-line);
 }
+
+.actions {
+  gap: var(--rf-space-3);
+}

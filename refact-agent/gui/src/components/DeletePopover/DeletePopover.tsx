@@ -48,7 +48,12 @@ export const DeletePopover: FC<DeletePopoverProps> = ({
             </p>
           </div>
 
-          <ButtonGroup>
+          <ButtonGroup className={styles.actions}>
+            <Popover.Close asChild>
+              <Button size="md" variant="soft">
+                Cancel
+              </Button>
+            </Popover.Close>
             <Popover.Close asChild>
               <Button
                 size="md"
@@ -56,11 +61,6 @@ export const DeletePopover: FC<DeletePopoverProps> = ({
                 onClick={() => handleDelete(deleteBy)}
               >
                 Delete
-              </Button>
-            </Popover.Close>
-            <Popover.Close asChild>
-              <Button size="md" variant="soft">
-                Cancel
               </Button>
             </Popover.Close>
           </ButtonGroup>

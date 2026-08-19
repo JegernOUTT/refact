@@ -21,6 +21,7 @@ import {
 } from "../../features/Chat/Thread";
 import { regenerate } from "../../services/refact/chatCommands";
 import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
+import { humanizeIdentifier } from "../../utils/displayNames";
 import {
   useCreateTaskMutation,
   useDeleteTaskMutation,
@@ -244,7 +245,7 @@ export const TaskPlannerDialog: React.FC<TaskPlannerDialogProps> = ({
             <Flex align="center" gap="2">
               <Text>{title}</Text>
               <Badge tone="accent" size="sm">
-                task_planner
+                {humanizeIdentifier("task_planner")}
               </Badge>
             </Flex>
           </Dialog.Title>

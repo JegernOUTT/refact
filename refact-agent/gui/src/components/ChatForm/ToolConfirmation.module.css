@@ -64,6 +64,14 @@
   gap: var(--rf-space-1);
 }
 
+.ToolItemHeader {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-2);
+}
+
 .CommandPreview {
   max-width: 100%;
   color: var(--rf-color-muted);
@@ -75,6 +83,7 @@
 
 .IntegrationHint {
   margin: var(--rf-space-3) 0 0;
+  font-size: var(--rf-text-1);
 }
 
 .ActionRow,

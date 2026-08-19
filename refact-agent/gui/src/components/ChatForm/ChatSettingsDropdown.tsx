@@ -1,6 +1,5 @@
 import React, { useCallback, useMemo, useState, useEffect } from "react";
 import { Flex, Text, Separator, Skeleton } from "@radix-ui/themes";
-import { Cross1Icon } from "@radix-ui/react-icons";
 import {
   Brain,
   ChevronDown,
@@ -8,6 +7,7 @@ import {
   MousePointer2,
   Rocket,
   Wrench,
+  X,
 } from "lucide-react";
 import classNames from "classnames";
 import {
@@ -636,7 +636,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                               disabled={isInteractionDisabled}
                               aria-label="Reset max tokens"
                             >
-                              <Cross1Icon />
+                              <Icon icon={X} size="md" />
                             </button>
                           )}
                         </div>
@@ -711,7 +711,7 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
                               disabled={isInteractionDisabled}
                               aria-label="Reset auto-compression cap"
                             >
-                              <Cross1Icon />
+                              <Icon icon={X} size="md" />
                             </button>
                           )}
                         </div>

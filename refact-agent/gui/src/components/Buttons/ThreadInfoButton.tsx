@@ -190,12 +190,7 @@ export const ThreadInfoButton: React.FC<ThreadInfoButtonProps> = ({
         className={styles.popoverContent}
         data-testid="thread-info-popover"
       >
-        <Flex
-          direction="column"
-          gap="3"
-          minWidth="min(280px, calc(100vw - 2 * var(--rf-space-3)))"
-          maxWidth="420px"
-        >
+        <Flex direction="column" gap="3" className={styles.infoStack}>
           <Flex direction="column" gap="1">
             <Text size="1" color="gray">
               Thread id

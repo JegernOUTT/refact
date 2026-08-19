@@ -1,4 +1,5 @@
 .trigger {
+  position: relative;
   display: inline-flex;
   max-width: 100%;
   padding: 0;
@@ -7,6 +8,14 @@
   background: transparent;
   color: var(--rf-color-muted);
   cursor: zoom-in;
+}
+
+/* Inline markdown images render at content size (~16px tall), far under the
+   28px tap floor (audit N-32); expand the hit area without moving pixels. */
+.trigger::before {
+  content: "";
+  position: absolute;
+  inset: calc(-1 * var(--rf-space-xs));
 }
 
 .trigger:focus-visible {

@@ -145,20 +145,20 @@
   gap: var(--rf-space-3);
 }
 
-.modalFields {
-  margin-top: var(--rf-space-3);
-}
-
 .field,
 .itemTitle,
 .dialogOverlayText {
   gap: var(--rf-space-1);
 }
 
+/*
+ * L-13: one horizontal grid for the whole panel.
+ * The popover body already pads by var(--rf-panel-pad) (12px, +1px border),
+ * so headers, hints, rows and actions must not add a second inset.
+ */
 .menuHeader {
   justify-content: space-between;
   gap: var(--rf-space-2);
-  padding: 0 var(--rf-space-1);
 }
 
 .menuHint,
@@ -167,7 +167,6 @@
 .metaText,
 .emptyText,
 .sectionHeader,
-.errorText,
 .warningText,
 .resultSummary {
   margin: 0;
@@ -185,18 +184,48 @@
   color: var(--rf-color-muted);
 }
 
-.menuHint,
-.feedback,
-.feedbackStack,
-.sectionHeader {
-  padding: 0 var(--rf-space-1);
+/*
+ * N-58: error owned by a single field. The kit FieldError supplies
+ * role="alert" and the danger colour; the margin is dropped so the field
+ * column gap stays the single spacing mechanism (N-57).
+ */
+.fieldError {
+  margin: 0;
 }
 
+/*
+ * N-58 / N-53: errors that are genuinely form-level (not attributable to one
+ * field) keep an alert slot, and pair the danger colour with an icon and a
+ * semibold weight so the state is never colour-only.
+ */
+.formError {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  margin: 0;
+  color: var(--rf-color-danger);
+  font-family: var(--rf-font-ui);
+  font-size: var(--rf-text-1);
+  font-weight: 650;
+  line-height: var(--rf-line);
+}
+
+/*
+ * L-13: .menuHint / .feedback / .feedbackStack / .sectionHeader used to add
+ * their own 4px inset on top of the panel padding, which is how the panel
+ * ended up measuring 13/17/21px edges. They now inherit the single grid.
+ */
 .sectionHeader {
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
+/*
+ * L-13: rows keep their own 8px hover-chrome padding, so the list bleeds
+ * outward by the same amount. Row text then starts on the panel grid
+ * (var(--rf-panel-pad)) instead of 8px further in.
+ */
 .list {
   composes: scrollbarThin from "../../components/shared/scrollbar.module.css";
   display: flex;
@@ -204,6 +233,7 @@
   gap: var(--rf-space-1);
   max-height: min(200px, calc(100dvh - var(--rf-space-6) * 4));
   overflow-y: auto;
+  margin: 0 calc(-1 * var(--rf-space-2));
   padding-bottom: var(--rf-space-2);
   scroll-padding-bottom: var(--rf-space-2);
 }
@@ -271,15 +301,21 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+/*
+ * N-65: height-derived control (28px) on the shared icon-control scale with
+ * the chip radius, instead of the previous padding-derived box. Horizontal
+ * padding stays because these buttons carry a text label next to the icon.
+ */
 .actionButton {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 0;
+  min-width: var(--rf-control-h-icon-sm);
+  height: var(--rf-control-h-icon-sm);
   gap: var(--rf-space-1);
-  padding: var(--rf-space-1) var(--rf-space-2);
+  padding: 0 var(--rf-space-2);
   border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-ctl);
+  border-radius: var(--rf-radius-chip);
   background: transparent;
   color: var(--rf-color-muted);
   cursor: pointer;
@@ -421,11 +457,15 @@
   accent-color: var(--rf-color-accent);
 }
 
+/*
+ * N-57: no margin here. The modal wrapper is a flex column whose
+ * gap (var(--rf-space-3)) is the single mechanism for section spacing;
+ * a margin on top of it produced off-scale 24/28px breaks.
+ */
 .modalActions {
   display: flex;
   justify-content: flex-end;
   gap: var(--rf-space-3);
-  margin-top: var(--rf-space-4);
 }
 
 .diffDialog,
@@ -450,8 +490,7 @@
   background: transparent;
 }
 
-.errorBox,
-.errorText {
+.errorBox {
   color: var(--rf-color-danger);
 }
 

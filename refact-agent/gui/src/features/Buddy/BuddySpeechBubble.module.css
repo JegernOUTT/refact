@@ -204,6 +204,7 @@
 .content {
   position: relative;
   display: block;
+  font-size: var(--rf-text-1);
   animation: bb-wipe 0.46s steps(16) 0.1s both;
 }
 

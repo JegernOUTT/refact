@@ -319,29 +319,35 @@ export const selectEventLog = (
   return eventMessages.length > 0 ? eventMessages : EMPTY_EVENT_MESSAGES;
 };
 
-function selectBasePlanMessages(
-  state: RootState,
-  threadId: string,
-): PlanMessage[] {
-  const planMessages = selectMessagesById(state, threadId)
-    .map((message, index) => ({ message, index }))
-    .filter((entry): entry is { message: PlanMessage; index: number } =>
-      isPlanMessage(entry.message),
-    );
-  if (planMessages.length === 0) return EMPTY_PLAN_MESSAGES;
-  return [...planMessages]
-    .sort((a, b) => {
-      const leftVersion = getPlanMetadata(a.message).version;
-      const rightVersion = getPlanMetadata(b.message).version;
-      if (leftVersion !== undefined && rightVersion !== undefined) {
-        return rightVersion - leftVersion || b.index - a.index;
-      }
-      if (leftVersion !== undefined) return -1;
-      if (rightVersion !== undefined) return 1;
-      return b.index - a.index;
-    })
-    .map((entry) => entry.message);
-}
+/**
+ * Memoized on the messages array reference: both plan selectors below are
+ * used as createSelector INPUTS, and an input that allocates a fresh array
+ * per call defeats memoization and fires reselect's "input selector
+ * returned a different result" warning on every render (audit N-37/L-20).
+ */
+const selectBasePlanMessages = createSelector(
+  [selectMessagesById],
+  (messages): PlanMessage[] => {
+    const planMessages = messages
+      .map((message, index) => ({ message, index }))
+      .filter((entry): entry is { message: PlanMessage; index: number } =>
+        isPlanMessage(entry.message),
+      );
+    if (planMessages.length === 0) return EMPTY_PLAN_MESSAGES;
+    return [...planMessages]
+      .sort((a, b) => {
+        const leftVersion = getPlanMetadata(a.message).version;
+        const rightVersion = getPlanMetadata(b.message).version;
+        if (leftVersion !== undefined && rightVersion !== undefined) {
+          return rightVersion - leftVersion || b.index - a.index;
+        }
+        if (leftVersion !== undefined) return -1;
+        if (rightVersion !== undefined) return 1;
+        return b.index - a.index;
+      })
+      .map((entry) => entry.message);
+  },
+);
 
 function collectPlanDeltaEvents(messages: ChatMessages): EventMessage[] {
   let deltas: EventMessage[] | null = null;
@@ -379,11 +385,10 @@ export const selectCurrentPlan = (
   threadId: string,
 ): PlanMessage | undefined => selectBasePlanMessages(state, threadId)[0];
 
-export const selectPlanDeltaEvents = (
-  state: RootState,
-  threadId: string,
-): EventMessage[] =>
-  collectPlanDeltaEvents(selectMessagesById(state, threadId));
+export const selectPlanDeltaEvents = createSelector(
+  [selectMessagesById],
+  (messages): EventMessage[] => collectPlanDeltaEvents(messages),
+);
 
 export const selectSynthesizedPlanText = (
   state: RootState,

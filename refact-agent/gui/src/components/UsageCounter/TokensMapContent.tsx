@@ -1,5 +1,5 @@
 import { Box, Flex, Text, ScrollArea, HoverCard } from "../LongTailPrimitives";
-import { InfoCircledIcon } from "@radix-ui/react-icons";
+import { Info } from "lucide-react";
 import React, { useMemo } from "react";
 import type { TokenMap, TokenMapSegment } from "../../services/refact/chat";
 import { formatNumberToFixed } from "../../utils/formatNumberToFixed";
@@ -143,7 +143,8 @@ export const TokensMapContent: React.FC<TokensMapContentProps> = ({
           </Text>
           <HoverCard.Root>
             <HoverCard.Trigger asChild>
-              <InfoCircledIcon
+              <Info
+                size={15}
                 color="var(--rf-color-muted)"
                 style={{ cursor: "help", flexShrink: 0 }}
               />

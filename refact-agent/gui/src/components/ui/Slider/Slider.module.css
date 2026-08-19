@@ -56,6 +56,7 @@
 }
 
 .thumb {
+  position: relative;
   display: block;
   width: 18px;
   height: 18px;
@@ -63,6 +64,13 @@
   border: var(--rf-hairline) solid var(--rf-border-strong);
   border-radius: var(--rf-radius-pill);
   box-shadow: var(--rf-elev-overlay);
+}
+
+/* Invisible hit area: keeps the small visual thumb but guarantees a 28px tap target. */
+.thumb::before {
+  content: "";
+  position: absolute;
+  inset: calc((var(--rf-control-h-icon-sm) - 18px) / -2);
 }
 
 .thumb:hover {

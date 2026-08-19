@@ -100,7 +100,13 @@
 }
 
 .actionButton {
+  display: flex;
   flex: 1;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--rf-control-h-icon-sm);
+  border-radius: var(--rf-radius-chip);
 }
 
 .dialogBody {

@@ -4,7 +4,7 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--rf-space-2);
-  min-height: var(--rf-control-h);
+  height: var(--rf-control-h);
   padding: 0 var(--rf-space-2) 0 var(--rf-space-3);
   color: var(--rf-color-fg);
   background: var(--rf-surface-1);

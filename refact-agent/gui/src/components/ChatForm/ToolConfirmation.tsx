@@ -47,10 +47,10 @@ const getConfirmationMessage = (
     } denied${ruleClause}.`;
   } else {
     return `${
-      confirmationToolNames.length > 1 ? "Commands need" : "Command needs"
-    } confirmation: ${confirmationToolNames.join(", ")}.\n\nFollowing ${
-      denialToolNames.length > 1 ? "commands were" : "command was"
-    } denied: ${denialToolNames.join(", ")}.${
+      denialToolNames.length > 1 ? "Commands were" : "Command was"
+    } denied: ${denialToolNames.join(", ")}.\n\nFollowing ${
+      confirmationToolNames.length > 1 ? "commands need" : "command needs"
+    } confirmation: ${confirmationToolNames.join(", ")}.${
       ruleClause ? `\n\nAll${ruleClause}.` : ""
     }`;
   }
@@ -172,6 +172,10 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
   const denialToolNames = resolvedReasons
     .filter((r) => r.type === "denial")
     .map((r) => r.toolName);
+  const orderedReasons = [...resolvedReasons].sort((a, b) => {
+    if (a.type === b.type) return 0;
+    return a.type === "denial" ? -1 : 1;
+  });
 
   const { respondToTools } = useChatActions(chatId);
 
@@ -262,17 +266,25 @@ export const ToolConfirmation: React.FC<ToolConfirmationProps> = ({
             <span>Model {allConfirmation ? "wants" : "tried"} to run:</span>
           </div>
           <div className={styles.ToolList}>
-            {resolvedReasons.map((r) => (
+            {orderedReasons.map((r) => (
               <div
                 className={styles.ToolItem}
                 key={`${r.type}-${r.tool_call_id}`}
               >
-                <Badge
-                  tone={r.type === "denial" ? "danger" : "warning"}
-                  size="md"
-                >
-                  {r.toolName}
-                </Badge>
+                <div className={styles.ToolItemHeader}>
+                  <Badge
+                    tone={r.type === "denial" ? "danger" : "warning"}
+                    size="md"
+                  >
+                    {r.toolName}
+                  </Badge>
+                  <Badge
+                    tone={r.type === "denial" ? "danger" : "warning"}
+                    size="md"
+                  >
+                    {r.type === "denial" ? "Denied" : "Needs confirmation"}
+                  </Badge>
+                </div>
                 {r.command && r.command !== r.toolName && (
                   <span className={styles.CommandPreview}>
                     {trimCommand(r.command)}

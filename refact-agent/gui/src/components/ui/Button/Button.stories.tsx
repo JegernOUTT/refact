@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { ChevronRight, Download, Plus, Trash2 } from "lucide-react";
+import { Fragment } from "react";
 import { Button, ButtonGroup, IconButton } from "./Button";
 import styles from "./Button.stories.module.css";
 
@@ -33,24 +34,22 @@ function ButtonMatrix() {
                 </span>
               ))}
               {variants.map((variant) => (
-                <div className={styles.rowLabel} key={variant}>
-                  {variant}
-                </div>
+                <Fragment key={variant}>
+                  <div className={styles.rowLabel}>{variant}</div>
+                  {sizes.map((size) => (
+                    <div className={styles.cell} key={`${variant}-${size}`}>
+                      <Button
+                        leftIcon={Plus}
+                        rightIcon={ChevronRight}
+                        size={size}
+                        variant={variant}
+                      >
+                        {variant}
+                      </Button>
+                    </div>
+                  ))}
+                </Fragment>
               ))}
-              {variants.flatMap((variant) =>
-                sizes.map((size) => (
-                  <div className={styles.cell} key={`${variant}-${size}`}>
-                    <Button
-                      leftIcon={Plus}
-                      rightIcon={ChevronRight}
-                      size={size}
-                      variant={variant}
-                    >
-                      {variant}
-                    </Button>
-                  </div>
-                )),
-              )}
             </div>
           </div>
 
@@ -83,7 +82,7 @@ function ButtonMatrix() {
 
           <div className={styles.section}>
             <h3 className={styles.sectionTitle}>Icon-only sizes</h3>
-            <div className={styles.iconGrid}>
+            <div className={styles.iconGrid} style={{ alignItems: "center" }}>
               {variants.flatMap((variant) =>
                 sizes.map((size) => (
                   <IconButton

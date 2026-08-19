@@ -22,7 +22,6 @@
   z-index: var(--rf-z-modal, 700);
   display: flex;
   flex-direction: column;
-  gap: var(--rf-space-3);
   width: min(
     var(--rf-overlay-ideal-width),
     calc(100vw - 2 * var(--rf-space-3))
@@ -31,7 +30,7 @@
     var(--rf-overlay-ideal-height),
     var(--rf-overlay-viewport-max-height)
   );
-  overflow-y: auto;
+  overflow: hidden;
   color: var(--rf-color-fg);
   background: var(--rf-surface-overlay);
   border: var(--rf-hairline) solid var(--rf-border-strong);
@@ -49,12 +48,47 @@
   outline-offset: var(--rf-space-1);
 }
 
-.inner {
+/* Pinned header: title/description never scroll away. */
+.header {
   display: flex;
   min-width: 0;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-4) var(--rf-space-4) 0;
+}
+
+/* The only scroll owner inside the dialog. */
+.inner {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: var(--rf-space-3);
   padding: var(--rf-space-4);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.header + .inner {
+  padding-top: var(--rf-space-3);
+}
+
+/* Pinned footer: close/action controls stay above the fold. */
+.footer {
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--rf-space-2);
+  padding: 0 var(--rf-space-4) var(--rf-space-4);
+}
+
+.inner + .footer {
+  padding-top: var(--rf-space-1);
 }
 
 .title {

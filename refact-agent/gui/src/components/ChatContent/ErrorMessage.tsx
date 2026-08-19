@@ -2,6 +2,7 @@ import React from "react";
 import { Flex, Text } from "@radix-ui/themes";
 import { AlertTriangle, LoaderCircle } from "lucide-react";
 import { Badge, Button, Icon } from "../ui";
+import { humanizeIdentifier } from "../../utils/displayNames";
 import styles from "./ChatContent.module.css";
 import type {
   ErrorMessage,
@@ -195,7 +196,7 @@ const ClassifiedError: React.FC<{
             <Text size="2" weight="bold">
               {info.title}
             </Text>
-            <Badge tone={tone}>{info.category}</Badge>
+            <Badge tone={tone}>{humanizeIdentifier(info.category)}</Badge>
           </Flex>
           {retry ? (
             <RetryingBadge retry={retry} tone={tone} />
@@ -215,7 +216,7 @@ const ClassifiedError: React.FC<{
         </Flex>
       )}
       <Text size="2">{info.explanation}</Text>
-      <Text className={styles.errorMessageHint} size="1">
+      <Text className={styles.errorMessageHint}>
         {retry
           ? `Auto-retrying in ${retry.delay_secs}s (attempt ${retry.attempt}/${retry.max_attempts}).`
           : info.is_retryable
@@ -266,7 +267,9 @@ export const ErrorMessageCard: React.FC<ErrorMessageCardProps> = ({
               {title}
             </Text>
             {firstClassified && (
-              <Badge tone={tone}>{firstClassified.category}</Badge>
+              <Badge tone={tone}>
+                {humanizeIdentifier(firstClassified.category)}
+              </Badge>
             )}
           </Flex>
           {firstClassified &&

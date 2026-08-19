@@ -17,6 +17,7 @@ import { useAppDispatch, useAppSelector } from "../../hooks";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import { regenerate } from "../../services/refact/chatCommands";
 import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
+import { humanizeIdentifier } from "../../utils/displayNames";
 import styles from "./ModeTransitionDialog.module.css";
 
 function extractErrorMessage(err: unknown): string {
@@ -44,6 +45,7 @@ type ModeTransitionDialogProps = {
   onOpenChange: (open: boolean) => void;
   chatId: string;
   currentMode: string;
+  currentModeTitle?: string;
   targetMode: string;
   targetModeTitle: string;
   targetModeDescription: string;
@@ -79,6 +81,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
   onOpenChange,
   chatId,
   currentMode,
+  currentModeTitle,
   targetMode,
   targetModeTitle,
   targetModeDescription,
@@ -94,6 +97,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
   const [phase, setPhase] = useState<TransitionPhase | null>(null);
   const [activeTransition, setActiveTransition] = useState<{
     currentMode: string;
+    currentModeTitle?: string;
     targetMode: string;
     targetModeTitle: string;
     isSelf: boolean;
@@ -108,6 +112,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
 
     const transition = {
       currentMode,
+      currentModeTitle,
       targetMode,
       targetModeTitle,
       isSelf: isSelfSwitch(currentMode, targetMode),
@@ -170,6 +175,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
   }, [
     isBusy,
     currentMode,
+    currentModeTitle,
     chatId,
     targetMode,
     targetModeTitle,
@@ -200,6 +206,9 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
   const isSelf =
     activeTransition?.isSelf ?? isSelfSwitch(currentMode, targetMode);
   const displayCurrentMode = activeTransition?.currentMode ?? currentMode;
+  const displayCurrentModeTitle =
+    (activeTransition ? activeTransition.currentModeTitle : currentModeTitle) ??
+    humanizeIdentifier(displayCurrentMode);
   const displayTargetMode = activeTransition?.targetMode ?? targetMode;
   const displayTargetModeTitle =
     activeTransition?.targetModeTitle ?? targetModeTitle;
@@ -223,7 +232,7 @@ export const ModeTransitionDialog: React.FC<ModeTransitionDialogProps> = ({
               ) : (
                 <>
                   <Badge tone="muted" size="sm">
-                    {displayCurrentMode}
+                    {displayCurrentModeTitle}
                   </Badge>
                   <Text color="gray">→</Text>
                   <Badge tone="accent" size="sm">

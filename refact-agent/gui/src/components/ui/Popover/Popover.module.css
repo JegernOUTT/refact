@@ -1,4 +1,6 @@
 .content {
+  composes: scrollbarThin from "../../shared/scrollbar.module.css";
+
   --rf-overlay-ideal-width: var(
     --rf-overlay-max-width,
     var(--rf-overlay-popover-max)

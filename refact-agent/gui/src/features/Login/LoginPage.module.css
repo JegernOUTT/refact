@@ -25,7 +25,7 @@
   margin: 0;
   color: var(--rf-color-accent);
   font-size: var(--rf-text-2);
-  font-weight: 650;
+  font-weight: var(--rf-weight-semibold);
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -33,7 +33,8 @@
 .title {
   margin: 0;
   color: var(--rf-color-fg);
-  font-size: clamp(var(--rf-text-5), 4vw, 28px);
+  font-size: var(--rf-text-5);
+  font-weight: var(--rf-weight-bold);
   letter-spacing: -0.03em;
 }
 
@@ -41,7 +42,7 @@
   max-width: 38rem;
   margin: 0;
   color: var(--rf-color-muted);
-  font-size: var(--rf-text-3);
+  font-size: var(--rf-text-2);
   line-height: var(--rf-line);
 }
 
@@ -93,7 +94,7 @@
 
 .status {
   color: var(--rf-color-muted);
-  font-size: var(--rf-text-3);
+  font-size: var(--rf-text-2);
 }
 
 @media (prefers-reduced-transparency: reduce) {

@@ -23,6 +23,23 @@
   max-width: 280px;
 }
 
+/* The light half of every light/dark gallery must paint its own canvas and
+   flip color-scheme; otherwise it keeps the dark UA color scheme and the
+   flipped tokens render illegibly (audit N-03). */
+.panel[data-appearance="light"],
+.panel:global(.light) {
+  background: var(--rf-bg);
+  color-scheme: light;
+}
+
+/* .panel/.stack are grids, so bare controls used to stretch to the full panel
+   width. Trigger buttons must keep their intrinsic size (audit N-16). */
+.panel > button,
+.stack > button {
+  justify-self: start;
+  width: auto;
+}
+
 .row {
   display: flex;
   flex-wrap: wrap;

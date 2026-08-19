@@ -69,7 +69,7 @@
 }
 
 .tabTitle {
-  max-width: var(--rf-overlay-popover-min);
+  max-width: var(--rf-overlay-popover-max);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

@@ -93,3 +93,10 @@
   --rf-dur-med: 0s;
   --rf-dur-slow: 0s;
 }
+
+/* Light halves must paint a light canvas (audit N-03). */
+.panel[data-appearance="light"],
+.panel:global(.light) {
+  background: var(--rf-bg);
+  color-scheme: light;
+}

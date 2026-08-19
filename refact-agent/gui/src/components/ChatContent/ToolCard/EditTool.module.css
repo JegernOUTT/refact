@@ -33,6 +33,10 @@
 }
 
 .hunkFileButton {
+  display: inline-flex;
+  box-sizing: border-box;
+  min-height: var(--rf-control-h-sm);
+  align-items: center;
   cursor: pointer;
 }
 
@@ -174,7 +178,10 @@
 }
 
 .showMoreButton {
-  display: block;
+  display: flex;
+  box-sizing: border-box;
+  align-items: center;
+  min-height: var(--rf-control-h-sm);
   width: 100%;
   min-width: 0;
   padding: var(--rf-space-1) 0;
@@ -182,7 +189,7 @@
   background: transparent;
   border: 0;
   font-family: var(--rf-font-mono);
-  font-size: 12px;
+  font-size: var(--rf-text-1);
   text-align: left;
   cursor: pointer;
 }

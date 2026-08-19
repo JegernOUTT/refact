@@ -15,13 +15,14 @@ import {
   CHAT_WITH_DIFFS,
   FROG_CHAT,
   LARGE_DIFF,
-  CHAT_WITH_MULTI_MODAL,
+  CHAT_WITH_MULTI_MODAL_IMAGES,
   CHAT_CONFIG_THREAD,
   STUB_LINKS_FOR_CHAT_RESPONSE,
   CHAT_WITH_TEXTDOC,
   MARKDOWN_ISSUE,
 } from "../../__fixtures__";
 import { http, HttpResponse } from "msw";
+import { userEvent, within } from "@storybook/testing-library";
 import { Flex } from "@radix-ui/themes";
 import { CHAT_LINKS_URL } from "../../services/refact/consts";
 import {
@@ -160,23 +161,35 @@ export const AssistantMarkdown: Story = {
   },
 };
 
-// User ask (index 0) plus the chrome tool call/result pair (indices 3-4)
-// from the multimodal fixture: the smallest conversation that renders
-// image thumbnails inside a tool card.
-const TOOL_IMAGE_MESSAGES = CHAT_WITH_MULTI_MODAL.messages
-  .slice(0, 1)
-  .concat(CHAT_WITH_MULTI_MODAL.messages.slice(3, 5));
+// The multimodal fixture pairs a `chrome`-named call (routed to <ChromeTool>,
+// whose screenshots live inside the collapsible ToolCard body) with a
+// non-chrome `screenshot` call (routed to <MultiModalToolContent>, whose image
+// strip renders outside the collapsible and is visible while collapsed). Both
+// results carry the real 480x270 PNG fixture.
+const TOOL_IMAGE_MESSAGES = CHAT_WITH_MULTI_MODAL_IMAGES.slice(0, 3);
 
 export const ToolImages: Story = {
   args: {
     ...meta.args,
     messages: TOOL_IMAGE_MESSAGES,
   },
+  // The chrome tool card renders its screenshots inside the collapsible body,
+  // so expand every collapsed tool card to cover the in-body images too.
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const buttons = await canvas.findAllByRole("button");
+    const collapsed = buttons.filter(
+      (button) => button.getAttribute("aria-expanded") === "false",
+    );
+    for (const toggle of collapsed) {
+      await userEvent.click(toggle);
+    }
+  },
 };
 
 export const MultiModal: Story = {
   args: {
-    messages: CHAT_WITH_MULTI_MODAL.messages,
+    messages: CHAT_WITH_MULTI_MODAL_IMAGES,
   },
 };
 

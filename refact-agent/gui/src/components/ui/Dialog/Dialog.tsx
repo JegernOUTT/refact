@@ -25,33 +25,6 @@ const DialogRoot: React.FC<DialogProps> = ({ modal = true, ...props }) => {
 const DialogTrigger = DialogPrimitive.Trigger;
 const DialogClose = DialogPrimitive.Close;
 
-const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps>(
-  ({ className, maxWidth, maxHeight, children }, ref) => {
-    return (
-      <DialogPrimitive.Portal container={document.body}>
-        <Portal>
-          <DialogPrimitive.Overlay className={styles.overlay} />
-        </Portal>
-        <Portal>
-          <DialogPrimitive.Content
-            ref={ref}
-            className={classNames(
-              styles.content,
-              "rf-popover-motion",
-              className,
-            )}
-            style={overlayStyle(maxWidth, maxHeight)}
-          >
-            <ModalOverlayProvider value>
-              <div className={styles.inner}>{children}</div>
-            </ModalOverlayProvider>
-          </DialogPrimitive.Content>
-        </Portal>
-      </DialogPrimitive.Portal>
-    );
-  },
-);
-
 const DialogTitle = React.forwardRef<HTMLHeadingElement, DialogTitleProps>(
   ({ className, ...props }, ref) => {
     return (
@@ -76,6 +49,79 @@ const DialogDescription = React.forwardRef<
     />
   );
 });
+
+const isElementOfType = (
+  node: React.ReactNode,
+  types: readonly React.ElementType[],
+) =>
+  React.isValidElement(node) && types.includes(node.type as React.ElementType);
+
+/**
+ * Splits children into a pinned header (leading Title/Description run), a
+ * scrollable body, and a pinned footer (trailing Dialog.Close run). Only
+ * prefix/suffix runs are lifted, so document order is always preserved and
+ * consumers that interleave their own markup keep rendering unchanged.
+ */
+const partitionDialogChildren = (children: React.ReactNode) => {
+  const nodes = React.Children.toArray(children);
+
+  let headerEnd = 0;
+  while (
+    headerEnd < nodes.length &&
+    isElementOfType(nodes[headerEnd], [DialogTitle, DialogDescription])
+  ) {
+    headerEnd += 1;
+  }
+
+  let footerStart = nodes.length;
+  while (
+    footerStart > headerEnd &&
+    isElementOfType(nodes[footerStart - 1], [DialogClose])
+  ) {
+    footerStart -= 1;
+  }
+
+  return {
+    header: nodes.slice(0, headerEnd),
+    body: nodes.slice(headerEnd, footerStart),
+    footer: nodes.slice(footerStart),
+  };
+};
+
+const DialogContent = React.forwardRef<HTMLDivElement, DialogContentProps>(
+  ({ className, maxWidth, maxHeight, children }, ref) => {
+    const { header, body, footer } = partitionDialogChildren(children);
+
+    return (
+      <DialogPrimitive.Portal container={document.body}>
+        <Portal>
+          <DialogPrimitive.Overlay className={styles.overlay} />
+        </Portal>
+        <Portal>
+          <DialogPrimitive.Content
+            ref={ref}
+            className={classNames(
+              styles.content,
+              "rf-popover-motion",
+              className,
+            )}
+            style={overlayStyle(maxWidth, maxHeight)}
+          >
+            <ModalOverlayProvider value>
+              {header.length > 0 ? (
+                <div className={styles.header}>{header}</div>
+              ) : null}
+              <div className={styles.inner}>{body}</div>
+              {footer.length > 0 ? (
+                <div className={styles.footer}>{footer}</div>
+              ) : null}
+            </ModalOverlayProvider>
+          </DialogPrimitive.Content>
+        </Portal>
+      </DialogPrimitive.Portal>
+    );
+  },
+);
 
 DialogContent.displayName = "Dialog.Content";
 DialogTitle.displayName = "Dialog.Title";

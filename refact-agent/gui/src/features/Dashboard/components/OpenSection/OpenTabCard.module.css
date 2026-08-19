@@ -50,7 +50,7 @@
   min-width: 18px;
   height: 18px;
   padding: 0 var(--rf-space-1);
-  border-radius: var(--radius-full);
+  border-radius: var(--rf-radius-pill);
   background: var(--rf-color-danger);
   color: var(--rf-color-bg);
   font-size: 10px;

@@ -1,6 +1,6 @@
 import React, { useMemo, useEffect, useRef, useState } from "react";
 import { Flex, Text } from "../LongTailPrimitives";
-import { ArrowDownIcon } from "@radix-ui/react-icons";
+import { ArrowDown } from "lucide-react";
 import classNames from "classnames";
 
 import { useAppSelector } from "../../hooks";
@@ -169,7 +169,7 @@ export const StreamingTokenCounter: React.FC = () => {
         {isOutputEstimate ? "~" : ""}
         {formatNumberToFixed(tokensToDisplay)}
       </Text>
-      <ArrowDownIcon width={12} height={12} />
+      <ArrowDown size={12} />
     </Flex>
   );
 };

@@ -9,7 +9,7 @@ import {
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import { IntegrationWithIconResponse } from "../../services/refact";
 import { ErrorCallout } from "../Callout";
-import { InformationCallout } from "../Callout/Callout";
+import { InformationCallout } from "../Callout";
 import { Spinner } from "../Spinner";
 import { IntegrationsList } from "./DisplayIntegrations/IntegrationsList";
 import { IntegrationsHeader } from "./Header/IntegrationsHeader";
@@ -112,7 +112,6 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
         {information && (
           <InformationCallout
             timeout={isDeletingIntegration ? 1000 : 3000}
-            mx="0"
             onClick={() => dispatch(clearInformation())}
             className={classNames(styles.popup, {
               [styles.popup_ide]: currentHost !== "web",
@@ -123,7 +122,6 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
         )}
         {globalError && (
           <ErrorCallout
-            mx="0"
             timeout={3000}
             onClick={() => dispatch(clearError())}
             className={classNames(styles.popup, {
@@ -161,7 +159,6 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
         className={classNames(styles.popup, {
           [styles.popup_ide]: config.host !== "web",
         })}
-        mx="0"
         onClick={goBackAndClearError}
       >
         fetching integrations.
@@ -195,7 +192,6 @@ export const IntegrationsView: FC<IntegrationViewProps> = ({
         {renderContent()}
         {globalError && (
           <ErrorCallout
-            mx="0"
             timeout={3000}
             onClick={() => dispatch(clearError())}
             className={classNames(styles.popup, {

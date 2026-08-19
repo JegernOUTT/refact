@@ -31,7 +31,8 @@ export function useAttachedImages() {
   const textFiles = useAppSelector((state) =>
     selectThreadTextFilesById(state, chatId),
   );
-  const { isMultimodalitySupportedForCurrentModel } = useCapsForToolUse();
+  const { isMultimodalitySupportedForCurrentModel, data: capsData } =
+    useCapsForToolUse();
   const dispatch = useAppDispatch();
 
   const removeImage = useCallback(
@@ -103,10 +104,14 @@ export function useAttachedImages() {
   }, [dispatch, chatId]);
 
   useEffect(() => {
+    // Only reset once caps have resolved: while they load the multimodality
+    // flag is false-by-default and this effect used to wipe the user's
+    // attached images on every caps refetch (audit N-40).
+    if (!capsData) return;
     if (!isMultimodalitySupportedForCurrentModel) {
       dispatch(resetThreadImages({ id: chatId }));
     }
-  }, [isMultimodalitySupportedForCurrentModel, dispatch, chatId]);
+  }, [capsData, isMultimodalitySupportedForCurrentModel, dispatch, chatId]);
 
   return {
     images,

@@ -102,11 +102,11 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: var(--rf-control-h-sm);
-  height: var(--rf-control-h-sm);
+  width: var(--rf-control-h-icon-sm);
+  height: var(--rf-control-h-icon-sm);
   color: var(--rf-color-muted);
   background: transparent;
-  border-radius: var(--rf-radius-ctl);
+  border-radius: var(--rf-radius-chip);
   cursor: pointer;
   transition:
     background-color 0.1s,

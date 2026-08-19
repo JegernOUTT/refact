@@ -1,10 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Flex, Text, ScrollArea, Separator, Code } from "@radix-ui/themes";
-import {
-  ExclamationTriangleIcon,
-  CheckCircledIcon,
-} from "@radix-ui/react-icons";
-import { Eye, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Eye, X } from "lucide-react";
 import {
   useGetProjectInformationQuery,
   useSaveProjectInformationMutation,
@@ -176,7 +172,7 @@ const ContentPreviewDialog: React.FC<ContentPreviewProps> = ({
                 wordBreak: "break-word",
                 padding: "var(--space-3)",
                 backgroundColor: "var(--gray-2)",
-                borderRadius: "var(--radius-2)",
+                borderRadius: "var(--rf-radius-chip)",
               }}
             >
               {block.content || "(empty)"}
@@ -530,7 +526,7 @@ export const ProjectInformationDialog: React.FC<Props> = ({
             <Flex direction="column" mb="3">
               <Surface variant="glass" radius="card">
                 <Flex align="center" gap="2" p="3">
-                  <ExclamationTriangleIcon />
+                  <AlertTriangle size={15} />
                   <Text color="red" size="2">
                     {saveError}
                   </Text>
@@ -543,7 +539,7 @@ export const ProjectInformationDialog: React.FC<Props> = ({
             <Flex direction="column" mb="3">
               <Surface variant="glass" radius="card">
                 <Flex align="center" gap="2" p="3">
-                  <CheckCircledIcon />
+                  <CheckCircle2 size={15} />
                   <Text color="green" size="2">
                     Configuration saved!
                   </Text>
@@ -605,7 +601,7 @@ export const ProjectInformationDialog: React.FC<Props> = ({
             <Flex direction="column" mt="3">
               <Surface variant="glass" radius="card">
                 <Flex align="center" gap="2" p="3">
-                  <ExclamationTriangleIcon />
+                  <AlertTriangle size={15} />
                   <Text color="orange" size="2">
                     {previewData.warnings.length} warning(s):{" "}
                     {previewData.warnings[0]}

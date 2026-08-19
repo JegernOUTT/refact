@@ -9,7 +9,7 @@
 .countdown {
   padding: var(--rf-space-2);
   border: 1px solid var(--rf-border);
-  border-radius: var(--radius-3);
+  border-radius: var(--rf-radius-ctl);
   background: color-mix(in oklab, var(--rf-surface-glass) 52%, transparent);
   box-shadow: var(--rf-elev-panel);
 }

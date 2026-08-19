@@ -10,7 +10,7 @@
   height: 12px;
   overflow: hidden;
   background-color: var(--rf-surface-2);
-  border-radius: var(--radius-2);
+  border-radius: var(--rf-radius-chip);
 }
 
 .segment {
@@ -20,15 +20,15 @@
 }
 
 .segment:first-child {
-  border-radius: var(--radius-2) 0 0 var(--radius-2);
+  border-radius: var(--rf-radius-chip) 0 0 var(--rf-radius-chip);
 }
 
 .segment:last-child {
-  border-radius: 0 var(--radius-2) var(--radius-2) 0;
+  border-radius: 0 var(--rf-radius-chip) var(--rf-radius-chip) 0;
 }
 
 .segment:only-child {
-  border-radius: var(--radius-2);
+  border-radius: var(--rf-radius-chip);
 }
 
 .categoryRow,

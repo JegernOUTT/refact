@@ -28,8 +28,16 @@
 .root pre,
 .root kbd,
 .root samp {
-  font-size: 1em !important;
+  font-size: var(--rf-text-2) !important;
   line-height: inherit;
+}
+
+.variant_chat *,
+.variant_chat code,
+.variant_chat pre,
+.variant_chat kbd,
+.variant_chat samp {
+  font-size: var(--rf-text-3) !important;
 }
 
 .paragraph {

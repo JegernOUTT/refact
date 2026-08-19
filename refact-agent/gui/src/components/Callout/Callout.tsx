@@ -5,8 +5,6 @@ import { useTimeout } from "usehooks-ts";
 import classNames from "classnames";
 import { Icon, Surface } from "../ui";
 import styles from "./Callout.module.css";
-import { useAppSelector } from "../../hooks/useAppSelector";
-import { getIsAuthError } from "../../features/Errors/errorsSlice";
 
 export type CalloutProps = Omit<
   React.ComponentPropsWithoutRef<"div">,
@@ -17,13 +15,6 @@ export type CalloutProps = Omit<
   timeout?: number | null;
   preventRetry?: boolean;
   preventClose?: boolean;
-  color?: string;
-  hex?: string;
-  message?: string | string[] | null;
-  mx?: string;
-  mt?: string;
-  mb?: string;
-  size?: string;
 };
 
 export const Callout: React.FC<CalloutProps> = ({
@@ -33,13 +24,6 @@ export const Callout: React.FC<CalloutProps> = ({
   onClick = () => void 0,
   preventClose = false,
   className,
-  color: _color,
-  hex: _hex,
-  message: _message,
-  mx: _mx,
-  mt: _mt,
-  mb: _mb,
-  size: _size,
   ...props
 }) => {
   const [isOpened, setIsOpened] = useState(false);
@@ -99,21 +83,27 @@ export const Callout: React.FC<CalloutProps> = ({
   );
 };
 
-export const ErrorCallout: React.FC<Omit<CalloutProps, "type">> = ({
+export type ErrorCalloutViewProps = Omit<CalloutProps, "type"> & {
+  /**
+   * Presentational flag; the store-connected wrapper in ErrorCallout.tsx
+   * derives it from auth state so this file stays store-free.
+   */
+  isAuthError?: boolean;
+};
+
+export const ErrorCalloutView: React.FC<ErrorCalloutViewProps> = ({
   timeout = null,
   onClick,
   children,
   preventRetry,
   preventClose = false,
   className,
+  isAuthError = false,
   ...props
 }) => {
-  const isAuthError = useAppSelector(getIsAuthError);
-
   return (
     <Callout
       type="error"
-      color="red"
       onClick={onClick}
       timeout={timeout}
       preventClose={preventClose || isAuthError}
@@ -142,19 +132,17 @@ export const InformationCallout: React.FC<Omit<CalloutProps, "type">> = ({
   ...props
 }) => {
   return (
-    <Callout
-      type="info"
-      color="blue"
-      onClick={onClick}
-      timeout={timeout}
-      {...props}
-    >
+    <Callout type="info" onClick={onClick} timeout={timeout} {...props}>
       Info: {children}
     </Callout>
   );
 };
 
-export const DiffWarningCallout: React.FC<Omit<CalloutProps, "type">> = ({
+export type DiffWarningCalloutProps = Omit<CalloutProps, "type"> & {
+  message?: string | string[] | null;
+};
+
+export const DiffWarningCallout: React.FC<DiffWarningCalloutProps> = ({
   timeout = null,
   onClick,
   message = null,
@@ -168,13 +156,7 @@ export const DiffWarningCallout: React.FC<Omit<CalloutProps, "type">> = ({
       : [message];
 
   return (
-    <Callout
-      type="warning"
-      color={Array.isArray(message) ? "orange" : "amber"}
-      onClick={onClick}
-      timeout={timeout}
-      {...props}
-    >
+    <Callout type="warning" onClick={onClick} timeout={timeout} {...props}>
       <Flex direction="column" gap="1">
         {warningMessages.map((msg, i) => (
           <span key={`${msg}-${i}`}>{i === 0 ? `Warning: ${msg}` : msg}</span>

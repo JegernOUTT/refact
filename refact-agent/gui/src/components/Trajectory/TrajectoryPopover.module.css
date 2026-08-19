@@ -13,6 +13,9 @@
   --rf-control-h: var(--rf-control-h-sm);
 
   max-width: 100%;
+  /* border + inner padding put the tabs 5px off the content column; trimming
+     the hairline lands the strip back on the 4px rung */
+  padding: calc(var(--rf-space-1) - var(--rf-hairline));
 }
 
 .tabStrip [role="tab"] {
@@ -25,6 +28,11 @@
   flex-direction: column;
   gap: var(--rf-space-3);
   margin-bottom: var(--rf-space-4);
+}
+
+.optionsSection label {
+  min-height: var(--rf-control-h-sm);
+  align-items: center;
 }
 
 .nestedOption {

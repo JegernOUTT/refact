@@ -12,7 +12,8 @@
   font: inherit;
   cursor: pointer;
   opacity: var(--rf-motion-opacity-soft);
-  padding: var(--rf-space-2) var(--rf-space-3);
+  height: var(--rf-control-h-lg);
+  padding: 0 var(--rf-space-3);
   text-align: left;
   transition: opacity var(--rf-dur-fast) var(--rf-ease-standard);
 }
@@ -101,7 +102,8 @@
   background: transparent;
   color: inherit;
   cursor: pointer;
-  padding: var(--rf-space-2);
+  height: var(--rf-control-h-lg);
+  padding: 0 var(--rf-space-3);
   text-align: left;
 }
 
@@ -191,6 +193,11 @@
 
 .goalProgress {
   min-width: 0;
+}
+
+.goalProgressSaturated {
+  color: var(--rf-color-danger);
+  font-weight: var(--rf-weight-semibold);
 }
 
 .goalControls {

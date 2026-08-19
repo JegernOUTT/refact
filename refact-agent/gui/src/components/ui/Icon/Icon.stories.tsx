@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { AlertTriangle, CheckCircle, Info, Sparkles } from "lucide-react";
+import { Fragment } from "react";
 import { Icon } from "./Icon";
 import styles from "./Icon.stories.module.css";
 
@@ -37,29 +38,29 @@ function IconMatrix() {
               </span>
             ))}
             {tones.map((tone) => (
-              <div className={styles.rowLabel} key={tone}>
-                <Icon icon={Sparkles} size="sm" tone={tone} />
-                <span>{tone}</span>
-              </div>
-            ))}
-            {tones.flatMap((tone) =>
-              sizes.map((size) => (
-                <div className={styles.cell} key={`${tone}-${size}`}>
-                  <Icon
-                    aria-label={`${tone} ${size} icon`}
-                    icon={
-                      tone === "danger"
-                        ? AlertTriangle
-                        : tone === "success"
-                          ? CheckCircle
-                          : Info
-                    }
-                    size={size}
-                    tone={tone}
-                  />
+              <Fragment key={tone}>
+                <div className={styles.rowLabel}>
+                  <Icon icon={Sparkles} size="sm" tone={tone} />
+                  <span>{tone}</span>
                 </div>
-              )),
-            )}
+                {sizes.map((size) => (
+                  <div className={styles.cell} key={`${tone}-${size}`}>
+                    <Icon
+                      aria-label={`${tone} ${size} icon`}
+                      icon={
+                        tone === "danger"
+                          ? AlertTriangle
+                          : tone === "success"
+                            ? CheckCircle
+                            : Info
+                      }
+                      size={size}
+                      tone={tone}
+                    />
+                  </div>
+                ))}
+              </Fragment>
+            ))}
           </div>
         </section>
       ))}

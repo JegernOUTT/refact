@@ -1,6 +1,7 @@
 .list {
   position: relative;
   display: grid;
+  box-sizing: border-box;
   grid-auto-columns: minmax(0, 1fr);
   grid-auto-flow: column;
   width: 100%;

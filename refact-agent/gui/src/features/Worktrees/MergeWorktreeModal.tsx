@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { TriangleAlert } from "lucide-react";
 import {
   Badge,
   Button,
   Dialog,
   FieldSelect,
   FieldText,
+  Icon,
 } from "../../components/ui";
 import { useAppDispatch } from "../../hooks";
 import {
@@ -294,7 +296,21 @@ export const MergeWorktreeModal: React.FC<MergeWorktreeModalProps> = ({
               </label>
             </div>
 
-            {error && <p className={styles.errorBox}>{error}</p>}
+            {/*
+              N-58: merge failures come from the operation as a whole, not from
+              one control, so they stay a form-level slot -- but with role
+              ="alert" and an icon + semibold weight so the state is never
+              signalled by colour alone (N-53 family).
+            */}
+            {error && (
+              <p
+                className={`${styles.errorBox} ${styles.formError}`}
+                role="alert"
+              >
+                <Icon icon={TriangleAlert} size="sm" tone="danger" />
+                {error}
+              </p>
+            )}
 
             {result && (
               <div className={styles.resultBox}>

@@ -1,6 +1,8 @@
 .callout_text {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
 }
 
 .callout_box {

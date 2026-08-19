@@ -152,6 +152,12 @@ export const PausedGoal: Story = {
   },
 };
 
+export const Verifying: Story = {
+  args: {
+    goal: { ...activeGoal, active: true, status: "verifying" },
+  },
+};
+
 export const CompletedGoal: Story = {
   args: {
     goal: {
@@ -184,6 +190,34 @@ export const BudgetExhausted: Story = {
         max_tokens: 10_000,
       },
       progress: { ...activeGoal.progress, turns_used: 6, tokens_used: 10_000 },
+    },
+  },
+};
+
+export const Stopped: Story = {
+  args: {
+    goal: { ...activeGoal, active: false, status: "stopped" },
+  },
+};
+
+export const NoProgress: Story = {
+  args: {
+    goal: {
+      ...activeGoal,
+      active: false,
+      status: "no_progress",
+      progress: { ...activeGoal.progress, no_progress_turns: 3 },
+    },
+  },
+};
+
+export const Transferred: Story = {
+  args: {
+    goal: {
+      ...activeGoal,
+      active: false,
+      status: "transferred",
+      transferred_to: "composer-follow-up-chat",
     },
   },
 };

@@ -266,8 +266,11 @@
 
 .runHistoryTitle,
 .webhookTitle {
-  color: var(--rf-color-fg);
-  font: 700 var(--rf-text-2) / var(--rf-line) var(--rf-font-ui);
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-semibold) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 .runHistoryToggle {

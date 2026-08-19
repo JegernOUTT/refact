@@ -1,7 +1,7 @@
 .chip {
   display: inline-flex;
   max-width: 100%;
-  min-height: auto;
+  min-height: var(--rf-control-h-icon-sm);
   align-items: center;
   gap: var(--rf-space-1);
   padding: var(--rf-space-2xs) var(--rf-space-xs);
@@ -76,14 +76,21 @@
 }
 
 .remove {
-  width: 18px;
-  height: 18px;
+  position: relative;
+  width: var(--rf-icon-lg);
+  height: var(--rf-icon-lg);
   margin-right: calc(var(--rf-space-2xs) * -1);
   padding: 0;
   border: 0;
   border-radius: var(--rf-radius-pill);
   background: transparent;
   cursor: pointer;
+}
+
+.remove::before {
+  position: absolute;
+  inset: calc((var(--rf-control-h-icon-sm) - var(--rf-icon-lg)) / -2);
+  content: "";
 }
 
 .remove:disabled {

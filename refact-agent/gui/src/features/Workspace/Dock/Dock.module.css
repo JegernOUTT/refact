@@ -24,6 +24,19 @@
   width: 100%;
 }
 
+/*
+ * Narrow-mode dismiss: the dock renders as a near-fullscreen left Sheet on
+ * small viewports; without a visible close control the sheet reads as the
+ * whole app (audit L-01). Keep the button compact against the stretching
+ * switcher row above.
+ */
+.switcher > .sheetClose {
+  flex: 0 0 auto;
+  width: var(--rf-control-h-icon-sm);
+  margin-left: var(--rf-space-2);
+  align-self: center;
+}
+
 .sectionBadge {
   flex: 0 0 auto;
 }

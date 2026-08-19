@@ -311,6 +311,7 @@
   cursor: pointer;
   display: flex;
   align-items: center;
+  min-height: var(--rf-control-h-sm);
   gap: var(--rf-space-2);
   color: var(--rf-color-muted);
   border-radius: var(--rf-radius-ctl);
@@ -551,6 +552,17 @@
   color: var(--rf-color-muted);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Guidance must outrank the raw upstream string (audit N-63). */
+.errorMessageHint {
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+}
+
+.errorMessageRaw {
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
 }
 
 .retryingBadgeIcon {

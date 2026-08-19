@@ -1,1 +1,7 @@
-export { Callout, ErrorCallout, DiffWarningCallout } from "./Callout";
+export {
+  Callout,
+  DiffWarningCallout,
+  ErrorCalloutView,
+  InformationCallout,
+} from "./Callout";
+export { ErrorCallout } from "./ErrorCallout";

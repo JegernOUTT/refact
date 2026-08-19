@@ -264,6 +264,7 @@ export const ModeSelect: React.FC<ModeSelectProps> = ({
           onOpenChange={handleTransitionDialogClose}
           chatId={currentChatId}
           currentMode={effectiveMode}
+          currentModeTitle={currentTitle}
           targetMode={targetModeForTransition.id}
           targetModeTitle={targetModeForTransition.title}
           targetModeDescription={targetModeForTransition.description}

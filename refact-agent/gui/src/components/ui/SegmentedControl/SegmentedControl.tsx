@@ -33,6 +33,13 @@ function isIconOnlyLabel(label: React.ReactNode): boolean {
   return child.type === "svg" || child.type === Icon;
 }
 
+/**
+ * Radiogroup pattern: each segment is a visually hidden `input[type=radio]`
+ * paired with a styled `<span>` inside its `<label>`, so browsers and screen
+ * readers get native radio semantics and arrow-key roving focus for free.
+ * Focus is therefore owned by the input, and the visible ring is painted on
+ * the sibling span via `.input:focus-visible + .label` in the stylesheet.
+ */
 export function SegmentedControl({
   className,
   name,

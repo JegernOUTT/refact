@@ -71,17 +71,19 @@
 }
 
 .list {
+  composes: scrollbarThin from "../../../../components/shared/scrollbar.module.css";
   display: flex;
   flex-direction: column;
   min-height: 0;
   flex: 1;
-  overflow: hidden;
+  overflow-y: auto;
   overflow-x: hidden;
 }
 
 .virtuosoList {
   composes: scrollbarThin from "../../../../components/shared/scrollbar.module.css";
   flex: 1;
+  padding-bottom: var(--rf-space-3);
 }
 
 .groupLabel {
