@@ -39,6 +39,13 @@ const ALL_INCLUDE_FIELDS: &[&str] = &[
     "message.input_image.image_url",
 ];
 
+fn supports_openai_include_extensions(endpoint: &str) -> bool {
+    reqwest::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| host == "api.openai.com")
+}
+
 impl LlmWireAdapter for OpenAiResponsesAdapter {
     fn build_http(
         &self,
@@ -74,6 +81,8 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
         // reasoning, store, stream, stream_options, include, text.
         // It rejects max_output_tokens, temperature, frequency_penalty, stop, etc.
         let is_chatgpt_backend = settings.endpoint.contains("chatgpt.com/backend-api");
+        let supports_openai_include_extensions =
+            supports_openai_include_extensions(&settings.endpoint);
 
         // ChatGPT backend rejects store=true; Platform API needs it for previous_response_id chaining.
         body["store"] = json!(!is_chatgpt_backend);
@@ -168,9 +177,7 @@ impl LlmWireAdapter for OpenAiResponsesAdapter {
             body.as_object_mut().map(|obj| obj.remove("top_p"));
         }
 
-        // Ask server to include extra fields we rely on for rich tool cards.
-        // ChatGPT backend rejects `include`; only send on Platform API.
-        if !is_chatgpt_backend {
+        if supports_openai_include_extensions {
             let mut include_fields: Vec<&str> = ALL_INCLUDE_FIELDS.to_vec();
             if settings.supports_reasoning {
                 include_fields.push("reasoning.encrypted_content");
@@ -1326,6 +1333,14 @@ mod tests {
         }
     }
 
+    fn xai_responses_settings() -> AdapterSettings {
+        AdapterSettings {
+            endpoint: "https://api.x.ai/v1/responses".to_string(),
+            model_name: "grok-4.20-0309-non-reasoning".to_string(),
+            ..default_settings()
+        }
+    }
+
     fn event_message(subkind: &str, source: &str, payload: Value, content: &str) -> ChatMessage {
         let mut extra = serde_json::Map::new();
         extra.insert(
@@ -1694,6 +1709,21 @@ mod tests {
             http.body.get("top_p").is_none(),
             "Responses requests for reasoning-capable models must omit top_p"
         );
+    }
+
+    #[test]
+    fn xai_responses_omits_openai_only_include_extensions() {
+        let adapter = OpenAiResponsesAdapter;
+        let request = LlmRequest::new(
+            "grok-4.20-0309-non-reasoning".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
+
+        let http = adapter
+            .build_http(&cleared(&request), &xai_responses_settings())
+            .unwrap();
+
+        assert!(http.body.get("include").is_none());
     }
 
     #[test]

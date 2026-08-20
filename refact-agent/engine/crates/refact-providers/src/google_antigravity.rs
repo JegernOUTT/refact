@@ -7,14 +7,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{Mutex as AMutex, MutexGuard};
 
+use refact_core::antigravity_client::antigravity_headers;
+use refact_core::model_caps::{resolve_model_caps, ModelCapabilities};
 use refact_core::llm_types::WireFormat;
 use crate::google_antigravity_oauth::OAuthTokens;
 use crate::traits::{
-    CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
-    parse_custom_models, parse_enabled_models, set_model_enabled_impl,
+    AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+    merge_custom_models, parse_custom_models, parse_enabled_models, set_model_enabled_impl,
 };
 
 const CLOUDCODE_PROJECT_HEADER: &str = "x-refact-internal-cloudcode-project";
+const CLOUDCODE_MODELS_URL: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
 lazy_static::lazy_static! {
     static ref GOOGLE_ANTIGRAVITY_REFRESH_GUARD: AMutex<()> = AMutex::new(());
@@ -89,6 +93,51 @@ impl GoogleAntigravityProvider {
         })
         .await
         .map(|_| ())
+    }
+
+    fn available_models_from_live_response(
+        &self,
+        response: &serde_json::Value,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Option<Vec<AvailableModel>> {
+        let models = response.get("models")?.as_object()?;
+        let enabled_set: std::collections::HashSet<&str> = self
+            .enabled_models
+            .iter()
+            .map(|model| model.as_str())
+            .collect();
+        let mut available_models = Vec::new();
+
+        for (id, metadata) in models {
+            if id.is_empty() {
+                continue;
+            }
+            let caps = resolve_model_caps(model_caps, &format!("google_antigravity/{id}"))
+                .or_else(|| resolve_model_caps(model_caps, &format!("google/{id}")))
+                .or_else(|| resolve_model_caps(model_caps, id))
+                .map(|resolved| resolved.caps)
+                .unwrap_or_else(|| ModelCapabilities {
+                    n_ctx: 128_000,
+                    supports_tools: true,
+                    supports_parallel_tools: true,
+                    ..Default::default()
+                });
+            let pricing = self
+                .custom_model_pricing(id)
+                .or_else(|| caps.pricing.clone());
+            let mut available =
+                AvailableModel::from_caps(id, &caps, enabled_set.contains(id.as_str()), pricing);
+            available.display_name = metadata
+                .get("displayName")
+                .or_else(|| metadata.get("display_name"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            available_models.push(available);
+        }
+
+        merge_custom_models(&mut available_models, &self.custom_models, &enabled_set);
+        available_models.sort_by(|left, right| left.id.cmp(&right.id));
+        Some(available_models)
     }
 }
 
@@ -199,7 +248,7 @@ available:
     }
 
     fn model_source(&self) -> ModelSource {
-        ModelSource::ModelCaps
+        ModelSource::Api
     }
 
     fn enabled_models(&self) -> &[String] {
@@ -237,6 +286,56 @@ available:
         self.custom_models
             .get(model_id)
             .and_then(|config| config.pricing.clone())
+    }
+
+    async fn fetch_available_models(
+        &self,
+        http_client: &reqwest::Client,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
+        let fallback_models = || self.get_available_models_from_caps(model_caps);
+        if self.oauth_tokens.access_token.is_empty() || self.oauth_tokens.project_id.is_empty() {
+            return fallback_models();
+        }
+
+        let mut request = http_client
+            .post(CLOUDCODE_MODELS_URL)
+            .bearer_auth(&self.oauth_tokens.access_token)
+            .json(&json!({"project": self.oauth_tokens.project_id}));
+        for (name, value) in antigravity_headers() {
+            request = request.header(name, value);
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!("Google Antigravity: failed to fetch available models: {error}");
+                return fallback_models();
+            }
+        };
+        if !response.status().is_success() {
+            tracing::warn!(
+                "Google Antigravity: available models request returned status {}; using catalog fallback",
+                response.status()
+            );
+            return fallback_models();
+        }
+        let response = match response.json::<serde_json::Value>().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(
+                    "Google Antigravity: failed to parse available models response: {error}"
+                );
+                return fallback_models();
+            }
+        };
+
+        match self.available_models_from_live_response(&response, model_caps) {
+            Some(models) if !models.is_empty() => models,
+            _ => {
+                tracing::warn!("Google Antigravity: available models response was empty or invalid; using catalog fallback");
+                fallback_models()
+            }
+        }
     }
 
     async fn startup_refresh_and_sync(
@@ -280,5 +379,38 @@ available:
         }
         self.oauth_tokens = refreshed;
         self.save_oauth_tokens_config(config_dir, instance_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn live_catalog_includes_models_not_present_in_models_dev() {
+        let provider = GoogleAntigravityProvider {
+            enabled_models: vec!["claude-opus-4.6-thinking".to_string()],
+            ..Default::default()
+        };
+        let response = json!({
+            "models": {
+                "claude-opus-4.6-thinking": {"displayName": "Claude Opus 4.6"},
+                "gemini-3.7-flash": {"displayName": "Gemini 3.7 Flash"}
+            }
+        });
+
+        let models = provider
+            .available_models_from_live_response(&response, &HashMap::new())
+            .unwrap();
+
+        assert_eq!(models.len(), 2);
+        let claude = models
+            .iter()
+            .find(|model| model.id == "claude-opus-4.6-thinking")
+            .unwrap();
+        assert_eq!(claude.display_name.as_deref(), Some("Claude Opus 4.6"));
+        assert!(claude.enabled);
+        assert!(claude.supports_tools);
     }
 }

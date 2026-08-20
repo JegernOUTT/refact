@@ -5,6 +5,7 @@ import { render, screen, waitFor } from "../utils/test-utils";
 import { server } from "../utils/mockServer";
 import { setUpStore } from "../app/store";
 import { getProviderName } from "../features/Providers/getProviderName";
+import { getProviderIcon } from "../features/Providers/icons/iconsMap";
 import { ProviderCard } from "../features/Providers/ProviderCard";
 import { AddProviderInstanceModal } from "../features/Providers/ProvidersView/AddProviderInstanceModal";
 import { ProvidersView } from "../features/Providers/ProvidersView";
@@ -160,6 +161,18 @@ describe("Providers provider instances", () => {
       screen.getByRole("heading", { name: "Work OpenAI" }),
     ).toBeInTheDocument();
     expect(screen.getByText("openai_work")).toBeInTheDocument();
+  });
+
+  test("OAuth providers use their matching provider icons", () => {
+    expect(
+      getProviderIcon({ name: "xai_oauth", base_provider: "xai_oauth" }),
+    ).not.toBeNull();
+    expect(
+      getProviderIcon({
+        name: "google_antigravity",
+        base_provider: "google_antigravity",
+      }),
+    ).not.toBeNull();
   });
 
   test("provider type guards accept base provider fields", () => {

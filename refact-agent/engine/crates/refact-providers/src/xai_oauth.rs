@@ -7,12 +7,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{Mutex as AMutex, MutexGuard};
 
+use refact_core::model_caps::{resolve_model_caps, ModelCapabilities};
 use refact_core::llm_types::WireFormat;
 use crate::traits::{
-    CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
-    parse_enabled_models, parse_custom_models, set_model_enabled_impl,
+    AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+    merge_custom_models, parse_enabled_models, parse_custom_models, set_model_enabled_impl,
 };
 use crate::xai_oauth_flow::OAuthTokens;
+
+const XAI_MODELS_URL: &str = "https://api.x.ai/v1/models";
 
 lazy_static::lazy_static! {
     static ref XAI_OAUTH_REFRESH_GUARD: AMutex<()> = AMutex::new(());
@@ -80,6 +83,59 @@ impl XAIOAuthProvider {
         })
         .await
         .map(|_| ())
+    }
+
+    fn available_models_from_live_response(
+        &self,
+        response: &serde_json::Value,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Option<Vec<AvailableModel>> {
+        let models = response.get("data")?.as_array()?;
+        let enabled_set: std::collections::HashSet<&str> = self
+            .enabled_models
+            .iter()
+            .map(|model| model.as_str())
+            .collect();
+        let mut available_models = Vec::new();
+
+        for model in models {
+            let Some(id) = model.get("id").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            if !id.starts_with("grok-") {
+                continue;
+            }
+
+            let n_ctx = model
+                .get("context_length")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(128_000);
+            let caps = resolve_model_caps(model_caps, &format!("xai/{id}"))
+                .or_else(|| resolve_model_caps(model_caps, id))
+                .map(|resolved| resolved.caps)
+                .unwrap_or_else(|| ModelCapabilities {
+                    n_ctx,
+                    supports_tools: true,
+                    supports_parallel_tools: true,
+                    ..Default::default()
+                });
+            let pricing = self
+                .custom_model_pricing(id)
+                .or_else(|| caps.pricing.clone());
+            let mut available =
+                AvailableModel::from_caps(id, &caps, enabled_set.contains(id), pricing);
+            available.display_name = model
+                .get("display_name")
+                .or_else(|| model.get("name"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            available_models.push(available);
+        }
+
+        merge_custom_models(&mut available_models, &self.custom_models, &enabled_set);
+        available_models.sort_by(|left, right| left.id.cmp(&right.id));
+        Some(available_models)
     }
 }
 
@@ -181,7 +237,7 @@ available:
     }
 
     fn model_source(&self) -> ModelSource {
-        ModelSource::ModelCaps
+        ModelSource::Api
     }
 
     fn enabled_models(&self) -> &[String] {
@@ -219,6 +275,52 @@ available:
         self.custom_models
             .get(model_id)
             .and_then(|config| config.pricing.clone())
+    }
+
+    async fn fetch_available_models(
+        &self,
+        http_client: &reqwest::Client,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
+        let fallback_models = || self.get_available_models_from_caps(model_caps);
+        if self.oauth_tokens.access_token.is_empty() {
+            return fallback_models();
+        }
+
+        let response = match http_client
+            .get(XAI_MODELS_URL)
+            .bearer_auth(&self.oauth_tokens.access_token)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!("xAI OAuth: failed to fetch available models: {error}");
+                return fallback_models();
+            }
+        };
+        if !response.status().is_success() {
+            tracing::warn!(
+                "xAI OAuth: available models request returned status {}; using catalog fallback",
+                response.status()
+            );
+            return fallback_models();
+        }
+        let response = match response.json::<serde_json::Value>().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!("xAI OAuth: failed to parse available models response: {error}");
+                return fallback_models();
+            }
+        };
+
+        match self.available_models_from_live_response(&response, model_caps) {
+            Some(models) if !models.is_empty() => models,
+            _ => {
+                tracing::warn!("xAI OAuth: available models response was empty or invalid; using catalog fallback");
+                fallback_models()
+            }
+        }
     }
 
     async fn startup_refresh_and_sync(
@@ -259,5 +361,36 @@ available:
         };
         self.oauth_tokens = refreshed;
         self.save_oauth_tokens_config(config_dir, instance_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn live_catalog_includes_new_grok_models_without_models_dev_caps() {
+        let provider = XAIOAuthProvider {
+            enabled_models: vec!["grok-4.6".to_string()],
+            ..Default::default()
+        };
+        let response = json!({
+            "data": [
+                {"id": "grok-4.6", "context_length": 500000},
+                {"id": "grok-imagine-image", "context_length": 1024},
+                {"id": "not-a-grok-model"}
+            ]
+        });
+
+        let models = provider
+            .available_models_from_live_response(&response, &HashMap::new())
+            .unwrap();
+
+        assert_eq!(models.len(), 2);
+        let grok = models.iter().find(|model| model.id == "grok-4.6").unwrap();
+        assert_eq!(grok.n_ctx, 500_000);
+        assert!(grok.enabled);
+        assert!(grok.supports_tools);
     }
 }
