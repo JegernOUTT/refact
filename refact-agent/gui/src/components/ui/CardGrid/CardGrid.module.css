@@ -1,0 +1,18 @@
+.grid {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: repeat(
+    auto-fill,
+    minmax(min(100%, var(--rf-cardgrid-min)), 1fr)
+  );
+  gap: var(--rf-section-gap);
+}
+
+.regular {
+  --rf-cardgrid-min: 280px;
+}
+
+.dense {
+  --rf-cardgrid-min: 240px;
+}

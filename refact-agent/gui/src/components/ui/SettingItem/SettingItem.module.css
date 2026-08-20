@@ -3,7 +3,6 @@
 
   display: grid;
   min-width: 0;
-  max-width: var(--rf-settings-measure);
   gap: var(--rf-row-gap);
   padding: var(--rf-row-pad) 0;
   color: var(--rf-color-fg);
@@ -27,6 +26,10 @@
   display: grid;
   min-width: 0;
   gap: var(--rf-space-1);
+}
+
+.copy {
+  max-width: 68ch;
 }
 
 .control {

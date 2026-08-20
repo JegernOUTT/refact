@@ -47,13 +47,28 @@ describe("SettingItem", () => {
     expect(getSettingItem("Stack item")?.className).toContain("stack");
   });
 
-  it("bounds width with absolute lengths so long setting lists stay cheap to lay out", async () => {
+  it("keeps the row fluid and bounds width with absolute lengths only", async () => {
     const css = await readFile(
       path.resolve(__dirname, "SettingItem.module.css"),
       "utf8",
     );
 
-    expect(css).toContain("max-width: var(--rf-settings-measure);");
-    expect(css).not.toMatch(/max-width:\s*(min\(\s*)?100%/);
+    const itemBlock = /\.item\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+
+    // Fluid row doctrine: the row fills its section grid track, so `.item`
+    // carries no max-width at all (neither the old 52rem measure cap nor a
+    // percentage cap, which would make intrinsic sizing cyclic).
+    expect(itemBlock).not.toMatch(/max-width/);
+    expect(css).not.toContain("max-width: var(--rf-settings-measure);");
+
+    // Containment still comes from min-width: 0 plus the control cap.
+    expect(itemBlock).toContain("min-width: 0;");
+    expect(css).toContain("--rf-setting-item-control-max: 360px;");
+    expect(css).toContain("max-width: var(--rf-setting-item-control-max);");
+
+    // Any max-width that remains must be an absolute length (never a
+    // percentage) so long setting lists stay cheap to lay out.
+    expect(css).not.toMatch(/max-width:\s*(min\(\s*)?[\d.]*%/);
+    expect(css).not.toMatch(/max-width:\s*(min|max|clamp)\(/);
   });
 });

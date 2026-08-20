@@ -11,7 +11,11 @@
   --rf-surface-1: rgba(255, 255, 255, 0.03);
   --rf-surface-2: rgba(255, 255, 255, 0.05);
   --rf-surface-3: rgba(255, 255, 255, 0.07);
-  --rf-surface-overlay: rgba(28, 28, 31, 0.94);
+  /* Overlays are deliberately translucent like the chat dock glass (user
+     request: selectors, worktrees, project info, dialogs all read as glass);
+     keep a small opacity step above --rf-surface-glass so the elevation
+     ladder survives. */
+  --rf-surface-overlay: rgba(28, 28, 31, 0.84);
   --rf-surface-glass: rgba(20, 20, 22, 0.82);
   --rf-scrim: rgba(0, 0, 0, 0.55);
   --rf-border: rgba(255, 255, 255, 0.1);
@@ -234,8 +238,9 @@
   --rf-surface-2: rgba(0, 0, 0, 0.05);
   --rf-surface-3: rgba(0, 0, 0, 0.08);
   /* Overlay must sit visibly above panel glass; a shared value collapsed
-     the light-theme elevation ladder to one tier (audit L-05). */
-  --rf-surface-overlay: rgba(253, 253, 254, 0.97);
+     the light-theme elevation ladder to one tier (audit L-05). Translucent
+     per the glass doctrine, one step above glass. */
+  --rf-surface-overlay: rgba(253, 253, 254, 0.92);
   --rf-surface-glass: rgba(250, 250, 251, 0.88);
   --rf-scrim: rgba(0, 0, 0, 0.32);
   --rf-border: rgba(0, 0, 0, 0.12);

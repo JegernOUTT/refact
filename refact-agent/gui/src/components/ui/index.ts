@@ -10,6 +10,7 @@ export type {
   ButtonVariant,
 } from "./Button";
 export * from "./Card";
+export * from "./CardGrid";
 export * from "./DataTable";
 export * from "./Chip";
 export { Combobox } from "./Combobox";
@@ -64,6 +65,7 @@ export type {
 } from "./SegmentedControl";
 export { Select } from "./Select";
 export * from "./SettingItem";
+export * from "./SettingsListEditor";
 export * from "./SettingsShell";
 export type {
   SelectContentProps,

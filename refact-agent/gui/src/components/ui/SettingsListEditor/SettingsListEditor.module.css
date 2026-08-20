@@ -1,0 +1,80 @@
+.root {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: var(--rf-space-2);
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+}
+
+.rows {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.row {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: var(--rf-control-h);
+  padding: 0 var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
+}
+
+.mono {
+  font-family: var(--rf-font-mono);
+}
+
+.input::placeholder {
+  color: var(--rf-color-faint);
+}
+
+.input:hover:not(:disabled) {
+  border-color: var(--rf-border-strong);
+  background: var(--rf-surface-2);
+}
+
+.input:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.input:disabled {
+  color: var(--rf-color-faint);
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.remove {
+  width: var(--rf-control-h-icon-sm);
+  min-width: var(--rf-control-h-icon-sm);
+  height: var(--rf-control-h-icon-sm);
+  color: var(--rf-color-danger);
+}
+
+.addButton {
+  justify-self: start;
+}
+
+.empty {
+  margin: 0;
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+}
