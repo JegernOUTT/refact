@@ -676,6 +676,10 @@ export function loadPersistedWorkspace(
           ),
         )
       : undefined,
+    liveEditsDefault:
+      typeof record.liveEditsDefault === "boolean"
+        ? record.liveEditsDefault
+        : undefined,
     dock: normalizePersistedDock(record.dock),
     drawer: {
       ...normalizePersistedDrawer(record.drawer),
@@ -707,6 +711,7 @@ export function savePersistedWorkspace(
     groups: workspace.groups,
     contextChatByTab: workspace.contextChatByTab,
     liveEditsByChat: workspace.liveEditsByChat,
+    liveEditsDefault: workspace.liveEditsDefault,
     dock: normalizeWorkspaceDock(workspace.dock),
     drawer: normalizeWorkspaceDrawer(workspace.drawer),
     updatedAt: Date.now(),

@@ -39,6 +39,8 @@ export type WorkspaceState = {
   contextChatByTab?: Record<SurfaceKey, string>;
   panelsForced?: boolean;
   liveEditsByChat?: Record<string, boolean>;
+  /** Sticky default for chats without an explicit toggle; last manual choice wins. */
+  liveEditsDefault?: boolean;
   dock?: WorkspaceDockState;
   drawer?: WorkspaceDrawerState;
 };
@@ -66,6 +68,7 @@ export type WorkspaceHydrationState = Pick<
       | "contextChatByTab"
       | "panelsForced"
       | "liveEditsByChat"
+      | "liveEditsDefault"
       | "dock"
       | "drawer"
     >
@@ -141,6 +144,7 @@ const initialState: WorkspaceState = {
   groups: {},
   panelsForced: false,
   liveEditsByChat: undefined,
+  liveEditsDefault: undefined,
   dock: { ...DEFAULT_WORKSPACE_DOCK },
   drawer: { ...DEFAULT_WORKSPACE_DRAWER },
 };
@@ -1036,6 +1040,7 @@ const workspaceStatesEqual = (
   return (
     left.activeTabId === right.activeTabId &&
     Boolean(left.panelsForced) === Boolean(right.panelsForced) &&
+    Boolean(left.liveEditsDefault) === Boolean(right.liveEditsDefault) &&
     leftDock.open === rightDock.open &&
     leftDock.width === rightDock.width &&
     leftDock.section === rightDock.section &&
@@ -1131,6 +1136,7 @@ export const sanitizeWorkspaceSurfaceUniqueness = (
       : {}),
     panelsForced: state.panelsForced === true ? true : undefined,
     liveEditsByChat: state.liveEditsByChat,
+    liveEditsDefault: state.liveEditsDefault,
     dock: normalizeWorkspaceDock(state.dock),
     drawer: normalizeWorkspaceDrawer(state.drawer),
   };
@@ -1171,6 +1177,7 @@ export const reconcileWorkspaceState = (
       : {}),
     panelsForced: state.panelsForced === true ? true : undefined,
     liveEditsByChat: state.liveEditsByChat,
+    liveEditsDefault: state.liveEditsDefault,
     dock: normalizeWorkspaceDock(state.dock),
     drawer: normalizeWorkspaceDrawer(state.drawer),
   };
@@ -1225,6 +1232,7 @@ export const workspaceSlice = createSlice({
         ...state.liveEditsByChat,
         [action.payload.chatId]: action.payload.enabled,
       };
+      state.liveEditsDefault = action.payload.enabled;
     },
     clearWorkspaceChatState: (state, action: PayloadAction<string>) => {
       closeContextSurfacesForChat(state, action.payload);
@@ -1753,6 +1761,7 @@ export const workspaceSlice = createSlice({
             : {}),
           panelsForced: panelsForced || undefined,
           liveEditsByChat: action.payload.liveEditsByChat,
+          liveEditsDefault: action.payload.liveEditsDefault,
           dock: normalizeWorkspaceDock(action.payload.dock),
           drawer: {
             ...normalizeWorkspaceDrawer(action.payload.drawer),
@@ -1862,7 +1871,9 @@ export const selectLiveEditsForChat = (
   state: FocusedChatWorkspaceRootState,
   chatId: string,
 ): boolean =>
-  state.workspace.liveEditsByChat?.[chatId] ?? state.config?.host === "web";
+  state.workspace.liveEditsByChat?.[chatId] ??
+  state.workspace.liveEditsDefault ??
+  false;
 
 export const selectActiveGroup = (state: WorkspaceRootState) =>
   state.workspace.activeTabId

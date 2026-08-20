@@ -325,25 +325,26 @@ describe("Toolbar single workspace tab row", () => {
     rerenderToolbar(view, activeTab);
 
     const liveEdits = screen.getByRole("button", { name: "Live edits" });
-    expect(liveEdits).toHaveAttribute("aria-pressed", "true");
+    expect(liveEdits).toHaveAttribute("aria-pressed", "false");
     expect(liveEdits).not.toHaveTextContent("Live edits");
 
     await view.user.click(liveEdits);
     expect(view.store.getState().workspace.liveEditsByChat?.["chat-a"]).toBe(
-      false,
+      true,
     );
-    expect(liveEdits).toHaveAttribute("aria-pressed", "false");
+    expect(liveEdits).toHaveAttribute("aria-pressed", "true");
 
     act(() => {
       view.store.dispatch(setActiveTab(chatB));
     });
 
+    // Sticky default: the last manual choice carries over to other chats.
     await waitFor(() =>
       expect(liveEdits).toHaveAttribute("aria-pressed", "true"),
     );
     await view.user.click(liveEdits);
     expect(view.store.getState().workspace.liveEditsByChat).toEqual({
-      "chat-a": false,
+      "chat-a": true,
       "chat-b": false,
     });
 
@@ -351,7 +352,7 @@ describe("Toolbar single workspace tab row", () => {
       view.store.dispatch(setActiveTab(chatA));
     });
     await waitFor(() =>
-      expect(liveEdits).toHaveAttribute("aria-pressed", "false"),
+      expect(liveEdits).toHaveAttribute("aria-pressed", "true"),
     );
   });
 
@@ -375,11 +376,27 @@ describe("Toolbar single workspace tab row", () => {
     rerenderToolbar(view, activeTab);
 
     const liveEdits = screen.getByRole("button", { name: "Live edits" });
-    expect(liveEdits).toHaveAttribute("aria-pressed", "true");
+    expect(liveEdits).toHaveAttribute("aria-pressed", "false");
     await view.user.click(liveEdits);
     expect(view.store.getState().workspace.liveEditsByChat?.["chat-a"]).toBe(
-      false,
+      true,
     );
+  });
+
+  it("hides Live edits on the home page even with a focused workspace chat", () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "dashboard" });
+
+    act(() => {
+      view.store.dispatch(
+        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
+      );
+      view.store.dispatch(openTab(makeSurfaceKey("chat", "chat-a")));
+      view.store.dispatch(setActiveTab(makeSurfaceKey("chat", "chat-a")));
+    });
+    rerenderToolbar(view, { type: "dashboard" });
+
+    expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull();
   });
 
   it("hides Live edits without a focused chat or available panels", () => {

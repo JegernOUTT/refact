@@ -207,7 +207,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
       : false,
   );
   const showLiveEdits =
-    focusedWorkspaceChatId !== null && workspaceAvailability.files;
+    activeTab.type === "chat" &&
+    focusedWorkspaceChatId !== null &&
+    workspaceAvailability.files;
   const { openSettings } = useEventsBusForIDE();
   const toolbarChatId =
     activeTab.type === "chat"

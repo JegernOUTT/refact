@@ -757,14 +757,14 @@ describe("workspaceSlice", () => {
     );
   });
 
-  test("live edits default by host and persist explicit per-chat choices", () => {
+  test("live edits default off everywhere and the last choice sticks for new chats", () => {
     const state = reducer(undefined, openTab(chat("a")));
     expect(
       selectLiveEditsForChat(
         { ...contextState(state, { a: null }), config: { host: "web" } },
         "a",
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       selectLiveEditsForChat(
         { ...contextState(state, { a: null }), config: { host: "vscode" } },
@@ -772,14 +772,38 @@ describe("workspaceSlice", () => {
       ),
     ).toBe(false);
 
-    const disabled = reducer(
+    const enabled = reducer(
       state,
+      setLiveEditsForChat({ chatId: "a", enabled: true }),
+    );
+    expect(
+      selectLiveEditsForChat(
+        { ...contextState(enabled, { a: null }), config: { host: "web" } },
+        "a",
+      ),
+    ).toBe(true);
+    // Sticky default: chats without an explicit entry inherit the last choice.
+    expect(
+      selectLiveEditsForChat(
+        { ...contextState(enabled, { a: null }), config: { host: "web" } },
+        "b",
+      ),
+    ).toBe(true);
+
+    const disabled = reducer(
+      enabled,
       setLiveEditsForChat({ chatId: "a", enabled: false }),
     );
     expect(
       selectLiveEditsForChat(
         { ...contextState(disabled, { a: null }), config: { host: "web" } },
         "a",
+      ),
+    ).toBe(false);
+    expect(
+      selectLiveEditsForChat(
+        { ...contextState(disabled, { a: null }), config: { host: "web" } },
+        "b",
       ),
     ).toBe(false);
   });
