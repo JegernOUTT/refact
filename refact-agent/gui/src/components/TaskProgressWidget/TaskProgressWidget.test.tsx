@@ -171,7 +171,7 @@ describe("TaskProgressWidget goal projection", () => {
 
   test("empty collapsed header distinguishes fresh goal creation from cleared tasks", () => {
     const freshView = renderWidget(
-      makeRuntime({ goal: null, mode: "quick_agent", toolUse: "explore" }),
+      makeRuntime({ goal: null, mode: "agent", toolUse: "explore" }),
     );
 
     expect(screen.getByText("Set a goal")).toBeInTheDocument();
@@ -182,7 +182,7 @@ describe("TaskProgressWidget goal projection", () => {
       makeRuntime({
         goal: null,
         messages: taskMessages([]),
-        mode: "quick_agent",
+        mode: "agent",
         toolUse: "explore",
       }),
     );

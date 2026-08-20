@@ -279,14 +279,7 @@ function goalControlActions(
   ];
 }
 
-const GOAL_SUPPORTED_MODES = new Set([
-  "agent",
-  "openai_agent",
-  "quick_agent",
-  "task_agent",
-  "task_planner",
-  "ultra_agent",
-]);
+const GOAL_SUPPORTED_MODES = new Set(["agent", "task_agent", "task_planner"]);
 
 function isGoalSupported(
   mode: string | undefined,

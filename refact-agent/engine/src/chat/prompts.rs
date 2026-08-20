@@ -38,13 +38,6 @@ struct BuddyPersonaCacheEntry {
 static BUDDY_PERSONA_CACHE: OnceLock<AMutex<HashMap<(String, String), BuddyPersonaCacheEntry>>> =
     OnceLock::new();
 
-fn buddy_persona_cache_mode_id(mode_id: &str) -> String {
-    match mode_id {
-        "openai_agent" => "openai_agent".to_string(),
-        _ => map_legacy_mode_to_id(mode_id).to_string(),
-    }
-}
-
 fn buddy_persona_cache() -> &'static AMutex<HashMap<(String, String), BuddyPersonaCacheEntry>> {
     BUDDY_PERSONA_CACHE.get_or_init(|| AMutex::new(HashMap::new()))
 }
@@ -472,7 +465,7 @@ async fn buddy_persona_block(app: AppState, mode_id: &str) -> String {
     let Some(snapshot) = app.buddy_event_sink.snapshot().await else {
         return String::new();
     };
-    let mode_id = buddy_persona_cache_mode_id(mode_id);
+    let mode_id = map_legacy_mode_to_id(mode_id).to_string();
     let archetype_id = snapshot.state.personality.archetype_id.clone();
     let identity_name = snapshot.state.identity.name.clone();
     let version = refact_buddy_core::state::persona_cache_version();
@@ -570,18 +563,6 @@ mod tests {
             lookup_mode: "plan",
             model_id: None,
             cache_mode: "plan",
-        },
-        ModePromptCase {
-            label: "quick_agent",
-            lookup_mode: "quick_agent",
-            model_id: None,
-            cache_mode: "quick_agent",
-        },
-        ModePromptCase {
-            label: "openai_agent",
-            lookup_mode: "agent",
-            model_id: Some("gpt-5"),
-            cache_mode: "openai_agent",
         },
     ];
 
