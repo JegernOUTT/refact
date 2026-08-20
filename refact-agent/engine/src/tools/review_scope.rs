@@ -122,7 +122,7 @@ async fn git_context(
     let changed_files = diff
         .files
         .into_iter()
-        .map(|file| root.join(file.path))
+        .map(|file| crate::files_correction::canonicalize_normalized_path(root.join(file.path)))
         .filter(|path| seen.insert(path.clone()))
         .collect();
     let patch = (!diff.patch.trim().is_empty()).then_some(diff.patch);
@@ -278,7 +278,12 @@ mod tests {
         .await;
 
         assert!(scope.diff_base.is_some());
-        assert_eq!(scope.changed_files, vec![temp.path().join("changed.rs")]);
+        assert_eq!(
+            scope.changed_files,
+            vec![crate::files_correction::canonicalize_normalized_path(
+                temp.path().join("changed.rs")
+            )]
+        );
         assert!(scope
             .diff_patch
             .as_deref()

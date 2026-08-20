@@ -13,7 +13,8 @@ import {
 } from "../../features/Chat/Thread/actions";
 import { selectThreadById } from "../../features/Chat/Thread/selectors";
 import { push } from "../../features/Pages/pagesSlice";
-import { useAppDispatch, useAppSelector } from "../../hooks";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import { regenerate } from "../../services/refact/chatCommands";
 import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";

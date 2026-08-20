@@ -3,7 +3,6 @@
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  box-sizing: border-box;
   align-items: center;
   gap: var(--rf-space-xs);
   padding: var(--rf-space-2xs) var(--rf-space-1);
@@ -175,7 +174,7 @@
   color: var(--rf-color-fg);
   font-family: var(--rf-font-mono);
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   background: var(--rf-surface-2);

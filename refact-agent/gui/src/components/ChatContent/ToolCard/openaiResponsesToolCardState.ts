@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useStoredOpen } from "../useStoredOpen";
 
-import { useAppSelector } from "../../../hooks";
+import { useAppSelector } from "../../../hooks/useAppSelector";
 import {
   selectIsStreamingById,
   selectIsWaitingById,

@@ -150,7 +150,7 @@
   white-space: nowrap;
   font-size: var(--rf-text-3);
   font-weight: var(--rf-weight-bold);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-3);
 }
 
 .badgeGroup {
@@ -178,7 +178,7 @@
   gap: var(--rf-space-2);
   color: var(--rf-color-muted);
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
 }
 
 .metaItem {

@@ -148,7 +148,6 @@
 
 .card {
   height: 100%;
-  box-sizing: border-box;
   min-height: 0;
   overflow: hidden;
   display: flex;

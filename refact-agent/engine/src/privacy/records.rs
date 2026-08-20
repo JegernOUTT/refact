@@ -140,6 +140,7 @@ fn record_path_candidates(
     mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
 ) -> Vec<PathBuf> {
     let mut candidates = registered_alias_paths(path, mappings);
+    candidates.push(path.to_path_buf());
     let workspaces = gcx
         .documents_state
         .workspace_folders

@@ -2,7 +2,6 @@
   display: grid;
   width: 100%;
   min-width: 0;
-  box-sizing: border-box;
   min-height: calc(var(--rf-control-h-lg) + var(--rf-space-5));
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;

@@ -58,7 +58,7 @@
   color: inherit;
   font-size: var(--rf-text-3);
   font-weight: var(--rf-weight-bold);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-3);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -98,7 +98,6 @@
 
 .actionButton {
   all: unset;
-  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: center;

@@ -24,7 +24,7 @@
 .title {
   margin: 0;
   font-size: var(--rf-text-5);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-5);
 }
 
 .gallery {
@@ -46,5 +46,5 @@
   border-radius: var(--rf-radius-ctl);
   font-family: var(--rf-font-mono);
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
 }

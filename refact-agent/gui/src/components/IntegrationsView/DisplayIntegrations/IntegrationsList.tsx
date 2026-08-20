@@ -11,7 +11,7 @@ import {
 import { GlobalIntegrations } from "./GlobalIntegrations";
 import { NewIntegrations } from "./NewIntegrations";
 import { ProjectIntegrations } from "./ProjectIntegrations";
-import { useAppDispatch } from "../../../hooks";
+import { useAppDispatch } from "../../../hooks/useAppDispatch";
 import { push } from "../../../features/Pages/pagesSlice";
 import { Button, Flex } from "../../ui";
 import { MCPImportDialog } from "../MCPImportDialog";

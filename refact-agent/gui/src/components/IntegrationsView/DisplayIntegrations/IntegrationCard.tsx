@@ -2,7 +2,7 @@ import type { FC, KeyboardEventHandler, MouseEventHandler } from "react";
 import classNames from "classnames";
 
 import { Surface } from "../../ui";
-import { useAppSelector } from "../../../hooks";
+import { useAppSelector } from "../../../hooks/useAppSelector";
 import { useUpdateIntegration } from "./useUpdateIntegration";
 
 import {

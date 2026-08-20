@@ -15,7 +15,7 @@
 
 .variant_tool {
   font-size: var(--rf-text-2);
-  line-height: 1.5;
+  line-height: var(--rf-line-2);
 }
 
 .variant_terminal {

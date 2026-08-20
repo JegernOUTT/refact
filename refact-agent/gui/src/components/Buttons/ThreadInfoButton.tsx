@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Flex, Text } from "@radix-ui/themes";
 import { Check, Copy, Info } from "lucide-react";
 import { Button, IconButton, Popover } from "../ui";
-import { useCopyToClipboard } from "../../hooks";
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import {
   useGetTrajectoryPathQuery,
   useLazyGetTrajectoryQuery,
@@ -10,7 +10,7 @@ import {
 } from "../../services/refact";
 import { trajectoryDataToChatThread } from "../../services/refact/trajectories";
 import { copyChatHistoryToClipboard } from "../../utils/copyChatHistoryToClipboard";
-import { useAppSelector } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import { selectThreadById } from "../../features/Chat/Thread/selectors";
 import styles from "./ThreadInfoButton.module.css";
 

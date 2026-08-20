@@ -287,7 +287,7 @@ Auto-approve for patch-like tools when `automatic_patch === true`: `patch`, `tex
 ### Global CSS contract (cascade + base resets)
 
 - Global stylesheets (radix themes, `styles/tokens.css`, `styles/base.css`, glass/motion/responsive/scrollbar, theme-config, shared tokens) are imported FIRST in `src/lib/index.ts` and mirrored in `.storybook/preview.tsx`. Component CSS modules win equal-specificity battles against Radix defaults (e.g. `.rt-Box { display: block }` vs a module's `display: flex`) only because of this order; `src/lib/cssOrder.test.ts` locks it. Never make a global sheet reachable only through a component module.
-- `styles/base.css` owns the global `box-sizing: border-box` reset (KaTeX subtree exempted), the 13px ambient base, and theme-root-scoped `:where()` maps for bare `h1`-`h6`, `code/kbd/samp/pre`, and form controls. New code must not add per-component `box-sizing` declarations; ~50 legacy declarations remain and are removed opportunistically when their files are touched.
+- `styles/base.css` owns the global `box-sizing: border-box` reset (KaTeX subtree exempted), the 13px ambient base, theme-root-scoped `:where()` maps for bare `h1`-`h6`, `code/kbd/samp/pre`, and form controls, and the gray-text adapter that routes Radix `<Text color="gray">` (`--gray-a11`, an unowned color) onto `--rf-color-muted`. New code must not add per-component `box-sizing` declarations; the legacy sweep is complete and only `ui/Tabs` keeps a deliberate belt-and-braces declaration for story isolation.
 
 ### Control-height recipe (the Button pattern)
 
@@ -296,7 +296,7 @@ Every interactive control uses **fixed `height` (or a `min-height` floor plus st
 ### Typography tokens
 
 - Weights come only from `--rf-weight-regular/medium/semibold/bold` (400/500/650/700); zero `font-weight:` literals outside `tokens.css`.
-- Line heights pair with sizes via `--rf-line-1..5` (18/20/21/22/28px) to avoid half-pixel line boxes; prefer them over the unitless `--rf-line` for new code.
+- Line heights pair with sizes via `--rf-line-1..5` (18/20/21/22/28px) to avoid half-pixel line boxes; the app-wide sweep is done, so any rule block that declares a scale font-size must use the paired token. Unitless `--rf-line` remains only on blocks without their own font-size (it inherits as a factor; pinning those to px would change descendant metrics).
 - Never use `em` font sizes or Radix `var(--radius-*)` / `var(--space-*)` tokens in module CSS — use `--rf-text-*` and `--rf-radius-*`/`--rf-space-*`.
 
 ### Identifier display

@@ -83,7 +83,6 @@
 }
 
 .kindTabs {
-  box-sizing: border-box;
   width: 100%;
   max-width: 100%;
 }
@@ -113,14 +112,12 @@
 }
 
 .listPanel {
-  box-sizing: border-box;
   width: 100%;
   max-width: 100%;
   min-width: 0;
 }
 
 .listPanel * {
-  box-sizing: border-box;
   min-width: 0;
 }
 
@@ -197,7 +194,6 @@
 
 .formContainer,
 .formContainer * {
-  box-sizing: border-box;
 }
 
 .yamlEditor {

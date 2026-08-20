@@ -119,7 +119,6 @@
 .content *,
 .content *::before,
 .content *::after {
-  box-sizing: border-box;
 }
 
 .mobileNav {

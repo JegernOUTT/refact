@@ -13,7 +13,8 @@ import {
   ChatModeThreadDefaults,
 } from "../../services/refact/chatModes";
 import { DEFAULT_MODE } from "../../features/Chat/Thread/types";
-import { useAppSelector, useAppDispatch } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { selectMessagesById, useThreadId } from "../../features/Chat/Thread";
 import { push, selectCurrentPage } from "../../features/Pages/pagesSlice";
 import { Badge, Chip, Icon, Popover, Skeleton } from "../ui";

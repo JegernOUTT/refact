@@ -4567,6 +4567,7 @@ dependencies = [
 name = "refact-privacy"
 version = "0.1.0"
 dependencies = [
+ "dunce",
  "glob",
  "refact-core",
  "serde",

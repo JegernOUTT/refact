@@ -3,7 +3,6 @@
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  box-sizing: border-box;
   align-items: center;
   gap: var(--rf-space-xs);
   padding: var(--rf-space-2xs) var(--rf-space-1);

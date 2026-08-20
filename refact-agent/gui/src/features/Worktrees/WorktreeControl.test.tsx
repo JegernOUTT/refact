@@ -474,7 +474,6 @@ describe("WorktreeControl", () => {
 
     expect(dialogInner).toContain("max-width: 100%;");
     expect(dialogInner).toContain("min-width: 0;");
-    expect(branchPicker).toContain("box-sizing: border-box;");
     expect(branchPicker).toContain("width: 100%;");
     expect(branchPicker).toContain("max-width: 100%;");
   });

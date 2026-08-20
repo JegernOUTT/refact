@@ -8,7 +8,7 @@
   padding: var(--rf-space-3);
   font-family: var(--rf-font-mono);
   font-size: var(--rf-text-1);
-  line-height: 1.5;
+  line-height: var(--rf-line-1);
   color: var(--rf-color-fg);
   max-width: 600px;
   min-width: 200px;

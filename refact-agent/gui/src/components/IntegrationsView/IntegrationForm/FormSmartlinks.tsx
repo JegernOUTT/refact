@@ -1,7 +1,8 @@
 import { FC } from "react";
 import { Integration, SmartLink as TSmartLink } from "../../../services/refact";
 import { selectConfig } from "../../../features/Config/configSlice";
-import { useAppSelector, useEventsBusForIDE } from "../../../hooks";
+import { useAppSelector } from "../../../hooks/useAppSelector";
+import { useEventsBusForIDE } from "../../../hooks/useEventBusForIDE";
 import { Button, Flex } from "../../ui";
 import { SmartLink } from "../../SmartLink";
 import styles from "./IntegrationForm.module.css";

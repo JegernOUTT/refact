@@ -3,7 +3,7 @@ import type { FC } from "react";
 import { WandSparkles } from "lucide-react";
 import type { SmartLink as SmartLinkType } from "../../services/refact";
 import { Button } from "../ui";
-import { useSmartLinks } from "../../hooks";
+import { useSmartLinks } from "../../hooks/useSmartLinks";
 import styles from "./SmartLink.module.css";
 
 export const SmartLink: FC<{

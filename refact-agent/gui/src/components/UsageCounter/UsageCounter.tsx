@@ -27,12 +27,12 @@ import {
 import { TokensMapContent } from "./TokensMapContent";
 import { useTokenMap } from "./useTokenMap";
 import { formatNumberToFixed } from "../../utils/formatNumberToFixed";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useEffectOnce } from "../../hooks/useEffectOnce";
 import {
-  useAppSelector,
-  useEffectOnce,
   useTotalTokenMeteringForChat,
   useTotalUsdForChat,
-} from "../../hooks";
+} from "../../hooks/useTotalCostForChat";
 import { formatUsd } from "../../utils/getMetering";
 
 import styles from "./UsageCounter.module.css";

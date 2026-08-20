@@ -1,7 +1,6 @@
 .modelCard {
   display: grid;
   min-width: 0;
-  box-sizing: border-box;
   gap: var(--rf-space-2);
   padding: var(--rf-space-3);
   color: var(--rf-color-fg);
@@ -229,7 +228,6 @@
 .notice {
   display: flex;
   min-width: 0;
-  box-sizing: border-box;
   align-items: center;
   gap: var(--rf-space-2);
   color: var(--rf-color-muted);
@@ -265,7 +263,6 @@
 .emptyCopy {
   display: grid;
   min-width: 0;
-  box-sizing: border-box;
   gap: var(--rf-space-1);
   justify-items: center;
   padding: var(--rf-space-4) 0;

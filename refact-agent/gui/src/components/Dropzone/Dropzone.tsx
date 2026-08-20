@@ -1,7 +1,7 @@
 import React, { createContext, isValidElement, useCallback } from "react";
 import { Image, X } from "lucide-react";
 import { DropzoneInputProps, FileRejection, useDropzone } from "react-dropzone";
-import { useCapsForToolUse } from "../../hooks";
+import { useCapsForToolUse } from "../../hooks/useCapsForToolUse";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
 import { useAttachedFiles } from "../ChatForm/useCheckBoxes";
 import { TruncateLeft } from "../Text";

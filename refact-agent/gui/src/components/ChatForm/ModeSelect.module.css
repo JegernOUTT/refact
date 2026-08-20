@@ -86,7 +86,6 @@
 
 .content,
 .content > div {
-  box-sizing: border-box;
   min-width: 0;
 }
 
@@ -198,7 +197,7 @@
   color: var(--rf-color-fg);
   font-size: var(--rf-text-2);
   font-weight: var(--rf-weight-semibold);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-2);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

@@ -10,7 +10,8 @@ import {
   type OpenAICodexRateLimit,
   type OpenCodeUsageData,
 } from "../../services/refact/providers";
-import { useCapsForToolUse, useGetConfiguredProvidersQuery } from "../../hooks";
+import { useCapsForToolUse } from "../../hooks/useCapsForToolUse";
+import { useGetConfiguredProvidersQuery } from "../../hooks/useProvidersQuery";
 import styles from "./UsageCounter.module.css";
 import {
   clampPercent,

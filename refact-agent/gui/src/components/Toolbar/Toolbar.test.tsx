@@ -197,10 +197,11 @@ describe("Toolbar single workspace tab row", () => {
     "renders and toggles workspace panels on the %s host",
     async (host) => {
       useToolbarHandlers();
-      const view = render(<Toolbar activeTab={{ type: "dashboard" }} />, {
+      const activeTab = { type: "chat" as const, id: "chat-1" };
+      const view = render(<Toolbar activeTab={activeTab} />, {
         preloadedState: {
           config: { ...baseConfig, host },
-          pages: pagesForActiveTab({ type: "dashboard" }),
+          pages: pagesForActiveTab(activeTab),
         },
       });
       const button = screen.getByRole("button", { name: "Workspace panels" });
@@ -220,6 +221,20 @@ describe("Toolbar single workspace tab row", () => {
       }
     },
   );
+
+  it("hides the workspace panels button on web surfaces that do not host the dock", () => {
+    useToolbarHandlers();
+    render(<Toolbar activeTab={{ type: "dashboard" }} />, {
+      preloadedState: {
+        config: { ...baseConfig, host: "web" },
+        pages: pagesForActiveTab({ type: "dashboard" }),
+      },
+    });
+
+    expect(
+      screen.queryByRole("button", { name: "Workspace panels" }),
+    ).not.toBeInTheDocument();
+  });
 
   it("hides the workspace panels button for a terminal-only web host without mutating dock state", () => {
     useToolbarHandlers();
@@ -277,7 +292,7 @@ describe("Toolbar single workspace tab row", () => {
 
   it("reflects externally collapsed web dock state", async () => {
     useToolbarHandlers();
-    const view = renderToolbar({ type: "dashboard" });
+    const view = renderToolbar({ type: "chat", id: "chat-1" });
     const button = screen.getByRole("button", { name: "Workspace panels" });
 
     act(() => {

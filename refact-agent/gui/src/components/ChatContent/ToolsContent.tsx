@@ -24,7 +24,8 @@ import {
 } from "../../services/refact";
 import { CommandMarkdown } from "../Command";
 import { Chevron } from "../Collapsible";
-import { useAppDispatch, useAppSelector } from "../../hooks";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import {
   selectIsStreamingById,
   selectIsWaitingById,

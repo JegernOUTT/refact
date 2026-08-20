@@ -114,7 +114,6 @@
 
 .entryButton {
   all: unset;
-  box-sizing: border-box;
   display: block;
   width: 100%;
   color: inherit;
@@ -191,7 +190,7 @@
   color: var(--rf-color-fg);
   font-family: var(--rf-font-mono);
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
   white-space: pre-wrap;
   word-break: break-word;
 }

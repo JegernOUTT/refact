@@ -3,7 +3,7 @@ import { Flex, Text } from "../LongTailPrimitives";
 import { ArrowDown } from "lucide-react";
 import classNames from "classnames";
 
-import { useAppSelector } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import {
   selectIsStreamingById,
   selectIsWaitingById,

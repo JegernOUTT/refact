@@ -1,7 +1,8 @@
 import { forwardRef, useCallback, useRef, useState } from "react";
 import { Globe } from "lucide-react";
 import { IconButton, Tooltip } from "../ui";
-import { useAppDispatch, useAppSelector } from "../../hooks";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import {
   selectBrowserUiOpen,
   selectBrowserRuntime,

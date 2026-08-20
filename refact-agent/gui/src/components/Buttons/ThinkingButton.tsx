@@ -2,7 +2,7 @@ import React from "react";
 import { Flex, Text } from "@radix-ui/themes";
 import { WandSparkles } from "lucide-react";
 import { useThinking } from "../../hooks/useThinking";
-import { useAppSelector } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import {
   selectThreadBoostReasoningById,
   useThreadId,

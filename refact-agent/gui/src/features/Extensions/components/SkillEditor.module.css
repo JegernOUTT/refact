@@ -61,7 +61,6 @@
 .rawTextarea {
   width: 100%;
   min-width: 0;
-  box-sizing: border-box;
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-ctl);
   background-color: var(--rf-surface-1);

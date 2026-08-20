@@ -46,15 +46,49 @@ pub struct CompiledPolicy {
 }
 
 pub fn compile_patterns(patterns: &[String]) -> Result<Vec<Pattern>, PolicyError> {
-    patterns
-        .iter()
-        .map(|pattern| {
-            Pattern::new(&normalize(pattern)).map_err(|error| PolicyError::InvalidGlob {
+    let mut compiled = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        let normalized = normalize(pattern);
+        compiled.push(
+            Pattern::new(&normalized).map_err(|error| PolicyError::InvalidGlob {
                 pattern: pattern.clone(),
                 message: error.to_string(),
-            })
-        })
-        .collect()
+            })?,
+        );
+        for alias in canonical_pattern_aliases(&normalized) {
+            if let Ok(alias) = Pattern::new(&alias) {
+                compiled.push(alias);
+            }
+        }
+    }
+    Ok(compiled)
+}
+
+#[cfg(windows)]
+fn canonical_pattern_aliases(normalized: &str) -> Vec<String> {
+    let literal_end = normalized.find(['*', '?', '[']).unwrap_or(normalized.len());
+    let boundary = normalized[..literal_end]
+        .rfind('/')
+        .map_or(0, |index| index + 1);
+    let (base, tail) = normalized.split_at(boundary);
+    if base.is_empty() {
+        return Vec::new();
+    }
+    let Ok(canonical) = dunce::canonicalize(base) else {
+        return Vec::new();
+    };
+    let canonical = normalize(&canonical.to_string_lossy());
+    let alias = format!("{}/{tail}", canonical.trim_end_matches('/'));
+    if alias == normalized {
+        Vec::new()
+    } else {
+        vec![alias]
+    }
+}
+
+#[cfg(not(windows))]
+fn canonical_pattern_aliases(_normalized: &str) -> Vec<String> {
+    Vec::new()
 }
 
 impl PrivacyPolicy {
@@ -359,7 +393,7 @@ fn absolute_path(path: &Path) -> PathBuf {
 }
 
 fn canonicalize_or_original(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn append_relative_candidates(candidate_paths: &mut Vec<PathBuf>, roots: &[PathBuf]) {

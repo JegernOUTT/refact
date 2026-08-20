@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Box, Card, Flex, Text } from "@radix-ui/themes";
-import { useAppDispatch } from "../../../hooks";
+import { useAppDispatch } from "../../../hooks/useAppDispatch";
 import { openScheduler } from "../../../features/Pages/pagesSlice";
 import type {
   EventMessage,

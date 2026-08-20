@@ -10,7 +10,7 @@ import {
   defaultProjectInformationConfig,
   SectionConfig,
 } from "../../services/refact/projectInformation";
-import { useAppDispatch } from "../../hooks";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import { setIncludeProjectInfo } from "../../features/Chat/Thread/actions";
 import {

@@ -3,7 +3,9 @@ import * as Collapsible from "@radix-ui/react-collapsible";
 import classNames from "classnames";
 import { Pause, Play, Square, Target, type LucideIcon } from "lucide-react";
 
-import { useChatActions, useAppDispatch, useAppSelector } from "../../hooks";
+import { useChatActions } from "../../hooks/useChatActions";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import {
   selectCurrentTasksById,
   selectGoalById,

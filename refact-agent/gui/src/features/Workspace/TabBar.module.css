@@ -2,7 +2,6 @@
   --tab-min-w: 96px;
 
   display: flex;
-  box-sizing: border-box;
   align-items: center;
   width: 100%;
   min-width: 0;
@@ -120,7 +119,6 @@
 
 .tabButton {
   display: flex;
-  box-sizing: border-box;
   align-items: center;
   width: 100%;
   min-width: 0;

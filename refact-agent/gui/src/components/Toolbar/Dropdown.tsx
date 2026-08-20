@@ -11,7 +11,8 @@ import {
 } from "lucide-react";
 
 import { selectHost } from "../../features/Config/configSlice";
-import { useAppSelector, useEventsBusForIDE } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useEventsBusForIDE } from "../../hooks/useEventBusForIDE";
 import { Icon, IconButton, Menu, Tooltip } from "../ui";
 import styles from "./Toolbar.module.css";
 

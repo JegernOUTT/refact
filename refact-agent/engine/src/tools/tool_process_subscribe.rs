@@ -862,7 +862,8 @@ mod tests {
         session: &Arc<AMutex<ChatSession>>,
         expected_count: usize,
     ) -> Vec<ChatMessage> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let wait_secs = if cfg!(target_os = "windows") { 15 } else { 2 };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_secs);
         loop {
             let events = subscribe_events(session).await;
             if events.len() >= expected_count {

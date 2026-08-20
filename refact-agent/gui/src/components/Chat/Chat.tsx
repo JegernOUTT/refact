@@ -3,7 +3,9 @@ import { ChatForm, ChatFormProps } from "../ChatForm";
 import { ChatContent } from "../ChatContent";
 import { Flex, Button, Card, Container } from "@radix-ui/themes";
 import styles from "./Chat.module.css";
-import { useAppSelector, useAppDispatch, useChatActions } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
+import { useChatActions } from "../../hooks/useChatActions";
 import { type Config } from "../../features/Config/configSlice";
 import {
   enableSend,

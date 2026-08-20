@@ -8,7 +8,7 @@ import {
   NotConfiguredIntegrationWithIconRecord,
 } from "../../../services/refact";
 import { setError } from "../../../features/Errors/errorsSlice";
-import { useAppDispatch } from "../../../hooks";
+import { useAppDispatch } from "../../../hooks/useAppDispatch";
 
 const getAvailabilityErrorMessage = (error: unknown, fallback: string) => {
   if (error && typeof error === "object" && "data" in error) {

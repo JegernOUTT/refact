@@ -64,3 +64,12 @@
 .radix-themes :where(button, input, select, textarea) {
   font: inherit;
 }
+
+/*
+ * Radix `<Text color="gray">` resolves to --gray-a11 — an unowned color
+ * (rgba(0,0,0,.608) in light, audit L-06). Route the gray-text idiom to the
+ * design system's muted tier so every secondary label shares one color.
+ */
+.radix-themes .rt-Text[data-accent-color="gray"] {
+  color: var(--rf-color-muted);
+}

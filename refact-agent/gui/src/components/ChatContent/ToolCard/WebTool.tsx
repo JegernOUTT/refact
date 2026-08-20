@@ -5,7 +5,7 @@ import { Box, Flex, Text } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { ContextFileList } from "./ContextFileList";
-import { useAppSelector } from "../../../hooks";
+import { useAppSelector } from "../../../hooks/useAppSelector";
 import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
 import { ChatContextFile, ToolCall } from "../../../services/refact/types";

@@ -3,7 +3,6 @@
   top: 0;
   z-index: 5;
   width: 100%;
-  box-sizing: border-box;
   background: transparent;
   padding-bottom: var(--rf-space-1);
 }
@@ -11,14 +10,12 @@
 .container {
   width: 100%;
   min-width: 0;
-  box-sizing: border-box;
 }
 
 .card {
   overflow: hidden;
   width: 100%;
   min-width: 0;
-  box-sizing: border-box;
   border-left: 2px solid var(--red-9);
   padding-left: var(--rf-space-2);
 }
@@ -33,7 +30,6 @@
 
 .toggleButton {
   all: unset;
-  box-sizing: border-box;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -42,7 +38,7 @@
   min-width: 0;
   min-height: var(--rf-control-h-icon-sm);
   border-radius: var(--rf-radius-ctl);
-  transition: filter 0.15s ease;
+  transition: filter var(--rf-dur-fast) var(--rf-ease-standard);
 }
 
 .toggleButton:focus-visible {
@@ -73,7 +69,6 @@
 .body {
   composes: scrollbarThin from "../../shared/scrollbar.module.css";
   padding: var(--rf-space-2) 0 var(--rf-space-1);
-  box-sizing: border-box;
   min-width: 0;
   max-width: 100%;
   max-height: 400px;
@@ -116,7 +111,6 @@
 
 .actionButton {
   all: unset;
-  box-sizing: border-box;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -124,10 +118,10 @@
   width: var(--rf-control-h-icon-sm);
   height: var(--rf-control-h-icon-sm);
   border-radius: var(--rf-radius-chip);
-  color: var(--gray-11);
+  color: var(--rf-color-muted);
   transition:
-    background-color 0.1s,
-    color 0.1s;
+    background-color var(--rf-dur-fast),
+    color var(--rf-dur-fast);
 }
 
 .actionButton:hover {

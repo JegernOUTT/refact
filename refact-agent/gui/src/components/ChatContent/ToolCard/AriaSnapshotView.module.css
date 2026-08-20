@@ -79,7 +79,6 @@
 
 .nodeToggle {
   all: unset;
-  box-sizing: border-box;
   display: inline-flex;
   width: var(--rf-control-h-sm);
   height: var(--rf-control-h-sm);

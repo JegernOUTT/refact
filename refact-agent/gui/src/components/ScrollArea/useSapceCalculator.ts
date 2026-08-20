@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useDeferredValue } from "react";
-import { useResizeObserver } from "../../hooks";
+import { useResizeObserver } from "../../hooks/useResizeObserver";
 
 function calculateSpace(
   scrollElem: HTMLElement,

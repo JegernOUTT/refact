@@ -13,7 +13,8 @@ import {
   setTaskActiveChat,
 } from "../../features/Tasks/tasksSlice";
 import { push } from "../../features/Pages/pagesSlice";
-import { useAppDispatch, useAppSelector } from "../../hooks";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import {
   selectMessagesById,

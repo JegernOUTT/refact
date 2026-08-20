@@ -1,7 +1,6 @@
 .container {
   display: flex;
   min-width: 0;
-  box-sizing: border-box;
   width: 100%;
   flex-direction: column;
   gap: var(--rf-space-3);
@@ -38,7 +37,7 @@
 .codeBox {
   min-width: 0;
   font-size: var(--rf-text-2);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-2);
 }
 
 .copy {

@@ -11,7 +11,7 @@ import {
   Send,
   Settings,
 } from "lucide-react";
-import { useAppSelector } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import {
   selectIsStreamingById,
   selectIsWaitingById,

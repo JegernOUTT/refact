@@ -1,7 +1,9 @@
 import React, { useCallback, useMemo, useState } from "react";
 import classNames from "classnames";
 import { AlertTriangle, OctagonX } from "lucide-react";
-import { useAppDispatch, useAppSelector, useChatActions } from "../../hooks";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useChatActions } from "../../hooks/useChatActions";
 import { Markdown } from "../Markdown";
 import { Link } from "../Link";
 import styles from "./ToolConfirmation.module.css";

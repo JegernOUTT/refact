@@ -2,11 +2,9 @@ import { CircleCheck, LoaderCircle, RotateCcw } from "lucide-react";
 import React, { useMemo, useCallback } from "react";
 import { Flex, Box } from "@radix-ui/themes";
 import { Icon } from "../../ui";
-import {
-  useAppSelector,
-  useEventsBusForIDE,
-  useOpenFileInApp,
-} from "../../../hooks";
+import { useAppSelector } from "../../../hooks/useAppSelector";
+import { useEventsBusForIDE } from "../../../hooks/useEventBusForIDE";
+import { useOpenFileInApp } from "../../../hooks/useOpenFileInApp";
 import { selectCapabilities } from "../../../features/Config/configSlice";
 import {
   selectManyDiffMessageByThreadAndIds,

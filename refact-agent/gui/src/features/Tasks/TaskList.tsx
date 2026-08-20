@@ -29,15 +29,14 @@ import {
   TaskMeta,
 } from "../../services/refact/tasks";
 import { openTask } from "./tasksSlice";
+import { humanizeIdentifier } from "../../utils/displayNames";
 import styles from "./Tasks.module.css";
 
-const statusLabels: Record<TaskMeta["status"], string> = {
-  planning: "Planning",
-  active: "Active",
-  paused: "Paused",
-  completed: "Done",
-  abandoned: "Abandoned",
-};
+// Task list keeps the product wording "Done" for `completed`; the shared
+// vocabulary says "Completed", so it stays a local override. Every other
+// status is plain identifier humanization.
+const statusLabel = (status: TaskMeta["status"]): string =>
+  status === "completed" ? "Done" : humanizeIdentifier(status);
 
 const statusTones: Record<
   TaskMeta["status"],
@@ -100,7 +99,7 @@ const TaskItem: React.FC<TaskItemProps> = ({ task, onClick, onDelete }) => {
             </span>
             <span className={styles.taskItemTitle}>{task.name}</span>
             <Badge tone={statusTones[task.status]}>
-              {statusLabels[task.status]}
+              {statusLabel(task.status)}
             </Badge>
           </span>
           <IconButton

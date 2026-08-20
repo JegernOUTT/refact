@@ -3,7 +3,8 @@ import React, { useMemo, useCallback } from "react";
 import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
-import { useAppSelector, useOpenFileInApp } from "../../../hooks";
+import { useAppSelector } from "../../../hooks/useAppSelector";
+import { useOpenFileInApp } from "../../../hooks/useOpenFileInApp";
 import {
   selectToolResultByThreadAndId,
   selectManyDiffMessageByThreadAndIds,

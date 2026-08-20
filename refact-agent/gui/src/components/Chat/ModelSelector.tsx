@@ -2,7 +2,7 @@ import React, { useCallback, useMemo } from "react";
 
 import styles from "./ModelSelector.module.css";
 
-import { useGetCapsQuery } from "../../hooks";
+import { useGetCapsQuery } from "../../hooks/useGetCapsQuery";
 import { CapabilityIcons } from "../../features/Providers/ProviderForm/ProviderModelsList/components";
 import {
   formatContextWindow,

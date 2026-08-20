@@ -6,7 +6,8 @@ import {
   clearInformation,
   getInformationMessage,
 } from "../../features/Errors/informationSlice";
-import { useAppDispatch, useAppSelector } from "../../hooks";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import { IntegrationWithIconResponse } from "../../services/refact";
 import { ErrorCallout } from "../Callout";
 import { InformationCallout } from "../Callout";

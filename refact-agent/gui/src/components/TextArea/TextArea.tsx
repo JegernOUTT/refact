@@ -6,7 +6,7 @@ import React, {
   useCallback,
 } from "react";
 import classNames from "classnames";
-import { useUndoRedo } from "../../hooks";
+import { useUndoRedo } from "../../hooks/useUndoRedo";
 import { createSyntheticEvent } from "../../utils/createSyntheticEvent";
 import styles from "./TextArea.module.css";
 

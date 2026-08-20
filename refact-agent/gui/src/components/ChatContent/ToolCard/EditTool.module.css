@@ -3,7 +3,7 @@
   max-width: 100%;
   font-family: var(--rf-font-mono);
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
 }
 
 .diffBlock {
@@ -34,7 +34,6 @@
 
 .hunkFileButton {
   display: inline-flex;
-  box-sizing: border-box;
   min-height: var(--rf-control-h-sm);
   align-items: center;
   cursor: pointer;
@@ -72,7 +71,6 @@
 
 .hunkActionButton {
   all: unset;
-  box-sizing: border-box;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -179,7 +177,6 @@
 
 .showMoreButton {
   display: flex;
-  box-sizing: border-box;
   align-items: center;
   min-height: var(--rf-control-h-sm);
   width: 100%;

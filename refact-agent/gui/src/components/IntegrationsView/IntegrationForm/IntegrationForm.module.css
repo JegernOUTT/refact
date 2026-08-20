@@ -142,7 +142,7 @@
   color: var(--rf-color-fg);
   font-size: var(--rf-text-2);
   font-weight: var(--rf-weight-medium);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-2);
 }
 
 .errorSurface {
@@ -164,7 +164,7 @@
   color: var(--rf-color-fg);
   font-size: var(--rf-text-3);
   font-weight: var(--rf-weight-semibold);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-3);
 }
 
 .logsScroll {

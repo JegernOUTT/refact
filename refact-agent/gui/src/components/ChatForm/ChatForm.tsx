@@ -80,17 +80,15 @@ import {
 import { TrajectoryButton } from "../Trajectory";
 import { TextAreaWithChips } from "../TextAreaWithChips";
 import { selectHost } from "../../features/Config/configSlice";
-import { useEventsBusForIDE } from "../../hooks";
+import { useEventsBusForIDE } from "../../hooks/useEventBusForIDE";
 import { Form } from "./Form";
-import {
-  useOnPressedEnter,
-  useIsOnline,
-  useConfig,
-  useCapsForToolUse,
-  useAutoFocusOnce,
-  useChatActions,
-  useFirstSendAutoFlip,
-} from "../../hooks";
+import { useOnPressedEnter } from "../../hooks/useOnPressedEnter";
+import { useIsOnline } from "../../hooks/useIsOnline";
+import { useConfig } from "../../hooks/useConfig";
+import { useCapsForToolUse } from "../../hooks/useCapsForToolUse";
+import { useAutoFocusOnce } from "../../hooks/useAutoFocusOnce";
+import { useChatActions } from "../../hooks/useChatActions";
+import { useFirstSendAutoFlip } from "../../hooks/useFirstSendAutoFlip";
 import { Callout } from "../Callout";
 import { ComboBox } from "../ComboBox";
 import { UnifiedAttachmentsTray } from "./UnifiedAttachmentsTray";
@@ -100,7 +98,8 @@ import { WorktreeControl } from "../../features/Worktrees";
 import { addCheckboxValuesToInput } from "./utils";
 import { stripUnfilledPlaceholders } from "../ComboBox/argumentPlaceholders";
 import { useCommandCompletionAndPreviewFiles } from "./useCommandCompletionAndPreviewFiles";
-import { useAppSelector, useAppDispatch } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { clearError, getErrorMessage } from "../../features/Errors/errorsSlice";
 import { useAttachedFiles, useCheckboxes } from "./useCheckBoxes";
 import { useInputValue } from "./useInputValue";

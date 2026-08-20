@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useDebounceCallback } from "usehooks-ts";
 import { Checkboxes } from "./useCheckBoxes";
-import { useAppSelector, useHasCaps } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useHasCaps } from "../../hooks/useHasCaps";
 import { addCheckboxValuesToInput } from "./utils";
 import {
   type CommandCompletionResponse,

@@ -1,5 +1,4 @@
 .page {
-  box-sizing: border-box;
   display: flex;
   width: min(960px, 100%);
   min-width: 0;
@@ -43,7 +42,7 @@
   margin: 0;
   color: var(--rf-color-muted);
   font-size: var(--rf-text-2);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-2);
 }
 
 .providerGrid {

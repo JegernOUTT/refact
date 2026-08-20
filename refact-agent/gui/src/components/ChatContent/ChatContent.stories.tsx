@@ -1,11 +1,6 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
-import React from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import { ChatContent } from ".";
-import { Provider } from "react-redux";
-import { setUpStore } from "../../app/store";
-import { Theme } from "../Theme";
-import { AbortControllerProvider } from "../../contexts/AbortControllers";
 import { MarkdownMessage } from "../../__fixtures__/markdown";
 import type { ChatMessages } from "../../services/refact";
 import type { ChatThread } from "../../features/Chat/Thread";
@@ -17,97 +12,43 @@ import {
   LARGE_DIFF,
   CHAT_WITH_MULTI_MODAL_IMAGES,
   CHAT_CONFIG_THREAD,
-  STUB_LINKS_FOR_CHAT_RESPONSE,
   CHAT_WITH_TEXTDOC,
   MARKDOWN_ISSUE,
 } from "../../__fixtures__";
-import { http, HttpResponse } from "msw";
 import { userEvent, within } from "@storybook/testing-library";
-import { Flex } from "@radix-ui/themes";
-import { CHAT_LINKS_URL } from "../../services/refact/consts";
-import {
-  goodCaps,
-  goodPing,
-  goodPrompts,
-  goodUser,
-  noCommandPreview,
-  noCompletions,
-  noTools,
-  ToolConfirmation,
-} from "../../__fixtures__/msw";
+import { chatLinks } from "../../__fixtures__/msw";
 import { ChatStoryHarness } from "../../__stories__/ChatStoryHarness";
+import { CHAT_STORY_MSW_HANDLERS } from "../../__stories__/chatStoryState";
 import { makeChatThread } from "../../__stories__/chatStoryState";
 import type { QueuedItem } from "../../features/Chat/Thread/types";
 
-const MockedStore: React.FC<{
+type ChatContentStoryProps = {
   messages?: ChatMessages;
   thread?: ChatThread;
-}> = ({ messages, thread }) => {
-  const threadData = thread ?? {
-    id: "test",
-    model: "test",
-    messages: messages ?? [],
-    new_chat_suggested: {
-      wasSuggested: false,
-    },
-  };
-  const threadId = threadData.id;
-  const store = setUpStore({
-    chat: {
-      current_thread_id: threadId,
-      open_thread_ids: [threadId],
-      threads: {
-        [threadId]: {
-          thread: threadData,
-          streaming: false,
-          waiting_for_response: false,
-          prevent_send: false,
-          error: null,
-          queued_items: [],
-          send_immediately: false,
-          attached_images: [],
-          attached_text_files: [],
-          background_agents: {},
-          confirmation: {
-            pause: false,
-            pause_reasons: [],
-            status: { wasInteracted: false, confirmationStatus: true },
-          },
-          snapshot_received: true,
-          task_widget_expanded: false,
-          memory_enrichment_user_touched: false,
-          manual_preview_items: [],
-          manual_preview_ran: false,
-        },
-      },
-      max_new_tokens: 4096,
-      tool_use: "quick",
-      system_prompt: {},
-      sse_refresh_requested: null,
-      stream_version: 0,
-    },
-  });
-
-  return (
-    <Provider store={store}>
-      <Theme>
-        <AbortControllerProvider>
-          <Flex direction="column" align="stretch" height="100dvh">
-            <ChatContent onRetry={() => ({})} onStopStreaming={() => ({})} />
-          </Flex>
-        </AbortControllerProvider>
-      </Theme>
-    </Provider>
-  );
 };
+
+// Shared harness (store + Theme + AbortControllers + ChatThreadProvider) with
+// no story chrome: the transcript owns the whole preview viewport, exactly as
+// it does inside the application shell.
+const ChatContentStory = ({ messages, thread }: ChatContentStoryProps) => (
+  <ChatStoryHarness thread={thread} messages={messages ?? []}>
+    <ChatContent onRetry={() => ({})} onStopStreaming={() => ({})} />
+  </ChatStoryHarness>
+);
 
 const meta = {
   title: "Chat Content",
-  component: MockedStore,
+  component: ChatContentStory,
   args: {
     messages: [],
   },
-} satisfies Meta<typeof MockedStore>;
+  parameters: {
+    layout: "fullscreen",
+    msw: {
+      handlers: CHAT_STORY_MSW_HANDLERS,
+    },
+  },
+} satisfies Meta<typeof ChatContentStory>;
 
 export default meta;
 
@@ -137,14 +78,12 @@ export const WithDiffs: Story = {
 export const WithDiffActions: Story = {
   args: {
     messages: CHAT_WITH_DIFF_ACTIONS.messages,
-    // getDiffByIndex: (key: string) => CHAT_WITH_DIFF_ACTIONS.applied_diffs[key],
   },
 };
 
 export const LargeDiff: Story = {
   args: {
     messages: LARGE_DIFF.messages,
-    // getDiffByIndex: (key: string) => LARGE_DIFF.applied_diffs[key],
   },
 };
 
@@ -200,11 +139,7 @@ export const IntegrationChat: Story = {
   },
   parameters: {
     msw: {
-      handlers: [
-        http.post(`http://127.0.0.1:8001${CHAT_LINKS_URL}`, () => {
-          return HttpResponse.json(STUB_LINKS_FOR_CHAT_RESPONSE);
-        }),
-      ],
+      handlers: [...CHAT_STORY_MSW_HANDLERS, chatLinks],
     },
   },
 };
@@ -213,43 +148,11 @@ export const TextDoc: Story = {
   args: {
     thread: CHAT_WITH_TEXTDOC,
   },
-  parameters: {
-    msw: {
-      handlers: [
-        goodCaps,
-        goodPing,
-        goodPrompts,
-        goodUser,
-        // noChatLinks,
-        noTools,
-
-        ToolConfirmation,
-        noCompletions,
-        noCommandPreview,
-      ],
-    },
-  },
 };
 
 export const MarkdownIssue: Story = {
   args: {
     thread: MARKDOWN_ISSUE,
-  },
-  parameters: {
-    msw: {
-      handlers: [
-        goodCaps,
-        goodPing,
-        goodPrompts,
-        goodUser,
-        // noChatLinks,
-        noTools,
-
-        ToolConfirmation,
-        noCompletions,
-        noCommandPreview,
-      ],
-    },
   },
 };
 
@@ -274,22 +177,6 @@ export const ToolWaiting: Story = {
             },
           ],
         },
-      ],
-    },
-  },
-  parameters: {
-    msw: {
-      handlers: [
-        goodCaps,
-        goodPing,
-        goodPrompts,
-        goodUser,
-        // noChatLinks,
-        noTools,
-
-        ToolConfirmation,
-        noCompletions,
-        noCommandPreview,
       ],
     },
   },

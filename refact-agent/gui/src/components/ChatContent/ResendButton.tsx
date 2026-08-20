@@ -1,6 +1,7 @@
 import React from "react";
 import { RefreshCw } from "lucide-react";
-import { useAppSelector, useChatActions } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useChatActions } from "../../hooks/useChatActions";
 import {
   selectIsStreamingById,
   selectIsWaitingById,

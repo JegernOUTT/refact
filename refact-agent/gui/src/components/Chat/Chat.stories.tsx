@@ -1,111 +1,50 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
-import React from "react";
 import type { Meta, StoryObj } from "@storybook/react";
 import { Chat } from "./Chat";
 import { ChatThread } from "../../features/Chat/Thread/types";
-import { RootState, setUpStore } from "../../app/store";
-import { Provider } from "react-redux";
-import { Theme } from "../Theme";
-import { AbortControllerProvider } from "../../contexts/AbortControllers";
+import { RootState } from "../../app/store";
 import {
   CHAT_CONFIG_THREAD,
   CHAT_WITH_KNOWLEDGE_TOOL,
 } from "../../__fixtures__";
 
-import {
-  goodCaps,
-  goodPing,
-  goodPrompts,
-  goodUser,
-  chatLinks,
-  goodTools,
-  noTools,
-  // noChatLinks,
-} from "../../__fixtures__/msw";
-import { Flex } from "@radix-ui/themes";
+import { chatLinks, goodTools } from "../../__fixtures__/msw";
+import { ChatStoryHarness } from "../../__stories__/ChatStoryHarness";
+import { CHAT_STORY_MSW_HANDLERS } from "../../__stories__/chatStoryState";
+import { makeChatThread } from "../../__stories__/chatStoryState";
 
-const Template: React.FC<{
+type ChatStoryProps = {
   thread?: ChatThread;
   config?: RootState["config"];
-}> = ({ thread, config }) => {
-  const threadData = thread ?? {
-    id: "test",
-    model: "gpt-4o", // or any model from STUB CAPS REQUEst
-    messages: [],
-    new_chat_suggested: {
-      wasSuggested: false,
-    },
-  };
-  const threadId = threadData.id;
-  const store = setUpStore({
-    chat: {
-      current_thread_id: threadId,
-      open_thread_ids: [threadId],
-      threads: {
-        [threadId]: {
-          thread: threadData,
-          streaming: false,
-          waiting_for_response: false,
-          prevent_send: false,
-          error: null,
-          queued_items: [],
-          send_immediately: false,
-          attached_images: [],
-          attached_text_files: [],
-          background_agents: {},
-          confirmation: {
-            pause: false,
-            pause_reasons: [],
-            status: { wasInteracted: false, confirmationStatus: true },
-          },
-          snapshot_received: true,
-          task_widget_expanded: false,
-          memory_enrichment_user_touched: false,
-          manual_preview_items: [],
-          manual_preview_ran: false,
-        },
-      },
-      max_new_tokens: 4096,
-      tool_use: "agent",
-      system_prompt: {},
-      sse_refresh_requested: null,
-      stream_version: 0,
-    },
-    config,
-  });
-
-  return (
-    <Provider store={store}>
-      <Theme>
-        <AbortControllerProvider>
-          <Flex direction="column" align="stretch" height="100dvh">
-            <Chat
-              unCalledTools={false}
-              host="web"
-              tabbed={false}
-              backFromChat={() => ({})}
-              maybeSendToSidebar={() => ({})}
-            />
-          </Flex>
-        </AbortControllerProvider>
-      </Theme>
-    </Provider>
-  );
 };
+
+// The shared harness owns the store, Theme, abort controllers and the
+// full-height flex column, so the chat shell fills the preview viewport
+// instead of being pushed past it by story padding.
+const Template = ({ thread, config }: ChatStoryProps) => (
+  <ChatStoryHarness thread={thread ?? makeChatThread()} config={config}>
+    <Chat
+      unCalledTools={false}
+      host="web"
+      tabbed={false}
+      backFromChat={() => ({})}
+      maybeSendToSidebar={() => ({})}
+    />
+  </ChatStoryHarness>
+);
+
+// MSW resolves the first matching handler, so the story-specific ones are
+// prepended to the shared chat polling set.
+const CHAT_HANDLERS = [chatLinks, ...CHAT_STORY_MSW_HANDLERS];
+const CHAT_HANDLERS_WITH_TOOLS = [goodTools, ...CHAT_HANDLERS];
 
 const meta: Meta<typeof Template> = {
   title: "Chat",
   component: Template,
   parameters: {
+    layout: "fullscreen",
     msw: {
-      handlers: [
-        goodCaps,
-        goodPing,
-        goodPrompts,
-        goodUser,
-        chatLinks,
-        goodTools,
-      ],
+      handlers: CHAT_HANDLERS_WITH_TOOLS,
     },
   },
   argTypes: {},
@@ -136,7 +75,7 @@ export const IDE: Story = {
 
   parameters: {
     msw: {
-      handlers: [goodCaps, goodPing, goodPrompts, goodUser, chatLinks, noTools],
+      handlers: CHAT_HANDLERS,
     },
   },
 };
@@ -155,24 +94,14 @@ export const Knowledge: Story = {
   },
   parameters: {
     msw: {
-      handlers: [
-        goodCaps,
-        goodPing,
-        goodPrompts,
-        goodUser,
-        // noChatLinks,
-        chatLinks,
-        noTools,
-      ],
+      handlers: CHAT_HANDLERS,
     },
   },
 };
 
 export const EmptySpaceAtBottom: Story = {
   args: {
-    thread: {
-      id: "test",
-      model: "gpt-4o", // or any model from STUB CAPS REQUEst
+    thread: makeChatThread({
       messages: [
         {
           role: "user",
@@ -186,34 +115,20 @@ export const EmptySpaceAtBottom: Story = {
           role: "user",
           content: "👋",
         },
-        // { role: "assistant", content: "👋" },
       ],
-      new_chat_suggested: {
-        wasSuggested: false,
-      },
-    },
+    }),
   },
 
   parameters: {
     msw: {
-      handlers: [
-        goodCaps,
-        goodPing,
-        goodPrompts,
-        goodUser,
-        // noChatLinks,
-        chatLinks,
-        noTools,
-      ],
+      handlers: CHAT_HANDLERS,
     },
   },
 };
 
 export const UserMessageEmptySpaceAtBottom: Story = {
   args: {
-    thread: {
-      id: "test",
-      model: "gpt-4o", // or any model from STUB CAPS REQUEst
+    thread: makeChatThread({
       messages: [
         {
           role: "user",
@@ -268,32 +183,19 @@ export const UserMessageEmptySpaceAtBottom: Story = {
         },
         { role: "assistant", content: "👋" },
       ],
-      new_chat_suggested: {
-        wasSuggested: false,
-      },
-    },
+    }),
   },
 
   parameters: {
     msw: {
-      handlers: [
-        goodCaps,
-        goodPing,
-        goodPrompts,
-        goodUser,
-        // noChatLinks,
-        chatLinks,
-        noTools,
-      ],
+      handlers: CHAT_HANDLERS,
     },
   },
 };
 
 export const CompressButton: Story = {
   args: {
-    thread: {
-      id: "test",
-      model: "gpt-4o", // or any model from STUB CAPS REQUEst
+    thread: makeChatThread({
       messages: [
         {
           role: "user",
@@ -350,23 +252,12 @@ export const CompressButton: Story = {
         },
         { role: "assistant", content: "👋" },
       ],
-      new_chat_suggested: {
-        wasSuggested: false,
-      },
-    },
+    }),
   },
 
   parameters: {
     msw: {
-      handlers: [
-        goodCaps,
-        goodPing,
-        goodPrompts,
-        goodUser,
-        // noChatLinks,
-        chatLinks,
-        noTools,
-      ],
+      handlers: CHAT_HANDLERS,
     },
   },
 };

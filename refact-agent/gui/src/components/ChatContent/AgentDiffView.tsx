@@ -2,7 +2,7 @@ import React, { useMemo, useState } from "react";
 import classNames from "classnames";
 import { CircleAlert, FileText, Github } from "lucide-react";
 import groupBy from "lodash.groupby";
-import { useAppSelector } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import {
   selectIsStreamingById,
   selectIsWaitingById,

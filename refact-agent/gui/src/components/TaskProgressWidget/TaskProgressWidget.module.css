@@ -119,7 +119,7 @@
 .goalLabel {
   color: var(--rf-color-muted);
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
 }
 
 .goalInput {
@@ -153,7 +153,7 @@
   padding: 0;
   color: var(--rf-color-muted);
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
 }
 
 .goalBudgetGrid {
@@ -175,7 +175,7 @@
 .goalBudgetLabel {
   color: var(--rf-color-muted);
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
 }
 
 .goalBudgetInput {
@@ -234,7 +234,7 @@
   padding-inline-start: var(--rf-space-4);
   color: var(--rf-color-muted);
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
 }
 
 .verifierReply {

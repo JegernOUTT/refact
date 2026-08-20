@@ -9,7 +9,8 @@ import React, {
 import { Box, Button, Container, Flex, Text } from "@radix-ui/themes";
 import classNames from "classnames";
 import { Check, ClipboardList, Copy } from "lucide-react";
-import { useAppSelector, useCopyToClipboard } from "../../../hooks";
+import { useAppSelector } from "../../../hooks/useAppSelector";
+import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
 import { selectPlanBannerState } from "../../../features/Chat/Thread/selectors";
 import { Markdown } from "../../Markdown";
 import { Icon } from "../../ui";

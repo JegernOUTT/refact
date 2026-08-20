@@ -751,3 +751,54 @@ A 90-finding multi-agent review ran over the remediation commits; every accepted
 - **rf-b6a97107** (~50 legacy box-sizing declarations): AGENTS wording now says new code must not add them; legacy removed opportunistically (done in every file touched this round).
 - **rf-5088b886** (TaskBoardLoader indirection, 0.35 confidence): pre-existing pattern, deferred.
 - **rf-4c8cb831** (isIconOnlyLabel heuristic → explicit API): public API change, deferred.
+
+---
+
+## Part 9 — RESIDUALS SESSION (post-review): every remaining open finding fixed or closed with evidence
+
+**Session scope:** the user reported the task-workspace 0-height regression as still-live (screenshot showed `_chatContent_3lkns_461` at `display: block`, `1199×0`); mission was to verify that, then fix every genuinely-open ledger item.
+
+### Regression triage: task-workspace 0-height (user screenshot)
+
+**Verdict: already healed — the screenshot was a stale in-memory bundle.** Evidence chain: shipped `style.css` carries `_chatContent_1cgrn_461` while the screenshot DOM used hash `3lkns` → two different builds (CSS-module hashes differ per build content). `gui/dist` ↔ `engine/assets/chat/dist` checksums identical (built post-fix). Engine serves all GUI assets with `cache-control: no-cache`, so no HTTP-cache mixing is possible — the broken window was a tab loaded before the rebuild. Fresh-profile live measurement: `chatContent d=flex h=784 → workspaceTabs d=flex h=840 → taskWorkspace d=flex h=840` at 1280×900, and full content render at 420×900. **A plain reload fixes any window still showing the bug.**
+
+### L-01 re-verified live (engine-served dist, 420×900)
+
+Dock renders as Sheet `x=12 w=396` (symmetric 12px margins) with the **Close workspace panel** IconButton at exactly **28×28** in the Files|Git|Tasks switcher row. Screenshot on record.
+
+### Fixed this session
+
+| ID | Fix | Evidence / mechanism |
+|---|---|---|
+| N-06 (rest) | **Full barrel-import codemod: 84 files** in `components/` now import hooks from leaf modules (`hooks/useX`), preserving inline `type` markers; zero unresolved names | scripted codemod + tsc/lint/prettier green |
+| N-21/L-04 (rest) | **Line-height pairing sweep completed** across `features/` + `components/` (2 delegates + block-aware script): every block declaring a scale font-size now uses the paired `--rf-line-N`; blocks without their own font-size deliberately keep unitless `--rf-line` (px would change descendant inheritance) | AGENTS typography rule updated to "sweep done" |
+| rf-b6a97107 | **69 → 1 legacy `box-sizing` declarations removed**; the survivor is `ui/Tabs` (documented belt-and-braces) + the KaTeX content-box exemption | AGENTS box-model note updated |
+| L-26/N-27/L-21 | **Legacy story suites migrated**: `Chat.stories.tsx` + `ChatContent.stories.tsx` off MockedStore onto `ChatStoryHarness` (all 22 story ids preserved), `layout: "fullscreen"` (p48 chrome gone), shared `CHAT_STORY_MSW_HANDLERS` incl. new exec/list, skills-status, buddy/opportunities stubs; harness now resolves appearance from the Storybook global (html `data-appearance`) with dark fallback | delegate report + smoke suite green |
+| rf-2c6bf74f | **Humanizer consolidation with honest verdicts**: TaskList `statusLabels` and StatusBadge `humanizeStatus` deleted in favor of `humanizeIdentifier` (TaskList keeps curated `completed→"Done"` locally to avoid changing goal-status wording); TabBar/BackgroundAgentCard/WorktreeDiffPanel/buddyOpportunityActions confirmed NOT identifier humanizers (full sentences, lowercase badges asserted by tests, boolean-derived words, mid-sentence fragments) — documented, left alone | delegate report |
+| L-17 | RetryForm model trigger → `size="sm"` (26px, matching its 26px row) | one-prop fix |
+| L-06 | **Gray-text adapter**: `.radix-themes .rt-Text[data-accent-color="gray"] { color: var(--rf-color-muted) }` in base.css — the live-measured `rgba(0,0,0,0.608)` (`--gray-a11`) labels (composer trigger "·"/"1M", ChatSettingsDropdown ×8, ChatControls) now route to the owned muted tier. Honest note: muted is AA, not AAA — AAA for the muted metadata tier is a design decision, not a bug | live light-theme measurement found 3 leaked nodes pre-fix |
+| N-51 (rest) | **Enforcement test** `src/__tests__/tapTargetFloor.test.ts`: guards the 28px token, Chip floor + remove `::before` hit-area formula, DialogImage trigger hit-area, ModelSelector search height, EditTool hunk/show-more heights, PlanBanner control sizes | new characterization suite |
+| L-22 | **Portal test** `components/Portal/Portal.test.tsx`: store-free render + ThemePropsContext host/appearance propagation (also guards S3-23 regression) | new rendered tests |
+| S3-8 family leftovers | PlanBanner `.actionButton` `--gray-11` → `--rf-color-muted`; `transition: … 0.15s ease/0.1s` → `--rf-dur-fast`/`--rf-ease-standard` | spotted during test-writing |
+| N-67 (new) | **Mascot speech bubble clips off-viewport at narrow widths** (measured: bubble cut mid-word at 420×900). Fix: `BuddySpeechBubble` clamps via the independent `translate` property (composes with the float animation's `transform`) + `maxWidth` viewport cap `min(…, calc(100dvw - 16px))`, re-clamped on resize | screenshot + code fix |
+| N-68 (new) | **Task-workspace tabs truncate to "Bo… C… M… D…" at 420** (kit Tabs grid shares equal shrinkable columns; header row starves the list). Fix: `@media (max-width: 680px)` the header wraps and `.workspaceTabList` takes a full row (`flex: 1 1 100%`) — all four labels render intact | screenshot + CSS fix |
+| N-69 (new) | **Dock toggle rendered pressed-but-inert on non-shell surfaces** (task workspace/dashboard render as pages without `WorkspaceView`, which owns the Dock — `activeTab.type === "chat"` is the only dock-hosting surface). Fix: web hosts hide the Workspace-panels toggle unless the active surface hosts the dock; IDE-host behavior unchanged | live repro at 420 + Toolbar fix |
+| MCP clamp coupling | `.serverDescription` `max-height: calc(lines * 1em * var(--rf-line))` → `calc(lines * var(--rf-line-1))` (delegate-flagged decoupling) | follow-up from sweep |
+
+### Closed with evidence (no code change needed)
+
+| ID | Verdict |
+|---|---|
+| L-03 | **Healed by the integer type scale**: live probe over every `rt-Text` in a real task chat found **zero nodes off the 12/13/14/15/19 scale**. Radix size props now coincide with rf rungs |
+| L-05 | **Elevation split verified live**: light overlay `rgba(253,253,254,.97)` ≠ glass `rgba(250,250,251,.88)`. The intermittent black-glass ghost has not recurred since the N-66 cascade pin; keep watching |
+| N-31 | **Not reproducible**: generic overflow probe (scrollWidth > clientWidth + nowrap, no ellipsis) over the live task-chat transcript returned **zero matches**; the original sighting came from a legacy story wrapped in the p48 chrome that this session removed. Closed as probe artifact |
+
+### Still open / accepted (the honest remainder)
+
+- **Story sweep coverage: 89/171** — the 82-story queue in Part 4f is untouched (auditing, not fixing).
+- **Full 360×780 narrow pass + light-theme pass** over the story inventory: outstanding (light pass unblocked since N-03).
+- **L-09** (container-query ladder can't consume `var()`) — accepted/wontfix. **L-23** (deprecated `@storybook/testing-library`) — accepted, lint-config decision.
+- **rf-5088b886** (TaskBoardLoader indirection), **rf-4c8cb831** (isIconOnlyLabel explicit API) — deferred API refactors.
+- `Chat.stories.tsx` remains in the smoke suite's EXCLUDED list (pre-existing classification, unchanged by the migration).
+- Skipped-by-rule unitless `--rf-line` blocks (~12 sites without in-block font-size) are correct as-is, not debt.
+

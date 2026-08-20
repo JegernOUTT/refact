@@ -4,7 +4,6 @@
   min-width: 0;
   align-items: center;
   gap: var(--rf-space-1);
-  box-sizing: border-box;
   padding: 0 var(--rf-space-2);
   color: var(--rf-color-fg);
   font: inherit;
@@ -264,7 +263,6 @@
   min-height: var(--rf-control-h-sm);
   align-items: center;
   justify-content: center;
-  box-sizing: border-box;
   padding: 0 var(--rf-space-2);
   color: var(--rf-color-muted);
   line-height: var(--rf-line);
@@ -321,7 +319,7 @@
   background: color-mix(in srgb, var(--rf-color-warning) 12%, transparent);
   border-radius: var(--rf-radius-ctl);
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
 }
 
 @media (prefers-reduced-motion: reduce) {

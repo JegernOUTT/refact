@@ -1,7 +1,8 @@
 import React from "react";
 import { Button, Spinner } from "../ui";
 import { type ChatLink } from "../../services/refact/links";
-import { useAppSelector, useLinksFromLsp } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useLinksFromLsp } from "../../hooks/useLinksFromLsp";
 import { TruncateRight } from "../Text/TruncateRight";
 
 import styles from "./ChatLinks.module.css";

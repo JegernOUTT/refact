@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import { FileText } from "lucide-react";
-import { useAppSelector } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import {
   selectIsStreamingById,
   selectIsWaitingById,

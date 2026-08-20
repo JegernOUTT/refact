@@ -130,7 +130,6 @@
 
 .serverCard {
   height: 100%;
-  box-sizing: border-box;
   min-height: 0;
   overflow: hidden;
   display: flex;
@@ -260,12 +259,12 @@
 
   display: -webkit-box;
   flex-shrink: 0;
-  max-height: calc(var(--rf-clamp-lines) * 1em * var(--rf-line));
+  max-height: calc(var(--rf-clamp-lines) * var(--rf-line-1));
   -webkit-line-clamp: var(--rf-clamp-lines);
   -webkit-box-orient: vertical;
   overflow: hidden;
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
   color: var(--rf-color-muted);
 }
 

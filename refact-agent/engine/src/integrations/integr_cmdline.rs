@@ -719,6 +719,14 @@ mod tests {
         }
     }
 
+    fn platform_timeout_secs() -> String {
+        if cfg!(target_os = "windows") {
+            "60".to_string()
+        } else {
+            "10".to_string()
+        }
+    }
+
     fn failure_command() -> String {
         if cfg!(target_os = "windows") {
             "[Console]::Out.Write('bad'); exit 7".to_string()
@@ -832,6 +840,7 @@ mod tests {
                     description: "Measure duration".to_string(),
                     parameters: Vec::new(),
                     command_workdir: expected_cwd.clone(),
+                    timeout: platform_timeout_secs(),
                     ..CmdlineToolConfig::default()
                 },
                 ..ToolCmdline::default()

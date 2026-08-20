@@ -9,7 +9,8 @@ import "../../styles/responsive.css";
 import "../../styles/scrollbar.css";
 import "./theme-config.css";
 import "../shared/tokens.css";
-import { useAppearance, useConfig } from "../../hooks";
+import { useAppearance } from "../../hooks/useAppearance";
+import { useConfig } from "../../hooks/useConfig";
 import {
   ThemePropsContext,
   type ResolvedThemeProps,

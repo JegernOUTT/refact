@@ -8,7 +8,8 @@ import { Popover } from "./Popover";
 import { TruncateLeft } from "../Text";
 import { type DebouncedState } from "usehooks-ts";
 import { CommandCompletionResponse } from "../../services/refact";
-import { useAppSelector, useEventsBusForIDE } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useEventsBusForIDE } from "../../hooks/useEventBusForIDE";
 import { SlashCommandSuggestion } from "../SlashCommands";
 import { selectSubmitOption } from "../../features/Config/configSlice";
 import {

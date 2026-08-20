@@ -2,7 +2,7 @@ import React, { useCallback, useState } from "react";
 import { Flex, Text } from "@radix-ui/themes";
 import { Button, Field, FieldText } from "../../ui";
 
-import { useAppSelector } from "../../../hooks";
+import { useAppSelector } from "../../../hooks/useAppSelector";
 import {
   selectApiKey,
   selectConfig,

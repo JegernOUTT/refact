@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import classNames from "classnames";
 import type { BubblePosition, BuddyControl, Palette } from "./types";
 import type { BuddySpeechStyle } from "./buddySpeech";
@@ -79,10 +79,39 @@ export const BuddySpeechBubble: React.FC<BuddySpeechBubbleProps> = ({
     setControlError(null);
   }, [textKey]);
 
+  const anchorRef = useRef<HTMLDivElement | null>(null);
+  const [edgeShiftPx, setEdgeShiftPx] = useState(0);
+
+  useLayoutEffect(() => {
+    const el = anchorRef.current;
+    if (!el || !visible) {
+      setEdgeShiftPx(0);
+      return;
+    }
+    const clampToViewport = () => {
+      const margin = 8;
+      el.style.translate = "0px 0px";
+      const rect = el.getBoundingClientRect();
+      let shift = 0;
+      if (rect.width > 0) {
+        if (rect.left < margin) {
+          shift = margin - rect.left;
+        } else if (rect.right > window.innerWidth - margin) {
+          shift = window.innerWidth - margin - rect.right;
+        }
+      }
+      el.style.translate = "";
+      setEdgeShiftPx(Math.round(shift));
+    };
+    clampToViewport();
+    window.addEventListener("resize", clampToViewport);
+    return () => window.removeEventListener("resize", clampToViewport);
+  }, [textKey, position, compact, visible, width, maxWidth]);
+
   const style: BubbleVars = {
     ...anchorStyle,
     width,
-    maxWidth,
+    maxWidth: `min(${maxWidth}, calc(100dvw - 16px))`,
     whiteSpace,
     overflowWrap: "break-word",
     pointerEvents: hasControls && !closing ? "auto" : "none",
@@ -93,10 +122,12 @@ export const BuddySpeechBubble: React.FC<BuddySpeechBubbleProps> = ({
     "--bb-border": palette.dark,
     "--bb-accent": palette.body,
     "--bb-accent-soft": `${palette.body}55`,
+    translate: edgeShiftPx === 0 ? undefined : `${edgeShiftPx}px 0px`,
   };
 
   return (
     <div
+      ref={anchorRef}
       data-bubble-position={position}
       data-compact={String(compact)}
       data-style={bubbleStyle}

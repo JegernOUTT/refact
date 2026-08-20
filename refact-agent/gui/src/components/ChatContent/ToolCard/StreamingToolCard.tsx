@@ -4,7 +4,7 @@ import { LoaderCircle } from "lucide-react";
 import { Icon } from "../../ui";
 import classNames from "classnames";
 import { useAutoExpandCollapse, ToolStatus } from "./useAutoExpandCollapse";
-import { useAppSelector } from "../../../hooks";
+import { useAppSelector } from "../../../hooks/useAppSelector";
 import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
 import { ToolCall } from "../../../services/refact/types";

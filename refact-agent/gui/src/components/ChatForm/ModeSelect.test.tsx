@@ -127,7 +127,6 @@ describe("ModeSelect", () => {
       css.match(/\.content,\n\.content > div \{[^}]+\}/)?.[0] ?? "";
     const item = css.match(/\.item,\n\.addModeItem \{[^}]+\}/)?.[0] ?? "";
 
-    expect(content).toContain("box-sizing: border-box;");
     expect(content).toContain("min-width: 0;");
     expect(item).toContain("width: 100%;");
     expect(item).toContain("border-radius: 0;");

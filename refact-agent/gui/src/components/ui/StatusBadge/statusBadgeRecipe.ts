@@ -1,4 +1,5 @@
 import type { LucideIcon } from "lucide-react";
+import { humanizeIdentifier } from "../../../utils/displayNames";
 import type { BadgeSize, BadgeTone, BadgeVariant } from "../Badge";
 
 export type StatusBadgeTone = BadgeTone;
@@ -141,23 +142,18 @@ const STATUS_RECIPES: Partial<Record<string, StatusBadgeRecipe>> = {
   },
 };
 
-function humanizeStatus(status: StatusBadgeStatus): string {
-  return String(status)
-    .replace(/[_-]+/g, " ")
-    .replace(/\b\w/g, (character) => character.toUpperCase());
-}
-
 export function getStatusBadgeRecipe(
   status: StatusBadgeStatus,
 ): StatusBadgeRecipe {
-  return (
-    STATUS_RECIPES[status] ?? {
-      status,
-      tone: "muted",
-      label: humanizeStatus(status),
-      ariaLabel: humanizeStatus(status),
-    }
-  );
+  const known = STATUS_RECIPES[status];
+  if (known) return known;
+  const label = humanizeIdentifier(String(status));
+  return {
+    status,
+    tone: "muted",
+    label,
+    ariaLabel: label,
+  };
 }
 
 export function getFileStatusBadgeProps(

@@ -34,12 +34,10 @@ import { filename } from "../../utils/filename";
 import styles from "./Texdoc.module.css";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { Reveal } from "../Reveal";
-import {
-  useAppSelector,
-  useHideScroll,
-  useEventsBusForIDE,
-  useOpenFileInApp,
-} from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useHideScroll } from "../../hooks/useHideScroll";
+import { useEventsBusForIDE } from "../../hooks/useEventBusForIDE";
+import { useOpenFileInApp } from "../../hooks/useOpenFileInApp";
 import { selectCapabilities } from "../../features/Config/configSlice";
 import { selectCanPaste, selectChatId } from "../../features/Chat";
 import { toolsApi } from "../../services/refact";

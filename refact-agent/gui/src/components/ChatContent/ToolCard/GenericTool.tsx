@@ -3,7 +3,7 @@ import React, { useMemo } from "react";
 import { Box } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
-import { useAppSelector } from "../../../hooks";
+import { useAppSelector } from "../../../hooks/useAppSelector";
 import {
   selectToolResultByThreadAndId,
   selectIsStreamingById,

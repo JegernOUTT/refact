@@ -1,8 +1,8 @@
 import React, { useCallback, useMemo, useState } from "react";
 import { Text, Flex, Skeleton, Box } from "@radix-ui/themes";
 import { ChevronDown } from "lucide-react";
-import { useCapsForToolUse } from "../../hooks";
-import { useAppDispatch } from "../../hooks";
+import { useCapsForToolUse } from "../../hooks/useCapsForToolUse";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { push } from "../../features/Pages/pagesSlice";
 import { enrichAndGroupModels } from "../../utils/enrichModels";
 import {

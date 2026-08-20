@@ -1,6 +1,7 @@
 import { FC, useCallback } from "react";
 import classNames from "classnames";
-import { useConfig, useOpenUrl } from "../../hooks";
+import { useConfig } from "../../hooks/useConfig";
+import { useOpenUrl } from "../../hooks/useOpenUrl";
 import styles from "./Link.module.css";
 
 interface LinkProps extends React.ComponentPropsWithoutRef<"a"> {

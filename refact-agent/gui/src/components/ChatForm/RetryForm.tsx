@@ -10,7 +10,8 @@ import { FileRejection, useDropzone } from "react-dropzone";
 import classNames from "classnames";
 
 import { TextArea } from "../TextArea";
-import { useAppSelector, useCapsForToolUse } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useCapsForToolUse } from "../../hooks/useCapsForToolUse";
 import {
   ProcessedUserMessageContentWithImages,
   UserImage,
@@ -431,6 +432,7 @@ const RetryModelSelector: React.FC<{ disabled?: boolean }> = ({ disabled }) => {
           className={classNames(styles.modelSelector, styles.modelTrigger)}
           disabled={disabled}
           rightIcon={ChevronDown}
+          size="sm"
           type="button"
           variant="soft"
         >

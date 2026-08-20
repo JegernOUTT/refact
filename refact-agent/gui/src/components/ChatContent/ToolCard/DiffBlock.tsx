@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Flex, Text, Box } from "@radix-ui/themes";
-import { useAppearance, useShiki } from "../../../hooks";
+import { useAppearance } from "../../../hooks/useAppearance";
+import { useShiki } from "../../../hooks/useShiki";
 import { DiffChunk } from "../../../services/refact/types";
 import { basename } from "./utils";
 import { extractCodeLines } from "./editToolHighlight";

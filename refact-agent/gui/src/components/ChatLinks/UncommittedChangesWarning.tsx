@@ -1,5 +1,6 @@
 import React from "react";
-import { useAppSelector, useGetLinksFromLsp } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useGetLinksFromLsp } from "../../hooks/useLinksFromLsp";
 import { Markdown } from "../Markdown";
 import { Flex, Separator } from "../LongTailPrimitives";
 import {

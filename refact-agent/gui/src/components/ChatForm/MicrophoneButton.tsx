@@ -3,7 +3,7 @@ import classNames from "classnames";
 import { Mic } from "lucide-react";
 import { IconButton, Tooltip } from "../ui";
 import { useVoiceInput } from "../../hooks/useVoiceInput";
-import { useAppDispatch } from "../../hooks";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { setError } from "../../features/Errors/errorsSlice";
 import styles from "./MicrophoneButton.module.css";
 

@@ -1816,7 +1816,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     fn stdout_command(text: &str) -> Vec<String> {
-        vec!["Write-Output".to_string(), text.to_string()]
+        vec!["cmd".to_string(), "/C".to_string(), format!("echo {text}")]
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1837,9 +1837,9 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn slow_empty_command() -> Vec<String> {
         vec![
-            "Start-Sleep".to_string(),
-            "-Milliseconds".to_string(),
-            "200".to_string(),
+            "powershell.exe".to_string(),
+            "-Command".to_string(),
+            "Start-Sleep -Milliseconds 200".to_string(),
         ]
     }
 

@@ -1,7 +1,8 @@
 import { useCallback } from "react";
 import { WandSparkles } from "lucide-react";
 import { IconButton, Tooltip } from "../ui";
-import { useAppDispatch, useAppSelector } from "../../hooks";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import {
   selectManualPreviewItemsById,
   setManualPreviewItems,

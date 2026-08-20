@@ -36,14 +36,12 @@ import {
   toggleDock,
 } from "../../features/Workspace";
 import { TabBar } from "../../features/Workspace/TabBar";
-import {
-  useAppDispatch,
-  useAppSelector,
-  useAppearance,
-  useConfig,
-  useEventsBusForIDE,
-  useOpenUrl,
-} from "../../hooks";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useAppearance } from "../../hooks/useAppearance";
+import { useConfig } from "../../hooks/useConfig";
+import { useEventsBusForIDE } from "../../hooks/useEventBusForIDE";
+import { useOpenUrl } from "../../hooks/useOpenUrl";
 import { useCreateTaskMutation } from "../../services/refact/tasks";
 import {
   resolveEngineBaseUrl,
@@ -197,7 +195,9 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     capabilities,
     panelsForced,
   );
-  const showWorkspacePanels = host !== "web" || workspaceAvailability.dock;
+  const dockSurfaceActive = activeTab.type === "chat";
+  const showWorkspacePanels =
+    host !== "web" || (workspaceAvailability.dock && dockSurfaceActive);
   const workspacePanelsPressed = workspaceAvailability.dock
     ? workspaceDock.open
     : false;

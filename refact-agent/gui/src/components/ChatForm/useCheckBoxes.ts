@@ -1,11 +1,12 @@
 import { useState, useMemo, useCallback, useEffect } from "react";
 import { selectSelectedSnippet } from "../../features/Chat/selectedSnippet";
 import { FileInfo, selectActiveFile } from "../../features/Chat/activeFile";
-import { useConfig, useAppSelector } from "../../hooks";
+import { useConfig } from "../../hooks/useConfig";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import { selectMessagesById } from "../../features/Chat/Thread/selectors";
 import { createSelector } from "@reduxjs/toolkit";
 import { filename } from "../../utils";
-import { ideAttachFileToChat } from "../../hooks";
+import { ideAttachFileToChat } from "../../hooks/useEventBusForApp";
 import { useThreadId } from "../../features/Chat/Thread";
 
 type CheckboxHelp = {

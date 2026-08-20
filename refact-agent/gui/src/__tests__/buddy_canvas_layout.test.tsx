@@ -115,7 +115,7 @@ describe("BuddyCanvas compact speech layout", () => {
     await waitFor(() => {
       expect(bubbleElement).toHaveStyle({
         width: "220px",
-        maxWidth: "220px",
+        maxWidth: "min(220px, calc(100dvw - 16px))",
         whiteSpace: "normal",
       });
       expect(bubbleElement).toHaveAttribute("data-bubble-position", "top");
@@ -149,7 +149,7 @@ describe("BuddyCanvas compact speech layout", () => {
         width: "300px",
       });
       expect(bubbleElement?.getAttribute("style")).toContain(
-        "max-width: min(460px, 72vw)",
+        "max-width: min(min(460px, 72vw), calc(100dvw - 16px))",
       );
       expect(bubbleElement?.getAttribute("style")).toContain(
         "right: calc(78% - 0px)",
@@ -185,7 +185,7 @@ describe("BuddyCanvas compact speech layout", () => {
     await waitFor(() => {
       expect(bubbleElement).toHaveStyle({
         width: "220px",
-        maxWidth: "220px",
+        maxWidth: "min(220px, calc(100dvw - 16px))",
         whiteSpace: "normal",
       });
       expect(bubbleElement).toHaveAttribute("data-bubble-position", "left");
@@ -215,7 +215,7 @@ describe("BuddyCanvas compact speech layout", () => {
     await waitFor(() => {
       expect(bubbleElement).toHaveStyle({
         width: "270px",
-        maxWidth: "300px",
+        maxWidth: "min(300px, calc(100dvw - 16px))",
       });
       expect(bubbleElement).toHaveAttribute("data-bubble-position", "left");
     });

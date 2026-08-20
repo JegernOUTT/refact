@@ -6,7 +6,7 @@ import { Icon } from "../ui";
 import { useStoredOpen } from "./useStoredOpen";
 import { AnimatedCollapsible } from "./shared/AnimatedCollapsible";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
-import { useEventsBusForIDE } from "../../hooks";
+import { useEventsBusForIDE } from "../../hooks/useEventBusForIDE";
 import { isIdeHost } from "../../utils/isIdeHost";
 import styles from "./SkillReportCard.module.css";
 

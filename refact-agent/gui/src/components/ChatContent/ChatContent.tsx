@@ -17,7 +17,9 @@ import { ContextFiles } from "./ContextFiles";
 import { SystemPrompt } from "./SystemPrompt";
 import { AssistantInput } from "./AssistantInput";
 import { PlainText } from "./PlainText";
-import { useAppDispatch, useAppSelector, useDiffFileReload } from "../../hooks";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useDiffFileReload } from "../../hooks/useDiffFileReload";
 import {
   selectIntegrationById,
   selectIsStreamingById,

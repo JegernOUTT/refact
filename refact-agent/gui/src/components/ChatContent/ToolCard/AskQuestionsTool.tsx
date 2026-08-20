@@ -11,7 +11,8 @@ import { ToolCard, ToolStatus } from "./ToolCard";
 import { Button, FieldTextarea, SegmentedControl, Switch } from "../../ui";
 import { useStoredOpen } from "../useStoredOpen";
 import { Markdown } from "../../Markdown";
-import { useAppSelector, useChatActions } from "../../../hooks";
+import { useAppSelector } from "../../../hooks/useAppSelector";
+import { useChatActions } from "../../../hooks/useChatActions";
 import {
   selectToolResultByThreadAndId,
   selectMessagesById,

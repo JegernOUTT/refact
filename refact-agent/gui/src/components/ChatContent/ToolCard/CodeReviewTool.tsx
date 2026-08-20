@@ -2,7 +2,7 @@ import { Search } from "lucide-react";
 import React, { useMemo } from "react";
 import { Box } from "@radix-ui/themes";
 import type { ToolCall } from "../../../services/refact/types";
-import { useAppSelector } from "../../../hooks";
+import { useAppSelector } from "../../../hooks/useAppSelector";
 import { useThreadId } from "../../../features/Chat/Thread";
 import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
 import { Markdown, ShikiCodeBlock } from "../../Markdown";

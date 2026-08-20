@@ -21,7 +21,7 @@
   color: var(--rf-color-fg);
   font-size: var(--rf-text-4);
   font-weight: var(--rf-weight-semibold);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-4);
 }
 
 .version {

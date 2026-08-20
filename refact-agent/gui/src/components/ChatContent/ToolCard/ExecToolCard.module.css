@@ -167,7 +167,7 @@
   margin: 0;
   font-family: var(--rf-font-mono);
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
   min-width: max-content;
   white-space: pre-wrap;
   overflow-wrap: anywhere;

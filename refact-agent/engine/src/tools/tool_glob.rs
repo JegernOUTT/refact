@@ -39,11 +39,26 @@ fn glob_match_options() -> MatchOptions {
     }
 }
 
+#[cfg(windows)]
+fn normalize_glob_separators(path: &str) -> std::borrow::Cow<'_, str> {
+    if path.contains('\\') {
+        std::borrow::Cow::Owned(path.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(path)
+    }
+}
+
+#[cfg(not(windows))]
+fn normalize_glob_separators(path: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(path)
+}
+
 fn path_matches_glob(pattern: &Pattern, path: &str, opts: &MatchOptions) -> bool {
-    if pattern.matches_with(path, *opts) {
+    let normalized = normalize_glob_separators(path);
+    let mut remainder = normalized.as_ref();
+    if pattern.matches_with(remainder, *opts) {
         return true;
     }
-    let mut remainder = path;
     while let Some(idx) = remainder.find('/') {
         remainder = &remainder[idx + 1..];
         if pattern.matches_with(remainder, *opts) {

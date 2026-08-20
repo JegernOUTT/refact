@@ -3,7 +3,8 @@ import { Text } from "@radix-ui/themes";
 import { Archive } from "lucide-react";
 import { IconButton } from "../ui";
 import { HoverCard } from "../LongTailPrimitives";
-import { useAppDispatch, useAppSelector } from "../../hooks";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import {
   selectAutoCompactEnabledById,
   setAutoCompactEnabled,

@@ -21,7 +21,8 @@ import {
   popBackTo,
   selectCurrentPage,
 } from "../../../features/Pages/pagesSlice";
-import { useAppDispatch, useAppSelector } from "../../../hooks";
+import { useAppDispatch } from "../../../hooks/useAppDispatch";
+import { useAppSelector } from "../../../hooks/useAppSelector";
 import { useDeleteIntegrationByPath } from "../../../hooks/useDeleteIntegrationByPath";
 import { useSaveIntegrationData } from "../../../hooks/useSaveIntegrationData";
 import {

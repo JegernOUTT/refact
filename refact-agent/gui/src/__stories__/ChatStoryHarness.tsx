@@ -10,16 +10,30 @@ import type { ChatMessages } from "../services/refact";
 import {
   makeChatSlice,
   makeChatThread,
+  resolveStoryAppearance,
+  type StoryAppearance,
   type ThreadRuntime,
 } from "./chatStoryState";
 
-const DEFAULT_CONFIG: RootState["config"] = {
-  apiKey: "test",
-  host: "web",
-  lspPort: 8001,
-  dev: true,
-  themeProps: { appearance: "dark" },
-};
+function makeDefaultConfig(appearance: StoryAppearance): RootState["config"] {
+  return {
+    apiKey: "test",
+    host: "web",
+    lspPort: 8001,
+    dev: true,
+    themeProps: { appearance },
+  };
+}
+
+// A story-provided config still gets the resolved appearance unless it pins
+// one itself, so the toolbar global keeps working for host-specific stories.
+function withStoryAppearance(
+  config: RootState["config"],
+  appearance: StoryAppearance,
+): RootState["config"] {
+  if (config.themeProps.appearance) return config;
+  return { ...config, themeProps: { ...config.themeProps, appearance } };
+}
 
 export type ChatStoryHarnessProps = {
   children: React.ReactNode;
@@ -29,6 +43,7 @@ export type ChatStoryHarnessProps = {
   extraState?: Partial<RootState>;
   runtime?: Partial<ThreadRuntime>;
   height?: string;
+  appearance?: StoryAppearance;
 };
 
 export const ChatStoryHarness: React.FC<ChatStoryHarnessProps> = ({
@@ -39,7 +54,11 @@ export const ChatStoryHarness: React.FC<ChatStoryHarnessProps> = ({
   extraState,
   runtime,
   height = "100dvh",
+  appearance,
 }) => {
+  const [resolvedAppearance] = useState(() =>
+    resolveStoryAppearance(appearance),
+  );
   const [threadData] = useState(
     () => thread ?? makeChatThread({ messages: messages ?? [] }),
   );
@@ -55,7 +74,9 @@ export const ChatStoryHarness: React.FC<ChatStoryHarnessProps> = ({
         suspended: false,
       },
       ...extraState,
-      config: config ?? DEFAULT_CONFIG,
+      config: config
+        ? withStoryAppearance(config, resolvedAppearance)
+        : makeDefaultConfig(resolvedAppearance),
       chat: makeChatSlice(threadData, runtime),
     }),
   );

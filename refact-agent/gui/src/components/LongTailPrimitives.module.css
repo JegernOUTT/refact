@@ -7,7 +7,7 @@
   min-width: 0;
   color: var(--rf-color-fg);
   font-size: var(--rf-text-3);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-3);
 }
 
 .text1 {
@@ -38,7 +38,7 @@
   margin: 0;
   color: var(--rf-color-fg);
   font-size: var(--rf-text-4);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-4);
 }
 
 .code {

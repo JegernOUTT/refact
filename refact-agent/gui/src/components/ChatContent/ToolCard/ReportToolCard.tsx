@@ -10,7 +10,7 @@ import { Flex, Text, Box } from "@radix-ui/themes";
 import { Icon } from "../../ui";
 import classNames from "classnames";
 import { useStoredOpen } from "../useStoredOpen";
-import { useAppSelector } from "../../../hooks";
+import { useAppSelector } from "../../../hooks/useAppSelector";
 import { selectToolResultByThreadAndId } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
 import { ToolCall } from "../../../services/refact/types";
@@ -22,8 +22,8 @@ import {
   usePrepareChatScrollAnchor,
 } from "../useChatScrollAnchor";
 import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
-import { useEventsBusForIDE } from "../../../hooks";
-import { useOpenFileInApp } from "../../../hooks";
+import { useEventsBusForIDE } from "../../../hooks/useEventBusForIDE";
+import { useOpenFileInApp } from "../../../hooks/useOpenFileInApp";
 import { isIdeHost } from "../../../utils/isIdeHost";
 import { basename } from "./utils";
 import { useStreamingMarkdown } from "../../Markdown/useStreamingMarkdown";

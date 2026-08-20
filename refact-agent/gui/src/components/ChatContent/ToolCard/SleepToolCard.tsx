@@ -6,7 +6,7 @@ import { Button } from "../../ui";
 import { ToolCard } from "./ToolCard";
 import type { ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
-import { useAppSelector } from "../../../hooks";
+import { useAppSelector } from "../../../hooks/useAppSelector";
 import { useChatActions } from "../../../hooks/useChatActions";
 import {
   selectMessagesById,

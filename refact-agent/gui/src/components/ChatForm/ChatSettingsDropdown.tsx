@@ -10,12 +10,10 @@ import {
   X,
 } from "lucide-react";
 import classNames from "classnames";
-import {
-  useAppSelector,
-  useAppDispatch,
-  useCapsForToolUse,
-  useGetCapsQuery,
-} from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
+import { useCapsForToolUse } from "../../hooks/useCapsForToolUse";
+import { useGetCapsQuery } from "../../hooks/useGetCapsQuery";
 import type { CapCost } from "../../services/refact/caps";
 import {
   selectModelById,

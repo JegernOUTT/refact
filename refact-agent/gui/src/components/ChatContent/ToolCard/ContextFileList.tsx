@@ -2,7 +2,7 @@ import { FileText } from "lucide-react";
 import React, { useState, useCallback } from "react";
 import { Box, Text } from "@radix-ui/themes";
 import { ChatContextFile } from "../../../services/refact/types";
-import { useOpenFileInApp } from "../../../hooks";
+import { useOpenFileInApp } from "../../../hooks/useOpenFileInApp";
 import { ShikiCodeBlock } from "../../Markdown";
 import { AnimatedCollapsible } from "../shared/AnimatedCollapsible";
 import styles from "./ContextFileList.module.css";

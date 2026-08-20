@@ -79,7 +79,7 @@
   font-family: var(--rf-font-ui);
   font-size: var(--rf-text-2);
   font-weight: var(--rf-weight-semibold);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-2);
 }
 
 .branchIcon {
@@ -172,7 +172,7 @@
   margin: 0;
   font-family: var(--rf-font-ui);
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
 }
 
 .menuHint,
@@ -208,7 +208,7 @@
   font-family: var(--rf-font-ui);
   font-size: var(--rf-text-1);
   font-weight: var(--rf-weight-semibold);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
 }
 
 /*
@@ -413,7 +413,6 @@
 
 .branchPicker,
 .branchPicker input {
-  box-sizing: border-box;
   width: 100%;
   min-width: 0;
   max-width: 100%;
@@ -450,7 +449,7 @@
   color: var(--rf-color-fg);
   font-family: var(--rf-font-ui);
   font-size: var(--rf-text-2);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-2);
 }
 
 .checkboxRow input {
@@ -544,7 +543,7 @@
   padding: var(--rf-space-2) 0;
   font-family: var(--rf-font-mono);
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
   white-space: pre;
 }
 
@@ -585,7 +584,7 @@
   color: var(--rf-color-muted);
   font-family: var(--rf-font-ui);
   font-size: var(--rf-text-1);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-1);
 }
 
 .spinner {

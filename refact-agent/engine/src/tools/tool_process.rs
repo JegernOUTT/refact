@@ -2444,7 +2444,14 @@ mod tests {
                 ("description", json!("Start keyword readiness service")),
                 ("mode", json!("service")),
                 ("service_name", json!("keyword")),
-                ("startup_wait_ms", json!(2000)),
+                (
+                    "startup_wait_ms",
+                    json!(if cfg!(target_os = "windows") {
+                        15000
+                    } else {
+                        2000
+                    }),
+                ),
                 ("startup_wait_keyword", json!("ready-keyword")),
             ]),
         )

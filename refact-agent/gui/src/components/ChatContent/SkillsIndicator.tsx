@@ -4,7 +4,7 @@ import classNames from "classnames";
 import { BookOpen } from "lucide-react";
 
 import { Button, Icon } from "../ui";
-import { useAppDispatch } from "../../hooks";
+import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { push } from "../../features/Pages/pagesSlice";
 import { useSkillsStatus } from "../../hooks/useSkillsStatus";
 import styles from "./SkillsIndicator.module.css";

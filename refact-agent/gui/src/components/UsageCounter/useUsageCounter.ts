@@ -4,7 +4,7 @@ import {
   selectEffectiveMaxContextTokensById,
   useThreadId,
 } from "../../features/Chat/Thread";
-import { useAppSelector } from "../../hooks";
+import { useAppSelector } from "../../hooks/useAppSelector";
 import {
   calculateUsageInputTokens,
   getCacheCreationTokens,

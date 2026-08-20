@@ -121,7 +121,7 @@
   border-bottom: var(--rf-hairline) dotted var(--rf-border-strong);
   font-size: var(--rf-text-2);
   color: var(--rf-color-fg);
-  line-height: var(--rf-line);
+  line-height: var(--rf-line-2);
 }
 
 .hoverTrigger:hover {

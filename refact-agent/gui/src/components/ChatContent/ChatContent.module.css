@@ -1,5 +1,4 @@
 .content {
-  box-sizing: border-box;
   width: 100%;
   min-width: 0;
   max-width: 100%;
@@ -307,7 +306,6 @@
 
 .diffHeader {
   all: unset;
-  box-sizing: border-box;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -393,12 +391,10 @@
 .tool_result {
   width: 100%;
   margin-top: var(--rf-space-1);
-  box-sizing: border-box;
 }
 
 .tool_result_markdown {
   width: 100%;
-  box-sizing: border-box;
   border-radius: var(--rf-radius-ctl);
   padding: var(--rf-space-2);
   overflow-x: auto;
@@ -432,7 +428,6 @@
 .queuedMessagesContent {
   width: 100%;
   min-width: 0;
-  box-sizing: border-box;
 }
 
 .queuedMessage {

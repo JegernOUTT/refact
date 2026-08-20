@@ -14,7 +14,7 @@ import remarkMath from "remark-math";
 import remarkGfm from "remark-gfm";
 import "katex/dist/katex.min.css";
 import type { PluggableList } from "unified";
-import { useLinksFromLsp } from "../../hooks";
+import { useLinksFromLsp } from "../../hooks/useLinksFromLsp";
 import { maskIncompleteSpecialCodeFences } from "./renderUtils";
 import { DialogImage } from "../DialogImage";
 

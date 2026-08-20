@@ -8,7 +8,6 @@
   border-radius: var(--rf-radius-ctl);
   cursor: pointer;
   background: transparent;
-  box-sizing: border-box;
   min-width: 0;
   text-align: left;
   transition: background var(--rf-dur-fast) ease;
