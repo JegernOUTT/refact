@@ -1610,6 +1610,18 @@ pub async fn get_tools_for_mode(
             })
             .collect();
 
+    let registered_tool_names: HashSet<String> = all_tool_groups
+        .iter()
+        .map(|(_, tool)| tool.tool_description().name)
+        .collect();
+    crate::yaml_configs::mode_validation::warn_unknown_mode_tools(
+        gcx.clone(),
+        mode_id,
+        &mode_config.tools,
+        &registered_tool_names,
+    )
+    .await;
+
     let all_tools: Vec<(ToolGroupCategory, Box<dyn Tool + Send>)> = all_tool_groups
         .into_iter()
         .filter(|(_, tool)| tool.config().unwrap_or_default().enabled)

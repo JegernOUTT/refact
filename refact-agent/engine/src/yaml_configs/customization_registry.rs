@@ -300,6 +300,45 @@ async fn is_unchanged_default(path: &Path, kind: &str) -> bool {
     compute_checksum(&content) == default_checksum
 }
 
+fn select_mode_override<'a>(
+    registry: &'a ProjectRegistry,
+    mode_id: &str,
+    model_id: &str,
+) -> Option<&'a ModeConfig> {
+    registry
+        .mode_overrides
+        .iter()
+        .filter(|o| o.base.as_deref() == Some(mode_id))
+        .filter_map(|o| {
+            o.match_models
+                .as_ref()
+                .and_then(|patterns| best_matching_pattern_specificity(model_id, patterns))
+                .map(|specificity| (specificity, o))
+        })
+        .fold(None, best_override_by_specificity)
+        .map(|(_, o)| o)
+}
+
+pub fn mode_override_tool_drift(
+    registry: &ProjectRegistry,
+    mode_id: &str,
+    model_id: Option<&str>,
+) -> Option<(String, Vec<String>)> {
+    let base = registry.modes.get(mode_id)?;
+    let overlay = select_mode_override(registry, mode_id, model_id?)?;
+    let override_config = overlay.override_config.as_ref()?;
+    override_config.tools_replace.as_ref()?;
+
+    let resolved = base.apply_override(override_config);
+    let dropped =
+        crate::yaml_configs::mode_validation::dropped_tool_names(&base.tools, &resolved.tools);
+    if dropped.is_empty() {
+        None
+    } else {
+        Some((overlay.id.clone(), dropped))
+    }
+}
+
 pub fn resolve_mode_for_model(
     registry: &ProjectRegistry,
     mode_id: &str,
@@ -312,18 +351,7 @@ pub fn resolve_mode_for_model(
         None => return Some(base.clone()),
     };
 
-    let matching_override = registry
-        .mode_overrides
-        .iter()
-        .filter(|o| o.base.as_deref() == Some(mode_id))
-        .filter_map(|o| {
-            o.match_models
-                .as_ref()
-                .and_then(|patterns| best_matching_pattern_specificity(model_id, patterns))
-                .map(|specificity| (specificity, o))
-        })
-        .fold(None, best_override_by_specificity)
-        .map(|(_, o)| o);
+    let matching_override = select_mode_override(registry, mode_id, model_id);
 
     match matching_override {
         Some(override_config) => {
@@ -580,7 +608,16 @@ pub async fn get_mode_config(
     mode_id: &str,
     model_id: Option<&str>,
 ) -> Option<ModeConfig> {
-    let registry = get_project_registry(gcx).await?;
+    let registry = get_project_registry(gcx.clone()).await?;
+    if let Some((overlay_id, dropped)) = mode_override_tool_drift(&registry, mode_id, model_id) {
+        crate::yaml_configs::mode_validation::warn_override_tool_drift(
+            gcx,
+            mode_id,
+            &overlay_id,
+            &dropped,
+        )
+        .await;
+    }
     resolve_mode_for_model(&registry, mode_id, model_id)
 }
 
@@ -966,6 +1003,75 @@ mod tests {
         ));
         assert_eq!(exact_resolved.prompt, "specific");
         assert_eq!(provider_resolved.prompt, "specific");
+    }
+
+    fn mode_override_with_tools(
+        id: &str,
+        patterns: &[&str],
+        tools_replace: Option<&[&str]>,
+        tools_add: Option<&[&str]>,
+    ) -> ModeConfig {
+        let mut overlay = mode_override(id, patterns, "overlay");
+        overlay.override_config = Some(ModeOverride {
+            prompt: Some("overlay".to_string()),
+            tools_replace: tools_replace.map(|tools| tools.iter().map(|t| t.to_string()).collect()),
+            tools_add: tools_add.map(|tools| tools.iter().map(|t| t.to_string()).collect()),
+            ..Default::default()
+        });
+        overlay
+    }
+
+    #[test]
+    fn test_mode_override_tool_drift_reports_tools_dropped_by_tools_replace() {
+        let registry = registry_with_mode_overrides(vec![mode_override_with_tools(
+            "frozen_agent",
+            &["gpt-5*"],
+            Some(&["cat"]),
+            None,
+        )]);
+
+        let (overlay_id, dropped) =
+            mode_override_tool_drift(&registry, "agent", Some("gpt-5.6-sol"))
+                .expect("tools_replace that drops base tools must be reported");
+
+        assert_eq!(overlay_id, "frozen_agent");
+        assert_eq!(dropped, vec!["shell".to_string(), "tree".to_string()]);
+    }
+
+    #[test]
+    fn test_mode_override_tool_drift_ignores_tools_add_overlays() {
+        let registry = registry_with_mode_overrides(vec![mode_override_with_tools(
+            "additive_agent",
+            &["gpt-5*"],
+            None,
+            Some(&["glob"]),
+        )]);
+
+        assert!(mode_override_tool_drift(&registry, "agent", Some("gpt-5.6-sol")).is_none());
+    }
+
+    #[test]
+    fn test_mode_override_tool_drift_ignores_complete_tools_replace() {
+        let registry = registry_with_mode_overrides(vec![mode_override_with_tools(
+            "complete_agent",
+            &["gpt-5*"],
+            Some(&["tree", "cat", "shell", "glob"]),
+            None,
+        )]);
+
+        assert!(mode_override_tool_drift(&registry, "agent", Some("gpt-5.6-sol")).is_none());
+    }
+
+    #[test]
+    fn test_mode_override_tool_drift_is_none_without_model_id() {
+        let registry = registry_with_mode_overrides(vec![mode_override_with_tools(
+            "frozen_agent",
+            &["gpt-5*"],
+            Some(&["cat"]),
+            None,
+        )]);
+
+        assert!(mode_override_tool_drift(&registry, "agent", None).is_none());
     }
 
     #[test]
