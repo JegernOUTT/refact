@@ -1,0 +1,83 @@
+.filterBar {
+  container-type: inline-size;
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.segmented {
+  flex-shrink: 0;
+}
+
+.attentionChip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  flex-shrink: 0;
+  height: var(--rf-control-h);
+  padding: 0 var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-color-warning);
+  border-radius: var(--rf-radius-pill);
+  background: transparent;
+  color: var(--rf-color-warning);
+  cursor: pointer;
+  font-size: var(--rf-text-1);
+  font-weight: var(--rf-weight-semibold);
+}
+
+.attentionChip[data-active] {
+  background: var(--rf-surface-2);
+}
+
+.attentionChip:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.searchField {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--rf-control-h);
+  padding: 0 var(--rf-space-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-muted);
+}
+
+.searchField:focus-within {
+  border-color: var(--rf-border-strong);
+}
+
+.searchInput {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--rf-color-fg);
+  font-family: var(--rf-font-ui);
+  font-size: var(--rf-text-2);
+  outline: none;
+}
+
+.aggregate {
+  flex-shrink: 0;
+  color: var(--rf-color-faint);
+  font-size: var(--rf-text-1);
+  white-space: nowrap;
+}
+
+.newButton {
+  flex-shrink: 0;
+}
+
+@container (max-width: 700px) {
+  .aggregate {
+    display: none;
+  }
+}

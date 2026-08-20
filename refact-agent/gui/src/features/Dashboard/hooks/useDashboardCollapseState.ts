@@ -4,31 +4,25 @@ const STORAGE_KEY = "dashboard:v1:collapse";
 
 type CollapseState = {
   buddy: boolean;
-  chats: boolean;
-  tasks: boolean;
 };
 
 const DEFAULTS: CollapseState = {
   buddy: false,
-  chats: false,
-  tasks: false,
 };
 
 function isBool(x: unknown): x is boolean {
   return typeof x === "boolean";
 }
 
+// Parsing stays lenient: older builds persisted `chats`/`tasks` keys next to
+// `buddy`. Unknown keys are ignored instead of invalidating the whole entry.
 function load(): CollapseState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw) as Partial<
-        Record<keyof CollapseState, unknown>
-      >;
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
       return {
         buddy: isBool(parsed.buddy) ? parsed.buddy : DEFAULTS.buddy,
-        chats: isBool(parsed.chats) ? parsed.chats : DEFAULTS.chats,
-        tasks: isBool(parsed.tasks) ? parsed.tasks : DEFAULTS.tasks,
       };
     }
   } catch {

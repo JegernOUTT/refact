@@ -1,0 +1,250 @@
+.section {
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  min-width: 0;
+  padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
+  cursor: pointer;
+  overflow: hidden;
+  transition:
+    transform var(--rf-dur-med) var(--rf-ease-entrance),
+    box-shadow var(--rf-dur-med) var(--rf-ease-entrance),
+    border-color var(--rf-dur-fast) var(--rf-ease-entrance);
+}
+
+/* Corner kind-wash: accent for chats, success for tasks. */
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: var(--rf-motion-opacity-soft);
+  transition: opacity var(--rf-dur-med) var(--rf-ease-entrance);
+}
+
+.card[data-kind="chat"]::before {
+  background: radial-gradient(
+    circle at 100% 0%,
+    var(--rf-color-accent-soft),
+    transparent 60%
+  );
+}
+
+.card[data-kind="task"]::before {
+  background: radial-gradient(
+    circle at 100% 0%,
+    var(--rf-color-success),
+    transparent 60%
+  );
+}
+
+.card:hover {
+  transform: translateY(-3px);
+  border-color: var(--rf-border-strong);
+  box-shadow: var(--rf-elev-overlay);
+}
+
+.card:hover::before {
+  opacity: var(--rf-motion-opacity-muted);
+}
+
+.card:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.cardTop {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.kindTile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-2);
+  transition: transform var(--rf-dur-fast) var(--rf-ease-entrance);
+}
+
+.card:hover .kindTile {
+  transform: scale(var(--rf-motion-scale-highlight));
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  font-size: var(--rf-text-3);
+  font-weight: var(--rf-weight-bold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.liveChip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-1);
+  flex-shrink: 0;
+  padding: 0 var(--rf-space-2);
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
+  font-size: var(--rf-text-1);
+  font-weight: var(--rf-weight-semibold);
+  white-space: nowrap;
+}
+
+.liveDot {
+  width: var(--rf-space-1);
+  height: var(--rf-space-1);
+  border-radius: var(--rf-radius-pill);
+  background: currentcolor;
+}
+
+.subLine {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progressTrack {
+  position: relative;
+  height: var(--rf-space-1);
+  min-width: 0;
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-surface-3);
+  overflow: hidden;
+}
+
+.progressFill {
+  position: relative;
+  height: 100%;
+  width: var(--rf-continue-progress, 0%);
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-color-success);
+  overflow: hidden;
+}
+
+.chipRow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--rf-space-1);
+  min-width: 0;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--rf-space-2);
+  border-radius: var(--rf-radius-chip);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  white-space: nowrap;
+}
+
+.time {
+  margin-left: auto;
+  color: var(--rf-color-faint);
+  font-size: var(--rf-text-1);
+  white-space: nowrap;
+}
+
+@keyframes rf-continue-progress-fill {
+  from {
+    width: 0;
+  }
+
+  to {
+    width: var(--rf-continue-progress, 0%);
+  }
+}
+
+@keyframes rf-continue-live-pulse {
+  0%,
+  100% {
+    opacity: var(--rf-motion-opacity-visible);
+  }
+
+  50% {
+    opacity: var(--rf-motion-opacity-muted);
+  }
+}
+
+@keyframes rf-continue-progress-shimmer {
+  from {
+    transform: translateX(var(--rf-motion-shimmer-start));
+  }
+
+  to {
+    transform: translateX(var(--rf-motion-shimmer-end));
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .progressFill {
+    animation: rf-continue-progress-fill var(--rf-dur-slow)
+      var(--rf-ease-entrance) both;
+  }
+
+  .progressFill[data-shimmer]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      transparent var(--rf-motion-gradient-start),
+      var(--rf-surface-overlay) var(--rf-motion-gradient-mid),
+      transparent 100%
+    );
+    animation: rf-continue-progress-shimmer var(--rf-motion-shimmer-duration)
+      linear infinite;
+  }
+
+  .liveDot {
+    animation: rf-continue-live-pulse calc(var(--rf-dur-slow) * 4) ease-in-out
+      infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .kindTile,
+  .card::before {
+    transition: none;
+  }
+
+  .card:hover {
+    transform: none;
+  }
+}

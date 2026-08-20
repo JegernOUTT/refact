@@ -3,7 +3,6 @@ import {
   buildHistoryTree,
   type ChatHistoryItem,
 } from "../features/History/historySlice";
-import { buildDotTrail } from "../features/Dashboard/components/DotTrail/buildDotTrail";
 
 const createItem = (
   id: string,
@@ -215,9 +214,9 @@ describe("buildHistoryTree", () => {
 
       expect(result).toHaveLength(1);
       expect(result[0].id).toBe("b");
-      expect(buildDotTrail(result[0]).map((dot) => dot.chatId)).toEqual(["d"]);
+      expect(result[0].bubbleChildren.map((child) => child.id)).toEqual(["d"]);
       expect(
-        buildDotTrail(result[0].children[0]).map((dot) => dot.chatId),
+        result[0].children[0].bubbleChildren.map((child) => child.id),
       ).toEqual(["c"]);
     });
   });

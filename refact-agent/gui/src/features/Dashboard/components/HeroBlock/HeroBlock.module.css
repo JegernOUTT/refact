@@ -1,0 +1,68 @@
+.hero {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+/* grid-template-rows 1fr <-> 0fr keeps the scene in the tree while it
+   collapses, so the buddy animation state survives the toggle. */
+.sceneWrap {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-width: 0;
+  transition: grid-template-rows var(--rf-dur-slow) var(--rf-ease-entrance);
+}
+
+.hero[data-collapsed] .sceneWrap {
+  grid-template-rows: 0fr;
+}
+
+.sceneInner {
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.strip {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  height: 44px;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.statusText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activeChip {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 0 var(--rf-space-2);
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
+  font-size: var(--rf-text-1);
+  font-weight: var(--rf-weight-semibold);
+  white-space: nowrap;
+}
+
+.toggle {
+  flex-shrink: 0;
+  border-radius: var(--rf-radius-pill);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sceneWrap {
+    transition: none;
+  }
+}

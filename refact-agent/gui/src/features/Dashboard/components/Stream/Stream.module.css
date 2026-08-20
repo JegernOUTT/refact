@@ -1,0 +1,665 @@
+/* Stream list — redesigned Home feed.
+   Tokens only: no raw colours, no raw durations, paired --rf-text-N/--rf-line-N.
+
+   Shared geometry: the row, the thread rail, and the peek band all derive
+   their edges from the same custom properties so expanded regions line up
+   with the collapsed row (template contract: "everything is super neat").
+   Column plan, wide:            narrow (<520px):
+     row : tile | title | slot1 | state | expand | time
+     rail: elbow | dot  | title | link  | gutter | time
+   The trailing three tracks are identical in both grids, so the state/link
+   column, the expand gutter, and the time column share exact edges. */
+
+/* ---------------------------------------------------------------- keyframes */
+
+@keyframes rfStreamRise {
+  from {
+    opacity: var(--rf-motion-opacity-hidden);
+    transform: translateY(var(--rf-motion-distance-sm));
+  }
+
+  to {
+    opacity: var(--rf-motion-opacity-visible);
+    transform: translateY(var(--rf-motion-distance-none));
+  }
+}
+
+@keyframes rfStreamGrowY {
+  from {
+    transform: scaleY(var(--rf-motion-scale-none));
+  }
+
+  to {
+    transform: scaleY(var(--rf-motion-scale-active));
+  }
+}
+
+@keyframes rfStreamPulse {
+  0% {
+    opacity: var(--rf-motion-opacity-visible);
+    transform: scale(var(--rf-motion-scale-active));
+  }
+
+  50% {
+    opacity: var(--rf-motion-opacity-muted);
+    transform: scale(var(--rf-motion-scale-emphasis));
+  }
+
+  100% {
+    opacity: var(--rf-motion-opacity-visible);
+    transform: scale(var(--rf-motion-scale-active));
+  }
+}
+
+/* ---------------------------------------------------------------- container */
+
+.container {
+  /* Shared column geometry. --stream-indent = row padding + tile column +
+     grid gap = the x where row titles start; peek content aligns to it. */
+  --stream-tile-col: 30px;
+  --stream-state-col: 88px;
+  --stream-expand-col: 28px;
+  --stream-time-col: 46px;
+  --stream-indent: calc(
+    var(--rf-space-3) + var(--stream-tile-col) + var(--rf-space-2)
+  );
+  container-type: inline-size;
+  container-name: rf-stream;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+  background: var(--rf-surface-glass);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+}
+
+.list {
+  composes: scrollbarThin from "../../../../components/shared/scrollbar.module.css";
+  flex: 1;
+  min-height: 0;
+  padding-block: var(--rf-space-1);
+}
+
+.empty {
+  padding: var(--rf-space-4);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+  text-align: center;
+}
+
+/* ------------------------------------------------------------ group headers */
+
+.groupHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-3) var(--rf-space-1);
+  min-width: 0;
+}
+
+.groupLabel {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  font-weight: var(--rf-weight-semibold);
+  color: var(--rf-color-faint);
+  white-space: nowrap;
+}
+
+.groupLabelLive {
+  color: var(--rf-color-accent);
+}
+
+.groupRule {
+  flex: 1;
+  height: var(--rf-hairline);
+  background: var(--rf-border);
+}
+
+/* ------------------------------------------------------------------ the row */
+
+.row {
+  display: grid;
+  grid-template-columns:
+    var(--stream-tile-col) minmax(0, 1fr) 128px var(--stream-state-col)
+    var(--stream-expand-col) var(--stream-time-col);
+  align-items: center;
+  gap: var(--rf-space-2);
+  width: 100%;
+  min-height: 40px;
+  padding-inline: var(--rf-space-3);
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--rf-color-fg);
+  transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
+  animation: rfStreamRise var(--rf-dur-med) var(--rf-ease-entrance) both;
+}
+
+.row:hover,
+.row:focus-visible {
+  background: var(--rf-surface-1);
+}
+
+.row[data-open="true"] {
+  background: var(--rf-surface-2);
+}
+
+.tile {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  justify-self: center;
+  transition: transform var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.row:hover .tile {
+  transform: scale(var(--rf-motion-scale-emphasis));
+}
+
+.tileChat {
+  background: var(--rf-color-accent-soft);
+}
+
+.tileTask {
+  background: var(--rf-color-accent-soft);
+}
+
+@supports (background: color-mix(in oklab, #000 12%, transparent)) {
+  .tileTask {
+    background: color-mix(in oklab, var(--rf-color-success) 14%, transparent);
+  }
+}
+
+.titleCell {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+  color: var(--rf-color-fg);
+}
+
+.msgCount {
+  flex-shrink: 0;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  color: var(--rf-color-muted);
+}
+
+.familyPill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-2xs);
+  flex-shrink: 0;
+  height: 18px;
+  padding-inline: var(--rf-space-1);
+  border: 0;
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-color-accent-soft);
+  color: var(--rf-color-accent);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  cursor: pointer;
+  transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.familyPill:hover {
+  background: var(--rf-selected-bg);
+}
+
+/* ------------------------------------------------------------------- chips */
+
+.slot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--rf-space-1);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--rf-space-2xs);
+  height: 18px;
+  padding-inline: var(--rf-space-1);
+  border-radius: var(--rf-radius-chip);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  white-space: nowrap;
+}
+
+.chipMono {
+  font-family: var(--rf-font-mono);
+}
+
+.chipAdds {
+  color: var(--rf-color-success);
+}
+
+.chipDels {
+  color: var(--rf-color-danger);
+}
+
+.stateChip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  max-width: 100%;
+  padding-inline: var(--rf-space-1);
+  border-radius: var(--rf-radius-chip);
+  background: var(--rf-surface-2);
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toneAccent {
+  color: var(--rf-color-accent);
+  background: var(--rf-color-accent-soft);
+}
+
+.toneSuccess {
+  color: var(--rf-color-success);
+}
+
+.toneDanger {
+  color: var(--rf-color-danger);
+}
+
+.toneWarning {
+  color: var(--rf-color-warning);
+}
+
+.toneNeutral {
+  color: var(--rf-color-muted);
+}
+
+.time {
+  justify-self: end;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  color: var(--rf-color-faint);
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------- expanders */
+
+.xp {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--rf-dur-med) var(--rf-ease-entrance);
+}
+
+.xp.open {
+  grid-template-rows: 1fr;
+}
+
+.xpInner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.expandBtn {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--rf-control-h-icon-sm);
+  height: var(--rf-control-h-icon-sm);
+  padding: 0;
+  border: 0;
+  border-radius: var(--rf-radius-chip);
+  background: transparent;
+  color: var(--rf-color-faint);
+  cursor: pointer;
+  transition:
+    color var(--rf-dur-fast) var(--rf-ease-standard),
+    background var(--rf-dur-fast) var(--rf-ease-standard),
+    transform var(--rf-dur-med) var(--rf-ease-entrance);
+}
+
+.expandBtn:hover {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-2);
+}
+
+.expandBtn:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.expandBtn[aria-expanded="true"] {
+  color: var(--rf-color-accent);
+  transform: rotate(180deg);
+}
+
+/* ------------------------------------------------------------- thread rail
+   Grid mirrors the row: the elbow column drops the connector line exactly
+   under the tile centre, and the trailing link/gutter/time tracks reuse the
+   row's state/expand/time widths so both right rails share column edges. */
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  padding: var(--rf-space-1) var(--rf-space-3) var(--rf-space-2);
+  background: var(--rf-surface-1);
+}
+
+.railRow {
+  display: grid;
+  grid-template-columns:
+    26px 20px minmax(0, 1fr) var(--stream-state-col)
+    var(--stream-expand-col) var(--stream-time-col);
+  align-items: center;
+  gap: var(--rf-space-2);
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--rf-radius-chip);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--rf-color-muted);
+  transition: background-color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.railRow:hover,
+.railRow:focus-visible {
+  background: var(--rf-surface-2);
+}
+
+.railElbow {
+  position: relative;
+  align-self: stretch;
+}
+
+.railElbow::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: calc(var(--stream-tile-col) / 2);
+  width: var(--rf-hairline);
+  background: var(--rf-border);
+  transform-origin: top;
+  animation: rfStreamGrowY var(--rf-dur-med) var(--rf-ease-entrance) both;
+}
+
+.railElbow::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  inset-inline-start: calc(var(--stream-tile-col) / 2);
+  width: var(--rf-space-3);
+  height: var(--rf-hairline);
+  background: var(--rf-border);
+}
+
+.railElbowLast::before {
+  inset-block-end: 50%;
+}
+
+.railDot {
+  justify-self: center;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--rf-radius-pill);
+  background: var(--rf-color-faint);
+}
+
+.railDotLive {
+  background: var(--rf-color-accent);
+  animation: rfStreamPulse calc(var(--rf-dur-slow) * 4) var(--rf-ease-standard)
+    infinite;
+}
+
+.railDotDone {
+  background: var(--rf-color-success);
+}
+
+.railDotFailed {
+  background: var(--rf-color-danger);
+}
+
+.railTitleWrap {
+  display: flex;
+  align-items: baseline;
+  gap: var(--rf-space-2);
+  min-width: 0;
+}
+
+.railTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+  color: var(--rf-color-fg);
+  transition: color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.railRow:hover .railTitle {
+  color: var(--rf-color-accent);
+  text-decoration: underline;
+}
+
+.railTitleLive {
+  color: var(--rf-color-accent);
+}
+
+.railMeta {
+  flex-shrink: 0;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  color: var(--rf-color-muted);
+}
+
+.railLinkType {
+  justify-self: end;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  color: var(--rf-color-faint);
+}
+
+.railTime {
+  justify-self: end;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  color: var(--rf-color-faint);
+  white-space: nowrap;
+}
+
+/* -------------------------------------------------------------------- peek
+   Flush metadata band, not a floating box: aligns with the title column via
+   --stream-indent and reads as an attached sub-surface of the row. */
+
+.peek {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-3) var(--rf-space-2)
+    var(--stream-indent);
+  background: var(--rf-surface-1);
+}
+
+.peekBlocks {
+  /* peek blocks stagger at 50ms steps; rows keep the global --rf-stagger */
+  --rf-stream-step: 0.05s;
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: var(--rf-space-4);
+  row-gap: var(--rf-space-2);
+}
+
+.pk {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2xs);
+  min-width: 0;
+  max-width: 100%;
+  animation: rfStreamRise var(--rf-dur-med) var(--rf-ease-entrance) both;
+}
+
+.pkLabel {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+  color: var(--rf-color-faint);
+}
+
+.pkValue {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+  color: var(--rf-color-fg);
+}
+
+.pkDiff {
+  display: inline-flex;
+  gap: var(--rf-space-1);
+  font-family: var(--rf-font-mono);
+}
+
+.pkAdds {
+  color: var(--rf-color-success);
+}
+
+.pkDels {
+  color: var(--rf-color-danger);
+}
+
+.peekActions {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.peekDelete {
+  height: var(--rf-control-h-sm);
+}
+
+/* ------------------------------------- stagger / indent steps (no inline styles) */
+
+.d0 {
+  animation-delay: 0s;
+}
+
+.d1 {
+  animation-delay: calc(var(--rf-stream-step, var(--rf-stagger)) * 1);
+}
+
+.d2 {
+  animation-delay: calc(var(--rf-stream-step, var(--rf-stagger)) * 2);
+}
+
+.d3 {
+  animation-delay: calc(var(--rf-stream-step, var(--rf-stagger)) * 3);
+}
+
+.d4 {
+  animation-delay: calc(var(--rf-stream-step, var(--rf-stagger)) * 4);
+}
+
+.d5 {
+  animation-delay: calc(var(--rf-stream-step, var(--rf-stagger)) * 5);
+}
+
+.d6 {
+  animation-delay: calc(var(--rf-stream-step, var(--rf-stagger)) * 6);
+}
+
+.d7 {
+  animation-delay: calc(var(--rf-stream-step, var(--rf-stagger)) * 7);
+}
+
+.i0 {
+  margin-inline-start: 0;
+}
+
+.i1 {
+  margin-inline-start: 26px;
+}
+
+.i2 {
+  margin-inline-start: 52px;
+}
+
+.i3 {
+  margin-inline-start: 78px;
+}
+
+.i4 {
+  margin-inline-start: 104px;
+}
+
+/* --------------------------------------------------------- container query */
+
+@container rf-stream (inline-size < 520px) {
+  .row {
+    grid-template-columns:
+      var(--stream-tile-col) minmax(0, 1fr) var(--stream-state-col)
+      var(--stream-expand-col) var(--stream-time-col);
+  }
+
+  .slot1 {
+    display: none;
+  }
+
+  .railRow {
+    grid-template-columns:
+      26px 20px minmax(0, 1fr) var(--stream-expand-col)
+      var(--stream-time-col);
+  }
+
+  .railLinkType {
+    display: none;
+  }
+}
+
+/* ------------------------------------------------------- reduced motion */
+
+@media (prefers-reduced-motion: reduce) {
+  .row,
+  .pk,
+  .railElbow::before,
+  .railDotLive {
+    animation: none;
+  }
+
+  .row .tile,
+  .row:hover .tile,
+  .xp,
+  .railTitle {
+    transition: none;
+    transform: none;
+  }
+}
