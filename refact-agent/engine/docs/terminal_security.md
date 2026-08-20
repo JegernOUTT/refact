@@ -32,7 +32,7 @@ Centralized execution uses a scrubbed child environment. The platform base allow
 
 Linux selects fully enforcing bubblewrap when available, otherwise Landlock when the kernel reports full or partial enforcement. Other platforms currently report no usable provider. `sandbox_preferred` requires full enforcement before applying confinement; `sandbox_required` accepts a usable provider and fails closed when none exists.
 
-Shell and background-process calls may request `workspace_write` or `full_access` with a non-empty justification. Escalation always requires the existing user confirmation flow, is never auto-approved, and applies to that call only. An escalation cannot bypass an unavailable provider in `sandbox_required` mode. Requests, refusals, and downgrades are recorded as `event(system_notice)` messages from `exec.sandbox`.
+Shell and background-process calls may request `workspace_write` or `full_access` with a non-empty justification, and the request applies to that call only. Escalation does not create a confirmation of its own: the ordinary shell gate and tool confirmation rules still decide whether the command needs approval, and a malformed `escalate` argument is still denied. An escalation cannot bypass an unavailable provider in `sandbox_required` mode. Refusals and downgrades are recorded as `event(system_notice)` messages from `exec.sandbox`; an escalation is recorded there only when it actually widens confinement — that is, when a sandbox is applied and the requested mode exceeds the mode the chat mode would already get. No-op escalations (no sandbox applied, or a mode the call already had) are not recorded.
 
 ## Direct-spawn inventory
 

@@ -246,32 +246,15 @@ pub async fn handle_v1_tools_check_if_confirmation_needed(
         refact_tool_api::coerce_hashmap_to_schema(&mut args, &desc.input_schema);
 
         if matches!(tool_call.function.name.as_str(), "shell" | "process_start") {
-            match escalation_from_args(&args) {
-                Ok(Some(escalation)) => {
-                    result_messages.push(PauseReason {
-                        reason_type: PauseReasonType::Confirmation,
-                        command: tool_call.function.name.clone(),
-                        rule: format!(
-                            "Sandbox escalation to {} requested: {}",
-                            escalation.mode_name(),
-                            escalation.justification
-                        ),
-                        tool_call_id: tool_call.id.clone(),
-                        integr_config_path: tool.has_config_path(),
-                    });
-                    continue;
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    result_messages.push(PauseReason {
-                        reason_type: PauseReasonType::Denial,
-                        command: tool_call.function.name.clone(),
-                        rule: error,
-                        tool_call_id: tool_call.id.clone(),
-                        integr_config_path: tool.has_config_path(),
-                    });
-                    continue;
-                }
+            if let Err(error) = escalation_from_args(&args) {
+                result_messages.push(PauseReason {
+                    reason_type: PauseReasonType::Denial,
+                    command: tool_call.function.name.clone(),
+                    rule: error,
+                    tool_call_id: tool_call.id.clone(),
+                    integr_config_path: tool.has_config_path(),
+                });
+                continue;
             }
         }
 

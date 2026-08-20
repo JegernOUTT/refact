@@ -22,7 +22,7 @@ use crate::yaml_configs::customization_registry::{
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};
 use refact_tool_api::{build_registry_from_names, MatchConfirmDenyResult};
-use crate::exec::command_policy::{escalation_audit, escalation_from_args, ExecSource};
+use crate::exec::command_policy::escalation_from_args;
 
 fn make_runtime_event(
     signal_type: &str,
@@ -330,11 +330,6 @@ fn should_auto_approve_confirmation(thread: &ThreadParams, tool_name: &str) -> b
     }
     thread.auto_approve_dangerous_commands
         || (thread.auto_approve_editing_tools && is_editing_tool(tool_name))
-}
-
-fn confirmation_can_auto_approve(reason: &PauseReason, thread: &ThreadParams) -> bool {
-    !reason.rule.starts_with("Sandbox escalation to ")
-        && should_auto_approve_confirmation(thread, &reason.tool_name)
 }
 
 async fn record_tool_activity(
@@ -847,14 +842,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn escalation_always_requires_confirmation_with_justification() {
+    async fn escalation_does_not_require_confirmation() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx).await;
         let thread = ThreadParams {
             id: "escalation-confirmation".to_string(),
             model: "model".to_string(),
-            autonomous_no_confirm: true,
-            auto_approve_dangerous_commands: true,
             ..Default::default()
         };
         let session = ChatSession::new(thread.id.clone());
@@ -895,12 +888,7 @@ mod tests {
         .await;
 
         assert!(denials.is_empty());
-        assert_eq!(confirmations.len(), 1);
-        assert!(confirmations[0]
-            .rule
-            .contains("write the requested system path"));
-        assert!(confirmations[0].rule.contains("full_access"));
-        assert!(!confirmation_can_auto_approve(&confirmations[0], &thread));
+        assert!(confirmations.is_empty());
         let session = app
             .chat
             .sessions
@@ -910,11 +898,55 @@ mod tests {
             .cloned()
             .unwrap();
         let session = session.lock().await;
-        assert_eq!(session.post_tool_side_effects.len(), 1);
-        assert_eq!(
-            session.post_tool_side_effects[0].extra["event"]["source"],
-            serde_json::json!("exec.sandbox")
-        );
+        assert!(session.post_tool_side_effects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_escalation_argument_is_still_denied() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let thread = ThreadParams {
+            id: "escalation-invalid".to_string(),
+            model: "model".to_string(),
+            ..Default::default()
+        };
+        let session = ChatSession::new(thread.id.clone());
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(thread.id.clone(), Arc::new(AMutex::new(session)));
+        let tool_call = ChatToolCall {
+            id: "tc-escalate-invalid".to_string(),
+            index: None,
+            function: crate::call_validation::ChatToolFunction {
+                name: "shell".to_string(),
+                arguments: serde_json::json!({
+                    "command": "printf ok",
+                    "description": "Print ok",
+                    "escalate": {"mode": "full_access", "justification": "   "}
+                })
+                .to_string(),
+            },
+            tool_type: "function".to_string(),
+            extra_content: None,
+        };
+
+        let (confirmations, denials) = check_tools_confirmation(
+            app.clone(),
+            &[tool_call],
+            &[],
+            &thread,
+            "agent",
+            None,
+            &[],
+            "",
+        )
+        .await;
+
+        assert!(confirmations.is_empty());
+        assert_eq!(denials.len(), 1);
+        assert!(denials[0].rule.contains("justification"));
     }
 
     #[test]
@@ -932,7 +964,7 @@ mod tests {
             integr_config_path: None,
         };
 
-        assert!(confirmation_can_auto_approve(&reason, &thread));
+        assert!(should_auto_approve_confirmation(&thread, &reason.tool_name));
     }
 
     #[test]
@@ -1455,9 +1487,10 @@ pub async fn process_tool_calls_once(
         std::collections::HashSet::new();
 
     if !confirmations.is_empty() {
-        let (auto_approved, remaining): (Vec<_>, Vec<_>) = confirmations
-            .into_iter()
-            .partition(|confirmation| confirmation_can_auto_approve(confirmation, &thread));
+        let (auto_approved, remaining): (Vec<_>, Vec<_>) =
+            confirmations.into_iter().partition(|confirmation| {
+                should_auto_approve_confirmation(&thread, &confirmation.tool_name)
+            });
 
         for confirmation in &auto_approved {
             approved_activity_ids.insert(confirmation.tool_call_id.clone());
@@ -1877,51 +1910,16 @@ pub async fn check_tools_confirmation(
         };
 
         if matches!(tool_call.function.name.as_str(), "shell" | "process_start") {
-            match escalation_from_args(&args.clone().into_iter().collect()) {
-                Ok(Some(escalation)) => {
-                    confirmations.push(PauseReason {
-                        reason_type: "confirmation".to_string(),
-                        tool_name: tool_call.function.name.clone(),
-                        command: tool_call.function.name.clone(),
-                        rule: format!(
-                            "Sandbox escalation to {} requested: {}",
-                            escalation.mode_name(),
-                            escalation.justification
-                        ),
-                        tool_call_id: tool_call.id.clone(),
-                        integr_config_path: None,
-                    });
-                    let session = {
-                        let sessions = app.chat.sessions.read().await;
-                        sessions.get(&thread.id).cloned()
-                    };
-                    if let Some(session) = session {
-                        session.lock().await.queue_post_tool_side_effect(
-                            escalation_audit(
-                                &escalation,
-                                if tool_call.function.name == "shell" {
-                                    ExecSource::ShellTool
-                                } else {
-                                    ExecSource::ProcessTool
-                                },
-                            )
-                            .message(),
-                        );
-                    }
-                    continue;
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    denials.push(PauseReason {
-                        reason_type: "denial".to_string(),
-                        tool_name: tool_call.function.name.clone(),
-                        command: tool_call.function.name.clone(),
-                        rule: error,
-                        tool_call_id: tool_call.id.clone(),
-                        integr_config_path: None,
-                    });
-                    continue;
-                }
+            if let Err(error) = escalation_from_args(&args.clone().into_iter().collect()) {
+                denials.push(PauseReason {
+                    reason_type: "denial".to_string(),
+                    tool_name: tool_call.function.name.clone(),
+                    command: tool_call.function.name.clone(),
+                    rule: error,
+                    tool_call_id: tool_call.id.clone(),
+                    integr_config_path: None,
+                });
+                continue;
             }
         }
 

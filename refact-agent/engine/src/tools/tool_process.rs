@@ -1002,7 +1002,7 @@ fn process_start_input_schema() -> Value {
         },
         "required": ["mode", "justification"],
         "additionalProperties": false,
-        "description": "Request a per-call sandbox escalation. Always requires user approval and must explain why the wider access is needed."
+        "description": "Request a per-call sandbox escalation. Only has an effect when a sandbox is actually enforced; must explain why the wider access is needed."
     });
     schema
 }

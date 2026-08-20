@@ -150,6 +150,7 @@ pub async fn build_exec_request(
     };
     let sandbox_mode =
         requested_sandbox_mode(input.chat_mode.as_deref(), input.escalation.as_ref());
+    let baseline_sandbox_mode = requested_sandbox_mode(input.chat_mode.as_deref(), None);
     let status = refact_sandbox::sandbox_status();
     let roots = gcx
         .documents_state
@@ -163,14 +164,23 @@ pub async fn build_exec_request(
             .cloned()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()))
     });
-    let sandbox_policy = resolve_sandbox_policy(
+    let SandboxPolicyResolution {
+        sandbox,
+        warning,
+        audit,
+    } = resolve_sandbox_policy(
         gcx.terminal_security_config.mode,
-        sandbox_mode,
+        sandbox_mode.clone(),
         status,
         &cwd,
         roots,
         input.source,
     )?;
+    let audit = audit.or_else(|| {
+        let escalation = input.escalation.as_ref()?;
+        escalation_widens_access(sandbox.is_some(), &sandbox_mode, &baseline_sandbox_mode)
+            .then(|| escalation_audit(escalation, input.source))
+    });
     let justification = input
         .escalation
         .as_ref()
@@ -189,15 +199,15 @@ pub async fn build_exec_request(
     } else {
         request
     };
-    let request = if let Some(sandbox) = sandbox_policy.sandbox {
+    let request = if let Some(sandbox) = sandbox {
         request.with_sandbox(sandbox)
     } else {
         request
     };
     Ok(ExecRequestPolicy {
         request,
-        warning: sandbox_policy.warning,
-        audit: sandbox_policy.audit,
+        warning,
+        audit,
     })
 }
 
@@ -229,6 +239,22 @@ fn requested_sandbox_mode(
         "explore" | "no_tools" | "no-tools" | "chat" => ExecSandboxMode::ReadOnly,
         _ => ExecSandboxMode::WorkspaceWrite,
     }
+}
+
+fn sandbox_mode_rank(mode: &ExecSandboxMode) -> u8 {
+    match mode {
+        ExecSandboxMode::ReadOnly => 0,
+        ExecSandboxMode::WorkspaceWrite => 1,
+        ExecSandboxMode::FullAccess => 2,
+    }
+}
+
+fn escalation_widens_access(
+    sandbox_applied: bool,
+    requested: &ExecSandboxMode,
+    baseline: &ExecSandboxMode,
+) -> bool {
+    sandbox_applied && sandbox_mode_rank(requested) > sandbox_mode_rank(baseline)
 }
 
 fn terminal_mode_name(mode: TerminalSecurityMode) -> &'static str {
@@ -367,7 +393,7 @@ pub fn escalation_from_args(
         .map(Some)
 }
 
-pub fn escalation_audit(escalation: &ExecEscalation, source: ExecSource) -> SandboxAuditRecord {
+fn escalation_audit(escalation: &ExecEscalation, source: ExecSource) -> SandboxAuditRecord {
     let status = refact_sandbox::sandbox_status();
     SandboxAuditRecord {
         mode: escalation.mode_name().to_string(),
@@ -598,6 +624,59 @@ mod tests {
             vec![PathBuf::from("/workspace")],
         );
         assert_eq!(spec.rw_paths, vec![PathBuf::from("/")]);
+    }
+
+    #[test]
+    fn escalation_only_widens_access_when_a_sandbox_applies_and_the_mode_grows() {
+        assert!(escalation_widens_access(
+            true,
+            &ExecSandboxMode::FullAccess,
+            &ExecSandboxMode::WorkspaceWrite
+        ));
+        assert!(escalation_widens_access(
+            true,
+            &ExecSandboxMode::WorkspaceWrite,
+            &ExecSandboxMode::ReadOnly
+        ));
+        assert!(!escalation_widens_access(
+            true,
+            &ExecSandboxMode::WorkspaceWrite,
+            &ExecSandboxMode::WorkspaceWrite
+        ));
+        assert!(!escalation_widens_access(
+            false,
+            &ExecSandboxMode::FullAccess,
+            &ExecSandboxMode::ReadOnly
+        ));
+    }
+
+    #[tokio::test]
+    async fn no_op_escalation_records_no_audit() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let argv = vec!["printf".to_string(), "ok".to_string()];
+
+        let policy = build_exec_request(
+            gcx,
+            CommandPolicyInput {
+                source: ExecSource::ShellTool,
+                command: CommandKind::Argv(&argv),
+                cwd: None,
+                env: HashMap::new(),
+                chat_mode: Some("agent".to_string()),
+                escalation: Some(ExecEscalation {
+                    mode: ExecEscalationMode::WorkspaceWrite,
+                    justification: "commit inside the task worktree".to_string(),
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(policy.audit.is_none());
+        assert_eq!(
+            policy.request.audit.unwrap().justification.as_deref(),
+            Some("commit inside the task worktree")
+        );
     }
 
     #[test]
