@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex as AMutex, mpsc};
 use serde_json::{json, Value};
@@ -1313,6 +1313,49 @@ fn is_subagentic_link_type(link_type: &str) -> bool {
     !matches!(link_type, "handoff" | "mode_transition" | "branch")
 }
 
+type SubchatProgress = Arc<StdMutex<Vec<ChatMessage>>>;
+
+fn record_subchat_progress(progress: &SubchatProgress, messages: &[ChatMessage]) {
+    let mut slot = match progress.lock() {
+        Ok(slot) => slot,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *slot = messages.to_vec();
+}
+
+fn take_subchat_progress(progress: &SubchatProgress) -> Vec<ChatMessage> {
+    match progress.lock() {
+        Ok(slot) => slot.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+async fn save_failed_subchat_trajectory(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    config: &SubchatConfig,
+    progress: &SubchatProgress,
+    error: &str,
+) {
+    let mut messages = take_subchat_progress(progress);
+    if messages.is_empty() {
+        return;
+    }
+
+    messages.push(crate::chat::internal_roles::event(
+        crate::chat::internal_roles::EventSubkind::SystemNotice,
+        "subchat.run",
+        json!({"error": error, "tool_name": config.tool_name}),
+        format!("Subchat run failed: {error}"),
+    ));
+
+    let mut thread = stateful_thread_from_config(chat_id, config);
+    register_stateful_subchat_worktree(gcx.clone(), chat_id, &mut thread).await;
+    save_trajectory_as(gcx.clone(), &thread, &messages).await;
+    let app = AppState::from_gcx(gcx).await;
+    crate::chat::trajectories::refresh_session_from_trajectory_if_stale(app, chat_id, true).await;
+}
+
 fn task_meta_for_stateful_subchat(config: &SubchatConfig) -> Option<TaskMeta> {
     let mut task_meta = config.task_meta.clone()?;
     if task_meta.role == "planner"
@@ -1373,6 +1416,8 @@ pub async fn run_subchat(
 
     let mut _usage = ChatUsage::default();
 
+    let progress_messages: SubchatProgress = Arc::new(StdMutex::new(messages.clone()));
+
     let current_messages_result = if let Some(ref wrap_up) = config.wrap_up {
         Box::pin(run_subchat_with_wrap_up(
             ccx.clone(),
@@ -1381,6 +1426,7 @@ pub async fn run_subchat(
             &config.tools,
             wrap_up,
             &mut _usage,
+            &progress_messages,
         ))
         .await
     } else {
@@ -1390,12 +1436,23 @@ pub async fn run_subchat(
             messages,
             &config.tools,
             &mut _usage,
+            &progress_messages,
         ))
         .await
     };
     let mut current_messages = match current_messages_result {
         Ok(messages) => messages,
         Err(e) => {
+            if config.stateful {
+                save_failed_subchat_trajectory(
+                    gcx.clone(),
+                    &chat_id,
+                    &config,
+                    &progress_messages,
+                    &e,
+                )
+                .await;
+            }
             clear_unbound_openai_codex_websocket_session(&chat_id).await;
             return Err(e);
         }
@@ -1636,6 +1693,7 @@ async fn run_subchat_loop(
     mut messages: Vec<ChatMessage>,
     tools_policy: &ToolsPolicy,
     usage: &mut ChatUsage,
+    progress: &SubchatProgress,
 ) -> Result<Vec<ChatMessage>, String> {
     let mut context_limit_compact_count = 0usize;
     let mut empty_choice_retry_count = 0usize;
@@ -1710,6 +1768,7 @@ async fn run_subchat_loop(
 
         update_usage_from_messages(usage, &results);
         messages = results.into_iter().next().unwrap_or(messages);
+        record_subchat_progress(progress, &messages);
 
         if has_final_answer(&messages) {
             break;
@@ -1727,6 +1786,7 @@ async fn run_subchat_loop(
             config.autonomous_no_confirm,
         )
         .await?;
+        record_subchat_progress(progress, &messages);
 
         if is_aborted(&config.abort_flag) {
             return Err("Aborted".to_string());
@@ -1746,6 +1806,7 @@ async fn run_subchat_loop(
             usage,
         )
         .await?;
+        record_subchat_progress(progress, &messages);
     }
 
     Ok(messages)
@@ -1833,6 +1894,7 @@ async fn run_subchat_with_wrap_up(
     tools_policy: &ToolsPolicy,
     wrap_up: &WrapUpConfig,
     usage: &mut ChatUsage,
+    progress: &SubchatProgress,
 ) -> Result<Vec<ChatMessage>, String> {
     let mut step_n = 0;
     let mut context_limit_compact_count = 0usize;
@@ -1933,6 +1995,7 @@ async fn run_subchat_with_wrap_up(
 
         update_usage_from_messages(usage, &results);
         messages = results.into_iter().next().unwrap_or(messages);
+        record_subchat_progress(progress, &messages);
 
         messages = execute_pending_tool_calls(
             ccx.clone(),
@@ -1946,6 +2009,7 @@ async fn run_subchat_with_wrap_up(
             config.autonomous_no_confirm,
         )
         .await?;
+        record_subchat_progress(progress, &messages);
 
         step_n += 1;
 
@@ -1970,8 +2034,10 @@ async fn run_subchat_with_wrap_up(
         config.autonomous_no_confirm,
     )
     .await?;
+    record_subchat_progress(progress, &messages);
 
     messages.push(ChatMessage::new("user".to_string(), wrap_up.prompt.clone()));
+    record_subchat_progress(progress, &messages);
 
     let final_results = loop {
         match subchat_single_internal(

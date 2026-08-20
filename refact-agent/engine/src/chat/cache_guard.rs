@@ -11,7 +11,7 @@ use tokio::sync::{Mutex as AMutex};
 
 use crate::app_state::AppState;
 use crate::caps::ChatModelRecord;
-use crate::chat::types::{ChatSession, TaskMeta};
+use crate::chat::types::{ChatSession, TaskMeta, ThreadParams};
 use crate::tokens::{cached_tokenizer, count_text_tokens_with_fallback};
 
 const CACHE_GUARD_TOOL_NAME: &str = "cache_guard";
@@ -73,6 +73,10 @@ pub fn cache_guard_event_message(payload: Value, summary: impl Into<String>) -> 
 }
 
 pub async fn is_guard_enabled(app: AppState, model_id: &str, session: &ChatSession) -> bool {
+    if is_non_interactive_thread(&session.thread) {
+        return false;
+    }
+
     is_guard_enabled_for_task_meta(app, model_id, session.thread.task_meta.as_ref()).await
 }
 
@@ -89,7 +93,33 @@ async fn is_guard_enabled_for_task_meta(
 }
 
 fn is_task_management_role(role: &str) -> bool {
-    matches!(role, "planner" | "agent" | "agents" | "task_agent")
+    matches!(
+        role,
+        "planner" | "agent" | "agents" | "task_agent" | "subchats"
+    )
+}
+
+pub fn is_non_interactive_thread(thread: &ThreadParams) -> bool {
+    if thread
+        .task_meta
+        .as_ref()
+        .is_some_and(|meta| is_task_management_role(&meta.role))
+    {
+        return true;
+    }
+
+    if thread.buddy_meta.is_some() {
+        return true;
+    }
+
+    thread
+        .link_type
+        .as_deref()
+        .is_some_and(is_subagentic_link_type)
+}
+
+fn is_subagentic_link_type(link_type: &str) -> bool {
+    !matches!(link_type, "handoff" | "mode_transition" | "branch")
 }
 
 async fn model_supports_cache_guard(app: AppState, model_id: &str) -> bool {
@@ -520,11 +550,18 @@ pub async fn check_or_pause_cache_guard(
     model_id: &str,
     request_body: &Value,
 ) -> Result<CacheGuardOutcome, String> {
-    let task_meta = {
+    let (task_meta, non_interactive) = {
         let session = session_arc.lock().await;
-        session.thread.task_meta.clone()
+        (
+            session.thread.task_meta.clone(),
+            is_non_interactive_thread(&session.thread),
+        )
     };
     if !has_anthropic_explicit_cache_markers(request_body) {
+        return Ok(CacheGuardOutcome::Pass(None));
+    }
+
+    if non_interactive {
         return Ok(CacheGuardOutcome::Pass(None));
     }
 
@@ -1575,6 +1612,80 @@ mod tests {
                 "cache guard should be disabled for task role {role}"
             );
         }
+    }
+
+    fn session_with_link_type(link_type: &str) -> crate::chat::types::ChatSession {
+        let mut session =
+            crate::chat::types::ChatSession::new("test-cache-guard-child".to_string());
+        session.thread.parent_id = Some("parent-chat".to_string());
+        session.thread.link_type = Some(link_type.to_string());
+        session
+    }
+
+    #[tokio::test]
+    async fn cache_guard_disabled_for_subagentic_child_threads() {
+        for link_type in ["subagent", "delegate", "buddy", "task_agent"] {
+            let app = app_with_cache_priced_model("test/model-with-cache").await;
+            let session = session_with_link_type(link_type);
+
+            assert!(
+                !is_guard_enabled(app, "test/model-with-cache", &session).await,
+                "cache guard must be disabled for non-interactive child link type {link_type}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_guard_stays_enabled_for_user_facing_child_threads() {
+        for link_type in ["handoff", "mode_transition", "branch"] {
+            let app = app_with_cache_priced_model("test/model-with-cache").await;
+            let session = session_with_link_type(link_type);
+
+            assert!(
+                is_guard_enabled(app, "test/model-with-cache", &session).await,
+                "cache guard must stay enabled for user-facing link type {link_type}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_guard_never_pauses_subagent_child_on_prefix_break() {
+        let app = app_with_cache_priced_model("test/model-with-cache").await;
+        let mut session = session_with_link_type("subagent");
+        let prev_body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "seed", "cache_control": {"type": "ephemeral"}}]
+            }],
+            "model": "test"
+        });
+        session.cache_guard_snapshot = Some(body_for_cache_guard(&prev_body));
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+
+        let next_body = json!({
+            "messages": [{
+                "role": "assistant",
+                "content": [{"type": "text", "text": "rewritten prefix", "cache_control": {"type": "ephemeral"}}]
+            }],
+            "model": "test"
+        });
+
+        let outcome = check_or_pause_cache_guard(
+            app,
+            session_arc.clone(),
+            "test/model-with-cache",
+            &next_body,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(outcome, CacheGuardOutcome::Pass(None)),
+            "a subagent child has no user to force-continue, so it must never pause"
+        );
+        let session = session_arc.lock().await;
+        assert!(session.runtime.pause_reasons.is_empty());
+        assert!(!session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]

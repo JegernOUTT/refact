@@ -239,6 +239,7 @@ tools:
   - undo_textdoc
   - rm
   - mv
+  - review
   - agent_finish
   - task_mem_save
   - task_mem_search

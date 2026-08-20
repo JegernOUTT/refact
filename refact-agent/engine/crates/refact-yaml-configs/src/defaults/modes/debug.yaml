@@ -142,6 +142,7 @@ tools:
   - agent_wait
   - agent_result
   - agent_cancel
+  - review
   - ask_questions
 
 tool_confirm:
