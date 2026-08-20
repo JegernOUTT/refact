@@ -20,7 +20,9 @@ use crate::types::{
 
 #[cfg(not(test))]
 const REMOVE_KILL_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(test)]
+#[cfg(all(test, target_os = "windows"))]
+const REMOVE_KILL_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(all(test, not(target_os = "windows")))]
 const REMOVE_KILL_TIMEOUT: Duration = Duration::from_millis(200);
 const PROCESS_COMPLETION_CHANNEL_CAPACITY: usize = 256;
 const PROCESS_OUTPUT_CHANNEL_CAPACITY: usize = 4096;

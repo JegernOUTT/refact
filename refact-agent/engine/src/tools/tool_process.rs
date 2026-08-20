@@ -1873,6 +1873,14 @@ mod tests {
         }
     }
 
+    fn wait_completion_timeout_ms() -> u64 {
+        if cfg!(target_os = "windows") {
+            60_000
+        } else {
+            2_000
+        }
+    }
+
     fn quick_command(output: &str) -> String {
         if cfg!(target_os = "windows") {
             format!("[Console]::Out.Write('{output}')")
@@ -2829,7 +2837,7 @@ mod tests {
             ccx,
             make_args_map(vec![
                 ("process_id", json!(done_process_id.as_str())),
-                ("timeout_ms", json!(2000)),
+                ("timeout_ms", json!(wait_completion_timeout_ms())),
             ]),
         )
         .await

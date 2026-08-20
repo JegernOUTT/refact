@@ -809,10 +809,18 @@ mod tests {
 
     fn ready_command() -> String {
         if cfg!(target_os = "windows") {
-            "Start-Sleep -Milliseconds 100; [Console]::Out.Write(\"READY`nNOT_READY`nREADY`n\")"
+            "Start-Sleep -Milliseconds 100; [Console]::Out.Write('READY' + [char]10 + 'NOT_READY' + [char]10 + 'READY' + [char]10)"
                 .to_string()
         } else {
             "sleep 0.1; printf 'READY\nNOT_READY\nREADY\n'".to_string()
+        }
+    }
+
+    fn subscribe_duration_ms() -> u64 {
+        if cfg!(target_os = "windows") {
+            60_000
+        } else {
+            5_000
         }
     }
 
@@ -910,7 +918,7 @@ mod tests {
             args(vec![
                 ("process_id", json!(process_id.as_str())),
                 ("regex_filter", json!("^READY$")),
-                ("max_duration_ms", json!(5_000)),
+                ("max_duration_ms", json!(subscribe_duration_ms())),
             ]),
         )
         .await;
@@ -918,7 +926,7 @@ mod tests {
             serde_json::from_str::<Value>(&message.content.content_text_only()).unwrap(),
             json!({
                 "subscribed": true,
-                "max_duration_ms": 5_000,
+                "max_duration_ms": subscribe_duration_ms(),
                 "max_events": DEFAULT_MAX_EVENTS,
                 "max_line_bytes": DEFAULT_MAX_LINE_BYTES,
                 "process_id": process_id.as_str()
@@ -1012,7 +1020,7 @@ mod tests {
             args(vec![
                 ("process_id", json!(process_id.as_str())),
                 ("regex_filter", json!("READY")),
-                ("max_duration_ms", json!(5_000)),
+                ("max_duration_ms", json!(subscribe_duration_ms())),
             ]),
         )
         .await;
