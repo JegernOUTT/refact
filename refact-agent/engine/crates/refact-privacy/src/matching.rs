@@ -177,11 +177,9 @@ impl CompiledPolicy {
         append_relative_candidates(&mut candidate_paths, &roots);
 
         #[cfg(unix)]
-        if let Some(identity) = file_identity(path) {
-            if file_link_count(path).is_some_and(|count| count > 1) {
-                append_identity_aliases(&mut candidate_paths, identity, &roots);
-                append_relative_candidates(&mut candidate_paths, &roots);
-            }
+        if let Some(identity) = hard_linked_file_identity(path) {
+            append_identity_aliases(&mut candidate_paths, identity, &roots);
+            append_relative_candidates(&mut candidate_paths, &roots);
         }
 
         let candidates = normalized_candidates(&candidate_paths);
@@ -439,10 +437,17 @@ fn file_identity(path: &Path) -> Option<FileIdentity> {
 }
 
 #[cfg(unix)]
-fn file_link_count(path: &Path) -> Option<u64> {
+fn hard_linked_file_identity(path: &Path) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
 
-    Some(std::fs::metadata(path).ok()?.nlink())
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.nlink() <= 1 {
+        return None;
+    }
+    Some(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
 }
 
 #[cfg(unix)]
@@ -901,6 +906,23 @@ mod tests {
                 }]
             })
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directories_are_not_treated_as_hard_linked_files() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        std::fs::create_dir(temp.path().join("nested")).expect("nested dir should be created");
+        assert!(std::fs::metadata(temp.path()).unwrap().nlink() > 1);
+        assert_eq!(hard_linked_file_identity(temp.path()), None);
+
+        let file = temp.path().join("file.txt");
+        let alias = temp.path().join("alias.txt");
+        std::fs::write(&file, "content").expect("file should be written");
+        std::fs::hard_link(&file, &alias).expect("hard link should be created");
+        assert_eq!(hard_linked_file_identity(&file), file_identity(&file));
     }
 
     #[cfg(unix)]

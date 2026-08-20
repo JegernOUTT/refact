@@ -32,19 +32,12 @@
   max-width: 100%;
 }
 
-/* Tail spacer inside the virtualized scroller so the latest message can
-   rest above the floating glass composer while older text flows behind it.
-   The extra space keeps the streaming tail clear of the panel edge. */
+/* Tail breathing gap inside the virtualized scroller. The transcript area
+   itself ends at the dock's top edge (margin-bottom on .transcriptArea), so
+   this spacer only keeps the streaming tail clear of the panel border. */
 .composerClearance {
-  height: calc(var(--rf-composer-clearance, 0px) + var(--rf-space-4));
+  height: var(--rf-space-4);
   flex-shrink: 0;
-  transition: height var(--rf-dur-med) var(--rf-ease-standard);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .composerClearance {
-    transition: none;
-  }
 }
 
 .file {

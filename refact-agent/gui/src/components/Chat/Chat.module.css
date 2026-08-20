@@ -2,6 +2,19 @@
   position: relative;
 }
 
+/* End the transcript viewport (and its scrollbar) at the dock's top edge
+   instead of running behind the floating glass composer. */
+.transcriptArea {
+  margin-bottom: var(--rf-composer-clearance, 0px);
+  transition: margin-bottom var(--rf-dur-med) var(--rf-ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transcriptArea {
+    transition: none;
+  }
+}
+
 .bottomDock {
   position: absolute;
   z-index: var(--rf-z-dropdown);

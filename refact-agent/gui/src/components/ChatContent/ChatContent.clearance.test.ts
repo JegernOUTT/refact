@@ -20,16 +20,24 @@ function rule(css: string, selector: string): string {
 
 describe("chat bottom dock clearance styles", () => {
   it("uses one measured variable for transcript and floating consumers", () => {
-    // The transcript area must not reserve composer clearance anywhere in
-    // Chat.module.css; the in-scroller spacer is the single source.
+    // The transcript viewport ends at the dock's top edge: the clearance is
+    // reserved once, as margin on .transcriptArea, so the scrollbar stops at
+    // the composer instead of running behind the glass. The in-scroller
+    // spacer only adds the tail breathing gap.
+    expect(rule(chatCss, ".transcriptArea")).toContain(
+      "margin-bottom: var(--rf-composer-clearance, 0px)",
+    );
     expect(chatCss).not.toContain(
       "padding-bottom: var(--rf-composer-clearance",
     );
+    expect(rule(contentCss, ".composerClearance")).toContain(
+      "height: var(--rf-space-4)",
+    );
+    expect(rule(contentCss, ".composerClearance")).not.toContain(
+      "--rf-composer-clearance",
+    );
     expect(rule(contentCss, ".floatingLinks")).toContain(
       "bottom: var(--rf-composer-clearance, 0px)",
-    );
-    expect(rule(contentCss, ".composerClearance")).toContain(
-      "height: calc(var(--rf-composer-clearance, 0px) + var(--rf-space-4))",
     );
     expect(rule(contentCss, ".queuedMessagesContainer")).toContain(
       "bottom: calc(var(--rf-composer-clearance, 0px) + var(--rf-space-2))",
