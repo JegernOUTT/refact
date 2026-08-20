@@ -4,6 +4,8 @@ import type { RootState } from "../../app/store";
 import { buildApiUrlFromState } from "./apiUrl";
 import type { ResolvedPrivacyZone } from "./privacy";
 
+export const FILES_TREE_REQUEST_TIMEOUT_MS = 15_000;
+
 export type FilesTreeEntry = {
   name: string;
   path: string;
@@ -65,11 +67,36 @@ export const filesApi = createApi({
     getFilesTree: builder.query<FilesTreeResponse, string>({
       queryFn: async (path, api, _extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
-        const result = await baseQuery({
-          url: buildApiUrlFromState(state, "/v1/files/tree", { path }),
-          credentials: "same-origin",
-          redirect: "follow",
-        });
+        const controller = new AbortController();
+        const timeoutState = { expired: false };
+        const abortRequest = () => controller.abort();
+        api.signal.addEventListener("abort", abortRequest, { once: true });
+        const timeoutId = setTimeout(() => {
+          timeoutState.expired = true;
+          abortRequest();
+        }, FILES_TREE_REQUEST_TIMEOUT_MS);
+        let result: Awaited<ReturnType<typeof baseQuery>>;
+        try {
+          result = await baseQuery({
+            url: buildApiUrlFromState(state, "/v1/files/tree", { path }),
+            credentials: "same-origin",
+            redirect: "follow",
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+          api.signal.removeEventListener("abort", abortRequest);
+        }
+        if (timeoutState.expired) {
+          return {
+            error: {
+              status: "TIMEOUT_ERROR",
+              error: `Workspace files request timed out after ${String(
+                FILES_TREE_REQUEST_TIMEOUT_MS,
+              )}ms`,
+            },
+          };
+        }
         if (result.error) return { error: result.error };
         return { data: result.data as FilesTreeResponse };
       },
