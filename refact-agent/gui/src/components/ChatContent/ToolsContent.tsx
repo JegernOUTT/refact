@@ -368,18 +368,20 @@ function decorateBackgroundAgentTool(
   const agent =
     backgroundAgents[agentId] ?? backgroundAgentPlaceholder(result, toolName);
   if (!agent) return elem;
+  // The card carries every fact the raw "✓ Started background delegate…" tool
+  // result spells out (id, target files, status, steps), so rendering both
+  // duplicated the same wall of text under the card. The card becomes the
+  // primary — and only — rendering for background agent tool calls.
   return (
-    <React.Fragment key={`background-agent-${agent.agent_id}`}>
-      {elem}
-      <BackgroundAgentCard
-        agent={agent}
-        onOpenTrajectory={
-          agent.child_chat_id
-            ? (childChatId) => onOpenTrajectory(agent, childChatId)
-            : undefined
-        }
-      />
-    </React.Fragment>
+    <BackgroundAgentCard
+      key={`background-agent-${agent.agent_id}`}
+      agent={agent}
+      onOpenTrajectory={
+        agent.child_chat_id
+          ? (childChatId) => onOpenTrajectory(agent, childChatId)
+          : undefined
+      }
+    />
   );
 }
 

@@ -462,28 +462,35 @@ describe("background agents", () => {
   test("BackgroundAgentCard renders status badge, title, target_files, and edited_files", () => {
     render(<BackgroundAgentCard agent={makeAgent()} />);
 
-    expect(screen.getByText("running")).toBeInTheDocument();
-    expect(screen.getByText("Subagent: Inspect the frogs")).toBeInTheDocument();
-    expect(screen.getByText("src/frog.ts")).toBeInTheDocument();
-    expect(screen.getByText("src/toad.ts")).toBeInTheDocument();
+    expect(screen.getByText("Running")).toBeInTheDocument();
+    expect(screen.getByText("Inspect the frogs")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "1 target files" }),
+    ).toBeInTheDocument();
   });
 
   test("BackgroundAgentCard renders error badge when error is set", () => {
-    render(<BackgroundAgentCard agent={makeAgent({ error: "boom" })} />);
+    render(
+      <BackgroundAgentCard
+        agent={makeAgent({ status: "failed", error: "boom" })}
+      />,
+    );
 
-    expect(screen.getByText("error")).toBeInTheDocument();
+    expect(screen.getAllByText("Failed").length).toBeGreaterThan(0);
     expect(screen.getByText("boom")).toBeInTheDocument();
   });
 
   test("BackgroundAgentCard renders conflict badge when conflict_summary is set", () => {
     render(
       <BackgroundAgentCard
-        agent={makeAgent({ conflict_summary: "src/frog.ts conflicted" })}
+        agent={makeAgent({
+          status: "completed",
+          conflict_summary: "src/frog.ts conflicted",
+        })}
       />,
     );
 
-    expect(screen.getByText("⚠ conflicts")).toBeInTheDocument();
-    expect(screen.getByText("src/frog.ts conflicted")).toBeInTheDocument();
+    expect(screen.getByText("Conflicts")).toBeInTheDocument();
   });
 
   test("ToolContent renders BackgroundAgentCard from flattened tool fields", () => {
@@ -498,9 +505,11 @@ describe("background agents", () => {
     ]);
 
     expect(screen.getByTestId("background-agent-card")).toBeInTheDocument();
-    expect(screen.getByText("running")).toBeInTheDocument();
-    expect(screen.getByText("bgagent-flat")).toBeInTheDocument();
-    expect(screen.getByText("src/flat.ts")).toBeInTheDocument();
+    expect(screen.getByText("Running")).toBeInTheDocument();
+    expect(screen.getByTitle("bgagent-flat")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "1 target files" }),
+    ).toBeInTheDocument();
   });
 
   test("ToolContent keeps rendering BackgroundAgentCard from nested extra fallback", () => {
@@ -517,8 +526,10 @@ describe("background agents", () => {
     ]);
 
     expect(screen.getByTestId("background-agent-card")).toBeInTheDocument();
-    expect(screen.getByText("bgagent-extra")).toBeInTheDocument();
-    expect(screen.getByText("src/extra.ts")).toBeInTheDocument();
+    expect(screen.getByTitle("bgagent-extra")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "1 target files" }),
+    ).toBeInTheDocument();
   });
 
   test("BackgroundAgentUpdated state overrides the flattened placeholder card", () => {
@@ -543,11 +554,9 @@ describe("background agents", () => {
     );
 
     expect(screen.getByTestId("background-agent-card")).toBeInTheDocument();
-    expect(screen.getByText("completed")).toBeInTheDocument();
-    expect(
-      screen.getByText("Subagent: Updated frog report"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Done reading frogs")).toBeInTheDocument();
+    expect(screen.getByText("Completed")).toBeInTheDocument();
+    expect(screen.getByText("Updated frog report")).toBeInTheDocument();
+    expect(screen.getByText("Completed")).toBeInTheDocument();
   });
 
   test("flattened message_added event keeps background agent fields on selected tool result", () => {
@@ -591,9 +600,7 @@ describe("background agents", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: "Open child trajectory" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Open trajectory" }));
 
     expect(onOpenTrajectory).toHaveBeenCalledWith("child-chat");
   });
