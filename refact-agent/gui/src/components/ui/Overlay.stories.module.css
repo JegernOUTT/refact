@@ -102,3 +102,10 @@
   color: var(--rf-color-fg);
   color-scheme: light;
 }
+
+.panel[data-appearance="dark"],
+.panel:global(.dark) {
+  background: var(--rf-bg);
+  color: var(--rf-color-fg);
+  color-scheme: dark;
+}

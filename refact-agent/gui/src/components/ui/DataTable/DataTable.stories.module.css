@@ -18,6 +18,14 @@
   color-scheme: light;
 }
 
+/* Mirror for the dark half: it must paint its own canvas too, otherwise the
+   dark tokens render on the light page canvas under the light global. */
+.panel[data-appearance="dark"] {
+  background: var(--rf-bg);
+  color: var(--rf-color-fg);
+  color-scheme: dark;
+}
+
 .wideCell {
   display: inline-block;
   min-width: 260px;

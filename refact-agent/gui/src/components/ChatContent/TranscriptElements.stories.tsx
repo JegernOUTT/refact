@@ -11,16 +11,8 @@ import {
   THINKING_BLOCKS_ASSISTANT,
   USER_WITH_IMAGES,
 } from "../../__fixtures__/transcriptElements";
-import {
-  goodCaps,
-  goodPing,
-  goodPrompts,
-  goodUser,
-  noCommandPreview,
-  noCompletions,
-  noTools,
-} from "../../__fixtures__/msw";
 import { ChatStoryHarness } from "../../__stories__/ChatStoryHarness";
+import { CHAT_STORY_MSW_HANDLERS } from "../../__stories__/chatStoryState";
 import type { ChatMessages } from "../../services/refact";
 import { ChatContent } from ".";
 
@@ -44,15 +36,7 @@ const meta = {
   parameters: {
     layout: "fullscreen",
     msw: {
-      handlers: [
-        goodPing,
-        goodCaps,
-        goodPrompts,
-        goodUser,
-        noTools,
-        noCompletions,
-        noCommandPreview,
-      ],
+      handlers: [...CHAT_STORY_MSW_HANDLERS],
     },
   },
 } satisfies Meta<typeof TranscriptStory>;

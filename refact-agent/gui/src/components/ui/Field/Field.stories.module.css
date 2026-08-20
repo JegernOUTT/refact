@@ -27,6 +27,12 @@
   color-scheme: light;
 }
 
+.panel[data-appearance="dark"] {
+  background: var(--rf-bg);
+  color: var(--rf-color-fg);
+  color-scheme: dark;
+}
+
 .sectionStack {
   display: grid;
   min-width: 0;

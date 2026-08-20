@@ -20,6 +20,15 @@
   color: var(--rf-color-fg);
 }
 
+/* The dark half of the light/dark gallery must paint its own canvas and pin
+   color-scheme, otherwise its dark tokens render on the light page canvas
+   (audit N-03). */
+.panel[data-appearance="dark"] {
+  background: var(--rf-bg);
+  color: var(--rf-color-fg);
+  color-scheme: dark;
+}
+
 .header,
 .section {
   display: flex;

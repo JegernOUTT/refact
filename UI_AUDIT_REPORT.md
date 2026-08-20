@@ -857,3 +857,54 @@ Dock renders as Sheet `x=12 w=396` (symmetric 12px margins) with the **Close wor
 ### Remaining residuals (unchanged)
 
 L-09/L-23 accepted; L-21 (harness dark pin) + L-22 partial + full app-level light-theme pass still open; rf-5088b886 + rf-4c8cb831 deferred API refactors; odd-size × unitless `--rf-line` inherit cases documented as correct-by-rule.
+
+---
+
+## Part 11 — SESSION-8: LIGHT-THEME PASS (app-wide) + NARROW COMPLETION + IDE-host verification
+
+**Scope:** the two passes Part 10 left outstanding — the full light-theme pass (now unblocked) and the narrow pass for never-narrow-swept families — plus code-level verification of the Toolbar dock-toggle contract in IDE hosts and quantification of the half-pixel line-box residual (both via background subagents).
+
+**Rig:** portal-aware contrast probe `__light()` (WCAG ratio per text node with ancestor bg compositing incl. `color(srgb)` parsing, dark-surface leak scan) + narrow probe `__nar()` (page hscroll, off-viewport rects, sub-28 tap targets), driven through `iframe.html?...&globals=appearance:light` batches at 1280×900 and 360×780. Storybook restarted as `storybook_light_pass` (old service had died).
+
+### Root cause of the session: N-79 (S2/infra) — harness appearance RACE — **fixed**
+
+`resolveStoryAppearance` (chatStoryState.ts:94-103) reads `document.documentElement.dataset.appearance` with a **dark fallback**, but the preview decorator wrote that dataset in a `useEffect` — which runs after first render. `ChatStoryHarness` freezes the read in a `useState` initializer → any harness story that mounts before the effect pins its app `Theme` **dark forever**; lazy-chunk-heavy stories (chat--configuration) suspend past the effect and win the race, light ones (chat-form, toolconfirmation) lose it. Under `globals=appearance:light` this produced dark composer/dock islands on light pages and made every chat-land light measurement untrustworthy.
+**Fix:** `applyDocumentModes()` extracted and called **synchronously in the decorator body** (preview.tsx) before children mount; effect retained for updates. Verified: chat-form composer computes light glass `rgba(250,250,251,0.88)`, "no dark pin"; chat--primary dock leaks gone.
+
+### N-78 (S3/a11y, PRODUCT) — status colors had no light-mode variants — **fixed**
+
+tokens.css light block overrode bg/fg/surfaces/borders/accent/charts but **not** `--rf-color-success/warning/danger`; the dark pastels (#5fae8b/#cda04e/#d8736d) rode into light mode. Measured: Badge tones 2.23–2.59, Button danger ghost/soft labels 2.95 (13/14/15px), SaveStatus Saved 2.59 / Error 3.11, EditableTable validation error 3.11, CreateWorktree field error 3.13, TPW Paused badge 2.28 / Stop label 3.02, DataTable status text 2.59 — all on ~white. **Fix:** light-scope overrides in tokens.css, same hue families darkened to ≥4.5 on white AND on their own 12% soft tints (precedent: the light chart palette in the same file): success `#1e7a52` (5.2:1), warning `#8f5e08` (5.5:1), danger `#c13c33` (5.2:1). Re-measured: badge gallery 0 fails, Field 0 fails, CreateWorktree error 0 fails, TPW only the story-context borderline below.
+
+### N-80 (S3/story) — light-pair shells never painted their DARK halves — **fixed**
+
+Mirror of N-03: under `globals=appearance:light` the dark-scoped story shells (Button `_ruvci_`, Icon `_ngy6l_`, Field, shared Overlay shell `_qrzy8_`) rendered dark-scope white text at **1.01–1.02:1** over the light page — dark panels pinned tokens but painted no background (historically relied on the dark page). **Fix:** mirror painting rules `.panel[data-appearance="dark"], .panel:global(.dark) { background: var(--rf-bg); color: var(--rf-color-fg); color-scheme: dark; }` added to Button/Icon/Field/DataTable/VirtualList (delegate) + Overlay + Control (parent — delegate correctly refused out-of-scope files). Verified: dark halves paint `rgb(12,13,15)`, invisible-text fails gone.
+
+### N-81 (S4/story) — TranscriptElements suite fired unmocked requests — **fixed**
+
+Observed MSW warnings (GET /v1/privacy/policy, /v1/chat-modes, POST /v1/privacy/inspect); converged onto `[...CHAT_STORY_MSW_HANDLERS]` (its 7 local handlers were a strict subset).
+
+### Retractions (honesty ledger)
+
+1. **"Hardcoded dark glass in Chat.module.css/ChatForm"** — retracted: `terminalWorkbench`/`dockGroup`/composer all use `var(--rf-surface-glass)` correctly; grep found zero hardcoded dark rgba outside tokens.css; the dark values were honest renders of N-79-raced subtrees.
+2. **"Mascot bubble 1.44:1 in light mode"** — retracted twice over: the probe can't see gradient backgrounds (`background-image` cream bubble, `--bb-ink` text = fine), and under the fixed rig the ancestor chain is light anyway.
+3. ToolCard `rf-text-shimmer` "ratio 1" fails — probe limitation (gradient-painted text via background-clip), by design.
+
+### Light-pass verdicts (post-fix)
+
+Kit galleries, overlays (incl. the 6 light-overlay stories), DataTable/EditableTable/VirtualList/ModelSelector, chat land (chat--primary/configuration, chat-form, chat-content--with-diffs, transcript error-card, TPW ×2, PlanBanner ×2), dialogs (ModeTransition, CreateWorktree ×2, DeletePopover, Login): **zero non-exempt contrast fails**. Exempt/known: disabled controls at ~2.8 (WCAG-exempt), `Needs work` accent badge **4.42** under Storybook's indigo accent-9 (#3E63DD) on soft tint — the app's light accent (`--accent-9` blue #006adc) passes; story-context borderline, documented not fixed. ToolConfirmation story keeps a deliberate dark Surface wrapper simulating the dock context (story chrome).
+
+### Narrow-pass completion (360×780, families with no prior narrow coverage)
+
+toolconfirmation--mixed · chat-dialogs-modetransitiondialog--switch-mode · task-progress-widget--with-tasks · chat-transcript-elements--compression-cards · chat-content-plan-banner--plan-with-deltas: all **hscroll:false, zero off-viewport rects, zero sub-28 tap targets**.
+
+### Dock-toggle IDE-host verification (subagent, code-level) — **regression-free**
+
+Three-layer enforcement: `Toolbar.tsx:199` (`host !== "web" || (dock && activeTab.type === "chat")`), `resolveCapabilities` hard-`false` files/git for non-web hosts, and `WorkspaceView` structurally mounted only under the chat page (`App.tsx:597`). IDE characterization suite covers opt-in launcher semantics + stale-persisted-layout guard (`capabilitiesMatrix.test.tsx:281-338`). One optional coverage gap noted: no test for IDE host + `panelsForced` + non-chat page asserting no dock chrome (structurally prevented today).
+
+### Half-pixel line-box residual (subagent, quantified — decision pending)
+
+Ambient body text is **integer today** (base.css pairs 13px with `--rf-line-2` 20px). The true surviving residual is the **`font: <weight> var(--rf-text-N) / var(--rf-line) <family>` shorthand** form the sweep never touched: **124 sites** pair `--rf-text-2` with unitless 1.5 (19.5px boxes) + 6 × text-4 (22.5) + 7 × text-5 (28.5), plus 18 standalone `line-height: var(--rf-line)` declarations and a few split-block compositions (DashboardPrimitives `.text.size2`, marketplace patterns). ~90 files. The 148 "no line-height in block" cases mostly inherit the integer 20px and are fine. Options: (a) mechanical shorthand sweep `/ var(--rf-line)` → `/ var(--rf-line-N)` for N=2/4/5; (b) formally accept + document.
+
+### Session-8 fix inventory
+
+preview.tsx (sync `applyDocumentModes`) · tokens.css (light status colors) · 7 story css modules (dark mirrors) · TranscriptElements.stories.tsx (handler convergence). Product CSS delta: **3 tokens + comment**. Everything else story-infra.

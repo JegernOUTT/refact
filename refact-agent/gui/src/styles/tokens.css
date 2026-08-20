@@ -240,6 +240,13 @@
   --rf-scrim: rgba(0, 0, 0, 0.32);
   --rf-border: rgba(0, 0, 0, 0.12);
   --rf-border-strong: rgba(0, 0, 0, 0.22);
+  /* Status colors need light-mode variants: the dark-theme pastels measure
+     2.2-3.1:1 on the light bg (badge tones, SaveStatus, field errors, danger
+     ghost/soft button labels). Same hue families, darkened to >=4.5:1 on
+     white and on their own 12% soft tints. */
+  --rf-color-success: #1e7a52;
+  --rf-color-warning: #8f5e08;
+  --rf-color-danger: #c13c33;
   --rf-color-accent: var(--accent-9, #006adc);
   --rf-color-accent-soft: rgba(0, 106, 220, 0.12);
   --rf-selected-bg: rgba(0, 106, 220, 0.1);

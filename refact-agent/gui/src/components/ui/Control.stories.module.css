@@ -32,6 +32,13 @@
   color-scheme: light;
 }
 
+.panel[data-appearance="dark"],
+.panel:global(.dark) {
+  background: var(--rf-bg);
+  color: var(--rf-color-fg);
+  color-scheme: dark;
+}
+
 /* .panel/.stack are grids, so bare controls used to stretch to the full panel
    width. Trigger buttons must keep their intrinsic size (audit N-16). */
 .panel > button,

@@ -43,6 +43,19 @@ function isAppearance(value: unknown): value is Appearance {
 // src/styles/motion.css has an html[data-reduced-motion="on"] block (audit
 // N-09), and tokens.css resolves [data-appearance] / .light|.dark from any
 // ancestor, which is what makes light overlays possible (audit N-04).
+function applyDocumentModes(
+  appearance: Appearance,
+  reducedMotion: ReducedMotion,
+) {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  root.dataset.reducedMotion = reducedMotion === "on" ? "on" : "off";
+  root.dataset.appearance = appearance;
+  root.classList.toggle("light", appearance === "light");
+  root.classList.toggle("dark", appearance === "dark");
+  root.style.colorScheme = appearance;
+}
+
 function DocumentModes({
   appearance,
   reducedMotion,
@@ -51,12 +64,7 @@ function DocumentModes({
   reducedMotion: ReducedMotion;
 }) {
   useEffect(() => {
-    const root = document.documentElement;
-    root.dataset.reducedMotion = reducedMotion === "on" ? "on" : "off";
-    root.dataset.appearance = appearance;
-    root.classList.toggle("light", appearance === "light");
-    root.classList.toggle("dark", appearance === "dark");
-    root.style.colorScheme = appearance;
+    applyDocumentModes(appearance, reducedMotion);
   }, [appearance, reducedMotion]);
 
   return null;
@@ -80,6 +88,11 @@ const withDesignSystemModes: Decorator = (Story, context) => {
     storyReducedMotion === "on" || storyReducedMotion === "off"
       ? storyReducedMotion
       : (context.globals.reducedMotion as ReducedMotion);
+
+  // Harness stories read documentElement.dataset.appearance during their first
+  // render (resolveStoryAppearance falls back to dark): apply modes
+  // synchronously before children mount so that read never races the effect.
+  applyDocumentModes(appearance, reducedMotion);
 
   return (
     <Theme appearance={appearance} accentColor="indigo" grayColor="slate">
