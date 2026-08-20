@@ -47,6 +47,23 @@ async fn lock_provider_config_file(
     lock_provider_file(config_dir, instance_id, "config").await
 }
 
+fn provider_lock_is_contended(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        const ERROR_LOCK_VIOLATION: i32 = 33;
+        return matches!(
+            error.raw_os_error(),
+            Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
+        );
+    }
+    #[cfg(not(windows))]
+    false
+}
+
 async fn lock_provider_file(
     config_dir: &Path,
     instance_id: &str,
@@ -80,16 +97,13 @@ async fn lock_provider_file(
         loop {
             match fs2::FileExt::try_lock_exclusive(&file) {
                 Ok(()) => return Ok(ProviderFileLock { file }),
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        && std::time::Instant::now() < deadline =>
-                {
+                Err(error) if provider_lock_is_contended(&error) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "Provider lock timed out after {PROVIDER_FILE_LOCK_TIMEOUT_SECS}s"
+                        ));
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    return Err(format!(
-                        "Provider lock timed out after {PROVIDER_FILE_LOCK_TIMEOUT_SECS}s"
-                    ));
                 }
                 Err(error) => {
                     return Err(format!("Failed to lock provider state: {error}"));
