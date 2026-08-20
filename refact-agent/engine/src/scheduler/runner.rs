@@ -1837,9 +1837,9 @@ mod tests {
     #[cfg(target_os = "windows")]
     fn slow_empty_command() -> Vec<String> {
         vec![
-            "powershell.exe".to_string(),
-            "-Command".to_string(),
-            "Start-Sleep -Milliseconds 200".to_string(),
+            "cmd".to_string(),
+            "/C".to_string(),
+            "ping -n 2 127.0.0.1 >nul".to_string(),
         ]
     }
 

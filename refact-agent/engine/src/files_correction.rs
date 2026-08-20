@@ -83,10 +83,12 @@ pub fn registered_worktree_path_mappings(cache_dir: &Path) -> Vec<RegisteredWork
             continue;
         }
         let registry_source = canonicalize_normalized_path(registry.source_workspace_root.clone());
-        if !registry_source.is_dir()
-            || refact_worktrees::service::project_hash_for_path(&registry_source)
-                != registry.project_hash
-        {
+        let source_hash_matches = [&registry_source, &registry.source_workspace_root]
+            .into_iter()
+            .any(|candidate| {
+                refact_worktrees::service::project_hash_for_path(candidate) == registry.project_hash
+            });
+        if !registry_source.is_dir() || !source_hash_matches {
             continue;
         }
         for record in registry.records {

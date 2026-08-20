@@ -1032,7 +1032,7 @@ mod tests {
         let path = worktree_root.join("main.rs");
         tokio::fs::write(&path, "old\n").await.unwrap();
 
-        let (status, _) = post_json(
+        let (status, response) = post_json(
             router,
             "/v1/files/write",
             serde_json::json!({
@@ -1042,7 +1042,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::OK, "{response:?}");
         assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "new\n");
     }
 
@@ -1062,7 +1062,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::OK, "{response:?}");
         assert_eq!(response["content"], "fn main() {}\n");
     }
 
@@ -1083,7 +1083,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::OK, "{response:?}");
         assert!(response["entries"]
             .as_array()
             .unwrap()

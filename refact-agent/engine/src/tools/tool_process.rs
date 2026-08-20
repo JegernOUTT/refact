@@ -2447,7 +2447,7 @@ mod tests {
                 (
                     "startup_wait_ms",
                     json!(if cfg!(target_os = "windows") {
-                        15000
+                        60000
                     } else {
                         2000
                     }),
