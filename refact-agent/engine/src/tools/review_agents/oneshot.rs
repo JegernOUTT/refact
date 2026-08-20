@@ -5,7 +5,7 @@ use crate::caps::resolve_chat_model;
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
 use crate::postprocessing::pp_context_files::postprocess_context_files;
-use crate::subchat::{run_subchat_once_with_explicit_params, ExplicitSubchatSpec};
+use crate::subchat::{run_subchat_once_with_explicit_params, ExplicitSubchatSpec, TraceParent};
 use crate::tokens::count_text_tokens_with_fallback;
 use crate::tools::review_agents::{now_ms, AgentCtx, AgentOutcome};
 use crate::tools::review_candidates::parse_candidates_with_reasons;
@@ -245,6 +245,7 @@ pub(crate) async fn run_oneshot_instance(
         ctx.depth,
         ctx.task_meta.clone(),
         ctx.worktree.clone(),
+        TraceParent::rooted(&ctx.chat_id, &ctx.root_chat_id),
     )
     .await
     {
@@ -279,6 +280,7 @@ pub(crate) async fn run_oneshot_instance(
                 ctx.depth,
                 ctx.task_meta.clone(),
                 ctx.worktree.clone(),
+                TraceParent::rooted(&ctx.chat_id, &ctx.root_chat_id),
             )
             .await
             {

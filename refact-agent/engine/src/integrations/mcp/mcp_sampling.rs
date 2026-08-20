@@ -7,7 +7,7 @@ use rmcp::ErrorData as McpError;
 
 use crate::call_validation::{ChatContent, ChatMessage, MultimodalElement};
 use crate::global_context::GlobalContext;
-use crate::subchat::run_subchat_once;
+use crate::subchat::{run_subchat_once, TraceParent};
 
 fn content_to_multimodal(c: &SamplingMessageContent) -> MultimodalElement {
     match c {
@@ -81,7 +81,7 @@ pub async fn mcp_sampling_create_message(
         );
     }
 
-    let result = run_subchat_once(gcx, "mcp_sampling", messages)
+    let result = run_subchat_once(gcx, "mcp_sampling", messages, TraceParent::unattributed())
         .await
         .map_err(|e| {
             tracing::warn!("MCP sampling subchat failed for {}: {}", debug_name, e);

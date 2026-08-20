@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::call_validation::ChatMessage;
 use crate::global_context::GlobalContext;
-use crate::subchat::run_subchat_once;
+use crate::subchat::{run_subchat_once, TraceParent};
 use crate::yaml_configs::customization_registry::get_subagent_config;
 
 use refact_knowledge_graph::kg_structs::KnowledgeDoc;
@@ -51,11 +51,13 @@ pub async fn enrich_knowledge_metadata(
     entities: &[String],
     candidate_files: &[String],
     candidate_docs: &[(String, String)],
+    parent_chat_id: Option<&str>,
 ) -> Result<EnrichmentResult, String> {
     let content = content.to_string();
     let entities = entities.to_vec();
     let candidate_files = candidate_files.to_vec();
     let candidate_docs = candidate_docs.to_vec();
+    let parent_chat_id = parent_chat_id.map(|s| s.to_string());
     let gcx2 = gcx.clone();
     crate::buddy::workflows::buddy_wrap_workflow(
         crate::app_state::AppState::from_gcx(gcx).await,
@@ -102,7 +104,13 @@ pub async fn enrich_knowledge_metadata(
 
             let messages = vec![ChatMessage::new("user".to_string(), prompt)];
 
-            let result = run_subchat_once(gcx2, KG_ENRICH_SUBAGENT_ID, messages).await?;
+            let result = run_subchat_once(
+                gcx2,
+                KG_ENRICH_SUBAGENT_ID,
+                messages,
+                TraceParent::from_parts(parent_chat_id.as_deref(), None),
+            )
+            .await?;
 
             let response = result
                 .messages
@@ -128,6 +136,7 @@ pub async fn check_deprecation(
     new_doc_files: &[String],
     new_doc_snippet: &str,
     candidates: &[&KnowledgeDoc],
+    parent_chat_id: Option<&str>,
 ) -> Result<DeprecationResult, String> {
     if candidates.is_empty() {
         return Ok(DeprecationResult {
@@ -140,6 +149,7 @@ pub async fn check_deprecation(
     let files = new_doc_files.to_vec();
     let snippet = new_doc_snippet.to_string();
     let candidates: Vec<KnowledgeDoc> = candidates.iter().map(|d| (*d).clone()).collect();
+    let parent_chat_id = parent_chat_id.map(|s| s.to_string());
     let gcx2 = gcx.clone();
     crate::buddy::workflows::buddy_wrap_workflow(
         crate::app_state::AppState::from_gcx(gcx).await,
@@ -198,7 +208,13 @@ pub async fn check_deprecation(
 
             let messages = vec![ChatMessage::new("user".to_string(), prompt)];
 
-            let result = run_subchat_once(gcx2, KG_DEPRECATE_SUBAGENT_ID, messages).await?;
+            let result = run_subchat_once(
+                gcx2,
+                KG_DEPRECATE_SUBAGENT_ID,
+                messages,
+                TraceParent::from_parts(parent_chat_id.as_deref(), None),
+            )
+            .await?;
 
             let response = result
                 .messages

@@ -6,7 +6,7 @@ use serde::Deserialize;
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::subchat::{
     resolve_subchat_config_with_explicit_params, run_subchat,
-    run_subchat_once_with_explicit_params, ExplicitSubchatSpec,
+    run_subchat_once_with_explicit_params, ExplicitSubchatSpec, TraceParent,
 };
 use crate::tools::review_agents::{now_ms, AgentCtx, AgentOutcome};
 use crate::tools::review_candidates::{extract_last_json_block, validate_candidate, CandidateFinding};
@@ -444,6 +444,7 @@ async fn enrich_once(
                 ctx.depth,
                 ctx.task_meta.clone(),
                 ctx.worktree.clone(),
+                TraceParent::rooted(&ctx.chat_id, &ctx.root_chat_id),
             )
             .await?;
             merge_metering(&mut metering, retry.metering.clone());

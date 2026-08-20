@@ -19,7 +19,7 @@ use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
 use crate::files_correction::get_project_dirs;
 use crate::global_context::GlobalContext;
 use crate::memories::extract_file_paths;
-use crate::subchat::run_subchat_once;
+use crate::subchat::{run_subchat_once, TraceParent};
 use crate::yaml_configs::customization_registry::get_subagent_config;
 
 const ABANDONED_THRESHOLD_HOURS: i64 = 2;
@@ -67,7 +67,7 @@ async fn process_abandoned_trajectories(gcx: Arc<GlobalContext>) -> Result<(), S
         }
 
         for entry in WalkDir::new(&trajectories_dir)
-            .max_depth(1)
+            .max_depth(2)
             .into_iter()
             .filter_map(|e| e.ok())
         {
@@ -171,6 +171,8 @@ async fn process_single_trajectory(
 
     let gcx2 = gcx.clone();
     let title2 = current_title.clone();
+    let trajectory_id2 = trajectory_id.clone();
+    let root_chat_id2 = root_chat_id.clone();
     let extraction = crate::buddy::workflows::buddy_wrap_workflow(
         crate::app_state::AppState::from_gcx(gcx.clone()).await,
         "memo_extraction",
@@ -178,7 +180,15 @@ async fn process_single_trajectory(
         8,
         |r: &ExtractionResult| format!("Memory extracted: {} memos", r.memos.len()),
         move || async move {
-            extract_memos_and_meta(gcx2, chat_messages, &title2, is_title_generated).await
+            extract_memos_and_meta(
+                gcx2,
+                chat_messages,
+                &title2,
+                is_title_generated,
+                Some(trajectory_id2.as_str()),
+                Some(root_chat_id2.as_str()),
+            )
+            .await
         },
     )
     .await?;
@@ -352,6 +362,8 @@ async fn extract_memos_and_meta(
     mut messages: Vec<ChatMessage>,
     current_title: &str,
     is_title_generated: bool,
+    parent_chat_id: Option<&str>,
+    parent_root_chat_id: Option<&str>,
 ) -> Result<ExtractionResult, String> {
     let subagent_config = get_subagent_config(gcx.clone(), SUBAGENT_ID, None)
         .await
@@ -380,9 +392,14 @@ async fn extract_memos_and_meta(
         ..Default::default()
     });
 
-    let result = run_subchat_once(gcx, SUBAGENT_ID, messages)
-        .await
-        .map_err(|e| e.to_string())?;
+    let result = run_subchat_once(
+        gcx,
+        SUBAGENT_ID,
+        messages,
+        TraceParent::from_parts(parent_chat_id, parent_root_chat_id),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     let response_text = result
         .messages
@@ -595,12 +612,16 @@ async fn enqueue_trajectory_memory_ops(
 }
 
 fn trajectory_project_root(path: &Path) -> Option<PathBuf> {
-    let parent = path.parent()?;
-    if parent.file_name().and_then(|name| name.to_str()) == Some("trajectories") {
-        let refact_dir = parent.parent()?;
-        if refact_dir.file_name().and_then(|name| name.to_str()) == Some(".refact") {
-            return refact_dir.parent().map(Path::to_path_buf);
+    let mut parent = path.parent();
+    while let Some(dir) = parent {
+        if dir.file_name().and_then(|name| name.to_str()) == Some("trajectories") {
+            let refact_dir = dir.parent()?;
+            if refact_dir.file_name().and_then(|name| name.to_str()) == Some(".refact") {
+                return refact_dir.parent().map(Path::to_path_buf);
+            }
+            return None;
         }
+        parent = dir.parent();
     }
     None
 }

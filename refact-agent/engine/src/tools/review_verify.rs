@@ -10,7 +10,7 @@ use tokio::sync::Mutex as AMutex;
 use crate::call_validation::ChatMessage;
 use crate::chat::types::TaskMeta;
 use crate::global_context::GlobalContext;
-use crate::subchat::{run_subchat_once_with_explicit_params, ExplicitSubchatSpec};
+use crate::subchat::{run_subchat_once_with_explicit_params, ExplicitSubchatSpec, TraceParent};
 use crate::tools::review_types::{ReviewEvidence, ReviewFinding, ReviewSeverity, VerificationStatus};
 use crate::tools::subagent_phases::get_last_assistant_content;
 use crate::worktrees::types::WorktreeMeta;
@@ -111,6 +111,8 @@ pub(crate) struct VerifyParentCtx {
     pub depth: usize,
     pub task_meta: Option<TaskMeta>,
     pub worktree: Option<WorktreeMeta>,
+    pub chat_id: String,
+    pub root_chat_id: String,
 }
 
 fn severity_label(severity: &ReviewSeverity) -> &'static str {
@@ -402,6 +404,7 @@ pub(crate) async fn verify_findings(
             parent.depth,
             parent.task_meta.clone(),
             parent.worktree.clone(),
+            TraceParent::rooted(&parent.chat_id, &parent.root_chat_id),
         )
     };
 

@@ -643,6 +643,7 @@ async fn merge_registered_task_worktree(
                 gcx.clone(),
                 &diff_text,
                 &Some(card.title.clone()),
+                None,
             )
             .await
             {
@@ -1098,6 +1099,7 @@ Then call `merge_agent` again."#,
                 gcx.clone(),
                 &diff,
                 &Some(card.title.clone()),
+                None,
             )
             .await
             {

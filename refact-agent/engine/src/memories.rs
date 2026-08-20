@@ -1926,6 +1926,7 @@ pub async fn memories_add_enriched(
         &entities,
         &candidate_files,
         &candidate_docs,
+        params.source_chat_id.as_deref(),
     )
     .await;
 
@@ -2113,6 +2114,7 @@ pub async fn memories_add_enriched(
             &final_filenames,
             &snippet,
             &deprecation_candidates,
+            params.source_chat_id.as_deref(),
         )
         .await
         {

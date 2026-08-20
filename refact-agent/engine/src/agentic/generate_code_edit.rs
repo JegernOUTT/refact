@@ -2,7 +2,7 @@ pub use refact_agentic::generate_code_edit::remove_markdown_fences;
 
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::global_context::GlobalContext;
-use crate::subchat::run_subchat_once;
+use crate::subchat::{run_subchat_once, TraceParent};
 use crate::yaml_configs::customization_registry::get_subagent_config;
 use std::sync::Arc;
 
@@ -55,7 +55,7 @@ pub async fn generate_code_edit(
         },
     ];
 
-    let result = run_subchat_once(gcx, SUBAGENT_ID, messages)
+    let result = run_subchat_once(gcx, SUBAGENT_ID, messages, TraceParent::unattributed())
         .await
         .map_err(|e| format!("Error generating code edit: {}", e))?;
 

@@ -110,17 +110,59 @@ fn read_trajectory_prefix(path: &Path) -> Option<String> {
 
 fn collect_trajectory_json_files(dir: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return paths;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-            paths.push(path);
-        }
+    let mut chat_folders = Vec::new();
+    collect_json_files_in_dir(dir, &mut paths, Some(&mut chat_folders), None);
+    for folder in chat_folders {
+        let Some(owner_stem) = folder.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let owner_stem = owner_stem.to_string();
+        collect_json_files_in_dir(&folder, &mut paths, None, Some(&owner_stem));
     }
     paths.sort();
     paths
+}
+
+fn collect_json_files_in_dir(
+    dir: &Path,
+    paths: &mut Vec<PathBuf>,
+    mut subdirs: Option<&mut Vec<PathBuf>>,
+    owner_stem: Option<&str>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            if let Some(subdirs) = subdirs.as_deref_mut() {
+                subdirs.push(path);
+            }
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) == Some("index.json") {
+            continue;
+        }
+        if let Some(owner_stem) = owner_stem {
+            let is_folder_owner = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem == owner_stem);
+            if !is_folder_owner {
+                continue;
+            }
+        }
+        paths.push(path);
+    }
 }
 
 fn skill_exists(project_root: &Path, skill_id: &str) -> bool {

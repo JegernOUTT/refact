@@ -1553,6 +1553,7 @@ async fn summarize_segment_text(
     model_n_ctx: usize,
     max_new_tokens: usize,
     goal_hint: Option<String>,
+    parent_chat_id: Option<&str>,
 ) -> Result<String, SegmentSummaryFailure> {
     let user_content = match goal_hint {
         Some(hint) if !hint.trim().is_empty() => {
@@ -1597,6 +1598,7 @@ async fn summarize_segment_text(
         final_step_force_answer: false,
         buddy_meta: None,
         step_progress: None,
+        trace_parent: crate::subchat::TraceParent::from_parts(parent_chat_id, None),
     };
 
     let result = run_subchat(gcx, summarize_messages, config)
@@ -2235,6 +2237,7 @@ async fn summarize_segment(
     model: String,
     model_n_ctx: usize,
     goal_hint: Option<String>,
+    parent_chat_id: Option<&str>,
 ) -> Result<ChatMessage, SegmentSummaryFailure> {
     let mut text = segment_text(messages);
     let goal_hint = sanitize_goal_hint(goal_hint);
@@ -2277,6 +2280,7 @@ async fn summarize_segment(
         model_n_ctx,
         max_new_tokens,
         goal_hint,
+        parent_chat_id,
     )
     .await?;
     Ok(make_segment_summary_message(summary, messages, &model))
@@ -2366,6 +2370,7 @@ pub async fn summarize_oldest_segment_with_resolved_model(
     messages: &mut Vec<ChatMessage>,
     model: &str,
     model_n_ctx: usize,
+    parent_chat_id: Option<&str>,
 ) -> Result<bool, SegmentSummaryFailure> {
     if model.is_empty() {
         return Err(SegmentSummaryFailure::NoModelAvailable);
@@ -2390,6 +2395,7 @@ pub async fn summarize_oldest_segment_with_resolved_model(
         model.to_string(),
         model_n_ctx,
         goal_hint,
+        parent_chat_id,
     )
     .await?;
     let preserved_source_messages =
@@ -3114,6 +3120,13 @@ async fn run_reserved_segment_summarization(
                 model.clone(),
                 model_n_ctx,
                 goal_hint,
+                Some(
+                    thread
+                        .root_chat_id
+                        .as_deref()
+                        .filter(|root| !root.is_empty())
+                        .unwrap_or(thread.id.as_str()),
+                ),
             )
             .await
             {

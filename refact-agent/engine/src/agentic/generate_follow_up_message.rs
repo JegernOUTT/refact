@@ -3,7 +3,7 @@ pub use refact_agentic::generate_follow_up_message::{FollowUpResponse, make_conv
 use std::sync::Arc;
 
 use crate::global_context::GlobalContext;
-use crate::subchat::run_subchat_once;
+use crate::subchat::{run_subchat_once, TraceParent};
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::json_utils;
 use crate::yaml_configs::customization_registry::get_subagent_config;
@@ -15,9 +15,10 @@ pub async fn generate_follow_up_message(
     messages: Vec<ChatMessage>,
     gcx: Arc<GlobalContext>,
     _model_id: &str,
-    _chat_id: &str,
+    chat_id: &str,
 ) -> Result<FollowUpResponse, String> {
     let gcx2 = gcx.clone();
+    let chat_id = chat_id.to_string();
     crate::buddy::workflows::buddy_wrap_workflow(
         crate::app_state::AppState::from_gcx(gcx).await,
         "follow_up",
@@ -45,6 +46,7 @@ pub async fn generate_follow_up_message(
                 gcx2,
                 SUBAGENT_ID,
                 make_conversation(&messages, &system_prompt),
+                TraceParent::chat(&chat_id),
             )
             .await?;
 

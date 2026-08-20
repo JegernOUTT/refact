@@ -82,7 +82,7 @@ pub async fn generate_commit_messages(
         };
 
         commit.commit_message =
-            match generate_commit_message_by_diff(gcx.clone(), &diff, &None).await {
+            match generate_commit_message_by_diff(gcx.clone(), &diff, &None, None).await {
                 Ok(msg) => msg,
                 Err(e) => {
                     error!("{}", e);

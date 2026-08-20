@@ -10,7 +10,9 @@ use crate::call_validation::{ChatMessage, ChatContent};
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::files_correction::correct_to_nearest_filename;
 use crate::global_context::GlobalContext;
-use crate::subchat::{run_subchat, run_subchat_once_with_parent, resolve_subchat_config_with_parent};
+use crate::subchat::{
+    run_subchat, run_subchat_once_with_parent, resolve_subchat_config_with_parent, TraceParent,
+};
 use crate::tools::tool_helpers::{load_code_subagent_config, CodeSubagentConfig};
 use crate::worktrees::scope::ExecutionScope;
 
@@ -408,6 +410,8 @@ pub async fn gather_files_phase_with_plan(
         )
     };
 
+    let trace_parent = TraceParent::rooted(&parent_chat_id, &parent_root_chat_id);
+
     let GatherPlan {
         attribution_id,
         system_prompt,
@@ -531,6 +535,7 @@ pub async fn gather_files_phase_with_plan(
                     current_depth,
                     parent_task_meta.clone(),
                     parent_worktree.clone(),
+                    trace_parent.clone(),
                 )
                 .await?
             }
@@ -546,6 +551,7 @@ pub async fn gather_files_phase_with_plan(
                     current_depth,
                     parent_task_meta.clone(),
                     parent_worktree.clone(),
+                    trace_parent.clone(),
                 )
                 .await?
             }

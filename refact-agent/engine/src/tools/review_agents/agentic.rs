@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::subchat::{
     resolve_subchat_config_with_explicit_params, run_subchat,
-    run_subchat_once_with_explicit_params, ExplicitSubchatSpec,
+    run_subchat_once_with_explicit_params, ExplicitSubchatSpec, TraceParent,
 };
 use crate::tools::review_agents::oneshot::CANDIDATE_RETRY_PROMPT;
 use crate::tools::review_agents::{now_ms, AgentCtx, AgentOutcome};
@@ -157,6 +157,7 @@ pub(crate) async fn run_agentic_instance(
                 ctx.depth,
                 ctx.task_meta.clone(),
                 ctx.worktree.clone(),
+                TraceParent::rooted(&ctx.chat_id, &ctx.root_chat_id),
             )
             .await
             {

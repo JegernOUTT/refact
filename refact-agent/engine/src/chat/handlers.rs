@@ -600,6 +600,7 @@ mod tests {
             .path()
             .join(".refact")
             .join("trajectories")
+            .join(chat_id)
             .join(format!("{chat_id}.json"));
         let trajectory: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(trajectory_path).await.unwrap())

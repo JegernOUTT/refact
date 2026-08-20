@@ -597,6 +597,7 @@ pub async fn handle_mode_transition_apply(
         &messages,
         &target_mode,
         &req.target_mode_description,
+        Some(chat_id.as_str()),
     )
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -766,6 +767,7 @@ pub async fn handle_planner_from_transition(
         &messages,
         &target_mode,
         &req.target_mode_description,
+        Some(req.source_chat_id.as_str()),
     )
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -1377,6 +1379,7 @@ mod tests {
             .path()
             .join(".refact")
             .join("trajectories")
+            .join("source-chat")
             .join("transition-chat.json");
         let raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();

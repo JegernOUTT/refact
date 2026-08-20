@@ -186,6 +186,10 @@ pub async fn spawn_background_agent(
             final_step_force_answer: false,
             buddy_meta: None,
             step_progress: None,
+            trace_parent: crate::subchat::TraceParent::from_parts(
+                Some(&parent_chat_id),
+                parent_root_chat_id.as_deref(),
+            ),
         }
     } else {
         resolve_subchat_config_with_parent(

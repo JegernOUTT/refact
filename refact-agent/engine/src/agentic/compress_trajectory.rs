@@ -1,6 +1,6 @@
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::global_context::GlobalContext;
-use crate::subchat::run_subchat_once;
+use crate::subchat::{run_subchat_once, TraceParent};
 use crate::yaml_configs::customization_registry::get_subagent_config;
 use std::sync::Arc;
 
@@ -38,12 +38,14 @@ fn assistant_text_after_prompt(messages: &[ChatMessage], prompt_idx: usize) -> O
 pub async fn compress_trajectory(
     gcx: Arc<GlobalContext>,
     messages: &Vec<ChatMessage>,
+    parent_chat_id: Option<&str>,
 ) -> Result<CompressedTrajectory, String> {
     if messages.is_empty() {
         return Err("The provided chat is empty".to_string());
     }
     let messages = messages.clone();
     let gcx2 = gcx.clone();
+    let parent_chat_id = parent_chat_id.map(|id| id.to_string());
     crate::buddy::workflows::buddy_wrap_workflow(
         crate::app_state::AppState::from_gcx(gcx).await,
         "compress_trajectory",
@@ -75,9 +77,14 @@ pub async fn compress_trajectory(
             });
             let compression_prompt_idx = messages_compress.len() - 1;
 
-            let result = run_subchat_once(gcx2, SUBAGENT_ID, messages_compress)
-                .await
-                .map_err(|e| format!("compress_trajectory subchat failed: {}", e))?;
+            let result = run_subchat_once(
+                gcx2,
+                SUBAGENT_ID,
+                messages_compress,
+                TraceParent::from_parts(parent_chat_id.as_deref(), None),
+            )
+            .await
+            .map_err(|e| format!("compress_trajectory subchat failed: {}", e))?;
 
             let content = assistant_text_after_prompt(&result.messages, compression_prompt_idx)
                 .ok_or_else(|| "Trajectory compression produced empty result".to_string())?;

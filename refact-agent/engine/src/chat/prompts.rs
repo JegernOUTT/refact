@@ -2047,6 +2047,7 @@ async fn run_task_briefing_subchat(
                     final_step_force_answer: false,
                     buddy_meta: None,
                     step_progress: None,
+                    trace_parent: crate::subchat::TraceParent::unattributed(),
                 };
                 let result = crate::subchat::run_subchat(app.gcx.clone(), messages, config).await?;
                 let briefing = result

@@ -151,10 +151,13 @@ pub async fn handoff_select(
         let excluded_sanitized = sanitize_messages_for_new_thread(&excluded);
 
         if !excluded_sanitized.is_empty() {
-            let summary =
-                crate::agentic::compress_trajectory::compress_trajectory(gcx, &excluded_sanitized)
-                    .await
-                    .map_err(|e| format!("Failed to generate summary: {}", e))?;
+            let summary = crate::agentic::compress_trajectory::compress_trajectory(
+                gcx,
+                &excluded_sanitized,
+                Some(trajectory_id),
+            )
+            .await
+            .map_err(|e| format!("Failed to generate summary: {}", e))?;
             llm_summary = Some(summary.text.clone());
             summary_msg = Some(previous_conversation_summary_message(summary));
         }

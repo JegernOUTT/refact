@@ -28,7 +28,7 @@ pub async fn handle_v1_commit_message_from_diff(
     })?;
 
     let commit_message =
-        generate_commit_message_by_diff(global_context.clone(), &post.diff, &post.text)
+        generate_commit_message_by_diff(global_context.clone(), &post.diff, &post.text, None)
             .await
             .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
 
@@ -58,7 +58,7 @@ pub async fn handle_v1_trajectory_compress(
         )
     })?;
 
-    let trajectory = compress_trajectory(global_context.clone(), &post.messages)
+    let trajectory = compress_trajectory(global_context.clone(), &post.messages, None)
         .await
         .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
 

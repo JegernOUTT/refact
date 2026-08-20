@@ -7,7 +7,7 @@ use serde::Deserialize;
 use crate::call_validation::ChatMessage;
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
 use crate::json_utils::extract_json_object;
-use crate::subchat::{run_subchat, run_subchat_once, SubchatConfig, ToolsPolicy};
+use crate::subchat::{run_subchat, run_subchat_once, SubchatConfig, ToolsPolicy, TraceParent};
 use crate::tools::shell_gate::ShellLlmValidation;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -41,7 +41,7 @@ pub async fn validate_command(
     let cache_per_chat = cfg.cache_per_chat;
     let verdict = tokio::time::timeout(
         Duration::from_secs(cfg.timeout_secs),
-        validate_command_inner(gcx, command, cfg),
+        validate_command_inner(gcx, command, chat_id, cfg),
     )
     .await
     .ok()
@@ -75,6 +75,7 @@ mod tests {
 async fn validate_command_inner(
     gcx: Arc<GlobalContext>,
     command: String,
+    chat_id: &str,
     cfg: ShellLlmValidation,
 ) -> Option<LlmVerdict> {
     let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
@@ -105,9 +106,14 @@ async fn validate_command_inner(
     )];
 
     let result = if cfg.model.trim().is_empty() && model == light_model {
-        run_subchat_once(gcx, "shell_command_validator", messages)
-            .await
-            .ok()?
+        run_subchat_once(
+            gcx,
+            "shell_command_validator",
+            messages,
+            TraceParent::chat(chat_id),
+        )
+        .await
+        .ok()?
     } else {
         let config = SubchatConfig {
             tool_name: "shell_command_validator".to_string(),
@@ -138,6 +144,7 @@ async fn validate_command_inner(
             final_step_force_answer: false,
             buddy_meta: None,
             step_progress: None,
+            trace_parent: TraceParent::chat(chat_id),
         };
         run_subchat(gcx, messages, config).await.ok()?
     };

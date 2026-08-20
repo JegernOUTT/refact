@@ -354,6 +354,7 @@ impl Tool for ToolWorktreeMerge {
         let include_uncommitted = bool_arg(args, "include_uncommitted", true)?;
         let target_branch = string_arg(args, "target_branch")?;
 
+        let parent_chat_id = ccx.lock().await.chat_id.clone();
         let service = service_from_gcx(gcx.clone(), source_workspace_root).await?;
         let commit_message = match string_arg(args, "commit_message")? {
             Some(message) => Some(message),
@@ -367,6 +368,7 @@ impl Tool for ToolWorktreeMerge {
                             gcx.clone(),
                             &diff.patch,
                             &target_branch,
+                            Some(&parent_chat_id),
                         )
                         .await
                         {

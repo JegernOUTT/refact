@@ -17,7 +17,7 @@ use refact_context_api::PathsAccess;
 
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::global_context::GlobalContext;
-use crate::subchat::run_subchat_once;
+use crate::subchat::{run_subchat_once, TraceParent};
 use crate::yaml_configs::customization_registry::get_subagent_config;
 
 const SUBAGENT_ID: &str = "mode_transition";
@@ -58,6 +58,7 @@ pub async fn analyze_mode_transition(
     messages: &[ChatMessage],
     target_mode: &str,
     target_mode_description: &str,
+    parent_chat_id: Option<&str>,
 ) -> Result<ParsedDecisions, String> {
     if messages.is_empty() {
         return Err("The provided chat is empty".to_string());
@@ -103,9 +104,14 @@ pub async fn analyze_mode_transition(
         .map_err(|error| error.to_string())?;
     let analysis_messages = vec![analysis_message];
 
-    let result = run_subchat_once(gcx, SUBAGENT_ID, analysis_messages)
-        .await
-        .map_err(|e| format!("Error analyzing mode transition: {}", e))?;
+    let result = run_subchat_once(
+        gcx,
+        SUBAGENT_ID,
+        analysis_messages,
+        TraceParent::from_parts(parent_chat_id, None),
+    )
+    .await
+    .map_err(|e| format!("Error analyzing mode transition: {}", e))?;
 
     let response_text = result
         .messages

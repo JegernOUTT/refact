@@ -108,6 +108,8 @@ impl AgentCtx {
             depth: self.depth,
             task_meta: self.task_meta.clone(),
             worktree: self.worktree.clone(),
+            chat_id: self.chat_id.clone(),
+            root_chat_id: self.root_chat_id.clone(),
         }
     }
 }

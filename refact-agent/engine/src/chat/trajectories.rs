@@ -244,6 +244,9 @@ pub fn trajectory_event_is_displayable_chat(event: &TrajectoryEvent) -> bool {
     ) {
         return false;
     }
+    if is_internal_trace_link_type(event.link_type.as_deref()) {
+        return false;
+    }
     if event.parent_id.is_some() && !trajectory_list_main_link_type(event.link_type.as_deref()) {
         return false;
     }
@@ -261,6 +264,9 @@ pub(crate) fn trajectory_list_data_is_displayable_chat(data: &TrajectoryListData
 
     let parent_id = data.extra.get("parent_id").and_then(|v| v.as_str());
     let link_type = data.extra.get("link_type").and_then(|v| v.as_str());
+    if is_internal_trace_link_type(link_type) {
+        return false;
+    }
     if parent_id.is_some() && !trajectory_list_main_link_type(link_type) {
         return false;
     }
@@ -425,6 +431,68 @@ pub async fn get_global_trajectories_dir(gcx: Arc<GlobalContext>) -> PathBuf {
     config_dir.join("trajectories")
 }
 
+pub const INTERNAL_TRACE_LINK_PREFIX: &str = "internal:";
+pub const UNATTRIBUTED_TRACES_DIR: &str = "internal";
+
+pub fn is_internal_trace_link_type(link_type: Option<&str>) -> bool {
+    link_type.is_some_and(|value| value.starts_with(INTERNAL_TRACE_LINK_PREFIX))
+}
+
+pub fn internal_trace_link_type(feature: &str) -> String {
+    format!("{INTERNAL_TRACE_LINK_PREFIX}{feature}")
+}
+
+pub(crate) async fn index_dir_for_trajectory_file(
+    gcx: Arc<GlobalContext>,
+    file_path: &Path,
+) -> Option<PathBuf> {
+    let parent = file_path.parent()?;
+    let known_dirs = list_trajectory_dirs(&gcx).await;
+    if known_dirs.iter().any(|dir| dir == parent) {
+        return Some(parent.to_path_buf());
+    }
+    if let Some(grandparent) = parent.parent() {
+        if known_dirs.iter().any(|dir| dir == grandparent) {
+            return Some(grandparent.to_path_buf());
+        }
+    }
+    Some(parent.to_path_buf())
+}
+
+const TRAJECTORY_ID_MISMATCH_PREFIX: &str = "Existing trajectory file id mismatch";
+
+pub(crate) fn trajectory_id_mismatch_error(path: &Path) -> String {
+    format!("{TRAJECTORY_ID_MISMATCH_PREFIX} for {}", path.display())
+}
+
+pub(crate) fn is_trajectory_id_mismatch_error(error: &str) -> bool {
+    error.starts_with(TRAJECTORY_ID_MISMATCH_PREFIX)
+}
+
+pub fn chat_folder_name<'a>(chat_id: &'a str, root_chat_id: Option<&'a str>) -> &'a str {
+    match root_chat_id {
+        Some(root) if !root.is_empty() && validate_trajectory_id(root).is_ok() => root,
+        _ => chat_id,
+    }
+}
+
+pub(crate) async fn list_chat_folder_dirs(gcx: &Arc<GlobalContext>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for base in get_all_trajectories_dirs(gcx.clone()).await {
+        let mut entries = match fs::read_dir(&base).await {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if is_real_dir(&path).await {
+                dirs.push(path);
+            }
+        }
+    }
+    dirs
+}
+
 pub async fn get_all_trajectories_dirs(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for dir in get_project_dirs(gcx.clone())
@@ -499,7 +567,7 @@ pub(crate) async fn list_task_trajectory_dirs(gcx: &Arc<GlobalContext>) -> Vec<P
             if !is_real_dir(&task_dir).await {
                 continue;
             }
-            for role in ["planner", "agents"] {
+            for role in ["planner", "agents", "subchats"] {
                 collect_existing_dirs(task_dir.join("trajectories").join(role), &mut dirs).await;
             }
         }
@@ -930,13 +998,63 @@ fn fix_tool_call_indexes(messages: &mut [ChatMessage]) {
     }
 }
 
-async fn normal_trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for dir in get_all_trajectories_dirs(gcx).await {
-        if let Some(path) = safe_trajectory_file_in_dir(&dir, chat_id).await {
-            paths.push(path);
+fn extend_unique_paths(
+    target: &mut Vec<PathBuf>,
+    seen: &mut std::collections::HashSet<PathBuf>,
+    paths: Vec<PathBuf>,
+) {
+    for path in paths {
+        if seen.insert(path.clone()) {
+            target.push(path);
         }
     }
+}
+
+async fn indexed_candidate_paths_in_dirs(dirs: &[PathBuf], chat_id: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for dir in dirs {
+        let entries = match trajectory_index::read_trajectory_index(dir).await {
+            Ok(Some(index)) => index.entries,
+            Ok(None) => continue,
+            Err(e) => {
+                warn!("Failed to read trajectory index {:?}: {}", dir, e);
+                continue;
+            }
+        };
+        for entry in entries {
+            if entry.id == chat_id
+                && trajectory_index::trajectory_index_entry_is_fresh(dir, &entry).await
+            {
+                paths.push(trajectory_index::trajectory_file_path_for_entry(
+                    dir, &entry,
+                ));
+            }
+        }
+    }
+    paths
+}
+
+async fn normal_trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let normal_dirs = get_all_trajectories_dirs(gcx).await;
+    for dir in &normal_dirs {
+        if let Some(path) = safe_trajectory_file_in_dir(dir, chat_id).await {
+            if seen.insert(path.clone()) {
+                paths.push(path);
+            }
+        }
+        let own_folder = dir.join(chat_id);
+        if is_real_dir(&own_folder).await {
+            if let Some(path) = safe_trajectory_file_in_dir(&own_folder, chat_id).await {
+                if seen.insert(path.clone()) {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    let indexed = indexed_candidate_paths_in_dirs(&normal_dirs, chat_id).await;
+    extend_unique_paths(&mut paths, &mut seen, indexed);
     paths
 }
 
@@ -950,29 +1068,14 @@ async fn trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> V
     candidates
 }
 
-async fn indexed_trajectory_candidate_paths(
+async fn nested_chat_folder_candidate_paths(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
 ) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    for dir in list_trajectory_dirs(&gcx).await {
-        let entries =
-            match trajectory_index::list_trajectory_entries_from_index_or_rebuild(&dir, None).await
-            {
-                Ok(entries) => entries,
-                Err(e) => {
-                    warn!("Failed to read trajectory index {:?}: {}", dir, e);
-                    continue;
-                }
-            };
-        for entry in entries {
-            if entry.id == chat_id
-                && trajectory_index::trajectory_index_entry_is_fresh(&dir, &entry).await
-            {
-                paths.push(trajectory_index::trajectory_file_path_for_entry(
-                    &dir, &entry,
-                ));
-            }
+    for dir in list_chat_folder_dirs(&gcx).await {
+        if let Some(path) = safe_trajectory_file_in_dir(&dir, chat_id).await {
+            paths.push(path);
         }
     }
     paths
@@ -1064,13 +1167,17 @@ async fn find_trajectory_file(
     chat_id: &str,
 ) -> Option<ValidTrajectoryCandidate> {
     validate_trajectory_id(chat_id).ok()?;
-    let mut candidates = indexed_trajectory_candidate_paths(gcx.clone(), chat_id).await;
-    for path in trajectory_candidate_paths(gcx, chat_id).await {
-        if !candidates.iter().any(|existing| existing == &path) {
-            candidates.push(path);
-        }
+    let mut candidates = normal_trajectory_candidate_paths(gcx.clone(), chat_id).await;
+    let mut seen: std::collections::HashSet<PathBuf> = candidates.iter().cloned().collect();
+    let indexed = indexed_candidate_paths_in_dirs(&list_trajectory_dirs(&gcx).await, chat_id).await;
+    extend_unique_paths(&mut candidates, &mut seen, indexed);
+    let task_scoped = trajectory_candidate_paths(gcx.clone(), chat_id).await;
+    extend_unique_paths(&mut candidates, &mut seen, task_scoped);
+    if let Some(found) = first_valid_trajectory_candidate(candidates, chat_id).await {
+        return Some(found);
     }
-    first_valid_trajectory_candidate(candidates, chat_id).await
+    let nested = nested_chat_folder_candidate_paths(gcx, chat_id).await;
+    first_valid_trajectory_candidate(nested, chat_id).await
 }
 
 async fn find_normal_trajectory_path(gcx: Arc<GlobalContext>, chat_id: &str) -> Option<PathBuf> {
@@ -1155,12 +1262,16 @@ async fn find_trajectory_or_buddy_file(
 ) -> Option<ValidTrajectoryCandidate> {
     validate_trajectory_id(chat_id).ok()?;
     let mut candidates = trajectory_candidate_paths(gcx.clone(), chat_id).await;
-    if let Ok(buddy_dir) = get_buddy_conversations_dir(gcx).await {
+    if let Ok(buddy_dir) = get_buddy_conversations_dir(gcx.clone()).await {
         if let Some(buddy_path) = safe_trajectory_file_in_dir(&buddy_dir, chat_id).await {
             candidates.push(buddy_path);
         }
     }
-    first_valid_trajectory_candidate(candidates, chat_id).await
+    if let Some(found) = first_valid_trajectory_candidate(candidates, chat_id).await {
+        return Some(found);
+    }
+    let nested = nested_chat_folder_candidate_paths(gcx, chat_id).await;
+    first_valid_trajectory_candidate(nested, chat_id).await
 }
 
 async fn ensure_existing_trajectory_file_matches(path: &Path, chat_id: &str) -> Result<(), String> {
@@ -1188,10 +1299,7 @@ async fn ensure_existing_trajectory_file_matches(path: &Path, chat_id: &str) -> 
     if trajectory_root_id_matches(&json, chat_id, path) {
         Ok(())
     } else {
-        Err(format!(
-            "Existing trajectory file id mismatch for {}",
-            path.display()
-        ))
+        Err(trajectory_id_mismatch_error(path))
     }
 }
 
@@ -1221,10 +1329,7 @@ async fn read_existing_trajectory_object(
     .await
     .map_err(|e| format!("Existing trajectory parse task failed: {}", e))??;
     if !trajectory_root_id_matches(&json, chat_id, path) {
-        return Err(format!(
-            "Existing trajectory file id mismatch for {}",
-            path.display()
-        ));
+        return Err(trajectory_id_mismatch_error(path));
     }
     json.as_object()
         .cloned()
@@ -1304,7 +1409,7 @@ fn preserve_existing_trajectory_metadata(
 
 fn validate_task_trajectory_role(role: &str) -> Result<(), String> {
     match role {
-        "planner" | "agents" => Ok(()),
+        "planner" | "agents" | "subchats" => Ok(()),
         _ => Err(format!("Invalid task trajectory role: {role}")),
     }
 }
@@ -1358,6 +1463,32 @@ async fn safe_new_buddy_trajectory_file(
 ) -> Result<PathBuf, String> {
     let buddy_dir = get_or_create_buddy_conversations_dir(gcx).await?;
     safe_new_trajectory_file_in_dir(&buddy_dir, chat_id).await
+}
+
+async fn ensure_legacy_flat_slot_is_safe(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+) -> Result<(), String> {
+    let trajectories_dir = get_trajectories_dir(gcx).await?;
+    let legacy_path = safe_new_trajectory_file_in_dir(&trajectories_dir, chat_id).await?;
+    if is_real_file(&legacy_path).await {
+        read_existing_trajectory_object(&legacy_path, chat_id).await?;
+    }
+    Ok(())
+}
+
+async fn safe_new_nested_trajectory_file(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+    root_chat_id: Option<&str>,
+) -> Result<PathBuf, String> {
+    validate_trajectory_id(chat_id).map_err(|e| e.message)?;
+    ensure_legacy_flat_slot_is_safe(gcx.clone(), chat_id).await?;
+    let folder = chat_folder_name(chat_id, root_chat_id);
+    let base = get_trajectories_dir(gcx).await?;
+    let dir = base.join(folder);
+    ensure_real_dir_tree(&dir).await?;
+    safe_new_trajectory_file_in_dir(&dir, chat_id).await
 }
 
 async fn trajectory_source_path_is_allowed(gcx: Arc<GlobalContext>, path: &Path) -> bool {
@@ -1416,8 +1547,12 @@ async fn resolve_trajectory_data_save_path(
     if let Some(candidate) = find_normal_trajectory_file(gcx.clone(), id).await {
         return Ok(candidate.path);
     }
-    let trajectories_dir = get_trajectories_dir(gcx.clone()).await?;
-    safe_new_trajectory_file_in_dir(&trajectories_dir, id).await
+    let root_chat_id = data
+        .extra
+        .get("root_chat_id")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    safe_new_nested_trajectory_file(gcx.clone(), id, root_chat_id.as_deref()).await
 }
 
 async fn title_generation_backing_file_matches(
@@ -2579,8 +2714,12 @@ pub async fn save_trajectory_snapshot(
     } else if let Some(path) = existing_no_meta_path {
         path
     } else {
-        let trajectories_dir = get_trajectories_dir(gcx.clone()).await?;
-        safe_new_trajectory_file_in_dir(&trajectories_dir, &snapshot.chat_id).await?
+        safe_new_nested_trajectory_file(
+            gcx.clone(),
+            &snapshot.chat_id,
+            snapshot.root_chat_id.as_deref(),
+        )
+        .await?
     };
     let existing_trajectory =
         read_existing_trajectory_object(&file_path, &snapshot.chat_id).await?;
@@ -2610,21 +2749,23 @@ pub async fn save_trajectory_snapshot(
         snapshot.chat_id, message_count, file_path
     );
 
-    if let Some(dir) = file_path.parent() {
-        let source_hint = if let Some(task_meta) = snapshot.task_meta.as_ref() {
-            Some(TrajectorySourceIdentity::from_task_meta(task_meta))
-        } else if snapshot.buddy_meta.is_some() {
-            Some(TrajectorySourceIdentity::Buddy)
-        } else {
-            Some(TrajectorySourceIdentity::Normal)
-        };
-        trajectory_index::upsert_trajectory_index_entry_from_owned_value(
-            dir,
-            &file_path,
-            trajectory,
-            source_hint,
-        )
-        .await?;
+    if !is_internal_trace_link_type(snapshot.link_type.as_deref()) {
+        if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), &file_path).await {
+            let source_hint = if let Some(task_meta) = snapshot.task_meta.as_ref() {
+                Some(TrajectorySourceIdentity::from_task_meta(task_meta))
+            } else if snapshot.buddy_meta.is_some() {
+                Some(TrajectorySourceIdentity::Buddy)
+            } else {
+                Some(TrajectorySourceIdentity::Normal)
+            };
+            trajectory_index::upsert_trajectory_index_entry_from_owned_value(
+                &dir,
+                &file_path,
+                trajectory,
+                source_hint,
+            )
+            .await?;
+        }
     }
 
     if snapshot.buddy_meta.is_some() {
@@ -2862,7 +3003,7 @@ pub(crate) async fn persist_loaded_trajectory_repair_raw(
     let chat_id = &repair.chat_id;
     validate_trajectory_id(chat_id).map_err(|e| e.message)?;
     let file_path = &repair.source_path;
-    if !trajectory_source_path_is_allowed(gcx, file_path).await {
+    if !trajectory_source_path_is_allowed(gcx.clone(), file_path).await {
         return Err(format!(
             "Trajectory source path is not in an approved trajectory root: {}",
             file_path.display()
@@ -2931,13 +3072,13 @@ pub(crate) async fn persist_loaded_trajectory_repair_raw(
         Some("Failed to write trajectory"),
     )
     .await?;
-    if let Some(dir) = file_path.parent() {
+    if let Some(dir) = index_dir_for_trajectory_file(gcx, file_path).await {
         let source_hint = Some(trajectory_index::source_from_hint_or_value(
             &trajectory,
             None,
         ));
         trajectory_index::upsert_trajectory_index_entry_from_owned_value(
-            dir,
+            &dir,
             file_path,
             trajectory,
             source_hint,
@@ -3499,12 +3640,14 @@ pub async fn check_external_reload_pending(
 }
 
 async fn refresh_trajectory_index_entry_for_path(
+    gcx: Arc<GlobalContext>,
     path: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<(), String> {
-    let dir = path
-        .parent()
+    let dir = index_dir_for_trajectory_file(gcx, path)
+        .await
         .ok_or_else(|| format!("Trajectory path has no parent: {}", path.display()))?;
+    let dir = dir.as_path();
     let content = fs::read_to_string(path)
         .await
         .map_err(|e| format!("Failed to read trajectory for index refresh: {}", e))?;
@@ -3644,9 +3787,12 @@ async fn process_trajectory_change_for_source(
                 &loaded_for_index.thread,
             ))
         });
-        if let Err(e) =
-            refresh_trajectory_index_entry_for_path(&loaded_for_index.source_path, source_hint)
-                .await
+        if let Err(e) = refresh_trajectory_index_entry_for_path(
+            gcx.clone(),
+            &loaded_for_index.source_path,
+            source_hint,
+        )
+        .await
         {
             warn!("Failed to refresh trajectory index for {}: {}", chat_id, e);
         }
@@ -3764,7 +3910,7 @@ fn task_trajectory_context_from_path(
             continue;
         }
         let role = parts[2].as_str();
-        if role != "planner" && role != "agents" {
+        if role != "planner" && role != "agents" && role != "subchats" {
             continue;
         }
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -3941,7 +4087,7 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
         {
             let mut w = _watcher.lock().unwrap();
             for dir in &trajectories_dirs {
-                if let Err(e) = w.watch(dir, RecursiveMode::NonRecursive) {
+                if let Err(e) = w.watch(dir, RecursiveMode::Recursive) {
                     warn!("Failed to watch trajectories dir {:?}: {}", dir, e);
                 }
             }
@@ -4242,6 +4388,7 @@ pub(crate) fn task_context_from_task_meta(
 async fn generate_title_llm(
     gcx: Arc<GlobalContext>,
     messages: &[serde_json::Value],
+    parent_chat_id: Option<&str>,
 ) -> Option<String> {
     let context = build_title_generation_context(messages);
     if context.trim().is_empty() {
@@ -4274,7 +4421,14 @@ async fn generate_title_llm(
     let prompt = format!("Chat conversation:\n{}\n\n{}", context, title_prompt);
     let chat_messages = vec![ChatMessage::new("user".to_string(), prompt)];
 
-    match run_subchat_once(gcx, TITLE_GENERATION_SUBAGENT_ID, chat_messages).await {
+    match run_subchat_once(
+        gcx,
+        TITLE_GENERATION_SUBAGENT_ID,
+        chat_messages,
+        crate::subchat::TraceParent::from_parts(parent_chat_id, None),
+    )
+    .await
+    {
         Ok(result) => {
             if let Some(last_msg) = result.messages.last() {
                 let raw_title = last_msg.content.content_text_only();
@@ -4304,7 +4458,7 @@ fn spawn_title_generation_task(
         let app = AppState::from_gcx(gcx.clone()).await;
         let generated_title = match tokio::time::timeout(
             TITLE_GENERATION_LLM_TIMEOUT,
-            generate_title_llm(gcx.clone(), &messages),
+            generate_title_llm(gcx.clone(), &messages, Some(id.as_str())),
         )
         .await
         {
@@ -4481,7 +4635,7 @@ fn spawn_task_name_generation_task(
             return;
         }
 
-        let generated_name = generate_title_llm(gcx.clone(), &messages).await;
+        let generated_name = generate_title_llm(gcx.clone(), &messages, None).await;
         let name = match generated_name {
             Some(n) => n,
             None => match extract_first_user_message(&messages) {
@@ -5625,7 +5779,14 @@ pub async fn handle_v1_trajectories_save(
         .map_or(true, |value| value.is_null());
     let file_path = resolve_trajectory_data_save_path(gcx.clone(), &id, &data)
         .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| {
+            let status = if is_trajectory_id_mismatch_error(&e) {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            ScratchError::new(status, e)
+        })?;
     ensure_existing_trajectory_file_matches(&file_path, &id)
         .await
         .map_err(|e| ScratchError::new(StatusCode::CONFLICT, e))?;
@@ -5768,8 +5929,8 @@ pub async fn handle_v1_trajectories_delete(
     fs::remove_file(&file_path)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    if let Some(dir) = file_path.parent() {
-        if let Err(e) = trajectory_index::remove_trajectory_index_entry(dir, &id).await {
+    if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), &file_path).await {
+        if let Err(e) = trajectory_index::remove_trajectory_index_entry(&dir, &id).await {
             warn!(
                 "Failed to remove trajectory {} from index {:?}: {}",
                 id, dir, e
@@ -6181,6 +6342,376 @@ mod tests {
 
     async fn wait_for_watcher_start() {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+
+    fn nested_trajectory_path(
+        workspace: &std::path::Path,
+        folder: &str,
+        chat_id: &str,
+    ) -> std::path::PathBuf {
+        workspace
+            .join(".refact")
+            .join("trajectories")
+            .join(folder)
+            .join(format!("{chat_id}.json"))
+    }
+
+    #[tokio::test]
+    async fn new_root_chat_saves_into_its_own_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "layout-root-chat";
+
+        save_trajectory_snapshot(
+            gcx.clone(),
+            test_snapshot(
+                chat_id,
+                "Root",
+                vec![ChatMessage::new("user".to_string(), "hi".to_string())],
+            ),
+        )
+        .await
+        .unwrap();
+
+        let nested = nested_trajectory_path(dir.path(), chat_id, chat_id);
+        assert!(tokio::fs::try_exists(&nested).await.unwrap());
+        let flat = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        assert!(!tokio::fs::try_exists(&flat).await.unwrap());
+        assert!(load_trajectory_for_chat(gcx, chat_id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn subchat_saves_into_root_chat_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let root_id = "layout-parent-chat";
+        let child_id = "subchat-layout-child";
+
+        let mut snapshot = test_snapshot(
+            child_id,
+            "Child",
+            vec![ChatMessage::new("user".to_string(), "hi".to_string())],
+        );
+        snapshot.root_chat_id = Some(root_id.to_string());
+        snapshot.parent_id = Some(root_id.to_string());
+        snapshot.link_type = Some("subagent".to_string());
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+
+        let nested = nested_trajectory_path(dir.path(), root_id, child_id);
+        assert!(
+            tokio::fs::try_exists(&nested).await.unwrap(),
+            "child must live in the root chat folder"
+        );
+        assert!(load_trajectory_for_chat(gcx, child_id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn resaving_child_without_root_id_updates_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let root_id = "layout-resave-root";
+        let child_id = "subchat-layout-resave-child";
+
+        let mut first = test_snapshot(
+            child_id,
+            "Child",
+            vec![ChatMessage::new("user".to_string(), "hi".to_string())],
+        );
+        first.root_chat_id = Some(root_id.to_string());
+        first.parent_id = Some(root_id.to_string());
+        first.link_type = Some("subagent".to_string());
+        save_trajectory_snapshot(gcx.clone(), first).await.unwrap();
+
+        let mut second = test_snapshot(
+            child_id,
+            "Child",
+            vec![
+                ChatMessage::new("user".to_string(), "hi".to_string()),
+                ChatMessage::new("assistant".to_string(), "there".to_string()),
+            ],
+        );
+        second.root_chat_id = None;
+        second.parent_id = None;
+        save_trajectory_snapshot(gcx.clone(), second).await.unwrap();
+
+        let nested = nested_trajectory_path(dir.path(), root_id, child_id);
+        let duplicate = nested_trajectory_path(dir.path(), child_id, child_id);
+        assert!(tokio::fs::try_exists(&nested).await.unwrap());
+        assert!(
+            !tokio::fs::try_exists(&duplicate).await.unwrap(),
+            "a re-save without root_chat_id must update in place, not fork a duplicate file"
+        );
+
+        let loaded = load_trajectory_for_chat(gcx, child_id)
+            .await
+            .expect("child must still resolve");
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.source_path, nested);
+    }
+
+    #[tokio::test]
+    async fn legacy_flat_trajectory_keeps_being_written_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "layout-legacy-chat";
+        let flat = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(&flat, chat_id, "Legacy", "2024-01-01T00:00:00Z").await;
+
+        save_trajectory_snapshot(
+            gcx.clone(),
+            test_snapshot(
+                chat_id,
+                "Legacy Updated",
+                vec![ChatMessage::new("user".to_string(), "hi".to_string())],
+            ),
+        )
+        .await
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&flat).await.unwrap()).unwrap();
+        assert_eq!(saved["title"], "Legacy Updated");
+        let nested = nested_trajectory_path(dir.path(), chat_id, chat_id);
+        assert!(
+            !tokio::fs::try_exists(&nested).await.unwrap(),
+            "legacy chats must not be duplicated into a folder"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_trajectory_is_indexed_and_resolvable_through_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "layout-indexed-chat";
+
+        save_trajectory_snapshot(
+            gcx.clone(),
+            test_snapshot(
+                chat_id,
+                "Indexed",
+                vec![ChatMessage::new("user".to_string(), "hi".to_string())],
+            ),
+        )
+        .await
+        .unwrap();
+
+        let root = dir.path().join(".refact").join("trajectories");
+        assert!(
+            !tokio::fs::try_exists(root.join(chat_id).join("index.json"))
+                .await
+                .unwrap(),
+            "index.json must not be created inside a chat folder"
+        );
+
+        let index = trajectory_index::read_trajectory_index(&root)
+            .await
+            .unwrap()
+            .expect("root index should exist");
+        let entry = index
+            .entries
+            .iter()
+            .find(|entry| entry.id == chat_id)
+            .expect("nested chat must be indexed");
+        assert_eq!(entry.file_name, format!("{chat_id}/{chat_id}.json"));
+        assert!(
+            trajectory_index::trajectory_index_entry_is_fresh(&root, entry).await,
+            "a nested index entry must not be treated as stale"
+        );
+        assert_eq!(
+            trajectory_index::trajectory_file_path_for_entry(&root, entry),
+            nested_trajectory_path(dir.path(), chat_id, chat_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn id_mismatched_legacy_flat_slot_refuses_the_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "layout-squatted-chat";
+
+        let root = dir.path().join(".refact").join("trajectories");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        tokio::fs::write(
+            root.join(format!("{chat_id}.json")),
+            serde_json::to_string(&serde_json::json!({
+                "id": "some-other-chat",
+                "title": "Squatter",
+                "created_at": "2026-01-01T00:00:00Z",
+                "messages": [],
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let result = save_trajectory_snapshot(
+            gcx.clone(),
+            test_snapshot(
+                chat_id,
+                "New",
+                vec![ChatMessage::new("user".to_string(), "hi".to_string())],
+            ),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "an id-mismatched legacy flat slot must refuse the save, not write elsewhere"
+        );
+        assert!(
+            !tokio::fs::try_exists(nested_trajectory_path(dir.path(), chat_id, chat_id))
+                .await
+                .unwrap(),
+            "refusal must not leave a nested copy behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_traces_are_not_written_into_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let root_id = "layout-trace-owner";
+        let trace_id = "subchat-layout-trace";
+
+        save_trajectory_snapshot(
+            gcx.clone(),
+            test_snapshot(
+                root_id,
+                "Owner",
+                vec![ChatMessage::new("user".to_string(), "hi".to_string())],
+            ),
+        )
+        .await
+        .unwrap();
+
+        let mut trace = test_snapshot(
+            trace_id,
+            "Trace",
+            vec![ChatMessage::new("user".to_string(), "hi".to_string())],
+        );
+        trace.root_chat_id = Some(root_id.to_string());
+        trace.link_type = Some(internal_trace_link_type("title_generation"));
+        save_trajectory_snapshot(gcx.clone(), trace).await.unwrap();
+
+        assert!(
+            tokio::fs::try_exists(nested_trajectory_path(dir.path(), root_id, trace_id))
+                .await
+                .unwrap(),
+            "the trace must still be written into the owning conversation folder"
+        );
+
+        let root = dir.path().join(".refact").join("trajectories");
+        let index = trajectory_index::read_trajectory_index(&root)
+            .await
+            .unwrap()
+            .expect("root index should exist");
+        assert!(
+            index.entries.iter().any(|entry| entry.id == root_id),
+            "the owning chat stays indexed"
+        );
+        assert!(
+            !index.entries.iter().any(|entry| entry.id == trace_id),
+            "internal traces must not grow the index"
+        );
+    }
+
+    #[test]
+    fn index_entry_file_names_accept_one_folder_level_only() {
+        assert!(trajectory_index::index_entry_file_name_is_valid("a.json"));
+        assert!(trajectory_index::index_entry_file_name_is_valid(
+            "root/a.json"
+        ));
+        assert!(!trajectory_index::index_entry_file_name_is_valid(
+            "a/b/c.json"
+        ));
+        assert!(!trajectory_index::index_entry_file_name_is_valid(
+            "../a.json"
+        ));
+        assert!(!trajectory_index::index_entry_file_name_is_valid(
+            "root/index.json"
+        ));
+        assert!(!trajectory_index::index_entry_file_name_is_valid("a.txt"));
+        assert!(!trajectory_index::index_entry_file_name_is_valid(
+            "C:/evil.json"
+        ));
+        assert!(!trajectory_index::index_entry_file_name_is_valid(
+            "/etc/evil.json"
+        ));
+    }
+
+    #[test]
+    fn internal_trace_events_are_not_displayable_chats() {
+        let event_with_link_type = |link_type: Option<String>| -> TrajectoryEvent {
+            let mut value = serde_json::json!({
+                "type": "trajectory_updated",
+                "id": "trace-chat",
+            });
+            if let Some(link_type) = link_type {
+                value["link_type"] = serde_json::Value::String(link_type);
+            }
+            serde_json::from_value(value).unwrap()
+        };
+
+        assert!(!trajectory_event_is_displayable_chat(
+            &event_with_link_type(Some(internal_trace_link_type("title_generation")))
+        ));
+        assert!(trajectory_event_is_displayable_chat(&event_with_link_type(
+            None
+        )));
+    }
+
+    #[tokio::test]
+    async fn task_agent_index_stays_in_its_own_agent_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let agent_dir = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-index-scope")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-7");
+        tokio::fs::create_dir_all(&agent_dir).await.unwrap();
+
+        let resolved = index_dir_for_trajectory_file(gcx, &agent_dir.join("agent-chat.json"))
+            .await
+            .expect("index dir must resolve");
+
+        assert_eq!(
+            resolved, agent_dir,
+            "a task agent index must not be relocated to the shared agents/ folder"
+        );
+    }
+
+    #[test]
+    fn internal_traces_are_not_displayable_chats() {
+        let internal: TrajectoryListData = serde_json::from_value(serde_json::json!({
+            "id": "internal-1",
+            "updated_at": "2024-01-01T00:00:00Z",
+            "mode": "agent",
+            "link_type": "internal:title_generation"
+        }))
+        .unwrap();
+        assert!(!trajectory_list_data_is_displayable_chat(&internal));
+
+        let plain: TrajectoryListData = serde_json::from_value(serde_json::json!({
+            "id": "plain-1",
+            "updated_at": "2024-01-01T00:00:00Z",
+            "mode": "agent"
+        }))
+        .unwrap();
+        assert!(trajectory_list_data_is_displayable_chat(&plain));
     }
 
     fn test_snapshot(chat_id: &str, title: &str, messages: Vec<ChatMessage>) -> TrajectorySnapshot {
@@ -8595,11 +9126,7 @@ mod tests {
             tokio::fs::read_to_string(&buddy_path).await.unwrap(),
             before
         );
-        let normal_path = dir
-            .path()
-            .join(".refact")
-            .join("trajectories")
-            .join(format!("{chat_id}.json"));
+        let normal_path = nested_trajectory_path(dir.path(), chat_id, chat_id);
         let saved: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&normal_path).await.unwrap()).unwrap();
         assert_eq!(saved["title"], "Generic Saved");
@@ -8633,11 +9160,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(tokio::fs::read_to_string(&task_path).await.unwrap(), before);
-        let normal_path = dir
-            .path()
-            .join(".refact")
-            .join("trajectories")
-            .join(format!("{chat_id}.json"));
+        let normal_path = nested_trajectory_path(dir.path(), chat_id, chat_id);
         let saved: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&normal_path).await.unwrap()).unwrap();
         assert_eq!(saved["title"], "Generic Saved");
@@ -13245,11 +13768,7 @@ mod tests {
         }
         try_save_trajectory(app, session_arc.clone()).await.unwrap();
 
-        let path = dir
-            .path()
-            .join(".refact")
-            .join("trajectories")
-            .join(format!("{chat_id}.json"));
+        let path = nested_trajectory_path(dir.path(), chat_id, chat_id);
         let saved: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
 
@@ -14211,11 +14730,7 @@ mod tests {
         .await
         .unwrap();
 
-        let path = dir
-            .path()
-            .join(".refact")
-            .join("trajectories")
-            .join(format!("{}.json", chat_id));
+        let path = nested_trajectory_path(dir.path(), chat_id, chat_id);
         let saved: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
         assert!(saved.get("worktree").is_none());
@@ -14270,10 +14785,7 @@ mod tests {
         .await
         .unwrap();
 
-        let path = source
-            .join(".refact")
-            .join("trajectories")
-            .join(format!("{}.json", chat_id));
+        let path = nested_trajectory_path(&source, chat_id, chat_id);
         let saved: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
         assert_eq!(saved["worktree"]["id"], worktree.id);
@@ -14355,10 +14867,7 @@ mod tests {
         save_trajectory_snapshot(gcx.clone(), snapshot)
             .await
             .unwrap();
-        let path = source
-            .join(".refact")
-            .join("trajectories")
-            .join(format!("{}.json", chat_id));
+        let path = nested_trajectory_path(&source, &chat_id, &chat_id);
         let raw = tokio::fs::read_to_string(path).await.unwrap();
         let raw_json: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(raw_json["worktree"]["id"], worktree.id);
@@ -14413,11 +14922,11 @@ mod tests {
             .await
             .unwrap();
 
-        let path = dir
-            .path()
-            .join(".refact")
-            .join("trajectories")
-            .join("frozen-prefix-roundtrip.json");
+        let path = nested_trajectory_path(
+            dir.path(),
+            "frozen-prefix-roundtrip",
+            "frozen-prefix-roundtrip",
+        );
         let raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
         assert_eq!(
@@ -15438,11 +15947,7 @@ mod tests {
         .await
         .unwrap();
 
-        let normal_path = dir
-            .path()
-            .join(".refact")
-            .join("trajectories")
-            .join(format!("{chat_id}.json"));
+        let normal_path = nested_trajectory_path(dir.path(), chat_id, chat_id);
         assert!(tokio::fs::try_exists(&normal_path).await.unwrap());
         let buddy_raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&buddy_path).await.unwrap()).unwrap();
@@ -15497,11 +16002,7 @@ mod tests {
         .await
         .unwrap();
 
-        let normal_path = dir
-            .path()
-            .join(".refact")
-            .join("trajectories")
-            .join(format!("{chat_id}.json"));
+        let normal_path = nested_trajectory_path(dir.path(), chat_id, chat_id);
         assert!(tokio::fs::try_exists(&normal_path).await.unwrap());
         assert_eq!(
             tokio::fs::read_to_string(&task_path).await.unwrap(),
@@ -16455,11 +16956,7 @@ mod tests {
 
         save_trajectory_snapshot(gcx, snapshot).await.unwrap();
 
-        let path = dir
-            .path()
-            .join(".refact")
-            .join("trajectories")
-            .join("empty-frozen-normal.json");
+        let path = nested_trajectory_path(dir.path(), "empty-frozen-normal", "empty-frozen-normal");
         let raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
         assert_eq!(
@@ -16481,11 +16978,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let path = dir
-            .path()
-            .join(".refact")
-            .join("trajectories")
-            .join(format!("{}.json", chat_id));
+        let path = nested_trajectory_path(dir.path(), chat_id, chat_id);
         let first_raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
         let first_updated_at = first_raw["updated_at"].as_str().unwrap().to_string();
@@ -16515,11 +17008,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let path = dir
-            .path()
-            .join(".refact")
-            .join("trajectories")
-            .join(format!("{}.json", chat_id));
+        let path = nested_trajectory_path(dir.path(), chat_id, chat_id);
         let first_raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
         let first_updated_at = first_raw["updated_at"].as_str().unwrap().to_string();
@@ -16580,11 +17069,11 @@ mod tests {
             .await
             .unwrap();
 
-        let path = dir
-            .path()
-            .join(".refact")
-            .join("trajectories")
-            .join("cache-guard-runtime-only.json");
+        let path = nested_trajectory_path(
+            dir.path(),
+            "cache-guard-runtime-only",
+            "cache-guard-runtime-only",
+        );
         let saved_json = tokio::fs::read_to_string(path).await.unwrap();
         assert!(!saved_json.contains("cache_guard_snapshot"));
         assert!(!saved_json.contains(raw_request_marker));
@@ -16604,11 +17093,11 @@ mod tests {
             .await
             .unwrap();
 
-        let traj_path = dir
-            .path()
-            .join(".refact")
-            .join("trajectories")
-            .join("reactive-attempts-roundtrip.json");
+        let traj_path = nested_trajectory_path(
+            dir.path(),
+            "reactive-attempts-roundtrip",
+            "reactive-attempts-roundtrip",
+        );
         let saved = tokio::fs::read_to_string(&traj_path).await.unwrap();
         assert!(!saved.contains("reactive_compact_attempts"));
 

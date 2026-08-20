@@ -324,7 +324,38 @@ Thinking blocks with cryptographic signatures must be preserved verbatim — no 
 
 ### Trajectories
 
-Stored: `.refact/trajectories/{chat_id}.json`. Atomic writes (`.tmp` → rename). Rich JSON: id, title, model, mode, tool_use, messages, `goal`, task_meta, version, created_at, reasoning_effort, checkpoints_enabled, parent_id, root_chat_id, etc. `goal` is a serialized `GoalSnapshot` projection and is rebuilt from hidden goal messages on restore/restart when possible.
+Atomic writes (`.tmp` → rename). Rich JSON: id, title, model, mode, tool_use, messages, `goal`, task_meta, version, created_at, reasoning_effort, checkpoints_enabled, parent_id, root_chat_id, etc. `goal` is a serialized `GoalSnapshot` projection and is rebuilt from hidden goal messages on restore/restart when possible.
+
+#### Storage layout
+
+New chats use a per-conversation folder under `.refact/trajectories/`, with one uniform rule: a trajectory always lives at `<folder>/<chat_id>.json`.
+
+```
+.refact/trajectories/
+  index.json                  one global index for every displayable chat
+  <root_chat_id>/
+    <root_chat_id>.json       the root chat itself
+    <child_chat_id>.json      subagent / delegate / review agent / internal trace
+  <legacy_id>.json            pre-existing flat files, still read and written in place
+```
+
+The folder is chosen by `chat_folder_name(chat_id, root_chat_id)`: the root chat id when it is present and valid, otherwise the chat's own id. Legacy flat files are never migrated — `save_trajectory_snapshot` resolves an existing file first (flat slot, own folder, then the index) and only creates a nested file when none exists, so a chat that already lives at `<id>.json` keeps being written there. `ensure_legacy_flat_slot_is_safe` refuses the write when the flat slot is squatted by a symlink or an id-mismatched file.
+
+Index entries store a relative `file_name` (`"<folder>/<file>.json"`, forward slashes) validated by `index_entry_file_name_is_valid`, which accepts at most one folder level and rejects traversal, drive-absolute names, nested `index.json`, and non-`.json` names. Every index writer resolves its directory with `index_dir_for_trajectory_file` so an `index.json` is never created inside a chat folder.
+
+Path resolution reads `index.json` directly (`read_trajectory_index`) and never reconciles: reconciliation (`list_trajectory_entries_from_index_or_rebuild`, which scans the root plus one folder level under the per-directory lock) belongs to listing/history surfaces only. This matters because saves resolve their destination through the same candidate path, and per-step subchat persistence would otherwise scan the whole tree on every step. When the index misses, the load path falls back to a bounded chat-folder scan; saves do not scan, because a new nested file's path is derived deterministically from `chat_folder_name`.
+
+Internal traces are not indexed. `save_trajectory_snapshot` skips the index upsert when `link_type` is an `internal:` trace, so `index.json` stays proportional to user-visible chats rather than growing with every title-generation or commit-message trace. Their paths stay resolvable because a trace always carries a `root_chat_id`, so its location is deterministic. Directory walkers must decide file type with `entry.file_type()` / `symlink_metadata` — `DirEntry::metadata()` follows symlinks and silently defeats the symlink guard.
+
+Task-owned trajectories keep their own layout under `tasks/<task_id>/trajectories/{planner,agents/<agent_id>,subchats}/`, and buddy chats under `.refact/buddy/chats/conversations/`. Anything scanning the trajectories root must descend one folder level.
+
+#### Internal traces
+
+Every subchat persists, including non-stateful internal ones. `run_subchat` saves a seed before the loop and `persist_subchat_progress` re-saves after each LLM step and tool step, so an in-progress subagent trajectory can be opened and inspected live; failures save partial work with an `event(system_notice, "subchat.run")` note.
+
+Non-stateful subchats are tagged `link_type = "internal:<feature>"` (`internal_trace_link_type`). `is_internal_trace_link_type` keeps them out of chat history listings while leaving them openable by direct link.
+
+Attribution is carried by `SubchatConfig.trace_parent` (`TraceParent { chat_id, root_chat_id }`), which decides only the trace folder and has no effect on runtime chat semantics — it is deliberately separate from `config.root_chat_id`, which flows into `AtCommandsContext`. `TraceParent::trace_folder_owner()` prefers the root chat id over the immediate chat id. `run_subchat_once`, `run_subchat_once_with_abort`, `run_subchat_once_with_parent`, and `run_subchat_once_with_explicit_params` all take a `TraceParent` so each call site must state its owner explicitly. Traces fall back to the shared `internal/` bucket (`UNATTRIBUTED_TRACES_DIR`) only where no owning conversation exists: MCP sampling (the client handler spans multiple chats), task briefings (cached per task, shared across chats), stateless HTTP endpoints such as code edit and diff-only commit messages, and workspace-wide background loops.
 
 OpenAI conversion lives in `src/llm/adapters/openai_chat.rs` (`convert_messages_to_openai()`).
 

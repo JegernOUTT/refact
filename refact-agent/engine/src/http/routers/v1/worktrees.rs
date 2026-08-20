@@ -310,7 +310,7 @@ pub async fn handle_v1_worktrees_merge(
                     .or_else(|| diff.base_branch.clone())
                     .map(|target| format!("Merge worktree into {}", target));
                 if let Ok(message) =
-                    generate_commit_message_by_diff(gcx.clone(), &diff.patch, &prompt).await
+                    generate_commit_message_by_diff(gcx.clone(), &diff.patch, &prompt, None).await
                 {
                     if !message.trim().is_empty() {
                         request.commit_message = Some(message);

@@ -325,7 +325,7 @@ pub async fn verify_card(
         .await
         .unwrap_or_else(|error| format!("diff unavailable: {}", error));
     let prompt = verifier_prompt(&card, &command_results, &diff);
-    let model_concerns = run_verifier_review(gcx.clone(), prompt)
+    let model_concerns = run_verifier_review(gcx.clone(), prompt, card.agent_chat_id.as_deref())
         .await
         .unwrap_or_else(|error| {
             vec![format!(
@@ -643,6 +643,7 @@ fn verifier_prompt(card: &BoardCard, commands: &[VerificationResult], diff: &str
 async fn run_verifier_review(
     gcx: Arc<GlobalContext>,
     prompt: String,
+    parent_chat_id: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let model = resolve_verifier_model(gcx.clone()).await?;
     let config = crate::subchat::SubchatConfig {
@@ -674,6 +675,7 @@ async fn run_verifier_review(
         final_step_force_answer: false,
         buddy_meta: None,
         step_progress: None,
+        trace_parent: crate::subchat::TraceParent::from_parts(parent_chat_id, None),
     };
     let messages = vec![event(
         EventSubkind::VerifierReport,

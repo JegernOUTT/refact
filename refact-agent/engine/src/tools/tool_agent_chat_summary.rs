@@ -8,7 +8,7 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::{AtCommandsContext, MAX_SUBCHAT_DEPTH};
 use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ContextEnum};
-use crate::subchat::{run_subchat, SubchatConfig, ToolsPolicy};
+use crate::subchat::{run_subchat, SubchatConfig, ToolsPolicy, TraceParent};
 use crate::tasks::storage;
 use crate::tools::task_tool_helpers::require_bound_planner_task;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
@@ -363,6 +363,8 @@ async fn run_summary_subchat(
         ));
     }
 
+    let trace_parent = TraceParent::rooted(&parent_chat_id, &root_chat_id);
+
     let config = SubchatConfig {
         tool_name: "agent_chat_summary".to_string(),
         stateful: false,
@@ -392,6 +394,7 @@ async fn run_summary_subchat(
         final_step_force_answer: false,
         buddy_meta: None,
         step_progress: None,
+        trace_parent,
     };
 
     let mut messages = vec![ChatMessage::new("user".to_string(), prompt)];

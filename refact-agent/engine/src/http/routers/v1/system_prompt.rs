@@ -69,6 +69,7 @@ mod tests {
             .path()
             .join(".refact")
             .join("trajectories")
+            .join(chat_id)
             .join(format!("{chat_id}.json"));
         let raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
@@ -151,6 +152,7 @@ mod tests {
             .path()
             .join(".refact")
             .join("trajectories")
+            .join(chat_id)
             .join(format!("{chat_id}.json"));
         let raw: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();

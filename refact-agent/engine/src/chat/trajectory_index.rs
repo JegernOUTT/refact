@@ -211,7 +211,7 @@ pub fn source_from_hint_or_value(
 }
 
 pub fn entry_from_trajectory_value(
-    _dir: &Path,
+    dir: &Path,
     path: &Path,
     value: &serde_json::Value,
     source_hint: Option<TrajectorySourceIdentity>,
@@ -224,14 +224,21 @@ pub fn entry_from_trajectory_value(
             path
         ));
     }
-    let file_name = path
+    let bare_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("Trajectory path has no UTF-8 file name: {:?}", path))?
         .to_string();
-    if file_name == TRAJECTORY_INDEX_FILE || !file_name.ends_with(".json") {
+    if bare_name == TRAJECTORY_INDEX_FILE || !bare_name.ends_with(".json") {
         return Err(format!("Not a trajectory JSON file: {:?}", path));
     }
+    let file_name = path
+        .strip_prefix(dir)
+        .ok()
+        .and_then(|rel| rel.to_str())
+        .map(|rel| rel.replace('\\', "/"))
+        .filter(|rel| index_entry_file_name_is_valid(rel))
+        .unwrap_or(bare_name);
     let stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -387,12 +394,35 @@ async fn write_trajectory_index_atomic_owned(
     crate::chat::trajectories::atomic_write_file(&tmp_path, &path).await
 }
 
-pub async fn trajectory_index_entry_is_fresh(dir: &Path, entry: &TrajectoryIndexEntry) -> bool {
-    if entry.file_name == TRAJECTORY_INDEX_FILE
-        || entry.file_name.contains('/')
-        || entry.file_name.contains('\\')
-        || !entry.file_name.ends_with(".json")
+pub fn index_entry_file_name_is_valid(file_name: &str) -> bool {
+    if file_name.contains('\\')
+        || file_name.contains(':')
+        || file_name.starts_with('/')
+        || !file_name.ends_with(".json")
     {
+        return false;
+    }
+    let mut parts = file_name.split('/');
+    let (Some(first), second, None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let (folder, name) = match second {
+        Some(name) => (Some(first), name),
+        None => (None, first),
+    };
+    if name.is_empty() || name == TRAJECTORY_INDEX_FILE || name.starts_with('.') {
+        return false;
+    }
+    match folder {
+        Some(folder) => {
+            !folder.is_empty() && folder != "." && folder != ".." && !folder.contains('/')
+        }
+        None => true,
+    }
+}
+
+pub async fn trajectory_index_entry_is_fresh(dir: &Path, entry: &TrajectoryIndexEntry) -> bool {
+    if !index_entry_file_name_is_valid(&entry.file_name) {
         return false;
     }
     let path = trajectory_file_path_for_entry(dir, entry);
@@ -506,8 +536,23 @@ async fn scan_trajectory_entries(
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<Vec<TrajectoryIndexEntry>, String> {
     let mut indexed_entries = Vec::new();
-    let mut entries = match fs::read_dir(dir).await {
-        Ok(entries) => entries,
+    let mut scan_dirs = match fs::read_dir(dir).await {
+        Ok(mut top) => {
+            let mut dirs = vec![dir.to_path_buf()];
+            while let Ok(Some(entry)) = top.next_entry().await {
+                let name = entry.file_name().into_string().unwrap_or_default();
+                if name.starts_with('.') {
+                    continue;
+                }
+                match entry.file_type().await {
+                    Ok(file_type) if file_type.is_dir() && !file_type.is_symlink() => {
+                        dirs.push(entry.path());
+                    }
+                    _ => {}
+                }
+            }
+            dirs
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(indexed_entries),
         Err(e) => {
             return Err(format!(
@@ -516,51 +561,77 @@ async fn scan_trajectory_entries(
             ))
         }
     };
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|e| format!("Failed to iterate trajectory directory {:?}: {e}", dir))?
-    {
-        let path = entry.path();
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        if file_name == TRAJECTORY_INDEX_FILE
-            || file_name.starts_with('.')
-            || path.extension().and_then(|e| e.to_str()) != Some("json")
+
+    while let Some(scan_dir) = scan_dirs.pop() {
+        let mut entries = match fs::read_dir(&scan_dir).await {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| format!("Failed to iterate trajectory directory {:?}: {e}", scan_dir))?
         {
-            continue;
-        }
-        let metadata = match entry.metadata().await {
-            Ok(metadata) => metadata,
-            Err(_) => continue,
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            continue;
-        }
-        let content = match fs::read_to_string(&path).await {
-            Ok(content) => content,
-            Err(_) => continue,
-        };
-        let parse_path = path.clone();
-        let parse_dir = dir.to_path_buf();
-        let candidate_source_hint = source_hint.clone();
-        let parsed = tokio::task::spawn_blocking(move || {
-            let value = serde_json::from_str::<serde_json::Value>(&content)
-                .map_err(|e| format!("Failed to parse trajectory {:?}: {}", parse_path, e))?;
-            entry_from_trajectory_value(&parse_dir, &parse_path, &value, candidate_source_hint)
-        })
-        .await;
-        match parsed {
-            Ok(Ok(entry)) => indexed_entries.push(entry),
-            Ok(Err(e)) => {
-                tracing::warn!("Failed to parse trajectory {:?}: {}", path, e);
+            let path = entry.path();
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if file_name == TRAJECTORY_INDEX_FILE
+                || file_name.starts_with('.')
+                || path.extension().and_then(|e| e.to_str()) != Some("json")
+            {
+                continue;
             }
-            Err(e) => tracing::warn!("Trajectory indexing task failed for {:?}: {}", path, e),
+            let metadata = match fs::symlink_metadata(&path).await {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                continue;
+            }
+            let content = match fs::read_to_string(&path).await {
+                Ok(content) => content,
+                Err(_) => continue,
+            };
+            let parse_path = path.clone();
+            let parse_dir = dir.to_path_buf();
+            let candidate_source_hint = source_hint.clone();
+            let parsed = tokio::task::spawn_blocking(move || {
+                let value = serde_json::from_str::<serde_json::Value>(&content)
+                    .map_err(|e| format!("Failed to parse trajectory {:?}: {}", parse_path, e))?;
+                entry_from_trajectory_value(&parse_dir, &parse_path, &value, candidate_source_hint)
+            })
+            .await;
+            match parsed {
+                Ok(Ok(entry)) => indexed_entries.push(entry),
+                Ok(Err(e)) => {
+                    tracing::warn!("Failed to parse trajectory {:?}: {}", path, e);
+                }
+                Err(e) => tracing::warn!("Trajectory indexing task failed for {:?}: {}", path, e),
+            }
         }
     }
-    Ok(indexed_entries)
+    Ok(dedupe_entries_by_id(indexed_entries))
+}
+
+fn dedupe_entries_by_id(entries: Vec<TrajectoryIndexEntry>) -> Vec<TrajectoryIndexEntry> {
+    let mut position_by_id: HashMap<String, usize> = HashMap::new();
+    let mut deduped: Vec<TrajectoryIndexEntry> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match position_by_id.get(&entry.id) {
+            Some(&position) => {
+                if entry.file_modified_unix_ms > deduped[position].file_modified_unix_ms {
+                    deduped[position] = entry;
+                }
+            }
+            None => {
+                position_by_id.insert(entry.id.clone(), deduped.len());
+                deduped.push(entry);
+            }
+        }
+    }
+    deduped
 }
 
 struct DiskTrajectoryFile {
@@ -583,38 +654,65 @@ async fn scan_trajectory_dir_files(dir: &Path) -> Result<Vec<DiskTrajectoryFile>
                 ))
             }
         };
-        let mut files = Vec::new();
-        for entry in read_dir {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-            let file_name = match entry.file_name().into_string() {
+        let mut scan_targets: Vec<(std::path::PathBuf, Option<String>)> = vec![(dir.clone(), None)];
+        for entry in read_dir.flatten() {
+            let name = match entry.file_name().into_string() {
                 Ok(name) => name,
                 Err(_) => continue,
             };
-            if file_name == TRAJECTORY_INDEX_FILE
-                || file_name.starts_with('.')
-                || !file_name.ends_with(".json")
-            {
+            if name.starts_with('.') {
                 continue;
             }
-            let metadata = match entry.metadata() {
-                Ok(metadata) => metadata,
-                Err(_) => continue,
-            };
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                continue;
+            match entry.file_type() {
+                Ok(file_type) if file_type.is_dir() && !file_type.is_symlink() => {
+                    scan_targets.push((entry.path(), Some(name)));
+                }
+                _ => {}
             }
-            let file_modified_unix_ms = match unix_modified_ms(&metadata) {
-                Ok(ms) => ms,
+        }
+
+        let mut files = Vec::new();
+        for (scan_dir, prefix) in scan_targets {
+            let scan_read_dir = match std::fs::read_dir(&scan_dir) {
+                Ok(read_dir) => read_dir,
                 Err(_) => continue,
             };
-            files.push(DiskTrajectoryFile {
-                file_name,
-                file_len: metadata.len(),
-                file_modified_unix_ms,
-            });
+            for entry in scan_read_dir {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(_) => continue,
+                };
+                let file_name = match entry.file_name().into_string() {
+                    Ok(name) => name,
+                    Err(_) => continue,
+                };
+                if file_name == TRAJECTORY_INDEX_FILE
+                    || file_name.starts_with('.')
+                    || !file_name.ends_with(".json")
+                {
+                    continue;
+                }
+                let metadata = match std::fs::symlink_metadata(entry.path()) {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
+                };
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    continue;
+                }
+                let file_modified_unix_ms = match unix_modified_ms(&metadata) {
+                    Ok(ms) => ms,
+                    Err(_) => continue,
+                };
+                let relative_name = match &prefix {
+                    Some(prefix) => format!("{prefix}/{file_name}"),
+                    None => file_name,
+                };
+                files.push(DiskTrajectoryFile {
+                    file_name: relative_name,
+                    file_len: metadata.len(),
+                    file_modified_unix_ms,
+                });
+            }
         }
         Ok(files)
     })
@@ -643,20 +741,6 @@ async fn read_and_index_single_trajectory(
     .and_then(Result::ok)
 }
 
-async fn persist_reconciled_trajectory_index(
-    dir: &Path,
-    entries: &[TrajectoryIndexEntry],
-) -> Result<(), String> {
-    let lock = get_trajectory_index_lock(dir).await;
-    let _guard = lock.lock().await;
-    let index = TrajectoryIndex {
-        schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
-        updated_at: Utc::now().to_rfc3339(),
-        entries: entries.to_vec(),
-    };
-    write_trajectory_index_atomic_owned(dir, index).await
-}
-
 pub async fn rebuild_trajectory_index_from_disk(
     dir: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
@@ -677,6 +761,8 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
     dir: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<Vec<TrajectoryIndexEntry>, String> {
+    let lock = get_trajectory_index_lock(dir).await;
+    let _guard = lock.lock().await;
     let disk_files = scan_trajectory_dir_files(dir).await?;
 
     let (existing_entries, index_unreadable) = match read_trajectory_index(dir).await {
@@ -727,8 +813,15 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
             .any(|file_name| !disk_names.contains(file_name.as_str()));
     }
 
+    let new_entries = dedupe_entries_by_id(new_entries);
+
     if content_changed {
-        persist_reconciled_trajectory_index(dir, &new_entries).await?;
+        let index = TrajectoryIndex {
+            schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
+            updated_at: Utc::now().to_rfc3339(),
+            entries: new_entries.clone(),
+        };
+        write_trajectory_index_atomic_owned(dir, index).await?;
     }
 
     Ok(new_entries)

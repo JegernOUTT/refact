@@ -195,11 +195,13 @@ async fn apply_subchat_reactive_compaction(
 ) -> bool {
     let original_messages = messages.clone();
     append_reactive_compaction_diagnostic(messages, error, preserve_last_message);
+    let trace_owner = config.trace_parent.trace_folder_owner();
     let compacted = match crate::chat::summarization::summarize_oldest_segment_with_resolved_model(
         gcx,
         messages,
         &config.model,
         config.n_ctx,
+        trace_owner.as_deref(),
     )
     .await
     {
@@ -292,6 +294,43 @@ pub struct WrapUpConfig {
     pub prompt: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TraceParent {
+    pub chat_id: Option<String>,
+    pub root_chat_id: Option<String>,
+}
+
+impl TraceParent {
+    pub fn unattributed() -> Self {
+        Self::default()
+    }
+
+    pub fn from_parts(chat_id: Option<&str>, root_chat_id: Option<&str>) -> Self {
+        let normalize = |value: Option<&str>| {
+            value
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        Self {
+            chat_id: normalize(chat_id),
+            root_chat_id: normalize(root_chat_id),
+        }
+    }
+
+    pub fn chat(chat_id: &str) -> Self {
+        Self::from_parts(Some(chat_id), None)
+    }
+
+    pub fn rooted(chat_id: &str, root_chat_id: &str) -> Self {
+        Self::from_parts(Some(chat_id), Some(root_chat_id))
+    }
+
+    pub fn trace_folder_owner(&self) -> Option<String> {
+        self.root_chat_id.clone().or_else(|| self.chat_id.clone())
+    }
+}
+
 #[derive(Clone)]
 pub struct SubchatConfig {
     pub tool_name: String,
@@ -322,6 +361,7 @@ pub struct SubchatConfig {
     pub final_step_force_answer: bool,
     pub buddy_meta: Option<crate::buddy::types::BuddyThreadMeta>,
     pub step_progress: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    pub trace_parent: TraceParent,
 }
 
 fn should_stream_thinking_progress(tool_name: &str) -> bool {
@@ -1073,6 +1113,8 @@ pub async fn resolve_subchat_config_with_parent(
         }
     }
 
+    let trace_parent = TraceParent::from_parts(parent_id.as_deref(), root_chat_id.as_deref());
+
     Ok(SubchatConfig {
         tool_name: tool_name.to_string(),
         stateful,
@@ -1102,6 +1144,7 @@ pub async fn resolve_subchat_config_with_parent(
         final_step_force_answer: false,
         buddy_meta: None,
         step_progress: None,
+        trace_parent,
     })
 }
 
@@ -1195,6 +1238,8 @@ pub async fn resolve_subchat_config_with_explicit_params(
         }
     }
 
+    let trace_parent = TraceParent::from_parts(parent_id.as_deref(), root_chat_id.as_deref());
+
     Ok(SubchatConfig {
         tool_name: attribution_id.to_string(),
         stateful,
@@ -1224,6 +1269,7 @@ pub async fn resolve_subchat_config_with_explicit_params(
         final_step_force_answer: false,
         buddy_meta: None,
         step_progress: None,
+        trace_parent,
     })
 }
 
@@ -1238,8 +1284,9 @@ pub async fn run_subchat_once_with_explicit_params(
     parent_depth: usize,
     parent_task_meta: Option<TaskMeta>,
     parent_worktree: Option<WorktreeMeta>,
+    trace_parent: TraceParent,
 ) -> Result<SubchatResult, String> {
-    let config = resolve_subchat_config_with_explicit_params(
+    let mut config = resolve_subchat_config_with_explicit_params(
         gcx.clone(),
         attribution_id,
         spec,
@@ -1261,6 +1308,7 @@ pub async fn run_subchat_once_with_explicit_params(
         parent_depth + 1,
     )
     .await?;
+    config.trace_parent = trace_parent;
 
     run_subchat(gcx, messages, config).await
 }
@@ -1313,6 +1361,22 @@ fn is_subagentic_link_type(link_type: &str) -> bool {
     !matches!(link_type, "handoff" | "mode_transition" | "branch")
 }
 
+fn trace_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadParams {
+    let mut thread = stateful_thread_from_config(chat_id, config);
+    if !config.stateful {
+        thread.link_type = Some(crate::chat::trajectories::internal_trace_link_type(
+            &config.tool_name,
+        ));
+        thread.root_chat_id = config
+            .trace_parent
+            .trace_folder_owner()
+            .or_else(|| thread.root_chat_id.clone())
+            .or_else(|| config.parent_id.clone())
+            .or_else(|| Some(crate::chat::trajectories::UNATTRIBUTED_TRACES_DIR.to_string()));
+    }
+    thread
+}
+
 type SubchatProgress = Arc<StdMutex<Vec<ChatMessage>>>;
 
 fn record_subchat_progress(progress: &SubchatProgress, messages: &[ChatMessage]) {
@@ -1321,6 +1385,31 @@ fn record_subchat_progress(progress: &SubchatProgress, messages: &[ChatMessage])
         Err(poisoned) => poisoned.into_inner(),
     };
     *slot = messages.to_vec();
+}
+
+async fn persist_subchat_progress(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    config: &SubchatConfig,
+    progress: &SubchatProgress,
+    messages: &[ChatMessage],
+) {
+    record_subchat_progress(progress, messages);
+    if messages.is_empty() {
+        return;
+    }
+
+    let (gcx, chat_id) = {
+        let cgcx = ccx.lock().await;
+        (cgcx.global_context.clone(), cgcx.chat_id.clone())
+    };
+
+    let thread = trace_thread_from_config(&chat_id, config);
+    save_trajectory_as(gcx.clone(), &thread, messages).await;
+    if config.stateful {
+        let app = AppState::from_gcx(gcx).await;
+        crate::chat::trajectories::refresh_session_from_trajectory_if_stale(app, &chat_id, true)
+            .await;
+    }
 }
 
 fn take_subchat_progress(progress: &SubchatProgress) -> Vec<ChatMessage> {
@@ -1342,6 +1431,7 @@ async fn save_failed_subchat_trajectory(
         return;
     }
 
+    let error = safe_context_limit_error_for_log(error);
     messages.push(crate::chat::internal_roles::event(
         crate::chat::internal_roles::EventSubkind::SystemNotice,
         "subchat.run",
@@ -1349,11 +1439,16 @@ async fn save_failed_subchat_trajectory(
         format!("Subchat run failed: {error}"),
     ));
 
-    let mut thread = stateful_thread_from_config(chat_id, config);
-    register_stateful_subchat_worktree(gcx.clone(), chat_id, &mut thread).await;
+    let mut thread = trace_thread_from_config(chat_id, config);
+    if config.stateful {
+        register_stateful_subchat_worktree(gcx.clone(), chat_id, &mut thread).await;
+    }
     save_trajectory_as(gcx.clone(), &thread, &messages).await;
-    let app = AppState::from_gcx(gcx).await;
-    crate::chat::trajectories::refresh_session_from_trajectory_if_stale(app, chat_id, true).await;
+    if config.stateful {
+        let app = AppState::from_gcx(gcx).await;
+        crate::chat::trajectories::refresh_session_from_trajectory_if_stale(app, chat_id, true)
+            .await;
+    }
 }
 
 fn task_meta_for_stateful_subchat(config: &SubchatConfig) -> Option<TaskMeta> {
@@ -1387,8 +1482,8 @@ pub async fn run_subchat(
 
     let messages = sanitize_messages_for_new_thread(&messages);
     let messages = prepare_subchat_messages(&gcx, messages, &config.model)?;
-    if config.stateful {
-        let thread = stateful_thread_from_config(&chat_id, &config);
+    {
+        let thread = trace_thread_from_config(&chat_id, &config);
         save_trajectory_as(gcx.clone(), &thread, &messages).await;
     }
     let ccx = Arc::new(AMutex::new(
@@ -1443,16 +1538,8 @@ pub async fn run_subchat(
     let mut current_messages = match current_messages_result {
         Ok(messages) => messages,
         Err(e) => {
-            if config.stateful {
-                save_failed_subchat_trajectory(
-                    gcx.clone(),
-                    &chat_id,
-                    &config,
-                    &progress_messages,
-                    &e,
-                )
+            save_failed_subchat_trajectory(gcx.clone(), &chat_id, &config, &progress_messages, &e)
                 .await;
-            }
             clear_unbound_openai_codex_websocket_session(&chat_id).await;
             return Err(e);
         }
@@ -1465,8 +1552,13 @@ pub async fn run_subchat(
         .policy
         .subagents
         .clone();
-    apply_subchat_report_policy(&subagent_policy, &mut current_messages)
-        .map_err(|error| error.to_string())?;
+    if let Err(error) = apply_subchat_report_policy(&subagent_policy, &mut current_messages) {
+        let error = error.to_string();
+        save_failed_subchat_trajectory(gcx.clone(), &chat_id, &config, &progress_messages, &error)
+            .await;
+        clear_unbound_openai_codex_websocket_session(&chat_id).await;
+        return Err(error);
+    }
 
     if config.stateful {
         let mut thread = stateful_thread_from_config(&chat_id, &config);
@@ -1475,11 +1567,8 @@ pub async fn run_subchat(
         let app = AppState::from_gcx(gcx.clone()).await;
         crate::chat::trajectories::refresh_session_from_trajectory_if_stale(app, &chat_id, true)
             .await;
-    } else if current_messages
-        .iter()
-        .any(crate::chat::diagnostics::is_ui_only_message)
-    {
-        let thread = stateful_thread_from_config(&chat_id, &config);
+    } else {
+        let thread = trace_thread_from_config(&chat_id, &config);
         save_trajectory_as(gcx.clone(), &thread, &current_messages).await;
     }
 
@@ -1497,8 +1586,9 @@ pub async fn run_subchat_once(
     gcx: Arc<GlobalContext>,
     tool_name: &str,
     messages: Vec<ChatMessage>,
+    trace_parent: TraceParent,
 ) -> Result<SubchatResult, String> {
-    run_subchat_once_with_abort(gcx, tool_name, messages, None).await
+    run_subchat_once_with_abort(gcx, tool_name, messages, None, trace_parent).await
 }
 
 pub async fn run_subchat_once_with_abort(
@@ -1506,8 +1596,9 @@ pub async fn run_subchat_once_with_abort(
     tool_name: &str,
     messages: Vec<ChatMessage>,
     abort_flag: Option<Arc<AtomicBool>>,
+    trace_parent: TraceParent,
 ) -> Result<SubchatResult, String> {
-    let config = resolve_subchat_config_with_parent(
+    let mut config = resolve_subchat_config_with_parent(
         gcx.clone(),
         tool_name,
         false,
@@ -1529,6 +1620,7 @@ pub async fn run_subchat_once_with_abort(
         0,
     )
     .await?;
+    config.trace_parent = trace_parent;
 
     run_subchat(gcx, messages, config).await
 }
@@ -1543,8 +1635,9 @@ pub async fn run_subchat_once_with_parent(
     parent_depth: usize,
     parent_task_meta: Option<TaskMeta>,
     parent_worktree: Option<WorktreeMeta>,
+    trace_parent: TraceParent,
 ) -> Result<SubchatResult, String> {
-    let config = resolve_subchat_config_with_parent(
+    let mut config = resolve_subchat_config_with_parent(
         gcx.clone(),
         tool_name,
         false,
@@ -1566,6 +1659,7 @@ pub async fn run_subchat_once_with_parent(
         parent_depth + 1,
     )
     .await?;
+    config.trace_parent = trace_parent;
 
     run_subchat(gcx, messages, config).await
 }
@@ -1768,7 +1862,7 @@ async fn run_subchat_loop(
 
         update_usage_from_messages(usage, &results);
         messages = results.into_iter().next().unwrap_or(messages);
-        record_subchat_progress(progress, &messages);
+        persist_subchat_progress(&ccx, config, progress, &messages).await;
 
         if has_final_answer(&messages) {
             break;
@@ -1786,7 +1880,7 @@ async fn run_subchat_loop(
             config.autonomous_no_confirm,
         )
         .await?;
-        record_subchat_progress(progress, &messages);
+        persist_subchat_progress(&ccx, config, progress, &messages).await;
 
         if is_aborted(&config.abort_flag) {
             return Err("Aborted".to_string());
@@ -1806,7 +1900,7 @@ async fn run_subchat_loop(
             usage,
         )
         .await?;
-        record_subchat_progress(progress, &messages);
+        persist_subchat_progress(&ccx, config, progress, &messages).await;
     }
 
     Ok(messages)
@@ -1995,7 +2089,7 @@ async fn run_subchat_with_wrap_up(
 
         update_usage_from_messages(usage, &results);
         messages = results.into_iter().next().unwrap_or(messages);
-        record_subchat_progress(progress, &messages);
+        persist_subchat_progress(&ccx, config, progress, &messages).await;
 
         messages = execute_pending_tool_calls(
             ccx.clone(),
@@ -2009,7 +2103,7 @@ async fn run_subchat_with_wrap_up(
             config.autonomous_no_confirm,
         )
         .await?;
-        record_subchat_progress(progress, &messages);
+        persist_subchat_progress(&ccx, config, progress, &messages).await;
 
         step_n += 1;
 
@@ -2034,7 +2128,7 @@ async fn run_subchat_with_wrap_up(
         config.autonomous_no_confirm,
     )
     .await?;
-    record_subchat_progress(progress, &messages);
+    persist_subchat_progress(&ccx, config, progress, &messages).await;
 
     messages.push(ChatMessage::new("user".to_string(), wrap_up.prompt.clone()));
     record_subchat_progress(progress, &messages);
@@ -2722,8 +2816,8 @@ mod subchat_tests {
         register_stateful_subchat_worktree, resolve_subchat_config_with_parent,
         resolve_subchat_model, resolve_subchat_params, resolve_subchat_worktree,
         safe_context_limit_error_for_log, should_compact_context_limit_error,
-        stateful_thread_from_config, SubchatConfig, ToolsPolicy, GUARDED_REPORT_INSTRUCTION,
-        PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        stateful_thread_from_config, SubchatConfig, ToolsPolicy, TraceParent,
+        GUARDED_REPORT_INSTRUCTION, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
@@ -2841,6 +2935,7 @@ mod subchat_tests {
             final_step_force_answer: false,
             buddy_meta: None,
             step_progress: None,
+            trace_parent: TraceParent::unattributed(),
         }
     }
 
@@ -3355,6 +3450,7 @@ mod subchat_tests {
             final_step_force_answer: false,
             buddy_meta: None,
             step_progress: None,
+            trace_parent: TraceParent::unattributed(),
         };
 
         let thread = stateful_thread_from_config("subchat-1", &config);
@@ -3405,6 +3501,7 @@ mod subchat_tests {
             final_step_force_answer: false,
             buddy_meta: None,
             step_progress: None,
+            trace_parent: TraceParent::unattributed(),
         };
 
         let thread = stateful_thread_from_config("subchat-1", &config);
@@ -3461,6 +3558,7 @@ mod subchat_tests {
             final_step_force_answer: false,
             buddy_meta: None,
             step_progress: None,
+            trace_parent: TraceParent::unattributed(),
         };
 
         assert_eq!(config.task_meta, Some(task_meta));
@@ -3676,6 +3774,7 @@ mod subchat_tests {
             final_step_force_answer: false,
             buddy_meta: None,
             step_progress: None,
+            trace_parent: TraceParent::unattributed(),
         };
         let mut thread = stateful_thread_from_config("child-ref-chat", &config);
 
