@@ -44,5 +44,7 @@ export const States: Story = {
 };
 
 export const ReducedMotion: Story = {
+  // Pin the html attribute so the spring thumb stops animating too.
+  parameters: { reducedMotion: "on" },
   render: () => <SwitchDemo reducedMotion />,
 };

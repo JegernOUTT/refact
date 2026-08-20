@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react";
 
 import { DataTable } from "./DataTable";
 import type { DataTableColumn } from "./DataTable";
+import storyStyles from "../Control.stories.module.css";
 import styles from "./DataTable.stories.module.css";
 
 interface ProviderRow {
@@ -123,5 +124,25 @@ export const NarrowStacked: Story = {
 };
 
 export const LightDark: Story = {
-  render: () => <TableDemo />,
+  parameters: { layout: "fullscreen" },
+  render: () => (
+    <div className={storyStyles.storyShell}>
+      <section
+        className={`${storyStyles.panel} ${styles.panel}`}
+        data-appearance="dark"
+      >
+        <h3 className={storyStyles.title}>Dark</h3>
+        <p className={storyStyles.description}>Default appearance.</p>
+        <TableDemo />
+      </section>
+      <section
+        className={`${storyStyles.panel} ${styles.panel} light`}
+        data-appearance="light"
+      >
+        <h3 className={storyStyles.title}>Light</h3>
+        <p className={storyStyles.description}>Flipped tokens.</p>
+        <TableDemo />
+      </section>
+    </div>
+  ),
 };

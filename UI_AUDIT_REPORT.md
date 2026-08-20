@@ -802,3 +802,58 @@ Dock renders as Sheet `x=12 w=396` (symmetric 12px margins) with the **Close wor
 - `Chat.stories.tsx` remains in the smoke suite's EXCLUDED list (pre-existing classification, unchanged by the migration).
 - Skipped-by-rule unitless `--rf-line` blocks (~12 sites without in-block font-size) are correct as-is, not debt.
 
+
+---
+
+## Part 10 — SESSION-7: SWEEP COMPLETE (184/184) + fix round
+
+**Coverage milestone: every live story measured.** Live `index.json` = 184 stories (inventory grew from 171 via remediation-added stories). Reconciled audited ids from Parts 3b–4e (89 unique) against the live index and swept the remaining **95** this session at the standard rig (1280×900 @2x, portal-aware probes, WS shim, `__p`/`__rm`/`__t`/`__colors`). Narrow 360×780 pass done for the responsive-designated stories; kit light coverage measured via the 6 new `light-overlay` stories + all light-dark panels. All fixes below are landed, gate-verified (types 0 · lint 0 · format 0 · vitest 325 files / 3695 passed), and re-measured live.
+
+### Fix-verifications (previously-fixed findings confirmed against live renders)
+
+| Finding | Verdict |
+|---|---|
+| N-09 (RM keyframe leak) | **CLOSED-VERIFIED** — 11/11 RM stories show zero product animations; portaled overlay motion killed by the `html[data-reduced-motion]` block; only color-only item fades survive (doctrine-acceptable) |
+| N-03/N-04 (light overlays) | **CLOSED-VERIFIED** — all 6 `light-overlay` stories compute light overlay surface `rgba(253,253,254,.97)`, dark text `.88`, light border/shadow, `color-scheme: light` |
+| N-05 (VirtualList blank) | verified painting (“1000 memories” + windowed items) |
+| N-41 (search input 21px) | verified 381×28 in the inline host |
+| N-20 (DataTable scrollX) | verified `.scrollX` island |
+| N-61/N-62 (goal matrix + missing statuses) | verified live: `transferred` → no Resume/Stop; `stopped` → controls killed; `no_progress` → Resume+Stop; `verifying` → Pause+Stop; zero raw identifiers |
+| N-53 (verdict chips) | `--with-denial` renders the **Denied** chip |
+| N-64/L-25 (image pipeline) | DialogImage trigger 80×80 with real 480×270 asset, lightbox `contain` |
+| S2-9 (unreachable footer) | AddCustomModelModal footer pinned at y=841+30 in 900 viewport, 1 scroll owner |
+| S2-1 (phantom icon token) | checkbox measures 15×15 |
+| S3-8 (TrajectoryButton) | 28×28 kit IconButton, svg 13, popover r10 + overlay glass |
+| L-19 (Login type) | heading 19/700, census clean |
+| EditableTable light-dark | light inputs resolve light tokens (`rgba(0,0,0,.12)` border on light bg) — the old contrast-1.00 case is gone |
+
+### New findings — ALL FIXED this session
+
+| ID | Sev | Finding | Fix |
+|---|---|---|---|
+| N-70 | S3 | **`AnimatedCollapsible .trigger` = 29px** (`min-height: 26 + 4px vertical padding` — the N-47 anti-pattern; this module is the true home of every 29px reveal-trigger sighting incl. N-30's species split; measured again in delegate/finish cards) | fixed `height: var(--rf-control-h-sm)` + `padding: 0 var(--rf-space-2)`; re-measured 26.0 |
+| N-71 | S4 | **`SettingsShell .navItem` = 37.5px fractional** (min-height 30 + padding 8 vertical) | fixed `height: var(--rf-control-h-lg)` + `padding: 0 var(--rf-row-pad)` |
+| N-72 | S3 | **`ui/Surface` doesn't forward refs** — Card→HoverCard passes one; console ref warning in UsageCounter story | forwardRef with polymorphic `ComponentPropsWithRef<T>["ref"]` typing |
+| N-73 | S2/story | **Field stories light panels never painted** — `settings-page` light half: `--rf-surface-1` wash over dark canvas, labels dark-on-dark, **input text/border pure white**; `narrow-settings-page` hardcodes `data-appearance="light"` with the same broken treatment (N-03 disease alive in the Field family) | painted rule `.panel[data-appearance="light"] { background: var(--rf-bg); color: var(--rf-color-fg); color-scheme: light; }`; re-measured: bg 252,252,253 / fg .88 black / black inputs |
+| N-74 | S3/story | **Overlay stories light panel lacks `color`** — light panel h2 titles inherit dark-shell white → invisible (measured at sheet/tooltip light-dark; screenshot on record) | `color: var(--rf-color-fg)` added to the light-panel rule; h2 re-measured `rgba(0,0,0,.88)` |
+| N-75 | S2/story | **DataTable + VirtualList `LightDark` stories rendered a single dark demo** — the story name lies (N-33/N-40 family) | both rebuilt as true two-panel compositions following EditableTable's pattern; re-measured light th `rgba(0,0,0,.55)` / light fg `.88` |
+| N-76 | S2/story | **Three dead story families:** checkpoints ×3 blank (S2-10 chat-id fixture gate STILL alive), `components-chatlinks--default` empty (non-globbed `/v1/links` handler never matched + missing state), `combobox-v2--default` crashes (`ComboBox` uses `useSelector`, no Provider) | checkpoints store preloads the fixture's chat id (popup renders: "Files changed from checkpoint…"); ChatLinks uses house `*/v1/links` fixtures + preloaded config/connection/thread state (link buttons render); ComboBox got the DeletePopover-style Provider decorator |
+| N-77 | S4/infra | **Story hygiene batch:** 5 form RM stories missing `parameters.reducedMotion` (rmAttr stayed "off"); Menu `openFirstMenu` play throws on aria-hidden re-query; 2 SB8 `ImplicitActionsDuringRendering` deprecations (TrajectoryButton `onOpenChange`, TextArea `onTextAreaHeightChange`); Tooltip play used deprecated `screen`; `retryform--with-images` shipped a 1×1 gif; tool-card stories fired unmocked `/v1/privacy/*` + `/v1/chat-modes` | all fixed: params pinned (rmAttr:on verified), play captures all triggers up front (menus:2, no error), explicit no-op args, `within(document.body)`, real 480×270 fixture, shared `goodPrivacyPolicy`/`goodPrivacyInspect` handlers added to `CHAT_STORY_MSW_HANDLERS` and both ToolCards suites converged onto the shared list |
+
+### Retractions & non-findings (honesty ledger)
+
+- **RM "story-shell transition:all survives"** — retracted: the computed 0.001ms `transition-duration` IS the `.rf-force-reduced` kill rule (`.storybook/preview.css`); my probe's `>0` threshold flagged the kill mechanism itself.
+- Select light-overlay option accent `#3E63DD` = Radix indigo-9 from the preview theme (`data-accent-color="indigo"`), not a token leak.
+- ModelSelector inline rows at 62/87/109px are content-driven (pricing/badges/capabilities lines); not filed, but worth an eyeball if row rhythm complaints recur.
+- Overview workbench `motionBox` 38px button and the sleep-ask 1px hidden radio input are story-demo chrome / a11y patterns, not defects.
+- `textarea--primary` pad 2px = UA default on the bare compat TextArea (ships no padding by design, per L-10 resolution).
+
+### Method notes
+
+- Batch pipe-masking nearly hid a real tsc failure (`echo $?` after `tail` reports tail's status). All gate runs now capture exit codes before filtering. Same trap as the documented `npm run build | tail` rule — it applies to every gate.
+- The `Surface` forwardRef needed the polymorphic `ComponentPropsWithRef<T>["ref"]` type; a plain `ForwardedRef<HTMLElement>` is contravariant-incompatible with callers' `Ref<HTMLDivElement>`.
+- Storybook's browser context can be recycled mid-session — init scripts (incl. the WS shim) die with it; the storyPrepared token flood returns as the telltale.
+
+### Remaining residuals (unchanged)
+
+L-09/L-23 accepted; L-21 (harness dark pin) + L-22 partial + full app-level light-theme pass still open; rf-5088b886 + rf-4c8cb831 deferred API refactors; odd-size × unitless `--rf-line` inherit cases documented as correct-by-rule.

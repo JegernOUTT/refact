@@ -99,5 +99,6 @@
 .panel[data-appearance="light"],
 .panel:global(.light) {
   background: var(--rf-bg);
+  color: var(--rf-color-fg);
   color-scheme: light;
 }

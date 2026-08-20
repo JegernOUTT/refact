@@ -15,6 +15,14 @@
   background: var(--rf-surface-1);
 }
 
+/* The light half of the light/dark gallery must paint its own canvas and flip
+   color-scheme, otherwise the flipped tokens render on the dark canvas. */
+.panel[data-appearance="light"] {
+  background: var(--rf-bg);
+  color: var(--rf-color-fg);
+  color-scheme: light;
+}
+
 .title {
   color: var(--rf-color-fg);
   font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)

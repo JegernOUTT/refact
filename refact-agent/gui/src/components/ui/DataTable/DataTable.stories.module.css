@@ -10,6 +10,14 @@
   min-width: 0;
 }
 
+/* The light half of the light/dark gallery must paint its own canvas and flip
+   color-scheme, otherwise the flipped tokens render on the dark canvas. */
+.panel[data-appearance="light"] {
+  background: var(--rf-bg);
+  color: var(--rf-color-fg);
+  color-scheme: light;
+}
+
 .wideCell {
   display: inline-block;
   min-width: 260px;

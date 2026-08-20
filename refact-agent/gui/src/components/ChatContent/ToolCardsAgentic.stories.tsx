@@ -10,15 +10,7 @@ import {
   SLEEP_ASK_MESSAGES,
   SUBAGENT_MESSAGES,
 } from "../../__fixtures__/toolCardsAgentic";
-import {
-  goodCaps,
-  goodPing,
-  goodPrompts,
-  goodUser,
-  noCommandPreview,
-  noCompletions,
-  noTools,
-} from "../../__fixtures__/msw";
+import { CHAT_STORY_MSW_HANDLERS } from "../../__stories__/chatStoryState";
 import type { ChatMessages } from "../../services/refact";
 import { ChatContent } from ".";
 
@@ -37,15 +29,7 @@ const meta = {
   component: AgenticToolCardsStory,
   parameters: {
     msw: {
-      handlers: [
-        goodCaps,
-        goodPing,
-        goodPrompts,
-        goodUser,
-        noTools,
-        noCompletions,
-        noCommandPreview,
-      ],
+      handlers: [...CHAT_STORY_MSW_HANDLERS],
     },
   },
 } satisfies Meta<typeof AgenticToolCardsStory>;

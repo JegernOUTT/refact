@@ -12,16 +12,8 @@ import {
   WEB_SEARCH_TOOL_MESSAGES,
   WEB_TOOL_MESSAGES,
 } from "../../__fixtures__/toolCardsFileOps";
-import {
-  goodCaps,
-  goodPing,
-  goodPrompts,
-  goodUser,
-  noCommandPreview,
-  noCompletions,
-  noTools,
-} from "../../__fixtures__/msw";
 import { ChatStoryHarness } from "../../__stories__/ChatStoryHarness";
+import { CHAT_STORY_MSW_HANDLERS } from "../../__stories__/chatStoryState";
 import type { ChatMessages } from "../../services/refact";
 import { ChatContent } from "./ChatContent";
 
@@ -40,15 +32,7 @@ const meta = {
   component: ToolCardsStory,
   parameters: {
     msw: {
-      handlers: [
-        goodCaps,
-        goodPing,
-        goodPrompts,
-        goodUser,
-        noTools,
-        noCompletions,
-        noCommandPreview,
-      ],
+      handlers: [...CHAT_STORY_MSW_HANDLERS],
     },
   },
 } satisfies Meta<typeof ToolCardsStory>;

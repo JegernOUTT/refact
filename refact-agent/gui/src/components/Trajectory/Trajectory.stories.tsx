@@ -49,6 +49,11 @@ const meta = {
       ],
     },
   },
+  // SB8 no longer auto-creates implicit action args, and the popover reports
+  // open state during render/play (ImplicitActionsDuringRendering).
+  args: {
+    onOpenChange: () => undefined,
+  },
 } satisfies Meta<typeof TrajectoryButton>;
 
 export default meta;

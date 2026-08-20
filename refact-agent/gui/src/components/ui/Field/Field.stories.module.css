@@ -21,6 +21,11 @@
 .narrowPanel {
   max-width: 360px;
 }
+.panel[data-appearance="light"] {
+  background: var(--rf-bg);
+  color: var(--rf-color-fg);
+  color-scheme: light;
+}
 
 .sectionStack {
   display: grid;

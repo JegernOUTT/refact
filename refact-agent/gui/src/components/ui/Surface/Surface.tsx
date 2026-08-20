@@ -44,15 +44,22 @@ const radiusClass: Record<SurfaceRadius, string> = {
   pill: styles.radiusPill,
 };
 
-export function Surface<T extends React.ElementType = "div">({
-  as,
-  variant = "plain",
-  radius = "card",
-  animated = false,
-  interactive,
-  className,
-  ...props
-}: SurfaceProps<T>) {
+type SurfaceComponent = <T extends React.ElementType = "div">(
+  props: SurfaceProps<T> & { ref?: React.ComponentPropsWithRef<T>["ref"] },
+) => React.ReactElement | null;
+
+export const Surface: SurfaceComponent = React.forwardRef(function Surface(
+  {
+    as,
+    variant = "plain",
+    radius = "card",
+    animated = false,
+    interactive,
+    className,
+    ...props
+  }: SurfaceProps<React.ElementType>,
+  ref: React.ForwardedRef<HTMLElement>,
+) {
   const Component = as ?? "div";
   const isInteractive =
     interactive ??
@@ -60,6 +67,7 @@ export function Surface<T extends React.ElementType = "div">({
 
   return (
     <Component
+      ref={ref}
       className={classNames(
         styles.surface,
         variantClass[variant],
@@ -67,9 +75,9 @@ export function Surface<T extends React.ElementType = "div">({
         animated === true && "rf-enter",
         animated === "rise" && "rf-enter-rise",
         isInteractive && "rf-pressable",
-        className,
+        typeof className === "string" ? className : undefined,
       )}
       {...props}
     />
   );
-}
+}) as SurfaceComponent;

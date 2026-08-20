@@ -41,10 +41,10 @@
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
-  min-height: var(--rf-control-h-sm);
+  height: var(--rf-control-h-sm);
   align-items: center;
   gap: var(--rf-space-2);
-  padding: var(--rf-space-1) var(--rf-space-2);
+  padding: 0 var(--rf-space-2);
   color: inherit;
   text-align: left;
   background: transparent;

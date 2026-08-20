@@ -71,5 +71,7 @@ export const States: Story = {
 };
 
 export const ReducedMotion: Story = {
+  // Pin the html attribute so the tab indicator stops animating too.
+  parameters: { reducedMotion: "on" },
   render: () => <TabsDemo reducedMotion />,
 };

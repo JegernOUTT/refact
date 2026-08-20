@@ -61,9 +61,16 @@ function MenuStory({ reducedMotion = false }: { reducedMotion?: boolean }) {
 // overlay has been dismissed, so the story never renders trigger-only (N-16).
 async function openFirstMenu(canvasElement: HTMLElement) {
   const canvas = within(canvasElement);
-  const [trigger] = canvas.getAllByRole("button", { name: /open menu/i });
-  if (trigger.getAttribute("aria-expanded") !== "true") {
-    await userEvent.click(trigger);
+  // Radix marks the canvas root aria-hidden as soon as one menu is open, so
+  // capture every trigger once (hidden included) before clicking any of them.
+  const triggers = await canvas.findAllByRole("button", {
+    name: /open menu/i,
+    hidden: true,
+  });
+  for (const trigger of triggers) {
+    if (trigger.getAttribute("aria-expanded") !== "true") {
+      await userEvent.click(trigger);
+    }
   }
 }
 

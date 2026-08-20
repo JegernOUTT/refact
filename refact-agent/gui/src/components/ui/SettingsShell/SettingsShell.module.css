@@ -58,10 +58,10 @@
   display: flex;
   min-width: 0;
   max-width: 100%;
-  min-height: var(--rf-control-h);
+  height: var(--rf-control-h-lg);
   align-items: center;
   gap: var(--rf-row-gap);
-  padding: var(--rf-row-pad);
+  padding: 0 var(--rf-row-pad);
   overflow: hidden;
   color: var(--rf-color-muted);
   background: transparent;

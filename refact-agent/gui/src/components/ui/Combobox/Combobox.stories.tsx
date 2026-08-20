@@ -69,6 +69,8 @@ export const States: Story = {
 };
 
 export const ReducedMotion: Story = {
+  // Pin the html attribute so the portaled popover stops animating too.
+  parameters: { reducedMotion: "on" },
   args: {
     items,
     value: "",

@@ -71,6 +71,8 @@ export const States: Story = {
 };
 
 export const ReducedMotion: Story = {
+  // Pin the html attribute so the sliding indicator stops animating too.
+  parameters: { reducedMotion: "on" },
   args: {
     options: densityOptions,
     value: "regular",

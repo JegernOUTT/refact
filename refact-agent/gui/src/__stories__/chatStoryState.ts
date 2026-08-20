@@ -122,6 +122,34 @@ const noBuddyOpportunities: HttpHandler = http.get(
   () => HttpResponse.json({ opportunities: [] }),
 );
 
+const goodPrivacyPolicy: HttpHandler = http.get("*/v1/privacy/policy", () =>
+  HttpResponse.json({
+    policy: {
+      blocked: [],
+      zones: [],
+      subagents: { report_declassifies: true },
+      tool_access: { providers: {} },
+    },
+    destinations: [],
+    match_counts: {},
+    error: null,
+    source_paths: [],
+    has_project_overrides: false,
+  }),
+);
+
+const goodPrivacyInspect: HttpHandler = http.post("*/v1/privacy/inspect", () =>
+  HttpResponse.json({
+    chat_id: STORY_CHAT_ID,
+    destination: { id: "gpt-4o", kind: "provider", display_name: "gpt-4o" },
+    sendable: true,
+    would_send: [],
+    records: [],
+    blocked: [],
+    refusal: null,
+  }),
+);
+
 // Every endpoint the chat shell polls on mount. MSW resolves the first
 // matching handler in the array, so a story that needs a different response
 // for one of these should prepend its own handler to this list.
@@ -141,4 +169,6 @@ export const CHAT_STORY_MSW_HANDLERS: HttpHandler[] = [
   noExecList,
   noSkillsStatus,
   noBuddyOpportunities,
+  goodPrivacyPolicy,
+  goodPrivacyInspect,
 ];

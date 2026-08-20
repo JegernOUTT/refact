@@ -1,5 +1,7 @@
 import React from "react";
 import type { Meta, StoryObj } from "@storybook/react";
+import { Provider } from "react-redux";
+import { setUpStore } from "../../app/store";
 import { ComboBox, type ComboBoxProps } from "./ComboBox";
 import { TextArea } from "../TextArea";
 import { Card } from "@radix-ui/themes";
@@ -49,6 +51,14 @@ const App: React.FC<ComboBoxProps> = (props) => {
 const meta = {
   title: "ComboBox V2",
   component: App,
+  // ComboBox reads config through useSelector, so it needs a store in context.
+  decorators: [
+    (Story) => (
+      <Provider store={setUpStore()}>
+        <Story />
+      </Provider>
+    ),
+  ],
 } satisfies Meta<typeof ComboBox>;
 
 export default meta;

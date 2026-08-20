@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { within, userEvent, screen } from "@storybook/testing-library";
+import { within, userEvent } from "@storybook/testing-library";
 
 import { Tooltip } from "./Tooltip";
 import styles from "../Overlay.stories.module.css";
@@ -62,9 +62,11 @@ async function showFirstTooltip(canvasElement: HTMLElement) {
   });
   await userEvent.hover(trigger);
   trigger.focus();
-  // The tooltip is portaled to document.body, so query the whole screen.
+  // The tooltip is portaled to document.body, so query outside the canvas.
   // Never fail the story if the popper is still animating in.
-  await screen.findByRole("tooltip").catch(() => null);
+  await within(document.body)
+    .findByRole("tooltip")
+    .catch(() => null);
 }
 
 const meta = {

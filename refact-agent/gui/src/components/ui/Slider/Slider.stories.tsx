@@ -52,5 +52,7 @@ export const States: Story = {
 };
 
 export const ReducedMotion: Story = {
+  // Pin the html attribute so the thumb/track stop animating too.
+  parameters: { reducedMotion: "on" },
   render: () => <SliderDemo reducedMotion />,
 };
