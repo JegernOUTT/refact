@@ -3,12 +3,13 @@ import { ArrowLeft } from "lucide-react";
 
 import { PageWrapper } from "../../components/PageWrapper";
 import {
+  Badge,
   Button,
   Dialog,
   EmptyState,
   FieldError,
   LoadingState,
-  SegmentedControl,
+  Tabs,
 } from "../../components/ui";
 import type { Config } from "../Config/configSlice";
 import {
@@ -27,6 +28,14 @@ import styles from "./Extensions.module.css";
 import { SettingsSection } from "../Settings/SettingsSection";
 
 export type ExtensionsTab = "skills" | "commands" | "hooks";
+
+const TAB_ORDER: ExtensionsTab[] = ["skills", "commands", "hooks"];
+
+const TAB_LABELS: Record<ExtensionsTab, string> = {
+  skills: "Skills",
+  commands: "Commands",
+  hooks: "Hooks",
+};
 
 export type ExtensionsProps = {
   backFromExtensions: () => void;
@@ -173,39 +182,34 @@ export const Extensions: React.FC<ExtensionsProps> = ({
     );
   }
 
+  const tabCounts: Record<ExtensionsTab, number> = {
+    skills: registry?.skills.length ?? 0,
+    commands: registry?.slash_commands.length ?? 0,
+    hooks: registry?.hooks.length ?? 0,
+  };
+  const activeIndex = TAB_ORDER.indexOf(activeTab);
+  const showEditor =
+    (activeTab === "skills" && selectedSkill != null) ||
+    (activeTab === "commands" && selectedCommand != null) ||
+    activeTab === "hooks";
+
   const tabs = (
-    <SegmentedControl
-      className={styles.tabs}
-      value={activeTab}
-      onValueChange={handleTabChange}
-      size="sm"
-      options={[
-        {
-          value: "skills",
-          label: (
-            <span className={styles.tabLabel}>
-              Skills <span>({registry?.skills.length ?? 0})</span>
-            </span>
-          ),
-        },
-        {
-          value: "commands",
-          label: (
-            <span className={styles.tabLabel}>
-              Commands <span>({registry?.slash_commands.length ?? 0})</span>
-            </span>
-          ),
-        },
-        {
-          value: "hooks",
-          label: (
-            <span className={styles.tabLabel}>
-              Hooks <span>({registry?.hooks.length ?? 0})</span>
-            </span>
-          ),
-        },
-      ]}
-    />
+    <Tabs.List
+      activeIndex={activeIndex}
+      className={styles.kindTabs}
+      itemCount={TAB_ORDER.length}
+    >
+      {TAB_ORDER.map((tab) => (
+        <Tabs.Trigger key={tab} value={tab}>
+          <span className={styles.tabTriggerContent}>
+            <span className={styles.tabText}>{TAB_LABELS[tab]}</span>
+            <Badge className={styles.tabCount} tone="muted">
+              {tabCounts[tab]}
+            </Badge>
+          </span>
+        </Tabs.Trigger>
+      ))}
+    </Tabs.List>
   );
 
   const actions = !embedded ? (
@@ -215,58 +219,60 @@ export const Extensions: React.FC<ExtensionsProps> = ({
   ) : null;
 
   const inner = (
-    <>
-      <SettingsSection
-        title="Extensions"
-        description="Manage reusable skills, slash commands, and automation hooks."
-        actions={actions}
-        subNav={tabs}
-        width="wide"
-      >
-        {deleteError ? <FieldError>{deleteError}</FieldError> : null}
+    <div className={`${styles.pageShell} rf-enter`}>
+      <Tabs value={activeTab} onValueChange={handleTabChange}>
+        <SettingsSection
+          title="Extensions"
+          description="Manage reusable skills, slash commands, and automation hooks."
+          actions={actions}
+          subNav={tabs}
+          width={showEditor ? "wide" : "default"}
+        >
+          {deleteError ? <FieldError>{deleteError}</FieldError> : null}
 
-        <div className={styles.panelContainer}>
-          {activeTab === "skills" &&
-            (selectedSkill ? (
-              <SkillEditor
-                name={selectedSkill}
-                onBack={() => setSelectedSkill(null)}
-                draftId={draftId}
-              />
-            ) : (
-              <div className={styles.itemListContainer}>
-                <ExtItemList
-                  items={registry?.skills ?? []}
-                  selectedId={selectedSkill}
-                  onSelect={setSelectedSkill}
-                  onCreate={() => openCreateDialog("skill")}
-                  onDelete={handleDeleteSkill}
+          <div className={styles.panelContainer}>
+            {activeTab === "skills" &&
+              (selectedSkill ? (
+                <SkillEditor
+                  name={selectedSkill}
+                  onBack={() => setSelectedSkill(null)}
+                  draftId={draftId}
                 />
-              </div>
-            ))}
+              ) : (
+                <div className={styles.itemListContainer}>
+                  <ExtItemList
+                    items={registry?.skills ?? []}
+                    selectedId={selectedSkill}
+                    onSelect={setSelectedSkill}
+                    onCreate={() => openCreateDialog("skill")}
+                    onDelete={handleDeleteSkill}
+                  />
+                </div>
+              ))}
 
-          {activeTab === "commands" &&
-            (selectedCommand ? (
-              <CommandEditor
-                name={selectedCommand}
-                onBack={() => setSelectedCommand(null)}
-                draftId={draftId}
-              />
-            ) : (
-              <div className={styles.itemListContainer}>
-                <ExtItemList
-                  items={registry?.slash_commands ?? []}
-                  selectedId={selectedCommand}
-                  onSelect={setSelectedCommand}
-                  onCreate={() => openCreateDialog("command")}
-                  onDelete={handleDeleteCommand}
+            {activeTab === "commands" &&
+              (selectedCommand ? (
+                <CommandEditor
+                  name={selectedCommand}
+                  onBack={() => setSelectedCommand(null)}
+                  draftId={draftId}
                 />
-              </div>
-            ))}
+              ) : (
+                <div className={styles.itemListContainer}>
+                  <ExtItemList
+                    items={registry?.slash_commands ?? []}
+                    selectedId={selectedCommand}
+                    onSelect={setSelectedCommand}
+                    onCreate={() => openCreateDialog("command")}
+                    onDelete={handleDeleteCommand}
+                  />
+                </div>
+              ))}
 
-          {activeTab === "hooks" && <HooksEditor />}
-        </div>
-      </SettingsSection>
+            {activeTab === "hooks" && <HooksEditor />}
+          </div>
+        </SettingsSection>
+      </Tabs>
 
       <CreateItemDialog
         type={createDialogType}
@@ -286,14 +292,14 @@ export const Extensions: React.FC<ExtensionsProps> = ({
           if (!open) setDeleteTarget(null);
         }}
       >
-        <Dialog.Content maxWidth="400px">
-          <Dialog.Title>Confirm Delete</Dialog.Title>
+        <Dialog.Content maxWidth="calc(var(--rf-space-6) * 12)">
+          <Dialog.Title>Delete extension?</Dialog.Title>
           <Dialog.Description>
-            {`Delete ${deleteTarget?.type ?? ""} "${
-              deleteTarget?.name ?? ""
-            }"?`}
+            {deleteTarget
+              ? `Delete ${deleteTarget.type} "${deleteTarget.name}"?`
+              : "Delete this item?"}
           </Dialog.Description>
-          <div className={styles.dialogActions}>
+          <div className={styles.dialogFooter}>
             <Dialog.Close asChild>
               <Button variant="soft">Cancel</Button>
             </Dialog.Close>
@@ -305,7 +311,7 @@ export const Extensions: React.FC<ExtensionsProps> = ({
           </div>
         </Dialog.Content>
       </Dialog>
-    </>
+    </div>
   );
 
   if (embedded) return inner;

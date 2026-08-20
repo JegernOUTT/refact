@@ -7,23 +7,17 @@
   align-items: center;
 }
 
-.providersGrid {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
-  gap: var(--rf-space-2);
-}
-
 .popup {
   position: fixed;
   bottom: var(--rf-space-6);
   left: 50%;
-  width: min(max-content, calc(100vw - var(--rf-space-4)));
-  max-width: calc(100vw - var(--rf-space-4));
+  width: min(max-content, calc(100vw - 2 * var(--rf-space-3)));
+  max-width: calc(100vw - 2 * var(--rf-space-3));
   transform: translateX(-50%);
   border: var(--rf-hairline) solid var(--rf-border);
-  background-color: var(--rf-surface-glass);
-  box-shadow: var(--rf-elev-panel);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-overlay);
+  box-shadow: var(--rf-elev-overlay);
   backdrop-filter: blur(var(--rf-blur-overlay));
 }
 

@@ -1,20 +1,13 @@
 .providerCard {
-  display: grid;
+  display: flex;
   width: 100%;
   min-width: 0;
   min-height: calc(var(--rf-control-h-lg) + var(--rf-space-5));
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  flex-direction: column;
   gap: var(--rf-space-3);
-  padding: var(--rf-space-3);
-  border: var(--rf-hairline) solid var(--rf-border);
-  background: var(--rf-surface-glass);
-  box-shadow: var(--rf-elev-panel);
-  color: var(--rf-color-fg);
   text-align: left;
   cursor: pointer;
   user-select: none;
-  backdrop-filter: blur(var(--rf-blur-overlay));
   transition:
     background var(--rf-dur-fast) var(--rf-ease-standard),
     border-color var(--rf-dur-fast) var(--rf-ease-standard),
@@ -34,9 +27,9 @@
   outline-offset: var(--rf-hairline);
 }
 
-@media (prefers-reduced-transparency: reduce) {
+@media (prefers-reduced-motion: reduce) {
   .providerCard {
-    backdrop-filter: none;
+    transition: none;
   }
 }
 
@@ -52,8 +45,9 @@
 }
 
 .meta {
-  flex-shrink: 0;
+  min-height: var(--rf-control-h-lg);
   justify-content: flex-end;
+  margin-top: auto;
   gap: var(--rf-space-2);
 }
 
@@ -116,14 +110,4 @@
   width: var(--rf-space-3);
   flex-shrink: 0;
   justify-content: center;
-}
-
-@media (width <= 520px) {
-  .providerCard {
-    grid-template-columns: 1fr;
-  }
-
-  .meta {
-    justify-content: flex-start;
-  }
 }

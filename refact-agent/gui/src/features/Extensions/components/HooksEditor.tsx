@@ -19,6 +19,7 @@ import {
 } from "../../../services/refact/extensions";
 import { Spinner } from "../../../components/Spinner";
 import styles from "./HooksEditor.module.css";
+import shell from "./editorShell.module.css";
 import featureStyles from "../../featureUi.module.css";
 
 const HOOK_EVENTS = [
@@ -260,11 +261,12 @@ export const HooksEditor: React.FC<HooksEditorProps> = ({ scope }) => {
   }
 
   return (
-    <div className={`${styles.editor} rf-enter`}>
-      <div className={styles.header}>
+    <div className={`${shell.editorPanel} rf-enter`}>
+      <div className={shell.editorHeader}>
         <div className={styles.headerTitle}>
-          <h2 className={styles.title}>Hooks</h2>
+          <h2 className={shell.editorTitle}>Hooks</h2>
           <SegmentedControl
+            className={shell.scopeToggle}
             size="sm"
             value={hooksScope}
             onValueChange={handleScopeChange}
@@ -274,8 +276,9 @@ export const HooksEditor: React.FC<HooksEditorProps> = ({ scope }) => {
             ]}
           />
         </div>
-        <div className={styles.headerActions}>
+        <div className={shell.editorActions}>
           <SegmentedControl
+            className={shell.editorToggle}
             size="sm"
             value={view}
             onValueChange={(value) => setView(value as EditorView)}
@@ -302,7 +305,7 @@ export const HooksEditor: React.FC<HooksEditorProps> = ({ scope }) => {
       {saveError && <FieldError>{saveError}</FieldError>}
 
       {view === "form" ? (
-        <div className={`${styles.formContent} rf-stagger`}>
+        <div className={`${styles.hookList} rf-stagger`}>
           {hooks.map((hook, index) => (
             <HookRow
               key={index}
@@ -330,7 +333,7 @@ export const HooksEditor: React.FC<HooksEditorProps> = ({ scope }) => {
         </div>
       ) : (
         <textarea
-          className={styles.rawTextarea}
+          className={shell.yamlEditor}
           value={rawYaml}
           onChange={(e) => setRawYaml(e.target.value)}
           spellCheck={false}

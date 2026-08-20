@@ -1,5 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Flex, Text, ScrollArea, Separator, Code } from "@radix-ui/themes";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { ScrollArea } from "@radix-ui/themes";
 import { AlertTriangle, CheckCircle2, Eye, X } from "lucide-react";
 import {
   useGetProjectInformationQuery,
@@ -13,21 +19,16 @@ import {
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { dialogNonInteractiveCloseHandlers } from "../../utils/dialogPointerClose";
 import { setIncludeProjectInfo } from "../../features/Chat/Thread/actions";
-import {
-  Badge,
-  Button,
-  Dialog,
-  IconButton,
-  Slider,
-  Surface,
-  Switch,
-} from "../ui";
+import { Badge, Button, Dialog, Icon, IconButton, Slider, Switch } from "../ui";
+import styles from "./ProjectInformationDialog.module.css";
 
 type Props = {
   chatId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 };
+
+type SectionKey = keyof ProjectInformationConfig["sections"];
 
 type SectionMeta = {
   label: string;
@@ -37,7 +38,7 @@ type SectionMeta = {
   stepTokens: number;
 };
 
-const SECTION_META: Record<string, SectionMeta> = {
+const SECTION_META: Record<SectionKey, SectionMeta> = {
   system_info: {
     label: "System Information",
     field: "max_chars",
@@ -96,6 +97,15 @@ const SECTION_META: Record<string, SectionMeta> = {
   },
 };
 
+const SECTION_KEYS = Object.keys(SECTION_META) as SectionKey[];
+
+const SECTIONS_WITH_FILE_TOGGLES: SectionKey[] = [
+  "instruction_files",
+  "memories",
+];
+
+const PREVIEW_DEBOUNCE_MS = 400;
+
 const truncatePath = (path: string, maxLen = 50): string => {
   if (path.length <= maxLen) return path;
   const parts = path.split("/");
@@ -111,6 +121,19 @@ const CHARS_PER_TOKEN = 4;
 const charsToTokens = (chars: number): number =>
   Math.ceil(chars / CHARS_PER_TOKEN);
 const tokensToChars = (tokens: number): number => tokens * CHARS_PER_TOKEN;
+
+const countTokens = (blocks: ProjectInfoBlock[]): number =>
+  charsToTokens(
+    blocks.reduce((sum, b) => (b.enabled ? sum + b.char_count : sum), 0),
+  );
+
+const sameBlockList = (
+  a: ProjectInfoBlock[] | undefined,
+  b: ProjectInfoBlock[],
+): boolean => {
+  if (!a || a.length !== b.length) return false;
+  return a.every((block, index) => block === b[index]);
+};
 
 type ContentPreviewProps = {
   block: ProjectInfoBlock | null;
@@ -134,8 +157,8 @@ const ContentPreviewDialog: React.FC<ContentPreviewProps> = ({
     <Dialog open={!!block} onOpenChange={(open) => !open && onClose()}>
       <Dialog.Content maxWidth="800px" maxHeight="80vh">
         <div {...dialogNonInteractiveCloseHandlers(onClose)}>
-          <Flex justify="between" align="center" mb="3">
-            <Dialog.Title style={{ margin: 0 }}>
+          <div className={styles.previewHeader}>
+            <Dialog.Title className={styles.title}>
               {block.path ?? block.title}
             </Dialog.Title>
             <IconButton
@@ -145,9 +168,9 @@ const ContentPreviewDialog: React.FC<ContentPreviewProps> = ({
               variant="ghost"
               onClick={onClose}
             />
-          </Flex>
+          </div>
 
-          <Flex gap="2" mb="3" wrap="wrap">
+          <div className={styles.previewBadges}>
             <Badge tone="accent" size="sm">
               {isTruncated
                 ? `${originalTokens.toLocaleString()} → ${truncatedTokens.toLocaleString()} tokens`
@@ -161,29 +184,19 @@ const ContentPreviewDialog: React.FC<ContentPreviewProps> = ({
             <Badge tone="muted" size="sm">
               {block.section}
             </Badge>
-          </Flex>
+          </div>
 
-          <ScrollArea style={{ maxHeight: "calc(80vh - 150px)" }}>
-            <Code
-              size="1"
-              style={{
-                display: "block",
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-word",
-                padding: "var(--space-3)",
-                backgroundColor: "var(--gray-2)",
-                borderRadius: "var(--rf-radius-chip)",
-              }}
-            >
+          <ScrollArea className={styles.previewScroll}>
+            <code className={styles.previewCode}>
               {block.content || "(empty)"}
-            </Code>
+            </code>
           </ScrollArea>
 
-          <Flex justify="end" mt="3">
+          <div className={styles.footer}>
             <Button type="button" variant="soft" size="md" onClick={onClose}>
               Close
             </Button>
-          </Flex>
+          </div>
         </div>
       </Dialog.Content>
     </Dialog>
@@ -191,31 +204,31 @@ const ContentPreviewDialog: React.FC<ContentPreviewProps> = ({
 };
 
 type SectionRowProps = {
-  sectionKey: string;
+  sectionKey: SectionKey;
   config: SectionConfig;
   blocks: ProjectInfoBlock[];
-  onToggle: (enabled: boolean) => void;
-  onFieldChange: (field: string, value: number) => void;
-  onFileToggle?: (path: string, enabled: boolean) => void;
-  onPreviewBlock?: (block: ProjectInfoBlock) => void;
+  onToggle: (sectionKey: SectionKey, enabled: boolean) => void;
+  onLimitChange: (sectionKey: SectionKey, field: string, value: number) => void;
+  onFileToggle: (
+    sectionKey: SectionKey,
+    block: ProjectInfoBlock,
+    enabled: boolean,
+  ) => void;
+  onPreviewBlock: (block: ProjectInfoBlock) => void;
 };
 
-const SECTIONS_WITH_FILE_TOGGLES = ["instruction_files", "memories"];
-
-const SectionRow: React.FC<SectionRowProps> = ({
+const SectionRowComponent: React.FC<SectionRowProps> = ({
   sectionKey,
   config,
   blocks,
   onToggle,
-  onFieldChange,
+  onLimitChange,
   onFileToggle,
   onPreviewBlock,
 }) => {
   const meta = SECTION_META[sectionKey];
-  const allSectionBlocks = blocks.filter((b) => b.section === sectionKey);
-  const enabledBlocks = allSectionBlocks.filter((b) => b.enabled);
-  const totalChars = enabledBlocks.reduce((sum, b) => sum + b.char_count, 0);
-  const tokens = charsToTokens(totalChars);
+  const enabledBlocks = blocks.filter((b) => b.enabled);
+  const tokens = countTokens(blocks);
 
   const isItemsField = meta.field === "max_items";
   const currentChars = config[meta.field] ?? tokensToChars(meta.maxTokens / 2);
@@ -225,126 +238,114 @@ const SectionRow: React.FC<SectionRowProps> = ({
   const fieldLabel = isItemsField ? "Max items" : "Max tokens";
   const showFileToggles =
     SECTIONS_WITH_FILE_TOGGLES.includes(sectionKey) &&
-    allSectionBlocks.length > 0 &&
-    allSectionBlocks[0].path;
+    blocks.length > 0 &&
+    Boolean(blocks[0].path);
 
   const handleSliderChange = (tokenValue: number) => {
     const charValue = isItemsField ? tokenValue : tokensToChars(tokenValue);
-    onFieldChange(meta.field, charValue);
+    onLimitChange(sectionKey, meta.field, charValue);
   };
 
   return (
-    <Flex direction="column" gap="2" py="2">
-      <Flex align="center" justify="between">
-        <Flex align="center" gap="2">
+    <div className={styles.section}>
+      <div className={styles.row}>
+        <div className={styles.rowCopy}>
           <Switch
             checked={config.enabled}
-            onCheckedChange={onToggle}
+            onCheckedChange={(enabled) => onToggle(sectionKey, enabled)}
             className="rf-pressable"
+            aria-label={meta.label}
           />
-          <Text size="2" weight="medium">
-            {meta.label}
-          </Text>
-        </Flex>
-        <Badge tone={config.enabled ? "accent" : "muted"} size="xs">
-          ~{tokens.toLocaleString()} tokens
-        </Badge>
-      </Flex>
+          <span className={styles.sectionLabel}>{meta.label}</span>
+        </div>
+        <div className={styles.rowControls}>
+          <Badge tone={config.enabled ? "accent" : "muted"} size="xs">
+            ~{tokens.toLocaleString()} tokens
+          </Badge>
+        </div>
+      </div>
+
       {config.enabled && (
-        <Flex direction="column" gap="1" pl="6">
-          <Flex align="center" gap="2">
-            <Text size="1" color="gray">
-              {fieldLabel}:
-            </Text>
-            <Slider
-              value={[currentTokens]}
-              min={meta.minTokens}
-              max={meta.maxTokens}
-              step={meta.stepTokens}
-              onValueChange={([v]) => handleSliderChange(v)}
-              style={{ width: 120 }}
-            />
-            <Text size="1" color="gray">
-              {currentTokens.toLocaleString()}
-            </Text>
-          </Flex>
-          {allSectionBlocks.length > 0 && (
-            <Flex align="center" gap="2">
-              <Text size="1" color="gray">
-                {enabledBlocks.length}/{allSectionBlocks.length} item(s), ~
+        <div className={styles.detail}>
+          <div className={styles.row}>
+            <span className={styles.limitLabel}>{fieldLabel}</span>
+            <div className={styles.rowControls}>
+              <Slider
+                value={[currentTokens]}
+                min={meta.minTokens}
+                max={meta.maxTokens}
+                step={meta.stepTokens}
+                onValueChange={([v]) => handleSliderChange(v)}
+                className={styles.limitSlider}
+                aria-label={`${meta.label} ${fieldLabel}`}
+              />
+              <span className={styles.limitValue}>
+                {currentTokens.toLocaleString()}
+              </span>
+            </div>
+          </div>
+
+          {blocks.length > 0 && (
+            <div className={styles.row}>
+              <span className={styles.meta}>
+                {enabledBlocks.length}/{blocks.length} item(s), ~
                 {tokens.toLocaleString()} tokens
-              </Text>
-              {!showFileToggles &&
-                allSectionBlocks.length === 1 &&
-                onPreviewBlock && (
+              </span>
+              <div className={styles.rowControls}>
+                {!showFileToggles && blocks.length === 1 && (
                   <IconButton
                     icon={Eye}
                     aria-label="View content"
                     size="sm"
                     variant="ghost"
-                    onClick={() => onPreviewBlock(allSectionBlocks[0])}
+                    onClick={() => onPreviewBlock(blocks[0])}
                     title="View content"
                   />
                 )}
-            </Flex>
+              </div>
+            </div>
           )}
-          {showFileToggles && onFileToggle && (
-            <Flex
-              direction="column"
-              gap="1"
-              mt="2"
-              style={{ maxWidth: "100%", overflow: "hidden" }}
-            >
-              {allSectionBlocks.map((block) => (
-                <Flex
+
+          {showFileToggles && (
+            <div className={styles.files}>
+              {blocks.map((block) => (
+                <div
                   key={block.id}
-                  align="center"
-                  gap="2"
-                  style={{
-                    opacity: block.enabled ? 1 : 0.6,
-                    minWidth: 0,
-                  }}
+                  className={
+                    block.enabled
+                      ? styles.fileRow
+                      : `${styles.fileRow} ${styles.fileRowDisabled}`
+                  }
                 >
-                  <Switch
-                    checked={block.enabled}
-                    onCheckedChange={(checked) => {
-                      if (block.path) {
-                        onFileToggle(block.path, checked);
+                  <div className={styles.fileCopy}>
+                    <Switch
+                      checked={block.enabled}
+                      onCheckedChange={(checked) =>
+                        onFileToggle(sectionKey, block, checked)
                       }
-                    }}
-                    className="rf-pressable"
-                    style={{ flexShrink: 0 }}
-                  />
-                  <Text
-                    size="1"
-                    style={{
-                      flex: 1,
-                      minWidth: 0,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                    title={block.path ?? block.title}
-                  >
-                    {truncatePath(block.path ?? block.title, 45)}
-                  </Text>
-                  <Text
-                    size="1"
-                    color="gray"
-                    style={{ flexShrink: 0, whiteSpace: "nowrap" }}
-                  >
-                    {block.original_char_count
-                      ? `${charsToTokens(
-                          block.original_char_count,
-                        ).toLocaleString()}→${charsToTokens(
-                          block.char_count,
-                        ).toLocaleString()}`
-                      : `~${charsToTokens(
-                          block.char_count,
-                        ).toLocaleString()}`}{" "}
-                    tok
-                  </Text>
-                  {onPreviewBlock && (
+                      className="rf-pressable"
+                      aria-label={block.path ?? block.title}
+                    />
+                    <span
+                      className={styles.filePath}
+                      title={block.path ?? block.title}
+                    >
+                      {truncatePath(block.path ?? block.title, 45)}
+                    </span>
+                  </div>
+                  <div className={styles.rowControls}>
+                    <span className={styles.fileTokens}>
+                      {block.original_char_count
+                        ? `${charsToTokens(
+                            block.original_char_count,
+                          ).toLocaleString()}→${charsToTokens(
+                            block.char_count,
+                          ).toLocaleString()}`
+                        : `~${charsToTokens(
+                            block.char_count,
+                          ).toLocaleString()}`}{" "}
+                      tok
+                    </span>
                     <IconButton
                       icon={Eye}
                       aria-label="View content"
@@ -352,18 +353,20 @@ const SectionRow: React.FC<SectionRowProps> = ({
                       variant="ghost"
                       onClick={() => onPreviewBlock(block)}
                       title="View content"
-                      style={{ flexShrink: 0 }}
                     />
-                  )}
-                </Flex>
+                  </div>
+                </div>
               ))}
-            </Flex>
+            </div>
           )}
-        </Flex>
+        </div>
       )}
-    </Flex>
+    </div>
   );
 };
+
+const SectionRow = React.memo(SectionRowComponent);
+SectionRow.displayName = "SectionRow";
 
 export const ProjectInformationDialog: React.FC<Props> = ({
   chatId,
@@ -385,76 +388,168 @@ export const ProjectInformationDialog: React.FC<Props> = ({
   const [localConfig, setLocalConfig] = useState<ProjectInformationConfig>(
     defaultProjectInformationConfig,
   );
+  // Optimistic, id-keyed overlay for per-file switches. Never sent to the
+  // preview endpoint: file toggles do not change server-side truncation.
+  const [fileOverlay, setFileOverlay] = useState<
+    Partial<Record<string, boolean>>
+  >({});
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [previewBlock, setPreviewBlock] = useState<ProjectInfoBlock | null>(
     null,
   );
 
-  useEffect(() => {
-    if (savedConfig) {
-      setLocalConfig(savedConfig);
-    }
-  }, [savedConfig]);
+  const configRef = useRef(localConfig);
+  configRef.current = localConfig;
 
+  // Sync from the server only when the dialog (re)opens, so an in-dialog save
+  // never replaces the config the user is editing.
+  const syncedRef = useRef(false);
   useEffect(() => {
     if (!open) {
+      syncedRef.current = false;
       setSaveError(null);
       setSaveSuccess(false);
+      return;
     }
-  }, [open]);
+    if (savedConfig && !syncedRef.current) {
+      syncedRef.current = true;
+      setLocalConfig(savedConfig);
+      setFileOverlay({});
+    }
+  }, [open, savedConfig]);
+
+  // Only limit values change what the backend renders, so only those retrigger
+  // a preview (debounced).
+  const limitsSignature = useMemo(
+    () =>
+      JSON.stringify(
+        SECTION_KEYS.map((key) => {
+          const section = localConfig.sections[key];
+          return [
+            section.max_chars,
+            section.max_items,
+            section.max_chars_per_item,
+            section.max_depth,
+          ];
+        }),
+      ),
+    [localConfig.sections],
+  );
 
   useEffect(() => {
-    if (open && localConfig.enabled) {
-      const timeoutId = setTimeout(() => {
-        void triggerPreview(localConfig);
-      }, 300);
-      return () => clearTimeout(timeoutId);
-    }
-  }, [open, localConfig, triggerPreview]);
+    if (!open) return;
+    const timeoutId = setTimeout(() => {
+      if (!configRef.current.enabled) return;
+      void triggerPreview(configRef.current);
+    }, PREVIEW_DEBOUNCE_MS);
+    return () => clearTimeout(timeoutId);
+  }, [open, limitsSignature, triggerPreview]);
 
-  const blocks = useMemo(
+  const baseBlocks = useMemo(
     () => previewData?.blocks ?? [],
     [previewData?.blocks],
   );
 
+  // Per-block identity cache: a resolved block keeps its reference as long as
+  // neither its source nor its effective enabled flag changed.
+  const blockCacheRef = useRef(
+    new Map<string, { source: ProjectInfoBlock; result: ProjectInfoBlock }>(),
+  );
+  // Per-section slice cache: unchanged sections keep the same array reference,
+  // so their memoized rows never re-render.
+  const sliceCacheRef = useRef<Partial<Record<SectionKey, ProjectInfoBlock[]>>>(
+    {},
+  );
+
+  const blocksBySection = useMemo(() => {
+    const grouped = {} as Record<SectionKey, ProjectInfoBlock[]>;
+    for (const key of SECTION_KEYS) {
+      grouped[key] = [];
+    }
+
+    const cache = blockCacheRef.current;
+    baseBlocks.forEach((block) => {
+      const sectionKey = block.section as SectionKey;
+      if (!(sectionKey in grouped)) return;
+      const sectionEnabled = localConfig.sections[sectionKey].enabled;
+      const overlay = fileOverlay[block.id];
+      const enabled = sectionEnabled && (overlay ?? block.enabled);
+      let resolved: ProjectInfoBlock;
+      const cached = cache.get(block.id);
+      if (
+        cached &&
+        cached.source === block &&
+        cached.result.enabled === enabled
+      ) {
+        resolved = cached.result;
+      } else {
+        resolved = block.enabled === enabled ? block : { ...block, enabled };
+        cache.set(block.id, { source: block, result: resolved });
+      }
+      grouped[sectionKey].push(resolved);
+    });
+
+    const previous = sliceCacheRef.current;
+    const next: Record<SectionKey, ProjectInfoBlock[]> = grouped;
+    SECTION_KEYS.forEach((key) => {
+      const cachedSlice = previous[key];
+      if (sameBlockList(cachedSlice, grouped[key]) && cachedSlice) {
+        next[key] = cachedSlice;
+      }
+    });
+    sliceCacheRef.current = next;
+    return next;
+  }, [baseBlocks, fileOverlay, localConfig.sections]);
+
   const totalTokens = useMemo(() => {
     if (!localConfig.enabled) return 0;
-    const enabledBlocks = blocks.filter((b) => b.enabled);
-    const totalChars = enabledBlocks.reduce((sum, b) => sum + b.char_count, 0);
-    return charsToTokens(totalChars);
-  }, [blocks, localConfig.enabled]);
+    return SECTION_KEYS.reduce(
+      (sum, key) => sum + countTokens(blocksBySection[key]),
+      0,
+    );
+  }, [blocksBySection, localConfig.enabled]);
 
-  const updateSection = useCallback(
-    (
-      sectionKey: keyof ProjectInformationConfig["sections"],
-      updates: Partial<SectionConfig>,
-    ) => {
+  // Optimistic: section switch only touches local state.
+  const handleSectionToggle = useCallback(
+    (sectionKey: SectionKey, enabled: boolean) => {
       setLocalConfig((prev) => ({
         ...prev,
         sections: {
           ...prev.sections,
-          [sectionKey]: {
-            ...prev.sections[sectionKey],
-            ...updates,
-          },
+          [sectionKey]: { ...prev.sections[sectionKey], enabled },
         },
       }));
     },
     [],
   );
 
-  const updateFileOverride = useCallback(
-    (
-      sectionKey: keyof ProjectInformationConfig["sections"],
-      path: string,
-      enabled: boolean,
-    ) => {
+  // The only change that needs the server: truncation depends on limits.
+  const handleLimitChange = useCallback(
+    (sectionKey: SectionKey, field: string, value: number) => {
+      setLocalConfig((prev) => ({
+        ...prev,
+        sections: {
+          ...prev.sections,
+          [sectionKey]: { ...prev.sections[sectionKey], [field]: value },
+        },
+      }));
+    },
+    [],
+  );
+
+  // Optimistic: per-file switch updates the config override and the local
+  // block overlay so token totals move instantly, with no round-trip.
+  const handleFileToggle = useCallback(
+    (sectionKey: SectionKey, block: ProjectInfoBlock, enabled: boolean) => {
+      setFileOverlay((prev) => ({ ...prev, [block.id]: enabled }));
+      const path = block.path;
+      if (!path) return;
       setLocalConfig((prev) => {
         const section = prev.sections[sectionKey];
-        const currentOverrides = section.overrides ?? {};
-        const currentOverride =
-          (currentOverrides[path] as Record<string, unknown> | undefined) ?? {};
+        const currentOverrides: Partial<
+          NonNullable<SectionConfig["overrides"]>
+        > = section.overrides ?? {};
         return {
           ...prev,
           sections: {
@@ -463,10 +558,7 @@ export const ProjectInformationDialog: React.FC<Props> = ({
               ...section,
               overrides: {
                 ...currentOverrides,
-                [path]: {
-                  ...currentOverride,
-                  enabled,
-                },
+                [path]: { ...(currentOverrides[path] ?? {}), enabled },
               },
             },
           },
@@ -476,11 +568,21 @@ export const ProjectInformationDialog: React.FC<Props> = ({
     [],
   );
 
+  const handleMasterToggle = useCallback(
+    (enabled: boolean) => {
+      setLocalConfig((prev) => ({ ...prev, enabled }));
+      if (chatId) {
+        dispatch(setIncludeProjectInfo({ chatId, value: enabled }));
+      }
+    },
+    [chatId, dispatch],
+  );
+
   const handleSave = useCallback(async () => {
     setSaveError(null);
     setSaveSuccess(false);
     try {
-      await saveConfig(localConfig).unwrap();
+      await saveConfig(configRef.current).unwrap();
       setSaveSuccess(true);
       setTimeout(() => onOpenChange(false), 500);
     } catch (err) {
@@ -488,10 +590,11 @@ export const ProjectInformationDialog: React.FC<Props> = ({
         err instanceof Error ? err.message : "Failed to save configuration",
       );
     }
-  }, [saveConfig, localConfig, onOpenChange]);
+  }, [saveConfig, onOpenChange]);
 
   const handleReset = useCallback(() => {
     setLocalConfig(defaultProjectInformationConfig);
+    setFileOverlay({});
   }, []);
 
   if (isLoading) {
@@ -501,142 +604,117 @@ export const ProjectInformationDialog: React.FC<Props> = ({
           <div
             {...dialogNonInteractiveCloseHandlers(() => onOpenChange(false))}
           >
-            <Dialog.Title>Project Information</Dialog.Title>
-            <Flex align="center" justify="center" py="6">
-              <Text color="gray">Loading...</Text>
-            </Flex>
+            <Dialog.Title className={styles.title}>
+              Project Information
+            </Dialog.Title>
+            <div className={styles.loading}>Loading...</div>
           </div>
         </Dialog.Content>
       </Dialog>
     );
   }
+
+  const warnings = previewData?.warnings ?? [];
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <Dialog.Content maxWidth="600px">
         <div {...dialogNonInteractiveCloseHandlers(() => onOpenChange(false))}>
-          <Dialog.Title>Project Information</Dialog.Title>
-          <Flex direction="column" mb="4">
-            <Dialog.Description>
+          <div className={styles.root}>
+            <Dialog.Title className={styles.title}>
+              Project Information
+            </Dialog.Title>
+            <Dialog.Description className={styles.description}>
               Configure what project information is included in chat context.
               Token counts are approximate (~4 chars/token).
             </Dialog.Description>
-          </Flex>
 
-          {saveError && (
-            <Flex direction="column" mb="3">
-              <Surface variant="glass" radius="card">
-                <Flex align="center" gap="2" p="3">
-                  <AlertTriangle size={15} />
-                  <Text color="red" size="2">
-                    {saveError}
-                  </Text>
-                </Flex>
-              </Surface>
-            </Flex>
-          )}
+            {saveError && (
+              <div className={`${styles.notice} ${styles.noticeError}`}>
+                <Icon icon={AlertTriangle} size="sm" tone="danger" />
+                <span className={styles.noticeText}>{saveError}</span>
+              </div>
+            )}
 
-          {saveSuccess && (
-            <Flex direction="column" mb="3">
-              <Surface variant="glass" radius="card">
-                <Flex align="center" gap="2" p="3">
-                  <CheckCircle2 size={15} />
-                  <Text color="green" size="2">
-                    Configuration saved!
-                  </Text>
-                </Flex>
-              </Surface>
-            </Flex>
-          )}
+            {saveSuccess && (
+              <div className={`${styles.notice} ${styles.noticeSuccess}`}>
+                <Icon icon={CheckCircle2} size="sm" tone="success" />
+                <span className={styles.noticeText}>Configuration saved!</span>
+              </div>
+            )}
 
-          <Flex align="center" justify="between" mb="3">
-            <Flex align="center" gap="2">
-              <Switch
-                checked={localConfig.enabled}
-                onCheckedChange={(enabled) => {
-                  setLocalConfig((prev) => ({ ...prev, enabled }));
-                  if (chatId) {
-                    dispatch(setIncludeProjectInfo({ chatId, value: enabled }));
-                  }
-                }}
-                className="rf-pressable"
-              />
-              <Text weight="medium">Include project information</Text>
-            </Flex>
-            <Badge tone="accent" size="sm">
-              Total: ~{totalTokens.toLocaleString()} tokens
-              {isPreviewing && " (updating...)"}
-            </Badge>
-          </Flex>
+            <div className={styles.masterRow}>
+              <div className={styles.masterCopy}>
+                <Switch
+                  checked={localConfig.enabled}
+                  onCheckedChange={handleMasterToggle}
+                  className="rf-pressable"
+                  aria-label="Include project information"
+                />
+                <span className={styles.masterLabel}>
+                  Include project information
+                </span>
+              </div>
+              <div className={styles.masterControls}>
+                <Badge tone="accent" size="sm">
+                  Total: ~{totalTokens.toLocaleString()} tokens
+                  {isPreviewing && " (updating...)"}
+                </Badge>
+              </div>
+            </div>
 
-          <Separator size="4" mb="3" />
+            <ScrollArea className={styles.body}>
+              <div className={styles.sections}>
+                {SECTION_KEYS.map((sectionKey) => (
+                  <SectionRow
+                    key={sectionKey}
+                    sectionKey={sectionKey}
+                    config={localConfig.sections[sectionKey]}
+                    blocks={blocksBySection[sectionKey]}
+                    onToggle={handleSectionToggle}
+                    onLimitChange={handleLimitChange}
+                    onFileToggle={handleFileToggle}
+                    onPreviewBlock={setPreviewBlock}
+                  />
+                ))}
+              </div>
+            </ScrollArea>
 
-          <ScrollArea style={{ maxHeight: 400 }}>
-            <Flex direction="column" gap="1">
-              {Object.keys(SECTION_META).map((sectionKey) => {
-                const key =
-                  sectionKey as keyof ProjectInformationConfig["sections"];
-                return (
-                  <React.Fragment key={sectionKey}>
-                    <SectionRow
-                      sectionKey={sectionKey}
-                      config={localConfig.sections[key]}
-                      blocks={blocks}
-                      onToggle={(enabled) => updateSection(key, { enabled })}
-                      onFieldChange={(field, value) =>
-                        updateSection(key, { [field]: value })
-                      }
-                      onFileToggle={(path, enabled) =>
-                        updateFileOverride(key, path, enabled)
-                      }
-                      onPreviewBlock={setPreviewBlock}
-                    />
-                    <Separator size="4" />
-                  </React.Fragment>
-                );
-              })}
-            </Flex>
-          </ScrollArea>
+            {warnings.length > 0 && (
+              <div className={`${styles.notice} ${styles.noticeWarning}`}>
+                <Icon icon={AlertTriangle} size="sm" tone="warning" />
+                <span className={styles.noticeText}>
+                  {warnings.length} warning(s): {warnings[0]}
+                  {warnings.length > 1 && ` (+${warnings.length - 1} more)`}
+                </span>
+              </div>
+            )}
 
-          {previewData?.warnings && previewData.warnings.length > 0 && (
-            <Flex direction="column" mt="3">
-              <Surface variant="glass" radius="card">
-                <Flex align="center" gap="2" p="3">
-                  <AlertTriangle size={15} />
-                  <Text color="orange" size="2">
-                    {previewData.warnings.length} warning(s):{" "}
-                    {previewData.warnings[0]}
-                    {previewData.warnings.length > 1 &&
-                      ` (+${previewData.warnings.length - 1} more)`}
-                  </Text>
-                </Flex>
-              </Surface>
-            </Flex>
-          )}
-
-          <Flex gap="3" mt="4" justify="end">
-            <Button
-              type="button"
-              variant="soft"
-              size="md"
-              onClick={handleReset}
-            >
-              Reset to Defaults
-            </Button>
-            <Dialog.Close asChild>
-              <Button type="button" variant="soft" size="md">
-                Cancel
+            <div className={styles.footer}>
+              <Button
+                type="button"
+                variant="soft"
+                size="md"
+                onClick={handleReset}
+              >
+                Reset to Defaults
               </Button>
-            </Dialog.Close>
-            <Button
-              type="button"
-              variant="primary"
-              size="md"
-              onClick={() => void handleSave()}
-              disabled={isSaving}
-            >
-              {isSaving ? "Saving..." : "Save"}
-            </Button>
-          </Flex>
+              <Dialog.Close asChild>
+                <Button type="button" variant="soft" size="md">
+                  Cancel
+                </Button>
+              </Dialog.Close>
+              <Button
+                type="button"
+                variant="primary"
+                size="md"
+                onClick={() => void handleSave()}
+                disabled={isSaving}
+              >
+                {isSaving ? "Saving..." : "Save"}
+              </Button>
+            </div>
+          </div>
 
           <ContentPreviewDialog
             block={previewBlock}

@@ -116,48 +116,35 @@ export const MarketplaceHub: React.FC<MarketplaceHubProps> = ({
     </>
   );
 
-  if (embedded) {
-    return (
-      <Tabs value={activeTab} onValueChange={handleTabChange}>
-        <SettingsSection
-          title="Marketplace"
-          description={MARKETPLACE_DESCRIPTION}
-          subNav={tabsList}
-        >
-          {panels}
-        </SettingsSection>
-      </Tabs>
-    );
-  }
+  const actions = embedded ? null : (
+    <Button variant="soft" onClick={back} leftIcon={ArrowLeft}>
+      Back
+    </Button>
+  );
+
+  const section = (
+    <Tabs
+      value={activeTab}
+      onValueChange={handleTabChange}
+      className={styles.tabsRoot}
+    >
+      <SettingsSection
+        title="Marketplace"
+        description={MARKETPLACE_DESCRIPTION}
+        actions={actions}
+        subNav={tabsList}
+      >
+        {panels}
+      </SettingsSection>
+    </Tabs>
+  );
+
+  if (embedded) return section;
 
   return (
-    <PageWrapper host={host}>
+    <PageWrapper host={host} noPadding>
       <ScrollArea scrollbars="vertical" fullHeight>
-        <div className={styles.pageStack}>
-          <div className={styles.header}>
-            <Button
-              variant="ghost"
-              size="sm"
-              leftIcon={ArrowLeft}
-              onClick={back}
-            >
-              Back
-            </Button>
-            <div className={styles.headerText}>
-              <h2 className={styles.title}>Marketplace</h2>
-              <p className={styles.description}>{MARKETPLACE_DESCRIPTION}</p>
-            </div>
-          </div>
-
-          <Tabs
-            value={activeTab}
-            onValueChange={handleTabChange}
-            className={styles.tabsRoot}
-          >
-            {tabsList}
-            {panels}
-          </Tabs>
-        </div>
+        <div className={styles.pageStack}>{section}</div>
       </ScrollArea>
     </PageWrapper>
   );

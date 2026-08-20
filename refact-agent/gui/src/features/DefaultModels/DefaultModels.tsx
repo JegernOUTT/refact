@@ -242,24 +242,18 @@ const ModelTypeSection: React.FC<{
                     description="Set the token budget available for reasoning."
                     layout="stack"
                     control={
-                      <div className={styles.sliderControl}>
-                        <span className={styles.boundary}>1K</span>
-                        <FieldSlider
-                          className={styles.slider}
-                          min={1024}
-                          max={32768}
-                          step={1024}
-                          value={[config.thinking_budget ?? 16384]}
-                          onChange={(value) =>
-                            handleSamplingChange("thinking_budget", value[0])
-                          }
-                          aria-label="Thinking tokens"
-                        />
-                        <span className={styles.boundary}>32K</span>
-                        <span className={styles.sliderValue}>
-                          {config.thinking_budget ?? 16384}
-                        </span>
-                      </div>
+                      <FieldSlider
+                        label={`${formatTokens(1024)} – ${formatTokens(32768)}`}
+                        valueLabel={config.thinking_budget ?? 16384}
+                        min={1024}
+                        max={32768}
+                        step={1024}
+                        value={[config.thinking_budget ?? 16384]}
+                        onChange={(value) =>
+                          handleSamplingChange("thinking_budget", value[0])
+                        }
+                        aria-label="Thinking tokens"
+                      />
                     }
                   />
                 ) : null}
@@ -272,10 +266,14 @@ const ModelTypeSection: React.FC<{
               description="Set the maximum length of the model response."
               layout="stack"
               control={
-                <div className={styles.sliderControl}>
-                  <span className={styles.boundary}>1K</span>
+                <div className={styles.valueControl}>
                   <FieldSlider
-                    className={styles.slider}
+                    label={`${formatTokens(1024)} – ${formatTokens(
+                      maxOutputTokens,
+                    )}`}
+                    valueLabel={
+                      config.max_new_tokens ?? `${defaultMaxTokens} (default)`
+                    }
                     min={1024}
                     max={maxOutputTokens}
                     step={1024}
@@ -285,25 +283,17 @@ const ModelTypeSection: React.FC<{
                     }
                     aria-label="Max tokens"
                   />
-                  <span className={styles.boundary}>
-                    {formatTokens(maxOutputTokens)}
-                  </span>
-                  <span className={styles.valueControl}>
-                    <span className={styles.sliderValue}>
-                      {config.max_new_tokens ?? `${defaultMaxTokens} (default)`}
-                    </span>
-                    {config.max_new_tokens != null ? (
-                      <IconButton
-                        icon={RotateCcw}
-                        size="sm"
-                        variant="plain"
-                        onClick={() =>
-                          handleSamplingChange("max_new_tokens", undefined)
-                        }
-                        aria-label="Reset max tokens"
-                      />
-                    ) : null}
-                  </span>
+                  {config.max_new_tokens != null ? (
+                    <IconButton
+                      icon={RotateCcw}
+                      size="sm"
+                      variant="plain"
+                      onClick={() =>
+                        handleSamplingChange("max_new_tokens", undefined)
+                      }
+                      aria-label="Reset max tokens"
+                    />
+                  ) : null}
                 </div>
               }
             />

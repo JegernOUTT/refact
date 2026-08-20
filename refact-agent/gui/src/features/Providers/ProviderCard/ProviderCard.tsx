@@ -3,9 +3,9 @@ import { Copy } from "lucide-react";
 
 import {
   Badge,
+  Card,
   IconButton,
   StatusDot,
-  Surface,
   Tooltip,
 } from "../../../components/ui";
 import { getProviderIcon } from "../icons/iconsMap";
@@ -58,12 +58,12 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
   };
 
   return (
-    <Surface
-      as="div"
+    <Card
       role="button"
       tabIndex={0}
       variant="glass"
       animated="rise"
+      padding="md"
       interactive
       onClick={handleSelectProvider}
       onKeyDown={handleCardKeyDown}
@@ -114,6 +114,6 @@ export const ProviderCard: React.FC<ProviderCardProps> = ({
           </Tooltip>
         ) : null}
       </span>
-    </Surface>
+    </Card>
   );
 };

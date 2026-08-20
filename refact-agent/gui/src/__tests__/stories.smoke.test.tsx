@@ -139,6 +139,8 @@ const EXCLUDED_STORY_FILES = [
   // UI-kit visual gallery is reviewed in Storybook.
   "../components/ui/Select/Select.stories.tsx",
   // UI-kit visual gallery is reviewed in Storybook.
+  "../components/ui/SettingsListEditor/SettingsListEditor.stories.tsx",
+  // UI-kit visual gallery is reviewed in Storybook.
   "../components/ui/Sheet/Sheet.stories.tsx",
   // UI-kit visual gallery is reviewed in Storybook.
   "../components/ui/Skeleton/Skeleton.stories.tsx",

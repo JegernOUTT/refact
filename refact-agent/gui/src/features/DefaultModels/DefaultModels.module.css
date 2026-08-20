@@ -59,41 +59,28 @@
   min-width: 0;
 }
 
-.reasoningLabel,
-.valueControl {
+.reasoningLabel {
   display: inline-flex;
   min-width: 0;
   align-items: center;
   gap: var(--rf-space-1);
 }
 
-.segmented {
-  width: min(100%, 360px);
-}
-
-.sliderControl {
-  display: grid;
+.valueControl {
+  display: flex;
+  width: 100%;
   min-width: 0;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  align-items: center;
+  align-items: flex-end;
   gap: var(--rf-space-2);
 }
 
-.slider {
-  width: 100%;
+.valueControl > *:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
-.boundary {
-  color: var(--rf-color-muted);
-  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
-    var(--rf-font-ui);
-}
-
-.sliderValue {
-  color: var(--rf-color-fg);
-  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
-    var(--rf-font-ui);
-  white-space: nowrap;
+.segmented {
+  width: min(100%, 360px);
 }
 
 .roleTabs {
@@ -140,15 +127,5 @@
   .headerActions > *,
   .actions > * {
     flex: 1 1 auto;
-  }
-
-  .sliderControl {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-  }
-
-  .valueControl,
-  .sliderControl > .sliderValue {
-    grid-column: 2 / -1;
-    justify-self: end;
   }
 }

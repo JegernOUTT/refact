@@ -1,6 +1,12 @@
 import React from "react";
 import { Plus, Trash2 } from "lucide-react";
-import { Badge, Button, EmptyState, IconButton } from "../../../components/ui";
+import {
+  Badge,
+  Button,
+  EmptyState,
+  IconButton,
+  VirtualizedGrid,
+} from "../../../components/ui";
 import type {
   SkillRegistryItem,
   CommandRegistryItem,
@@ -23,6 +29,14 @@ const SCOPE_LABELS = {
   plugin: "Plugin",
 } as const;
 
+const SCOPE_TONES = {
+  global: "accent",
+  local: "success",
+  plugin: "muted",
+} as const;
+
+const ITEM_ROW_GAP = 4;
+
 export const ExtItemList: React.FC<ExtItemListProps> = ({
   items,
   selectedId,
@@ -41,47 +55,64 @@ export const ExtItemList: React.FC<ExtItemListProps> = ({
       >
         New
       </Button>
-      {items.map((item) => (
-        <div
-          key={item.name}
-          className={`${styles.item} ${
-            selectedId === item.name ? styles.selected : ""
-          }`}
-        >
-          <button
-            type="button"
-            aria-label={`Select ${item.name}`}
-            aria-current={selectedId === item.name ? "true" : undefined}
-            className={`${styles.main} rf-pressable ${
-              selectedId === item.name ? styles.selected : ""
-            }`}
-            onClick={() => onSelect(item.name)}
-          >
-            <span className={styles.content}>
-              <span className={styles.title}>{item.name}</span>
-              <span className={styles.description}>{item.description}</span>
-            </span>
-          </button>
-          <span className={styles.meta}>
-            <Badge tone="muted">{SCOPE_LABELS[item.scope]}</Badge>
-            {item.read_only ? (
-              <span aria-hidden="true" className={styles.deletePlaceholder} />
-            ) : (
-              <IconButton
-                variant="danger"
-                size="sm"
-                icon={Trash2}
-                aria-label={`Delete ${item.name}`}
-                onClick={() => onDelete(item.name, item.scope)}
-              />
-            )}
-          </span>
-        </div>
-      ))}
-      {items.length === 0 && (
+      {items.length === 0 ? (
         <EmptyState
           title="No items found"
           description="Create one to get started."
+        />
+      ) : (
+        <VirtualizedGrid
+          items={items}
+          columns={1}
+          gap={ITEM_ROW_GAP}
+          getItemKey={(item) => item.name}
+          aria-label="Extensions"
+          renderItem={(item) => (
+            <div
+              role="button"
+              tabIndex={0}
+              aria-label={`Select ${item.name}`}
+              aria-current={selectedId === item.name ? "true" : undefined}
+              className={`${styles.itemRow} rf-pressable ${
+                selectedId === item.name ? styles.selected : ""
+              }`}
+              onClick={() => onSelect(item.name)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onSelect(item.name);
+                }
+              }}
+            >
+              <div className={styles.rowInfo}>
+                <span className={styles.rowTitle}>{item.name}</span>
+                <span className={styles.rowDescription}>
+                  {item.description}
+                </span>
+              </div>
+              <Badge
+                className={styles.scopeBadge}
+                tone={SCOPE_TONES[item.scope]}
+              >
+                {SCOPE_LABELS[item.scope]}
+              </Badge>
+              {item.read_only ? (
+                <span aria-hidden="true" className={styles.deletePlaceholder} />
+              ) : (
+                <IconButton
+                  variant="ghost"
+                  size="sm"
+                  icon={Trash2}
+                  className={styles.deleteBtn}
+                  aria-label={`Delete ${item.name}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDelete(item.name, item.scope);
+                  }}
+                />
+              )}
+            </div>
+          )}
         />
       )}
     </div>

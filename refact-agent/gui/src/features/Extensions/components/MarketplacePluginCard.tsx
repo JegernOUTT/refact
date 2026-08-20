@@ -1,6 +1,13 @@
 import React, { useCallback } from "react";
+import classNames from "classnames";
 import { Check } from "lucide-react";
-import { Badge, Button, FieldError, Icon } from "../../../components/ui";
+import {
+  Badge,
+  Button,
+  Card as KitCard,
+  FieldError,
+  Icon,
+} from "../../../components/ui";
 import {
   useInstallPluginMutation,
   useUninstallPluginMutation,
@@ -69,30 +76,66 @@ export const MarketplacePluginCard: React.FC<MarketplacePluginCardProps> = ({
         : null;
 
   return (
-    <article className={`${styles.card} rf-glass-panel rf-pressable`}>
-      <div className={styles.body}>
-        <div className={styles.header}>
-          <div className={styles.info}>
-            <h3 className={styles.title}>{plugin.name}</h3>
-            {plugin.description && (
-              <p className={styles.description}>{plugin.description}</p>
+    <KitCard interactive className={classNames(styles.card, "rf-glass-panel")}>
+      <div className={styles.cardColumn}>
+        <div className={styles.cardBody}>
+          <div className={styles.cardMeta}>
+            <div className={styles.cardTitle}>
+              <p className={classNames(styles.text, styles.truncate)}>
+                {plugin.name}
+              </p>
+            </div>
+            {plugin.version && (
+              <Badge tone="accent" className={styles.neutralBadge}>
+                {plugin.version}
+              </Badge>
             )}
           </div>
-          <div className={styles.actions}>
-            {isInstalled ? (
-              <div className={styles.installed}>
+
+          <p className={styles.description}>
+            {plugin.description || "No description"}
+          </p>
+
+          {plugin.tags && plugin.tags.length > 0 && (
+            <div className={styles.filterRow}>
+              {plugin.tags.slice(0, 4).map((tag) => (
+                <Badge key={tag} tone="muted">
+                  {tag}
+                </Badge>
+              ))}
+            </div>
+          )}
+
+          {errorMessage && <FieldError>{errorMessage}</FieldError>}
+        </div>
+
+        <div className={styles.cardFooterGroup}>
+          <div className={styles.cardFooter}>
+            <Badge tone="muted" className={styles.sourceBadge}>
+              {plugin.marketplace}
+            </Badge>
+            {isInstalled && (
+              <span
+                className={classNames(styles.cardActionRow, styles.successText)}
+              >
                 <Icon icon={Check} size="sm" tone="success" />
-                Installed
-                <Button
-                  size="sm"
-                  variant="soft"
-                  onClick={handleUninstall}
-                  disabled={uninstalling}
-                  loading={uninstalling}
-                >
-                  Uninstall
-                </Button>
-              </div>
+                <span className={styles.smallText}>Installed</span>
+              </span>
+            )}
+          </div>
+
+          <div className={styles.cardActionRow}>
+            {isInstalled ? (
+              <Button
+                size="sm"
+                variant="soft"
+                onClick={handleUninstall}
+                disabled={uninstalling}
+                loading={uninstalling}
+                className={styles.grow}
+              >
+                Uninstall
+              </Button>
             ) : (
               <Button
                 size="sm"
@@ -100,25 +143,14 @@ export const MarketplacePluginCard: React.FC<MarketplacePluginCardProps> = ({
                 onClick={handleInstall}
                 disabled={installing}
                 loading={installing}
+                className={styles.grow}
               >
                 Install
               </Button>
             )}
           </div>
         </div>
-
-        {errorMessage && <FieldError>{errorMessage}</FieldError>}
-
-        <div className={styles.tags}>
-          <Badge tone="muted">{plugin.marketplace}</Badge>
-          {plugin.version && <Badge tone="muted">{plugin.version}</Badge>}
-          {plugin.tags?.map((tag) => (
-            <Badge key={tag} tone="default">
-              {tag}
-            </Badge>
-          ))}
-        </div>
       </div>
-    </article>
+    </KitCard>
   );
 };

@@ -22,6 +22,7 @@ import { StringListEditor } from "../../Customization/components/StringListEdito
 import { Spinner } from "../../../components/Spinner";
 import { BuddyDraftPreview } from "../../Buddy/BuddyDraftPreview";
 import styles from "./SkillEditor.module.css";
+import shell from "./editorShell.module.css";
 import featureStyles from "../../featureUi.module.css";
 
 type EditorView = "form" | "raw";
@@ -34,7 +35,7 @@ type SkillFormProps = {
 
 const SkillForm: React.FC<SkillFormProps> = ({ data, onChange, disabled }) => {
   return (
-    <div className={styles.formContent}>
+    <div className={`${shell.formContainer} rf-stagger`}>
       <FieldStack
         label="Name"
         control={
@@ -265,12 +266,12 @@ export const SkillEditor: React.FC<SkillEditorProps> = ({
   const isReadOnly = localData.source.startsWith("plugin:");
 
   return (
-    <div className={`${styles.editor} rf-enter`}>
+    <div className={`${shell.editorPanel} rf-enter`}>
       <Button
         variant="ghost"
         size="sm"
         onClick={onBack}
-        className={styles.backButton}
+        className={shell.backToListBtn}
         leftIcon={ArrowLeft}
       >
         Back to list
@@ -296,10 +297,12 @@ export const SkillEditor: React.FC<SkillEditorProps> = ({
         </div>
       )}
 
-      <div className={styles.header}>
-        <h2 className={styles.title}>{name}</h2>
-        <div className={styles.headerActions}>
+      <div className={shell.editorHeader}>
+        <h2 className={shell.editorTitle}>{name}</h2>
+        <div className={shell.editorActions}>
           <SegmentedControl
+            aria-label="Editor view"
+            className={shell.editorToggle}
             size="sm"
             value={view}
             onValueChange={(value) => setView(value as EditorView)}
@@ -307,8 +310,15 @@ export const SkillEditor: React.FC<SkillEditorProps> = ({
               {
                 value: "form",
                 label: <Icon icon={SlidersHorizontal} size="sm" />,
+                iconOnly: true,
+                ariaLabel: "Form editor",
               },
-              { value: "raw", label: <Icon icon={Code} size="sm" /> },
+              {
+                value: "raw",
+                label: <Icon icon={Code} size="sm" />,
+                iconOnly: true,
+                ariaLabel: "Raw editor",
+              },
             ]}
           />
           {!isReadOnly && (
@@ -335,7 +345,7 @@ export const SkillEditor: React.FC<SkillEditorProps> = ({
         />
       ) : (
         <textarea
-          className={styles.rawTextarea}
+          className={shell.yamlEditor}
           value={rawContent}
           onChange={(e) => setRawContent(e.target.value)}
           disabled={isReadOnly}

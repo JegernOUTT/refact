@@ -1,6 +1,4 @@
 .pageStack,
-.header,
-.headerText,
 .tabsRoot,
 .tabsList,
 .tabPanel {
@@ -8,7 +6,6 @@
 }
 
 .pageStack,
-.headerText,
 .tabsRoot,
 .tabPanel {
   display: flex;
@@ -17,35 +14,6 @@
 
 .pageStack {
   gap: var(--rf-space-4);
-}
-
-.header {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--rf-space-3);
-  min-width: 0;
-}
-
-.headerText {
-  gap: var(--rf-space-1);
-}
-
-.title,
-.description {
-  margin: 0;
-  line-height: var(--rf-line);
-}
-
-.title {
-  font-size: var(--rf-text-4);
-  line-height: 1.2;
-  font-weight: var(--rf-weight-semibold);
-  color: var(--rf-color-fg);
-}
-
-.description {
-  font-size: var(--rf-text-2);
-  color: var(--rf-color-muted);
 }
 
 .tabsRoot {

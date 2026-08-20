@@ -1,7 +1,7 @@
 import type { FC, KeyboardEventHandler, MouseEventHandler } from "react";
 import classNames from "classnames";
 
-import { Surface } from "../../ui";
+import { Card } from "../../ui";
 import { useAppSelector } from "../../../hooks/useAppSelector";
 import { useUpdateIntegration } from "./useUpdateIntegration";
 
@@ -71,10 +71,10 @@ export const IntegrationCard: FC<IntegrationCardProps> = ({
   };
 
   return (
-    <Surface
+    <Card
       animated="rise"
-      radius="card"
-      variant="plain"
+      variant="surface-1"
+      padding="md"
       interactive
       role="button"
       tabIndex={0}
@@ -86,8 +86,8 @@ export const IntegrationCard: FC<IntegrationCardProps> = ({
       onKeyDown={handleCardKeyDown}
     >
       <span
-        className={classNames(styles.content, {
-          [styles.contentInline]: isNotConfigured,
+        className={classNames(styles.header, {
+          [styles.headerInline]: isNotConfigured,
         })}
       >
         <img
@@ -96,27 +96,23 @@ export const IntegrationCard: FC<IntegrationCardProps> = ({
           alt={integration.integr_name}
         />
         <span
-          className={classNames(styles.body, {
-            [styles.bodyInline]: isNotConfigured,
+          className={classNames(styles.title, {
+            [styles.titleInline]: isNotConfigured,
           })}
         >
-          <span
-            className={classNames(styles.title, {
-              [styles.titleInline]: isNotConfigured,
-            })}
-          >
-            {displayName}
-          </span>
-          {!isNotConfigured && (
-            <span className={styles.switchWrap}>
-              <OnOffSwitch
-                isEnabled={integrationAvailability.on_your_laptop}
-                handleClick={handleAvailabilityClick}
-              />
-            </span>
-          )}
+          {displayName}
         </span>
       </span>
-    </Surface>
+      {!isNotConfigured && (
+        <span className={styles.footer}>
+          <span className={styles.switchWrap}>
+            <OnOffSwitch
+              isEnabled={integrationAvailability.on_your_laptop}
+              handleClick={handleAvailabilityClick}
+            />
+          </span>
+        </span>
+      )}
+    </Card>
   );
 };

@@ -48,12 +48,22 @@
 
 .popup {
   position: fixed;
-  max-width: max-content;
-  width: 80%;
   left: 50%;
+  width: min(max-content, calc(100vw - 2 * var(--rf-space-3)));
+  max-width: calc(100vw - 2 * var(--rf-space-3));
   transform: translateX(-50%);
-  background-color: var(--rf-surface-2);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-overlay);
+  box-shadow: var(--rf-elev-overlay);
+  backdrop-filter: blur(var(--rf-blur-overlay));
   bottom: calc(var(--rf-control-h-lg) + var(--rf-space-5));
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .popup {
+    backdrop-filter: none;
+  }
 }
 
 .popup_ide {

@@ -1,13 +1,12 @@
 import React from "react";
 import { Plus } from "lucide-react";
 
-import { Button, EmptyState } from "../../../components/ui";
+import { Button, CardGrid, EmptyState } from "../../../components/ui";
 import { SettingsGroup } from "../../Settings/SettingsSection";
 import { ProviderCard } from "../ProviderCard/ProviderCard";
 
 import type { ProviderListItem } from "../../../services/refact";
 import { useGetConfiguredProvidersView } from "./useConfiguredProvidersView";
-import styles from "./ProvidersView.module.css";
 
 export type ConfiguredProvidersViewProps = {
   configuredProviders: ProviderListItem[];
@@ -31,7 +30,7 @@ export const ConfiguredProvidersView: React.FC<
   return (
     <SettingsGroup title="Configured providers">
       {sortedConfiguredProviders.length > 0 ? (
-        <div className={styles.providersGrid}>
+        <CardGrid>
           {sortedConfiguredProviders.map((provider, idx) => (
             <div className="rf-enter-rise" key={`${provider.name}_${idx}`}>
               <ProviderCard
@@ -41,7 +40,7 @@ export const ConfiguredProvidersView: React.FC<
               />
             </div>
           ))}
-        </div>
+        </CardGrid>
       ) : (
         <EmptyState
           variant="full"

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Callout } from "@radix-ui/themes";
+import classNames from "classnames";
 
 import {
   Badge,
@@ -14,6 +15,7 @@ import {
   LoadingState,
   SaveStatus,
   SettingItem,
+  SettingsListEditor,
   Text,
   type SaveStatusState,
 } from "../../components/ui";
@@ -31,7 +33,6 @@ import {
   useUpdateShellPolicyMutation,
 } from "../../services/refact/shellPolicy";
 import { SettingsGroup, SettingsSection } from "../Settings/SettingsSection";
-import { ShellRuleList } from "./ShellRuleList";
 import styles from "./ShellSettingsSection.module.css";
 
 const MODE_OPTIONS = [
@@ -110,6 +111,105 @@ function errorMessage(error: unknown): string {
     }
   }
   return "The command could not be evaluated.";
+}
+
+type ShellRuleTone = "deny" | "ask" | "allow";
+
+const RULE_PLACEHOLDER: Record<ShellRuleTone, string> = {
+  deny: "rm -rf *",
+  ask: "git push*",
+  allow: "ls",
+};
+
+const RULE_BADGE_TONE: Record<ShellRuleTone, "danger" | "warning" | "success"> =
+  {
+    deny: "danger",
+    ask: "warning",
+    allow: "success",
+  };
+
+interface ShellRuleBlockProps {
+  title: string;
+  hint: string;
+  tone: ShellRuleTone;
+  rules: string[];
+  savedRules: string[];
+  disabled: boolean;
+  onChange: (rules: string[]) => void;
+}
+
+function ShellRuleBlock({
+  disabled,
+  hint,
+  onChange,
+  rules,
+  savedRules,
+  title,
+  tone,
+}: ShellRuleBlockProps) {
+  const dirty =
+    rules.length !== savedRules.length ||
+    rules.some((rule, index) => rule !== savedRules[index]);
+
+  const items = rules.map((value, index) => ({
+    id: String(index),
+    value,
+  }));
+
+  return (
+    <SettingItem
+      layout="stack"
+      title={
+        <span className={styles.ruleTitle}>
+          <span
+            aria-hidden="true"
+            className={classNames(styles.ruleMarker, styles[tone])}
+          />
+          {title}
+          <Badge tone={RULE_BADGE_TONE[tone]}>{rules.length}</Badge>
+        </span>
+      }
+      description={hint}
+      control={
+        <Flex direction="column" gap="2" align="stretch">
+          <SettingsListEditor
+            addLabel="Add rule"
+            emptyLabel="No rules yet."
+            items={items}
+            itemAriaLabel={(_item, index) =>
+              `Remove rule ${String(index + 1)} from ${title}`
+            }
+            monospace
+            placeholder={RULE_PLACEHOLDER[tone]}
+            disabled={disabled}
+            onAdd={() => onChange([...rules, ""])}
+            onChange={(id, value) =>
+              onChange(
+                rules.map((rule, index) =>
+                  String(index) === id ? value : rule,
+                ),
+              )
+            }
+            onRemove={(id) =>
+              onChange(rules.filter((_rule, index) => String(index) !== id))
+            }
+          />
+          {dirty ? (
+            <Flex justify="end">
+              <Button
+                disabled={disabled}
+                size="sm"
+                variant="ghost"
+                onClick={() => onChange([...savedRules])}
+              >
+                Revert
+              </Button>
+            </Flex>
+          ) : null}
+        </Flex>
+      }
+    />
+  );
 }
 
 export function ShellSettingsSection() {
@@ -231,7 +331,7 @@ export function ShellSettingsSection() {
         title="Rules"
         description="A rule with no spaces matches the program name (rm, mkfs*); a rule with spaces matches the whole command (git push*). Prefixes exec:, argv:, re:, and raw: force a specific target; raw: is the old whole-line matching."
       >
-        <ShellRuleList
+        <ShellRuleBlock
           tone="deny"
           title="Never run (deny)"
           hint="Always blocked, in every mode."
@@ -240,7 +340,7 @@ export function ShellSettingsSection() {
           disabled={saving}
           onChange={(deny) => setDraft({ ...draft, deny })}
         />
-        <ShellRuleList
+        <ShellRuleBlock
           tone="ask"
           title="Always ask"
           hint="Always requires your approval before running."
@@ -249,7 +349,7 @@ export function ShellSettingsSection() {
           disabled={saving}
           onChange={(ask) => setDraft({ ...draft, ask })}
         />
-        <ShellRuleList
+        <ShellRuleBlock
           tone="allow"
           title="Never ask (allow)"
           hint="Runs without confirmation. Deny rules still win."
@@ -660,7 +760,13 @@ export function ShellSettingsSection() {
         </Flex>
       </SettingsGroup>
 
-      <Flex align="center" gap="2" wrap="wrap">
+      <Flex
+        align="center"
+        className={styles.footer}
+        gap="2"
+        justify="end"
+        wrap="wrap"
+      >
         <Button loading={saving} onClick={() => void updatePolicy(draft)}>
           Save
         </Button>

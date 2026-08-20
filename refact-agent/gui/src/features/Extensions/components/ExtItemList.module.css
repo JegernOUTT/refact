@@ -1,102 +1,111 @@
 .list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-1);
+  display: grid;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
+  gap: var(--rf-space-2);
 }
 
 .createButton {
   width: max-content;
-  align-self: flex-start;
+  justify-self: start;
 }
 
-.item {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--rf-space-2);
-  min-width: 0;
+.itemRow {
+  display: grid;
   width: 100%;
-  border-radius: var(--rf-radius-ctl);
-  background: transparent;
-  color: var(--rf-color-fg);
+  max-width: 100%;
+  min-width: 0;
+  min-height: var(--rf-control-h-lg);
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--rf-space-2);
   padding: var(--rf-space-2);
-  transition: background var(--rf-dur-fast) var(--rf-ease-standard);
+  color: var(--rf-color-fg);
+  background: transparent;
+  border: var(--rf-hairline) solid transparent;
+  border-radius: var(--rf-radius-ctl);
+  cursor: pointer;
 }
 
-.item:hover {
+.itemRow:hover {
   background: var(--rf-surface-1);
+  border-color: var(--rf-border);
 }
 
-.item.selected {
-  background: var(--rf-selected-bg);
+.itemRow:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.itemRow.selected {
+  background: var(--rf-color-accent-soft);
+  border-color: var(--rf-border-strong);
   box-shadow: inset 2px 0 0 var(--rf-color-accent);
 }
 
-.item.selected:hover {
-  background: var(--rf-selected-bg);
+.itemRow.selected:hover {
+  background: var(--rf-color-accent-soft);
 }
 
-.item.selected .title {
-  color: var(--rf-selected-fg);
-}
-
-.main {
-  display: flex;
-  flex: 1;
+.rowInfo {
+  display: grid;
   min-width: 0;
-  border: 0;
-  padding: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  font: inherit;
-  text-align: left;
-}
-
-.main::after {
-  position: absolute;
-  inset: 0;
-  content: "";
-}
-
-.content {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.title {
-  overflow: hidden;
-  color: var(--rf-color-fg);
-  font-size: var(--rf-text-2);
-  font-weight: var(--rf-weight-semibold);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.description {
-  overflow: hidden;
-  color: var(--rf-color-muted);
-  font-size: var(--rf-text-1);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.meta {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
   gap: var(--rf-space-1);
 }
 
+.rowTitle {
+  overflow: hidden;
+  color: var(--rf-color-fg);
+  font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowDescription {
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scopeBadge,
+.deleteBtn,
 .deletePlaceholder {
-  width: 28px;
-  height: 28px;
   flex-shrink: 0;
+}
+
+.deleteBtn {
+  color: var(--rf-color-danger);
+}
+
+.deletePlaceholder {
+  width: var(--rf-control-h-sm);
+  height: var(--rf-control-h-sm);
   visibility: hidden;
+}
+
+@media (width <= 42rem) {
+  .itemRow {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .scopeBadge {
+    justify-self: start;
+  }
+
+  .deleteBtn,
+  .deletePlaceholder {
+    grid-row: 1 / span 2;
+    grid-column: 2;
+  }
+}
+
+@media (width <= 24rem) {
+  .itemRow {
+    align-items: start;
+  }
 }

@@ -1,7 +1,7 @@
 .panel {
   container-type: inline-size;
   display: grid;
-  width: min(100%, var(--rf-settings-measure));
+  width: 100%;
   min-width: 0;
   gap: var(--rf-section-gap);
 }
@@ -136,7 +136,6 @@
 }
 
 .formActions,
-.listHeader,
 .jobHeader,
 .jobBadges,
 .jobActions {
@@ -148,13 +147,6 @@
   flex-wrap: wrap;
   justify-content: flex-start;
   gap: var(--rf-space-2);
-}
-
-.listHeader {
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--rf-space-2) var(--rf-space-3);
 }
 
 .emptyState {

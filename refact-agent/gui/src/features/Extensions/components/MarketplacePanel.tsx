@@ -27,7 +27,7 @@ import { MarketplacePluginCard } from "./MarketplacePluginCard";
 import styles from "./MarketplacePanel.module.css";
 
 const PLUGIN_COLUMN_WIDTH = 280;
-const PLUGIN_CARD_HEIGHT = 160;
+const PLUGIN_CARD_HEIGHT = 184;
 
 type PluginIdentity = Pick<PluginEntry, "marketplace" | "name">;
 

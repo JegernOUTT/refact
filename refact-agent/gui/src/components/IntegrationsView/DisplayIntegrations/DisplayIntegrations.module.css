@@ -13,17 +13,11 @@
   text-transform: none;
 }
 
+/* Grids delegate to the kit CardGrid recipe (see components/ui/CardGrid). */
 .cards {
-  display: grid;
-  width: 100%;
-  min-width: 0;
-  gap: var(--rf-space-2);
+  composes: grid regular from "../../ui/CardGrid/CardGrid.module.css";
 }
 
 .grid {
-  display: grid;
-  width: 100%;
-  min-width: 0;
-  grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
-  gap: var(--rf-space-3);
+  composes: grid dense from "../../ui/CardGrid/CardGrid.module.css";
 }

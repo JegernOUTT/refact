@@ -1,151 +1,104 @@
-.editor {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-3);
+.hookList {
+  display: grid;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
-}
-
-.formContent {
-  display: flex;
-  flex-direction: column;
   gap: var(--rf-space-3);
-  min-width: 0;
 }
 
 .addButton {
-  align-self: flex-start;
   width: max-content;
+  justify-self: start;
 }
 
 .hookRow {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2);
+  display: grid;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
+  gap: var(--rf-space-2);
+  padding: var(--rf-space-3);
+  background: var(--rf-surface-glass);
   border: var(--rf-hairline) solid var(--rf-border);
   border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-glass);
   box-shadow: var(--rf-elev-panel);
-  padding: var(--rf-space-3);
   backdrop-filter: blur(var(--rf-blur-overlay));
 }
 
-.hookHeader,
-.header,
-.headerTitle,
-.headerActions {
+.hookRow:hover {
+  border-color: var(--rf-border-strong);
+}
+
+.hookHeader {
   display: flex;
+  max-width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+}
+
+.headerTitle {
+  display: flex;
+  max-width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--rf-space-2);
-  min-width: 0;
-}
-
-.hookHeader,
-.header {
-  justify-content: space-between;
-  flex-wrap: wrap;
-}
-
-.header {
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-glass);
-  box-shadow: var(--rf-elev-panel);
-  padding: var(--rf-space-2) var(--rf-space-3);
-  backdrop-filter: blur(var(--rf-blur-overlay));
-}
-
-.headerActions {
-  gap: var(--rf-space-1);
-}
-
-.title {
-  margin: 0;
-  color: var(--rf-color-fg);
-  font-size: var(--rf-text-3);
-  font-weight: var(--rf-weight-semibold);
 }
 
 .matcher {
   color: var(--rf-color-muted);
-  font-size: var(--rf-text-1);
-}
-
-.commandTextarea,
-.rawTextarea {
-  width: 100%;
-  min-width: 0;
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-ctl);
-  background-color: var(--rf-surface-1);
-  color: var(--rf-color-fg);
-  font-family: var(--rf-font-mono);
-  font-size: var(--rf-text-1);
-  outline: none;
-  padding: var(--rf-space-2);
-  resize: vertical;
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
 }
 
 .commandTextarea {
-  min-height: 60px;
+  composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  min-height: calc(2 * var(--rf-control-h-lg));
+  padding: var(--rf-space-2);
+  overflow: auto;
+  color: var(--rf-color-fg);
+  background-color: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-ctl);
+  outline: none;
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  resize: vertical;
 }
 
-.rawTextarea {
-  flex: 1;
-  min-height: 300px;
-}
-
-.commandTextarea:focus-visible,
-.rawTextarea:focus-visible {
+.commandTextarea:focus-visible {
   border-color: var(--rf-focus-ring);
   box-shadow: 0 0 0 var(--rf-focus-ring-w)
     color-mix(in srgb, var(--rf-focus-ring) 24%, transparent);
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .editor,
-  .header,
-  .hookRow {
-    animation: extensions-hooks-editor-rise var(--rf-dur-med)
-      var(--rf-ease-entrance) both;
-  }
-
   .hookRow {
     transition:
       border-color var(--rf-dur-fast) var(--rf-ease-standard),
       box-shadow var(--rf-dur-fast) var(--rf-ease-standard),
       background var(--rf-dur-fast) var(--rf-ease-standard);
   }
-
-  .hookRow:hover {
-    border-color: var(--rf-border-strong);
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .editor,
-  .header,
   .hookRow {
-    animation: none;
     transition: none;
   }
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .header,
   .hookRow {
     backdrop-filter: none;
   }
 }
 
-@keyframes extensions-hooks-editor-rise {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+:global(.radix-themes[data-host="jetbrains"]) .hookRow {
+  backdrop-filter: none;
 }

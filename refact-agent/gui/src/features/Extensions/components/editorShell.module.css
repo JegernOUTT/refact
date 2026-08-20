@@ -1,0 +1,147 @@
+.editorPanel {
+  display: grid;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  gap: var(--rf-space-3);
+}
+
+.backToListBtn {
+  justify-self: start;
+}
+
+.editorTitle {
+  flex: 1 1 min(100%, calc(var(--rf-space-6) * 7));
+  min-width: 0;
+  overflow: hidden;
+  margin: 0;
+  color: var(--rf-color-fg);
+  font: var(--rf-weight-semibold) var(--rf-text-3) / var(--rf-line)
+    var(--rf-font-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editorHeader {
+  display: flex;
+  max-width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+}
+
+.editorActions,
+.scopeRow {
+  display: flex;
+  max-width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--rf-space-2);
+}
+
+.editorActions {
+  flex: 0 1 auto;
+  justify-content: flex-end;
+}
+
+.editorToggle,
+.scopeToggle {
+  flex: 0 0 auto;
+}
+
+.formContainer {
+  display: grid;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  gap: var(--rf-space-3);
+}
+
+.yamlEditor {
+  composes: scrollbarThin from "../../../components/shared/scrollbar.module.css";
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  min-height: calc(10 * var(--rf-control-h-lg));
+  padding: var(--rf-space-3);
+  overflow: auto;
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-glass);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+  font-family: var(--rf-font-mono);
+  font-size: var(--rf-text-1);
+  resize: vertical;
+}
+
+.yamlEditor:focus {
+  border-color: var(--rf-color-accent);
+  outline: none;
+}
+
+.errorBanner {
+  max-width: 100%;
+  min-width: 0;
+  padding: var(--rf-space-2) var(--rf-space-3);
+  overflow-wrap: anywhere;
+  background: color-mix(
+    in srgb,
+    var(--rf-color-danger) 10%,
+    var(--rf-surface-glass)
+  );
+  border: var(--rf-hairline) solid var(--rf-color-danger);
+  border-radius: var(--rf-radius-ctl);
+  box-shadow: var(--rf-elev-panel);
+  backdrop-filter: blur(var(--rf-blur-overlay));
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .yamlEditor,
+  .errorBanner {
+    backdrop-filter: none;
+  }
+}
+
+:global(.radix-themes[data-host="jetbrains"]) .yamlEditor,
+:global(.radix-themes[data-host="jetbrains"]) .errorBanner {
+  backdrop-filter: none;
+}
+
+@media (width <= 42rem) {
+  .editorHeader,
+  .editorActions,
+  .scopeRow {
+    justify-content: flex-start;
+  }
+}
+
+@media (width <= 30rem) {
+  .editorTitle {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .editorActions {
+    width: 100%;
+  }
+}
+
+@media (width <= 24rem) {
+  .editorActions,
+  .editorActions > button {
+    width: 100%;
+  }
+
+  .editorActions > button {
+    min-width: max-content;
+  }
+
+  .editorToggle {
+    width: 100%;
+  }
+}

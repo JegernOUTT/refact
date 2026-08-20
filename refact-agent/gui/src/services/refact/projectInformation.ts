@@ -122,7 +122,24 @@ export const projectInformationApi = createApi({
         }
         return { data: undefined };
       },
-      invalidatesTags: ["ProjectInformation"],
+      // Optimistically write the saved config into the cached query so the
+      // dialog never has to refetch (and never flashes) after a save.
+      onQueryStarted: async (config, { dispatch, queryFulfilled }) => {
+        const patch = dispatch(
+          projectInformationApi.util.updateQueryData(
+            "getProjectInformation",
+            undefined,
+            (draft) => {
+              Object.assign(draft, config);
+            },
+          ),
+        );
+        try {
+          await queryFulfilled;
+        } catch {
+          patch.undo();
+        }
+      },
     }),
     getProjectInformationPreview: builder.mutation<
       ProjectInformationPreviewResponse,

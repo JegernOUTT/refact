@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeEach } from "vitest";
 import { http, HttpResponse } from "msw";
-import { screen } from "../../utils/test-utils";
+import { fireEvent, screen } from "../../utils/test-utils";
 import { render } from "../../utils/test-utils";
 import { server, goodCaps } from "../../utils/mockServer";
 import { createDefaultChatState } from "../../utils/test-utils";
@@ -146,6 +146,46 @@ describe("ChatSettingsDropdown", () => {
       screen.getByText(/selected model's maximum context window/i),
     ).toBeInTheDocument();
     expect(screen.getAllByText("200K").length).toBeGreaterThan(0);
+
+    await user.click(
+      screen.getByRole("button", { name: "Reset auto-compression cap" }),
+    );
+    expect(
+      store.getState().chat.threads[chat.current_thread_id]?.thread
+        .auto_compression_cap,
+    ).toBeNull();
+    expect(screen.getByText("200K (model maximum)")).toBeInTheDocument();
+  });
+
+  test("sets and clears the auto-compression cap from the token limits disclosure", async () => {
+    const chat = chatStateWithReasoning(false);
+    const { user, store } = render(<ChatSettingsDropdown />, {
+      preloadedState: { chat, config },
+    });
+
+    await user.click(await screen.findByRole("button", { name: /openai\/o1/ }));
+    await user.click(screen.getByRole("button", { name: /Token limits/ }));
+
+    // Unset means "no cap": the model's full context window is used.
+    expect(
+      store.getState().chat.threads[chat.current_thread_id]?.thread
+        .auto_compression_cap,
+    ).toBeUndefined();
+    expect(screen.getByText("200K (model maximum)")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Reset auto-compression cap" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.keyDown(
+      screen.getByRole("slider", { name: "Auto-compression cap" }),
+      { key: "ArrowLeft" },
+    );
+
+    const cap =
+      store.getState().chat.threads[chat.current_thread_id]?.thread
+        .auto_compression_cap;
+    expect(typeof cap).toBe("number");
+    expect(cap).toBeLessThan(200000);
 
     await user.click(
       screen.getByRole("button", { name: "Reset auto-compression cap" }),

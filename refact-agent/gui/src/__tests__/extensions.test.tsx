@@ -371,7 +371,7 @@ describe("Extensions", () => {
     const deleteBtn = await screen.findByLabelText("Delete my_skill");
     fireEvent.click(deleteBtn);
 
-    const confirmTitle = await screen.findByText("Confirm Delete");
+    const confirmTitle = await screen.findByText("Delete extension?");
     expect(confirmTitle).toBeDefined();
     const cancelBtn = screen.getByText("Cancel");
     expect(cancelBtn).toBeDefined();
@@ -379,7 +379,7 @@ describe("Extensions", () => {
     fireEvent.click(cancelBtn);
 
     await waitFor(() => {
-      expect(screen.queryByText("Confirm Delete")).toBeNull();
+      expect(screen.queryByText("Delete extension?")).toBeNull();
     });
   });
 });
