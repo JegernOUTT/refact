@@ -17,11 +17,11 @@ use crate::traits::{
 };
 
 const CLOUDCODE_PROJECT_HEADER: &str = "x-refact-internal-cloudcode-project";
-const CLOUDCODE_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
+const CLOUDCODE_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
 const CLOUDCODE_MODELS_URL: &str =
-    "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
+    "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 const CLOUDCODE_QUOTA_URL: &str =
-    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GoogleAntigravityQuotaSummary {
@@ -351,7 +351,7 @@ impl ProviderTrait for GoogleAntigravityProvider {
     }
 
     fn model_filter_regex(&self) -> Option<&'static str> {
-        Some(r"^gemini-")
+        Some(r"^(gemini-|claude-)")
     }
 
     fn provider_schema(&self) -> &'static str {
@@ -612,15 +612,32 @@ mod tests {
 
         let runtime = provider.build_runtime().unwrap();
 
+        assert_eq!(runtime.chat_endpoint, "https://cloudcode-pa.googleapis.com");
         assert_eq!(
-            runtime.chat_endpoint,
-            "https://daily-cloudcode-pa.googleapis.com"
+            CLOUDCODE_MODELS_URL,
+            "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
+        );
+        assert_eq!(
+            CLOUDCODE_QUOTA_URL,
+            "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
         );
         assert_eq!(runtime.auth_token, "oauth-access-token");
         assert_eq!(
             runtime.extra_headers.get(CLOUDCODE_PROJECT_HEADER),
             Some(&"project-id".to_string())
         );
+    }
+
+    #[test]
+    fn model_filter_includes_antigravity_gemini_and_claude_models() {
+        let filter = GoogleAntigravityProvider::default()
+            .model_filter_regex()
+            .unwrap();
+        let filter = regex::Regex::new(filter).unwrap();
+
+        assert!(filter.is_match("gemini-3.6-flash-high"));
+        assert!(filter.is_match("claude-sonnet-4-6"));
+        assert!(!filter.is_match("gpt-5"));
     }
 
     #[test]

@@ -397,16 +397,48 @@ fn convert_tools(tools: &[Value]) -> Vec<Value> {
 }
 
 fn sanitize_schema(schema: &mut Value) {
+    let source = schema.clone();
+    sanitize_schema_inner(schema, &source, &mut Vec::new());
+}
+
+fn sanitize_schema_inner(schema: &mut Value, source: &Value, resolving_refs: &mut Vec<String>) {
     match schema {
         Value::Array(values) => {
             for value in values {
-                sanitize_schema(value);
+                sanitize_schema_inner(value, source, resolving_refs);
             }
         }
         Value::Object(object) => {
+            if let Some(reference) = object
+                .remove("$ref")
+                .and_then(|value| value.as_str().map(str::to_string))
+            {
+                if let Some(pointer) = reference.strip_prefix('#') {
+                    if !resolving_refs.contains(&reference) {
+                        if let Some(mut referenced) = source.pointer(pointer).cloned() {
+                            resolving_refs.push(reference);
+                            sanitize_schema_inner(&mut referenced, source, resolving_refs);
+                            resolving_refs.pop();
+                            merge_schema(object, referenced);
+                        }
+                    }
+                }
+            }
+
+            for union_key in ["oneOf", "anyOf"] {
+                if let Some(Value::Array(mut variants)) = object.remove(union_key) {
+                    for variant in &mut variants {
+                        sanitize_schema_inner(variant, source, resolving_refs);
+                    }
+                    merge_union(object, variants);
+                }
+            }
+
             for key in [
                 "additionalProperties",
                 "$schema",
+                "$defs",
+                "definitions",
                 "exclusiveMinimum",
                 "exclusiveMaximum",
                 "const",
@@ -414,7 +446,7 @@ fn sanitize_schema(schema: &mut Value) {
                 object.remove(key);
             }
             for value in object.values_mut() {
-                sanitize_schema(value);
+                sanitize_schema_inner(value, source, resolving_refs);
             }
             if object.get("type").and_then(|value| value.as_str()) == Some("object")
                 && !object.contains_key("properties")
@@ -423,6 +455,86 @@ fn sanitize_schema(schema: &mut Value) {
             }
         }
         _ => {}
+    }
+}
+
+fn merge_schema(target: &mut Map<String, Value>, schema: Value) {
+    if let Value::Object(schema) = schema {
+        for (key, value) in schema {
+            target.entry(key).or_insert(value);
+        }
+    }
+}
+
+fn merge_union(target: &mut Map<String, Value>, variants: Vec<Value>) {
+    let variants: Vec<Map<String, Value>> = variants
+        .into_iter()
+        .filter_map(|variant| variant.as_object().cloned())
+        .filter(|variant| variant.get("type").and_then(Value::as_str) != Some("null"))
+        .collect();
+
+    if variants.len() == 1 {
+        merge_schema(target, Value::Object(variants[0].clone()));
+        return;
+    }
+    if variants.is_empty() {
+        return;
+    }
+
+    let common_type = variants[0].get("type").cloned().filter(|schema_type| {
+        variants
+            .iter()
+            .all(|variant| variant.get("type") == Some(schema_type))
+    });
+    if let Some(schema_type) = common_type {
+        target.entry("type".to_string()).or_insert(schema_type);
+    }
+
+    // An enum union can be represented exactly by collecting its alternatives.
+    if variants
+        .iter()
+        .all(|variant| variant.get("enum").and_then(Value::as_array).is_some())
+    {
+        let mut values = Vec::new();
+        for variant in &variants {
+            for value in variant["enum"].as_array().unwrap() {
+                if !values.contains(value) {
+                    values.push(value.clone());
+                }
+            }
+        }
+        target
+            .entry("enum".to_string())
+            .or_insert(Value::Array(values));
+    }
+
+    // Combining object properties without making them required is a useful,
+    // non-restrictive approximation of object alternatives.
+    if variants
+        .iter()
+        .all(|variant| variant.get("type").and_then(Value::as_str) == Some("object"))
+    {
+        let mut properties = Map::new();
+        for variant in &variants {
+            if let Some(variant_properties) = variant.get("properties").and_then(Value::as_object) {
+                for (name, property) in variant_properties {
+                    match properties.entry(name.clone()) {
+                        serde_json::map::Entry::Vacant(entry) => {
+                            entry.insert(property.clone());
+                        }
+                        serde_json::map::Entry::Occupied(mut entry) if entry.get() != property => {
+                            entry.insert(Value::Object(Map::new()));
+                        }
+                        serde_json::map::Entry::Occupied(_) => {}
+                    }
+                }
+            }
+        }
+        if !properties.is_empty() {
+            target
+                .entry("properties".to_string())
+                .or_insert(Value::Object(properties));
+        }
     }
 }
 
@@ -514,5 +626,135 @@ fn parse_usage(usage: &Value) -> ChatUsage {
         cache_creation_tokens: None,
         cache_read_tokens: None,
         metering_usd: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_no_forbidden_schema_keys(value: &Value) {
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    assert_no_forbidden_schema_keys(value);
+                }
+            }
+            Value::Object(object) => {
+                for key in ["oneOf", "anyOf", "$ref"] {
+                    assert!(
+                        !object.contains_key(key),
+                        "found forbidden schema key {key}"
+                    );
+                }
+                for value in object.values() {
+                    assert_no_forbidden_schema_keys(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn tool_conversion_normalizes_unions_without_losing_useful_fields() {
+        let declarations = convert_tools(&[json!({
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "Search indexed files",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "mode": {
+                            "description": "Search mode",
+                            "anyOf": [
+                                {"type": "string", "enum": ["literal"]},
+                                {"type": "string", "enum": ["regex"]}
+                            ]
+                        },
+                        "limit": {
+                            "oneOf": [
+                                {"type": "integer", "minimum": 1, "maximum": 100},
+                                {"type": "null"}
+                            ]
+                        }
+                    },
+                    "required": ["mode"]
+                }
+            }
+        })]);
+        let function_declarations = json!({"functionDeclarations": declarations});
+
+        assert_no_forbidden_schema_keys(&function_declarations);
+        let declaration = &function_declarations["functionDeclarations"][0];
+        assert_eq!(declaration["description"], "Search indexed files");
+        assert_eq!(declaration["parameters"]["required"], json!(["mode"]));
+        assert_eq!(
+            declaration["parameters"]["properties"]["mode"],
+            json!({
+                "description": "Search mode",
+                "type": "string",
+                "enum": ["literal", "regex"]
+            })
+        );
+        assert_eq!(
+            declaration["parameters"]["properties"]["limit"],
+            json!({"type": "integer", "minimum": 1, "maximum": 100})
+        );
+    }
+
+    #[test]
+    fn tool_conversion_inlines_local_refs_and_flattens_object_alternatives() {
+        let declarations = convert_tools(&[json!({
+            "type": "function",
+            "function": {
+                "name": "edit",
+                "parameters": {
+                    "type": "object",
+                    "$defs": {
+                        "path": {
+                            "type": "string",
+                            "description": "Workspace-relative path",
+                            "minLength": 1
+                        }
+                    },
+                    "properties": {
+                        "path": {"$ref": "#/$defs/path"},
+                        "change": {
+                            "oneOf": [
+                                {"type": "object", "properties": {
+                                    "replacement": {"type": "string", "description": "New text"}
+                                }},
+                                {"type": "object", "properties": {
+                                    "replacement": {"type": "null"},
+                                    "delete": {"type": "boolean"}
+                                }}
+                            ]
+                        }
+                    }
+                }
+            }
+        })]);
+
+        assert_no_forbidden_schema_keys(&Value::Array(declarations.clone()));
+        let parameters = &declarations[0]["parameters"];
+        assert!(parameters.get("$defs").is_none());
+        assert_eq!(
+            parameters["properties"]["path"],
+            json!({
+                "type": "string",
+                "description": "Workspace-relative path",
+                "minLength": 1
+            })
+        );
+        assert_eq!(parameters["properties"]["change"]["type"], "object");
+        assert_eq!(
+            parameters["properties"]["change"]["properties"]["replacement"],
+            json!({})
+        );
+        assert_eq!(
+            parameters["properties"]["change"]["properties"]["delete"]["type"],
+            "boolean"
+        );
     }
 }
