@@ -6452,7 +6452,7 @@ mod tests {
             .await
             .expect("child must still resolve");
         assert_eq!(loaded.messages.len(), 2);
-        assert_eq!(loaded.source_path, nested);
+        assert_same_path(&loaded.source_path, &nested);
     }
 
     #[tokio::test]
