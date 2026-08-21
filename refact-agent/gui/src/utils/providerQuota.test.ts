@@ -8,8 +8,11 @@ import {
   formatCodexCreditsSummary,
   formatCodexSpendControl,
   formatLimitWindowSeconds,
+  formatRemainingFractionMeta,
   formatResetAfterSeconds,
   getClaudeUsageWindowRows,
+  remainingFractionToUsedPercent,
+  remainingCountToUsedPercent,
 } from "./providerQuota";
 
 describe("provider quota formatting", () => {
@@ -18,6 +21,30 @@ describe("provider quota formatting", () => {
     expect(formatLimitWindowSeconds(604_800)).toBe("7 days");
     expect(formatLimitWindowSeconds(null)).toBeNull();
     expect(formatResetAfterSeconds(60)).toBe("Resets in 1 minute");
+  });
+
+  it("converts normalized remaining fractions without inventing usage", () => {
+    expect(remainingFractionToUsedPercent(0.75)).toBe(25);
+    expect(remainingFractionToUsedPercent(0)).toBe(100);
+    expect(remainingFractionToUsedPercent(null)).toBeNull();
+    expect(remainingFractionToUsedPercent(Number.NaN)).toBeNull();
+    expect(formatRemainingFractionMeta(null)).toBe("Usage unavailable");
+  });
+
+  it("keeps normalized quota description and reset prose", () => {
+    expect(
+      formatRemainingFractionMeta(
+        0.4,
+        "Shared across models",
+        "Resets tomorrow",
+      ),
+    ).toBe("60% used · Shared across models · Resets tomorrow");
+  });
+
+  it("converts count windows only when a real limit is available", () => {
+    expect(remainingCountToUsedPercent(25, 100)).toBe(75);
+    expect(remainingCountToUsedPercent(null, 100)).toBeNull();
+    expect(remainingCountToUsedPercent(0, 0)).toBeNull();
   });
 
   it("keeps Claude extra usage null values explicit", () => {

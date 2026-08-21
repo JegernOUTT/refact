@@ -1,4 +1,4 @@
-pub const ANTIGRAVITY_VERSION: &str = "1.18.3";
+pub const ANTIGRAVITY_VERSION: &str = "1.1.16";
 
 pub fn antigravity_platform() -> &'static str {
     antigravity_platform_for(std::env::consts::OS, std::env::consts::ARCH)

@@ -12,11 +12,13 @@ import type {
   ProviderListItem,
   ProviderStatus,
   ClaudeCodeUsageWindow,
+  GoogleAntigravityUsageData,
   OpenAICodexAdditionalRateLimit,
   OpenAICodexRateLimit,
   OpenAICodexUsageData,
   OpenAICodexUsageWindow,
   OpenCodeUsageData,
+  XAIOAuthUsageData,
 } from "../../../services/refact";
 import { Badge, Button, Surface } from "../../../components/ui";
 
@@ -27,6 +29,8 @@ import {
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
   useGetOpenCodeUsageQuery,
+  useGetGoogleAntigravityUsageQuery,
+  useGetXAIOAuthUsageQuery,
   useRedeemOpenAICodexResetCreditMutation,
 } from "../../../services/refact";
 import {
@@ -37,12 +41,15 @@ import {
   formatCodexSpendControl,
   formatLimitWindowSeconds,
   formatNullableBool,
+  formatRemainingFractionMeta,
   formatQuotaMeta,
   formatResetAfterSeconds,
   formatResetAt,
   formatUsagePercent,
   formatWindowLabel,
   getClaudeUsageWindowRows,
+  remainingCountToUsedPercent,
+  remainingFractionToUsedPercent,
 } from "../../../utils/providerQuota";
 
 export type ProviderFormProps = {
@@ -129,6 +136,22 @@ const InfoRow: React.FC<{ label: string; value: string }> = ({
     <span>{value}</span>
   </div>
 );
+
+const PassiveQuotaRow: React.FC<{
+  label: string;
+  usedPercent: number | null;
+  meta: string;
+}> = ({ label, usedPercent, meta }) => {
+  return (
+    <div className={styles.usageRow}>
+      <div className={styles.usageRowHeader}>
+        <span>{label}</span>
+        <span>{meta}</span>
+      </div>
+      {usedPercent === null ? null : <UsageBar pct={usedPercent} />}
+    </div>
+  );
+};
 
 const ClaudeUsagePanel: React.FC<{ data: ClaudeCodeUsageData }> = ({
   data,
@@ -429,6 +452,100 @@ const OpenCodeUsagePanel: React.FC<{ data: OpenCodeUsageData }> = ({
   );
 };
 
+const GoogleAntigravityUsagePanel: React.FC<{
+  data: GoogleAntigravityUsageData;
+}> = ({ data }) => (
+  <Surface className={styles.usagePanel} variant="glass" animated="rise">
+    <div className={styles.usageTitle}>Usage</div>
+    <div className={styles.usageRows}>
+      {data.description ? (
+        <div className={styles.usageMeta}>{data.description}</div>
+      ) : null}
+      {data.groups.length > 0 ? (
+        data.groups.map((group, groupIndex) => (
+          <div
+            className={styles.usageRow}
+            key={`${group.display_name}-${groupIndex}`}
+          >
+            <div className={styles.usageTitle}>{group.display_name}</div>
+            {group.description ? (
+              <div className={styles.usageMeta}>{group.description}</div>
+            ) : null}
+            {group.buckets.length > 0 ? (
+              group.buckets.map((bucket, bucketIndex) => (
+                <PassiveQuotaRow
+                  key={`${bucket.display_name}-${bucketIndex}`}
+                  label={bucket.display_name}
+                  usedPercent={remainingFractionToUsedPercent(
+                    bucket.remaining_fraction,
+                  )}
+                  meta={formatRemainingFractionMeta(
+                    bucket.remaining_fraction,
+                    bucket.description,
+                    bucket.reset,
+                  )}
+                />
+              ))
+            ) : (
+              <div className={styles.usageMeta}>Quotas not reported.</div>
+            )}
+          </div>
+        ))
+      ) : (
+        <div className={styles.usageMeta}>Quota groups not reported.</div>
+      )}
+    </div>
+  </Surface>
+);
+
+const XAIOAuthUsagePanel: React.FC<{ data: XAIOAuthUsageData }> = ({
+  data,
+}) => {
+  const windows = data.windows;
+  return (
+    <Surface className={styles.usagePanel} variant="glass" animated="rise">
+      <div className={styles.usageTitle}>Usage</div>
+      <div className={styles.usageRows}>
+        {!data.available ? (
+          <div className={styles.usageMeta}>
+            {data.message || "Quota information is unavailable."}
+          </div>
+        ) : windows.length > 0 ? (
+          windows.map((window, index) => {
+            const usedPercent = remainingCountToUsedPercent(
+              window.remaining,
+              window.limit,
+            );
+            const countMeta =
+              typeof window.remaining === "number" &&
+              typeof window.limit === "number"
+                ? `${window.remaining} of ${window.limit} remaining`
+                : "Usage unavailable";
+            return (
+              <PassiveQuotaRow
+                key={`${window.name ?? "quota"}-${index}`}
+                label={window.name ?? "Quota"}
+                usedPercent={usedPercent}
+                meta={formatQuotaMeta([
+                  usedPercent === null
+                    ? countMeta
+                    : formatUsagePercent(usedPercent),
+                  usedPercent === null ? null : countMeta,
+                  formatResetAt(window.reset_at),
+                ])}
+              />
+            );
+          })
+        ) : (
+          <div className={styles.usageMeta}>
+            {data.message || "Quota windows not reported."}
+          </div>
+        )}
+      </div>
+    </Surface>
+  );
+};
+
 export const ProviderForm: React.FC<ProviderFormProps> = ({
   currentProvider,
 }) => {
@@ -454,6 +571,19 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
     useGetOpenCodeUsageQuery(
       { providerName: currentProvider.name, useInstanceRoute: true },
       { skip: baseProvider !== "opencode", pollingInterval: 60_000 },
+    );
+  const { data: antigravityUsage, isError: antigravityUsageError } =
+    useGetGoogleAntigravityUsageQuery(
+      { providerName: currentProvider.name, useInstanceRoute: true },
+      {
+        skip: baseProvider !== "google_antigravity",
+        pollingInterval: 60_000,
+      },
+    );
+  const { data: xaiOAuthUsage, isError: xaiOAuthUsageError } =
+    useGetXAIOAuthUsageQuery(
+      { providerName: currentProvider.name, useInstanceRoute: true },
+      { skip: baseProvider !== "xai_oauth", pollingInterval: 60_000 },
     );
   const {
     areShowingExtraFields,
@@ -523,6 +653,24 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
         {openCodeUsage?.error != null || openCodeUsageError ? (
           <div className={styles.defaultDescription}>
             Usage: {openCodeUsage?.error ?? "Failed to load"}
+          </div>
+        ) : null}
+
+        {antigravityUsage?.data && !antigravityUsage.error ? (
+          <GoogleAntigravityUsagePanel data={antigravityUsage.data} />
+        ) : null}
+        {antigravityUsage?.error != null || antigravityUsageError ? (
+          <div className={styles.defaultDescription}>
+            Usage: {antigravityUsage?.error ?? "Failed to load"}
+          </div>
+        ) : null}
+
+        {xaiOAuthUsage?.data && !xaiOAuthUsage.error ? (
+          <XAIOAuthUsagePanel data={xaiOAuthUsage.data} />
+        ) : null}
+        {xaiOAuthUsage?.error != null || xaiOAuthUsageError ? (
+          <div className={styles.defaultDescription}>
+            Usage: {xaiOAuthUsage?.error ?? "Failed to load"}
           </div>
         ) : null}
 

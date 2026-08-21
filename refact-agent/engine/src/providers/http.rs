@@ -56,6 +56,10 @@ use super::google_gemini::GoogleGeminiProvider;
 use super::claude_code::ClaudeCodeProvider;
 use super::openai_codex::{OpenAICodexProvider, UsageRequestError};
 use super::opencode::OpenCodeProvider;
+use crate::providers::google_antigravity::{
+    GoogleAntigravityProvider, GoogleAntigravityQuotaRequestError,
+};
+use crate::providers::xai_oauth::XAIOAuthProvider;
 
 const PROVIDER_AVAILABLE_MODELS_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -145,7 +149,10 @@ fn health_base_provider_supported(base_provider: &str) -> bool {
 }
 
 fn usage_base_provider_supported(base_provider: &str) -> bool {
-    matches!(base_provider, "claude_code" | "openai_codex" | "opencode")
+    matches!(
+        base_provider,
+        "claude_code" | "openai_codex" | "opencode" | "google_antigravity" | "xai_oauth"
+    )
 }
 
 fn provider_identity_from_existing_config(
@@ -3175,6 +3182,107 @@ async fn opencode_usage_response(
     }
 }
 
+async fn google_antigravity_usage_response(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+) -> Result<Response<Body>, ScratchError> {
+    let result = fetch_google_antigravity_usage_with_refresh(gcx, provider_name).await;
+    match result {
+        Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
+        Err(error) => json_response(StatusCode::OK, &json!({"error": error})),
+    }
+}
+
+async fn fetch_google_antigravity_usage_with_refresh(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+) -> Result<crate::providers::google_antigravity::GoogleAntigravityQuotaSummary, String> {
+    let (provider, http_client) =
+        resolve_provider_for_base(&gcx, provider_name, "google_antigravity")
+            .await
+            .map_err(|error| error.message)?;
+    let request_provider =
+        downcast_provider::<GoogleAntigravityProvider>(provider.as_ref(), "Google Antigravity")
+            .map_err(|error| error.message)?
+            .clone();
+    match request_provider
+        .fetch_quota_summary_once(&http_client, &request_provider.oauth_tokens.access_token)
+        .await
+    {
+        Ok(usage) => Ok(usage),
+        Err(GoogleAntigravityQuotaRequestError::Status(status, _))
+            if matches!(
+                status,
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+            ) && request_provider.oauth_tokens.has_refresh_token() =>
+        {
+            let _guard = GoogleAntigravityProvider::lock_refresh_guard().await?;
+            let (current_provider, _) =
+                resolve_provider_for_base(&gcx, provider_name, "google_antigravity")
+                    .await
+                    .map_err(|error| error.message)?;
+            let current_provider = downcast_provider::<GoogleAntigravityProvider>(
+                current_provider.as_ref(),
+                "Google Antigravity",
+            )
+            .map_err(|error| error.message)?
+            .clone();
+            if current_provider.oauth_tokens.access_token
+                != request_provider.oauth_tokens.access_token
+            {
+                return current_provider
+                    .fetch_quota_summary(&http_client)
+                    .await
+                    .map_err(GoogleAntigravityProvider::quota_request_error_to_string);
+            }
+            if !current_provider.oauth_tokens.has_refresh_token() {
+                return Err("Google Antigravity OAuth refresh token is missing".to_string());
+            }
+            let mut refreshed = crate::providers::google_antigravity_oauth::refresh_access_token(
+                &http_client,
+                &current_provider.oauth_tokens.refresh_token,
+            )
+            .await?;
+            if refreshed.project_id.is_empty() {
+                refreshed.project_id = current_provider.oauth_tokens.project_id.clone();
+            }
+            let config_dir = gcx.config_dir.clone();
+            let tokens_value = serde_yaml::to_value(&refreshed)
+                .map_err(|error| format!("Failed to serialize refreshed OAuth tokens: {error}"))?;
+            save_provider_oauth_tokens(
+                &gcx,
+                &config_dir,
+                provider_name,
+                "google_antigravity",
+                &tokens_value,
+            )
+            .await
+            .map_err(|error| error.message)?;
+            let mut retry_provider = current_provider;
+            retry_provider.oauth_tokens = refreshed;
+            retry_provider
+                .fetch_quota_summary(&http_client)
+                .await
+                .map_err(GoogleAntigravityProvider::quota_request_error_to_string)
+        }
+        Err(error) => Err(GoogleAntigravityProvider::quota_request_error_to_string(
+            error,
+        )),
+    }
+}
+
+async fn xai_oauth_usage_response(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+) -> Result<Response<Body>, ScratchError> {
+    let (provider, _) = resolve_provider_for_base(&gcx, provider_name, "xai_oauth").await?;
+    let xai = downcast_provider::<XAIOAuthProvider>(provider.as_ref(), "xAI OAuth")?;
+    match xai.fetch_usage().await {
+        Ok(usage) => json_response(StatusCode::OK, &json!({"data": usage})),
+        Err(error) => json_response(StatusCode::OK, &json!({"error": error})),
+    }
+}
+
 async fn openai_codex_redeem_response(
     gcx: Arc<GlobalContext>,
     provider_name: &str,
@@ -3206,6 +3314,8 @@ pub async fn handle_v1_provider_usage(
         "claude_code" => claude_code_usage_response(gcx, &params.name).await,
         "openai_codex" => openai_codex_usage_response(gcx, &params.name).await,
         "opencode" => opencode_usage_response(gcx, &params.name).await,
+        "google_antigravity" => google_antigravity_usage_response(gcx, &params.name).await,
+        "xai_oauth" => xai_oauth_usage_response(gcx, &params.name).await,
         _ => Err(ScratchError::new(
             StatusCode::BAD_REQUEST,
             format!("Provider '{}' does not support usage", params.name),
@@ -3703,6 +3813,13 @@ mod tests {
             merge_yaml_preserving_secrets_for_provider(provider_name, existing, incoming).unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn usage_dispatch_supports_subscription_oauth_providers() {
+        assert!(usage_base_provider_supported("google_antigravity"));
+        assert!(usage_base_provider_supported("xai_oauth"));
+        assert!(!usage_base_provider_supported("openai"));
     }
 
     #[test]

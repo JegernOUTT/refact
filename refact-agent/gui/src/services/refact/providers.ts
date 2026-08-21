@@ -264,6 +264,51 @@ export type OpenCodeUsageResponse = {
   error?: string | null;
 };
 
+export type GoogleAntigravityQuotaBucket = {
+  bucket_id: string;
+  display_name: string;
+  remaining_fraction: number | null;
+  description: string | null;
+  reset?: string | null;
+};
+
+export type GoogleAntigravityQuotaGroup = {
+  display_name: string;
+  description: string | null;
+  buckets: GoogleAntigravityQuotaBucket[];
+};
+
+export type GoogleAntigravityUsageData = {
+  description: string | null;
+  groups: GoogleAntigravityQuotaGroup[];
+  raw: unknown;
+};
+
+export type GoogleAntigravityUsageResponse = {
+  data?: GoogleAntigravityUsageData | null;
+  error?: string | null;
+};
+
+export type XAIOAuthUsageWindow = {
+  name: string | null;
+  limit: number | null;
+  remaining: number | null;
+  reset_at: string | null;
+};
+
+export type XAIOAuthUsageData = {
+  source: string;
+  available: boolean;
+  message: string;
+  windows: XAIOAuthUsageWindow[];
+  headers: Record<string, string>;
+};
+
+export type XAIOAuthUsageResponse = {
+  data?: XAIOAuthUsageData | null;
+  error?: string | null;
+};
+
 export type OpenAICodexResetRedeemData = {
   code: string;
   windows_reset?: number | null;
@@ -897,6 +942,94 @@ export const providersApi = createApi({
         }
 
         return { data: result.data as OpenCodeUsageResponse };
+      },
+    }),
+
+    getGoogleAntigravityUsage: builder.query<
+      GoogleAntigravityUsageResponse,
+      ProviderScopedQueryRequiredArg
+    >({
+      queryFn: async (args, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${encodeURIComponent(args.providerName)}/usage`,
+        );
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10_000);
+        let result: Awaited<ReturnType<typeof baseQuery>>;
+        try {
+          result = await baseQuery({
+            ...extraOptions,
+            method: "GET",
+            url,
+            credentials: "same-origin",
+            redirect: "follow",
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
+
+        if (result.error) return { error: result.error };
+
+        if (!isUsageResponse(result.data)) {
+          return {
+            meta: result.meta,
+            error: {
+              error: `Invalid response from /v1/providers/${args.providerName}/usage`,
+              data: result.data,
+              status: "CUSTOM_ERROR",
+            },
+          };
+        }
+
+        return { data: result.data as GoogleAntigravityUsageResponse };
+      },
+    }),
+
+    getXAIOAuthUsage: builder.query<
+      XAIOAuthUsageResponse,
+      ProviderScopedQueryRequiredArg
+    >({
+      queryFn: async (args, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(
+          state,
+          `${PROVIDERS_URL}/${encodeURIComponent(args.providerName)}/usage`,
+        );
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10_000);
+        let result: Awaited<ReturnType<typeof baseQuery>>;
+        try {
+          result = await baseQuery({
+            ...extraOptions,
+            method: "GET",
+            url,
+            credentials: "same-origin",
+            redirect: "follow",
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
+
+        if (result.error) return { error: result.error };
+
+        if (!isUsageResponse(result.data)) {
+          return {
+            meta: result.meta,
+            error: {
+              error: `Invalid response from /v1/providers/${args.providerName}/usage`,
+              data: result.data,
+              status: "CUSTOM_ERROR",
+            },
+          };
+        }
+
+        return { data: result.data as XAIOAuthUsageResponse };
       },
     }),
 
@@ -1707,6 +1840,8 @@ export const {
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
   useGetOpenCodeUsageQuery,
+  useGetGoogleAntigravityUsageQuery,
+  useGetXAIOAuthUsageQuery,
   useRedeemOpenAICodexResetCreditMutation,
   useToggleModelMutation,
   useSetModelProviderMutation,

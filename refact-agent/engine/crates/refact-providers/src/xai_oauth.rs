@@ -15,7 +15,33 @@ use crate::traits::{
 };
 use crate::xai_oauth_flow::OAuthTokens;
 
-const XAI_MODELS_URL: &str = "https://api.x.ai/v1/models";
+const XAI_MODELS_URL: &str = "https://cli-chat-proxy.grok.com/v1/models";
+const XAI_RESPONSES_URL: &str = "https://cli-chat-proxy.grok.com/v1/responses";
+const XAI_CLIENT_VERSION: &str = "1.0.5";
+const XAI_CLIENT_IDENTIFIER: &str = "grok-shell";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct XAIOAuthUsage {
+    pub source: String,
+    pub available: bool,
+    pub message: String,
+    #[serde(default)]
+    pub windows: Vec<XAIOAuthUsageWindow>,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct XAIOAuthUsageWindow {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+    #[serde(default)]
+    pub remaining: Option<u64>,
+    #[serde(default)]
+    pub reset_at: Option<String>,
+}
 
 lazy_static::lazy_static! {
     static ref XAI_OAUTH_REFRESH_GUARD: AMutex<()> = AMutex::new(());
@@ -33,6 +59,19 @@ pub struct XAIOAuthProvider {
 }
 
 impl XAIOAuthProvider {
+    fn cli_request_headers() -> HashMap<String, String> {
+        HashMap::from([
+            (
+                "x-grok-client-version".to_string(),
+                XAI_CLIENT_VERSION.to_string(),
+            ),
+            (
+                "x-grok-client-identifier".to_string(),
+                XAI_CLIENT_IDENTIFIER.to_string(),
+            ),
+        ])
+    }
+
     pub async fn lock_refresh_guard() -> Result<MutexGuard<'static, ()>, String> {
         tokio::time::timeout(Duration::from_secs(30), XAI_OAUTH_REFRESH_GUARD.lock())
             .await
@@ -137,6 +176,20 @@ impl XAIOAuthProvider {
         available_models.sort_by(|left, right| left.id.cmp(&right.id));
         Some(available_models)
     }
+
+    pub fn passive_usage() -> XAIOAuthUsage {
+        XAIOAuthUsage {
+            source: "passive".to_string(),
+            available: false,
+            message: "xAI OAuth has no public usage endpoint; quota is available only when the proxy returns rate-limit metadata on normal requests.".to_string(),
+            windows: Vec::new(),
+            headers: HashMap::new(),
+        }
+    }
+
+    pub async fn fetch_usage(&self) -> Result<XAIOAuthUsage, String> {
+        Ok(Self::passive_usage())
+    }
 }
 
 #[async_trait]
@@ -211,20 +264,21 @@ available:
     }
 
     fn build_runtime(&self) -> Result<ProviderRuntime, String> {
-        let auth_token = self.oauth_tokens.access_token.clone();
+        let api_key = self.oauth_tokens.access_token.clone();
+        let extra_headers = Self::cli_request_headers();
         Ok(ProviderRuntime {
             name: self.name().to_string(),
             display_name: self.display_name().to_string(),
-            enabled: self.enabled && !auth_token.is_empty() && !self.enabled_models.is_empty(),
+            enabled: self.enabled && !api_key.is_empty() && !self.enabled_models.is_empty(),
             readonly: false,
             wire_format: self.default_wire_format(),
-            chat_endpoint: "https://api.x.ai/v1/responses".to_string(),
+            chat_endpoint: XAI_RESPONSES_URL.to_string(),
             completion_endpoint: String::new(),
             embedding_endpoint: String::new(),
-            api_key: String::new(),
-            auth_token,
+            api_key,
+            auth_token: String::new(),
             tokenizer_api_key: String::new(),
-            extra_headers: HashMap::new(),
+            extra_headers,
             supports_cache_control: true,
             chat_models: Vec::new(),
             completion_models: Vec::new(),
@@ -287,12 +341,13 @@ available:
             return fallback_models();
         }
 
-        let response = match http_client
+        let mut request = http_client
             .get(XAI_MODELS_URL)
-            .bearer_auth(&self.oauth_tokens.access_token)
-            .send()
-            .await
-        {
+            .bearer_auth(&self.oauth_tokens.access_token);
+        for (name, value) in Self::cli_request_headers() {
+            request = request.header(name, value);
+        }
+        let response = match request.send().await {
             Ok(response) => response,
             Err(error) => {
                 tracing::warn!("xAI OAuth: failed to fetch available models: {error}");
@@ -392,5 +447,46 @@ mod tests {
         assert_eq!(grok.n_ctx, 500_000);
         assert!(grok.enabled);
         assert!(grok.supports_tools);
+    }
+
+    #[test]
+    fn passive_usage_is_honest_and_has_no_fabricated_quota() {
+        let usage = XAIOAuthProvider::passive_usage();
+        assert_eq!(usage.source, "passive");
+        assert!(!usage.available);
+        assert!(usage.windows.is_empty());
+        assert!(usage.headers.is_empty());
+        assert!(usage.message.contains("rate-limit metadata"));
+    }
+
+    #[test]
+    fn runtime_uses_grok_subscription_proxy_identity() {
+        let provider = XAIOAuthProvider {
+            oauth_tokens: OAuthTokens {
+                access_token: "oauth-access-token".to_string(),
+                ..Default::default()
+            },
+            enabled: true,
+            enabled_models: vec!["grok-4.6".to_string()],
+            ..Default::default()
+        };
+
+        let runtime = provider.build_runtime().unwrap();
+
+        assert_eq!(runtime.chat_endpoint, XAI_RESPONSES_URL);
+        assert_eq!(runtime.api_key, "oauth-access-token");
+        assert!(runtime.auth_token.is_empty());
+        assert_eq!(
+            runtime.extra_headers.get("x-grok-client-version"),
+            Some(&XAI_CLIENT_VERSION.to_string())
+        );
+        assert_eq!(
+            runtime.extra_headers.get("x-grok-client-identifier"),
+            Some(&XAI_CLIENT_IDENTIFIER.to_string())
+        );
+        assert_eq!(
+            XAIOAuthProvider::cli_request_headers(),
+            runtime.extra_headers
+        );
     }
 }

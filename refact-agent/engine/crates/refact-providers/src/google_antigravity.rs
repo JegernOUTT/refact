@@ -17,8 +17,90 @@ use crate::traits::{
 };
 
 const CLOUDCODE_PROJECT_HEADER: &str = "x-refact-internal-cloudcode-project";
+const CLOUDCODE_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
 const CLOUDCODE_MODELS_URL: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
+const CLOUDCODE_QUOTA_URL: &str =
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GoogleAntigravityQuotaSummary {
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub groups: Vec<GoogleAntigravityQuotaGroup>,
+    #[serde(default)]
+    pub raw: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GoogleAntigravityQuotaGroup {
+    pub display_name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub buckets: Vec<GoogleAntigravityQuotaBucket>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GoogleAntigravityQuotaBucket {
+    pub bucket_id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub remaining_fraction: Option<f64>,
+    #[serde(default)]
+    pub reset: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum GoogleAntigravityQuotaRequestError {
+    Status(reqwest::StatusCode, String),
+    Other(String),
+}
+
+#[derive(Deserialize)]
+struct QuotaSummaryWire {
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default, alias = "quotaGroups", alias = "quota_groups")]
+    groups: Vec<QuotaGroupWire>,
+}
+
+#[derive(Deserialize)]
+struct QuotaGroupWire {
+    #[serde(default, alias = "displayName")]
+    display_name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default, alias = "quotaBuckets", alias = "quota_buckets")]
+    buckets: Vec<QuotaBucketWire>,
+}
+
+#[derive(Deserialize)]
+struct QuotaBucketWire {
+    #[serde(default, alias = "bucketId")]
+    bucket_id: Option<String>,
+    #[serde(default, alias = "displayName")]
+    display_name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default, alias = "remainingFraction")]
+    remaining_fraction: Option<f64>,
+    #[serde(default)]
+    remaining: Option<QuotaRemainingWire>,
+    #[serde(default, alias = "resetTime")]
+    reset: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct QuotaRemainingWire {
+    #[serde(default, alias = "remainingFraction")]
+    remaining_fraction: Option<f64>,
+    #[serde(default, alias = "resetTime")]
+    reset: Option<String>,
+}
 
 lazy_static::lazy_static! {
     static ref GOOGLE_ANTIGRAVITY_REFRESH_GUARD: AMutex<()> = AMutex::new(());
@@ -139,6 +221,107 @@ impl GoogleAntigravityProvider {
         available_models.sort_by(|left, right| left.id.cmp(&right.id));
         Some(available_models)
     }
+
+    pub fn parse_quota_summary(
+        payload: &serde_json::Value,
+    ) -> Result<GoogleAntigravityQuotaSummary, String> {
+        let parsed: QuotaSummaryWire =
+            serde_json::from_value(payload.clone()).map_err(|error| {
+                format!("Failed to parse Google Antigravity quota response: {error}")
+            })?;
+        Ok(GoogleAntigravityQuotaSummary {
+            description: parsed.description,
+            groups: parsed
+                .groups
+                .into_iter()
+                .map(|group| GoogleAntigravityQuotaGroup {
+                    display_name: group.display_name.unwrap_or_default(),
+                    description: group.description,
+                    buckets: group
+                        .buckets
+                        .into_iter()
+                        .map(|bucket| GoogleAntigravityQuotaBucket {
+                            bucket_id: bucket.bucket_id.unwrap_or_default(),
+                            display_name: bucket.display_name.unwrap_or_default(),
+                            description: bucket.description,
+                            remaining_fraction: bucket.remaining_fraction.or_else(|| {
+                                bucket
+                                    .remaining
+                                    .as_ref()
+                                    .and_then(|remaining| remaining.remaining_fraction)
+                            }),
+                            reset: bucket
+                                .reset
+                                .or_else(|| bucket.remaining.and_then(|remaining| remaining.reset)),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            raw: payload.clone(),
+        })
+    }
+
+    pub async fn fetch_quota_summary_once(
+        &self,
+        http_client: &reqwest::Client,
+        access_token: &str,
+    ) -> Result<GoogleAntigravityQuotaSummary, GoogleAntigravityQuotaRequestError> {
+        if self.oauth_tokens.project_id.is_empty() {
+            return Err(GoogleAntigravityQuotaRequestError::Other(
+                "Google Antigravity project ID is missing; log in again".to_string(),
+            ));
+        }
+        let mut request = http_client
+            .post(CLOUDCODE_QUOTA_URL)
+            .bearer_auth(access_token)
+            .timeout(Duration::from_secs(10))
+            .json(&json!({"project": self.oauth_tokens.project_id}));
+        for (name, value) in antigravity_headers() {
+            request = request.header(name, value);
+        }
+        let response = request.send().await.map_err(|error| {
+            GoogleAntigravityQuotaRequestError::Other(format!(
+                "Failed to request Google Antigravity quota: {error}"
+            ))
+        })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body: String = response
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(512)
+                .collect();
+            return Err(GoogleAntigravityQuotaRequestError::Status(status, body));
+        }
+        let payload = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|error| {
+                GoogleAntigravityQuotaRequestError::Other(format!(
+                    "Failed to parse Google Antigravity quota response: {error}"
+                ))
+            })?;
+        Self::parse_quota_summary(&payload).map_err(GoogleAntigravityQuotaRequestError::Other)
+    }
+
+    pub async fn fetch_quota_summary(
+        &self,
+        http_client: &reqwest::Client,
+    ) -> Result<GoogleAntigravityQuotaSummary, GoogleAntigravityQuotaRequestError> {
+        self.fetch_quota_summary_once(http_client, &self.oauth_tokens.access_token)
+            .await
+    }
+
+    pub fn quota_request_error_to_string(error: GoogleAntigravityQuotaRequestError) -> String {
+        match error {
+            GoogleAntigravityQuotaRequestError::Status(status, body) => {
+                format!("Google Antigravity quota API returned {status}: {body}")
+            }
+            GoogleAntigravityQuotaRequestError::Other(message) => message,
+        }
+    }
 }
 
 #[async_trait]
@@ -229,7 +412,7 @@ available:
             enabled: self.enabled && !auth_token.is_empty() && !self.enabled_models.is_empty(),
             readonly: false,
             wire_format: self.default_wire_format(),
-            chat_endpoint: "https://cloudcode-pa.googleapis.com".to_string(),
+            chat_endpoint: CLOUDCODE_BASE_URL.to_string(),
             completion_endpoint: String::new(),
             embedding_endpoint: String::new(),
             api_key: String::new(),
@@ -412,5 +595,89 @@ mod tests {
         assert_eq!(claude.display_name.as_deref(), Some("Claude Opus 4.6"));
         assert!(claude.enabled);
         assert!(claude.supports_tools);
+    }
+
+    #[test]
+    fn runtime_uses_the_antigravity_cli_backend() {
+        let provider = GoogleAntigravityProvider {
+            oauth_tokens: OAuthTokens {
+                access_token: "oauth-access-token".to_string(),
+                project_id: "project-id".to_string(),
+                ..Default::default()
+            },
+            enabled: true,
+            enabled_models: vec!["claude-sonnet-4-6".to_string()],
+            ..Default::default()
+        };
+
+        let runtime = provider.build_runtime().unwrap();
+
+        assert_eq!(
+            runtime.chat_endpoint,
+            "https://daily-cloudcode-pa.googleapis.com"
+        );
+        assert_eq!(runtime.auth_token, "oauth-access-token");
+        assert_eq!(
+            runtime.extra_headers.get(CLOUDCODE_PROJECT_HEADER),
+            Some(&"project-id".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_nested_quota_remaining_and_preserves_raw_payload() {
+        let payload = json!({
+            "description": "Subscription quota",
+            "groups": [{
+                "displayName": "Models",
+                "buckets": [{
+                    "bucketId": "gemini-pro",
+                    "displayName": "Gemini Pro",
+                    "remaining": {"remainingFraction": 0.42, "resetTime": "later"}
+                }]
+            }],
+            "unknownTopLevel": {"kept": true}
+        });
+        let quota = GoogleAntigravityProvider::parse_quota_summary(&payload).unwrap();
+        assert_eq!(quota.groups[0].buckets[0].remaining_fraction, Some(0.42));
+        assert_eq!(quota.groups[0].buckets[0].reset.as_deref(), Some("later"));
+        assert_eq!(quota.raw, payload);
+    }
+
+    #[test]
+    fn parses_snake_case_aliases_and_flattened_remaining() {
+        let payload = json!({
+            "quota_groups": [{
+                "display_name": "Requests",
+                "quota_buckets": [{
+                    "bucket_id": "daily",
+                    "display_name": "Daily",
+                    "remaining_fraction": 0.75
+                }]
+            }]
+        });
+        let quota = GoogleAntigravityProvider::parse_quota_summary(&payload).unwrap();
+        assert_eq!(quota.groups[0].display_name, "Requests");
+        assert_eq!(quota.groups[0].buckets[0].bucket_id, "daily");
+        assert_eq!(quota.groups[0].buckets[0].remaining_fraction, Some(0.75));
+    }
+
+    #[test]
+    fn tolerates_null_quota_labels() {
+        let payload = json!({
+            "groups": [{
+                "displayName": null,
+                "buckets": [{
+                    "bucketId": null,
+                    "displayName": null,
+                    "remainingFraction": 0.5
+                }]
+            }]
+        });
+
+        let quota = GoogleAntigravityProvider::parse_quota_summary(&payload).unwrap();
+
+        assert_eq!(quota.groups[0].display_name, "");
+        assert_eq!(quota.groups[0].buckets[0].bucket_id, "");
+        assert_eq!(quota.groups[0].buckets[0].display_name, "");
     }
 }

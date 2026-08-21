@@ -85,6 +85,51 @@ export function clampPercent(value: number): number {
   return Math.max(0, Math.min(value, 100));
 }
 
+export function remainingFractionToUsedPercent(
+  remainingFraction: number | null | undefined,
+): number | null {
+  if (
+    typeof remainingFraction !== "number" ||
+    !Number.isFinite(remainingFraction)
+  ) {
+    return null;
+  }
+  return clampPercent((1 - Math.max(0, Math.min(remainingFraction, 1))) * 100);
+}
+
+export function formatRemainingFractionMeta(
+  remainingFraction: number | null | undefined,
+  description?: string | null,
+  reset?: string | null,
+): string {
+  const usedPercent = remainingFractionToUsedPercent(remainingFraction);
+  return (
+    formatQuotaMeta([
+      usedPercent === null
+        ? "Usage unavailable"
+        : formatUsagePercent(usedPercent),
+      description,
+      reset,
+    ]) || "Usage unavailable"
+  );
+}
+
+export function remainingCountToUsedPercent(
+  remaining: number | null | undefined,
+  limit: number | null | undefined,
+): number | null {
+  if (
+    typeof remaining !== "number" ||
+    !Number.isFinite(remaining) ||
+    typeof limit !== "number" ||
+    !Number.isFinite(limit) ||
+    limit <= 0
+  ) {
+    return null;
+  }
+  return clampPercent((1 - Math.max(0, remaining) / limit) * 100);
+}
+
 export function formatResetAt(
   resetAt: string | null | undefined,
 ): string | null {
