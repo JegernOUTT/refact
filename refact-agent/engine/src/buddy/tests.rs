@@ -5267,7 +5267,7 @@ fn provider_health_chat_default_uses_chat_namespace() {
 }
 
 #[test]
-fn mcp_auth_expiring_within_24h() {
+fn mcp_auth_authenticated_token_12h_away_is_not_expired() {
     use super::observers::mcp_auth::{detect_mcp_auth_facts, McpSessionSnapshot};
     use crate::integrations::mcp::session_mcp::MCPAuthStatus;
     let now = chrono::Utc::now();
@@ -5277,13 +5277,129 @@ fn mcp_auth_expiring_within_24h() {
         auth_status: MCPAuthStatus::Authenticated,
         failed_calls: 0,
         expires_at_ms: Some(expires_12h),
+        has_refresh_token: true,
     }];
     let facts = detect_mcp_auth_facts(&snaps, now);
-    assert!(
+    assert!(!facts
+        .iter()
+        .any(|f| f.kind == BuddyFactKind::McpAuthExpired));
+}
+
+#[test]
+fn mcp_auth_authenticated_token_exactly_five_minutes_away_is_not_expired() {
+    use super::observers::mcp_auth::{detect_mcp_auth_facts, McpSessionSnapshot};
+    use crate::integrations::mcp::session_mcp::MCPAuthStatus;
+    let now = chrono::Utc::now();
+    let snaps = vec![McpSessionSnapshot {
+        id: "github-mcp".to_string(),
+        auth_status: MCPAuthStatus::Authenticated,
+        failed_calls: 0,
+        expires_at_ms: Some(now.timestamp_millis() + 5 * 60 * 1000),
+        has_refresh_token: false,
+    }];
+    let facts = detect_mcp_auth_facts(&snaps, now);
+    assert!(!facts
+        .iter()
+        .any(|f| f.kind == BuddyFactKind::McpAuthExpired));
+}
+
+#[test]
+fn mcp_auth_authenticated_token_within_four_minutes_is_expired() {
+    use super::observers::mcp_auth::{detect_mcp_auth_facts, McpSessionSnapshot};
+    use crate::integrations::mcp::session_mcp::MCPAuthStatus;
+    let now = chrono::Utc::now();
+    let snaps = vec![McpSessionSnapshot {
+        id: "github-mcp".to_string(),
+        auth_status: MCPAuthStatus::Authenticated,
+        failed_calls: 0,
+        expires_at_ms: Some(now.timestamp_millis() + 4 * 60 * 1000),
+        has_refresh_token: false,
+    }];
+    let facts = detect_mcp_auth_facts(&snaps, now);
+    assert_eq!(
         facts
             .iter()
-            .any(|f| f.kind == BuddyFactKind::McpAuthExpired),
-        "must emit McpAuthExpired when token expires in 12h"
+            .filter(|f| f.kind == BuddyFactKind::McpAuthExpired)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn mcp_auth_authenticated_expired_token_is_expired() {
+    use super::observers::mcp_auth::{detect_mcp_auth_facts, McpSessionSnapshot};
+    use crate::integrations::mcp::session_mcp::MCPAuthStatus;
+    let now = chrono::Utc::now();
+    let snaps = vec![McpSessionSnapshot {
+        id: "github-mcp".to_string(),
+        auth_status: MCPAuthStatus::Authenticated,
+        failed_calls: 0,
+        expires_at_ms: Some(now.timestamp_millis() - 1000),
+        has_refresh_token: false,
+    }];
+    let facts = detect_mcp_auth_facts(&snaps, now);
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|f| f.kind == BuddyFactKind::McpAuthExpired)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn mcp_auth_authenticated_expired_token_with_refresh_token_is_not_expired() {
+    use super::observers::mcp_auth::{detect_mcp_auth_facts, McpSessionSnapshot};
+    use crate::integrations::mcp::session_mcp::MCPAuthStatus;
+    let now = chrono::Utc::now();
+    let snaps = vec![McpSessionSnapshot {
+        id: "github-mcp".to_string(),
+        auth_status: MCPAuthStatus::Authenticated,
+        failed_calls: 0,
+        expires_at_ms: Some(now.timestamp_millis() - 1000),
+        has_refresh_token: true,
+    }];
+    let facts = detect_mcp_auth_facts(&snaps, now);
+    assert!(!facts
+        .iter()
+        .any(|f| f.kind == BuddyFactKind::McpAuthExpired));
+}
+
+#[test]
+fn mcp_auth_failure_statuses_are_expired_without_expiry() {
+    use super::observers::mcp_auth::{detect_mcp_auth_facts, McpSessionSnapshot};
+    use crate::integrations::mcp::session_mcp::MCPAuthStatus;
+    let now = chrono::Utc::now();
+    let snaps = vec![
+        McpSessionSnapshot {
+            id: "login-mcp".to_string(),
+            auth_status: MCPAuthStatus::NeedsLogin,
+            failed_calls: 0,
+            expires_at_ms: None,
+            has_refresh_token: false,
+        },
+        McpSessionSnapshot {
+            id: "reauth-mcp".to_string(),
+            auth_status: MCPAuthStatus::NeedsReauth,
+            failed_calls: 0,
+            expires_at_ms: None,
+            has_refresh_token: true,
+        },
+        McpSessionSnapshot {
+            id: "error-mcp".to_string(),
+            auth_status: MCPAuthStatus::Error("failed".to_string()),
+            failed_calls: 0,
+            expires_at_ms: None,
+            has_refresh_token: true,
+        },
+    ];
+    let facts = detect_mcp_auth_facts(&snaps, now);
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|f| f.kind == BuddyFactKind::McpAuthExpired)
+            .count(),
+        3
     );
 }
 
@@ -5297,6 +5413,7 @@ fn mcp_auth_failure_count() {
         auth_status: MCPAuthStatus::NotApplicable,
         failed_calls: 3,
         expires_at_ms: None,
+        has_refresh_token: false,
     }];
     let facts = detect_mcp_auth_facts(&snaps, now);
     assert!(
@@ -7156,19 +7273,21 @@ fn mcp_auth_payload_keys_match_detector() {
     use super::opportunities::{OpportunityDetector, OpportunityQueue};
     use crate::integrations::mcp::session_mcp::MCPAuthStatus;
     let now = chrono::Utc::now();
-    let expires_12h = now.timestamp_millis() + 12 * 3600 * 1000;
+    let expires_4m = now.timestamp_millis() + 4 * 60 * 1000;
     let snaps = vec![
         McpSessionSnapshot {
             id: "github-mcp".to_string(),
             auth_status: MCPAuthStatus::Authenticated,
             failed_calls: 0,
-            expires_at_ms: Some(expires_12h),
+            expires_at_ms: Some(expires_4m),
+            has_refresh_token: false,
         },
         McpSessionSnapshot {
             id: "linear-mcp".to_string(),
             auth_status: MCPAuthStatus::NotApplicable,
             failed_calls: 5,
             expires_at_ms: None,
+            has_refresh_token: false,
         },
     ];
     let facts = detect_mcp_auth_facts(&snaps, now);

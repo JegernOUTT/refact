@@ -636,15 +636,19 @@ pub async fn create_auth_manager_from_tokens(
 
 const REFRESH_BEFORE_EXPIRY_MS: i64 = 5 * 60 * 1000;
 
-pub fn needs_refresh(tokens: &MCPOAuthTokens) -> bool {
-    if tokens.expires_at <= 0 {
+pub(crate) fn needs_refresh_at(expires_at_ms: i64, now_ms: i64) -> bool {
+    if expires_at_ms <= 0 {
         return false;
     }
+    expires_at_ms - now_ms < REFRESH_BEFORE_EXPIRY_MS
+}
+
+pub fn needs_refresh(tokens: &MCPOAuthTokens) -> bool {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
-    tokens.expires_at - now_ms < REFRESH_BEFORE_EXPIRY_MS
+    needs_refresh_at(tokens.expires_at, now_ms)
 }
 
 fn tokens_from_response(
