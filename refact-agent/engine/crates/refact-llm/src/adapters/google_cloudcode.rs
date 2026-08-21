@@ -104,6 +104,8 @@ impl LlmWireAdapter for GoogleCloudCodeAdapter {
             body: json!({
                 "model": settings.model_name,
                 "project": project,
+                "requestId": uuid::Uuid::new_v4().to_string(),
+                "userAgent": "antigravity",
                 "request": Value::Object(inner),
             }),
         })
@@ -632,6 +634,52 @@ fn parse_usage(usage: &Value) -> ChatUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_http_uses_cloudcode_envelope_with_request_attribution() {
+        let auth_token = "oauth-token-must-not-be-in-body";
+        let request = LlmRequest::new(
+            "google/ignored-request-model".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
+        let mut extra_headers = HashMap::new();
+        extra_headers.insert(PROJECT_HEADER.to_string(), "cloud-project-123".to_string());
+        let settings = AdapterSettings {
+            api_key: String::new(),
+            auth_token: auth_token.to_string(),
+            endpoint: "https://cloudcode-pa.googleapis.com".to_string(),
+            extra_headers,
+            model_name: "gemini-2.5-pro".to_string(),
+            supports_tools: false,
+            supports_reasoning: false,
+            reasoning_type: None,
+            supports_temperature: false,
+            supports_max_completion_tokens: false,
+            eof_is_done: false,
+            supports_web_search: false,
+            supports_cache_control: false,
+        };
+
+        let http = GoogleCloudCodeAdapter
+            .build_http(&refact_privacy::testing::cleared(request), &settings)
+            .unwrap();
+
+        assert_eq!(
+            http.url,
+            "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
+        );
+        let request_id = http.body["requestId"].as_str().unwrap();
+        assert!(!request_id.is_empty());
+        assert!(uuid::Uuid::parse_str(request_id).is_ok());
+        assert_eq!(http.body["userAgent"], "antigravity");
+        assert_eq!(http.body["model"], "gemini-2.5-pro");
+        assert_eq!(http.body["project"], "cloud-project-123");
+        assert_eq!(
+            http.body["request"]["contents"],
+            json!([{"role": "user", "parts": [{"text": "Hello"}]}])
+        );
+        assert!(!http.body.to_string().contains(auth_token));
+    }
 
     fn assert_no_forbidden_schema_keys(value: &Value) {
         match value {
