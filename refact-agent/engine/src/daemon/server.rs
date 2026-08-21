@@ -259,7 +259,7 @@ async fn shutdown(
 }
 
 async fn restart(State((state, _)): State<(Arc<DaemonState>, u16)>) -> Response {
-    if let Err(error) = spawn_daemon_relaunch() {
+    if let Err(error) = spawn_daemon_relaunch(&state) {
         tracing::warn!("daemon restart relaunch failed: {error}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -357,7 +357,7 @@ async fn update_install(
                     update_state.detail = Some(format!("installed {}", outcome.installed_version));
                     update_state.finished_at_ms = Some(crate::daemon::state::now_ms());
                 }
-                match spawn_daemon_relaunch() {
+                match spawn_daemon_relaunch(&task_state) {
                     Ok(()) => task_state.request_shutdown("self_update".to_string()),
                     Err(error) => {
                         let mut update_state = task_state.update_state.lock().await;
@@ -556,7 +556,7 @@ async fn update_settings(
         )
             .into_response();
     }
-    if let Err(error) = spawn_daemon_relaunch() {
+    if let Err(error) = spawn_daemon_relaunch(&state) {
         tracing::warn!("settings relaunch failed: {error}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -575,15 +575,21 @@ fn settings_error(message: &str) -> Response {
 }
 
 #[cfg(test)]
-fn spawn_daemon_relaunch() -> Result<(), String> {
+fn spawn_daemon_relaunch(_state: &DaemonState) -> Result<(), String> {
     Ok(())
 }
 
 #[cfg(not(test))]
-fn spawn_daemon_relaunch() -> Result<(), String> {
-    let exe = std::env::current_exe()
-        .map_err(|error| format!("cannot resolve current executable: {error}"))?;
-    let mut command = std::process::Command::new(exe);
+fn spawn_daemon_relaunch(state: &DaemonState) -> Result<(), String> {
+    let mut command = daemon_relaunch_command(state.relaunch_executable()?);
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("spawn failed: {error}"))
+}
+
+fn daemon_relaunch_command(executable: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(executable);
     command
         .arg("daemon")
         .env("REFACT_DAEMON_RELAUNCH", "1")
@@ -596,9 +602,6 @@ fn spawn_daemon_relaunch() -> Result<(), String> {
         command.process_group(0);
     }
     command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("spawn failed: {error}"))
 }
 
 async fn logs_stream(
@@ -908,6 +911,26 @@ mod tests {
     use super::*;
     use crate::daemon::events::EventBus;
     use crate::daemon::projects::ProjectRegistry;
+
+    #[test]
+    fn relaunch_command_uses_supplied_executable() {
+        let executable = PathBuf::from("/stable/refact-agent");
+        let command = daemon_relaunch_command(&executable);
+
+        assert_eq!(command.get_program(), executable.as_os_str());
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("daemon")]
+        );
+        assert_eq!(
+            command.get_envs().find_map(|(key, value)| {
+                (key == std::ffi::OsStr::new("REFACT_DAEMON_RELAUNCH"))
+                    .then_some(value)
+                    .flatten()
+            }),
+            Some(std::ffi::OsStr::new("1"))
+        );
+    }
 
     async fn test_state(dir: &tempfile::TempDir) -> Arc<DaemonState> {
         let state = DaemonState::new(

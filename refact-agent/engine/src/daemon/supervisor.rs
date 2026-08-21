@@ -123,6 +123,7 @@ pub struct Supervisor {
     proxy_restarts: Mutex<ProxyRestartTracker>,
     child_reap_tasks: Mutex<JoinSet<()>>,
     idle_timeout_secs: u64,
+    worker_executable: Result<PathBuf, String>,
     client: reqwest::Client,
     shutdown_tx: broadcast::Sender<String>,
 }
@@ -137,6 +138,7 @@ impl Supervisor {
             Arc::new(SyncRwLock::new(HashMap::new())),
             crate::daemon::config::DaemonConfig::default().idle_timeout_secs,
             None,
+            crate::daemon::state::resolve_current_executable(),
         )
     }
 
@@ -148,6 +150,7 @@ impl Supervisor {
         proxy_activity: Arc<SyncRwLock<HashMap<String, ProxyActivity>>>,
         idle_timeout_secs: u64,
         daemon_auth_token: Option<String>,
+        worker_executable: Result<PathBuf, String>,
     ) -> Arc<Self> {
         let (shutdown_tx, _) = broadcast::channel(16);
         Arc::new(Self {
@@ -163,6 +166,7 @@ impl Supervisor {
             proxy_restarts: Mutex::new(ProxyRestartTracker::default()),
             child_reap_tasks: Mutex::new(JoinSet::new()),
             idle_timeout_secs,
+            worker_executable,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(2))
                 .no_proxy()
@@ -906,9 +910,11 @@ impl Supervisor {
             cmd.args(args);
             return Ok(cmd);
         }
-        let exe = std::env::current_exe()
-            .map_err(|error| format!("failed to resolve current executable: {error}"))?;
-        let mut cmd = tokio::process::Command::new(exe);
+        let executable = self
+            .worker_executable
+            .as_ref()
+            .map_err(|error| error.clone())?;
+        let mut cmd = tokio::process::Command::new(executable);
         cmd.arg("worker");
         Ok(cmd)
     }
@@ -1851,6 +1857,7 @@ mod tests {
             Arc::new(SyncRwLock::new(HashMap::new())),
             crate::daemon::config::DaemonConfig::default().idle_timeout_secs,
             Some("secret-token".to_string()),
+            crate::daemon::state::resolve_current_executable(),
         );
         let spec = test_launch_spec(dir.path().join("project"));
         let command = supervisor
@@ -1878,6 +1885,44 @@ mod tests {
 
         assert_eq!(token.as_deref(), Some("secret-token"));
         assert!(!args.iter().any(|arg| arg.contains("secret-token")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn worker_command_uses_supplied_executable_after_atomic_replacement() {
+        let _worker_command = EnvGuard {
+            keys: vec![(
+                "REFACT_DAEMON_WORKER_CMD",
+                std::env::var("REFACT_DAEMON_WORKER_CMD").ok(),
+            )],
+        };
+        std::env::remove_var("REFACT_DAEMON_WORKER_CMD");
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("refact-agent");
+        let replacement = dir.path().join("refact-agent.new");
+        std::fs::write(&executable, b"old").unwrap();
+        std::fs::write(&replacement, b"new").unwrap();
+        let stable_path = executable.canonicalize().unwrap();
+        let supervisor = Supervisor::new_with_cron_pending(
+            EventBus::new(dir.path().join("events.jsonl")),
+            dir.path().join("daemon"),
+            8488,
+            Arc::new(SyncRwLock::new(HashMap::new())),
+            Arc::new(SyncRwLock::new(HashMap::new())),
+            crate::daemon::config::DaemonConfig::default().idle_timeout_secs,
+            None,
+            Ok(stable_path.clone()),
+        );
+
+        std::fs::rename(&replacement, &executable).unwrap();
+        let command = supervisor.worker_command_base().unwrap();
+
+        assert_eq!(command.as_std().get_program(), stable_path.as_os_str());
+        assert_eq!(
+            std::fs::read(command.as_std().get_program()).unwrap(),
+            b"new"
+        );
     }
 
     #[tokio::test]

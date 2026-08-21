@@ -87,6 +87,7 @@ pub struct DaemonState {
     pub auth_token: Option<String>,
     pub started_at_ms: u64,
     pub version: String,
+    relaunch_executable: Result<PathBuf, String>,
     pub projects: RwLock<crate::daemon::projects::ProjectRegistry>,
     worker_statuses: RwLock<HashMap<String, StoredWorkerStatus>>,
     pub proxy_activity: Arc<SyncRwLock<HashMap<String, ProxyActivity>>>,
@@ -133,6 +134,30 @@ impl Default for DaemonUpdateState {
             finished_at_ms: None,
         }
     }
+}
+
+pub(crate) fn resolve_current_executable() -> Result<PathBuf, String> {
+    let path = std::env::current_exe()
+        .map_err(|error| format!("cannot resolve current executable: {error}"))?;
+    Ok(stable_executable_path(path))
+}
+
+fn stable_executable_path(path: PathBuf) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        if let Some(path_bytes) = path.as_os_str().as_bytes().strip_suffix(b" (deleted)") {
+            let replacement = PathBuf::from(std::ffi::OsString::from_vec(path_bytes.to_vec()));
+            if replacement.is_file() {
+                return replacement.canonicalize().unwrap_or(replacement);
+            }
+        }
+    }
+    path
 }
 
 pub fn executable_sha256_for_path(path: &Path) -> Result<String, String> {
@@ -196,6 +221,24 @@ impl DaemonState {
         daemon_dir: PathBuf,
         daemon_port: u16,
     ) -> Arc<Self> {
+        Self::new_with_daemon_dir_and_executable(
+            config,
+            events,
+            auth_token,
+            daemon_dir,
+            daemon_port,
+            resolve_current_executable(),
+        )
+    }
+
+    fn new_with_daemon_dir_and_executable(
+        config: DaemonConfig,
+        events: EventBus,
+        auth_token: Option<String>,
+        daemon_dir: PathBuf,
+        daemon_port: u16,
+        relaunch_executable: Result<PathBuf, String>,
+    ) -> Arc<Self> {
         let (shutdown_tx, _) = broadcast::channel(16);
         let cron_pending = Arc::new(SyncRwLock::new(HashMap::new()));
         let proxy_activity = Arc::new(SyncRwLock::new(HashMap::new()));
@@ -214,6 +257,7 @@ impl DaemonState {
             proxy_activity.clone(),
             config.idle_timeout_secs,
             worker_auth_token,
+            relaunch_executable.clone(),
         );
         let proxy_client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
@@ -234,6 +278,7 @@ impl DaemonState {
             auth_token,
             started_at_ms: now_ms(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            relaunch_executable,
             projects: RwLock::new(crate::daemon::projects::ProjectRegistry::empty(
                 daemon_dir.join("projects.json"),
             )),
@@ -252,6 +297,12 @@ impl DaemonState {
             shutdown_tx,
             shutdown_requested: AtomicBool::new(false),
         })
+    }
+
+    pub(crate) fn relaunch_executable(&self) -> Result<&Path, String> {
+        self.relaunch_executable
+            .as_deref()
+            .map_err(|error| error.clone())
     }
 
     pub fn shutdown_receiver(&self) -> broadcast::Receiver<String> {
@@ -861,6 +912,64 @@ mod tests {
     use crate::daemon::projects::{ProjectEntry, ProjectSettings};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn daemon_state_captures_canonical_relaunch_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = DaemonState::new_with_daemon_dir(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("events.jsonl")),
+            None,
+            dir.path().join("daemon"),
+            0,
+        );
+
+        let executable = state.relaunch_executable().unwrap();
+        assert!(executable.is_absolute());
+        assert_eq!(executable, executable.canonicalize().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_state_keeps_executable_path_across_atomic_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("refact-agent");
+        let replacement = dir.path().join("refact-agent.new");
+        std::fs::write(&executable, b"old").unwrap();
+        std::fs::write(&replacement, b"new").unwrap();
+        let state = DaemonState::new_with_daemon_dir_and_executable(
+            DaemonConfig::default(),
+            EventBus::new(dir.path().join("events.jsonl")),
+            None,
+            dir.path().join("daemon"),
+            0,
+            Ok(executable.canonicalize().unwrap()),
+        );
+
+        std::fs::rename(&replacement, &executable).unwrap();
+
+        assert_eq!(
+            std::fs::read(state.relaunch_executable().unwrap()).unwrap(),
+            b"new"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stable_executable_path_recovers_replaced_linux_executable() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("refact-agent");
+        std::fs::write(&executable, b"new").unwrap();
+        let mut deleted_path = executable.as_os_str().as_bytes().to_vec();
+        deleted_path.extend_from_slice(b" (deleted)");
+
+        assert_eq!(
+            stable_executable_path(PathBuf::from(std::ffi::OsString::from_vec(deleted_path))),
+            executable.canonicalize().unwrap()
+        );
+    }
 
     fn test_daemon_info() -> DaemonInfo {
         DaemonInfo {
