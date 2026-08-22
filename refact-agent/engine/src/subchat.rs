@@ -64,6 +64,10 @@ fn should_compact_context_limit_error(
         && !is_aborted(abort_flag)
 }
 
+fn subchat_retries_allowed(config: &SubchatConfig) -> bool {
+    config.tool_name != "segment_summarize"
+}
+
 async fn emit_parent_compaction_diagnostics(
     config: &SubchatConfig,
     error: &str,
@@ -88,7 +92,7 @@ async fn emit_parent_compaction_diagnostics(
 fn parent_compaction_diagnostic_status(error: &str, attempt: usize, compacted: bool) -> String {
     let prefix = if compacted {
         format!(
-            "Context limit error handled by summarizing the oldest closed non-user segment (attempt {}):\n",
+            "Context limit error handled by compacting the oldest eligible context (attempt {}):\n",
             attempt,
         )
     } else {
@@ -202,11 +206,17 @@ async fn apply_subchat_reactive_compaction(
         &config.model,
         config.n_ctx,
         trace_owner.as_deref(),
+        config.abort_flag.clone(),
     )
     .await
     {
         Ok(true) => true,
-        Ok(false) => false,
+        Ok(false) => crate::tools::tool_compress_chat::deterministic_full_sweep(&original_messages)
+            .map(|compacted| {
+                *messages = compacted;
+                true
+            })
+            .unwrap_or(false),
         Err(failure) => {
             let failure_for_log =
                 crate::chat::summarization::safe_segment_summary_failure_for_log(&failure);
@@ -214,9 +224,16 @@ async fn apply_subchat_reactive_compaction(
                 "Subchat context-limit segment summarization failed; preserving original messages: {}",
                 failure_for_log
             );
-            *messages = original_messages;
-            append_reactive_compaction_diagnostic(messages, error, preserve_last_message);
-            false
+            crate::tools::tool_compress_chat::deterministic_full_sweep(&original_messages)
+                .map(|compacted| {
+                    *messages = compacted;
+                    true
+                })
+                .unwrap_or_else(|| {
+                    *messages = original_messages;
+                    append_reactive_compaction_diagnostic(messages, error, preserve_last_message);
+                    false
+                })
         }
     };
 
@@ -1377,6 +1394,10 @@ fn trace_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadPara
     thread
 }
 
+fn should_persist_subchat_trajectory(config: &SubchatConfig) -> bool {
+    config.stateful || config.tool_name != "segment_summarize"
+}
+
 type SubchatProgress = Arc<StdMutex<Vec<ChatMessage>>>;
 
 fn record_subchat_progress(progress: &SubchatProgress, messages: &[ChatMessage]) {
@@ -1394,7 +1415,7 @@ async fn persist_subchat_progress(
     messages: &[ChatMessage],
 ) {
     record_subchat_progress(progress, messages);
-    if messages.is_empty() {
+    if messages.is_empty() || !should_persist_subchat_trajectory(config) {
         return;
     }
 
@@ -1426,6 +1447,9 @@ async fn save_failed_subchat_trajectory(
     progress: &SubchatProgress,
     error: &str,
 ) {
+    if !should_persist_subchat_trajectory(config) {
+        return;
+    }
     let mut messages = take_subchat_progress(progress);
     if messages.is_empty() {
         return;
@@ -1482,7 +1506,7 @@ pub async fn run_subchat(
 
     let messages = sanitize_messages_for_new_thread(&messages);
     let messages = prepare_subchat_messages(&gcx, messages, &config.model)?;
-    {
+    if should_persist_subchat_trajectory(&config) {
         let thread = trace_thread_from_config(&chat_id, &config);
         save_trajectory_as(gcx.clone(), &thread, &messages).await;
     }
@@ -1567,7 +1591,7 @@ pub async fn run_subchat(
         let app = AppState::from_gcx(gcx.clone()).await;
         crate::chat::trajectories::refresh_session_from_trajectory_if_stale(app, &chat_id, true)
             .await;
-    } else {
+    } else if should_persist_subchat_trajectory(&config) {
         let thread = trace_thread_from_config(&chat_id, &config);
         save_trajectory_as(gcx.clone(), &thread, &current_messages).await;
     }
@@ -1817,16 +1841,18 @@ async fn run_subchat_loop(
                 } else {
                     None
                 },
+                subchat_retries_allowed(config),
             )
             .await
             {
                 Ok(r) => break r,
                 Err(ref err)
-                    if should_compact_context_limit_error(
-                        err,
-                        context_limit_compact_count,
-                        &config.abort_flag,
-                    ) =>
+                    if subchat_retries_allowed(config)
+                        && should_compact_context_limit_error(
+                            err,
+                            context_limit_compact_count,
+                            &config.abort_flag,
+                        ) =>
                 {
                     let original_error = err.clone();
                     let log_error = safe_context_limit_error_for_log(&original_error);
@@ -1847,6 +1873,7 @@ async fn run_subchat_loop(
                 }
                 Err(ref err)
                     if err.starts_with(EMPTY_CHOICE_ERROR_PREFIX)
+                        && subchat_retries_allowed(config)
                         && empty_choice_retry_count < MAX_EMPTY_CHOICE_RETRIES
                         && !is_aborted(&config.abort_flag) =>
                 {
@@ -1934,16 +1961,18 @@ async fn run_forced_final_answer_turn(
             } else {
                 None
             },
+            subchat_retries_allowed(config),
         )
         .await
         {
             Ok(r) => break r,
             Err(ref err)
-                if should_compact_context_limit_error(
-                    err,
-                    *context_limit_compact_count,
-                    &config.abort_flag,
-                ) =>
+                if subchat_retries_allowed(config)
+                    && should_compact_context_limit_error(
+                        err,
+                        *context_limit_compact_count,
+                        &config.abort_flag,
+                    ) =>
             {
                 let original_error = err.clone();
                 let log_error = safe_context_limit_error_for_log(&original_error);
@@ -1964,6 +1993,7 @@ async fn run_forced_final_answer_turn(
             }
             Err(ref err)
                 if err.starts_with(EMPTY_CHOICE_ERROR_PREFIX)
+                    && subchat_retries_allowed(config)
                     && empty_choice_retry_count < MAX_EMPTY_CHOICE_RETRIES
                     && !is_aborted(&config.abort_flag) =>
             {
@@ -2042,16 +2072,18 @@ async fn run_subchat_with_wrap_up(
                 } else {
                     None
                 },
+                subchat_retries_allowed(config),
             )
             .await
             {
                 Ok(r) => break r,
                 Err(ref err)
-                    if should_compact_context_limit_error(
-                        err,
-                        context_limit_compact_count,
-                        &config.abort_flag,
-                    ) =>
+                    if subchat_retries_allowed(config)
+                        && should_compact_context_limit_error(
+                            err,
+                            context_limit_compact_count,
+                            &config.abort_flag,
+                        ) =>
                 {
                     let original_error = err.clone();
                     let log_error = safe_context_limit_error_for_log(&original_error);
@@ -2074,6 +2106,7 @@ async fn run_subchat_with_wrap_up(
                 }
                 Err(ref err)
                     if err.starts_with(EMPTY_CHOICE_ERROR_PREFIX)
+                        && subchat_retries_allowed(config)
                         && empty_choice_retry_count < MAX_EMPTY_CHOICE_RETRIES
                         && !is_aborted(&config.abort_flag) =>
                 {
@@ -2151,16 +2184,18 @@ async fn run_subchat_with_wrap_up(
             } else {
                 None
             },
+            subchat_retries_allowed(config),
         )
         .await
         {
             Ok(r) => break r,
             Err(ref err)
-                if should_compact_context_limit_error(
-                    err,
-                    context_limit_compact_count,
-                    &config.abort_flag,
-                ) =>
+                if subchat_retries_allowed(config)
+                    && should_compact_context_limit_error(
+                        err,
+                        context_limit_compact_count,
+                        &config.abort_flag,
+                    ) =>
             {
                 let original_error = err.clone();
                 let log_error = safe_context_limit_error_for_log(&original_error);
@@ -2347,6 +2382,7 @@ async fn subchat_stream(
     cache_control: CacheControl,
     only_deterministic_messages: bool,
     progress_tool_call_id: Option<&str>,
+    allow_provider_retries: bool,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
     let (gcx, effective_n_ctx, abort_flag, task_meta, worktree) = {
         let cgcx = ccx.lock().await;
@@ -2516,7 +2552,8 @@ async fn subchat_stream(
                     .is_retryable_transient()
                     .then(|| retry_decision.reason().to_string());
                 let retry_attempt = attempt.saturating_sub(1);
-                let should_retry = error.should_retry(retry_attempt, &abort_flag);
+                let should_retry =
+                    allow_provider_retries && error.should_retry(retry_attempt, &abort_flag);
                 if error.partial_output_emitted
                     && !should_retry
                     && !retry_decision.is_context_limit()
@@ -2757,6 +2794,7 @@ async fn subchat_single_internal(
     cache_control: CacheControl,
     prepend_system_prompt: bool,
     progress_tool_call_id: Option<&str>,
+    allow_provider_retries: bool,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
     let gcx = {
         let cgcx = ccx.lock().await;
@@ -2803,6 +2841,7 @@ async fn subchat_single_internal(
         cache_control,
         only_deterministic_messages,
         progress_tool_call_id,
+        allow_provider_retries,
     )
     .await
 }
@@ -2816,15 +2855,15 @@ mod subchat_tests {
         register_stateful_subchat_worktree, resolve_subchat_config_with_parent,
         resolve_subchat_model, resolve_subchat_params, resolve_subchat_worktree,
         safe_context_limit_error_for_log, should_compact_context_limit_error,
-        stateful_thread_from_config, SubchatConfig, ToolsPolicy, TraceParent,
-        GUARDED_REPORT_INSTRUCTION, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        should_persist_subchat_trajectory, stateful_thread_from_config, subchat_retries_allowed,
+        SubchatConfig, ToolsPolicy, TraceParent, GUARDED_REPORT_INSTRUCTION,
+        PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
     use super::{final_step_wrap_up_message, needs_forced_final_answer};
     use crate::chat::diagnostics::{
-        is_ui_only_message, SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS,
-        SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED,
+        SAFE_PROVIDER_ERROR_DIAGNOSTIC_MAX_CHARS, SAFE_PROVIDER_ERROR_DIAGNOSTIC_TRUNCATED,
     };
     use crate::chat::summarization::{safe_segment_summary_failure_for_log, SegmentSummaryFailure};
     use crate::chat::trajectory_ops::sanitize_messages_for_new_thread;
@@ -2937,6 +2976,30 @@ mod subchat_tests {
             step_progress: None,
             trace_parent: TraceParent::unattributed(),
         }
+    }
+
+    #[test]
+    fn segment_summarizer_is_the_only_ephemeral_subchat_trajectory() {
+        let mut config = test_subchat_config();
+        assert!(should_persist_subchat_trajectory(&config));
+
+        config.tool_name = "title_generation".to_string();
+        assert!(should_persist_subchat_trajectory(&config));
+
+        config.tool_name = "segment_summarize".to_string();
+        assert!(!should_persist_subchat_trajectory(&config));
+
+        config.stateful = true;
+        assert!(should_persist_subchat_trajectory(&config));
+    }
+
+    #[test]
+    fn segment_summarizer_never_retries_provider_calls() {
+        let mut config = test_subchat_config();
+        assert!(subchat_retries_allowed(&config));
+
+        config.tool_name = "segment_summarize".to_string();
+        assert!(!subchat_retries_allowed(&config));
     }
 
     fn sample_worktree() -> (tempfile::TempDir, WorktreeMeta) {
@@ -3233,7 +3296,7 @@ mod subchat_tests {
     }
 
     #[tokio::test]
-    async fn subchat_reactive_compaction_appends_diagnostics_and_preserves_last_message() {
+    async fn subchat_reactive_compaction_falls_back_deterministically_and_preserves_last_message() {
         let gcx = make_test_gcx().await;
         let config = test_subchat_config();
         let mut messages = vec![
@@ -3263,7 +3326,8 @@ mod subchat_tests {
         );
         assert!(messages
             .iter()
-            .any(|message| message.role == "error" && is_ui_only_message(message)));
+            .any(|message| message.role
+                == refact_chat_history::trajectory_ops::COMPRESSION_REPORT_ROLE));
         assert!(!messages
             .iter()
             .any(crate::chat::summarization::is_segment_summary));
@@ -3312,7 +3376,7 @@ mod subchat_tests {
             .get("subchat_id")
             .and_then(|v| v.as_str())
             .unwrap()
-            .contains("could not summarize an eligible closed non-user segment"));
+            .contains("compacting the oldest eligible context"));
     }
 
     #[tokio::test]
@@ -3327,7 +3391,7 @@ mod subchat_tests {
 
         let first = rx.try_recv().unwrap();
         let status = first.get("subchat_id").and_then(|v| v.as_str()).unwrap();
-        assert!(status.contains("handled by summarizing"));
+        assert!(status.contains("handled by compacting"));
         assert!(status.contains("attempt 1"));
         assert!(!status.contains("sk-test-secret"));
         assert!(!status.contains("Authorization: Bearer sk-test-secret"));

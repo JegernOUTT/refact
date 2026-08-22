@@ -558,6 +558,7 @@ impl Tool for ToolHandoffToMode {
         let snapshot_task_meta = task_meta.clone();
         let snapshot = TrajectorySnapshot {
             goal_verification_blocked_until_ms: None,
+            compression_retry_after_ms: Default::default(),
             goal: transferred_goal.target_goal.clone(),
             goal_ledger: transferred_goal
                 .target_goal
@@ -1190,6 +1191,7 @@ mod tests {
                 goal: None,
                 goal_ledger: Vec::new(),
                 goal_verification_blocked_until_ms: None,
+                compression_retry_after_ms: Default::default(),
                 chat_id: planner_chat_id.clone(),
                 title: "Persisted planner controller".to_string(),
                 model: "model".to_string(),

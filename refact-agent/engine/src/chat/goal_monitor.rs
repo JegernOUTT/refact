@@ -237,11 +237,6 @@ pub fn try_apply_goal_nudge(
     if session.closed {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Closed);
     }
-    if session.abort_flag.load(Ordering::SeqCst)
-        || session.user_interrupt_flag.load(Ordering::SeqCst)
-    {
-        return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Aborted);
-    }
 
     let Some(goal) = session.goal.as_ref() else {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::NoGoal);
@@ -258,9 +253,17 @@ pub fn try_apply_goal_nudge(
     {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Snoozed);
     }
+    if session.abort_flag.load(Ordering::SeqCst)
+        || session.user_interrupt_flag.load(Ordering::SeqCst)
+    {
+        return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Aborted);
+    }
     if let Some(status) = goal.goal_budget_exhaustion_status_at(now_ms) {
         apply_goal_terminal_status(session, status, trigger, now_ms);
         return GoalNudgeOutcome::BudgetExhausted(status);
+    }
+    if crate::chat::summarization::compression_attempt_active(session) {
+        return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Busy);
     }
     if !goal.goal_nudge_ready_at_with_backoff(now_ms) {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Cooldown);
@@ -300,11 +303,13 @@ pub fn try_apply_goal_nudge(
         let context = session.goal.as_ref().map(nudge_context).unwrap_or_default();
         session.add_message(goal_nudge_event(trigger, reason, now_ms, &context));
     }
-    if matches!(reason, GoalNudgeReason::Error) {
-        // A turn that ends in an error never records usage-based progress, so
-        // nothing else advances no_progress_turns. Count the error nudge itself
-        // as a no-progress turn so exponential backoff and quiescence still
-        // engage for permanent-error loops instead of retrying forever.
+    if matches!(
+        reason,
+        GoalNudgeReason::Error | GoalNudgeReason::GeneratingNoTokens
+    ) {
+        // An error or a generation with no tokens never records usage-based
+        // progress, so nothing else advances no_progress_turns. Count the nudge
+        // itself so exponential backoff and quiescence still engage.
         session.goal_note_no_progress_turn();
     }
     session.goal_record_nudge(now_ms);
@@ -1242,6 +1247,119 @@ mod tests {
             GoalNudgeOutcome::Nudged(GoalNudgeReason::GeneratingNoTokens)
         );
         assert_eq!(session.command_queue.len(), 1);
+        assert_eq!(
+            session.goal.as_ref().unwrap().progress.no_progress_turns,
+            1,
+            "a no-token nudge must count as a no-progress turn"
+        );
+    }
+
+    #[test]
+    fn goal_monitor_active_compression_is_busy_and_not_interrupted() {
+        let now = Instant::now();
+        let mut sessions = Vec::new();
+
+        let mut session_flag = active_goal_session();
+        session_flag.is_compressing = true;
+        sessions.push(("session flag", session_flag));
+
+        let mut runtime_flag = active_goal_session();
+        runtime_flag.runtime.is_compressing = true;
+        sessions.push(("runtime flag", runtime_flag));
+
+        let mut session_phase = active_goal_session();
+        session_phase.compression_phase = Some(CompressionPhase::Checking);
+        sessions.push(("session phase", session_phase));
+
+        let mut runtime_phase = active_goal_session();
+        runtime_phase.runtime.compression_phase = Some(CompressionPhase::Running);
+        sessions.push(("runtime phase", runtime_phase));
+
+        let mut active_attempt = active_goal_session();
+        active_attempt.active_compression_attempt = Some(7);
+        sessions.push(("active attempt", active_attempt));
+
+        for (source, mut session) in sessions {
+            session.start_stream();
+            match source {
+                "session flag" => session.is_compressing = true,
+                "runtime flag" => session.runtime.is_compressing = true,
+                "session phase" => session.compression_phase = Some(CompressionPhase::Checking),
+                "runtime phase" => {
+                    session.runtime.compression_phase = Some(CompressionPhase::Running)
+                }
+                "active attempt" => {
+                    session.active_compression_attempt = Some(7);
+                    session.compression_attempt_started_at_ms = Some(epoch_ms_now());
+                }
+                _ => unreachable!(),
+            }
+            session.last_activity = now - Duration::from_secs(10);
+
+            assert_eq!(
+                apply_monitor(&mut session, 10_000, now),
+                GoalNudgeOutcome::Skipped(GoalNudgeSkip::Busy),
+                "compression indicated by {source} must stay busy"
+            );
+            assert!(!session.abort_flag.load(Ordering::SeqCst), "{source}");
+            assert!(
+                !session.user_interrupt_flag.load(Ordering::SeqCst),
+                "{source}"
+            );
+            assert_eq!(session.runtime.state, SessionState::Generating, "{source}");
+            assert!(session.command_queue.is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn goal_monitor_stale_compression_attempt_does_not_block_recovery() {
+        let mut session = active_goal_session();
+        let now = Instant::now();
+        session.start_stream();
+        session.is_compressing = true;
+        session.runtime.is_compressing = true;
+        session.compression_phase = Some(CompressionPhase::Running);
+        session.runtime.compression_phase = Some(CompressionPhase::Running);
+        session.active_compression_attempt = Some(7);
+        session.compression_attempt_started_at_ms =
+            Some(epoch_ms_now().saturating_sub(16 * 60 * 1000));
+        session.last_activity = now - Duration::from_secs(40);
+
+        assert_eq!(
+            apply_monitor(&mut session, 10_000, now),
+            GoalNudgeOutcome::Nudged(GoalNudgeReason::GeneratingNoTokens)
+        );
+    }
+
+    #[test]
+    fn goal_monitor_no_token_loop_reaches_quiescence() {
+        let mut session = unlimited_no_progress_session();
+        let now = Instant::now();
+        let mut now_ms = 10_000u64;
+
+        for expected in 1..=QUIESCENCE_NUDGES {
+            session.start_stream();
+            session.last_activity = now - Duration::from_secs(10);
+            assert_eq!(
+                apply_monitor(&mut session, now_ms, now),
+                GoalNudgeOutcome::Nudged(GoalNudgeReason::GeneratingNoTokens)
+            );
+            assert_eq!(
+                session.goal.as_ref().unwrap().progress.no_progress_turns,
+                expected
+            );
+            session.command_queue.clear();
+            now_ms += 600_000;
+        }
+
+        session.start_stream();
+        session.last_activity = now - Duration::from_secs(10);
+        assert_eq!(
+            apply_monitor(&mut session, now_ms, now),
+            GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent)
+        );
+        assert!(session.command_queue.is_empty());
+        assert!(goal_is_quiescent(&session));
     }
 
     #[test]

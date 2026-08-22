@@ -418,6 +418,7 @@ impl ChatSession {
             compression_attempt_generation: 0,
             active_compression_attempt: None,
             compression_attempt_started_at_ms: None,
+            compression_abort_flag: None,
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
@@ -448,6 +449,7 @@ impl ChatSession {
             tier1_compact_attempts: 0,
             tier1_compaction_disabled: false,
             compression_insufficient_hashes: HashSet::new(),
+            compression_retry_after_ms: Default::default(),
             pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
             cache_guard_force_next: false,
@@ -514,6 +516,7 @@ impl ChatSession {
             compression_attempt_generation: 0,
             active_compression_attempt: None,
             compression_attempt_started_at_ms: None,
+            compression_abort_flag: None,
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
@@ -544,6 +547,7 @@ impl ChatSession {
             tier1_compact_attempts: 0,
             tier1_compaction_disabled: false,
             compression_insufficient_hashes: HashSet::new(),
+            compression_retry_after_ms: Default::default(),
             pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
             cache_guard_force_next: false,
@@ -977,6 +981,9 @@ impl ChatSession {
         self.runtime.compression_phase = None;
         self.compression_reason = None;
         self.runtime.compression_reason = None;
+        if let Some(abort_flag) = self.compression_abort_flag.take() {
+            abort_flag.store(true, Ordering::SeqCst);
+        }
         self.active_compression_attempt = None;
         self.compression_attempt_started_at_ms = None;
         self.refresh_goal_runtime_mirror();
@@ -984,6 +991,7 @@ impl ChatSession {
 
     pub fn replace_messages(&mut self, messages: Vec<ChatMessage>) {
         self.messages = messages;
+        self.compression_retry_after_ms.clear();
         self.rebuild_goal_projection_from_messages();
         self.reset_compaction_runtime_state();
         self.increment_version();
@@ -1471,6 +1479,7 @@ impl ChatSession {
             self.tier1_compact_attempts = 0;
             self.tier1_compaction_disabled = false;
             self.compression_insufficient_hashes.clear();
+            self.compression_retry_after_ms.clear();
             self.thread.previous_response_id = None;
             self.emit(ChatEvent::MessageUpdated {
                 message_id: message_id.to_string(),
@@ -1598,6 +1607,7 @@ impl ChatSession {
             self.tier1_compact_attempts = 0;
             self.tier1_compaction_disabled = false;
             self.compression_insufficient_hashes.clear();
+            self.compression_retry_after_ms.clear();
             self.thread.previous_response_id = None;
             self.emit(ChatEvent::MessageRemoved {
                 message_id: message_id.to_string(),
@@ -1639,6 +1649,7 @@ impl ChatSession {
             self.tier1_compact_attempts = 0;
             self.tier1_compaction_disabled = false;
             self.compression_insufficient_hashes.clear();
+            self.compression_retry_after_ms.clear();
             self.thread.previous_response_id = None;
             self.emit(ChatEvent::MessagesTruncated { from_index });
             self.invalidate_orphaned_summaries();
@@ -1736,6 +1747,9 @@ impl ChatSession {
         self.runtime.queue_size = self.command_queue.len();
         self.runtime.queued_items = self.build_queued_items();
         if should_clear_terminal_compression {
+            if let Some(abort_flag) = self.compression_abort_flag.take() {
+                abort_flag.store(true, Ordering::SeqCst);
+            }
             self.is_compressing = false;
             self.runtime.is_compressing = false;
             self.active_compression_attempt = None;

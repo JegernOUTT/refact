@@ -1,5 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1026,6 +1027,7 @@ struct BehaviorTrajectoryCandidate {
 struct BehaviorTrajectoryScanStats {
     visited_entries: usize,
     matching_files_considered: usize,
+    raw_entries_examined: usize,
 }
 
 fn parse_json_string_at(content: &str, start: usize) -> Option<(String, usize)> {
@@ -1148,16 +1150,65 @@ fn top_level_json_string(content: &str, fields: &[&str]) -> Option<String> {
 }
 
 fn parse_behavior_trajectory_meta(content: &str, path: PathBuf) -> Option<BehaviorTrajectoryMeta> {
-    let id = top_level_json_string(content, &["id", "chat_id"])?;
-    let updated_at =
-        top_level_json_string(content, &["updated_at", "last_message_at", "created_at"])?;
+    let fields = top_level_json_strings(
+        content,
+        &[
+            "id",
+            "chat_id",
+            "title",
+            "mode",
+            "updated_at",
+            "last_message_at",
+            "created_at",
+            "link_type",
+        ],
+    );
+    if fields
+        .get("link_type")
+        .is_some_and(|link_type| link_type.starts_with("internal:"))
+    {
+        return None;
+    }
+    let id = ["id", "chat_id"]
+        .iter()
+        .find_map(|field| fields.get(*field).cloned())?;
+    let updated_at = ["updated_at", "last_message_at", "created_at"]
+        .iter()
+        .find_map(|field| fields.get(*field).cloned())?;
     Some(BehaviorTrajectoryMeta {
         id,
-        title: top_level_json_string(content, &["title"]).unwrap_or_default(),
-        mode: top_level_json_string(content, &["mode"]).unwrap_or_default(),
+        title: fields.get("title").cloned().unwrap_or_default(),
+        mode: fields.get("mode").cloned().unwrap_or_default(),
         updated_at,
         path,
     })
+}
+
+fn behavior_trajectory_is_internal(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let file_len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let mut prefix = String::new();
+    if (&mut file)
+        .take(MAX_BEHAVIOR_TRAJECTORY_META_BYTES)
+        .read_to_string(&mut prefix)
+        .is_err()
+    {
+        return false;
+    }
+    let tail_start = file_len.saturating_sub(MAX_BEHAVIOR_TRAJECTORY_META_BYTES);
+    if file.seek(SeekFrom::Start(tail_start)).is_err() {
+        return false;
+    }
+    let mut tail = String::new();
+    if file.read_to_string(&mut tail).is_err() {
+        return false;
+    }
+    [prefix.as_str(), tail.as_str()]
+        .iter()
+        .find_map(|content| top_level_json_string(content, &["link_type"]))
+        .is_some_and(|link_type| link_type.starts_with("internal:"))
 }
 
 #[cfg(test)]
@@ -1208,21 +1259,24 @@ fn collect_behavior_trajectory_candidates_from_dir(
     max_visited_entries: usize,
     stats: &mut BehaviorTrajectoryScanStats,
 ) {
-    if max_visited_entries == 0 || stats.visited_entries >= max_visited_entries {
+    let max_raw_entries = max_visited_entries.saturating_mul(4);
+    if max_visited_entries == 0 || stats.raw_entries_examined >= max_raw_entries {
         return;
     }
     let mut dirs = vec![dir.to_path_buf()];
     while let Some(dir) = dirs.pop() {
-        if stats.visited_entries >= max_visited_entries {
+        if stats.visited_entries >= max_visited_entries
+            || stats.raw_entries_examined >= max_raw_entries
+        {
             return;
         }
         let Ok(read_dir) = std::fs::read_dir(&dir) else {
             continue;
         };
-        let remaining = max_visited_entries.saturating_sub(stats.visited_entries);
+        let remaining = max_raw_entries.saturating_sub(stats.raw_entries_examined);
         let mut entries = Vec::new();
         for entry in read_dir.take(remaining) {
-            stats.visited_entries += 1;
+            stats.raw_entries_examined += 1;
             let Ok(entry) = entry else {
                 continue;
             };
@@ -1250,7 +1304,16 @@ fn collect_behavior_trajectory_candidates_from_dir(
             if metadata.len() > MAX_BEHAVIOR_TRAJECTORY_BYTES {
                 continue;
             }
+            // Filter before applying max_files so recent internal traces cannot crowd
+            // older user-visible chats out of the behavior learner's candidate set.
+            if behavior_trajectory_is_internal(&path) {
+                continue;
+            }
+            if stats.visited_entries >= max_visited_entries {
+                return;
+            }
             stats.matching_files_considered += 1;
+            stats.visited_entries += 1;
             let modified_key = metadata.modified().map(system_time_key).unwrap_or_default();
             push_behavior_trajectory_candidate(
                 heap,
@@ -4089,6 +4152,21 @@ mod tests {
             .unwrap();
     }
 
+    fn write_internal_behavior_trajectory(path: &Path, id: &str, modified_secs: i64) {
+        std::fs::write(
+            path,
+            serde_json::json!({
+                "id": id,
+                "updated_at": "2026-01-02T00:00:00Z",
+                "link_type": "internal:buddy"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(modified_secs, 0))
+            .unwrap();
+    }
+
     fn behavior_candidate_file_names(candidates: &[BehaviorTrajectoryCandidate]) -> Vec<String> {
         candidates
             .iter()
@@ -4618,6 +4696,40 @@ mod tests {
     }
 
     #[test]
+    fn recent_internal_trajectories_do_not_crowd_out_displayable_candidate_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        for idx in 0..5 {
+            write_internal_behavior_trajectory(
+                &dir.path().join(format!("internal_{idx}.json")),
+                &format!("internal-{idx}"),
+                1_000 + idx as i64,
+            );
+        }
+        for idx in 0..3 {
+            write_behavior_trajectory(
+                &dir.path().join(format!("displayable_{idx}.json")),
+                &format!("displayable-{idx}"),
+                100 + idx as i64,
+            );
+        }
+
+        let candidates =
+            collect_behavior_trajectory_candidates_from_dirs(&[dir.path().to_path_buf()], 3);
+        let mut metas = Vec::new();
+        let mut seen = HashSet::new();
+        collect_behavior_trajectory_metas_from_candidates(candidates, &mut metas, &mut seen);
+
+        assert_eq!(
+            metas
+                .iter()
+                .map(|meta| meta.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["displayable-2", "displayable-1", "displayable-0"]
+        );
+        assert!(metas.iter().all(|meta| !meta.id.starts_with("internal-")));
+    }
+
+    #[test]
     fn behavior_trajectory_candidate_scan_stops_at_visit_budget() {
         let dir = tempfile::tempdir().unwrap();
         for idx in 0..8 {
@@ -4740,6 +4852,23 @@ mod tests {
         assert_eq!(meta.mode, "agent");
         assert_eq!(meta.updated_at, "2026-01-02T00:00:00Z");
         assert_eq!(meta.path, path);
+    }
+
+    #[test]
+    fn behavior_trajectory_meta_excludes_internal_link_types() {
+        let meta = parse_behavior_trajectory_meta(
+            &serde_json::json!({
+                "id": "internal-report",
+                "title": "Internal report",
+                "updated_at": "2026-01-02T00:00:00Z",
+                "link_type": "internal:buddy-autonomous",
+                "messages": [{"role": "user", "content": "internal prompt"}]
+            })
+            .to_string(),
+            PathBuf::from("internal.json"),
+        );
+
+        assert!(meta.is_none());
     }
 
     #[test]

@@ -4,6 +4,7 @@ use refact_chat_api::{
 };
 use refact_core::chat_types::ChatMessage;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TrajectorySnapshot {
@@ -57,6 +58,8 @@ pub struct TrajectorySnapshot {
     pub goal_ledger: Vec<GoalLedgerEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_verification_blocked_until_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub compression_retry_after_ms: BTreeMap<String, u64>,
 }
 
 fn tolerant_goal_ledger<'de, D>(deserializer: D) -> Result<Vec<GoalLedgerEntry>, D::Error>
@@ -120,6 +123,7 @@ impl TrajectorySnapshot {
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
+            compression_retry_after_ms: BTreeMap::new(),
         }
     }
 }
@@ -204,6 +208,24 @@ mod tests {
             .remove("auto_compression_cap");
         let legacy: TrajectorySnapshot = serde_json::from_value(value).unwrap();
         assert_eq!(legacy.auto_compression_cap, None);
+    }
+
+    #[test]
+    fn compression_retry_cooldown_roundtrips_and_legacy_absence_defaults_empty() {
+        let mut snapshot = snapshot();
+        snapshot
+            .compression_retry_after_ms
+            .insert("source-hash".to_string(), 123_456);
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        let decoded: TrajectorySnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(decoded.compression_retry_after_ms["source-hash"], 123_456);
+
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("compression_retry_after_ms");
+        let legacy: TrajectorySnapshot = serde_json::from_value(value).unwrap();
+        assert!(legacy.compression_retry_after_ms.is_empty());
     }
 
     #[test]

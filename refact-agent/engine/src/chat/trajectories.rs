@@ -1,3 +1,4 @@
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -283,6 +284,7 @@ pub struct LoadedTrajectory {
     pub goal: Option<GoalSnapshot>,
     pub goal_ledger: Vec<GoalLedgerEntry>,
     pub goal_verification_blocked_until_ms: Option<u64>,
+    pub compression_retry_after_ms: std::collections::BTreeMap<String, u64>,
     pub created_at: String,
     pub updated_at: String,
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -342,6 +344,7 @@ fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot
     snapshot.goal = session.goal.clone();
     snapshot.goal_ledger = session.goal_ledger.clone();
     snapshot.goal_verification_blocked_until_ms = session.goal_verification_blocked_until_ms;
+    snapshot.compression_retry_after_ms = session.compression_retry_after_ms.clone();
     span.finish(
         PerfOutcome::Success,
         None,
@@ -446,13 +449,111 @@ pub async fn get_global_trajectories_dir(gcx: Arc<GlobalContext>) -> PathBuf {
 
 pub const INTERNAL_TRACE_LINK_PREFIX: &str = "internal:";
 pub const UNATTRIBUTED_TRACES_DIR: &str = "internal";
+const INTERNAL_TRACES_KEEP_PER_FOLDER: usize = 200;
+const INTERNAL_TRACE_METADATA_PREFIX_BYTES: u64 = 64 * 1024;
+const INTERNAL_TRACE_PRUNE_INTERVAL_SECS: u64 = 3600;
 
 pub fn is_internal_trace_link_type(link_type: Option<&str>) -> bool {
     link_type.is_some_and(|value| value.starts_with(INTERNAL_TRACE_LINK_PREFIX))
 }
 
+fn should_vectorize_trajectory(link_type: Option<&str>) -> bool {
+    !is_internal_trace_link_type(link_type)
+}
+
 pub fn internal_trace_link_type(feature: &str) -> String {
     format!("{INTERNAL_TRACE_LINK_PREFIX}{feature}")
+}
+
+async fn prune_internal_traces_in_folder(dir: &Path, keep: usize) -> Result<usize, String> {
+    let mut entries = match fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(format!(
+                "failed to read trace folder {}: {error}",
+                dir.display()
+            ))
+        }
+    };
+    let mut traces = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let metadata = match fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
+            _ => continue,
+        };
+        let path_for_read = path.clone();
+        let file_len = metadata.len();
+        let is_internal = tokio::task::spawn_blocking(move || {
+            let mut file = std::fs::File::open(path_for_read).ok()?;
+            let mut prefix = Vec::new();
+            (&mut file)
+                .take(INTERNAL_TRACE_METADATA_PREFIX_BYTES)
+                .read_to_end(&mut prefix)
+                .ok()?;
+            let tail_start = file_len.saturating_sub(INTERNAL_TRACE_METADATA_PREFIX_BYTES);
+            file.seek(SeekFrom::Start(tail_start)).ok()?;
+            let mut tail = Vec::new();
+            file.read_to_end(&mut tail).ok()?;
+            let prefix = String::from_utf8_lossy(&prefix);
+            let tail = String::from_utf8_lossy(&tail);
+            Some([prefix.as_ref(), tail.as_ref()].iter().any(|window| {
+                window.contains("\"link_type\": \"internal:")
+                    || window.contains("\"link_type\":\"internal:")
+            }))
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+        if !is_internal {
+            continue;
+        }
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+        traces.push((modified, path));
+    }
+    if traces.len() <= keep {
+        return Ok(0);
+    }
+    traces.sort_by(|left, right| right.0.cmp(&left.0));
+    let mut removed = 0;
+    for (_, path) in traces.into_iter().skip(keep) {
+        if fs::remove_file(&path).await.is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+async fn prune_internal_traces_throttled(dir: &Path) -> Result<usize, String> {
+    use std::sync::{Mutex, OnceLock};
+    static LAST_PRUNE_BY_DIR: OnceLock<Mutex<std::collections::HashMap<PathBuf, u64>>> =
+        OnceLock::new();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    {
+        let mut last_prune = LAST_PRUNE_BY_DIR
+            .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .map_err(|_| "internal trace prune throttle lock poisoned".to_string())?;
+        let previous = last_prune.get(dir).copied().unwrap_or(0);
+        if now.saturating_sub(previous) < INTERNAL_TRACE_PRUNE_INTERVAL_SECS {
+            return Ok(0);
+        }
+        last_prune.insert(dir.to_path_buf(), now);
+    }
+    prune_internal_traces_in_folder(dir, INTERNAL_TRACES_KEEP_PER_FOLDER).await
 }
 
 pub(crate) async fn index_dir_for_trajectory_file(
@@ -1396,6 +1497,9 @@ fn is_known_trajectory_top_level_key(key: &str) -> bool {
             | "root_chat_id"
             | "task_meta"
             | "goal"
+            | "goal_ledger"
+            | "goal_verification_blocked_until_ms"
+            | "compression_retry_after_ms"
             | "browser_meta"
     )
 }
@@ -1930,6 +2034,11 @@ async fn load_trajectory_candidate(
     let goal_ledger_value = t
         .as_object_mut()
         .and_then(|object| object.remove("goal_ledger"));
+    let compression_retry_after_ms = t
+        .as_object_mut()
+        .and_then(|object| object.remove("compression_retry_after_ms"))
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
     let (messages, goal_ledger, goal): (
         Vec<ChatMessage>,
         Vec<GoalLedgerEntry>,
@@ -2219,6 +2328,7 @@ async fn load_trajectory_candidate(
     Some(LoadedTrajectory {
         goal_ledger,
         goal_verification_blocked_until_ms,
+        compression_retry_after_ms,
         source_path: traj_path,
         messages,
         thread,
@@ -2467,6 +2577,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,
+        compression_retry_after_ms: Default::default(),
         chat_id: chat_id.to_string(),
         title: String::new(),
         model: String::new(),
@@ -2523,6 +2634,7 @@ pub async fn save_trajectory_as(
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,
+        compression_retry_after_ms: Default::default(),
         chat_id: thread.id.clone(),
         title: thread.title.clone(),
         model: thread.model.clone(),
@@ -2725,6 +2837,9 @@ async fn save_trajectory_snapshot_inner(
     if let Some(blocked_until_ms) = snapshot.goal_verification_blocked_until_ms {
         trajectory["goal_verification_blocked_until_ms"] = json!(blocked_until_ms);
     }
+    if !snapshot.compression_retry_after_ms.is_empty() {
+        trajectory["compression_retry_after_ms"] = json!(snapshot.compression_retry_after_ms);
+    }
     if let Some(ref worktree) = snapshot.worktree {
         trajectory["worktree"] = serde_json::to_value(worktree).unwrap_or_default();
     }
@@ -2852,18 +2967,30 @@ async fn save_trajectory_snapshot_inner(
             )
             .await?;
         }
+    } else if let Some(parent) = file_path.parent() {
+        match prune_internal_traces_throttled(parent).await {
+            Ok(0) => {}
+            Ok(removed) => info!("pruned {removed} old internal traces from {:?}", parent),
+            Err(error) => warn!("internal trace pruning failed: {error}"),
+        }
     }
 
     if snapshot.buddy_meta.is_some() {
         prune_buddy_conversations_throttled(gcx.clone()).await;
     }
 
-    let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
-    let vec_db = app.workspace.vec_db.clone();
-    if let Some(vecdb) = vec_db.lock().await.as_ref() {
-        vecdb
-            .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], false, roots)
-            .await;
+    if should_vectorize_trajectory(snapshot.link_type.as_deref()) {
+        let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
+        let vec_db = app.workspace.vec_db.clone();
+        if let Some(vecdb) = vec_db.lock().await.as_ref() {
+            vecdb
+                .vectorizer_enqueue_files(
+                    &vec![file_path.to_string_lossy().to_string()],
+                    false,
+                    roots,
+                )
+                .await;
+        };
     }
 
     if snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none() {
@@ -3264,6 +3391,7 @@ fn apply_loaded_external_update_to_session(
 ) -> Option<u64> {
     session.messages = loaded.messages;
     session.thread = loaded.thread;
+    session.compression_retry_after_ms = loaded.compression_retry_after_ms;
     session.reset_compaction_runtime_state();
     session.goal_ledger = loaded.goal_ledger;
     session.goal_verification_blocked_until_ms = loaded.goal_verification_blocked_until_ms;
@@ -6809,6 +6937,64 @@ mod tests {
     }
 
     #[test]
+    fn internal_traces_are_not_enqueued_for_vectorization() {
+        assert!(!should_vectorize_trajectory(Some(
+            "internal:title_generation"
+        )));
+        assert!(!should_vectorize_trajectory(Some(
+            "internal:commit_message"
+        )));
+        assert!(should_vectorize_trajectory(Some("subagent")));
+        assert!(should_vectorize_trajectory(None));
+    }
+
+    #[tokio::test]
+    async fn internal_trace_pruning_keeps_newest_and_preserves_displayable_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let displayable = dir.join("displayable.json");
+        tokio::fs::write(
+            &displayable,
+            serde_json::json!({"id":"displayable","link_type":"subagent"}).to_string(),
+        )
+        .await
+        .unwrap();
+        for index in 0..4 {
+            let path = dir.join(format!("internal-{index}.json"));
+            let payload = if index == 0 {
+                format!(
+                    "{{\"id\":\"internal-0\",\"messages\":[{{\"role\":\"user\",\"content\":\"{}\"}}],\"link_type\":\"internal:title_generation\"}}",
+                    "x".repeat((INTERNAL_TRACE_METADATA_PREFIX_BYTES as usize) + 1024)
+                )
+            } else {
+                serde_json::json!({
+                    "id": format!("internal-{index}"),
+                    "messages": [{"role":"user","content":"trace"}],
+                    "link_type": "internal:title_generation"
+                })
+                .to_string()
+            };
+            tokio::fs::write(&path, payload).await.unwrap();
+            let modified = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(index + 1);
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+        }
+
+        let removed = prune_internal_traces_in_folder(dir, 2).await.unwrap();
+
+        assert_eq!(removed, 2);
+        assert!(displayable.exists());
+        assert!(!dir.join("internal-0.json").exists());
+        assert!(!dir.join("internal-1.json").exists());
+        assert!(dir.join("internal-2.json").exists());
+        assert!(dir.join("internal-3.json").exists());
+    }
+
+    #[test]
     fn index_entry_file_names_accept_one_folder_level_only() {
         assert!(trajectory_index::index_entry_file_name_is_valid("a.json"));
         assert!(trajectory_index::index_entry_file_name_is_valid(
@@ -6902,6 +7088,7 @@ mod tests {
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
+            compression_retry_after_ms: Default::default(),
             chat_id: chat_id.to_string(),
             title: title.to_string(),
             model: "model".to_string(),
@@ -14073,6 +14260,7 @@ mod tests {
             compression_attempt_generation: 0,
             active_compression_attempt: None,
             compression_attempt_started_at_ms: None,
+            compression_abort_flag: None,
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
@@ -14102,6 +14290,7 @@ mod tests {
             tier1_compact_attempts: 0,
             tier1_compaction_disabled: false,
             compression_insufficient_hashes: std::collections::HashSet::new(),
+            compression_retry_after_ms: Default::default(),
             pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
             cache_guard_force_next: false,
@@ -14174,6 +14363,7 @@ mod tests {
             compression_attempt_generation: 0,
             active_compression_attempt: None,
             compression_attempt_started_at_ms: None,
+            compression_abort_flag: None,
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
@@ -14203,6 +14393,7 @@ mod tests {
             tier1_compact_attempts: 0,
             tier1_compaction_disabled: false,
             compression_insufficient_hashes: std::collections::HashSet::new(),
+            compression_retry_after_ms: Default::default(),
             pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
             cache_guard_force_next: false,
@@ -15007,6 +15198,7 @@ mod tests {
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
+            compression_retry_after_ms: Default::default(),
             chat_id: chat_id.clone(),
             title: "Worktree Chat".to_string(),
             model: "model".to_string(),

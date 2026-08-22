@@ -441,6 +441,7 @@ pub async fn handle_handoff_apply(
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,
+        compression_retry_after_ms: Default::default(),
         chat_id: new_chat_id.clone(),
         title: thread.title.clone(),
         model: thread.model.clone(),
@@ -632,6 +633,7 @@ pub async fn handle_mode_transition_apply(
 
     let mut snapshot = TrajectorySnapshot {
         goal_verification_blocked_until_ms: None,
+        compression_retry_after_ms: Default::default(),
         goal: transferred_goal.target_goal.clone(),
         goal_ledger: transferred_goal
             .target_goal
@@ -809,6 +811,7 @@ pub async fn handle_planner_from_transition(
 
     let mut snapshot = TrajectorySnapshot {
         goal_verification_blocked_until_ms: None,
+        compression_retry_after_ms: Default::default(),
         goal: transferred_goal.target_goal.clone(),
         goal_ledger: transferred_goal
             .target_goal
@@ -929,6 +932,7 @@ mod tests {
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
+            compression_retry_after_ms: Default::default(),
             chat_id: "transition-identity".to_string(),
             title: String::new(),
             model: "gpt-4".to_string(),
@@ -1328,6 +1332,7 @@ mod tests {
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
+            compression_retry_after_ms: Default::default(),
             chat_id: "transition-chat".to_string(),
             title: String::new(),
             model: "gpt-4".to_string(),

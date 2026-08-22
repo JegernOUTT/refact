@@ -30,6 +30,7 @@ async fn create_warning_chat(gcx: Arc<GlobalContext>, reason: &str) -> Result<St
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,
+        compression_retry_after_ms: Default::default(),
         chat_id: chat_id.clone(),
         title: "Privacy observation degraded".to_string(),
         model,

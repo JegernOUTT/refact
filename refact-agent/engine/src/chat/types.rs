@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -276,6 +276,7 @@ pub struct ChatSession {
     pub(crate) compression_attempt_generation: u64,
     pub(crate) active_compression_attempt: Option<u64>,
     pub(crate) compression_attempt_started_at_ms: Option<u64>,
+    pub(crate) compression_abort_flag: Option<Arc<AtomicBool>>,
     pub draft_message: Option<ChatMessage>,
     pub draft_usage: Option<ChatUsage>,
     pub command_queue: VecDeque<CommandRequest>,
@@ -306,6 +307,7 @@ pub struct ChatSession {
     pub tier1_compact_attempts: usize,
     pub tier1_compaction_disabled: bool,
     pub compression_insufficient_hashes: HashSet<String>,
+    pub compression_retry_after_ms: BTreeMap<String, u64>,
     pub pending_max_new_tokens_boost: Option<usize>,
     pub cache_guard_snapshot: Option<serde_json::Value>,
     pub cache_guard_force_next: bool,

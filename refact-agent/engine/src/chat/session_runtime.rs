@@ -180,6 +180,7 @@ pub async fn get_or_create_session_with_trajectory(
         );
         session.goal_ledger = loaded.goal_ledger;
         session.goal_verification_blocked_until_ms = loaded.goal_verification_blocked_until_ms;
+        session.compression_retry_after_ms = loaded.compression_retry_after_ms;
         if transition_identity_repaired {
             session.increment_version();
         }

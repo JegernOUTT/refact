@@ -58,7 +58,11 @@ const RESPONSES_INCOMPLETE_STREAM_ERROR: &str =
 const RESPONSES_CONTEXT_CUTOFF_ERROR: &str =
     "context_length_exceeded: Responses stream ended before a terminal event at critical context pressure";
 
-const MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS: usize = 8;
+const MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS: usize = 1;
+
+fn should_try_post_llm_deterministic_sweep(round: usize) -> bool {
+    round == MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS + 1
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NormalizedStopReason {
@@ -1490,6 +1494,8 @@ pub fn start_generation(
                                 session.clear_stream_for_retry();
                                 session.thread.previous_response_id = None;
                                 session.cache_guard_force_next = true;
+                                session.thread.reactive_compact_attempts =
+                                    Some(MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS);
                                 continue;
                             }
                             stalled_outcome @ (crate::chat::summarization::CompactionOutcome::LlmUnavailable
@@ -1519,10 +1525,28 @@ pub fn start_generation(
                                     session.clear_stream_for_retry();
                                     session.thread.previous_response_id = None;
                                     session.cache_guard_force_next = true;
+                                    session.thread.reactive_compact_attempts =
+                                        Some(MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS + 1);
                                     continue;
                                 }
                             }
                         }
+                    } else if should_try_post_llm_deterministic_sweep(round)
+                        && crate::chat::summarization::apply_deterministic_compaction_for_recovery(
+                            &session_arc,
+                        )
+                        .await
+                    {
+                        warn!(
+                            "Context limit persisted after one-shot LLM compression; applied the deterministic full sweep"
+                        );
+                        let mut session = session_arc.lock().await;
+                        session.clear_stream_for_retry();
+                        session.thread.previous_response_id = None;
+                        session.cache_guard_force_next = true;
+                        session.thread.reactive_compact_attempts =
+                            Some(MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS + 1);
+                        continue;
                     }
                     error.message = context_limit_final_error_message(&original_error);
                     {
@@ -3944,6 +3968,13 @@ mod tests {
             .messages
             .iter()
             .any(crate::chat::diagnostics::is_ui_only_message));
+    }
+
+    #[test]
+    fn context_limit_post_llm_retry_allows_exactly_one_deterministic_sweep() {
+        assert!(!should_try_post_llm_deterministic_sweep(1));
+        assert!(should_try_post_llm_deterministic_sweep(2));
+        assert!(!should_try_post_llm_deterministic_sweep(3));
     }
 
     #[test]

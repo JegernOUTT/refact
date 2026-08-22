@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -429,8 +429,9 @@ pub fn merge_records(message: &mut ChatMessage, records: impl IntoIterator<Item 
         .remove("privacy")
         .and_then(|value| serde_json::from_value::<PrivacyRecord>(value).ok())
         .unwrap_or_default();
+    let mut seen = privacy.files.iter().cloned().collect::<HashSet<_>>();
     for record in records {
-        if !privacy.files.contains(&record) {
+        if seen.insert(record.clone()) {
             privacy.files.push(record);
         }
     }
@@ -446,14 +447,11 @@ pub fn records_to_carry(
     sources: &[ChatMessage],
 ) -> Result<Vec<FileRecord>, refact_privacy::PrivacyAuditError> {
     refact_privacy::records_from_messages(sources).map(|indexed| {
+        let mut seen = HashSet::with_capacity(indexed.len());
         indexed
             .into_iter()
-            .fold(Vec::new(), |mut records, (_, record)| {
-                if !records.contains(&record) {
-                    records.push(record);
-                }
-                records
-            })
+            .filter_map(|(_, record)| seen.insert(record.clone()).then_some(record))
+            .collect()
     })
 }
 
@@ -1034,12 +1032,38 @@ mod tests {
         };
 
         attach_record(&mut message, first.clone());
-        merge_records(&mut message, [first, second.clone()]);
+        merge_records(&mut message, [first.clone(), second.clone()]);
 
         let privacy: PrivacyRecord =
             serde_json::from_value(message.extra["privacy"].clone()).unwrap();
-        assert_eq!(privacy.files.len(), 2);
-        assert_eq!(privacy.files[1], second);
+        assert_eq!(privacy.files, vec![first, second]);
+    }
+
+    #[test]
+    fn merge_records_deduplicates_large_input_in_first_seen_order() {
+        let expected = (0..5_000)
+            .map(|index| FileRecord {
+                path: format!("file-{index}.rs"),
+                zone: if index % 2 == 0 {
+                    "normal".to_string()
+                } else {
+                    "secrets".to_string()
+                },
+                attribution: Attribution::Observed,
+            })
+            .collect::<Vec<_>>();
+        let records = expected
+            .iter()
+            .cloned()
+            .flat_map(|record| [record.clone(), record])
+            .collect::<Vec<_>>();
+        let mut message = ChatMessage::default();
+
+        merge_records(&mut message, records);
+
+        let privacy: PrivacyRecord =
+            serde_json::from_value(message.extra["privacy"].clone()).unwrap();
+        assert_eq!(privacy.files, expected);
     }
 
     #[test]
@@ -1054,16 +1078,24 @@ mod tests {
             zone: "secrets".to_string(),
             attribution: Attribution::Observed,
         };
+        let third = FileRecord {
+            path: "later.rs".to_string(),
+            zone: "normal".to_string(),
+            attribution: Attribution::Heuristic,
+        };
         let mut source_a = ChatMessage::default();
         let mut source_b = ChatMessage::default();
         merge_records(&mut source_a, [first.clone(), second.clone()]);
-        merge_records(&mut source_b, [second.clone()]);
+        merge_records(
+            &mut source_b,
+            [second.clone(), third.clone(), first.clone()],
+        );
         let mut target = ChatMessage::default();
 
         merge_message_records(&mut target, &[source_a, source_b]).unwrap();
 
         let privacy: PrivacyRecord =
             serde_json::from_value(target.extra["privacy"].clone()).unwrap();
-        assert_eq!(privacy.files, vec![first, second]);
+        assert_eq!(privacy.files, vec![first, second, third]);
     }
 }

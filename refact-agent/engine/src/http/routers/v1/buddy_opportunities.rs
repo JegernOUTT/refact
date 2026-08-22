@@ -1407,6 +1407,7 @@ async fn create_investigation_chat(
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,
+        compression_retry_after_ms: Default::default(),
         chat_id: chat_id.clone(),
         title: "Investigation".to_string(),
         model,
