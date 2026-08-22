@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::app_state::AppState;
 use crate::chat::internal_roles::{self, EventSubkind};
 use crate::chat::process_command_queue;
-use crate::chat::trajectories::maybe_save_trajectory_background;
+use crate::chat::trajectories::maybe_save_trajectory_background_with_intent;
 use crate::chat::types::*;
 
 pub const GOAL_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
@@ -182,7 +182,11 @@ pub async fn handle_goal_turn_end(app: AppState, session_arc: Arc<AMutex<ChatSes
         }
     };
     if changed {
-        maybe_save_trajectory_background(app, session_arc);
+        maybe_save_trajectory_background_with_intent(
+            app,
+            session_arc,
+            TrajectoryCommitIntent::Checkpoint,
+        );
     }
     terminal
 }
@@ -215,7 +219,11 @@ pub async fn dispatch_goal_nudge(
     };
 
     if outcome.should_persist() {
-        maybe_save_trajectory_background(app.clone(), session_arc.clone());
+        maybe_save_trajectory_background_with_intent(
+            app.clone(),
+            session_arc.clone(),
+            TrajectoryCommitIntent::Checkpoint,
+        );
     }
 
     if let Some(processor_flag) = processor_flag {

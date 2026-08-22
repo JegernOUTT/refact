@@ -307,7 +307,12 @@ pub async fn handle_v1_chat_command(
         });
         drop(session);
         if should_save_trajectory {
-            super::trajectories::maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+            super::trajectories::maybe_save_trajectory_with_intent(
+                app.clone(),
+                session_arc.clone(),
+                TrajectoryCommitIntent::Required,
+            )
+            .await;
         }
         return Ok(Response::builder()
             .status(StatusCode::OK)
@@ -491,7 +496,12 @@ pub async fn handle_v1_chat_command(
         });
         drop(session);
         if changed {
-            super::trajectories::maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+            super::trajectories::maybe_save_trajectory_with_intent(
+                app.clone(),
+                session_arc.clone(),
+                TrajectoryCommitIntent::Required,
+            )
+            .await;
         }
         return Ok(Response::builder()
             .status(StatusCode::OK)

@@ -3225,7 +3225,12 @@ async fn run_reserved_segment_summarization(
     }
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     if !matches!(
-        crate::chat::trajectories::try_save_trajectory(app, session_arc.clone()).await,
+        crate::chat::trajectories::try_save_trajectory_with_intent(
+            app,
+            session_arc.clone(),
+            crate::chat::types::TrajectoryCommitIntent::Required,
+        )
+        .await,
         Ok(true)
     ) {
         let mut session = session_arc.lock().await;

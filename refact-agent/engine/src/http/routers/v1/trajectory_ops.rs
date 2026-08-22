@@ -95,9 +95,10 @@ async fn persist_live_source_goal_transfer(
             session.set_goal_projection(transferred_goal.source_goal.clone());
             session.emit_goal_status();
         }
-        crate::chat::trajectories::try_save_trajectory(
+        crate::chat::trajectories::try_save_trajectory_with_intent(
             AppState::from_gcx(gcx.clone()).await,
             session_arc,
+            crate::chat::types::TrajectoryCommitIntent::Required,
         )
         .await?;
     }
@@ -342,9 +343,10 @@ pub async fn handle_transform_apply(
         stats
     };
 
-    crate::chat::trajectories::maybe_save_trajectory(
+    crate::chat::trajectories::maybe_save_trajectory_with_intent(
         AppState::from_gcx(gcx.clone()).await,
         session_arc,
+        crate::chat::types::TrajectoryCommitIntent::Required,
     )
     .await;
 

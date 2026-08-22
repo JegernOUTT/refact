@@ -94,7 +94,8 @@ async fn atomic_write_json_with_tmp_path(
 
 use super::types::{
     ChatSession, ExternalReloadPending, GoalSnapshotBudgetExt, SessionState, TaskMeta,
-    ThreadParams, TrajectorySourceIdentity, TrajectorySourceIdentitySessionExt,
+    ThreadParams, TrajectoryCommitIntent, TrajectorySourceIdentity,
+    TrajectorySourceIdentitySessionExt,
 };
 use super::session::has_displayable_assistant_content;
 use super::config::timeouts;
@@ -2630,6 +2631,18 @@ pub async fn save_trajectory_as(
     thread: &ThreadParams,
     messages: &[ChatMessage],
 ) {
+    save_trajectory_as_with_intent(gcx, thread, messages, TrajectoryCommitIntent::Checkpoint).await;
+}
+
+pub async fn save_trajectory_as_with_intent(
+    gcx: Arc<GlobalContext>,
+    thread: &ThreadParams,
+    messages: &[ChatMessage],
+    intent: TrajectoryCommitIntent,
+) {
+    if !intent.persists() {
+        return;
+    }
     let snapshot = TrajectorySnapshot {
         goal: None,
         goal_ledger: Vec::new(),
@@ -3201,6 +3214,17 @@ pub async fn try_save_trajectory(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> Result<bool, String> {
+    try_save_trajectory_with_intent(app, session_arc, TrajectoryCommitIntent::Required).await
+}
+
+pub async fn try_save_trajectory_with_intent(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+    intent: TrajectoryCommitIntent,
+) -> Result<bool, String> {
+    if !intent.persists() {
+        return Ok(true);
+    }
     let save_mutex = {
         let session = session_arc.lock().await;
         if !session.trajectory_dirty {
@@ -3227,13 +3251,26 @@ pub async fn try_save_trajectory(
         .map_err(|e| format!("Failed to save trajectory for {}: {}", chat_id, e))?;
 
     let mut session = session_arc.lock().await;
-    if session.trajectory_version == saved_version {
-        session.trajectory_dirty = false;
-    }
+    session.complete_trajectory_commit(saved_version);
     Ok(!session.trajectory_dirty)
 }
 
 pub fn maybe_save_trajectory_background(app: AppState, session_arc: Arc<AMutex<ChatSession>>) {
+    maybe_save_trajectory_background_with_intent(
+        app,
+        session_arc,
+        TrajectoryCommitIntent::Checkpoint,
+    );
+}
+
+pub fn maybe_save_trajectory_background_with_intent(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+    intent: TrajectoryCommitIntent,
+) {
+    if !intent.persists() {
+        return;
+    }
     let gcx = app.gcx.clone();
     tokio::spawn(async move {
         loop {
@@ -3280,9 +3317,7 @@ pub fn maybe_save_trajectory_background(app: AppState, session_arc: Arc<AMutex<C
             let mut session = session_arc.lock().await;
             match result {
                 Ok(()) => {
-                    if session.trajectory_version == saved_version {
-                        session.trajectory_dirty = false;
-                    }
+                    session.complete_trajectory_commit(saved_version);
                 }
                 Err(e) => {
                     warn!("{}", e);
@@ -3307,7 +3342,15 @@ pub fn maybe_save_trajectory_background(app: AppState, session_arc: Arc<AMutex<C
 }
 
 pub async fn maybe_save_trajectory(app: AppState, session_arc: Arc<AMutex<ChatSession>>) {
-    if let Err(e) = try_save_trajectory(app, session_arc.clone()).await {
+    maybe_save_trajectory_with_intent(app, session_arc, TrajectoryCommitIntent::Required).await;
+}
+
+pub async fn maybe_save_trajectory_with_intent(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+    intent: TrajectoryCommitIntent,
+) {
+    if let Err(e) = try_save_trajectory_with_intent(app, session_arc.clone(), intent).await {
         warn!("{}", e);
     } else {
         let mut session = session_arc.lock().await;
@@ -3316,6 +3359,28 @@ pub async fn maybe_save_trajectory(app: AppState, session_arc: Arc<AMutex<ChatSe
             session.trajectory_save_queued = false;
         }
     }
+}
+
+#[cfg(test)]
+fn trajectory_commit_contract() -> [(&'static str, TrajectoryCommitIntent); 7] {
+    [
+        (
+            "explicit acknowledged mutations",
+            TrajectoryCommitIntent::Required,
+        ),
+        (
+            "branch handoff mode transition",
+            TrajectoryCommitIntent::Required,
+        ),
+        ("final failed subchat", TrajectoryCommitIntent::Required),
+        ("close", TrajectoryCommitIntent::Required),
+        ("graceful shutdown", TrajectoryCommitIntent::Required),
+        (
+            "assistant tool subchat progress",
+            TrajectoryCommitIntent::Checkpoint,
+        ),
+        ("stream delta", TrajectoryCommitIntent::Ephemeral),
+    ]
 }
 
 pub(crate) async fn persist_loaded_trajectory_repair_raw(
@@ -3673,9 +3738,7 @@ async fn apply_loaded_external_update_with_repair(
             );
         } else {
             let mut session = session_arc.lock().await;
-            if session.trajectory_version == repaired_version {
-                session.trajectory_dirty = false;
-            }
+            session.complete_trajectory_commit(repaired_version);
         }
     }
     true
@@ -3835,9 +3898,7 @@ async fn apply_external_delete_with_revalidation(
                 );
             } else {
                 let mut session = session_arc.lock().await;
-                if session.trajectory_version == repaired_version {
-                    session.trajectory_dirty = false;
-                }
+                session.complete_trajectory_commit(repaired_version);
             }
         }
         if same_source_transition_identity_repaired {
@@ -4833,7 +4894,12 @@ fn spawn_title_generation_task(
                     session.trajectory_events_tx = Some(tx);
                 }
                 drop(session);
-                maybe_save_trajectory(app.clone(), session_arc).await;
+                maybe_save_trajectory_with_intent(
+                    app.clone(),
+                    session_arc,
+                    TrajectoryCommitIntent::Checkpoint,
+                )
+                .await;
                 info!("Updated session {} with generated title: {}", id, title);
                 return;
             }
@@ -6421,6 +6487,75 @@ mod tests {
         assert!(!serialized.contains("confirmation_paused_at"));
     }
 
+    #[test]
+    fn trajectory_commit_intents_are_table_driven() {
+        let boundaries = trajectory_commit_contract();
+        assert_eq!(
+            boundaries,
+            [
+                (
+                    "explicit acknowledged mutations",
+                    TrajectoryCommitIntent::Required
+                ),
+                (
+                    "branch handoff mode transition",
+                    TrajectoryCommitIntent::Required
+                ),
+                ("final failed subchat", TrajectoryCommitIntent::Required),
+                ("close", TrajectoryCommitIntent::Required),
+                ("graceful shutdown", TrajectoryCommitIntent::Required),
+                (
+                    "assistant tool subchat progress",
+                    TrajectoryCommitIntent::Checkpoint,
+                ),
+                ("stream delta", TrajectoryCommitIntent::Ephemeral),
+            ]
+        );
+        assert!(TrajectoryCommitIntent::Required.requires_durability());
+        assert!(TrajectoryCommitIntent::Checkpoint.persists());
+        assert!(!TrajectoryCommitIntent::Ephemeral.persists());
+    }
+
+    #[test]
+    fn trajectory_commit_stale_completion_cannot_clear_newer_dirty_state() {
+        let mut session = ChatSession::new("trajectory-commit-stale".to_string());
+
+        session.increment_version();
+        assert!(session.complete_trajectory_commit(1));
+        assert_eq!(session.trajectory_committed_version, 1);
+        assert!(!session.trajectory_dirty);
+
+        session.increment_version();
+        assert!(session.complete_trajectory_commit(2));
+        assert_eq!(session.trajectory_committed_version, 2);
+        assert!(!session.trajectory_dirty);
+
+        session.increment_version();
+        assert!(!session.complete_trajectory_commit(1));
+        assert_eq!(session.trajectory_committed_version, 2);
+        assert!(session.trajectory_dirty);
+    }
+
+    #[test]
+    fn trajectory_commit_versions_are_isolated_per_chat() {
+        let mut chat_a = ChatSession::new("trajectory-commit-a".to_string());
+        let mut chat_b = ChatSession::new("trajectory-commit-b".to_string());
+
+        chat_a.increment_version();
+        chat_a.complete_trajectory_commit(1);
+        chat_a.increment_version();
+
+        chat_b.increment_version();
+        chat_b.complete_trajectory_commit(1);
+        chat_b.increment_version();
+        chat_b.complete_trajectory_commit(2);
+
+        assert_eq!(chat_a.trajectory_committed_version, 1);
+        assert!(chat_a.trajectory_dirty);
+        assert_eq!(chat_b.trajectory_committed_version, 2);
+        assert!(!chat_b.trajectory_dirty);
+    }
+
     fn assert_same_path(left: &Path, right: &Path) {
         assert_eq!(normalized_test_path(left), normalized_test_path(right));
     }
@@ -6926,7 +7061,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trajectory_save_round_trips_every_message() {
+    async fn trajectory_commit_round_trips_every_message() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, _) = make_app_with_workspace(dir.path()).await;
         let chat_id = "serialize-all-messages";
@@ -14551,6 +14686,7 @@ mod tests {
             last_tool_progress_at: None,
             trajectory_dirty: false,
             trajectory_version: 5,
+            trajectory_committed_version: 0,
             trajectory_save_in_flight: false,
             trajectory_save_queued: false,
             trajectory_save_mutex: Arc::new(AMutex::new(())),
@@ -14657,6 +14793,7 @@ mod tests {
             last_tool_progress_at: None,
             trajectory_dirty: false,
             trajectory_version: 1,
+            trajectory_committed_version: 0,
             trajectory_save_in_flight: false,
             trajectory_save_queued: false,
             trajectory_save_mutex: Arc::new(AMutex::new(())),

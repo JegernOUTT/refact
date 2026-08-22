@@ -27,9 +27,9 @@ use crate::chat::retry_policy::{
     classify_llm_error_for_retry, retry_delay_for_attempt, sleep_or_abort, MAX_LLM_RETRY_ATTEMPTS,
 };
 use crate::chat::tools::{execute_tools, resolve_tool_call_aliases, ExecuteToolsOptions};
-use crate::chat::types::{TaskMeta, ThreadParams};
+use crate::chat::types::{TaskMeta, ThreadParams, TrajectoryCommitIntent};
 use crate::worktrees::types::WorktreeMeta;
-use crate::chat::trajectories::save_trajectory_as;
+use crate::chat::trajectories::save_trajectory_as_with_intent;
 use crate::chat::trajectory_ops::sanitize_messages_for_new_thread;
 use crate::stats::event::{canonicalize_mode_for_stats, split_model_provider, LlmCallEvent};
 use crate::worktrees::service::WorktreeService;
@@ -1398,6 +1398,25 @@ fn should_persist_subchat_trajectory(config: &SubchatConfig) -> bool {
     config.stateful || config.tool_name != "segment_summarize"
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubchatTrajectoryCommitPhase {
+    Seed,
+    Progress,
+    Failed,
+    Final,
+}
+
+fn subchat_trajectory_commit_intent(phase: SubchatTrajectoryCommitPhase) -> TrajectoryCommitIntent {
+    match phase {
+        SubchatTrajectoryCommitPhase::Seed | SubchatTrajectoryCommitPhase::Progress => {
+            TrajectoryCommitIntent::Checkpoint
+        }
+        SubchatTrajectoryCommitPhase::Failed | SubchatTrajectoryCommitPhase::Final => {
+            TrajectoryCommitIntent::Required
+        }
+    }
+}
+
 type SubchatProgress = Arc<StdMutex<Vec<ChatMessage>>>;
 
 fn record_subchat_progress(progress: &SubchatProgress, messages: &[ChatMessage]) {
@@ -1425,7 +1444,13 @@ async fn persist_subchat_progress(
     };
 
     let thread = trace_thread_from_config(&chat_id, config);
-    save_trajectory_as(gcx.clone(), &thread, messages).await;
+    save_trajectory_as_with_intent(
+        gcx.clone(),
+        &thread,
+        messages,
+        subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Progress),
+    )
+    .await;
     if config.stateful {
         let app = AppState::from_gcx(gcx).await;
         crate::chat::trajectories::refresh_session_from_trajectory_if_stale(app, &chat_id, true)
@@ -1467,7 +1492,13 @@ async fn save_failed_subchat_trajectory(
     if config.stateful {
         register_stateful_subchat_worktree(gcx.clone(), chat_id, &mut thread).await;
     }
-    save_trajectory_as(gcx.clone(), &thread, &messages).await;
+    save_trajectory_as_with_intent(
+        gcx.clone(),
+        &thread,
+        &messages,
+        subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Failed),
+    )
+    .await;
     if config.stateful {
         let app = AppState::from_gcx(gcx).await;
         crate::chat::trajectories::refresh_session_from_trajectory_if_stale(app, chat_id, true)
@@ -1508,7 +1539,13 @@ pub async fn run_subchat(
     let messages = prepare_subchat_messages(&gcx, messages, &config.model)?;
     if should_persist_subchat_trajectory(&config) {
         let thread = trace_thread_from_config(&chat_id, &config);
-        save_trajectory_as(gcx.clone(), &thread, &messages).await;
+        save_trajectory_as_with_intent(
+            gcx.clone(),
+            &thread,
+            &messages,
+            subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Seed),
+        )
+        .await;
     }
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new_with_abort(
@@ -1587,13 +1624,25 @@ pub async fn run_subchat(
     if config.stateful {
         let mut thread = stateful_thread_from_config(&chat_id, &config);
         register_stateful_subchat_worktree(gcx.clone(), &chat_id, &mut thread).await;
-        save_trajectory_as(gcx.clone(), &thread, &current_messages).await;
+        save_trajectory_as_with_intent(
+            gcx.clone(),
+            &thread,
+            &current_messages,
+            subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Final),
+        )
+        .await;
         let app = AppState::from_gcx(gcx.clone()).await;
         crate::chat::trajectories::refresh_session_from_trajectory_if_stale(app, &chat_id, true)
             .await;
     } else if should_persist_subchat_trajectory(&config) {
         let thread = trace_thread_from_config(&chat_id, &config);
-        save_trajectory_as(gcx.clone(), &thread, &current_messages).await;
+        save_trajectory_as_with_intent(
+            gcx.clone(),
+            &thread,
+            &current_messages,
+            subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Final),
+        )
+        .await;
     }
 
     let metering = aggregate_metering_from_messages(&current_messages);
@@ -2856,8 +2905,8 @@ mod subchat_tests {
         resolve_subchat_model, resolve_subchat_params, resolve_subchat_worktree,
         safe_context_limit_error_for_log, should_compact_context_limit_error,
         should_persist_subchat_trajectory, stateful_thread_from_config, subchat_retries_allowed,
-        SubchatConfig, ToolsPolicy, TraceParent, GUARDED_REPORT_INSTRUCTION,
-        PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        subchat_trajectory_commit_intent, SubchatConfig, SubchatTrajectoryCommitPhase, ToolsPolicy,
+        TraceParent, GUARDED_REPORT_INSTRUCTION, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
@@ -2867,11 +2916,11 @@ mod subchat_tests {
     };
     use crate::chat::summarization::{safe_segment_summary_failure_for_log, SegmentSummaryFailure};
     use crate::chat::trajectory_ops::sanitize_messages_for_new_thread;
-    use crate::chat::trajectories::save_trajectory_as;
+    use crate::chat::trajectories::save_trajectory_as_with_intent;
     use crate::call_validation::{
         ChatContent, ChatMessage, ChatModelType, ReasoningEffort, SubchatParameters,
     };
-    use crate::chat::types::{TaskMeta, ThreadParams};
+    use crate::chat::types::{TaskMeta, ThreadParams, TrajectoryCommitIntent};
     use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
     use crate::global_context::tests::make_test_gcx;
     use crate::llm::params::CacheControl;
@@ -2991,6 +3040,32 @@ mod subchat_tests {
 
         config.stateful = true;
         assert!(should_persist_subchat_trajectory(&config));
+    }
+
+    #[test]
+    fn subchat_trajectory_commit_phases_have_explicit_intents() {
+        let cases = [
+            (
+                SubchatTrajectoryCommitPhase::Seed,
+                TrajectoryCommitIntent::Checkpoint,
+            ),
+            (
+                SubchatTrajectoryCommitPhase::Progress,
+                TrajectoryCommitIntent::Checkpoint,
+            ),
+            (
+                SubchatTrajectoryCommitPhase::Failed,
+                TrajectoryCommitIntent::Required,
+            ),
+            (
+                SubchatTrajectoryCommitPhase::Final,
+                TrajectoryCommitIntent::Required,
+            ),
+        ];
+
+        for (phase, expected) in cases {
+            assert_eq!(subchat_trajectory_commit_intent(phase), expected);
+        }
     }
 
     #[test]
@@ -3730,7 +3805,13 @@ mod subchat_tests {
             ..Default::default()
         };
         let messages = vec![ChatMessage::new("user".to_string(), "hello".to_string())];
-        save_trajectory_as(gcx.clone(), &thread, &messages).await;
+        save_trajectory_as_with_intent(
+            gcx.clone(),
+            &thread,
+            &messages,
+            TrajectoryCommitIntent::Checkpoint,
+        )
+        .await;
 
         assert_eq!(
             parent_thread_worktree(gcx, &parent_chat_id).await,
@@ -3772,7 +3853,13 @@ mod subchat_tests {
             ..Default::default()
         };
         let messages = vec![ChatMessage::new("user".to_string(), "hello".to_string())];
-        save_trajectory_as(gcx.clone(), &persisted_thread, &messages).await;
+        save_trajectory_as_with_intent(
+            gcx.clone(),
+            &persisted_thread,
+            &messages,
+            TrajectoryCommitIntent::Checkpoint,
+        )
+        .await;
         let sessions = gcx.chat_sessions.clone();
         {
             let mut sessions_write = sessions.write().await;

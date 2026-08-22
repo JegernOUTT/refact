@@ -250,9 +250,10 @@ impl ChatSessionFacade for EngineChatSessionFacade {
             sessions.get(chat_id).cloned()
         };
         if let Some(session_arc) = session_arc {
-            trajectories::maybe_save_trajectory(
+            trajectories::maybe_save_trajectory_with_intent(
                 AppState::from_gcx(self.gcx.clone()).await,
                 session_arc,
+                crate::chat::types::TrajectoryCommitIntent::Required,
             )
             .await;
         }

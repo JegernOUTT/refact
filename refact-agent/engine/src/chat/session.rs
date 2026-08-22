@@ -442,6 +442,7 @@ impl ChatSession {
             last_tool_progress_at: None,
             trajectory_dirty: false,
             trajectory_version: 0,
+            trajectory_committed_version: 0,
             trajectory_save_in_flight: false,
             trajectory_save_queued: false,
             trajectory_save_mutex: Arc::new(AMutex::new(())),
@@ -544,6 +545,7 @@ impl ChatSession {
             external_reload_pending: None,
             trajectory_dirty: false,
             trajectory_version: 0,
+            trajectory_committed_version: 0,
             trajectory_save_in_flight: false,
             trajectory_save_queued: false,
             trajectory_save_mutex: Arc::new(AMutex::new(())),
@@ -586,6 +588,19 @@ impl ChatSession {
         if self.trajectory_save_in_flight {
             self.trajectory_save_queued = true;
         }
+    }
+
+    pub(crate) fn trajectory_commit_can_write(&self, version: u64) -> bool {
+        version >= self.trajectory_committed_version
+    }
+
+    pub(crate) fn complete_trajectory_commit(&mut self, version: u64) -> bool {
+        if !self.trajectory_commit_can_write(version) {
+            return false;
+        }
+        self.trajectory_committed_version = version;
+        self.trajectory_dirty = self.trajectory_version != version;
+        true
     }
 
     pub(crate) fn refresh_goal_runtime_mirror(&mut self) {

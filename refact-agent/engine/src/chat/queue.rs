@@ -25,7 +25,9 @@ use super::goal_verifier::{
     should_verify_goal_on_done, verify_goal_before_completion, GoalCompletionGateOutcome,
 };
 use super::tools::{execute_tools_with_session, resolve_tool_call_aliases};
-use super::trajectories::{maybe_save_trajectory, maybe_save_trajectory_background};
+use super::trajectories::{
+    maybe_save_trajectory_with_intent, maybe_save_trajectory_background_with_intent,
+};
 use crate::ext::slash_expand::expand_slash_command;
 use crate::ext::skills_context::{expand_skill_includes, SKILLS_CONTEXT_MARKER};
 use crate::worktrees::service::WorktreeService;
@@ -242,7 +244,11 @@ pub async fn inject_priority_messages_if_any(
         }
     }
 
-    maybe_save_trajectory_background(app.clone(), session_arc.clone());
+    maybe_save_trajectory_background_with_intent(
+        app.clone(),
+        session_arc.clone(),
+        TrajectoryCommitIntent::Checkpoint,
+    );
     true
 }
 
@@ -1118,7 +1124,11 @@ pub async fn process_command_queue(
                     return;
                 }
 
-                maybe_save_trajectory_background(app.clone(), session_arc.clone());
+                maybe_save_trajectory_background_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Checkpoint,
+                );
 
                 let session = session_arc.lock().await;
                 if session.closed {
@@ -1161,7 +1171,14 @@ pub async fn process_command_queue(
                     handle_set_goal_command(&mut session, content, budget, criteria)
                 };
                 match result {
-                    Ok(_) => maybe_save_trajectory(app.clone(), session_arc.clone()).await,
+                    Ok(_) => {
+                        maybe_save_trajectory_with_intent(
+                            app.clone(),
+                            session_arc.clone(),
+                            TrajectoryCommitIntent::Required,
+                        )
+                        .await
+                    }
                     Err(error) => {
                         warn!("SetGoal command rejected: {}", error);
                         let mut session = session_arc.lock().await;
@@ -1175,7 +1192,14 @@ pub async fn process_command_queue(
                     handle_set_goal_budget_command(&mut session, budget)
                 };
                 match result {
-                    Ok(_) => maybe_save_trajectory(app.clone(), session_arc.clone()).await,
+                    Ok(_) => {
+                        maybe_save_trajectory_with_intent(
+                            app.clone(),
+                            session_arc.clone(),
+                            TrajectoryCommitIntent::Required,
+                        )
+                        .await
+                    }
                     Err(error) => {
                         warn!("SetGoalBudget command rejected: {}", error);
                         let mut session = session_arc.lock().await;
@@ -1189,7 +1213,14 @@ pub async fn process_command_queue(
                     handle_update_goal_command(&mut session, note)
                 };
                 match result {
-                    Ok(_) => maybe_save_trajectory(app.clone(), session_arc.clone()).await,
+                    Ok(_) => {
+                        maybe_save_trajectory_with_intent(
+                            app.clone(),
+                            session_arc.clone(),
+                            TrajectoryCommitIntent::Required,
+                        )
+                        .await
+                    }
                     Err(error) => {
                         warn!("UpdateGoal command rejected: {}", error);
                         let mut session = session_arc.lock().await;
@@ -1203,7 +1234,14 @@ pub async fn process_command_queue(
                     handle_goal_control_command(&mut session, action)
                 };
                 match result {
-                    Ok(_) => maybe_save_trajectory(app.clone(), session_arc.clone()).await,
+                    Ok(_) => {
+                        maybe_save_trajectory_with_intent(
+                            app.clone(),
+                            session_arc.clone(),
+                            TrajectoryCommitIntent::Required,
+                        )
+                        .await
+                    }
                     Err(error) => {
                         warn!("GoalControl command rejected: {}", error);
                         let mut session = session_arc.lock().await;
@@ -1568,7 +1606,11 @@ pub async fn process_command_queue(
                     let _ = maybe_enqueue_chat_reaction(app.clone(), accepted_user_message).await;
                 }
 
-                maybe_save_trajectory_background(app.clone(), session_arc.clone());
+                maybe_save_trajectory_background_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Checkpoint,
+                );
                 prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
                 if aborted_before_start_generation(&session_arc).await {
                     continue;
@@ -1593,7 +1635,11 @@ pub async fn process_command_queue(
                 note_user_turn_resets_goal_pursuit(&mut session);
                 drop(session);
 
-                maybe_save_trajectory_background(app.clone(), session_arc.clone());
+                maybe_save_trajectory_background_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Checkpoint,
+                );
                 prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
                 if aborted_before_start_generation(&session_arc).await {
                     continue;
@@ -1699,7 +1745,12 @@ pub async fn process_command_queue(
                 }
                 drop(session);
                 if changed {
-                    maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                    maybe_save_trajectory_with_intent(
+                        app.clone(),
+                        session_arc.clone(),
+                        TrajectoryCommitIntent::Required,
+                    )
+                    .await;
                 }
             }
             ChatCommand::Abort {} => {
@@ -1708,7 +1759,12 @@ pub async fn process_command_queue(
                 let goal_stopped = session.stop_goal_on_manual_abort();
                 drop(session);
                 if goal_stopped {
-                    maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                    maybe_save_trajectory_with_intent(
+                        app.clone(),
+                        session_arc.clone(),
+                        TrajectoryCommitIntent::Required,
+                    )
+                    .await;
                 }
             }
             ChatCommand::CleanBackgroundProcesses { include_services } => {
@@ -1727,7 +1783,12 @@ pub async fn process_command_queue(
                         let mut session = session_arc.lock().await;
                         session.add_background_process_cleanup_notice(killed.len());
                         drop(session);
-                        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                        maybe_save_trajectory_with_intent(
+                            app.clone(),
+                            session_arc.clone(),
+                            TrajectoryCommitIntent::Required,
+                        )
+                        .await;
                     }
                     Err(error) => {
                         warn!("CleanBackgroundProcesses failed: {}", error);
@@ -1802,7 +1863,11 @@ pub async fn process_command_queue(
                         session.set_runtime_state(SessionState::Generating, None);
                         session.reactivate_goal_stopped_by_manual_abort();
                         drop(session);
-                        maybe_save_trajectory_background(app.clone(), session_arc.clone());
+                        maybe_save_trajectory_background_with_intent(
+                            app.clone(),
+                            session_arc.clone(),
+                            TrajectoryCommitIntent::Checkpoint,
+                        );
                         prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone())
                             .await;
                         if aborted_before_start_generation(&session_arc).await {
@@ -1826,7 +1891,11 @@ pub async fn process_command_queue(
                         session.set_runtime_state(SessionState::Generating, None);
                         session.reactivate_goal_stopped_by_manual_abort();
                         drop(session);
-                        maybe_save_trajectory_background(app.clone(), session_arc.clone());
+                        maybe_save_trajectory_background_with_intent(
+                            app.clone(),
+                            session_arc.clone(),
+                            TrajectoryCommitIntent::Checkpoint,
+                        );
                         prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone())
                             .await;
                         if aborted_before_start_generation(&session_arc).await {
@@ -1841,7 +1910,11 @@ pub async fn process_command_queue(
                     let mut session = session_arc.lock().await;
                     session.reactivate_goal_stopped_by_manual_abort();
                 }
-                maybe_save_trajectory_background(app.clone(), session_arc.clone());
+                maybe_save_trajectory_background_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Checkpoint,
+                );
                 prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
                 if aborted_before_start_generation(&session_arc).await {
                     continue;
@@ -1860,7 +1933,12 @@ pub async fn process_command_queue(
                     }
                 }
                 drop(session);
-                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                maybe_save_trajectory_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Required,
+                )
+                .await;
             }
             ChatCommand::BranchFromChat {
                 source_chat_id,
@@ -1932,7 +2010,12 @@ pub async fn process_command_queue(
                         session.thread.worktree = Some(validated);
                     }
                 }
-                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                maybe_save_trajectory_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Required,
+                )
+                .await;
             }
             ChatCommand::BrowserContextDecision {
                 pending_message_id,
@@ -2040,7 +2123,11 @@ pub async fn process_command_queue(
                 }
 
                 browser_context::commit_browser_cursors(app.gcx.clone(), &browser_chat_id).await;
-                maybe_save_trajectory_background(app.clone(), session_arc.clone());
+                maybe_save_trajectory_background_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Checkpoint,
+                );
                 prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
                 if aborted_before_start_generation(&session_arc).await {
                     continue;
@@ -2306,7 +2393,12 @@ async fn handle_tool_decisions(
                 start_generation(app.clone(), session_arc.clone()).await;
             }
         } else {
-            maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+            maybe_save_trajectory_with_intent(
+                app.clone(),
+                session_arc.clone(),
+                TrajectoryCommitIntent::Required,
+            )
+            .await;
         }
         return;
     }
@@ -2520,7 +2612,12 @@ async fn handle_tool_decisions(
                 }
                 GoalCompletionGateOutcome::Finalized => {}
                 GoalCompletionGateOutcome::Rearmed => {
-                    maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                    maybe_save_trajectory_with_intent(
+                        app.clone(),
+                        session_arc.clone(),
+                        TrajectoryCommitIntent::Required,
+                    )
+                    .await;
                     return;
                 }
                 GoalCompletionGateOutcome::BudgetExhausted(_) => {}
@@ -2530,7 +2627,12 @@ async fn handle_tool_decisions(
                     session.set_runtime_state(SessionState::Completed, None);
                 }
                 GoalCompletionGateOutcome::Aborted => {
-                    maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                    maybe_save_trajectory_with_intent(
+                        app.clone(),
+                        session_arc.clone(),
+                        TrajectoryCommitIntent::Required,
+                    )
+                    .await;
                     return;
                 }
             }
@@ -2544,9 +2646,18 @@ async fn handle_tool_decisions(
         }
 
         if was_aborted || tool_initiated_stop {
-            maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+            maybe_save_trajectory_with_intent(
+                app.clone(),
+                session_arc.clone(),
+                TrajectoryCommitIntent::Required,
+            )
+            .await;
         } else {
-            maybe_save_trajectory_background(app.clone(), session_arc.clone());
+            maybe_save_trajectory_background_with_intent(
+                app.clone(),
+                session_arc.clone(),
+                TrajectoryCommitIntent::Checkpoint,
+            );
         }
 
         if was_aborted || tool_initiated_stop {
@@ -2559,7 +2670,7 @@ async fn handle_tool_decisions(
             let mut session = session_arc.lock().await;
             session.set_runtime_state(SessionState::Idle, None);
         }
-        maybe_save_trajectory(app, session_arc).await;
+        maybe_save_trajectory_with_intent(app, session_arc, TrajectoryCommitIntent::Required).await;
     } else if had_tool_calls {
         if !aborted_before_start_generation(&session_arc).await {
             start_generation(app, session_arc).await;
@@ -2569,7 +2680,7 @@ async fn handle_tool_decisions(
             let mut session = session_arc.lock().await;
             session.set_runtime_state(SessionState::Idle, None);
         }
-        maybe_save_trajectory(app, session_arc).await;
+        maybe_save_trajectory_with_intent(app, session_arc, TrajectoryCommitIntent::Required).await;
     }
 }
 

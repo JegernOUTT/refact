@@ -7,9 +7,7 @@ use crate::app_state::AppState;
 use crate::call_validation::{ChatContent, ChatMessage, ChatMeta, validate_mode_for_request};
 use crate::chat::get_or_create_session_with_trajectory;
 use crate::chat::prepare::build_canonical_openai_tools;
-use crate::chat::trajectories::{
-    ensure_frozen_prefix, maybe_save_trajectory, new_frozen_request_prefix,
-};
+use crate::chat::trajectories::{ensure_frozen_prefix, new_frozen_request_prefix};
 use crate::custom_error::ScratchError;
 use crate::indexing_utils::wait_for_indexing_if_needed;
 use crate::scratchpads::chat_utils_prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messages;
@@ -146,7 +144,12 @@ mod tests {
         }
 
         persist_init_frozen_prefix(app.clone(), chat_id, prefix("replacement frozen")).await;
-        crate::chat::trajectories::maybe_save_trajectory(app, session_arc).await;
+        crate::chat::trajectories::maybe_save_trajectory_with_intent(
+            app,
+            session_arc,
+            crate::chat::types::TrajectoryCommitIntent::Required,
+        )
+        .await;
 
         let path = dir
             .path()
@@ -249,7 +252,12 @@ async fn persist_init_frozen_prefix(
         .is_some()
     };
     if installed {
-        maybe_save_trajectory(app, session_arc).await;
+        crate::chat::trajectories::maybe_save_trajectory_with_intent(
+            app,
+            session_arc,
+            crate::chat::types::TrajectoryCommitIntent::Required,
+        )
+        .await;
     }
 }
 

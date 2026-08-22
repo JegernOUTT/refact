@@ -28,7 +28,8 @@ use super::goal_monitor::handle_goal_turn_end;
 use super::types::*;
 use super::trajectories::{
     check_external_reload_pending, ensure_frozen_prefix, first_system_prompt,
-    frozen_prefix_is_complete, maybe_save_trajectory, maybe_save_trajectory_background,
+    frozen_prefix_is_complete, maybe_save_trajectory_with_intent,
+    maybe_save_trajectory_background_with_intent,
 };
 use super::tools::{process_tool_calls_once, ToolStepOutcome};
 use super::prepare::{build_canonical_openai_tools, prepare_chat_passthrough, ChatPrepareOptions};
@@ -1171,7 +1172,12 @@ async fn handle_task_agent_reasoning_token_stop(
         (meta, finish_reason, usage, message_id, agent_chat_id)
     };
 
-    maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+    maybe_save_trajectory_with_intent(
+        app.clone(),
+        session_arc.clone(),
+        TrajectoryCommitIntent::Checkpoint,
+    )
+    .await;
 
     if let Err(error) = crate::chat::task_agent_monitor::handle_agent_reasoning_token_limit_stop(
         app,
@@ -1316,7 +1322,12 @@ pub fn start_generation(
                             session_arc.clone(),
                         )
                         .await;
-                        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                        maybe_save_trajectory_with_intent(
+                            app.clone(),
+                            session_arc.clone(),
+                            TrajectoryCommitIntent::Checkpoint,
+                        )
+                        .await;
                         break;
                     }
                     Err(e) => {
@@ -1400,7 +1411,12 @@ pub fn start_generation(
             .await;
 
             if let Ok(GenerationResult::PausedForUserDecision) = generation_result {
-                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                maybe_save_trajectory_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Checkpoint,
+                )
+                .await;
                 break;
             }
 
@@ -1604,7 +1620,12 @@ pub fn start_generation(
                     session.thread.task_meta.clone()
                 };
 
-                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                maybe_save_trajectory_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Checkpoint,
+                )
+                .await;
 
                 if let Some(task_meta) = task_meta_opt {
                     let error_msg = {
@@ -1695,7 +1716,11 @@ pub fn start_generation(
                 );
             }
 
-            maybe_save_trajectory_background(app.clone(), session_arc.clone());
+            maybe_save_trajectory_background_with_intent(
+                app.clone(),
+                session_arc.clone(),
+                TrajectoryCommitIntent::Checkpoint,
+            );
 
             match process_tool_calls_once(app.clone(), session_arc.clone(), &mode_id, model_id_opt)
                 .await
@@ -1720,7 +1745,12 @@ pub fn start_generation(
                     )
                     .await
                     {
-                        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                        maybe_save_trajectory_with_intent(
+                            app.clone(),
+                            session_arc.clone(),
+                            TrajectoryCommitIntent::Checkpoint,
+                        )
+                        .await;
                         continue;
                     }
                     if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone())
@@ -1736,7 +1766,12 @@ pub fn start_generation(
                         continue;
                     }
                     if maybe_record_goal_pursuit_progress(session_arc.clone()).await {
-                        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                        maybe_save_trajectory_with_intent(
+                            app.clone(),
+                            session_arc.clone(),
+                            TrajectoryCommitIntent::Checkpoint,
+                        )
+                        .await;
                     }
                     if handle_goal_turn_end(app.clone(), session_arc.clone()).await {
                         break;
@@ -1899,7 +1934,12 @@ pub async fn run_llm_generation(
         session.thread.frozen_request_prefix.clone()
     };
     if installed_frozen_prefix {
-        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+        maybe_save_trajectory_with_intent(
+            app.clone(),
+            session_arc.clone(),
+            TrajectoryCommitIntent::Checkpoint,
+        )
+        .await;
     }
 
     let model_n_ctx = if model_rec.base.n_ctx > 0 {

@@ -114,7 +114,9 @@ pub enum ToolStepOutcome {
 }
 
 use super::types::*;
-use super::trajectories::maybe_save_trajectory;
+use super::trajectories::{
+    maybe_save_trajectory_with_intent, maybe_save_trajectory_background_with_intent,
+};
 use super::goal_verifier::{
     should_verify_goal_on_done, verify_goal_before_completion, GoalCompletionGateOutcome,
 };
@@ -1867,9 +1869,10 @@ pub async fn process_tool_calls_once(
         let mut session = session_arc.lock().await;
         session.set_runtime_state(SessionState::Generating, None);
         drop(session);
-        crate::chat::trajectories::maybe_save_trajectory_background(
+        maybe_save_trajectory_background_with_intent(
             app.clone(),
             session_arc.clone(),
+            TrajectoryCommitIntent::Checkpoint,
         );
         return ToolStepOutcome::Continue;
     }
@@ -1933,9 +1936,10 @@ pub async fn process_tool_calls_once(
         let mut session = session_arc.lock().await;
         session.set_runtime_state(SessionState::Generating, None);
         drop(session);
-        crate::chat::trajectories::maybe_save_trajectory_background(
+        maybe_save_trajectory_background_with_intent(
             app.clone(),
             session_arc.clone(),
+            TrajectoryCommitIntent::Checkpoint,
         );
         return ToolStepOutcome::Continue;
     }
@@ -2064,7 +2068,12 @@ pub async fn process_tool_calls_once(
             }
             GoalCompletionGateOutcome::Finalized => {}
             GoalCompletionGateOutcome::Rearmed => {
-                maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+                maybe_save_trajectory_with_intent(
+                    app.clone(),
+                    session_arc.clone(),
+                    TrajectoryCommitIntent::Required,
+                )
+                .await;
                 return ToolStepOutcome::Stop;
             }
             GoalCompletionGateOutcome::BudgetExhausted(_) => {}
@@ -2086,11 +2095,17 @@ pub async fn process_tool_calls_once(
     }
 
     if was_aborted || tool_initiated_stop {
-        maybe_save_trajectory(app.clone(), session_arc.clone()).await;
-    } else {
-        crate::chat::trajectories::maybe_save_trajectory_background(
+        maybe_save_trajectory_with_intent(
             app.clone(),
             session_arc.clone(),
+            TrajectoryCommitIntent::Required,
+        )
+        .await;
+    } else {
+        maybe_save_trajectory_background_with_intent(
+            app.clone(),
+            session_arc.clone(),
+            TrajectoryCommitIntent::Checkpoint,
         );
     }
 

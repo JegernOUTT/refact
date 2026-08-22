@@ -258,6 +258,23 @@ impl ExternalReloadPending {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrajectoryCommitIntent {
+    Required,
+    Checkpoint,
+    Ephemeral,
+}
+
+impl TrajectoryCommitIntent {
+    pub const fn persists(self) -> bool {
+        !matches!(self, Self::Ephemeral)
+    }
+
+    pub const fn requires_durability(self) -> bool {
+        matches!(self, Self::Required)
+    }
+}
+
 pub struct ChatSession {
     pub chat_id: String,
     pub derived_privacy_zones: Arc<StdRwLock<HashMap<PathBuf, String>>>,
@@ -299,6 +316,7 @@ pub struct ChatSession {
     pub last_tool_progress_at: Option<Instant>,
     pub trajectory_dirty: bool,
     pub trajectory_version: u64,
+    pub trajectory_committed_version: u64,
     pub trajectory_save_in_flight: bool,
     pub trajectory_save_queued: bool,
     pub trajectory_save_mutex: Arc<AMutex<()>>,

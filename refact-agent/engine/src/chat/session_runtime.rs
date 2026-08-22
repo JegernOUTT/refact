@@ -113,7 +113,12 @@ async fn migrate_legacy_frozen_prefix_on_open(
         }
     };
     if installed {
-        super::trajectories::maybe_save_trajectory(app, session_arc).await;
+        super::trajectories::maybe_save_trajectory_with_intent(
+            app,
+            session_arc,
+            TrajectoryCommitIntent::Required,
+        )
+        .await;
     }
 }
 
@@ -277,9 +282,7 @@ pub async fn get_or_create_session_with_trajectory(
                 );
             } else {
                 let mut session = session_arc.lock().await;
-                if session.trajectory_version == repaired_version {
-                    session.trajectory_dirty = false;
-                }
+                session.complete_trajectory_commit(repaired_version);
             }
         }
     }
@@ -367,7 +370,13 @@ async fn save_idle_session_for_cleanup(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> bool {
-    match super::trajectories::try_save_trajectory(app, session_arc).await {
+    match super::trajectories::try_save_trajectory_with_intent(
+        app,
+        session_arc,
+        TrajectoryCommitIntent::Required,
+    )
+    .await
+    {
         Ok(saved) => saved,
         Err(error) => {
             warn!("{}", error);
@@ -694,7 +703,12 @@ mod tests {
             .await
             .insert(chat_id.to_string(), session_arc.clone());
 
-        super::super::trajectories::maybe_save_trajectory(app.clone(), session_arc.clone()).await;
+        super::super::trajectories::maybe_save_trajectory_with_intent(
+            app.clone(),
+            session_arc.clone(),
+            TrajectoryCommitIntent::Required,
+        )
+        .await;
         let process_id = app
             .runtime
             .exec_registry
