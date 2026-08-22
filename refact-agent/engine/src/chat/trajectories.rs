@@ -18069,6 +18069,19 @@ mod tests {
 
     #[serial]
     #[tokio::test]
+    async fn trajectory_get_handler_returns_404_for_missing_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let err =
+            handle_v1_trajectories_get(State(app), AxumPath("nonexistent-chat-id".to_string()))
+                .await
+                .unwrap_err();
+        assert_eq!(err.status_code, StatusCode::NOT_FOUND);
+        assert_eq!(err.message, "Trajectory not found");
+    }
+
+    #[serial]
+    #[tokio::test]
     async fn trajectory_path_handler_returns_404_for_missing_chat() {
         let dir = tempfile::tempdir().unwrap();
         let (_gcx, app) = make_app_with_workspace(dir.path()).await;
