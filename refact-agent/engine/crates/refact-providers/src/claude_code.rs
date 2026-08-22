@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tokio::sync::{Mutex as AMutex, MutexGuard};
 
-use refact_core::provider_types::ImageTokenMode;
+use refact_core::provider_types::{available_model_from_catalog_and_live, LiveModelFields};
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
 use crate::claude_code_oauth::OAuthTokens;
@@ -639,7 +639,11 @@ available:
     }
 
     fn model_source(&self) -> ModelSource {
-        ModelSource::ModelCaps
+        if self.resolve_auth().is_ok() {
+            ModelSource::Api
+        } else {
+            ModelSource::ModelCaps
+        }
     }
 
     fn enabled_models(&self) -> &[String] {
@@ -662,9 +666,6 @@ available:
             model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
         }
         merge_custom_models(&mut models, custom_models, &enabled_set);
-        for model in &mut models {
-            model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
-        }
         models.sort_by(|a, b| a.id.cmp(&b.id));
         models
     }
@@ -683,7 +684,7 @@ available:
             }
         };
 
-        let api_model_ids = match fetch_claude_code_model_ids(http_client, &auth_token).await {
+        let api_models = match fetch_claude_code_models(http_client, &auth_token).await {
             Ok(models) => models,
             Err(e) => {
                 tracing::warn!("Claude Code: cannot fetch models from API: {}", e);
@@ -691,54 +692,8 @@ available:
             }
         };
 
-        tracing::info!("Claude Code: API returned {} models", api_model_ids.len());
-
-        let enabled_set: std::collections::HashSet<_> =
-            self.enabled_models.iter().map(|s| s.as_str()).collect();
-        let regex_opt = self
-            .model_filter_regex()
-            .and_then(|p| regex::Regex::new(p).ok());
-
-        let date_regex = regex::Regex::new(r"^(.+?)-\d{8}$").expect("valid static regex");
-        let mut models: Vec<AvailableModel> = Vec::new();
-        for api_id in &api_model_ids {
-            let matches_filter = match &regex_opt {
-                Some(regex) => regex.is_match(api_id),
-                None => true,
-            };
-            if !matches_filter {
-                continue;
-            }
-            let api_id_without_date = date_regex
-                .captures(api_id)
-                .and_then(|caps| caps.get(1))
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_else(|| api_id.clone());
-
-            if let Some(caps) = resolve_claude_code_api_model_caps(model_caps, &api_id_without_date)
-            {
-                let enabled = enabled_set.contains(api_id.as_str());
-                let pricing = self.custom_model_pricing(api_id);
-                let mut model = AvailableModel::from_caps(api_id, &caps.caps, enabled, pricing);
-                model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
-                if api_id != &caps.matched_key {
-                    model.display_name = Some(api_id.clone());
-                }
-                models.push(model);
-            } else {
-                tracing::warn!(
-                    "Claude Code: model '{}' is missing model capabilities metadata; using API defaults",
-                    api_id
-                );
-                let enabled = enabled_set.contains(api_id.as_str());
-                models.push(claude_code_api_model_without_caps(api_id, enabled));
-            }
-        }
-
-        merge_custom_models(&mut models, &self.custom_models, &enabled_set);
-
-        models.sort_by(|a, b| a.id.cmp(&b.id));
-        models
+        tracing::info!("Claude Code: API returned {} models", api_models.len());
+        claude_available_models_from_live(self, &api_models, model_caps)
     }
 
     fn set_model_enabled(&mut self, model_id: &str, enabled: bool) {
@@ -814,36 +769,6 @@ available:
     }
 }
 
-fn claude_code_api_model_without_caps(model_id: &str, enabled: bool) -> AvailableModel {
-    AvailableModel {
-        id: model_id.to_string(),
-        display_name: None,
-        n_ctx: 200000,
-        supports_tools: true,
-        supports_parallel_tools: true,
-        supports_strict_tools: false,
-        supports_multimodality: true,
-        image_max_side_px: None,
-        image_preferred_side_px: None,
-        image_token_mode: ImageTokenMode::default(),
-        reasoning_effort_options: None,
-        supports_thinking_budget: true,
-        supports_adaptive_thinking_budget: false,
-        supports_cache_control: SUPPORTS_CACHE_CONTROL,
-        tokenizer: Some("claude".to_string()),
-        enabled,
-        is_custom: false,
-        pricing: None,
-        available_providers: Vec::new(),
-        selected_provider: None,
-        max_output_tokens: None,
-        provider_variants: Vec::new(),
-        wire_format_override: None,
-        endpoint_override: None,
-        base_model: None,
-    }
-}
-
 fn resolve_claude_code_api_model_caps(
     model_caps: &HashMap<String, ModelCapabilities>,
     model_id: &str,
@@ -853,62 +778,192 @@ fn resolve_claude_code_api_model_caps(
     })
 }
 
+fn claude_live_string(model: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        model
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
+fn claude_live_usize(model: &Value, keys: &[&str]) -> Option<usize> {
+    keys.iter()
+        .find_map(|key| model.get(*key).and_then(Value::as_u64))
+        .and_then(|value| usize::try_from(value).ok())
+}
+
+fn claude_available_models_from_live(
+    provider: &ClaudeCodeProvider,
+    api_models: &[Value],
+    model_caps: &HashMap<String, ModelCapabilities>,
+) -> Vec<AvailableModel> {
+    let enabled_set: HashSet<_> = provider.enabled_models.iter().map(String::as_str).collect();
+    let date_regex = regex::Regex::new(r"^(.+?)-\d{8}$").expect("valid static regex");
+    let mut models = Vec::new();
+
+    for api_model in api_models {
+        let Some(api_id) = claude_live_string(api_model, &["id"]) else {
+            continue;
+        };
+        if !api_id.starts_with("claude-") {
+            continue;
+        }
+        let api_id_without_date = date_regex
+            .captures(&api_id)
+            .and_then(|caps| caps.get(1))
+            .map(|matched| matched.as_str())
+            .unwrap_or(&api_id);
+        let resolved = resolve_claude_code_api_model_caps(model_caps, api_id_without_date);
+        if resolved.is_none() {
+            tracing::warn!(
+                "Claude Code: model '{}' is missing model capabilities metadata; using API defaults",
+                api_id
+            );
+        }
+        let live = LiveModelFields {
+            display_name: claude_live_string(api_model, &["display_name", "displayName"]).or_else(
+                || {
+                    resolved
+                        .as_ref()
+                        .and_then(|caps| (api_id != caps.matched_key).then(|| api_id.clone()))
+                },
+            ),
+            n_ctx: claude_live_usize(
+                api_model,
+                &["context_window", "contextWindow", "max_context_window"],
+            ),
+            max_output_tokens: claude_live_usize(
+                api_model,
+                &["max_output_tokens", "maxOutputTokens"],
+            ),
+            supports_cache_control: Some(SUPPORTS_CACHE_CONTROL),
+            pricing: provider.custom_model_pricing(&api_id),
+            supports_tools: resolved.is_none().then_some(true),
+            supports_parallel_tools: resolved.is_none().then_some(true),
+            supports_multimodality: resolved.is_none().then_some(true),
+            supports_thinking_budget: resolved.is_none().then_some(true),
+            ..Default::default()
+        };
+        models.push(available_model_from_catalog_and_live(
+            &api_id,
+            resolved.as_ref().map(|caps| &caps.caps),
+            &live,
+            claude_live_model_is_enabled(&enabled_set, &api_id, api_id_without_date),
+            200_000,
+        ));
+    }
+
+    merge_custom_models(&mut models, &provider.custom_models, &enabled_set);
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models
+}
+
+fn claude_live_model_is_enabled(
+    enabled_set: &HashSet<&str>,
+    api_id: &str,
+    api_id_without_date: &str,
+) -> bool {
+    enabled_set.iter().any(|enabled_id| {
+        let unqualified = enabled_id
+            .rsplit_once('/')
+            .map_or(*enabled_id, |(_, id)| id);
+        let enabled_without_date = unqualified
+            .rsplit_once('-')
+            .filter(|(_, suffix)| {
+                suffix.len() == 8 && suffix.chars().all(|character| character.is_ascii_digit())
+            })
+            .map_or(unqualified, |(base, _)| base);
+        unqualified == api_id
+            || unqualified == api_id_without_date
+            || enabled_without_date == api_id_without_date
+    })
+}
+
 const ANTHROPIC_MODELS_URL: &str = "https://api.anthropic.com/v1/models";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const ANTHROPIC_MODELS_MAX_PAGES: usize = 20;
 
-/// Fetch available model IDs from the Anthropic API using OAuth credentials.
-/// Returns model IDs (e.g., "claude-sonnet-4-20250514") that can be matched against model_caps.
-pub async fn fetch_claude_code_model_ids(
+/// Fetch live model records from the Anthropic API using OAuth credentials.
+pub async fn fetch_claude_code_models(
     http_client: &reqwest::Client,
     auth_token: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<Value>, String> {
     if auth_token.is_empty() {
         return Err("empty auth token".to_string());
     }
 
     let betas = refact_llm::adapters::claude_code_compat::CC_OAUTH_BETAS.join(",");
-    let request = http_client
-        .get(ANTHROPIC_MODELS_URL)
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .header("content-type", "application/json")
-        .header("Authorization", format!("Bearer {}", auth_token))
-        .header("anthropic-beta", betas)
-        .header(
-            "user-agent",
-            refact_llm::adapters::claude_code_compat::USER_AGENT,
-        );
-
-    match request.send().await {
-        Ok(response) => {
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                let truncated: String = body.chars().take(512).collect();
-                return Err(format!(
-                    "Claude Code models API returned status {}: {}",
-                    status, truncated
-                ));
-            }
-            match response.json::<serde_json::Value>().await {
-                Ok(json) => json
-                    .get("data")
-                    .and_then(|d| d.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|m| {
-                                m.get("id").and_then(|id| id.as_str()).map(String::from)
-                            })
-                            .collect()
-                    })
-                    .ok_or_else(|| "Claude Code models response missing data array".to_string()),
-                Err(e) => Err(format!(
-                    "Failed to parse Claude Code models response: {}",
-                    e
-                )),
-            }
+    let mut models = Vec::new();
+    let mut after_id: Option<String> = None;
+    for _ in 0..ANTHROPIC_MODELS_MAX_PAGES {
+        let mut url = reqwest::Url::parse(ANTHROPIC_MODELS_URL)
+            .map_err(|error| format!("Failed to build Claude Code models URL: {error}"))?;
+        url.query_pairs_mut().append_pair("limit", "1000");
+        if let Some(cursor) = after_id.as_deref() {
+            url.query_pairs_mut().append_pair("after_id", cursor);
         }
-        Err(e) => Err(format!("Failed to fetch Claude Code models: {}", e)),
+        let request = http_client
+            .get(url)
+            .timeout(std::time::Duration::from_secs(8))
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .header("Authorization", format!("Bearer {}", auth_token))
+            .header("anthropic-beta", betas.as_str())
+            .header(
+                "user-agent",
+                refact_llm::adapters::claude_code_compat::USER_AGENT,
+            );
+        let response = request
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch Claude Code models: {}", e))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            let truncated: String = body.chars().take(512).collect();
+            return Err(format!(
+                "Claude Code models API returned status {}: {}",
+                status, truncated
+            ));
+        }
+        let json = response
+            .json::<Value>()
+            .await
+            .map_err(|e| format!("Failed to parse Claude Code models response: {}", e))?;
+        let page = json
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Claude Code models response missing data array".to_string())?;
+        models.extend(page.iter().cloned());
+        let Some(next_cursor) = claude_models_next_cursor(&json)? else {
+            return Ok(models);
+        };
+        if after_id.as_deref() == Some(next_cursor.as_str()) {
+            return Err("Claude Code models response repeated pagination cursor".to_string());
+        }
+        after_id = Some(next_cursor);
     }
+    Err(format!(
+        "Claude Code models API exceeded {} pagination pages",
+        ANTHROPIC_MODELS_MAX_PAGES
+    ))
+}
+
+fn claude_models_next_cursor(response: &Value) -> Result<Option<String>, String> {
+    if response.get("has_more").and_then(Value::as_bool) != Some(true) {
+        return Ok(None);
+    }
+    response
+        .get("last_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty())
+        .map(ToString::to_string)
+        .map(Some)
+        .ok_or_else(|| "Claude Code models response has_more without last_id".to_string())
 }
 
 #[cfg(test)]
@@ -976,6 +1031,134 @@ mod tests {
         model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
 
         assert!(model.supports_cache_control);
+    }
+
+    #[test]
+    fn claude_live_id_uses_catalog_then_live_and_custom_overrides() {
+        let mut provider = ClaudeCodeProvider {
+            enabled_models: vec!["claude-sonnet-4-20250514".to_string()],
+            ..Default::default()
+        };
+        let model_caps = HashMap::from([(
+            "anthropic/claude-sonnet-4".to_string(),
+            ModelCapabilities {
+                n_ctx: 200_000,
+                supports_tools: true,
+                tokenizer: "claude".to_string(),
+                ..Default::default()
+            },
+        )]);
+        let live = vec![json!({
+            "id": "claude-sonnet-4-20250514",
+            "display_name": "Live Sonnet",
+            "context_window": 250_000,
+            "max_output_tokens": 32_000
+        })];
+
+        let models = claude_available_models_from_live(&provider, &live, &model_caps);
+        let model = models
+            .iter()
+            .find(|model| model.id == "claude-sonnet-4-20250514")
+            .unwrap();
+        assert!(model.supports_tools);
+        assert_eq!(model.display_name.as_deref(), Some("Live Sonnet"));
+        assert_eq!(model.n_ctx, 250_000);
+        assert_eq!(model.max_output_tokens, Some(32_000));
+
+        provider.custom_models.insert(
+            "claude-sonnet-4-20250514".to_string(),
+            CustomModelConfig {
+                n_ctx: Some(123_000),
+                supports_tools: Some(false),
+                ..Default::default()
+            },
+        );
+        let models = claude_available_models_from_live(&provider, &live, &model_caps);
+        let model = models
+            .iter()
+            .find(|model| model.id == "claude-sonnet-4-20250514")
+            .unwrap();
+        assert!(model.is_custom);
+        assert_eq!(model.n_ctx, 123_000);
+        assert!(!model.supports_tools);
+        assert!(model.supports_cache_control);
+    }
+
+    #[test]
+    fn uncatalogued_claude_live_models_keep_api_fallback_capabilities() {
+        let provider = ClaudeCodeProvider {
+            enabled_models: vec!["anthropic/claude-future-5".to_string()],
+            ..Default::default()
+        };
+        let models = claude_available_models_from_live(
+            &provider,
+            &[json!({ "id": "claude-future-5-20270101" })],
+            &HashMap::new(),
+        );
+        let model = models
+            .iter()
+            .find(|model| model.id == "claude-future-5-20270101")
+            .unwrap();
+
+        assert!(model.enabled);
+        assert!(model.supports_tools);
+        assert!(model.supports_parallel_tools);
+        assert!(model.supports_multimodality);
+        assert!(model.supports_cache_control);
+        assert!(model.supports_thinking_budget);
+    }
+
+    #[test]
+    fn claude_live_models_accept_qualified_exact_base_and_dated_enabled_ids() {
+        let api_id = "claude-sonnet-4-20250514";
+        let base_id = "claude-sonnet-4";
+        for enabled_id in [
+            api_id,
+            base_id,
+            "anthropic/claude-sonnet-4",
+            "claude_code/claude-sonnet-4-20250514",
+        ] {
+            let enabled_set = HashSet::from([enabled_id]);
+            assert!(
+                claude_live_model_is_enabled(&enabled_set, api_id, base_id),
+                "{enabled_id} should enable {api_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_models_pagination_uses_anthropic_cursor_fields() {
+        assert_eq!(
+            claude_models_next_cursor(&json!({
+                "has_more": true,
+                "first_id": "first",
+                "last_id": "last"
+            }))
+            .unwrap(),
+            Some("last".to_string())
+        );
+        assert_eq!(
+            claude_models_next_cursor(&json!({ "has_more": false, "last_id": "last" })).unwrap(),
+            None
+        );
+        assert!(claude_models_next_cursor(&json!({ "has_more": true })).is_err());
+    }
+
+    #[test]
+    fn claude_code_model_source_uses_api_when_authenticated() {
+        assert_eq!(
+            ClaudeCodeProvider::default().model_source(),
+            ModelSource::ModelCaps
+        );
+        let provider = ClaudeCodeProvider {
+            oauth_tokens: OAuthTokens {
+                access_token: "valid".to_string(),
+                expires_at: i64::MAX,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(provider.model_source(), ModelSource::Api);
     }
 
     #[test]

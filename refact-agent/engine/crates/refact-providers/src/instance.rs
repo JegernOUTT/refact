@@ -200,7 +200,7 @@ impl ProviderTrait for ProviderInstance {
         model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Vec<AvailableModel> {
         self.inner
-            .fetch_available_models(http_client, model_caps)
+            .fetch_available_models_for_instance(&self.instance_id, http_client, model_caps)
             .await
     }
 

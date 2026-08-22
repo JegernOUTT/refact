@@ -6,13 +6,15 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use refact_core::provider_types::ImageTokenMode;
+use refact_core::provider_types::{
+    AvailableModel, LiveModelFields, available_model_from_catalog_and_live,
+};
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
 use crate::traits::{
     derive_endpoint_from_chat_url, merge_custom_models, normalize_endpoint, parse_custom_models,
-    parse_enabled_models, set_model_enabled_impl, AvailableModel, CustomModelConfig, ModelPricing,
-    ModelSource, ProviderRuntime, ProviderTrait,
+    parse_enabled_models, set_model_enabled_impl, CustomModelConfig, ModelPricing, ModelSource,
+    ProviderRuntime, ProviderTrait,
 };
 
 const DEFAULT_OLLAMA_N_CTX: usize = 32_768;
@@ -64,6 +66,7 @@ impl OllamaProvider {
         model: &Value,
         show_model: Option<&Value>,
         enabled: bool,
+        model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Option<AvailableModel> {
         let name = Self::model_name(model)?.to_string();
         let tags_metadata = Self::parse_model_metadata(model);
@@ -72,8 +75,7 @@ impl OllamaProvider {
         let n_ctx = show_metadata
             .as_ref()
             .and_then(|m| m.n_ctx)
-            .or(tags_metadata.n_ctx)
-            .unwrap_or(DEFAULT_OLLAMA_N_CTX);
+            .or(tags_metadata.n_ctx);
         let family = show_metadata
             .as_ref()
             .and_then(|m| m.family.as_deref())
@@ -93,13 +95,11 @@ impl OllamaProvider {
         let supports_tools = show_metadata
             .as_ref()
             .and_then(|m| m.supports_tools)
-            .or(tags_metadata.supports_tools)
-            .unwrap_or_else(|| Self::family_supports_tools(family, families));
+            .or(tags_metadata.supports_tools);
         let supports_multimodality = show_metadata
             .as_ref()
             .and_then(|m| m.supports_multimodality)
-            .or(tags_metadata.supports_multimodality)
-            .unwrap_or_else(|| Self::family_supports_vision(family, families));
+            .or(tags_metadata.supports_multimodality);
 
         let display_name = if parameter_size.is_empty() {
             None
@@ -107,33 +107,49 @@ impl OllamaProvider {
             Some(format!("{} ({})", name, parameter_size))
         };
 
-        Some(AvailableModel {
-            id: name,
+        let live = LiveModelFields {
             display_name,
             n_ctx,
             supports_tools,
             supports_parallel_tools: supports_tools,
-            supports_strict_tools: false,
             supports_multimodality,
-            image_max_side_px: None,
-            image_preferred_side_px: None,
-            image_token_mode: ImageTokenMode::default(),
-            reasoning_effort_options: None,
-            supports_thinking_budget: false,
-            supports_adaptive_thinking_budget: false,
-            supports_cache_control: false,
-            tokenizer: None,
+            ..Default::default()
+        };
+        let catalog = Self::catalog_caps(model_caps, &name);
+        let mut available = available_model_from_catalog_and_live(
+            &name,
+            catalog,
+            &live,
             enabled,
-            is_custom: false,
-            pricing: None,
-            available_providers: Vec::new(),
-            selected_provider: None,
-            max_output_tokens: None,
-            provider_variants: Vec::new(),
-            wire_format_override: None,
-            endpoint_override: None,
-            base_model: None,
-        })
+            DEFAULT_OLLAMA_N_CTX,
+        );
+        if catalog.is_none() {
+            if live.supports_tools.is_none() {
+                available.supports_tools = Self::family_supports_tools(family, families);
+                available.supports_parallel_tools = available.supports_tools;
+            }
+            if live.supports_multimodality.is_none() {
+                available.supports_multimodality = Self::family_supports_vision(family, families);
+            }
+        }
+        Some(available)
+    }
+
+    fn catalog_caps<'a>(
+        model_caps: &'a HashMap<String, ModelCapabilities>,
+        id: &str,
+    ) -> Option<&'a ModelCapabilities> {
+        let without_latest = id.strip_suffix(":latest").unwrap_or(id);
+        let bare = without_latest.split(':').next().unwrap_or(without_latest);
+        for alias in [id, without_latest, bare] {
+            if let Some(caps) = model_caps
+                .get(&format!("ollama/{alias}"))
+                .or_else(|| model_caps.get(alias))
+            {
+                return Some(caps);
+            }
+        }
+        None
     }
 
     fn model_name(model: &Value) -> Option<&str> {
@@ -539,7 +555,7 @@ available:
     async fn fetch_available_models(
         &self,
         http_client: &reqwest::Client,
-        _model_caps: &HashMap<String, ModelCapabilities>,
+        model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Vec<AvailableModel> {
         let base_url = normalize_endpoint(&self.endpoint);
         let tags_url = format!("{}/api/tags", base_url);
@@ -587,7 +603,8 @@ available:
             let show_model = self
                 .fetch_ollama_show_model(http_client, &show_url, &name)
                 .await;
-            if let Some(model) = Self::parse_ollama_model(&tag_model, show_model.as_ref(), enabled)
+            if let Some(model) =
+                Self::parse_ollama_model(&tag_model, show_model.as_ref(), enabled, model_caps)
             {
                 models.push(model);
             }
@@ -602,6 +619,55 @@ available:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ollama_absent_live_fields_preserve_catalog_and_live_context_overrides() {
+        let caps = HashMap::from([(
+            "ollama/gemma3".to_string(),
+            ModelCapabilities {
+                n_ctx: 8_192,
+                supports_tools: true,
+                supports_parallel_tools: true,
+                supports_vision: true,
+                ..Default::default()
+            },
+        )]);
+        let tags = json!({"name": "gemma3:4b", "context_length": 32_768});
+        let model = OllamaProvider::parse_ollama_model(&tags, None, false, &caps).unwrap();
+
+        assert_eq!(model.n_ctx, 32_768);
+        assert!(model.supports_tools);
+        assert!(model.supports_multimodality);
+    }
+
+    #[test]
+    fn ollama_explicit_false_overwrites_catalog_true() {
+        let caps = HashMap::from([(
+            "ollama/gemma3".to_string(),
+            ModelCapabilities {
+                n_ctx: 8_192,
+                supports_tools: true,
+                supports_vision: true,
+                ..Default::default()
+            },
+        )]);
+        let tags = json!({"name": "gemma3:4b"});
+        let show = json!({"capabilities": []});
+        let model = OllamaProvider::parse_ollama_model(&tags, Some(&show), false, &caps).unwrap();
+
+        assert!(!model.supports_tools);
+        assert!(!model.supports_multimodality);
+    }
+
+    #[test]
+    fn ollama_custom_only_addition_is_preserved_for_backwards_compatibility() {
+        let mut provider = OllamaProvider::default();
+        provider
+            .custom_models
+            .insert("custom-only".to_string(), CustomModelConfig::default());
+
+        assert_eq!(provider.get_custom_models_only()[0].id, "custom-only");
+    }
 
     #[test]
     fn ollama_runtime_disables_cache_control_by_default() {
@@ -702,7 +768,8 @@ mod tests {
             }
         });
 
-        let model = OllamaProvider::parse_ollama_model(&tags, Some(&show), false).unwrap();
+        let model =
+            OllamaProvider::parse_ollama_model(&tags, Some(&show), false, &HashMap::new()).unwrap();
 
         assert_eq!(model.n_ctx, 131_072);
     }
@@ -724,7 +791,8 @@ mod tests {
             }
         });
 
-        let model = OllamaProvider::parse_ollama_model(&tags, Some(&show), false).unwrap();
+        let model =
+            OllamaProvider::parse_ollama_model(&tags, Some(&show), false, &HashMap::new()).unwrap();
 
         assert_eq!(model.n_ctx, 65_536);
     }
@@ -744,7 +812,8 @@ mod tests {
             }
         });
 
-        let model = OllamaProvider::parse_ollama_model(&tags, Some(&show), false).unwrap();
+        let model =
+            OllamaProvider::parse_ollama_model(&tags, Some(&show), false, &HashMap::new()).unwrap();
 
         assert!(model.supports_tools);
         assert!(model.supports_parallel_tools);
@@ -768,7 +837,8 @@ mod tests {
             }
         });
 
-        let model = OllamaProvider::parse_ollama_model(&tags, Some(&show), false).unwrap();
+        let model =
+            OllamaProvider::parse_ollama_model(&tags, Some(&show), false, &HashMap::new()).unwrap();
 
         assert!(!model.supports_tools);
         assert!(!model.supports_parallel_tools);
@@ -787,7 +857,7 @@ mod tests {
             }
         });
 
-        let model = OllamaProvider::parse_ollama_model(&tags, None, true).unwrap();
+        let model = OllamaProvider::parse_ollama_model(&tags, None, true, &HashMap::new()).unwrap();
 
         assert_eq!(model.id, "llama3.1:8b");
         assert_eq!(model.display_name.as_deref(), Some("llama3.1:8b (8B)"));

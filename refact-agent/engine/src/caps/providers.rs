@@ -18,6 +18,11 @@ pub use refact_caps_core::provider_config::{
     extend_model_collection, set_field_if_exists,
 };
 
+const LITELLM_PROVIDER_TEMPLATE: &str = r#"
+wire_format: openai_chat_completions
+supports_completion: false
+"#;
+
 const PROVIDER_TEMPLATES: &[(&str, &str)] = &[
     (
         "anthropic",
@@ -55,6 +60,7 @@ const PROVIDER_TEMPLATES: &[(&str, &str)] = &[
         "lmstudio",
         include_str!("../yaml_configs/default_providers/lmstudio.yaml"),
     ),
+    ("litellm", LITELLM_PROVIDER_TEMPLATE),
     (
         "minimax",
         include_str!("../yaml_configs/default_providers/minimax.yaml"),
@@ -260,12 +266,15 @@ pub async fn read_providers_d(
             }
         };
 
-        if identity.base_provider != "custom" && config_file_value.get("credential").is_some() {
+        let supports_command_credential =
+            matches!(identity.base_provider.as_str(), "custom" | "litellm");
+        if !supports_command_credential && config_file_value.get("credential").is_some() {
             error_log.push(YamlError {
                 path: yaml_path.to_string_lossy().to_string(),
                 error_line: 0,
-                error_msg: "command credentials are supported only for custom providers"
-                    .to_string(),
+                error_msg:
+                    "command credentials are supported only for custom and litellm providers"
+                        .to_string(),
             });
             continue;
         }
@@ -300,12 +309,15 @@ pub async fn read_providers_d(
             provider
         };
 
-        if provider.credential.is_some() && provider.base_provider != "custom" {
+        if provider.credential.is_some()
+            && !matches!(provider.base_provider.as_str(), "custom" | "litellm")
+        {
             error_log.push(YamlError {
                 path: yaml_path.to_string_lossy().to_string(),
                 error_line: 0,
-                error_msg: "command credentials are supported only for custom providers"
-                    .to_string(),
+                error_msg:
+                    "command credentials are supported only for custom and litellm providers"
+                        .to_string(),
             });
             continue;
         }
@@ -1054,16 +1066,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn providers_d_rejects_invalid_dual_and_non_custom_command_credentials() {
+    async fn litellm_alias_with_command_credential_loads_and_propagates_to_models() {
+        let temp = tempfile::tempdir().unwrap();
+        write_provider_config(
+            &temp,
+            "gateway.yaml",
+            "base_provider: litellm\nendpoint: https://gateway.example/v1\nenabled: true\nenabled_models:\n  - chat-model\ncredential:\n  type: command\n  command: credential-helper\n  args: [token]\n",
+        )
+        .await;
+
+        let (mut providers, errors) = read_providers_d(Vec::new(), temp.path(), false).await;
+
+        assert!(errors.is_empty(), "{}", errors.len());
+        assert_eq!(providers.len(), 1);
+        let provider = providers.first_mut().unwrap();
+        assert_eq!(provider.name, "gateway");
+        assert_eq!(provider.base_provider, "litellm");
+        assert!(provider.credential.is_some());
+        post_process_provider(provider, false, false);
+
+        let mut caps = CodeAssistantCaps::default();
+        add_models_to_caps(&mut caps, providers);
+        let model = &caps.chat_models["gateway/chat-model"].base;
+        assert!(model.api_key.is_empty());
+        assert!(model.credential.is_some());
+    }
+
+    #[tokio::test]
+    async fn providers_d_rejects_invalid_and_dual_litellm_and_unsupported_credentials() {
         let temp = tempfile::tempdir().unwrap();
         for (name, yaml) in [
             (
-                "invalid_custom.yaml",
-                "base_provider: custom\ncredential:\n  type: command\n  command: ''\n",
+                "invalid_litellm.yaml",
+                "base_provider: litellm\ncredential:\n  type: command\n  command: ''\n",
             ),
             (
-                "dual_custom.yaml",
-                "base_provider: custom\napi_key: secret\ncredential:\n  type: command\n  command: helper\n",
+                "dual_litellm.yaml",
+                "base_provider: litellm\napi_key: secret\ncredential:\n  type: command\n  command: helper\n",
             ),
             (
                 "openai_command.yaml",
@@ -1087,9 +1126,8 @@ mod tests {
         assert!(messages
             .iter()
             .any(|message| message.contains("mutually exclusive")));
-        assert!(messages
-            .iter()
-            .any(|message| message.contains("only for custom providers")));
+        assert!(messages.iter().any(|message| *message
+            == "command credentials are supported only for custom and litellm providers"));
     }
 
     #[test]

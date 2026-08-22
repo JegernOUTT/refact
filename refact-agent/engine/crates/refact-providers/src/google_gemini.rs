@@ -1,11 +1,13 @@
 use std::any::Any;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use refact_core::model_caps::{resolve_model_caps, ModelCapabilities, ResolvedCaps};
+use refact_core::provider_types::{available_model_from_catalog_and_live, LiveModelFields};
 use refact_core::llm_types::WireFormat;
 use crate::config::resolve_env_var;
 use crate::traits::{
@@ -14,6 +16,7 @@ use crate::traits::{
 };
 
 const GEMINI_MODELS_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+const GEMINI_MODELS_MAX_PAGES: usize = 100;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GoogleGeminiProvider {
@@ -32,11 +35,16 @@ pub struct GoogleGeminiHealthInfo {
 }
 
 impl GoogleGeminiProvider {
+    fn live_model_enabled(enabled_set: &std::collections::HashSet<&str>, id: &str) -> bool {
+        enabled_set.contains(id)
+            || enabled_set.contains(format!("google/{id}").as_str())
+            || enabled_set.contains(format!("google_gemini/{id}").as_str())
+    }
+
     fn parse_gemini_model(
         model: &serde_json::Value,
         enabled: bool,
-        caps: &ModelCapabilities,
-        pricing: Option<ModelPricing>,
+        caps: Option<&ModelCapabilities>,
     ) -> Option<AvailableModel> {
         let name = model.get("name")?.as_str()?;
         let id = name.strip_prefix("models/").unwrap_or(name).to_string();
@@ -51,13 +59,24 @@ impl GoogleGeminiProvider {
             return None;
         }
 
-        let display_name = model
-            .get("displayName")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let mut available = AvailableModel::from_caps(&id, caps, enabled, pricing);
-        available.display_name = display_name;
-        Some(available)
+        let live = LiveModelFields {
+            display_name: model
+                .get("displayName")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            n_ctx: model
+                .get("inputTokenLimit")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| usize::try_from(v).ok()),
+            max_output_tokens: model
+                .get("outputTokenLimit")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| usize::try_from(v).ok()),
+            ..Default::default()
+        };
+        Some(available_model_from_catalog_and_live(
+            &id, caps, &live, enabled, 128_000,
+        ))
     }
 
     fn resolve_models_dev_caps(
@@ -65,6 +84,7 @@ impl GoogleGeminiProvider {
         id: &str,
     ) -> Option<ResolvedCaps> {
         resolve_model_caps(model_caps, &format!("google/{id}"))
+            .or_else(|| resolve_model_caps(model_caps, &format!("google_gemini/{id}")))
             .or_else(|| resolve_model_caps(model_caps, id))
     }
 
@@ -103,7 +123,7 @@ impl GoogleGeminiProvider {
         let response = Self::models_request(http_client, &api_key, 1, None)?
             .send()
             .await
-            .map_err(|e| format!("Google Gemini models request failed: {e}"))?;
+            .map_err(|_| "Google Gemini models request failed".to_string())?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -288,8 +308,9 @@ available:
 
         let mut all_models: Vec<AvailableModel> = Vec::new();
         let mut page_token: Option<String> = None;
+        let mut seen_tokens = HashSet::new();
 
-        loop {
+        for _ in 0..GEMINI_MODELS_MAX_PAGES {
             let request =
                 match Self::models_request(http_client, &api_key, 1000, page_token.as_deref()) {
                     Ok(request) => request,
@@ -300,8 +321,8 @@ available:
                 };
             let response = match request.send().await {
                 Ok(resp) => resp,
-                Err(e) => {
-                    tracing::warn!("Google Gemini: failed to fetch models: {}", e);
+                Err(_) => {
+                    tracing::warn!("Google Gemini: failed to fetch models");
                     return self.get_custom_models_only();
                 }
             };
@@ -330,30 +351,31 @@ available:
                         .map(|name| name.strip_prefix("models/").unwrap_or(name));
 
                     if let Some(id) = model_id {
-                        let enabled = enabled_set.contains(id);
-                        let Some(resolved_caps) = Self::resolve_models_dev_caps(model_caps, id)
-                        else {
-                            continue;
-                        };
-                        let pricing = self
-                            .custom_model_pricing(id)
-                            .or_else(|| resolved_caps.caps.pricing.clone());
-                        if let Some(model) =
-                            Self::parse_gemini_model(m, enabled, &resolved_caps.caps, pricing)
-                        {
+                        let enabled = Self::live_model_enabled(&enabled_set, id);
+                        let resolved_caps = Self::resolve_models_dev_caps(model_caps, id);
+                        if let Some(model) = Self::parse_gemini_model(
+                            m,
+                            enabled,
+                            resolved_caps.as_ref().map(|resolved| &resolved.caps),
+                        ) {
                             all_models.push(model);
                         }
                     }
                 }
             }
 
-            page_token = json
+            let next_page_token = json
                 .get("nextPageToken")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            if page_token.is_none() {
+            let Some(next_page_token) = next_page_token else {
+                break;
+            };
+            if !seen_tokens.insert(next_page_token.clone()) {
+                tracing::warn!("Google Gemini: repeated models pagination token");
                 break;
             }
+            page_token = Some(next_page_token);
         }
 
         merge_custom_models(&mut all_models, &self.custom_models, &enabled_set);
@@ -399,11 +421,11 @@ mod tests {
         };
 
         let model =
-            GoogleGeminiProvider::parse_gemini_model(&live_model, true, &caps, None).unwrap();
+            GoogleGeminiProvider::parse_gemini_model(&live_model, true, Some(&caps)).unwrap();
 
         assert_eq!(model.id, "gemini-test");
-        assert_eq!(model.n_ctx, 12_345);
-        assert_eq!(model.max_output_tokens, Some(678));
+        assert_eq!(model.n_ctx, 999_999);
+        assert_eq!(model.max_output_tokens, Some(99_999));
         assert!(!model.supports_tools);
         assert!(!model.supports_parallel_tools);
         assert!(!model.supports_strict_tools);
@@ -431,7 +453,7 @@ mod tests {
         };
 
         let model =
-            GoogleGeminiProvider::parse_gemini_model(&live_model, false, &caps, None).unwrap();
+            GoogleGeminiProvider::parse_gemini_model(&live_model, false, Some(&caps)).unwrap();
 
         assert!(model.supports_tools);
         assert!(model.supports_parallel_tools);
@@ -439,12 +461,25 @@ mod tests {
     }
 
     #[test]
-    fn test_models_dev_gemini_unknown_live_models_are_hidden() {
+    fn test_gemini_unknown_live_generate_content_model_is_retained() {
         let empty_caps = HashMap::new();
-        assert!(
+        let live_model = json!({
+            "name": "models/gemini-uncataloged",
+            "supportedGenerationMethods": ["generateContent"],
+            "inputTokenLimit": 321000,
+            "outputTokenLimit": 12345
+        });
+        let model = GoogleGeminiProvider::parse_gemini_model(
+            &live_model,
+            false,
             GoogleGeminiProvider::resolve_models_dev_caps(&empty_caps, "gemini-uncataloged")
-                .is_none()
-        );
+                .as_ref()
+                .map(|resolved| &resolved.caps),
+        )
+        .unwrap();
+        assert_eq!(model.id, "gemini-uncataloged");
+        assert_eq!(model.n_ctx, 321_000);
+        assert_eq!(model.max_output_tokens, Some(12_345));
 
         let mut model_caps = HashMap::new();
         model_caps.insert(
@@ -458,6 +493,15 @@ mod tests {
             GoogleGeminiProvider::resolve_models_dev_caps(&model_caps, "gemini-cataloged")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn test_gemini_provider_qualified_enabled_ids_match_live_models() {
+        let enabled = std::collections::HashSet::from(["google_gemini/gemini-test"]);
+        assert!(GoogleGeminiProvider::live_model_enabled(
+            &enabled,
+            "gemini-test"
+        ));
     }
 
     #[test]

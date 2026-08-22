@@ -65,12 +65,13 @@ refact ui --no-open    # Print the URL, skip browser launch
 
 These are useful for scripts, Docker containers, or remote machines where you just need the URL to paste into a browser on another device.
 
-### Custom-provider command credentials
+### LiteLLM fast setup and command credentials
 
-For a custom provider whose credential comes from a local helper, use this shape in its **user-level** `~/.config/refact/providers.d/*.yaml` file:
+To connect a generic LiteLLM gateway whose credential comes from a local helper, create a **user-level** file such as `~/.config/refact/providers.d/team-gateway.yaml`:
 
 ```yaml
-base_provider: custom
+base_provider: litellm
+endpoint: https://gateway.example/v1
 api_key: ""
 credential:
   type: command
@@ -80,9 +81,14 @@ credential:
   refresh_interval_ms: 300000
   # cwd: /optional/working/directory
   # env_passthrough: ["PROFILE_NAME", "CREDENTIAL_*"]
+enabled: true
+# Optional: discovered models are enabled by default.
+# disabled_models: [legacy-model]
 ```
 
-The command credential is mutually exclusive with a non-empty `api_key`; static keys and existing `$ENV_VAR` key references continue to work unchanged. `cwd` and `env_passthrough` are optional. If omitted, `timeout_ms` defaults to 5,000 ms and `refresh_interval_ms` to 300,000 ms. The helper runs directly with `args`, without a shell, and receives a scrubbed, platform-safe baseline environment plus only the variables explicitly selected by `env_passthrough`. Command credentials are restricted to user-level provider configs, not project configuration.
+Refact loads every accessible model alias dynamically from `/v1/models` and enriches its capabilities with `/v1/model/info` when that endpoint is available, avoiding hand-written model records. Discovered aliases are enabled by default; per-model opt-outs are persisted in `disabled_models`. Aliases identified as Responses models route to `/v1/responses`; other aliases use the appropriate OpenAI-compatible chat route.
+
+The command credential is mutually exclusive with a non-empty `api_key`; static keys and existing `$ENV_VAR` key references continue to work unchanged. `cwd` and `env_passthrough` are optional. If omitted, `timeout_ms` defaults to 5,000 ms and `refresh_interval_ms` to 300,000 ms. The helper runs directly with `args`, without a shell, and receives a scrubbed, platform-safe baseline environment plus only the variables explicitly selected by `env_passthrough`. Command credentials are accepted only for `custom` and `litellm` base providers and are restricted to user-level provider configs, not project configuration.
 
 The credential is cached only in memory, refreshed when its TTL expires, and refreshed once more after a provider responds with 401 or 403 before that request is retried. Helper output is never persisted, returned by the GUI, or shown in errors. For failures, check the executable path, `cwd`, timeout, exit status, non-empty UTF-8 stdout, output size, and required passthrough variables by running the helper locally; diagnostics intentionally do not echo its stdout or stderr.
 

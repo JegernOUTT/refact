@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use refact_core::provider_types::ImageTokenMode;
+use refact_core::provider_types::{available_model_from_catalog_and_live, LiveModelFields};
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
 use crate::github_copilot_oauth::{resolve_api_base, OAuthTokens};
@@ -212,18 +212,17 @@ impl GitHubCopilotProvider {
             if !Self::live_model_is_available(model) {
                 continue;
             }
-            let enabled = enabled_set.contains(id);
-            let pricing = self.custom_model_pricing(id);
-            let mut available = if let Some(caps) = Self::resolve_catalog_caps(model_caps, id) {
-                AvailableModel::from_caps(id, caps, enabled, pricing)
-            } else {
-                self.unknown_live_model(id.to_string(), enabled, pricing.clone(), model)
-            };
-
-            available.display_name =
-                Self::live_model_display_name(model).or(available.display_name);
-            self.apply_live_capabilities(&mut available, model);
-            self.apply_endpoint_override(&mut available, model, api_base);
+            let enabled = enabled_set.contains(id)
+                || enabled_set.contains(format!("github-copilot/{id}").as_str())
+                || enabled_set.contains(format!("github_copilot/{id}").as_str());
+            let live = Self::live_fields(model, api_base);
+            let available = available_model_from_catalog_and_live(
+                id,
+                Self::resolve_catalog_caps(model_caps, id),
+                &live,
+                enabled,
+                8192,
+            );
             models_map.insert(id.to_string(), available);
         }
 
@@ -300,21 +299,21 @@ impl GitHubCopilotProvider {
     }
 
     fn live_reasoning_effort(model: &Value) -> Option<Vec<String>> {
-        let efforts = Self::live_supports(model)?
-            .get("reasoning_effort")
-            .and_then(Value::as_array)?
-            .iter()
-            .filter_map(|value| value.as_str().map(ToString::to_string))
-            .collect::<Vec<_>>();
-        (!efforts.is_empty()).then_some(efforts)
+        Some(
+            Self::live_supports(model)?
+                .get("reasoning_effort")
+                .and_then(Value::as_array)?
+                .iter()
+                .filter_map(|value| value.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>(),
+        )
     }
 
-    fn live_supports_vision(model: &Value) -> bool {
-        if Self::live_supports(model)
+    fn live_supports_vision(model: &Value) -> Option<bool> {
+        if let Some(vision) = Self::live_supports(model)
             .and_then(|supports| Self::live_bool_field(supports, "vision"))
-            .unwrap_or(false)
         {
-            return true;
+            return Some(vision);
         }
         Self::live_limits(model)
             .and_then(|limits| limits.get("vision"))
@@ -326,136 +325,77 @@ impl GitHubCopilotProvider {
                     .filter_map(Value::as_str)
                     .any(|media_type| media_type.starts_with("image/"))
             })
-            .unwrap_or(false)
     }
 
-    fn apply_live_capabilities(&self, available: &mut AvailableModel, model: &Value) {
-        if let Some(limits) = Self::live_limits(model) {
-            if let Some(n_ctx) = Self::live_usize_field(limits, "max_context_window_tokens") {
-                available.n_ctx = n_ctx;
-            } else if let Some(n_ctx) = Self::live_usize_field(limits, "max_prompt_tokens") {
-                available.n_ctx = n_ctx;
-            }
-            if let Some(max_output) = Self::live_usize_field(limits, "max_output_tokens") {
-                available.max_output_tokens = Some(max_output);
-            }
-        }
-        if let Some(supports) = Self::live_supports(model) {
-            if let Some(tool_calls) = Self::live_bool_field(supports, "tool_calls") {
-                available.supports_tools = tool_calls;
-            }
-            if let Some(structured) = Self::live_bool_field(supports, "structured_outputs") {
-                available.supports_strict_tools = structured;
-            }
-            if let Some(adaptive) = Self::live_bool_field(supports, "adaptive_thinking") {
-                available.supports_adaptive_thinking_budget = adaptive;
-            }
-            available.supports_thinking_budget = available.supports_thinking_budget
-                || supports.get("max_thinking_budget").is_some()
-                || supports.get("min_thinking_budget").is_some();
-        }
-        available.supports_multimodality = Self::live_supports_vision(model);
-        if let Some(reasoning) = Self::live_reasoning_effort(model) {
-            available.reasoning_effort_options = Some(reasoning);
-        }
-    }
-
-    fn apply_endpoint_override(
-        &self,
-        available: &mut AvailableModel,
-        model: &Value,
-        api_base: &str,
-    ) {
+    fn live_endpoint_fields(model: &Value, api_base: &str) -> (Option<WireFormat>, Option<String>) {
         let Some(endpoints) = model.get("supported_endpoints").and_then(Value::as_array) else {
-            return;
+            return (None, None);
         };
         let endpoint_values: Vec<&str> = endpoints.iter().filter_map(Value::as_str).collect();
         let api_base = api_base.trim_end_matches('/');
-        if endpoint_values
-            .iter()
-            .any(|endpoint| *endpoint == "/v1/messages")
+        let messages = endpoint_values.contains(&"/v1/messages");
+        let chat = endpoint_values.contains(&"/v1/chat/completions");
+        let responses =
+            endpoint_values.contains(&"/v1/responses") || endpoint_values.contains(&"/responses");
+        if [messages, chat, responses]
+            .into_iter()
+            .filter(|present| *present)
+            .count()
+            != 1
         {
-            available.wire_format_override = Some(WireFormat::AnthropicMessages);
-            available.endpoint_override = Some(format!("{}/v1/messages", api_base));
-        } else if endpoint_values
-            .iter()
-            .any(|endpoint| *endpoint == "/v1/chat/completions")
-        {
-            available.wire_format_override = Some(WireFormat::OpenaiChatCompletions);
-            available.endpoint_override = Some(format!("{}/v1/chat/completions", api_base));
-        } else if endpoint_values
-            .iter()
-            .any(|endpoint| *endpoint == "/v1/responses")
-        {
-            available.wire_format_override = Some(WireFormat::OpenaiResponses);
-            available.endpoint_override = Some(format!("{}/v1/responses", api_base));
-        } else if endpoint_values
-            .iter()
-            .any(|endpoint| *endpoint == "/responses")
-        {
-            available.wire_format_override = Some(WireFormat::OpenaiResponses);
-            available.endpoint_override = Some(format!("{}/responses", api_base));
+            return (None, None);
         }
+        if chat {
+            return (
+                Some(WireFormat::OpenaiChatCompletions),
+                Some(format!("{api_base}/v1/chat/completions")),
+            );
+        }
+        if responses {
+            let path = if endpoint_values.contains(&"/v1/responses") {
+                "/v1/responses"
+            } else {
+                "/responses"
+            };
+            return (
+                Some(WireFormat::OpenaiResponses),
+                Some(format!("{api_base}{path}")),
+            );
+        }
+        (
+            Some(WireFormat::AnthropicMessages),
+            Some(format!("{api_base}/v1/messages")),
+        )
     }
 
-    fn unknown_live_model(
-        &self,
-        id: String,
-        enabled: bool,
-        pricing: Option<ModelPricing>,
-        model: &Value,
-    ) -> AvailableModel {
-        let n_ctx = Self::live_limits(model)
-            .and_then(|limits| Self::live_usize_field(limits, "max_context_window_tokens"))
-            .or_else(|| {
-                Self::live_limits(model)
-                    .and_then(|limits| Self::live_usize_field(limits, "max_prompt_tokens"))
-            })
-            .unwrap_or(8192);
-        let max_output_tokens = Self::live_limits(model)
-            .and_then(|limits| Self::live_usize_field(limits, "max_output_tokens"));
-        let supports_tools = Self::live_supports(model)
-            .and_then(|supports| Self::live_bool_field(supports, "tool_calls"))
-            .unwrap_or(false);
-        let supports_strict_tools = Self::live_supports(model)
-            .and_then(|supports| Self::live_bool_field(supports, "structured_outputs"))
-            .unwrap_or(false);
-        let supports_adaptive_thinking_budget = Self::live_supports(model)
-            .and_then(|supports| Self::live_bool_field(supports, "adaptive_thinking"))
-            .unwrap_or(false);
-        let supports_thinking_budget = Self::live_supports(model)
-            .map(|supports| {
-                supports.get("max_thinking_budget").is_some()
-                    || supports.get("min_thinking_budget").is_some()
-            })
-            .unwrap_or(false);
-
-        AvailableModel {
-            id,
-            display_name: None,
-            n_ctx,
-            supports_tools,
-            supports_parallel_tools: false,
-            supports_strict_tools,
+    fn live_fields(model: &Value, api_base: &str) -> LiveModelFields {
+        let supports = Self::live_supports(model);
+        let (wire_format_override, endpoint_override) = Self::live_endpoint_fields(model, api_base);
+        LiveModelFields {
+            display_name: Self::live_model_display_name(model),
+            n_ctx: Self::live_limits(model)
+                .and_then(|limits| Self::live_usize_field(limits, "max_context_window_tokens"))
+                .or_else(|| {
+                    Self::live_limits(model)
+                        .and_then(|limits| Self::live_usize_field(limits, "max_prompt_tokens"))
+                }),
+            max_output_tokens: Self::live_limits(model)
+                .and_then(|limits| Self::live_usize_field(limits, "max_output_tokens")),
+            supports_tools: supports.and_then(|value| Self::live_bool_field(value, "tool_calls")),
+            supports_strict_tools: supports
+                .and_then(|value| Self::live_bool_field(value, "structured_outputs")),
             supports_multimodality: Self::live_supports_vision(model),
-            image_max_side_px: None,
-            image_preferred_side_px: None,
-            image_token_mode: ImageTokenMode::default(),
             reasoning_effort_options: Self::live_reasoning_effort(model),
-            supports_thinking_budget,
-            supports_adaptive_thinking_budget,
-            supports_cache_control: true,
-            tokenizer: None,
-            enabled,
-            is_custom: false,
-            pricing,
-            available_providers: Vec::new(),
-            selected_provider: None,
-            max_output_tokens,
-            provider_variants: Vec::new(),
-            wire_format_override: None,
-            endpoint_override: None,
-            base_model: None,
+            supports_thinking_budget: supports.and_then(|supports| {
+                (supports.get("max_thinking_budget").is_some()
+                    || supports.get("min_thinking_budget").is_some())
+                .then_some(true)
+            }),
+            supports_adaptive_thinking_budget: supports
+                .and_then(|value| Self::live_bool_field(value, "adaptive_thinking")),
+            wire_format_override,
+            endpoint_override,
+            ..Default::default()
         }
     }
 }
@@ -855,6 +795,53 @@ mod tests {
             model.endpoint_override.as_deref(),
             Some("https://api.githubcopilot.com/v1/chat/completions")
         );
+    }
+
+    #[test]
+    fn github_copilot_absent_live_boole_preserve_catalog_and_qualified_enablement() {
+        let mut provider = provider_with_token();
+        provider.enabled_models = vec!["github-copilot/gpt-4.1".to_string()];
+        let mut caps = caps_map();
+        caps.get_mut("github-copilot/gpt-4.1")
+            .unwrap()
+            .supports_vision = true;
+        let live = json!({
+            "data": [{
+                "model_picker_enabled": true,
+                "id": "gpt-4.1",
+                "capabilities": {"limits": {}, "supports": {}}
+            }]
+        });
+
+        let models = provider
+            .available_models_from_live_response(&live, &caps, DEFAULT_COPILOT_API_BASE)
+            .unwrap();
+        let model = &models[0];
+
+        assert!(model.enabled);
+        assert!(model.supports_tools);
+        assert!(model.supports_multimodality);
+    }
+
+    #[test]
+    fn github_copilot_incompatible_endpoint_families_do_not_silently_choose_anthropic() {
+        let provider = provider_with_token();
+        let live = json!({
+            "data": [{
+                "model_picker_enabled": true,
+                "id": "claude-sonnet-4",
+                "supported_endpoints": ["/v1/messages", "/v1/chat/completions"],
+                "capabilities": {"limits": {}, "supports": {}}
+            }]
+        });
+
+        let models = provider
+            .available_models_from_live_response(&live, &caps_map(), DEFAULT_COPILOT_API_BASE)
+            .unwrap();
+        let model = &models[0];
+
+        assert_eq!(model.wire_format_override, None);
+        assert_eq!(model.endpoint_override, None);
     }
 
     #[test]

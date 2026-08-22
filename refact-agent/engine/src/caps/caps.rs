@@ -18,7 +18,7 @@ use crate::caps::model_caps::{
 };
 use refact_core::provider_types::AvailableModel;
 
-const PROVIDER_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+const PROVIDER_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const MODEL_BASE_PROVIDER_HEADER: &str = "x-refact-internal-base-provider";
 
 fn resolve_image_token_mode(configured: ImageTokenMode, wire_format: WireFormat) -> ImageTokenMode {
@@ -154,7 +154,21 @@ fn build_chat_model_record(
         max_output_tokens,
         supports_parallel_tools,
         supports_strict_tools,
-    ) = if let Some(ref resolved) = resolved_caps {
+    ) = if !model.live_fields.is_empty() {
+        (
+            model.n_ctx,
+            model.supports_tools,
+            model.supports_multimodality,
+            model.reasoning_effort_options.clone(),
+            model.supports_thinking_budget,
+            model.supports_adaptive_thinking_budget,
+            model.tokenizer.clone().unwrap_or_default(),
+            model.supports_clicks,
+            model.max_output_tokens,
+            model.supports_parallel_tools,
+            model.supports_strict_tools,
+        )
+    } else if let Some(ref resolved) = resolved_caps {
         let caps = &resolved.caps;
         if model.is_custom {
             let clamped_n_ctx = if caps.n_ctx > 0 {
@@ -242,10 +256,14 @@ fn build_chat_model_record(
     };
 
     let supports_agent = supports_tools;
-    let supports_cache_control = model.supports_cache_control
-        || resolved_caps
-            .as_ref()
-            .is_some_and(|resolved| resolved.caps.supports_cache_control);
+    let supports_cache_control = if model.live_fields.is_empty() {
+        model.supports_cache_control
+            || resolved_caps
+                .as_ref()
+                .is_some_and(|resolved| resolved.caps.supports_cache_control)
+    } else {
+        model.supports_cache_control
+    };
     let effective_wire_format = model.wire_format_override.unwrap_or(runtime_wire_format);
     let effective_endpoint = model
         .endpoint_override
@@ -312,15 +330,23 @@ fn build_chat_model_record(
             tokenizer,
             enabled: model.enabled,
             experimental: false,
-            supports_max_completion_tokens: resolved_caps
-                .as_ref()
-                .map(|r| r.caps.supports_max_completion_tokens)
-                .unwrap_or(false),
+            supports_max_completion_tokens: if model.live_fields.is_empty() {
+                resolved_caps
+                    .as_ref()
+                    .map(|r| r.caps.supports_max_completion_tokens)
+                    .unwrap_or(false)
+            } else {
+                model.supports_max_completion_tokens
+            },
             eof_is_done: false,
-            supports_web_search: resolved_caps
-                .as_ref()
-                .map(|r| r.caps.supports_web_search)
-                .unwrap_or(false),
+            supports_web_search: if model.live_fields.is_empty() {
+                resolved_caps
+                    .as_ref()
+                    .map(|r| r.caps.supports_web_search)
+                    .unwrap_or(false)
+            } else {
+                model.supports_web_search
+            },
             supports_cache_control: runtime_supports_cache_control && supports_cache_control,
             image_max_side_px: model.image_max_side_px,
             image_preferred_side_px: model.image_preferred_side_px,
@@ -337,34 +363,55 @@ fn build_chat_model_record(
         reasoning_effort_options,
         supports_thinking_budget,
         supports_adaptive_thinking_budget,
-        max_thinking_tokens: resolved_caps
-            .as_ref()
-            .and_then(|r| r.caps.max_thinking_tokens),
-        default_temperature: resolved_caps
-            .as_ref()
-            .and_then(|r| r.caps.default_temperature),
+        max_thinking_tokens: if model.live_fields.is_empty() {
+            resolved_caps
+                .as_ref()
+                .and_then(|r| r.caps.max_thinking_tokens)
+        } else {
+            model.max_thinking_tokens
+        },
+        default_temperature: if model.live_fields.is_empty() {
+            resolved_caps
+                .as_ref()
+                .and_then(|r| r.caps.default_temperature)
+        } else {
+            model.default_temperature
+        },
         default_frequency_penalty: None,
-        default_max_tokens: resolved_caps
-            .as_ref()
-            .and_then(|r| r.caps.default_max_tokens),
+        default_max_tokens: if model.live_fields.is_empty() {
+            resolved_caps
+                .as_ref()
+                .and_then(|r| r.caps.default_max_tokens)
+        } else {
+            model.default_max_tokens
+        },
         max_output_tokens,
         supports_parallel_tools,
-        supports_strict_tools: resolved_caps
-            .as_ref()
-            .map(|r| {
-                if model.is_custom {
-                    supports_strict_tools
-                } else {
-                    r.caps.supports_strict_tools
-                }
-            })
-            .unwrap_or(supports_strict_tools),
-        supports_temperature: resolved_caps
-            .as_ref()
-            .map(|r| r.caps.supports_temperature)
-            .unwrap_or(true),
+        supports_strict_tools: if model.live_fields.is_empty() {
+            resolved_caps
+                .as_ref()
+                .map(|r| {
+                    if model.is_custom {
+                        supports_strict_tools
+                    } else {
+                        r.caps.supports_strict_tools
+                    }
+                })
+                .unwrap_or(supports_strict_tools)
+        } else {
+            model.supports_strict_tools
+        },
+        supports_temperature: if model.live_fields.is_empty() {
+            resolved_caps
+                .as_ref()
+                .map(|r| r.caps.supports_temperature)
+                .unwrap_or(true)
+        } else {
+            model.supports_temperature
+        },
         available_providers: model.available_providers.clone(),
         selected_provider: model.selected_provider.clone(),
+        live_fields: model.live_fields.clone(),
     }
 }
 
@@ -1021,6 +1068,66 @@ fn apply_model_caps_to_all_chat_models(caps: &mut CodeAssistantCaps) {
 }
 
 fn apply_registry_caps_to_chat_model(record: &mut ChatModelRecord, caps: &ModelCapabilities) {
+    if !record.live_fields.is_empty() {
+        let live = &record.live_fields;
+        if live.n_ctx.is_none() && caps.n_ctx > 0 {
+            record.base.n_ctx = caps.n_ctx;
+        }
+        if live.max_output_tokens.is_none() && caps.max_output_tokens > 0 {
+            record.max_output_tokens = Some(caps.max_output_tokens);
+        }
+        if live.supports_tools.is_none() {
+            record.supports_tools = caps.supports_tools;
+        }
+        if live.supports_parallel_tools.is_none() {
+            record.supports_parallel_tools = caps.supports_parallel_tools;
+        }
+        if live.supports_strict_tools.is_none() {
+            record.supports_strict_tools = caps.supports_strict_tools;
+        }
+        if live.supports_multimodality.is_none() {
+            record.supports_multimodality = caps.supports_vision
+                || caps.supports_video
+                || caps.supports_audio
+                || caps.supports_pdf;
+        }
+        if live.supports_clicks.is_none() {
+            record.supports_clicks = caps.supports_clicks;
+        }
+        if live.reasoning_effort_options.is_none() {
+            record.reasoning_effort_options = caps.reasoning_effort_options.clone();
+        }
+        if live.supports_thinking_budget.is_none() {
+            record.supports_thinking_budget = caps.supports_thinking_budget;
+        }
+        if live.supports_adaptive_thinking_budget.is_none() {
+            record.supports_adaptive_thinking_budget = caps.supports_adaptive_thinking_budget;
+        }
+        if live.max_thinking_tokens.is_none() {
+            record.max_thinking_tokens = caps.max_thinking_tokens;
+        }
+        if live.tokenizer.is_none() && !caps.tokenizer.is_empty() {
+            record.base.tokenizer = caps.tokenizer.clone();
+        }
+        if live.default_temperature.is_none() {
+            record.default_temperature = caps.default_temperature;
+        }
+        if live.default_max_tokens.is_none() {
+            record.default_max_tokens = caps.default_max_tokens;
+        }
+        if live.supports_temperature.is_none() {
+            record.supports_temperature = caps.supports_temperature;
+        }
+        if live.supports_web_search.is_none() {
+            record.base.supports_web_search = caps.supports_web_search;
+        }
+        if live.supports_max_completion_tokens.is_none() {
+            record.base.supports_max_completion_tokens = caps.supports_max_completion_tokens;
+        }
+        record.supports_agent = record.supports_tools;
+        return;
+    }
+
     if record.base.user_configured {
         if caps.n_ctx > 0 {
             record.base.n_ctx = record.base.n_ctx.min(caps.n_ctx);
@@ -1105,6 +1212,11 @@ pub fn resolve_completion_model<'a>(
 mod tests {
     use super::*;
     use indexmap::IndexMap;
+    use refact_core::provider_types::{
+        CustomModelConfig, LiveModelFields, available_model_from_catalog_and_live,
+        merge_custom_models,
+    };
+    use std::collections::HashSet;
 
     fn create_test_caps() -> CodeAssistantCaps {
         let mut caps = CodeAssistantCaps::default();
@@ -1124,6 +1236,138 @@ mod tests {
         caps.defaults.chat_default_model = "test-provider/test-model".to_string();
 
         caps
+    }
+
+    #[test]
+    fn registry_post_pass_preserves_explicit_live_values_and_fills_absent_fields() {
+        let catalog = ModelCapabilities {
+            n_ctx: 128_000,
+            max_output_tokens: 16_384,
+            supports_tools: true,
+            supports_parallel_tools: true,
+            supports_strict_tools: true,
+            supports_clicks: true,
+            supports_temperature: true,
+            reasoning_effort_options: Some(vec!["high".to_string()]),
+            tokenizer: "catalog-tokenizer".to_string(),
+            ..Default::default()
+        };
+        let live = LiveModelFields {
+            supports_tools: Some(false),
+            supports_temperature: Some(false),
+            reasoning_effort_options: Some(Vec::new()),
+            tokenizer: Some(String::new()),
+            ..Default::default()
+        };
+        let model =
+            available_model_from_catalog_and_live("model", Some(&catalog), &live, true, 4096);
+        let mut record = ChatModelRecord {
+            base: BaseModelRecord {
+                n_ctx: model.n_ctx,
+                tokenizer: model.tokenizer.clone().unwrap_or_default(),
+                ..Default::default()
+            },
+            supports_tools: model.supports_tools,
+            supports_parallel_tools: model.supports_parallel_tools,
+            supports_strict_tools: model.supports_strict_tools,
+            supports_clicks: model.supports_clicks,
+            reasoning_effort_options: model.reasoning_effort_options.clone(),
+            max_output_tokens: model.max_output_tokens,
+            supports_temperature: model.supports_temperature,
+            live_fields: model.live_fields.clone(),
+            ..Default::default()
+        };
+
+        apply_registry_caps_to_chat_model(&mut record, &catalog);
+
+        assert!(!record.supports_tools);
+        assert!(!record.supports_temperature);
+        assert_eq!(record.reasoning_effort_options, Some(Vec::new()));
+        assert_eq!(record.base.tokenizer, "");
+        assert!(record.supports_parallel_tools);
+        assert!(record.supports_strict_tools);
+        assert!(record.supports_clicks);
+        assert_eq!(record.base.n_ctx, 128_000);
+        assert_eq!(record.max_output_tokens, Some(16_384));
+    }
+
+    #[test]
+    fn registry_post_pass_preserves_custom_overrides_after_catalog_and_live_merge() {
+        let catalog = ModelCapabilities {
+            n_ctx: 128_000,
+            max_output_tokens: 16_384,
+            supports_tools: true,
+            supports_parallel_tools: true,
+            supports_strict_tools: true,
+            supports_vision: true,
+            supports_thinking_budget: true,
+            supports_adaptive_thinking_budget: true,
+            supports_cache_control: true,
+            reasoning_effort_options: Some(vec!["high".to_string()]),
+            tokenizer: "catalog-tokenizer".to_string(),
+            ..Default::default()
+        };
+        let live = LiveModelFields {
+            n_ctx: Some(64_000),
+            max_output_tokens: Some(8_192),
+            supports_tools: Some(true),
+            ..Default::default()
+        };
+        let mut models = vec![available_model_from_catalog_and_live(
+            "model",
+            Some(&catalog),
+            &live,
+            true,
+            4096,
+        )];
+        let custom = CustomModelConfig {
+            n_ctx: Some(32_000),
+            max_output_tokens: Some(2_048),
+            supports_tools: Some(false),
+            supports_parallel_tools: Some(false),
+            supports_strict_tools: Some(false),
+            supports_multimodality: Some(false),
+            reasoning_effort_options: Some(Vec::new()),
+            supports_thinking_budget: Some(false),
+            supports_adaptive_thinking_budget: Some(false),
+            supports_cache_control: Some(false),
+            tokenizer: Some(String::new()),
+            ..Default::default()
+        };
+        merge_custom_models(
+            &mut models,
+            &HashMap::from([("model".to_string(), custom)]),
+            &HashSet::from(["model"]),
+        );
+        let model_caps = HashMap::from([("provider/model".to_string(), catalog.clone())]);
+        let mut record = build_chat_model_record(
+            "provider",
+            &[],
+            &models[0],
+            &model_caps,
+            WireFormat::OpenaiChatCompletions,
+            "https://example.com/v1/chat/completions",
+            "",
+            "",
+            "",
+            &HashMap::new(),
+            None,
+            true,
+        );
+
+        apply_registry_caps_to_chat_model(&mut record, &catalog);
+
+        assert_eq!(record.base.n_ctx, 32_000);
+        assert_eq!(record.max_output_tokens, Some(2_048));
+        assert!(!record.supports_tools);
+        assert!(!record.supports_parallel_tools);
+        assert!(!record.supports_strict_tools);
+        assert!(!record.supports_multimodality);
+        assert_eq!(record.reasoning_effort_options, Some(Vec::new()));
+        assert!(!record.supports_thinking_budget);
+        assert!(!record.supports_adaptive_thinking_budget);
+        assert!(!record.base.supports_cache_control);
+        assert_eq!(record.base.tokenizer, "fake");
     }
 
     #[test]
@@ -1326,6 +1570,7 @@ mod tests {
             supports_parallel_tools: false,
             supports_strict_tools: false,
             supports_multimodality: false,
+            supports_clicks: false,
             image_max_side_px: None,
             image_preferred_side_px: None,
             image_token_mode: ImageTokenMode::Provider,
@@ -1344,6 +1589,16 @@ mod tests {
             wire_format_override: None,
             endpoint_override: None,
             base_model: None,
+            max_thinking_tokens: None,
+            supports_temperature: true,
+            default_temperature: None,
+            default_max_tokens: None,
+            supports_web_search: false,
+            supports_max_completion_tokens: false,
+            supported_parameters: None,
+            upstream_provider: None,
+            api_mode: None,
+            live_fields: Default::default(),
         };
 
         let record = build_chat_model_record(
@@ -1386,6 +1641,7 @@ mod tests {
             supports_parallel_tools: false,
             supports_strict_tools: false,
             supports_multimodality: false,
+            supports_clicks: false,
             image_max_side_px: None,
             image_preferred_side_px: None,
             image_token_mode: ImageTokenMode::Provider,
@@ -1404,6 +1660,16 @@ mod tests {
             wire_format_override: None,
             endpoint_override: None,
             base_model: None,
+            max_thinking_tokens: None,
+            supports_temperature: true,
+            default_temperature: None,
+            default_max_tokens: None,
+            supports_web_search: false,
+            supports_max_completion_tokens: false,
+            supported_parameters: None,
+            upstream_provider: None,
+            api_mode: None,
+            live_fields: Default::default(),
         };
 
         let openai_record = build_chat_model_record(
@@ -1507,6 +1773,7 @@ mod tests {
             supports_parallel_tools: false,
             supports_strict_tools: false,
             supports_multimodality: false,
+            supports_clicks: false,
             image_max_side_px: None,
             image_preferred_side_px: None,
             image_token_mode: ImageTokenMode::Provider,
@@ -1525,6 +1792,16 @@ mod tests {
             wire_format_override: None,
             endpoint_override: None,
             base_model: None,
+            max_thinking_tokens: None,
+            supports_temperature: true,
+            default_temperature: None,
+            default_max_tokens: None,
+            supports_web_search: false,
+            supports_max_completion_tokens: false,
+            supported_parameters: None,
+            upstream_provider: None,
+            api_mode: None,
+            live_fields: Default::default(),
         };
 
         let record = build_chat_model_record(
@@ -1592,6 +1869,7 @@ mod tests {
             supports_parallel_tools: false,
             supports_strict_tools: false,
             supports_multimodality: false,
+            supports_clicks: false,
             image_max_side_px: None,
             image_preferred_side_px: None,
             image_token_mode: ImageTokenMode::Provider,
@@ -1610,6 +1888,16 @@ mod tests {
             wire_format_override: None,
             endpoint_override: None,
             base_model: Some("Qwen/Qwen3.6-27B-FP8".to_string()),
+            max_thinking_tokens: None,
+            supports_temperature: true,
+            default_temperature: None,
+            default_max_tokens: None,
+            supports_web_search: false,
+            supports_max_completion_tokens: false,
+            supported_parameters: None,
+            upstream_provider: None,
+            api_mode: None,
+            live_fields: Default::default(),
         };
 
         let record = build_chat_model_record(

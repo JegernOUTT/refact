@@ -144,4 +144,32 @@ describe("SchemaField", () => {
     });
     confirm.mockRestore();
   });
+
+  it("disables secret actions and never saves when disabled", () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <SchemaField
+        field={{ key: "api_key", f_type: "string", f_label: "API Key" }}
+        value="***"
+        disabled
+        onSave={onSave}
+      />,
+    );
+
+    const input = screen.getByLabelText("API Key");
+    const reveal = screen.getByRole("button", { name: "Reveal" });
+    const clear = screen.getByRole("button", { name: "Clear saved value" });
+
+    expect(input).toBeDisabled();
+    expect(input).toHaveAttribute("type", "password");
+    expect(reveal).toBeDisabled();
+    expect(clear).toBeDisabled();
+
+    fireEvent.click(reveal);
+    fireEvent.click(clear);
+    fireEvent.blur(input);
+
+    expect(input).toHaveAttribute("type", "password");
+    expect(onSave).not.toHaveBeenCalled();
+  });
 });

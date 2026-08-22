@@ -151,9 +151,6 @@ available:
             model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
         }
         merge_custom_models(&mut models, custom_models, &enabled_set);
-        for model in &mut models {
-            model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
-        }
         models.sort_by(|a, b| a.id.cmp(&b.id));
         models
     }

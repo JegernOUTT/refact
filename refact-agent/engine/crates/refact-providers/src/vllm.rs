@@ -5,11 +5,13 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use refact_core::provider_types::ImageTokenMode;
+use refact_core::provider_types::{
+    AvailableModel, LiveModelFields, available_model_from_catalog_and_live,
+};
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
 use crate::traits::{
-    AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+    CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
     merge_custom_models, normalize_endpoint, derive_endpoint_from_chat_url, parse_enabled_models,
     parse_custom_models, set_model_enabled_impl,
 };
@@ -38,91 +40,117 @@ impl Default for VLLMProvider {
 }
 
 impl VLLMProvider {
-    fn parse_openai_model(model: &serde_json::Value, enabled: bool) -> Option<AvailableModel> {
-        let id = model.get("id")?.as_str()?.to_string();
+    fn catalog_caps<'a>(
+        model_caps: &'a HashMap<String, ModelCapabilities>,
+        id: &str,
+        base: Option<&str>,
+    ) -> Option<&'a ModelCapabilities> {
+        for alias in [base, Some(id)].into_iter().flatten() {
+            let bare = alias.rsplit('/').next().unwrap_or(alias);
+            for key in [format!("vllm/{alias}"), format!("vllm/{bare}")] {
+                if let Some(caps) = model_caps.get(&key) {
+                    return Some(caps);
+                }
+            }
+            if let Some(caps) = model_caps.get(alias).or_else(|| model_caps.get(bare)) {
+                return Some(caps);
+            }
+        }
+        None
+    }
+
+    fn parse_openai_model(
+        model: &serde_json::Value,
+        enabled: bool,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Option<AvailableModel> {
+        let id = model.get("id")?.as_str()?;
 
         let max_model_len = model
             .get("max_model_len")
             .or_else(|| model.get("context_length"))
+            .or_else(|| model.get("max_context_length"))
             .and_then(|v| v.as_u64())
             .map(|v| v as usize);
         let max_output_tokens = model
-            .get("max_tokens")
+            .get("max_output_tokens")
+            .or_else(|| model.get("max_tokens"))
             .or_else(|| model.get("max_completion_tokens"))
             .and_then(|v| v.as_u64())
             .map(|v| v as usize);
+        let supported_parameters = model
+            .get("supported_parameters")
+            .and_then(|v| v.as_array())
+            .map(|params| {
+                params
+                    .iter()
+                    .filter_map(|v| v.as_str().map(ToString::to_string))
+                    .collect::<Vec<_>>()
+            });
+        let parameter_support = |names: &[&str]| {
+            supported_parameters
+                .as_ref()
+                .map(|params| params.iter().any(|p| names.iter().any(|name| p == name)))
+        };
         let supports_tools = model
             .get("supports_tools")
             .and_then(|v| v.as_bool())
             .or_else(|| {
                 model
                     .get("supported_parameters")
-                    .and_then(|v| v.as_array())
-                    .map(|params| {
-                        params.iter().any(|p| {
-                            matches!(
-                                p.as_str(),
-                                Some("tools") | Some("tool_choice") | Some("functions")
-                            )
-                        })
-                    })
-            })
-            .unwrap_or(true);
+                    .and_then(|_| parameter_support(&["tools", "tool_choice", "functions"]))
+            });
         let supports_multimodality = model
-            .get("supports_vision")
+            .get("supports_multimodality")
+            .or_else(|| model.get("supports_vision"))
             .and_then(|v| v.as_bool())
             .or_else(|| {
                 model
                     .get("supported_parameters")
-                    .and_then(|v| v.as_array())
-                    .map(|params| {
-                        params.iter().any(|p| {
-                            matches!(p.as_str(), Some("vision") | Some("image") | Some("images"))
-                        })
-                    })
-            })
-            .unwrap_or(false);
+                    .and_then(|_| parameter_support(&["vision", "image", "images"]))
+            });
 
         let display_name = model
-            .get("name")
+            .get("display_name")
+            .or_else(|| model.get("name"))
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty() && *s != id)
             .map(String::from);
         let root = model
-            .get("root")
+            .get("base_model")
+            .or_else(|| model.get("root"))
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(String::from);
 
-        Some(AvailableModel {
-            id,
+        let live = LiveModelFields {
             display_name,
-            n_ctx: max_model_len.unwrap_or(32_768),
-            supports_tools,
-            supports_parallel_tools: supports_tools,
-            supports_strict_tools: false,
-            supports_multimodality,
-            image_max_side_px: None,
-            image_preferred_side_px: None,
-            image_token_mode: ImageTokenMode::default(),
-            reasoning_effort_options: None,
-            supports_thinking_budget: false,
-            supports_adaptive_thinking_budget: false,
-            supports_cache_control: false,
-            tokenizer: None,
-            enabled,
-            is_custom: false,
-            pricing: None,
-            available_providers: Vec::new(),
-            selected_provider: None,
+            n_ctx: max_model_len,
             max_output_tokens,
-            provider_variants: Vec::new(),
-            wire_format_override: None,
-            endpoint_override: None,
+            supports_tools,
+            supports_parallel_tools: model
+                .get("supports_parallel_tools")
+                .or_else(|| model.get("supports_parallel_tool_calls"))
+                .and_then(|v| v.as_bool())
+                .or_else(|| parameter_support(&["parallel_tool_calls"])),
+            supports_strict_tools: model
+                .get("supports_strict_tools")
+                .and_then(|v| v.as_bool())
+                .or_else(|| parameter_support(&["strict"])),
+            supports_multimodality,
+            supported_parameters,
             base_model: root,
-        })
+            ..Default::default()
+        };
+        Some(available_model_from_catalog_and_live(
+            id,
+            Self::catalog_caps(model_caps, id, live.base_model.as_deref()),
+            &live,
+            enabled,
+            32_768,
+        ))
     }
 }
 
@@ -133,6 +161,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn vllm_catalog_then_live_precedence() {
+        let caps = HashMap::from([(
+            "vllm/model-a".to_string(),
+            ModelCapabilities {
+                n_ctx: 8_192,
+                supports_tools: true,
+                supports_parallel_tools: true,
+                supports_vision: true,
+                ..Default::default()
+            },
+        )]);
+        let model = VLLMProvider::parse_openai_model(
+            &json!({"id": "model-a", "max_model_len": 65_536, "supports_tools": false}),
+            false,
+            &caps,
+        )
+        .unwrap();
+
+        assert_eq!(model.n_ctx, 65_536);
+        assert!(!model.supports_tools);
+        assert!(model.supports_multimodality);
+    }
+
+    #[test]
+    fn vllm_server_list_controls_availability_and_retains_unknown_models() {
+        let caps = HashMap::from([(
+            "vllm/catalog-only".to_string(),
+            ModelCapabilities::default(),
+        )]);
+        let models: Vec<_> = [json!({"id": "server-only"})]
+            .iter()
+            .filter_map(|m| VLLMProvider::parse_openai_model(m, false, &caps))
+            .collect();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "server-only");
+        assert!(models.iter().all(|m| m.id != "catalog-only"));
+    }
+
+    #[test]
+    fn vllm_custom_only_addition_is_preserved_for_backwards_compatibility() {
+        let mut provider = VLLMProvider::default();
+        provider
+            .custom_models
+            .insert("custom-only".to_string(), CustomModelConfig::default());
+
+        assert_eq!(provider.get_custom_models_only()[0].id, "custom-only");
+    }
+
+    #[test]
     fn parse_openai_model_keeps_root_only_as_base_model() {
         let model = VLLMProvider::parse_openai_model(
             &json!({
@@ -141,6 +219,7 @@ mod tests {
                 "root": "Qwen/Qwen3.6-27B-FP8"
             }),
             true,
+            &HashMap::new(),
         )
         .unwrap();
 
@@ -301,7 +380,7 @@ available:
     async fn fetch_available_models(
         &self,
         http_client: &reqwest::Client,
-        _model_caps: &HashMap<String, ModelCapabilities>,
+        model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Vec<AvailableModel> {
         let base_url = normalize_endpoint(&self.endpoint);
         let models_url = format!("{}/v1/models", base_url);
@@ -348,7 +427,7 @@ available:
                     .filter_map(|m| {
                         let id = m.get("id").and_then(|v| v.as_str())?;
                         let enabled = enabled_set.contains(id);
-                        Self::parse_openai_model(m, enabled)
+                        Self::parse_openai_model(m, enabled, model_caps)
                     })
                     .collect()
             })

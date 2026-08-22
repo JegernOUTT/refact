@@ -182,6 +182,7 @@ const NumberField: React.FC<SchemaFieldProps> = ({
       control={
         <FieldText
           id={field.key}
+          aria-label={field.f_label ?? field.key}
           type="number"
           value={localValue}
           placeholder={field.f_placeholder ?? ""}
@@ -231,6 +232,7 @@ const BooleanField: React.FC<SchemaFieldProps> = ({
       control={
         <Switch
           id={field.key}
+          aria-label={field.f_label ?? field.key}
           checked={Boolean(value)}
           disabled={disabled}
           onCheckedChange={(checked) => void handleChange(checked)}
@@ -263,6 +265,7 @@ const SecretField: React.FC<SchemaFieldProps> = ({
   }, [value, editing]);
 
   const handleBlur = useCallback(async () => {
+    if (disabled) return;
     if (!editing) return;
     if (localValue === "" && isMasked) {
       setEditing(false);
@@ -283,9 +286,10 @@ const SecretField: React.FC<SchemaFieldProps> = ({
       setSaveState("error");
       resetStatusLater(timerRef, setSaveState, "error");
     }
-  }, [editing, localValue, isMasked, field, onSave]);
+  }, [disabled, editing, localValue, isMasked, field, onSave]);
 
   const handleClear = useCallback(async () => {
+    if (disabled) return;
     if (!confirmFieldSave(field)) return;
     setSaveState("saving");
     try {
@@ -298,7 +302,7 @@ const SecretField: React.FC<SchemaFieldProps> = ({
       setSaveState("error");
       resetStatusLater(timerRef, setSaveState, "error");
     }
-  }, [field, onSave]);
+  }, [disabled, field, onSave]);
 
   const displayValue = editing
     ? localValue
@@ -319,6 +323,7 @@ const SecretField: React.FC<SchemaFieldProps> = ({
           <div className={styles.fieldControlRow}>
             <FieldText
               id={field.key}
+              aria-label={field.f_label ?? field.key}
               type={revealed ? "text" : "password"}
               value={displayValue}
               placeholder={placeholder}
@@ -336,6 +341,7 @@ const SecretField: React.FC<SchemaFieldProps> = ({
               icon={revealed ? EyeOff : Eye}
               variant="ghost"
               size="sm"
+              disabled={disabled}
               onClick={() => setRevealed(!revealed)}
             />
             {isMasked && !editing ? (
@@ -344,6 +350,7 @@ const SecretField: React.FC<SchemaFieldProps> = ({
                 icon={X}
                 variant="danger"
                 size="sm"
+                disabled={disabled}
                 onClick={() => void handleClear()}
               />
             ) : null}
@@ -438,6 +445,7 @@ const StringField: React.FC<SchemaFieldProps> = ({
           {isLong ? (
             <FieldTextarea
               id={field.key}
+              aria-label={field.f_label ?? field.key}
               value={localValue}
               placeholder={field.f_placeholder ?? ""}
               disabled={disabled}
@@ -448,6 +456,7 @@ const StringField: React.FC<SchemaFieldProps> = ({
           ) : (
             <FieldText
               id={field.key}
+              aria-label={field.f_label ?? field.key}
               value={localValue}
               placeholder={field.f_placeholder ?? ""}
               disabled={disabled}

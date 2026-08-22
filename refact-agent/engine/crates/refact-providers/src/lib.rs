@@ -22,6 +22,7 @@ pub mod google_antigravity_oauth;
 pub mod google_gemini;
 pub mod groq;
 pub mod kimi;
+pub mod litellm;
 pub mod lmstudio;
 pub mod minimax;
 pub mod ollama;

@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use refact_core::provider_types::ImageTokenMode;
-use refact_core::model_caps::ModelCapabilities;
+use refact_core::model_caps::{resolve_model_caps, ModelCapabilities};
+use refact_core::provider_types::{available_model_from_catalog_and_live, LiveModelFields};
 use refact_core::llm_types::WireFormat;
 use crate::config::resolve_env_var;
 use crate::traits::{
@@ -102,6 +102,7 @@ impl OpenRouterProvider {
         model: &serde_json::Value,
         enabled: bool,
         selected_provider: Option<String>,
+        catalog_caps: Option<&ModelCapabilities>,
     ) -> Option<AvailableModel> {
         let id = model.get("id")?.as_str()?.to_string();
         let mut available_providers: Vec<String> = Vec::new();
@@ -109,9 +110,11 @@ impl OpenRouterProvider {
         let mut selected_pricing: Option<ModelPricing> = None;
         let mut selected_n_ctx: Option<usize> = None;
         let mut selected_max_output: Option<usize> = None;
-        let mut supports_tools = false;
-        let mut supports_multimodality = false;
+        let mut supports_tools = None;
+        let mut supports_parallel_tools = None;
+        let mut supports_multimodality = None;
         let mut reasoning_effort_options: Option<Vec<String>> = None;
+        let mut selected_parameters: Option<Vec<String>> = None;
 
         if let Some(endpoints) = model.get("endpoints").and_then(|v| v.as_array()) {
             for ep in endpoints {
@@ -119,6 +122,7 @@ impl OpenRouterProvider {
                     .get("tag")
                     .and_then(|v| v.as_str())
                     .or_else(|| ep.get("provider_name").and_then(|v| v.as_str()))
+                    .or_else(|| ep.get("name").and_then(|v| v.as_str()))
                     .unwrap_or_default()
                     .to_string();
                 if !provider_tag.is_empty() && !available_providers.contains(&provider_tag) {
@@ -140,6 +144,7 @@ impl OpenRouterProvider {
                     .get("tag")
                     .and_then(|v| v.as_str())
                     .or_else(|| ep.get("provider_name").and_then(|v| v.as_str()))
+                    .or_else(|| ep.get("name").and_then(|v| v.as_str()))
                     .unwrap_or_default()
                     .to_string();
 
@@ -188,11 +193,21 @@ impl OpenRouterProvider {
                         ep.get("tag").and_then(|v| v.as_str()) == Some(provider.as_str())
                             || ep.get("provider_name").and_then(|v| v.as_str())
                                 == Some(provider.as_str())
+                            || ep.get("name").and_then(|v| v.as_str()) == Some(provider.as_str())
                     })
                 })
-                .or_else(|| endpoints.first());
+                .or_else(|| (endpoints.len() == 1).then(|| &endpoints[0]));
 
             if let Some(ep) = selected_endpoint {
+                selected_parameters = ep
+                    .get("supported_parameters")
+                    .and_then(|v| v.as_array())
+                    .map(|params| {
+                        params
+                            .iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    });
                 selected_pricing = ep.get("pricing").and_then(Self::parse_model_pricing);
                 selected_n_ctx = ep
                     .get("context_length")
@@ -213,8 +228,16 @@ impl OpenRouterProvider {
                                 Some("tools") | Some("tool_choice") | Some("functions")
                             )
                         })
-                    })
-                    .unwrap_or(false);
+                    });
+
+                supports_parallel_tools = ep
+                    .get("supported_parameters")
+                    .and_then(|v| v.as_array())
+                    .map(|params| {
+                        params
+                            .iter()
+                            .any(|p| p.as_str() == Some("parallel_tool_calls"))
+                    });
 
                 supports_multimodality = ep
                     .get("supported_parameters")
@@ -223,8 +246,7 @@ impl OpenRouterProvider {
                         params.iter().any(|p| {
                             matches!(p.as_str(), Some("vision") | Some("image") | Some("images"))
                         })
-                    })
-                    .unwrap_or(false);
+                    });
 
                 reasoning_effort_options = Self::parse_reasoning_effort_options(ep);
             }
@@ -259,36 +281,60 @@ impl OpenRouterProvider {
             selected_provider.filter(|provider| available_providers.contains(provider))
         };
 
-        Some(AvailableModel {
-            id,
+        let model_parameters = model
+            .get("top_provider")
+            .and_then(|v| v.get("supported_parameters"))
+            .and_then(|v| v.as_array())
+            .or_else(|| model.get("supported_parameters").and_then(|v| v.as_array()));
+        let live = LiveModelFields {
             display_name: model
                 .get("name")
                 .and_then(|v| v.as_str())
                 .map(|v| v.to_string()),
-            n_ctx: selected_n_ctx.or(fallback_n_ctx).unwrap_or(128_000),
-            supports_tools,
-            supports_parallel_tools: supports_tools,
-            supports_strict_tools: false,
-            supports_multimodality,
-            image_max_side_px: None,
-            image_preferred_side_px: None,
-            image_token_mode: ImageTokenMode::default(),
-            reasoning_effort_options,
-            supports_thinking_budget: false,
-            supports_adaptive_thinking_budget: false,
-            supports_cache_control: true,
-            tokenizer: None,
-            enabled,
-            is_custom: false,
-            pricing: selected_pricing.or(fallback_pricing),
-            available_providers,
-            selected_provider,
+            n_ctx: selected_n_ctx.or(fallback_n_ctx),
             max_output_tokens: selected_max_output.or(fallback_max_output),
-            provider_variants,
-            wire_format_override: None,
-            endpoint_override: None,
-            base_model: None,
-        })
+            supports_tools: supports_tools.or_else(|| {
+                model_parameters.map(|params| {
+                    params.iter().any(|p| {
+                        matches!(
+                            p.as_str(),
+                            Some("tools") | Some("tool_choice") | Some("functions")
+                        )
+                    })
+                })
+            }),
+            supports_parallel_tools: supports_parallel_tools.or_else(|| {
+                model_parameters.map(|params| {
+                    params
+                        .iter()
+                        .any(|p| p.as_str() == Some("parallel_tool_calls"))
+                })
+            }),
+            supports_multimodality: supports_multimodality.or_else(|| {
+                model
+                    .get("architecture")
+                    .and_then(|v| v.get("input_modalities"))
+                    .and_then(|v| v.as_array())
+                    .map(|modalities| modalities.iter().any(|v| v.as_str() == Some("image")))
+            }),
+            reasoning_effort_options,
+            pricing: selected_pricing.or(fallback_pricing),
+            supported_parameters: selected_parameters.or_else(|| {
+                model_parameters.map(|params| {
+                    params
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+            }),
+            ..Default::default()
+        };
+        let mut available =
+            available_model_from_catalog_and_live(&id, catalog_caps, &live, enabled, 128_000);
+        available.available_providers = available_providers;
+        available.selected_provider = selected_provider;
+        available.provider_variants = provider_variants;
+        Some(available)
     }
 
     async fn fetch_key_json(
@@ -712,7 +758,7 @@ available:
     async fn fetch_available_models(
         &self,
         http_client: &reqwest::Client,
-        _model_caps: &HashMap<String, ModelCapabilities>,
+        model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Vec<AvailableModel> {
         let api_key = resolve_env_var(&self.api_key, "", "openrouter api_key");
         if api_key.is_empty() {
@@ -760,7 +806,15 @@ available:
                         let model_id = m.get("id").and_then(|v| v.as_str())?;
                         let enabled = enabled_set.contains(model_id);
                         let selected_provider = self.selected_providers.get(model_id).cloned();
-                        Self::parse_openrouter_model(m, enabled, selected_provider)
+                        let resolved =
+                            resolve_model_caps(model_caps, &format!("openrouter/{model_id}"))
+                                .or_else(|| resolve_model_caps(model_caps, model_id));
+                        Self::parse_openrouter_model(
+                            m,
+                            enabled,
+                            selected_provider,
+                            resolved.as_ref().map(|resolved| &resolved.caps),
+                        )
                     })
                     .collect::<Vec<_>>()
             })
@@ -769,5 +823,98 @@ available:
         merge_custom_models(&mut models, &self.custom_models, &enabled_set);
         models.sort_by(|a, b| a.id.cmp(&b.id));
         models
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn ambiguous_endpoints_do_not_silently_supply_live_capabilities() {
+        let model = json!({
+            "id": "author/model",
+            "context_length": 64_000,
+            "endpoints": [
+                {"tag": "alpha", "context_length": 1_000, "supported_parameters": ["tools"]},
+                {"tag": "beta", "context_length": 2_000, "supported_parameters": ["vision"]}
+            ]
+        });
+
+        let ambiguous =
+            OpenRouterProvider::parse_openrouter_model(&model, false, None, None).unwrap();
+        assert_eq!(ambiguous.n_ctx, 64_000);
+        assert!(!ambiguous.supports_tools);
+        assert!(!ambiguous.supports_multimodality);
+        assert_eq!(ambiguous.provider_variants.len(), 2);
+
+        let selected = OpenRouterProvider::parse_openrouter_model(
+            &model,
+            false,
+            Some("alpha".to_string()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(selected.n_ctx, 1_000);
+        assert!(selected.supports_tools);
+        assert_eq!(selected.selected_provider.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn live_model_fields_override_catalog_while_absent_fields_survive() {
+        let model = json!({
+            "id": "author/model",
+            "name": "Live name",
+            "context_length": 8_192
+        });
+        let caps = ModelCapabilities {
+            n_ctx: 4_096,
+            supports_tools: true,
+            supports_strict_tools: true,
+            ..Default::default()
+        };
+
+        let parsed =
+            OpenRouterProvider::parse_openrouter_model(&model, true, None, Some(&caps)).unwrap();
+        assert_eq!(parsed.display_name.as_deref(), Some("Live name"));
+        assert_eq!(parsed.n_ctx, 8_192);
+        assert!(parsed.supports_tools);
+        assert!(parsed.supports_strict_tools);
+    }
+
+    #[test]
+    fn tools_do_not_imply_parallel_tool_calls() {
+        let without_parallel = json!({
+            "id": "author/model",
+            "supported_parameters": ["tools"]
+        });
+        let parsed =
+            OpenRouterProvider::parse_openrouter_model(&without_parallel, false, None, None)
+                .unwrap();
+        assert!(parsed.supports_tools);
+        assert!(!parsed.supports_parallel_tools);
+
+        let with_parallel = json!({
+            "id": "author/model",
+            "supported_parameters": ["tools", "parallel_tool_calls"]
+        });
+        let parsed =
+            OpenRouterProvider::parse_openrouter_model(&with_parallel, false, None, None).unwrap();
+        assert!(parsed.supports_parallel_tools);
+
+        let absent_live_metadata = json!({"id": "author/model"});
+        let caps = ModelCapabilities {
+            supports_parallel_tools: true,
+            ..Default::default()
+        };
+        let parsed = OpenRouterProvider::parse_openrouter_model(
+            &absent_live_metadata,
+            false,
+            None,
+            Some(&caps),
+        )
+        .unwrap();
+        assert!(parsed.supports_parallel_tools);
     }
 }

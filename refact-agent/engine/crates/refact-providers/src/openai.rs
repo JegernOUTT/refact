@@ -6,10 +6,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use refact_core::provider_types::ImageTokenMode;
-use refact_core::model_caps::{
-    predefined_cloud_tokenizer_for_model, resolve_model_caps, ModelCapabilities,
-};
+use refact_core::model_caps::{resolve_model_caps, ModelCapabilities};
+use refact_core::provider_types::{available_model_from_catalog_and_live, LiveModelFields};
 use refact_core::llm_types::WireFormat;
 use crate::config::{is_legacy_refact_model, resolve_env_var};
 use crate::llm_http_retry::{
@@ -233,88 +231,54 @@ available:
             }
         };
 
+        self.parse_available_models(&json, model_caps)
+    }
+}
+
+impl OpenAIProvider {
+    fn parse_available_models(
+        &self,
+        json: &serde_json::Value,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
         let filter_regex = self
             .model_filter_regex()
             .and_then(|pattern| Regex::new(pattern).ok());
-
         let enabled_set: std::collections::HashSet<&str> =
             self.enabled_models.iter().map(|s| s.as_str()).collect();
+        let mut models_map = HashMap::new();
 
-        let mut models_map: HashMap<String, AvailableModel> = HashMap::new();
-
-        if let Some(data) = json.get("data").and_then(|v| v.as_array()) {
-            for model in data {
-                let id = match model.get("id").and_then(|v| v.as_str()) {
-                    Some(id) => id.to_string(),
-                    None => continue,
-                };
-
-                if is_legacy_refact_model(&id) {
-                    continue;
-                }
-                if !is_openai_chat_model_id(&id) {
-                    continue;
-                }
-
-                let matches_filter = match &filter_regex {
-                    Some(regex) => regex.is_match(&id),
-                    None => true,
-                };
-                if !matches_filter {
-                    continue;
-                }
-
-                let enabled = enabled_set.contains(id.as_str());
-                let resolved_caps = resolve_model_caps(model_caps, &format!("openai/{id}"))
-                    .or_else(|| resolve_model_caps(model_caps, &id));
-                let pricing = self.custom_model_pricing(&id).or_else(|| {
-                    resolved_caps
-                        .as_ref()
-                        .and_then(|resolved| resolved.caps.pricing.clone())
-                });
-
-                if let Some(resolved) = resolved_caps {
-                    models_map.insert(
-                        id.clone(),
-                        AvailableModel::from_caps(&id, &resolved.caps, enabled, pricing),
-                    );
-                } else {
-                    models_map.insert(
-                        id.clone(),
-                        AvailableModel {
-                            id: id.clone(),
-                            display_name: None,
-                            n_ctx: 128_000,
-                            supports_tools: true,
-                            supports_parallel_tools: true,
-                            supports_strict_tools: false,
-                            supports_multimodality: true,
-                            image_max_side_px: None,
-                            image_preferred_side_px: None,
-                            image_token_mode: ImageTokenMode::default(),
-                            reasoning_effort_options: None,
-                            supports_thinking_budget: false,
-                            supports_adaptive_thinking_budget: false,
-                            supports_cache_control: true,
-                            tokenizer: predefined_cloud_tokenizer_for_model(self.name(), &id)
-                                .map(str::to_string),
-                            enabled,
-                            is_custom: false,
-                            pricing,
-                            available_providers: Vec::new(),
-                            selected_provider: None,
-                            max_output_tokens: None,
-                            provider_variants: Vec::new(),
-                            wire_format_override: None,
-                            endpoint_override: None,
-                            base_model: None,
-                        },
-                    );
-                }
+        for model in json
+            .get("data")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let Some(id) = model.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if is_legacy_refact_model(id)
+                || !is_openai_chat_model_id(id)
+                || filter_regex
+                    .as_ref()
+                    .is_some_and(|regex| !regex.is_match(id))
+            {
+                continue;
             }
+
+            let resolved = resolve_model_caps(model_caps, &format!("openai/{id}"))
+                .or_else(|| resolve_model_caps(model_caps, id));
+            let available = available_model_from_catalog_and_live(
+                id,
+                resolved.as_ref().map(|resolved| &resolved.caps),
+                &LiveModelFields::default(),
+                enabled_set.contains(id),
+                128_000,
+            );
+            models_map.insert(id.to_string(), available);
         }
 
-        let mut models: Vec<AvailableModel> = models_map.into_values().collect();
+        let mut models: Vec<_> = models_map.into_values().collect();
         merge_custom_models(&mut models, &self.custom_models, &enabled_set);
         models.sort_by(|a, b| a.id.cmp(&b.id));
         models
@@ -348,4 +312,50 @@ fn is_openai_chat_model_id(id: &str) -> bool {
         || id.starts_with("o3-")
         || id == "o4"
         || id.starts_with("o4-")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn server_ids_control_membership_and_catalog_fields_survive_minimal_response() {
+        let provider = OpenAIProvider::default();
+        let mut caps = HashMap::new();
+        caps.insert(
+            "openai/gpt-catalog-only".to_string(),
+            ModelCapabilities {
+                n_ctx: 32_768,
+                supports_tools: true,
+                supports_strict_tools: true,
+                ..Default::default()
+            },
+        );
+        caps.insert(
+            "openai/gpt-not-on-server".to_string(),
+            ModelCapabilities {
+                n_ctx: 999,
+                ..Default::default()
+            },
+        );
+
+        let models = provider.parse_available_models(
+            &json!({"data": [{"id": "gpt-catalog-only"}, {"id": "gpt-unknown"}]}),
+            &caps,
+        );
+
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["gpt-catalog-only", "gpt-unknown"]
+        );
+        let catalog = &models[0];
+        assert_eq!(catalog.n_ctx, 32_768);
+        assert!(catalog.supports_tools);
+        assert!(catalog.supports_strict_tools);
+        let unknown = &models[1];
+        assert_eq!(unknown.n_ctx, 128_000);
+        assert!(!unknown.supports_tools);
+        assert!(!unknown.supports_multimodality);
+    }
 }

@@ -525,6 +525,72 @@ fn default_true() -> bool {
     true
 }
 
+/// Values learned from a provider's live model-discovery endpoint.
+///
+/// `None` means that the endpoint did not report the field. In particular,
+/// `Some(false)` and `Some(Vec::new())` are authoritative values and must not
+/// be confused with an absent field when catalog capabilities are applied.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LiveModelFields {
+    pub display_name: Option<String>,
+    pub n_ctx: Option<usize>,
+    pub max_output_tokens: Option<usize>,
+    pub supports_tools: Option<bool>,
+    pub supports_parallel_tools: Option<bool>,
+    pub supports_strict_tools: Option<bool>,
+    pub supports_multimodality: Option<bool>,
+    pub supports_clicks: Option<bool>,
+    pub reasoning_effort_options: Option<Vec<String>>,
+    pub supports_thinking_budget: Option<bool>,
+    pub supports_adaptive_thinking_budget: Option<bool>,
+    pub max_thinking_tokens: Option<usize>,
+    pub supports_cache_control: Option<bool>,
+    pub tokenizer: Option<String>,
+    pub pricing: Option<ModelPricing>,
+    pub supports_temperature: Option<bool>,
+    pub default_temperature: Option<f32>,
+    pub default_max_tokens: Option<usize>,
+    pub supports_web_search: Option<bool>,
+    pub supports_max_completion_tokens: Option<bool>,
+    pub supported_parameters: Option<Vec<String>>,
+    pub wire_format_override: Option<WireFormat>,
+    pub endpoint_override: Option<String>,
+    pub base_model: Option<String>,
+    pub upstream_provider: Option<String>,
+    pub api_mode: Option<String>,
+}
+
+impl LiveModelFields {
+    pub fn is_empty(&self) -> bool {
+        self.display_name.is_none()
+            && self.n_ctx.is_none()
+            && self.max_output_tokens.is_none()
+            && self.supports_tools.is_none()
+            && self.supports_parallel_tools.is_none()
+            && self.supports_strict_tools.is_none()
+            && self.supports_multimodality.is_none()
+            && self.supports_clicks.is_none()
+            && self.reasoning_effort_options.is_none()
+            && self.supports_thinking_budget.is_none()
+            && self.supports_adaptive_thinking_budget.is_none()
+            && self.max_thinking_tokens.is_none()
+            && self.supports_cache_control.is_none()
+            && self.tokenizer.is_none()
+            && self.pricing.is_none()
+            && self.supports_temperature.is_none()
+            && self.default_temperature.is_none()
+            && self.default_max_tokens.is_none()
+            && self.supports_web_search.is_none()
+            && self.supports_max_completion_tokens.is_none()
+            && self.supported_parameters.is_none()
+            && self.wire_format_override.is_none()
+            && self.endpoint_override.is_none()
+            && self.base_model.is_none()
+            && self.upstream_provider.is_none()
+            && self.api_mode.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AvailableModel {
     pub id: String,
@@ -536,6 +602,8 @@ pub struct AvailableModel {
     #[serde(default)]
     pub supports_strict_tools: bool,
     pub supports_multimodality: bool,
+    #[serde(default)]
+    pub supports_clicks: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_max_side_px: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -548,6 +616,8 @@ pub struct AvailableModel {
     pub supports_thinking_budget: bool,
     #[serde(default)]
     pub supports_adaptive_thinking_budget: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_thinking_tokens: Option<usize>,
     #[serde(default = "default_true")]
     pub supports_cache_control: bool,
     pub tokenizer: Option<String>,
@@ -561,6 +631,18 @@ pub struct AvailableModel {
     pub selected_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<usize>,
+    #[serde(default = "default_true")]
+    pub supports_temperature: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_max_tokens: Option<usize>,
+    #[serde(default)]
+    pub supports_web_search: bool,
+    #[serde(default)]
+    pub supports_max_completion_tokens: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_parameters: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_variants: Vec<ProviderVariant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -569,6 +651,106 @@ pub struct AvailableModel {
     pub endpoint_override: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_mode: Option<String>,
+    #[serde(skip)]
+    pub live_fields: LiveModelFields,
+}
+
+pub fn available_model_from_catalog_and_live(
+    id: &str,
+    catalog_caps: Option<&ModelCapabilities>,
+    live: &LiveModelFields,
+    enabled: bool,
+    unknown_default_n_ctx: usize,
+) -> AvailableModel {
+    let mut model = if let Some(caps) = catalog_caps {
+        AvailableModel::from_caps(id, caps, enabled, None)
+    } else {
+        AvailableModel {
+            id: id.to_string(),
+            display_name: None,
+            n_ctx: unknown_default_n_ctx,
+            supports_tools: false,
+            supports_parallel_tools: false,
+            supports_strict_tools: false,
+            supports_multimodality: false,
+            supports_clicks: false,
+            image_max_side_px: None,
+            image_preferred_side_px: None,
+            image_token_mode: ImageTokenMode::Provider,
+            reasoning_effort_options: None,
+            supports_thinking_budget: false,
+            supports_adaptive_thinking_budget: false,
+            max_thinking_tokens: None,
+            supports_cache_control: false,
+            tokenizer: None,
+            enabled,
+            is_custom: false,
+            pricing: None,
+            available_providers: Vec::new(),
+            selected_provider: None,
+            max_output_tokens: None,
+            supports_temperature: true,
+            default_temperature: None,
+            default_max_tokens: None,
+            supports_web_search: false,
+            supports_max_completion_tokens: false,
+            supported_parameters: None,
+            provider_variants: Vec::new(),
+            wire_format_override: None,
+            endpoint_override: None,
+            base_model: None,
+            upstream_provider: None,
+            api_mode: None,
+            live_fields: LiveModelFields::default(),
+        }
+    };
+
+    macro_rules! apply_live_value {
+        ($field:ident) => {
+            if let Some(value) = live.$field.clone() {
+                model.$field = value;
+            }
+        };
+    }
+    macro_rules! apply_live_option {
+        ($field:ident) => {
+            if let Some(value) = live.$field.clone() {
+                model.$field = Some(value);
+            }
+        };
+    }
+    apply_live_option!(display_name);
+    apply_live_value!(n_ctx);
+    apply_live_option!(max_output_tokens);
+    apply_live_value!(supports_tools);
+    apply_live_value!(supports_parallel_tools);
+    apply_live_value!(supports_strict_tools);
+    apply_live_value!(supports_multimodality);
+    apply_live_value!(supports_clicks);
+    apply_live_option!(reasoning_effort_options);
+    apply_live_value!(supports_thinking_budget);
+    apply_live_value!(supports_adaptive_thinking_budget);
+    apply_live_option!(max_thinking_tokens);
+    apply_live_value!(supports_cache_control);
+    apply_live_option!(tokenizer);
+    apply_live_option!(pricing);
+    apply_live_value!(supports_temperature);
+    apply_live_option!(default_temperature);
+    apply_live_option!(default_max_tokens);
+    apply_live_value!(supports_web_search);
+    apply_live_value!(supports_max_completion_tokens);
+    apply_live_option!(supported_parameters);
+    apply_live_option!(wire_format_override);
+    apply_live_option!(endpoint_override);
+    apply_live_option!(base_model);
+    apply_live_option!(upstream_provider);
+    apply_live_option!(api_mode);
+    model.live_fields = live.clone();
+    model
 }
 
 impl AvailableModel {
@@ -589,12 +771,14 @@ impl AvailableModel {
                 || caps.supports_video
                 || caps.supports_audio
                 || caps.supports_pdf,
+            supports_clicks: caps.supports_clicks,
             image_max_side_px: None,
             image_preferred_side_px: None,
             image_token_mode: ImageTokenMode::Provider,
             reasoning_effort_options: caps.reasoning_effort_options.clone(),
             supports_thinking_budget: caps.supports_thinking_budget,
             supports_adaptive_thinking_budget: caps.supports_adaptive_thinking_budget,
+            max_thinking_tokens: caps.max_thinking_tokens,
             supports_cache_control: caps.supports_cache_control,
             tokenizer: if caps.tokenizer.is_empty() {
                 None
@@ -607,14 +791,38 @@ impl AvailableModel {
             available_providers: Vec::new(),
             selected_provider: None,
             max_output_tokens: (caps.max_output_tokens > 0).then_some(caps.max_output_tokens),
+            supports_temperature: caps.supports_temperature,
+            default_temperature: caps.default_temperature,
+            default_max_tokens: caps.default_max_tokens,
+            supports_web_search: caps.supports_web_search,
+            supports_max_completion_tokens: caps.supports_max_completion_tokens,
+            supported_parameters: None,
             provider_variants: Vec::new(),
             wire_format_override: None,
             endpoint_override: None,
             base_model: None,
+            upstream_provider: None,
+            api_mode: None,
+            live_fields: LiveModelFields::default(),
         }
     }
 
     pub fn from_custom(id: &str, config: &CustomModelConfig, enabled: bool) -> Self {
+        let live_fields = LiveModelFields {
+            n_ctx: config.n_ctx,
+            max_output_tokens: config.max_output_tokens,
+            supports_tools: config.supports_tools,
+            supports_parallel_tools: config.supports_parallel_tools,
+            supports_strict_tools: config.supports_strict_tools,
+            supports_multimodality: config.supports_multimodality,
+            reasoning_effort_options: config.reasoning_effort_options.clone(),
+            supports_thinking_budget: config.supports_thinking_budget,
+            supports_adaptive_thinking_budget: config.supports_adaptive_thinking_budget,
+            supports_cache_control: config.supports_cache_control,
+            tokenizer: config.tokenizer.clone(),
+            pricing: config.pricing.clone(),
+            ..Default::default()
+        };
         Self {
             id: id.to_string(),
             display_name: None,
@@ -623,6 +831,7 @@ impl AvailableModel {
             supports_parallel_tools: config.supports_parallel_tools.unwrap_or(false),
             supports_strict_tools: config.supports_strict_tools.unwrap_or(false),
             supports_multimodality: config.supports_multimodality.unwrap_or(false),
+            supports_clicks: false,
             image_max_side_px: config.image_max_side_px,
             image_preferred_side_px: config.image_preferred_side_px,
             image_token_mode: config.image_token_mode,
@@ -631,6 +840,7 @@ impl AvailableModel {
             supports_adaptive_thinking_budget: config
                 .supports_adaptive_thinking_budget
                 .unwrap_or(false),
+            max_thinking_tokens: None,
             supports_cache_control: config.supports_cache_control.unwrap_or(true),
             tokenizer: config.tokenizer.clone(),
             enabled,
@@ -639,10 +849,19 @@ impl AvailableModel {
             available_providers: Vec::new(),
             selected_provider: None,
             max_output_tokens: config.max_output_tokens,
+            supports_temperature: true,
+            default_temperature: None,
+            default_max_tokens: None,
+            supports_web_search: false,
+            supports_max_completion_tokens: false,
+            supported_parameters: None,
             provider_variants: Vec::new(),
             wire_format_override: None,
             endpoint_override: None,
             base_model: None,
+            upstream_provider: None,
+            api_mode: None,
+            live_fields,
         }
     }
 }
@@ -718,18 +937,23 @@ pub fn merge_custom_models(
                 || config.max_output_tokens.is_some();
             if let Some(n_ctx) = config.n_ctx {
                 existing.n_ctx = n_ctx;
+                existing.live_fields.n_ctx = Some(n_ctx);
             }
             if let Some(v) = config.supports_tools {
                 existing.supports_tools = v;
+                existing.live_fields.supports_tools = Some(v);
             }
             if let Some(v) = config.supports_parallel_tools {
                 existing.supports_parallel_tools = v;
+                existing.live_fields.supports_parallel_tools = Some(v);
             }
             if let Some(v) = config.supports_strict_tools {
                 existing.supports_strict_tools = v;
+                existing.live_fields.supports_strict_tools = Some(v);
             }
             if let Some(v) = config.supports_multimodality {
                 existing.supports_multimodality = v;
+                existing.live_fields.supports_multimodality = Some(v);
             }
             if config.image_max_side_px.is_some() {
                 existing.image_max_side_px = config.image_max_side_px;
@@ -742,24 +966,32 @@ pub fn merge_custom_models(
             }
             if config.reasoning_effort_options.is_some() {
                 existing.reasoning_effort_options = config.reasoning_effort_options.clone();
+                existing.live_fields.reasoning_effort_options =
+                    config.reasoning_effort_options.clone();
             }
             if let Some(v) = config.supports_thinking_budget {
                 existing.supports_thinking_budget = v;
+                existing.live_fields.supports_thinking_budget = Some(v);
             }
             if let Some(v) = config.supports_adaptive_thinking_budget {
                 existing.supports_adaptive_thinking_budget = v;
+                existing.live_fields.supports_adaptive_thinking_budget = Some(v);
             }
             if let Some(v) = config.supports_cache_control {
                 existing.supports_cache_control = v;
+                existing.live_fields.supports_cache_control = Some(v);
             }
             if config.tokenizer.is_some() {
                 existing.tokenizer = config.tokenizer.clone();
+                existing.live_fields.tokenizer = config.tokenizer.clone();
             }
             if config.pricing.is_some() {
                 existing.pricing = config.pricing.clone();
+                existing.live_fields.pricing = config.pricing.clone();
             }
             if config.max_output_tokens.is_some() {
                 existing.max_output_tokens = config.max_output_tokens;
+                existing.live_fields.max_output_tokens = config.max_output_tokens;
             }
             if has_capability_overrides {
                 existing.is_custom = true;
@@ -843,9 +1075,119 @@ pub fn set_model_enabled_impl(enabled_models: &mut Vec<String>, model_id: &str, 
 #[cfg(test)]
 mod tests {
     use super::{
-        CredentialSpec, DEFAULT_CREDENTIAL_REFRESH_INTERVAL_MS, DEFAULT_CREDENTIAL_TIMEOUT_MS,
-        ModelTypeDefaults, ProviderDefaults,
+        CredentialSpec, CustomModelConfig, DEFAULT_CREDENTIAL_REFRESH_INTERVAL_MS,
+        DEFAULT_CREDENTIAL_TIMEOUT_MS, LiveModelFields, ModelTypeDefaults, ProviderDefaults,
+        available_model_from_catalog_and_live, merge_custom_models,
     };
+    use crate::model_caps::ModelCapabilities;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn live_model_fields_override_catalog_including_false_and_empty() {
+        let caps = ModelCapabilities {
+            n_ctx: 128_000,
+            max_output_tokens: 16_384,
+            supports_tools: true,
+            supports_strict_tools: true,
+            reasoning_effort_options: Some(vec!["high".to_string()]),
+            tokenizer: "catalog-tokenizer".to_string(),
+            ..Default::default()
+        };
+        let live = LiveModelFields {
+            n_ctx: Some(32_000),
+            supports_tools: Some(false),
+            reasoning_effort_options: Some(Vec::new()),
+            tokenizer: Some(String::new()),
+            ..Default::default()
+        };
+
+        let model = available_model_from_catalog_and_live("model", Some(&caps), &live, true, 4096);
+
+        assert_eq!(model.n_ctx, 32_000);
+        assert!(!model.supports_tools);
+        assert!(model.supports_strict_tools);
+        assert_eq!(model.max_output_tokens, Some(16_384));
+        assert_eq!(model.reasoning_effort_options, Some(Vec::new()));
+        assert_eq!(model.tokenizer.as_deref(), Some(""));
+        assert_eq!(model.live_fields.supports_tools, Some(false));
+    }
+
+    #[test]
+    fn custom_overrides_replace_live_values_and_record_authoritative_provenance() {
+        let caps = ModelCapabilities {
+            n_ctx: 128_000,
+            max_output_tokens: 16_384,
+            supports_tools: true,
+            supports_parallel_tools: true,
+            supports_strict_tools: true,
+            supports_vision: true,
+            supports_thinking_budget: true,
+            supports_adaptive_thinking_budget: true,
+            supports_cache_control: true,
+            reasoning_effort_options: Some(vec!["high".to_string()]),
+            tokenizer: "catalog-tokenizer".to_string(),
+            ..Default::default()
+        };
+        let live = LiveModelFields {
+            n_ctx: Some(64_000),
+            max_output_tokens: Some(8_192),
+            supports_tools: Some(true),
+            ..Default::default()
+        };
+        let mut models = vec![available_model_from_catalog_and_live(
+            "model",
+            Some(&caps),
+            &live,
+            true,
+            4096,
+        )];
+        let custom = CustomModelConfig {
+            n_ctx: Some(32_000),
+            max_output_tokens: Some(2_048),
+            supports_tools: Some(false),
+            supports_parallel_tools: Some(false),
+            supports_strict_tools: Some(false),
+            supports_multimodality: Some(false),
+            reasoning_effort_options: Some(Vec::new()),
+            supports_thinking_budget: Some(false),
+            supports_adaptive_thinking_budget: Some(false),
+            supports_cache_control: Some(false),
+            tokenizer: Some(String::new()),
+            ..Default::default()
+        };
+        merge_custom_models(
+            &mut models,
+            &HashMap::from([("model".to_string(), custom)]),
+            &HashSet::from(["model"]),
+        );
+
+        let model = &models[0];
+        assert_eq!(model.n_ctx, 32_000);
+        assert_eq!(model.max_output_tokens, Some(2_048));
+        assert!(!model.supports_tools);
+        assert!(!model.supports_parallel_tools);
+        assert!(!model.supports_strict_tools);
+        assert!(!model.supports_multimodality);
+        assert_eq!(model.reasoning_effort_options, Some(Vec::new()));
+        assert!(!model.supports_thinking_budget);
+        assert!(!model.supports_adaptive_thinking_budget);
+        assert!(!model.supports_cache_control);
+        assert_eq!(model.tokenizer.as_deref(), Some(""));
+        assert_eq!(model.live_fields.n_ctx, Some(32_000));
+        assert_eq!(model.live_fields.max_output_tokens, Some(2_048));
+        assert_eq!(model.live_fields.supports_tools, Some(false));
+        assert_eq!(model.live_fields.supports_parallel_tools, Some(false));
+        assert_eq!(model.live_fields.supports_strict_tools, Some(false));
+        assert_eq!(model.live_fields.supports_multimodality, Some(false));
+        assert_eq!(model.live_fields.reasoning_effort_options, Some(Vec::new()));
+        assert_eq!(model.live_fields.supports_thinking_budget, Some(false));
+        assert_eq!(
+            model.live_fields.supports_adaptive_thinking_budget,
+            Some(false)
+        );
+        assert_eq!(model.live_fields.supports_cache_control, Some(false));
+        assert_eq!(model.live_fields.tokenizer.as_deref(), Some(""));
+    }
 
     #[test]
     fn credential_command_serde_defaults_and_validation() {

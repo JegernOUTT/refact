@@ -47,6 +47,17 @@ const openAiProvider: ProviderListItem = {
   model_count: 5,
 };
 
+const liteLlmProvider: ProviderListItem = {
+  name: "litellm",
+  base_provider: "litellm",
+  display_name: "LiteLLM",
+  enabled: true,
+  readonly: false,
+  has_credentials: true,
+  status: "active",
+  model_count: 3,
+};
+
 const hiddenOpenAiResponsesProvider: ProviderListItem = {
   name: "openai_responses",
   base_provider: "openai_responses",
@@ -173,6 +184,24 @@ describe("Providers provider instances", () => {
         base_provider: "google_antigravity",
       }),
     ).not.toBeNull();
+  });
+
+  test("native and aliased LiteLLM providers use first-class branding", () => {
+    expect(getProviderName({ name: "litellm" })).toBe("LiteLLM");
+    expect(getProviderName(liteLlmProvider)).toBe("LiteLLM");
+    expect(getProviderIcon(liteLlmProvider)).not.toBeNull();
+
+    const alias = {
+      ...liteLlmProvider,
+      name: "litellm_gateway",
+      display_name: "Team Gateway",
+    };
+    expect(getProviderName(alias)).toBe("Team Gateway");
+    expect(getProviderIcon(alias)).not.toBeNull();
+    expect(providerBaseOptions([liteLlmProvider, alias])).toContainEqual({
+      id: "litellm",
+      label: "LiteLLM",
+    });
   });
 
   test("provider type guards accept base provider fields", () => {

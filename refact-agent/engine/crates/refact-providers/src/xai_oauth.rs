@@ -8,6 +8,7 @@ use serde_json::json;
 use tokio::sync::{Mutex as AMutex, MutexGuard};
 
 use refact_core::model_caps::{resolve_model_caps, ModelCapabilities};
+use refact_core::provider_types::{available_model_from_catalog_and_live, LiveModelFields};
 use refact_core::llm_types::WireFormat;
 use crate::traits::{
     AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
@@ -145,30 +146,32 @@ impl XAIOAuthProvider {
                 continue;
             }
 
-            let n_ctx = model
-                .get("context_length")
-                .and_then(|value| value.as_u64())
-                .and_then(|value| usize::try_from(value).ok())
-                .unwrap_or(128_000);
+            let live = LiveModelFields {
+                display_name: model
+                    .get("display_name")
+                    .or_else(|| model.get("name"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                n_ctx: model
+                    .get("context_length")
+                    .and_then(|value| value.as_u64())
+                    .and_then(|value| usize::try_from(value).ok()),
+                ..Default::default()
+            };
             let caps = resolve_model_caps(model_caps, &format!("xai/{id}"))
+                .or_else(|| resolve_model_caps(model_caps, &format!("xai_oauth/{id}")))
                 .or_else(|| resolve_model_caps(model_caps, id))
-                .map(|resolved| resolved.caps)
-                .unwrap_or_else(|| ModelCapabilities {
-                    n_ctx,
-                    supports_tools: true,
-                    supports_parallel_tools: true,
-                    ..Default::default()
-                });
-            let pricing = self
-                .custom_model_pricing(id)
-                .or_else(|| caps.pricing.clone());
-            let mut available =
-                AvailableModel::from_caps(id, &caps, enabled_set.contains(id), pricing);
-            available.display_name = model
-                .get("display_name")
-                .or_else(|| model.get("name"))
-                .and_then(|value| value.as_str())
-                .map(str::to_string);
+                .map(|resolved| resolved.caps);
+            let live = LiveModelFields {
+                supports_tools: caps.is_none().then_some(true),
+                supports_parallel_tools: caps.is_none().then_some(true),
+                ..live
+            };
+            let enabled = enabled_set.contains(id)
+                || enabled_set.contains(format!("xai/{id}").as_str())
+                || enabled_set.contains(format!("xai_oauth/{id}").as_str());
+            let available =
+                available_model_from_catalog_and_live(id, caps.as_ref(), &live, enabled, 128_000);
             available_models.push(available);
         }
 
@@ -370,7 +373,7 @@ available:
         };
 
         match self.available_models_from_live_response(&response, model_caps) {
-            Some(models) if !models.is_empty() => models,
+            Some(models) => models,
             _ => {
                 tracing::warn!("xAI OAuth: available models response was empty or invalid; using catalog fallback");
                 fallback_models()
@@ -447,6 +450,31 @@ mod tests {
         assert_eq!(grok.n_ctx, 500_000);
         assert!(grok.enabled);
         assert!(grok.supports_tools);
+    }
+
+    #[test]
+    fn live_context_overrides_provider_qualified_catalog_caps() {
+        let provider = XAIOAuthProvider {
+            enabled_models: vec!["xai_oauth/grok-live".to_string()],
+            ..Default::default()
+        };
+        let response = json!({"data": [{"id": "grok-live", "context_length": 500000}]});
+        let caps = HashMap::from([(
+            "xai_oauth/grok-live".to_string(),
+            ModelCapabilities {
+                n_ctx: 128_000,
+                supports_tools: false,
+                ..Default::default()
+            },
+        )]);
+
+        let models = provider
+            .available_models_from_live_response(&response, &caps)
+            .unwrap();
+
+        assert_eq!(models[0].n_ctx, 500_000);
+        assert!(models[0].enabled);
+        assert!(!models[0].supports_tools);
     }
 
     #[test]

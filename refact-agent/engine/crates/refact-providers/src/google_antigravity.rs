@@ -9,6 +9,7 @@ use tokio::sync::{Mutex as AMutex, MutexGuard};
 
 use refact_core::antigravity_client::antigravity_headers;
 use refact_core::model_caps::{resolve_model_caps, ModelCapabilities};
+use refact_core::provider_types::{available_model_from_catalog_and_live, LiveModelFields};
 use refact_core::llm_types::WireFormat;
 use crate::google_antigravity_oauth::OAuthTokens;
 use crate::traits::{
@@ -183,6 +184,11 @@ impl GoogleAntigravityProvider {
         model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Option<Vec<AvailableModel>> {
         let models = response.get("models")?.as_object()?;
+        let authoritative_empty = response
+            .get("authoritativeEmpty")
+            .or_else(|| response.get("authoritative_empty"))
+            .and_then(|value| value.as_bool())
+            == Some(true);
         let enabled_set: std::collections::HashSet<&str> = self
             .enabled_models
             .iter()
@@ -197,39 +203,38 @@ impl GoogleAntigravityProvider {
             let caps = resolve_model_caps(model_caps, &format!("google_antigravity/{id}"))
                 .or_else(|| resolve_model_caps(model_caps, &format!("google/{id}")))
                 .or_else(|| resolve_model_caps(model_caps, id))
-                .map(|resolved| resolved.caps)
-                .unwrap_or_else(|| ModelCapabilities {
-                    n_ctx: 128_000,
-                    supports_tools: true,
-                    supports_parallel_tools: true,
-                    supports_thinking_budget: true,
-                    ..Default::default()
-                });
-            let mut caps = caps;
+                .map(|resolved| resolved.caps);
             let supports_thinking = metadata
                 .get("supportsThinking")
                 .or_else(|| metadata.get("supports_thinking"))
                 .and_then(|value| value.as_bool());
-            caps.supports_thinking_budget = supports_thinking.unwrap_or_else(|| {
-                caps.supports_thinking_budget
-                    || id.starts_with("claude-")
-                    || id.starts_with("gemini-")
-            });
-            if supports_thinking == Some(false) {
-                caps.supports_adaptive_thinking_budget = false;
-            }
-            caps.supports_cache_control = false;
-            let pricing = self
-                .custom_model_pricing(id)
-                .or_else(|| caps.pricing.clone());
-            let mut available =
-                AvailableModel::from_caps(id, &caps, enabled_set.contains(id.as_str()), pricing);
-            available.display_name = metadata
-                .get("displayName")
-                .or_else(|| metadata.get("display_name"))
-                .and_then(|value| value.as_str())
-                .map(str::to_string);
+            let live = LiveModelFields {
+                display_name: metadata
+                    .get("displayName")
+                    .or_else(|| metadata.get("display_name"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                supports_thinking_budget: supports_thinking.or_else(|| {
+                    caps.is_none()
+                        .then_some(id.starts_with("claude-") || id.starts_with("gemini-"))
+                }),
+                supports_adaptive_thinking_budget: (supports_thinking == Some(false))
+                    .then_some(false),
+                supports_cache_control: Some(false),
+                supports_tools: caps.is_none().then_some(true),
+                supports_parallel_tools: caps.is_none().then_some(true),
+                ..Default::default()
+            };
+            let enabled = enabled_set.contains(id.as_str())
+                || enabled_set.contains(format!("google_antigravity/{id}").as_str())
+                || enabled_set.contains(format!("google/{id}").as_str());
+            let available =
+                available_model_from_catalog_and_live(id, caps.as_ref(), &live, enabled, 128_000);
             available_models.push(available);
+        }
+
+        if available_models.is_empty() && !authoritative_empty {
+            return None;
         }
 
         merge_custom_models(&mut available_models, &self.custom_models, &enabled_set);
@@ -542,7 +547,7 @@ available:
         };
 
         match self.available_models_from_live_response(&response, model_caps) {
-            Some(models) if !models.is_empty() => models,
+            Some(models) => models,
             _ => {
                 tracing::warn!("Google Antigravity: available models response was empty or invalid; using catalog fallback");
                 fallback_models()
@@ -630,7 +635,10 @@ mod tests {
 
     #[test]
     fn live_catalog_honors_explicit_thinking_false() {
-        let provider = GoogleAntigravityProvider::default();
+        let provider = GoogleAntigravityProvider {
+            enabled_models: vec!["google_antigravity/gemini-plain".to_string()],
+            ..Default::default()
+        };
         let response = json!({
             "models": {
                 "gemini-plain": {
@@ -640,12 +648,48 @@ mod tests {
             }
         });
 
+        let caps = HashMap::from([(
+            "google_antigravity/gemini-plain".to_string(),
+            ModelCapabilities {
+                n_ctx: 128_000,
+                supports_thinking_budget: true,
+                supports_adaptive_thinking_budget: true,
+                ..Default::default()
+            },
+        )]);
         let models = provider
-            .available_models_from_live_response(&response, &HashMap::new())
+            .available_models_from_live_response(&response, &caps)
             .unwrap();
 
         assert!(!models[0].supports_thinking_budget);
         assert!(!models[0].supports_adaptive_thinking_budget);
+        assert!(models[0].enabled);
+    }
+
+    #[test]
+    fn empty_live_catalog_requires_authoritative_marker_to_suppress_fallback() {
+        let provider = GoogleAntigravityProvider::default();
+        let caps = HashMap::from([(
+            "google_antigravity/gemini-catalog".to_string(),
+            ModelCapabilities {
+                n_ctx: 128_000,
+                ..Default::default()
+            },
+        )]);
+
+        let models = provider
+            .available_models_from_live_response(&json!({"models": {}}), &caps)
+            .unwrap_or_else(|| provider.get_available_models_from_caps(&caps));
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gemini-catalog");
+
+        let models = provider
+            .available_models_from_live_response(
+                &json!({"models": {}, "authoritativeEmpty": true}),
+                &caps,
+            )
+            .unwrap();
+        assert!(models.is_empty());
     }
 
     #[test]

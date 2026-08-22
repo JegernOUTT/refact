@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use refact_core::llm_types::{BaseModelRecord, HasBaseModelRecord, default_true};
+use refact_core::provider_types::LiveModelFields;
 
 #[derive(Debug, Serialize, Clone, Deserialize)]
 pub struct ChatModelRecord {
@@ -48,6 +49,8 @@ pub struct ChatModelRecord {
     pub available_providers: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_provider: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub live_fields: LiveModelFields,
 }
 
 impl Default for ChatModelRecord {
@@ -73,6 +76,7 @@ impl Default for ChatModelRecord {
             supports_temperature: default_true(),
             available_providers: Vec::new(),
             selected_provider: None,
+            live_fields: LiveModelFields::default(),
         }
     }
 }

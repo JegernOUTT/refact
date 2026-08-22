@@ -35,7 +35,16 @@ impl std::error::Error for OpenAiEndpointError {}
 
 fn redact_credential(text: String, bearer_credential: Option<&str>) -> String {
     match bearer_credential.filter(|value| !value.is_empty()) {
-        Some(value) => text.replace(value, "[REDACTED]"),
+        Some(value) => {
+            let mut redacted = text.replace(value, "[REDACTED]");
+            if let Ok(escaped) = serde_json::to_string(value) {
+                let escaped = escaped.trim_matches('"');
+                if escaped != value {
+                    redacted = redacted.replace(escaped, "[REDACTED]");
+                }
+            }
+            redacted
+        }
         None => text,
     }
 }
@@ -177,8 +186,8 @@ pub async fn forward_to_openai_style_endpoint_with_bearer(
             bearer_credential,
         ));
     }
+    let safe_response_txt = redact_credential(response_txt.clone(), bearer_credential);
     if status_code != 200 {
-        let safe_response_txt = redact_credential(response_txt.clone(), bearer_credential);
         tracing::info!(
             "forward_to_openai_style_endpoint: {} {}\n{}",
             model_rec.endpoint,
@@ -186,16 +195,37 @@ pub async fn forward_to_openai_style_endpoint_with_bearer(
             safe_response_txt
         );
     }
-    let parsed_json: serde_json::Value = match serde_json::from_str(&response_txt) {
+    let response_to_parse = if status_code == 200 {
+        &response_txt
+    } else {
+        &safe_response_txt
+    };
+    let parsed_json: serde_json::Value = match serde_json::from_str(response_to_parse) {
         Ok(json) => json,
         Err(e) => {
             return Err(endpoint_error(
                 Some(status),
-                format!("Failed to parse JSON response: {}\n{}", e, response_txt),
+                format!(
+                    "Failed to parse JSON response: {}\n{}",
+                    e, safe_response_txt
+                ),
                 bearer_credential,
             ))
         }
     };
+    if parsed_json.get("error").is_some() {
+        return serde_json::from_str(&redact_credential(
+            parsed_json.to_string(),
+            bearer_credential,
+        ))
+        .map_err(|e| {
+            endpoint_error(
+                Some(status),
+                format!("Failed to redact JSON error response: {}", e),
+                bearer_credential,
+            )
+        });
+    }
     Ok(parsed_json)
 }
 
@@ -333,6 +363,8 @@ pub fn try_get_compression_from_prompt(_prompt: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[tokio::test]
     async fn empty_endpoint_returns_error() {
@@ -349,6 +381,55 @@ mod tests {
                 .await;
 
         assert_eq!(result.unwrap_err(), "No endpoint configured for test-model");
+    }
+
+    #[tokio::test]
+    async fn redacts_bearer_credential_from_accepted_400_json() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = r#"{"error":"credential echoed: test-bearer-secret"}"#;
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let model_rec = BaseModelRecord {
+            id: "test-model".to_string(),
+            name: "test".to_string(),
+            endpoint: format!("http://{address}"),
+            ..Default::default()
+        };
+
+        let result = forward_to_openai_style_endpoint_with_bearer(
+            &model_rec,
+            "prompt",
+            &reqwest::Client::new(),
+            &SamplingParameters::default(),
+            Some("test-bearer-secret"),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result["error"], "credential echoed: [REDACTED]");
+        assert!(!result.to_string().contains("test-bearer-secret"));
+    }
+
+    #[test]
+    fn redacts_json_escaped_bearer_credential() {
+        let credential = "quoted\"secret\\value";
+        let escaped = serde_json::to_string(credential).unwrap();
+        let text = format!("{{\"error\":{escaped}}}");
+        let redacted = redact_credential(text, Some(credential));
+
+        assert!(!redacted.contains("quoted"));
+        assert!(redacted.contains("[REDACTED]"));
     }
 
     #[test]

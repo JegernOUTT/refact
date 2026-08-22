@@ -6,6 +6,7 @@ import { GeminiIcon } from "./Gemini";
 import { GitHubCopilotIcon } from "./GitHubCopilot";
 import { GroqIcon } from "./Groq";
 import { KimiIcon } from "./Kimi";
+import { LiteLLMIcon } from "./LiteLLM";
 import { LMStudioIcon } from "./LMStudio";
 import { MiniMaxIcon } from "./MiniMax";
 import { OllamaIcon } from "./Ollama";
@@ -37,6 +38,7 @@ export const iconsMap: Record<string, JSX.Element> = {
   xai_oauth: <XaiIcon />,
   qwen: <QwenIcon />,
   kimi: <KimiIcon />,
+  litellm: <LiteLLMIcon />,
   zhipu: <ZhipuIcon />,
   minimax: <MiniMaxIcon />,
   doubao: <DoubaoIcon />,

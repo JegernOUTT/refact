@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tokio::sync::{Mutex as AMutex, MutexGuard};
 
-use refact_core::provider_types::ImageTokenMode;
+use refact_core::provider_types::{available_model_from_catalog_and_live, LiveModelFields};
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
 use crate::llm_http_retry::{
@@ -958,7 +958,7 @@ impl OpenAICodexProvider {
         let models = self.available_models_from_live_chatgpt_models(models_array, model_caps);
 
         tracing::info!(
-            "OpenAI Codex: {} models available (chatgpt backend + models.dev catalog)",
+            "OpenAI Codex: {} models available (chatgpt backend, enriched from models.dev catalog)",
             models.len()
         );
 
@@ -1028,15 +1028,14 @@ impl OpenAICodexProvider {
                 continue;
             }
             let enabled = enabled_set.contains(id);
-            let pricing = self.custom_model_pricing(id);
-            let mut available =
-                if let Some(caps) = resolve_openai_codex_catalog_caps(model_caps, id) {
-                    AvailableModel::from_caps(id, caps, enabled, pricing)
-                } else {
-                    self.unknown_live_codex_model(id.to_string(), enabled, pricing, model)
-                };
-            available.display_name =
-                Self::live_model_display_name(model).or(available.display_name);
+            let live = self.live_model_fields(model, id);
+            let available = available_model_from_catalog_and_live(
+                id,
+                resolve_openai_codex_catalog_caps(model_caps, id),
+                &live,
+                enabled,
+                8192,
+            );
             models_map.insert(id.to_string(), available);
         }
 
@@ -1108,7 +1107,7 @@ impl OpenAICodexProvider {
         model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Vec<AvailableModel> {
         let enabled_set: HashSet<&str> = self.enabled_models.iter().map(|s| s.as_str()).collect();
-        let mut models_map = self.catalog_model_map(model_caps, &enabled_set);
+        let mut models_map = HashMap::new();
 
         for model in models_array {
             let Some(slug) = Self::live_model_id(model) else {
@@ -1117,22 +1116,25 @@ impl OpenAICodexProvider {
             if !is_chatgpt_codex_live_model(slug) || !Self::live_model_is_supported(model) {
                 continue;
             }
-            let enabled = enabled_set.contains(slug);
-            let pricing = self.custom_model_pricing(slug);
-            let display_name = Self::live_model_display_name(model);
-            let mut available =
-                if let Some(caps) = resolve_openai_codex_catalog_caps(model_caps, slug) {
-                    AvailableModel::from_caps(slug, caps, enabled, pricing)
-                } else if let Some(caps) = codex_builtin_fallback_caps(slug) {
-                    AvailableModel::from_caps(slug, &caps, enabled, pricing)
-                } else {
-                    self.unknown_live_codex_model(slug.to_string(), enabled, pricing, model)
-                };
-            apply_codex_model_overrides(&mut available);
-            available.display_name = display_name.or(available.display_name);
-            if let Some(reasoning_levels) = Self::live_model_reasoning_levels(model) {
-                available.reasoning_effort_options = Some(reasoning_levels);
-            }
+            let enabled = enabled_set.contains(slug)
+                || enabled_set.contains(format!("openai_codex/{slug}").as_str())
+                || enabled_set.contains(format!("openai-codex/{slug}").as_str());
+            let builtin_caps = codex_builtin_fallback_caps(slug);
+            let catalog_caps =
+                resolve_openai_codex_catalog_caps(model_caps, slug).or(builtin_caps.as_ref());
+            let live = LiveModelFields {
+                display_name: Self::live_model_display_name(model),
+                n_ctx: Self::live_model_context_window(model),
+                max_output_tokens: Self::live_model_max_output_tokens(model),
+                supports_tools: Self::live_model_supports_tools(model),
+                supports_parallel_tools: Self::live_model_supports_parallel_tools(model),
+                supports_multimodality: Self::live_model_supports_multimodality(model),
+                reasoning_effort_options: Self::live_model_reasoning_levels(model),
+                pricing: self.custom_model_pricing(slug),
+                ..Default::default()
+            };
+            let available =
+                available_model_from_catalog_and_live(slug, catalog_caps, &live, enabled, 8192);
             models_map.insert(slug.to_string(), available);
         }
 
@@ -1286,7 +1288,7 @@ impl OpenAICodexProvider {
         !Self::live_status_is_disabled(model)
     }
 
-    fn live_model_supports_tools(model: &Value) -> bool {
+    fn live_model_supports_tools(model: &Value) -> Option<bool> {
         Self::live_bool_field(
             model,
             &[
@@ -1296,10 +1298,9 @@ impl OpenAICodexProvider {
                 "supportsTools",
             ],
         )
-        .unwrap_or(false)
     }
 
-    fn live_model_supports_parallel_tools(model: &Value) -> bool {
+    fn live_model_supports_parallel_tools(model: &Value) -> Option<bool> {
         Self::live_bool_field(
             model,
             &[
@@ -1309,20 +1310,29 @@ impl OpenAICodexProvider {
                 "supportsParallelTools",
             ],
         )
-        .unwrap_or(false)
     }
 
-    fn live_model_supports_multimodality(model: &Value) -> bool {
-        model
-            .get("input_modalities")
-            .or_else(|| model.get("inputModalities"))
-            .and_then(Value::as_array)
-            .map(|modalities| {
-                modalities
-                    .iter()
-                    .any(|modality| modality.as_str() == Some("image"))
-            })
-            .unwrap_or(false)
+    fn live_model_supports_multimodality(model: &Value) -> Option<bool> {
+        Self::live_bool_field(
+            model,
+            &[
+                "supports_multimodality",
+                "supportsMultimodality",
+                "supports_vision",
+                "supportsVision",
+            ],
+        )
+        .or_else(|| {
+            model
+                .get("input_modalities")
+                .or_else(|| model.get("inputModalities"))
+                .and_then(Value::as_array)
+                .map(|modalities| {
+                    modalities
+                        .iter()
+                        .any(|modality| modality.as_str() == Some("image"))
+                })
+        })
     }
 
     fn live_model_reasoning_levels(model: &Value) -> Option<Vec<String>> {
@@ -1342,7 +1352,7 @@ impl OpenAICodexProvider {
                     .map(ToString::to_string)
             })
             .collect::<Vec<_>>();
-        (!levels.is_empty()).then_some(levels)
+        Some(levels)
     }
 
     pub fn should_force_refresh_for_status(
@@ -1456,42 +1466,17 @@ impl OpenAICodexProvider {
         None
     }
 
-    fn unknown_live_codex_model(
-        &self,
-        id: String,
-        enabled: bool,
-        pricing: Option<ModelPricing>,
-        model: &Value,
-    ) -> AvailableModel {
-        let supports_tools = Self::live_model_supports_tools(model);
-        let supports_parallel_tools =
-            supports_tools && Self::live_model_supports_parallel_tools(model);
-        AvailableModel {
-            id,
-            display_name: None,
-            n_ctx: Self::live_model_context_window(model).unwrap_or(8192),
-            supports_tools,
-            supports_parallel_tools,
-            supports_strict_tools: false,
-            supports_multimodality: Self::live_model_supports_multimodality(model),
-            image_max_side_px: None,
-            image_preferred_side_px: None,
-            image_token_mode: ImageTokenMode::default(),
-            reasoning_effort_options: Self::live_model_reasoning_levels(model),
-            supports_thinking_budget: false,
-            supports_adaptive_thinking_budget: false,
-            supports_cache_control: true,
-            tokenizer: None,
-            enabled,
-            is_custom: false,
-            pricing,
-            available_providers: Vec::new(),
-            selected_provider: None,
+    fn live_model_fields(&self, model: &Value, id: &str) -> LiveModelFields {
+        LiveModelFields {
+            display_name: Self::live_model_display_name(model),
+            n_ctx: Self::live_model_context_window(model),
             max_output_tokens: Self::live_model_max_output_tokens(model),
-            provider_variants: Vec::new(),
-            wire_format_override: None,
-            endpoint_override: None,
-            base_model: None,
+            supports_tools: Self::live_model_supports_tools(model),
+            supports_parallel_tools: Self::live_model_supports_parallel_tools(model),
+            supports_multimodality: Self::live_model_supports_multimodality(model),
+            reasoning_effort_options: Self::live_model_reasoning_levels(model),
+            pricing: self.custom_model_pricing(id),
+            ..Default::default()
         }
     }
 }
@@ -1560,7 +1545,7 @@ oauth:
 description: |
   Use your ChatGPT Plus/Pro subscription to access OpenAI Codex and GPT-5 subscription models.
 
-  **Setup:** Click **Login with OpenAI** below, or install Codex CLI and run `codex login`.
+  **Setup:** Click **Login with OpenAI** below.
 available:
   on_your_laptop_possible: true
   when_isolated_possible: true
@@ -1690,8 +1675,11 @@ available:
     }
 
     fn model_source(&self) -> ModelSource {
-        // Subscription-only: catalog is the only source.
-        ModelSource::ModelCaps
+        if matches!(self.resolve_auth().1, CodexAuth::ChatGptBackendOAuth { .. }) {
+            ModelSource::Api
+        } else {
+            ModelSource::ModelCaps
+        }
     }
 
     fn enabled_models(&self) -> &[String] {
@@ -1874,10 +1862,9 @@ mod tests {
     }
 
     #[test]
-    fn model_source_is_always_model_caps() {
+    fn model_source_uses_api_when_live_discovery_is_authenticated() {
         let p = provider_with_oauth("tok", "acct-123");
-        assert_eq!(p.model_source(), ModelSource::ModelCaps);
-        // Even with no auth, source is ModelCaps (no API path remains).
+        assert_eq!(p.model_source(), ModelSource::Api);
         let p_no_auth = OpenAICodexProvider::default();
         assert_eq!(p_no_auth.model_source(), ModelSource::ModelCaps);
     }
@@ -2048,7 +2035,7 @@ mod tests {
             .iter()
             .find(|m| m.id == "gpt-5.6-terra")
             .unwrap();
-        assert_eq!(terra.n_ctx, 372_000);
+        assert_eq!(terra.n_ctx, 1_050_000);
         assert_eq!(terra.display_name.as_deref(), Some("GPT-5.6 Terra"));
         assert_eq!(
             terra.reasoning_effort_options.as_deref(),
@@ -2063,11 +2050,94 @@ mod tests {
             )
         );
         let luna = live_models.iter().find(|m| m.id == "gpt-5.6-luna").unwrap();
-        assert_eq!(luna.n_ctx, 372_000);
+        assert_eq!(luna.n_ctx, 1_050_000);
         assert_eq!(luna.display_name.as_deref(), Some("GPT-5.6 Luna"));
         assert!(luna.supports_tools);
         assert!(luna.supports_parallel_tools);
         assert!(!live_models.iter().any(|m| m.id == "gpt-5.6-random"));
+        assert!(!live_models.iter().any(|m| m.id == "gpt-5.3-codex"));
+    }
+
+    #[test]
+    fn live_chatgpt_membership_omits_stale_catalog_models_and_overrides_context() {
+        let p = provider_with_oauth("tok", "acct-123");
+        let models = p.available_models_from_live_chatgpt_models(
+            &[json!({
+                "slug": "gpt-5.5",
+                "display_name": "Live GPT-5.5",
+                "max_context_window": 333_000,
+                "supported": true
+            })],
+            &caps_map(),
+        );
+
+        assert_eq!(models.iter().filter(|model| !model.is_custom).count(), 1);
+        let model = models.iter().find(|model| model.id == "gpt-5.5").unwrap();
+        assert_eq!(model.display_name.as_deref(), Some("Live GPT-5.5"));
+        assert_eq!(model.n_ctx, 333_000);
+        assert!(!models.iter().any(|model| model.id == "gpt-5.3-codex"));
+        assert!(!models.iter().any(|model| model.id == "gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn live_chatgpt_only_overrides_capabilities_that_are_reported() {
+        let p = provider_with_oauth("tok", "acct-123");
+        let models = p.available_models_from_live_chatgpt_models(
+            &[
+                json!({ "slug": "gpt-5.5", "supported": true }),
+                json!({
+                    "slug": "gpt-5.3-codex",
+                    "supported": true,
+                    "supports_tools": false,
+                    "supports_parallel_tools": false,
+                    "input_modalities": ["text"]
+                }),
+            ],
+            &caps_map(),
+        );
+
+        let absent = models.iter().find(|model| model.id == "gpt-5.5").unwrap();
+        assert!(absent.supports_tools);
+        assert!(absent.supports_parallel_tools);
+        assert!(absent.supports_multimodality);
+        let explicit = models
+            .iter()
+            .find(|model| model.id == "gpt-5.3-codex")
+            .unwrap();
+        assert!(!explicit.supports_tools);
+        assert!(!explicit.supports_parallel_tools);
+        assert!(!explicit.supports_multimodality);
+    }
+
+    #[test]
+    fn secondary_api_live_fields_authoritatively_override_catalog() {
+        let p = provider_with_oauth("tok", "acct-123");
+        let live_record = json!({
+            "id": "gpt-5.3-codex",
+            "display_name": "API Codex",
+            "context_window": 123_000,
+            "max_output_tokens": 4_000,
+            "supports_tools": false,
+            "supports_parallel_tools": false,
+            "supports_multimodality": false,
+            "supported_reasoning_levels": []
+        });
+        let live = p.live_model_fields(&live_record, "gpt-5.3-codex");
+        let model = refact_core::provider_types::available_model_from_catalog_and_live(
+            "gpt-5.3-codex",
+            caps_map().get("openai/gpt-5.3-codex"),
+            &live,
+            false,
+            8192,
+        );
+
+        assert_eq!(model.display_name.as_deref(), Some("API Codex"));
+        assert_eq!(model.n_ctx, 123_000);
+        assert_eq!(model.max_output_tokens, Some(4_000));
+        assert!(!model.supports_tools);
+        assert!(!model.supports_parallel_tools);
+        assert!(!model.supports_multimodality);
+        assert_eq!(model.reasoning_effort_options, Some(Vec::new()));
     }
 
     #[test]

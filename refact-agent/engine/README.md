@@ -95,12 +95,13 @@ The engine uses these local locations by default:
 
 Provider setup is normally handled from the GUI, but the engine ultimately loads YAML files from `providers.d`. Current provider families include OpenAI-compatible APIs, Anthropic, OpenRouter, Ollama, LM Studio, vLLM, Groq, DeepSeek, Doubao, xAI, Google Gemini, Qwen, Kimi, Zhipu, MiniMax, GitHub Copilot, Claude Code, and custom endpoints. Available models are derived from provider config and provider/runtime catalogs instead of a fixed hard-coded model list.
 
-### Custom-provider command credentials
+### Command credentials and LiteLLM
 
-Custom providers may obtain a credential from a command in their **user-level** `~/.config/refact/providers.d/*.yaml` config:
+Custom and native LiteLLM providers may obtain a credential from a command in their **user-level** `~/.config/refact/providers.d/*.yaml` config. For a generic LiteLLM gateway, create (for example) `~/.config/refact/providers.d/team-gateway.yaml`:
 
 ```yaml
-base_provider: custom
+base_provider: litellm
+endpoint: https://gateway.example/v1
 api_key: ""
 credential:
   type: command
@@ -110,9 +111,14 @@ credential:
   refresh_interval_ms: 300000
   # cwd: /optional/working/directory
   # env_passthrough: ["PROFILE_NAME", "CREDENTIAL_*"]
+enabled: true
+# Optional: discovered models are enabled by default.
+# disabled_models: [legacy-model]
 ```
 
-`credential` and a non-empty `api_key` are mutually exclusive. Existing static `api_key` values and `$ENV_VAR` references remain supported unchanged. The helper is executed directly with the listed arguments, never through a shell; use a shell executable and explicit arguments only when shell behavior is intentional. `cwd` and `env_passthrough` are optional, while `timeout_ms` and `refresh_interval_ms` default to 5,000 ms and 300,000 ms if omitted.
+The native provider obtains every accessible alias dynamically from `/v1/models` and enriches entries when `/v1/model/info` is available, so models do not need hand-written capability records. Discovered aliases are enabled by default; model toggles persist explicit opt-outs in `disabled_models`. LiteLLM aliases identified as Responses models are routed to `/v1/responses`; other aliases use the appropriate OpenAI-compatible chat route.
+
+`credential` and a non-empty `api_key` are mutually exclusive. Existing static `api_key` values and `$ENV_VAR` references remain supported unchanged. The helper is executed directly with the listed arguments, never through a shell; use a shell executable and explicit arguments only when shell behavior is intentional. `cwd` and `env_passthrough` are optional, while `timeout_ms` and `refresh_interval_ms` default to 5,000 ms and 300,000 ms if omitted. Command credentials are accepted only for `custom` and `litellm` base providers.
 
 Helper stdout is trimmed and used only as the credential. It is cached in process memory until the refresh TTL, then regenerated; after a provider returns 401 or 403, the engine regenerates it and retries once. Helper output is never persisted or included in errors. The child starts with a scrubbed environment containing a small platform-safe baseline; add only required names or wildcard patterns to `env_passthrough`. Command credentials are not accepted from project-level configuration.
 

@@ -14,7 +14,7 @@ use crate::{
     google_gemini::GoogleGeminiProvider, google_antigravity::GoogleAntigravityProvider,
     qwen::QwenProvider, kimi::KimiProvider, zhipu::ZhipuProvider, minimax::MiniMaxProvider,
     github_copilot::GitHubCopilotProvider, custom::CustomProvider, claude_code::ClaudeCodeProvider,
-    opencode::OpenCodeProvider,
+    opencode::OpenCodeProvider, litellm::LiteLLMProvider,
 };
 
 pub const PROVIDER_NAMES: &[&str] = &[
@@ -26,6 +26,7 @@ pub const PROVIDER_NAMES: &[&str] = &[
     "ollama",
     "lmstudio",
     "vllm",
+    "litellm",
     "groq",
     "deepseek",
     "doubao",
@@ -54,6 +55,7 @@ pub fn create_provider(name: &str) -> Option<Box<dyn ProviderTrait>> {
         "ollama" => Some(Box::new(OllamaProvider::default())),
         "lmstudio" => Some(Box::new(LMStudioProvider::default())),
         "vllm" => Some(Box::new(VLLMProvider::default())),
+        "litellm" => Some(Box::new(LiteLLMProvider::default())),
         "groq" => Some(Box::new(GroqProvider::default())),
         "deepseek" => Some(Box::new(DeepseekProvider::default())),
         "doubao" => Some(Box::new(DoubaoProvider::default())),
@@ -151,10 +153,14 @@ pub async fn load_providers_from_config(
         Ok(e) => e,
         Err(_) => return Ok(registry),
     };
+    let mut paths = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        paths.push(entry.path());
+    }
+    paths.sort();
     let mut seen_stems = HashSet::new();
 
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
+    for path in paths {
         if !path.is_file() {
             continue;
         }
@@ -166,15 +172,6 @@ pub async fn load_providers_from_config(
             Some(n) => n,
             None => continue,
         };
-        let duplicate_key = instance_id.to_ascii_lowercase();
-        if !seen_stems.insert(duplicate_key) {
-            tracing::warn!(
-                "Ignoring duplicate provider config stem '{}' at {}",
-                instance_id,
-                path.display()
-            );
-            continue;
-        }
 
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
@@ -199,6 +196,25 @@ pub async fn load_providers_from_config(
                 continue;
             }
         };
+        let duplicate_key = identity.instance_id.to_ascii_lowercase();
+        if !seen_stems.insert(duplicate_key) {
+            tracing::warn!(
+                "Ignoring duplicate provider config stem '{}' at {}",
+                instance_id,
+                path.display()
+            );
+            continue;
+        }
+
+        if yaml.get("credential").is_some()
+            && !matches!(identity.base_provider.as_str(), "custom" | "litellm")
+        {
+            tracing::warn!(
+                "Ignoring provider config {}: credential is only supported by custom and litellm providers",
+                path.display()
+            );
+            continue;
+        }
 
         let mut provider = match create_provider(&identity.base_provider) {
             Some(provider) => provider,
@@ -363,6 +379,21 @@ mod tests {
         let registry = load_registry(&temp).await;
 
         assert!(!registry.has_instance("openai_2"));
+    }
+
+    #[tokio::test]
+    async fn credential_is_rejected_for_unsupported_base_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        write_provider_config(
+            &temp,
+            "openai.yaml",
+            "credential:\n  type: command\n  command: helper\nenabled: true\n",
+        )
+        .await;
+
+        let registry = load_registry(&temp).await;
+
+        assert!(!registry.has_instance("openai"));
     }
 
     #[tokio::test]

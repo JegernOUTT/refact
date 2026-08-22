@@ -5,11 +5,13 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use refact_core::provider_types::ImageTokenMode;
+use refact_core::provider_types::{
+    AvailableModel, LiveModelFields, available_model_from_catalog_and_live,
+};
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
 use crate::traits::{
-    AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+    CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
     merge_custom_models, normalize_endpoint, derive_endpoint_from_chat_url, parse_enabled_models,
     parse_custom_models, set_model_enabled_impl,
 };
@@ -41,71 +43,120 @@ impl Default for LMStudioProvider {
 }
 
 impl LMStudioProvider {
-    fn parse_openai_model(model: &serde_json::Value, enabled: bool) -> Option<AvailableModel> {
-        let id = model.get("id")?.as_str()?.to_string();
-        let n_ctx = model
-            .get("context_length")
-            .or_else(|| model.get("max_context_length"))
-            .or_else(|| model.get("max_model_len"))
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize)
-            .unwrap_or(32_768);
-        let max_output_tokens = model
-            .get("max_tokens")
-            .or_else(|| model.get("max_completion_tokens"))
-            .and_then(|v| v.as_u64())
-            .map(|v| v as usize);
-        let supports_tools = model
-            .get("supports_tools")
-            .and_then(|v| v.as_bool())
-            .or_else(|| {
-                model
-                    .get("capabilities")
-                    .and_then(|v| v.as_array())
-                    .map(|caps| caps.iter().any(|c| c.as_str() == Some("tools")))
-            })
-            .unwrap_or(true);
-        let supports_multimodality = model
-            .get("supports_vision")
-            .and_then(|v| v.as_bool())
-            .or_else(|| {
-                model
-                    .get("capabilities")
-                    .and_then(|v| v.as_array())
-                    .map(|caps| {
-                        caps.iter()
-                            .any(|c| matches!(c.as_str(), Some("vision") | Some("image")))
-                    })
-            })
-            .unwrap_or(false);
+    fn catalog_caps<'a>(
+        model_caps: &'a HashMap<String, ModelCapabilities>,
+        id: &str,
+        base_model: Option<&str>,
+    ) -> Option<&'a ModelCapabilities> {
+        let mut aliases = Vec::new();
+        if let Some(base) = base_model {
+            aliases.push(base);
+        }
+        aliases.push(id);
+        for alias in aliases {
+            let bare = alias.rsplit('/').next().unwrap_or(alias);
+            for provider in ["lmstudio", "lm-studio", "lm_studio"] {
+                if let Some(caps) = model_caps
+                    .get(&format!("{provider}/{alias}"))
+                    .or_else(|| model_caps.get(&format!("{provider}/{bare}")))
+                {
+                    return Some(caps);
+                }
+            }
+            if let Some(caps) = model_caps.get(alias).or_else(|| model_caps.get(bare)) {
+                return Some(caps);
+            }
+        }
+        None
+    }
 
-        Some(AvailableModel {
+    fn parse_openai_model(
+        model: &serde_json::Value,
+        enabled: bool,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Option<AvailableModel> {
+        let id = model.get("id")?.as_str()?;
+        let supported_parameters = model
+            .get("supported_parameters")
+            .and_then(|v| v.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|v| v.as_str().map(ToString::to_string))
+                    .collect::<Vec<_>>()
+            });
+        let parameter_support = |names: &[&str]| {
+            supported_parameters
+                .as_ref()
+                .map(|params| params.iter().any(|p| names.iter().any(|name| p == name)))
+        };
+        let capability_support = |names: &[&str]| {
+            model
+                .get("capabilities")
+                .and_then(|v| v.as_array())
+                .map(|caps| {
+                    caps.iter()
+                        .any(|c| c.as_str().is_some_and(|c| names.contains(&c)))
+                })
+        };
+        let base_model = model
+            .get("base_model")
+            .or_else(|| model.get("root"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        let live = LiveModelFields {
+            display_name: model
+                .get("display_name")
+                .or_else(|| model.get("name"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != id)
+                .map(String::from),
+            n_ctx: model
+                .get("context_length")
+                .or_else(|| model.get("max_context_length"))
+                .or_else(|| model.get("max_model_len"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize),
+            max_output_tokens: model
+                .get("max_output_tokens")
+                .or_else(|| model.get("max_tokens"))
+                .or_else(|| model.get("max_completion_tokens"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize),
+            supports_tools: model
+                .get("supports_tools")
+                .and_then(|v| v.as_bool())
+                .or_else(|| parameter_support(&["tools", "tool_choice", "functions"]))
+                .or_else(|| capability_support(&["tools"])),
+            supports_parallel_tools: model
+                .get("supports_parallel_tools")
+                .or_else(|| model.get("supports_parallel_tool_calls"))
+                .and_then(|v| v.as_bool())
+                .or_else(|| parameter_support(&["parallel_tool_calls"])),
+            supports_strict_tools: model
+                .get("supports_strict_tools")
+                .and_then(|v| v.as_bool())
+                .or_else(|| parameter_support(&["strict"])),
+            supports_multimodality: model
+                .get("supports_multimodality")
+                .or_else(|| model.get("supports_vision"))
+                .and_then(|v| v.as_bool())
+                .or_else(|| parameter_support(&["vision", "image", "images"]))
+                .or_else(|| capability_support(&["vision", "image"])),
+            supported_parameters,
+            base_model: base_model.clone(),
+            ..Default::default()
+        };
+        Some(available_model_from_catalog_and_live(
             id,
-            display_name: None,
-            n_ctx,
-            supports_tools,
-            supports_parallel_tools: supports_tools,
-            supports_strict_tools: false,
-            supports_multimodality,
-            image_max_side_px: None,
-            image_preferred_side_px: None,
-            image_token_mode: ImageTokenMode::default(),
-            reasoning_effort_options: None,
-            supports_thinking_budget: false,
-            supports_adaptive_thinking_budget: false,
-            supports_cache_control: false,
-            tokenizer: None,
+            Self::catalog_caps(model_caps, id, base_model.as_deref()),
+            &live,
             enabled,
-            is_custom: false,
-            pricing: None,
-            available_providers: Vec::new(),
-            selected_provider: None,
-            max_output_tokens,
-            provider_variants: Vec::new(),
-            wire_format_override: None,
-            endpoint_override: None,
-            base_model: None,
-        })
+            32_768,
+        ))
     }
 }
 
@@ -265,7 +316,7 @@ available:
     async fn fetch_available_models(
         &self,
         http_client: &reqwest::Client,
-        _model_caps: &HashMap<String, ModelCapabilities>,
+        model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Vec<AvailableModel> {
         let base_url = normalize_endpoint(&self.endpoint);
         let models_url = format!("{}/v1/models", base_url);
@@ -315,7 +366,7 @@ available:
                     .filter_map(|m| {
                         let id = m.get("id").and_then(|v| v.as_str())?;
                         let enabled = enabled_set.contains(id);
-                        Self::parse_openai_model(m, enabled)
+                        Self::parse_openai_model(m, enabled, model_caps)
                     })
                     .collect()
             })
@@ -330,6 +381,75 @@ available:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn catalog_model() -> ModelCapabilities {
+        ModelCapabilities {
+            n_ctx: 8_192,
+            supports_tools: true,
+            supports_parallel_tools: true,
+            supports_vision: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn lmstudio_live_fields_override_catalog_but_absent_fields_preserve_it() {
+        let caps = HashMap::from([("lmstudio/model-a".to_string(), catalog_model())]);
+        let model = LMStudioProvider::parse_openai_model(
+            &json!({"id": "model-a", "context_length": 16_384, "supports_tools": false}),
+            false,
+            &caps,
+        )
+        .unwrap();
+
+        assert_eq!(model.n_ctx, 16_384);
+        assert!(!model.supports_tools);
+        assert!(model.supports_multimodality);
+    }
+
+    #[test]
+    fn lmstudio_server_only_model_is_retained_and_catalog_only_model_is_not_added() {
+        let caps = HashMap::from([("lmstudio/catalog-only".to_string(), catalog_model())]);
+        let models: Vec<_> = [json!({"id": "server-only"})]
+            .iter()
+            .filter_map(|m| LMStudioProvider::parse_openai_model(m, false, &caps))
+            .collect();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "server-only");
+        assert_eq!(models[0].n_ctx, 32_768);
+    }
+
+    #[test]
+    fn lmstudio_custom_only_addition_is_preserved_for_backwards_compatibility() {
+        let mut provider = LMStudioProvider::default();
+        provider
+            .custom_models
+            .insert("custom-only".to_string(), CustomModelConfig::default());
+
+        assert_eq!(provider.get_custom_models_only()[0].id, "custom-only");
+    }
+
+    #[test]
+    fn lmstudio_matching_custom_fields_override_live_and_catalog_last() {
+        let caps = HashMap::from([("lmstudio/model-a".to_string(), catalog_model())]);
+        let mut models = vec![LMStudioProvider::parse_openai_model(
+            &json!({"id": "model-a", "context_length": 16_384}),
+            false,
+            &caps,
+        )
+        .unwrap()];
+        let custom = HashMap::from([(
+            "model-a".to_string(),
+            CustomModelConfig {
+                n_ctx: Some(4_096),
+                ..Default::default()
+            },
+        )]);
+        merge_custom_models(&mut models, &custom, &std::collections::HashSet::new());
+
+        assert_eq!(models[0].n_ctx, 4_096);
+    }
 
     #[test]
     fn lmstudio_runtime_disables_cache_control_by_default() {

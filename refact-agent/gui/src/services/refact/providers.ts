@@ -94,12 +94,26 @@ export type AvailableModel = {
   display_name: string | null;
   n_ctx: number;
   supports_tools: boolean;
+  supports_parallel_tools: boolean;
+  supports_strict_tools: boolean;
   supports_multimodality: boolean;
   reasoning_effort_options?: string[] | null;
   supports_thinking_budget?: boolean;
   supports_adaptive_thinking_budget?: boolean;
   supports_cache_control?: boolean;
+  supports_clicks?: boolean;
+  supports_temperature?: boolean;
+  supports_web_search?: boolean;
+  max_thinking_tokens?: number | null;
+  default_temperature?: number | null;
+  default_max_tokens?: number | null;
+  supported_parameters?: string[] | null;
+  upstream_provider?: string | null;
+  api_mode?: string | null;
   tokenizer: string | null;
+  wire_format_override: WireFormat | null;
+  endpoint_override: string | null;
+  base_model: string | null;
   enabled: boolean;
   is_custom: boolean;
   pricing?: {

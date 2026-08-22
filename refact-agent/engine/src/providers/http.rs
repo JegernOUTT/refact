@@ -61,7 +61,7 @@ use crate::providers::google_antigravity::{
 };
 use crate::providers::xai_oauth::XAIOAuthProvider;
 
-const PROVIDER_AVAILABLE_MODELS_TIMEOUT: Duration = Duration::from_secs(8);
+const PROVIDER_AVAILABLE_MODELS_TIMEOUT: Duration = Duration::from_secs(20);
 
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -153,6 +153,10 @@ fn usage_base_provider_supported(base_provider: &str) -> bool {
         base_provider,
         "claude_code" | "openai_codex" | "opencode" | "google_antigravity" | "xai_oauth"
     )
+}
+
+fn supports_structured_command_credentials(base_provider: &str) -> bool {
+    matches!(base_provider, "custom" | "litellm")
 }
 
 fn provider_identity_from_existing_config(
@@ -806,7 +810,9 @@ pub async fn handle_v1_provider_update(
             let had_existing = existing_settings.is_some();
             let existing = existing_settings
                 .unwrap_or_else(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-            let merged_settings = if had_existing || identity.base_provider == "custom" {
+            let merged_settings = if had_existing
+                || supports_structured_command_credentials(&identity.base_provider)
+            {
                 merge_yaml_preserving_secrets_for_provider(
                     &identity.base_provider,
                     existing,
@@ -1906,7 +1912,7 @@ async fn merge_provider_settings_preserving_secrets(
     let config_path = provider_file_path(config_dir, instance_id);
 
     if !provider_file_exists(config_dir, instance_id) {
-        if base_provider == "custom" {
+        if supports_structured_command_credentials(base_provider) {
             return merge_yaml_preserving_secrets_for_provider(
                 base_provider,
                 serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
@@ -1948,14 +1954,14 @@ fn merge_yaml_preserving_secrets_for_provider(
     match (existing, new) {
         (Value::Mapping(mut existing_map), Value::Mapping(new_map)) => {
             for (key, new_value) in new_map {
-                let replace_custom_extra_headers =
-                    provider_name == "custom" && key.as_str() == Some("extra_headers");
-                let replace_custom_credential =
-                    provider_name == "custom" && key.as_str() == Some("credential");
+                let replace_extra_headers = supports_structured_command_credentials(provider_name)
+                    && key.as_str() == Some("extra_headers");
+                let replace_credential = supports_structured_command_credentials(provider_name)
+                    && key.as_str() == Some("credential");
                 let existing_value = existing_map.remove(&key);
-                let merged_value = if replace_custom_extra_headers {
-                    merge_custom_extra_headers_replace(existing_value.as_ref(), &new_value)?
-                } else if replace_custom_credential {
+                let merged_value = if replace_extra_headers {
+                    merge_structured_extra_headers_replace(existing_value.as_ref(), &new_value)?
+                } else if replace_credential {
                     strip_masked_secrets(new_value)
                 } else if let Some(existing_value) = existing_value {
                     merge_yaml_preserving_secrets_for_provider(
@@ -1975,7 +1981,7 @@ fn merge_yaml_preserving_secrets_for_provider(
     }
 }
 
-fn merge_custom_extra_headers_replace(
+fn merge_structured_extra_headers_replace(
     existing: Option<&serde_yaml::Value>,
     incoming: &serde_yaml::Value,
 ) -> Result<serde_yaml::Value, String> {
@@ -4002,7 +4008,98 @@ credential:
     }
 
     #[test]
-    fn non_custom_provider_merge_preserves_nested_omitted_keys() {
+    fn litellm_provider_merge_preserves_omitted_secrets() {
+        let merged = merged_settings_json(
+            "litellm",
+            r#"
+api_key: sk-old
+extra_headers:
+  Authorization: Bearer old-secret
+enabled: true
+"#,
+            r#"
+enabled: false
+"#,
+        );
+
+        assert_eq!(merged["api_key"], "sk-old");
+        assert_eq!(
+            merged["extra_headers"]["Authorization"],
+            "Bearer old-secret"
+        );
+        assert_eq!(merged["enabled"], false);
+    }
+
+    #[test]
+    fn litellm_provider_merge_preserves_omitted_command_credential() {
+        let merged = merged_settings_json(
+            "litellm",
+            r#"
+credential:
+  type: command
+  command: old-helper
+  args: [token]
+enabled: true
+"#,
+            r#"
+enabled: false
+"#,
+        );
+
+        assert_eq!(merged["credential"]["command"], "old-helper");
+        assert_eq!(merged["credential"]["args"], json!(["token"]));
+        assert_eq!(merged["enabled"], false);
+    }
+
+    #[test]
+    fn litellm_provider_merge_replaces_credential_object() {
+        let merged = merged_settings_json(
+            "litellm",
+            r#"
+credential:
+  type: command
+  command: old-helper
+  args: [token]
+  cwd: /old/path
+  env_passthrough: [PROFILE]
+"#,
+            r#"
+credential:
+  type: command
+  command: new-helper
+  args: [token]
+"#,
+        );
+
+        assert_eq!(merged["credential"]["command"], "new-helper");
+        assert!(merged["credential"].get("cwd").is_none());
+        assert!(merged["credential"].get("env_passthrough").is_none());
+    }
+
+    #[test]
+    fn litellm_provider_merge_replaces_extra_headers_with_mask_preservation() {
+        let merged = merged_settings_json(
+            "litellm",
+            r#"
+extra_headers:
+  X-Keep: keep-secret
+  X-Replace: old-value
+  X-Remove: remove-me
+"#,
+            r#"
+extra_headers:
+  X-Keep: "***"
+  X-Replace: new-value
+"#,
+        );
+
+        assert_eq!(merged["extra_headers"]["X-Keep"], "keep-secret");
+        assert_eq!(merged["extra_headers"]["X-Replace"], "new-value");
+        assert!(merged["extra_headers"].get("X-Remove").is_none());
+    }
+
+    #[test]
+    fn unrelated_provider_retains_recursive_merge_behavior() {
         let merged = merged_settings_json(
             "openai_codex",
             r#"
@@ -4269,6 +4366,71 @@ extra_headers:
         };
         assert_eq!(runtime.name, "custom_2");
         assert_eq!(runtime.display_name, "Work Custom");
+        assert_eq!(runtime.api_key, "sk-old");
+        assert_eq!(
+            runtime.extra_headers.get("X-Keep").map(String::as_str),
+            Some("keep-secret")
+        );
+        assert_eq!(
+            runtime.extra_headers.get("X-Replace").map(String::as_str),
+            Some("new-value")
+        );
+        assert!(runtime.extra_headers.get("X-Remove").is_none());
+    }
+
+    #[tokio::test]
+    async fn litellm_update_preserves_masked_api_key_and_replaces_extra_headers() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let config_dir = gcx.config_dir.clone();
+        let providers_dir = config_dir.join("providers.d");
+        tokio::fs::create_dir_all(&providers_dir).await.unwrap();
+        tokio::fs::write(
+            providers_dir.join("litellm.yaml"),
+            r#"
+base_provider: litellm
+display_name: LiteLLM
+endpoint: https://gateway.example/v1
+api_key: sk-old
+enabled: false
+extra_headers:
+  X-Keep: keep-secret
+  X-Replace: old-value
+  X-Remove: remove-me
+"#,
+        )
+        .await
+        .unwrap();
+
+        let response = handle_v1_provider_update(
+            axum::extract::State(crate::app_state::AppState::from_gcx(gcx.clone()).await),
+            Path(ProviderPathParams {
+                name: "litellm".to_string(),
+            }),
+            hyper::body::Bytes::from(
+                serde_json::to_vec(&json!({
+                    "api_key": "***",
+                    "extra_headers": {
+                        "X-Keep": "***",
+                        "X-Replace": "new-value"
+                    }
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let saved = provider_config_json(&config_dir, "litellm").await;
+        assert_eq!(saved["api_key"], "sk-old");
+        assert_eq!(saved["extra_headers"]["X-Keep"], "keep-secret");
+        assert_eq!(saved["extra_headers"]["X-Replace"], "new-value");
+        assert!(saved["extra_headers"].get("X-Remove").is_none());
+
+        let runtime = {
+            let registry = gcx.providers.read().await;
+            registry.get("litellm").unwrap().build_runtime().unwrap()
+        };
         assert_eq!(runtime.api_key, "sk-old");
         assert_eq!(
             runtime.extra_headers.get("X-Keep").map(String::as_str),

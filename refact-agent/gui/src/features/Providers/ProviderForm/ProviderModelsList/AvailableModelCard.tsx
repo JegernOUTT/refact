@@ -191,6 +191,10 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
   const formatPrice = (price?: number | null) =>
     typeof price === "number" ? `$${price.toFixed(2)}` : "–";
 
+  const modeLabel = [model.api_mode, model.wire_format_override]
+    .filter(Boolean)
+    .join(" · ");
+
   const renderProviderRow = (
     variant: (typeof resolvedProviderVariants)[number],
   ) => {
@@ -373,6 +377,100 @@ export const AvailableModelCard: FC<AvailableModelCardProps> = ({
                 </Tooltip.Trigger>
                 <Tooltip.Content>
                   Pricing per 1M tokens (input/output)
+                </Tooltip.Content>
+              </Tooltip>
+            ) : null}
+            {model.supports_parallel_tools ? (
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <span>
+                    <Badge>Parallel tools</Badge>
+                  </span>
+                </Tooltip.Trigger>
+                <Tooltip.Content>Supports parallel tool calls</Tooltip.Content>
+              </Tooltip>
+            ) : null}
+            {model.supports_strict_tools ? (
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <span>
+                    <Badge>Strict/schema tools</Badge>
+                  </span>
+                </Tooltip.Trigger>
+                <Tooltip.Content>Supports strict tool schemas</Tooltip.Content>
+              </Tooltip>
+            ) : null}
+            {model.supports_cache_control ? (
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <span>
+                    <Badge>Cache</Badge>
+                  </span>
+                </Tooltip.Trigger>
+                <Tooltip.Content>Supports prompt cache control</Tooltip.Content>
+              </Tooltip>
+            ) : null}
+            {model.supports_web_search ? (
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <span>
+                    <Badge>Web search</Badge>
+                  </span>
+                </Tooltip.Trigger>
+                <Tooltip.Content>Supports web search</Tooltip.Content>
+              </Tooltip>
+            ) : null}
+            {modeLabel ? (
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <span>
+                    <Badge>{modeLabel}</Badge>
+                  </span>
+                </Tooltip.Trigger>
+                <Tooltip.Content>API mode / wire format</Tooltip.Content>
+              </Tooltip>
+            ) : null}
+            {model.upstream_provider ? (
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <span>
+                    <Badge>{model.upstream_provider}</Badge>
+                  </span>
+                </Tooltip.Trigger>
+                <Tooltip.Content>Upstream provider</Tooltip.Content>
+              </Tooltip>
+            ) : null}
+            {model.base_model ? (
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <span>
+                    <Badge>{model.base_model}</Badge>
+                  </span>
+                </Tooltip.Trigger>
+                <Tooltip.Content>Base model</Tooltip.Content>
+              </Tooltip>
+            ) : null}
+            {model.tokenizer ? (
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <span>
+                    <Badge>{model.tokenizer}</Badge>
+                  </span>
+                </Tooltip.Trigger>
+                <Tooltip.Content>Tokenizer</Tooltip.Content>
+              </Tooltip>
+            ) : null}
+            {model.supported_parameters?.length ? (
+              <Tooltip>
+                <Tooltip.Trigger asChild>
+                  <span>
+                    <Badge>
+                      {model.supported_parameters.length} parameters
+                    </Badge>
+                  </span>
+                </Tooltip.Trigger>
+                <Tooltip.Content>
+                  Supported parameters: {model.supported_parameters.join(", ")}
                 </Tooltip.Content>
               </Tooltip>
             ) : null}

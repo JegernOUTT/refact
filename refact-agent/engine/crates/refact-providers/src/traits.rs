@@ -148,6 +148,16 @@ pub trait ProviderTrait: Send + Sync {
         self.get_available_models_from_caps(model_caps)
     }
 
+    async fn fetch_available_models_for_instance(
+        &self,
+        instance_id: &str,
+        http_client: &reqwest::Client,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
+        let _ = instance_id;
+        self.fetch_available_models(http_client, model_caps).await
+    }
+
     async fn startup_refresh_and_sync(
         &mut self,
         _http_client: &reqwest::Client,

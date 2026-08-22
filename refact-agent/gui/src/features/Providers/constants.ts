@@ -12,6 +12,7 @@ export const BEAUTIFUL_PROVIDER_NAMES: Record<string, string> = {
   ollama: "Ollama",
   opencode: "OpenCode Go",
   lmstudio: "LM Studio",
+  litellm: "LiteLLM",
   vllm: "vLLM",
   xai: "xAI",
   xai_responses: "xAI (Responses API)",
