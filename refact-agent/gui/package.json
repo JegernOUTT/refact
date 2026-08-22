@@ -38,7 +38,7 @@
     "test:no-watch": "vitest run --exclude 'src/__tests__/integration/**'",
     "test:unit": "vitest run --exclude 'src/__tests__/integration/**'",
     "test:integration": "vitest run src/__tests__/integration/",
-    "test:stress": "vitest run src/__tests__/chatStreamingLargeHistory.stress.test.ts",
+    "test:stress": "vitest run src/__tests__/chatStreamingLargeHistory.stress.test.ts src/__tests__/chatStreamingMultiChat.stress.test.ts",
     "test:all": "vitest run",
     "test:ui": "vitest --ui",
     "coverage": "vitest run --coverage",

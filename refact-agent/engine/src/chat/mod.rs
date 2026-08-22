@@ -19,6 +19,7 @@ pub mod notifications;
 pub(crate) mod openai_codex_ws;
 mod openai_merge;
 pub mod perf_diagnostics;
+pub mod perf_harness;
 pub mod plan_role;
 pub mod post_merge_check;
 pub mod prepare;

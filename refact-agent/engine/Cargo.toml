@@ -188,6 +188,12 @@ name = "mcp_echo_server"
 path = "src/bin/mcp_echo_server.rs"
 
 [[bin]]
+name = "concurrent_chat_bench"
+path = "tools/concurrent_chat_bench.rs"
+test = false
+bench = false
+
+[[bin]]
 name = "refact"
 path = "src/bin/refact.rs"
 test = false

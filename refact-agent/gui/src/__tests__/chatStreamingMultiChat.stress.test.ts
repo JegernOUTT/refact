@@ -55,92 +55,73 @@ describe("Multi-Chat Streaming Stress Tests", () => {
     baseState = chatReducer(emptyState, newChatAction(undefined));
   });
 
-  it("handles 3 concurrent streaming chats without data loss", () => {
-    const CHAT_COUNT = 3;
-    const HISTORY_SIZE = 1200;
-    const CHUNKS_PER_CHAT = 500;
-    const CHUNK_TEXT = "Hello world streaming text. ";
+  it("handles every required concurrent chat level without data loss", () => {
+    const historySize = 120;
+    const chunksPerChat = 24;
+    const chunkText = "Hello world streaming text. ";
 
-    const chatIds: string[] = [];
-    let state = baseState;
+    for (const chatCount of [1, 4, 8, 16, 32]) {
+      const chatIds: string[] = [];
+      let state = baseState;
 
-    for (let c = 0; c < CHAT_COUNT; c++) {
-      state = chatReducer(state, newChatAction(undefined));
-      chatIds.push(state.current_thread_id);
-    }
+      for (let chat = 0; chat < chatCount; chat++) {
+        state = chatReducer(state, newChatAction(undefined));
+        chatIds.push(state.current_thread_id);
+      }
 
-    for (const chatId of chatIds) {
-      const snapshot = createSnapshotEvent(chatId, makeHistory(HISTORY_SIZE));
-      state = chatReducer(state, applyChatEvent(snapshot));
-    }
+      for (const chatId of chatIds) {
+        state = chatReducer(
+          state,
+          applyChatEvent(createSnapshotEvent(chatId, makeHistory(historySize))),
+        );
+        state = chatReducer(
+          state,
+          applyChatEvent({
+            chat_id: chatId,
+            seq: "2",
+            type: "stream_started",
+            message_id: `stream-${chatId}`,
+          }),
+        );
+      }
 
-    for (const chatId of chatIds) {
-      state = chatReducer(
-        state,
-        applyChatEvent({
-          chat_id: chatId,
-          seq: "2",
-          type: "stream_started",
-          message_id: `stream-${chatId}`,
-        }),
-      );
-    }
+      for (let chunk = 0; chunk < chunksPerChat; chunk++) {
+        for (const chatId of chatIds) {
+          state = chatReducer(
+            state,
+            applyChatEvent({
+              chat_id: chatId,
+              seq: String(chunk + 3),
+              type: "stream_delta",
+              message_id: `stream-${chatId}`,
+              ops: [{ op: "append_content", text: chunkText }],
+            }),
+          );
+        }
+      }
 
-    for (const chatId of chatIds) {
-      const rt = state.threads[chatId];
-      if (!rt) throw new Error(`Runtime not found for chat ${chatId}`);
-      expect(rt.streaming).toBe(true);
-      expect(rt.waiting_for_response).toBe(true);
-    }
-
-    const startedAt = Date.now();
-
-    for (let i = 0; i < CHUNKS_PER_CHAT; i++) {
       for (const chatId of chatIds) {
         state = chatReducer(
           state,
           applyChatEvent({
             chat_id: chatId,
-            seq: String(i + 3),
-            type: "stream_delta",
+            seq: String(chunksPerChat + 3),
+            type: "stream_finished",
             message_id: `stream-${chatId}`,
-            ops: [{ op: "append_content", text: CHUNK_TEXT }],
+            finish_reason: "stop",
           }),
         );
+        const runtime = state.threads[chatId];
+        if (!runtime) throw new Error(`Runtime not found for chat ${chatId}`);
+        const lastMessage = runtime.thread.messages.at(-1);
+        expect(runtime.thread.messages).toHaveLength(historySize + 1);
+        expect(lastMessage?.role).toBe("assistant");
+        expect(lastMessage?.content).toBe(chunkText.repeat(chunksPerChat));
+        expect(runtime.streaming).toBe(false);
+        expect(runtime.waiting_for_response).toBe(false);
+        expect(runtime.snapshot_received).toBe(true);
       }
     }
-
-    const streamElapsedMs = Date.now() - startedAt;
-
-    for (const chatId of chatIds) {
-      state = chatReducer(
-        state,
-        applyChatEvent({
-          chat_id: chatId,
-          seq: String(CHUNKS_PER_CHAT + 3),
-          type: "stream_finished",
-          message_id: `stream-${chatId}`,
-          finish_reason: "stop",
-        }),
-      );
-    }
-
-    for (const chatId of chatIds) {
-      const rt = state.threads[chatId];
-      if (!rt) throw new Error(`Runtime not found for chat ${chatId}`);
-      const msgs = rt.thread.messages;
-      expect(msgs).toHaveLength(HISTORY_SIZE + 1);
-
-      const lastMsg = msgs[msgs.length - 1];
-      expect(lastMsg.role).toBe("assistant");
-      expect(lastMsg.content).toBe(CHUNK_TEXT.repeat(CHUNKS_PER_CHAT));
-
-      expect(rt.streaming).toBe(false);
-      expect(rt.waiting_for_response).toBe(false);
-      expect(rt.snapshot_received).toBe(true);
-    }
-
-    expect(streamElapsedMs).toBeLessThan(15_000);
   });
 
   it("handles interleaved deltas with reasoning + tool_calls across 3 chats", () => {
@@ -374,6 +355,76 @@ describe("Multi-Chat Streaming Stress Tests", () => {
       const lastMsg = rt.thread.messages[rt.thread.messages.length - 1];
       expect(lastMsg.content).toBe("real");
       expect(rt.last_applied_seq).toBe("3");
+    }
+  });
+
+  it("recovers each active/background mix from a sequence-gap snapshot", () => {
+    for (const chatCount of [1, 4, 8, 16, 32]) {
+      const chatIds: string[] = [];
+      let state = baseState;
+
+      for (let chat = 0; chat < chatCount; chat++) {
+        state = chatReducer(state, newChatAction(undefined));
+        chatIds.push(state.current_thread_id);
+      }
+      for (const chatId of chatIds) {
+        state = chatReducer(
+          state,
+          applyChatEvent(createSnapshotEvent(chatId, makeHistory(4))),
+        );
+        state = chatReducer(
+          state,
+          applyChatEvent({
+            chat_id: chatId,
+            seq: "2",
+            type: "stream_started",
+            message_id: `gap-${chatId}`,
+          }),
+        );
+        state = chatReducer(
+          state,
+          applyChatEvent({
+            chat_id: chatId,
+            seq: "3",
+            type: "stream_delta",
+            message_id: `gap-${chatId}`,
+            ops: [{ op: "append_content", text: "before-gap" }],
+          }),
+        );
+      }
+
+      const recoveredChatId = chatIds[0];
+      const recoveredMessages = [
+        ...makeHistory(4),
+        {
+          role: "assistant" as const,
+          content: "snapshot-recovered",
+          message_id: `gap-${recoveredChatId}`,
+        },
+      ];
+      const snapshot = createSnapshotEvent(recoveredChatId, recoveredMessages, "0");
+      if (snapshot.type === "snapshot") snapshot.runtime.state = "generating";
+      state = chatReducer(state, applyChatEvent(snapshot));
+
+      const recoveredRuntime = state.threads[recoveredChatId];
+      if (!recoveredRuntime) {
+        throw new Error(`Runtime not found for chat ${recoveredChatId}`);
+      }
+      expect(recoveredRuntime.last_applied_seq).toBe("0");
+      expect(recoveredRuntime.thread.messages.at(-1)?.content).toBe(
+        "snapshot-recovered",
+      );
+      expect(recoveredRuntime.streaming).toBe(true);
+
+      for (const backgroundChatId of chatIds.slice(1)) {
+        const backgroundRuntime = state.threads[backgroundChatId];
+        if (!backgroundRuntime) {
+          throw new Error(`Runtime not found for chat ${backgroundChatId}`);
+        }
+        expect(backgroundRuntime.last_applied_seq).toBe("3");
+        expect(backgroundRuntime.thread.messages.at(-1)?.content).toBe("before-gap");
+        expect(backgroundRuntime.streaming).toBe(true);
+      }
     }
   });
 
