@@ -302,11 +302,45 @@ impl ActivitySink for AppActivitySink {
 
 pub struct AppToolRegistry {
     gcx: SharedGlobalContext,
+    #[cfg(test)]
+    test_tool_factory: Option<TestToolFactory>,
 }
+
+#[cfg(test)]
+type TestToolFactory =
+    Arc<dyn Fn() -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> + Send + Sync>;
 
 impl AppToolRegistry {
     pub fn new(gcx: SharedGlobalContext) -> Self {
-        Self { gcx }
+        Self {
+            gcx,
+            #[cfg(test)]
+            test_tool_factory: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_tool_factory(
+        gcx: SharedGlobalContext,
+        test_tool_factory: TestToolFactory,
+    ) -> Self {
+        Self {
+            gcx,
+            test_tool_factory: Some(test_tool_factory),
+        }
+    }
+
+    async fn tools_for_mode(
+        &self,
+        gcx: SharedGlobalContext,
+        mode: &str,
+        model_id: Option<&str>,
+    ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
+        #[cfg(test)]
+        if let Some(test_tool_factory) = &self.test_tool_factory {
+            return test_tool_factory();
+        }
+        crate::tools::tools_list::get_tools_for_mode(gcx, mode, model_id).await
     }
 }
 
@@ -319,7 +353,7 @@ impl ToolRegistry for AppToolRegistry {
     ) -> Vec<refact_tool_api::ToolDesc> {
         let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
-            crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await,
+            self.tools_for_mode(self.gcx.clone(), mode, model_id).await,
         )
         .tools
         .into_iter()
@@ -336,7 +370,7 @@ impl ToolRegistry for AppToolRegistry {
     ) -> ToolRegistryIndex {
         let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
-            crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await,
+            self.tools_for_mode(self.gcx.clone(), mode, model_id).await,
         );
         let tool_count = tools.tools.len() as u64;
         let index = ToolRegistryIndex {
@@ -372,8 +406,7 @@ impl ToolRegistry for AppToolRegistry {
             }
         };
         let catalog_span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
-        let raw_tools =
-            crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await;
+        let raw_tools = self.tools_for_mode(self.gcx.clone(), mode, model_id).await;
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools).tools;
         catalog_span.finish_tool(PerfOutcome::Success, 1, tools.len() as u64, None);
         let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
@@ -404,8 +437,7 @@ impl ToolRegistry for AppToolRegistry {
         model_id: Option<&str>,
     ) -> Vec<ToolPolicyInfo> {
         let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
-        let raw_tools =
-            crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await;
+        let raw_tools = self.tools_for_mode(self.gcx.clone(), mode, model_id).await;
         let policy = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools)
             .tools
             .into_iter()
@@ -449,8 +481,7 @@ impl ToolRegistry for AppToolRegistry {
             cgcx.app.gcx.clone()
         };
         let catalog_span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
-        let raw_tools =
-            crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode, model_id).await;
+        let raw_tools = self.tools_for_mode(gcx.clone(), mode, model_id).await;
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools).tools;
         catalog_span.finish_tool(PerfOutcome::Success, 1, tools.len() as u64, None);
         let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
@@ -474,9 +505,19 @@ impl ToolRegistry for AppToolRegistry {
                     let mut cgcx = ccx.lock().await;
                     cgcx.app = AppState::from_gcx(gcx.clone()).await;
                 }
-                let result = tool
-                    .tool_execute(ccx, &tool_call_id.to_string(), &coerced_args)
-                    .await?;
+                let tool_call_id = tool_call_id.to_string();
+                let runtime_span = perf_diagnostics::span(PerfComponent::ToolRuntime, None, None);
+                let result = tool.tool_execute(ccx, &tool_call_id, &coerced_args).await;
+                let result = match result {
+                    Ok(result) => {
+                        runtime_span.finish_tool(PerfOutcome::Success, 1, 1, None);
+                        result
+                    }
+                    Err(error) => {
+                        runtime_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
+                        return Err(error);
+                    }
+                };
                 let mut messages = Vec::new();
                 let mut context_files = Vec::new();
                 for item in result.1 {

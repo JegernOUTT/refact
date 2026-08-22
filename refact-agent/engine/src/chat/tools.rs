@@ -497,9 +497,6 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
     use crate::chat::perf_diagnostics::{MemoryPerfSink, PerfClock, PerfRecorder};
-    use refact_runtime_api::{
-        ToolConfirmationCheck, ToolExecutionResult, ToolPolicyInfo, ToolRegistry, ToolRegistryIndex,
-    };
     use serial_test::serial;
 
     struct TestPerfClock {
@@ -530,6 +527,7 @@ mod tests {
         (perf_diagnostics::install_test_recorder(recorder), sink)
     }
 
+    #[derive(Clone)]
     struct DeterministicToolRegistry {
         confirmation_result: MatchConfirmDenyResult,
         runtime_failure: bool,
@@ -552,92 +550,61 @@ mod tests {
         }
     }
 
+    struct DeterministicTool {
+        name: String,
+        confirmation_result: MatchConfirmDenyResult,
+        runtime_failure: bool,
+    }
+
     #[async_trait::async_trait]
-    impl ToolRegistry for DeterministicToolRegistry {
-        async fn get_tools_for_mode(
-            &self,
-            _mode: &str,
-            _model_id: Option<&str>,
-        ) -> Vec<refact_tool_api::ToolDesc> {
-            vec![
-                deterministic_tool_desc("alpha"),
-                deterministic_tool_desc("beta"),
-            ]
-        }
-
-        async fn get_tools_index_for_mode(
-            &self,
-            mode: &str,
-            model_id: Option<&str>,
-        ) -> ToolRegistryIndex {
-            ToolRegistryIndex {
-                tools: self.get_tools_for_mode(mode, model_id).await,
-                mcp_lazy_mode: false,
-                mcp_total_count: 0,
-                mcp_tool_index: Vec::new(),
-            }
-        }
-
-        async fn check_tool_confirmation(
-            &self,
-            _ccx: &(dyn std::any::Any + Send + Sync),
-            _mode: &str,
-            _model_id: Option<&str>,
-            tool_name: &str,
-            _args: serde_json::Map<String, serde_json::Value>,
-        ) -> Option<Result<ToolConfirmationCheck, String>> {
-            Some(Ok(ToolConfirmationCheck {
-                tool_name: tool_name.to_string(),
-                result: refact_tool_api::MatchConfirmDeny {
-                    result: self.confirmation_result.clone(),
-                    command: tool_name.to_string(),
-                    rule: "deterministic confirmation".to_string(),
-                },
-                integr_config_path: None,
-            }))
-        }
-
-        async fn get_tool_policy_info(
-            &self,
-            _mode: &str,
-            _model_id: Option<&str>,
-        ) -> Vec<ToolPolicyInfo> {
-            ["alpha", "beta"]
-                .into_iter()
-                .map(|name| ToolPolicyInfo {
-                    name: name.to_string(),
-                    effective_allow_parallel: true,
-                })
-                .collect()
-        }
-
-        async fn execute_tool(
-            &self,
-            _ccx: &(dyn std::any::Any + Send + Sync),
-            _mode: &str,
-            _model_id: Option<&str>,
-            tool_call_id: &str,
-            _tool_name: &str,
-            _args: serde_json::Map<String, serde_json::Value>,
-        ) -> Result<Option<ToolExecutionResult>, String> {
+    impl crate::tools::tools_description::Tool for DeterministicTool {
+        async fn tool_execute(
+            &mut self,
+            _ccx: Arc<AMutex<AtCommandsContext>>,
+            tool_call_id: &String,
+            _args: &std::collections::HashMap<String, serde_json::Value>,
+        ) -> Result<(bool, Vec<crate::call_validation::ContextEnum>), String> {
             if self.runtime_failure {
                 return Err("deterministic runtime failure".to_string());
             }
             let mut message =
                 ChatMessage::new("tool".to_string(), "deterministic result".to_string());
-            message.tool_call_id = tool_call_id.to_string();
-            Ok(Some(ToolExecutionResult {
-                had_corrections: false,
-                messages: vec![message],
-                context_files: Vec::new(),
-            }))
+            message.tool_call_id = tool_call_id.clone();
+            Ok((
+                false,
+                vec![crate::call_validation::ContextEnum::ChatMessage(message)],
+            ))
         }
 
-        async fn load_task_memories(
+        fn tool_description(&self) -> refact_tool_api::ToolDesc {
+            deterministic_tool_desc(&self.name)
+        }
+
+        async fn match_against_confirm_deny(
             &self,
-            _task_id: &str,
-        ) -> Result<Vec<(std::path::PathBuf, String)>, String> {
-            Ok(Vec::new())
+            _ccx: Arc<AMutex<AtCommandsContext>>,
+            _args: &std::collections::HashMap<String, serde_json::Value>,
+        ) -> Result<refact_tool_api::MatchConfirmDeny, String> {
+            Ok(refact_tool_api::MatchConfirmDeny {
+                result: self.confirmation_result.clone(),
+                command: self.name.clone(),
+                rule: "deterministic confirmation".to_string(),
+            })
+        }
+    }
+
+    impl DeterministicToolRegistry {
+        fn tools(&self) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
+            ["alpha", "beta"]
+                .into_iter()
+                .map(|name| {
+                    Box::new(DeterministicTool {
+                        name: name.to_string(),
+                        confirmation_result: self.confirmation_result.clone(),
+                        runtime_failure: self.runtime_failure,
+                    }) as Box<dyn crate::tools::tools_description::Tool + Send>
+                })
+                .collect()
         }
     }
 
@@ -661,12 +628,14 @@ mod tests {
         let (_guard, sink) = install_perf_recorder();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let base_app = AppState::from_gcx(gcx).await;
+        let test_tools = registry.clone();
         let app = AppState {
-            tool_registry: Arc::new(registry),
+            tool_registry: Arc::new(crate::app_state::AppToolRegistry::with_test_tool_factory(
+                base_app.gcx.clone(),
+                Arc::new(move || test_tools.tools()),
+            )),
             ..base_app
         };
-        let catalog = crate::app_state::AppToolRegistry::new(app.gcx.clone());
-        assert!(!catalog.get_tools_for_mode("agent", None).await.is_empty());
         let session = Arc::new(AMutex::new(ChatSession::new("same-turn-tools".to_string())));
         {
             let mut locked = session.lock().await;
@@ -734,9 +703,41 @@ mod tests {
         assert_eq!(runtime_events.len(), 2);
         assert!(runtime_events.iter().all(|event| {
             event.outcome == PerfOutcome::Success.as_str()
-                && event.batch_size == Some(2)
-                && event.execution_class == Some(ToolExecutionClass::Parallel.as_u8())
+                && event.batch_size == Some(1)
+                && event.execution_class.is_none()
         }));
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn app_registry_runtime_starts_after_catalog_build() {
+        let (outcome, sink) = process_deterministic_tool_turn(
+            DeterministicToolRegistry {
+                confirmation_result: MatchConfirmDenyResult::PASS,
+                runtime_failure: false,
+            },
+            vec![deterministic_tool_call("tool-alpha", "alpha")],
+        )
+        .await;
+
+        assert!(matches!(outcome, ToolStepOutcome::Continue));
+        let events = sink.events();
+        let runtime_index = events
+            .iter()
+            .position(|event| event.component == PerfComponent::ToolRuntime.as_str())
+            .expect("runtime event");
+        assert!(runtime_index > 0);
+        assert_eq!(
+            events[runtime_index - 1].component,
+            PerfComponent::ToolCatalogBuild.as_str()
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.component == PerfComponent::ToolRuntime.as_str())
+                .count(),
+            1
+        );
     }
 
     #[serial]
@@ -752,10 +753,13 @@ mod tests {
         .await;
 
         assert!(matches!(outcome, ToolStepOutcome::Continue));
-        assert!(sink.events().iter().any(|event| {
-            event.component == PerfComponent::ToolRuntime.as_str()
-                && event.outcome == PerfOutcome::Failure.as_str()
-        }));
+        let runtime_events = sink
+            .events()
+            .into_iter()
+            .filter(|event| event.component == PerfComponent::ToolRuntime.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(runtime_events.len(), 1);
+        assert_eq!(runtime_events[0].outcome, PerfOutcome::Failure.as_str());
     }
 
     #[serial]
@@ -2526,12 +2530,6 @@ async fn execute_single_tool(
         }
     }
 
-    let execution_class = if allow_parallel {
-        ToolExecutionClass::Parallel
-    } else {
-        ToolExecutionClass::Serial
-    };
-    let runtime_span = perf_diagnostics::span(PerfComponent::ToolRuntime, None, None);
     let (idx, had_corrections, mut msgs, files) = match app
         .tool_registry
         .execute_tool(
@@ -2551,12 +2549,6 @@ async fn execute_single_tool(
             result.context_files,
         ),
         Ok(None) => {
-            runtime_span.finish_tool(
-                PerfOutcome::Failure,
-                batch_size as u64,
-                1,
-                Some(execution_class),
-            );
             return (
                 idx,
                 true,
@@ -2576,12 +2568,6 @@ async fn execute_single_tool(
         }
         Err(e) => {
             info!("Tool execution failed: {}: {}", tool_call.function.name, e);
-            runtime_span.finish_tool(
-                PerfOutcome::Failure,
-                batch_size as u64,
-                1,
-                Some(execution_class),
-            );
             return (
                 idx,
                 true,
@@ -2597,12 +2583,12 @@ async fn execute_single_tool(
             );
         }
     };
-    runtime_span.finish_tool(
-        PerfOutcome::Success,
-        batch_size as u64,
-        1,
-        Some(execution_class),
-    );
+
+    let execution_class = if allow_parallel {
+        ToolExecutionClass::Parallel
+    } else {
+        ToolExecutionClass::Serial
+    };
 
     for msg in &mut msgs {
         if msg.message_id.is_empty() {
