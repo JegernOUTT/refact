@@ -369,6 +369,14 @@ impl TrajectoryIndexCoordinator {
         Ok(index)
     }
 
+    pub async fn list_entries(
+        &self,
+        dir: &Path,
+        source_hint: Option<TrajectorySourceIdentity>,
+    ) -> Result<Vec<TrajectoryIndexEntry>, String> {
+        Ok(self.reconcile(dir, source_hint).await?.entries)
+    }
+
     pub async fn flush_directory(&self, dir: &Path) -> Result<(), String> {
         let state = self.ensure_loaded(dir, None).await?;
         let (pending, last_sequence) = {
@@ -2343,6 +2351,24 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn coordinator_snapshot_does_not_reparse_clean_indexed_trajectories() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+        coordinator.flush_all().await.unwrap();
+        fs::write(&path, "invalid JSON").await.unwrap();
+
+        let snapshot = coordinator.snapshot(&dir, None).await.unwrap();
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].id, "chat-1");
     }
 
     #[tokio::test]
