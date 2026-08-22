@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -6,6 +7,7 @@ use std::time::UNIX_EPOCH;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::Mutex as AMutex;
 use uuid::Uuid;
 
@@ -27,6 +29,15 @@ pub struct TrajectoryIndex {
     pub updated_at: String,
     #[serde(default)]
     pub entries: Vec<TrajectoryIndexEntry>,
+    #[serde(default)]
+    pub skipped_files: Vec<TrajectoryIndexSkippedFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrajectoryIndexSkippedFile {
+    pub file_name: String,
+    pub file_len: u64,
+    pub file_modified_unix_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -455,13 +466,20 @@ pub async fn upsert_trajectory_index_entry(
     let _guard = lock.lock().await;
     let mut index = match read_trajectory_index(dir).await {
         Ok(Some(index)) => index,
-        Ok(None) | Err(_) => TrajectoryIndex {
-            schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
-            updated_at: Utc::now().to_rfc3339(),
-            entries: scan_trajectory_entries(dir, None).await?,
-        },
+        Ok(None) | Err(_) => {
+            let (entries, skipped_files) = scan_trajectory_index_data(dir, None).await?;
+            TrajectoryIndex {
+                schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
+                updated_at: Utc::now().to_rfc3339(),
+                entries,
+                skipped_files,
+            }
+        }
     };
     index.entries.retain(|existing| existing.id != entry.id);
+    index
+        .skipped_files
+        .retain(|skipped| skipped.file_name != entry.file_name);
     index.entries.push(entry);
     index.updated_at = Utc::now().to_rfc3339();
     write_trajectory_index_atomic_owned(dir, index).await
@@ -529,90 +547,6 @@ pub async fn remove_trajectory_index_entry(dir: &Path, chat_id: &str) -> Result<
     }
     index.updated_at = Utc::now().to_rfc3339();
     write_trajectory_index_atomic_owned(dir, index).await
-}
-
-async fn scan_trajectory_entries(
-    dir: &Path,
-    source_hint: Option<TrajectorySourceIdentity>,
-) -> Result<Vec<TrajectoryIndexEntry>, String> {
-    let mut indexed_entries = Vec::new();
-    let mut scan_dirs = match fs::read_dir(dir).await {
-        Ok(mut top) => {
-            let mut dirs = vec![dir.to_path_buf()];
-            while let Ok(Some(entry)) = top.next_entry().await {
-                let name = entry.file_name().into_string().unwrap_or_default();
-                if name.starts_with('.') {
-                    continue;
-                }
-                match entry.file_type().await {
-                    Ok(file_type) if file_type.is_dir() && !file_type.is_symlink() => {
-                        dirs.push(entry.path());
-                    }
-                    _ => {}
-                }
-            }
-            dirs
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(indexed_entries),
-        Err(e) => {
-            return Err(format!(
-                "Failed to read trajectory directory {:?}: {e}",
-                dir
-            ))
-        }
-    };
-
-    while let Some(scan_dir) = scan_dirs.pop() {
-        let mut entries = match fs::read_dir(&scan_dir).await {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|e| format!("Failed to iterate trajectory directory {:?}: {e}", scan_dir))?
-        {
-            let path = entry.path();
-            let file_name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("");
-            if file_name == TRAJECTORY_INDEX_FILE
-                || file_name.starts_with('.')
-                || path.extension().and_then(|e| e.to_str()) != Some("json")
-            {
-                continue;
-            }
-            let metadata = match fs::symlink_metadata(&path).await {
-                Ok(metadata) => metadata,
-                Err(_) => continue,
-            };
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                continue;
-            }
-            let content = match fs::read_to_string(&path).await {
-                Ok(content) => content,
-                Err(_) => continue,
-            };
-            let parse_path = path.clone();
-            let parse_dir = dir.to_path_buf();
-            let candidate_source_hint = source_hint.clone();
-            let parsed = tokio::task::spawn_blocking(move || {
-                let value = serde_json::from_str::<serde_json::Value>(&content)
-                    .map_err(|e| format!("Failed to parse trajectory {:?}: {}", parse_path, e))?;
-                entry_from_trajectory_value(&parse_dir, &parse_path, &value, candidate_source_hint)
-            })
-            .await;
-            match parsed {
-                Ok(Ok(entry)) => indexed_entries.push(entry),
-                Ok(Err(e)) => {
-                    tracing::warn!("Failed to parse trajectory {:?}: {}", path, e);
-                }
-                Err(e) => tracing::warn!("Trajectory indexing task failed for {:?}: {}", path, e),
-            }
-        }
-    }
-    Ok(dedupe_entries_by_id(indexed_entries))
 }
 
 fn dedupe_entries_by_id(entries: Vec<TrajectoryIndexEntry>) -> Vec<TrajectoryIndexEntry> {
@@ -724,21 +658,96 @@ async fn read_and_index_single_trajectory(
     dir: &Path,
     path: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
-) -> Option<TrajectoryIndexEntry> {
-    let content = fs::read_to_string(path).await.ok()?;
+) -> SingleTrajectoryIndexResult {
+    const INTERNAL_LINK_TAIL_BYTES: u64 = 64 * 1024;
+
+    let mut file = match fs::File::open(path).await {
+        Ok(file) => file,
+        Err(_) => return SingleTrajectoryIndexResult::TransientFailure,
+    };
+    let file_len = match file.metadata().await {
+        Ok(metadata) => metadata.len(),
+        Err(_) => return SingleTrajectoryIndexResult::TransientFailure,
+    };
+    let tail_start = file_len.saturating_sub(INTERNAL_LINK_TAIL_BYTES);
+    if file.seek(SeekFrom::Start(tail_start)).await.is_err() {
+        return SingleTrajectoryIndexResult::TransientFailure;
+    }
+    let mut tail = Vec::new();
+    if file.read_to_end(&mut tail).await.is_err() {
+        return SingleTrajectoryIndexResult::TransientFailure;
+    }
+    let tail = String::from_utf8_lossy(&tail);
+    if tail.lines().any(|line| {
+        let Some(value) = line
+            .strip_suffix(',')
+            .unwrap_or(line)
+            .strip_prefix("  \"link_type\": ")
+        else {
+            return false;
+        };
+        serde_json::from_str::<String>(value).is_ok_and(|value| value.starts_with("internal:"))
+    }) {
+        return SingleTrajectoryIndexResult::Skipped;
+    }
+
+    let content = match fs::read_to_string(path).await {
+        Ok(content) => content,
+        Err(_) => return SingleTrajectoryIndexResult::TransientFailure,
+    };
     let dir = dir.to_path_buf();
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    match tokio::task::spawn_blocking(move || {
         let value = serde_json::from_str::<serde_json::Value>(&content).map_err(|e| {
             tracing::warn!("Failed to parse trajectory {:?}: {}", path, e);
         })?;
+        if value
+            .get("link_type")
+            .and_then(|value| value.as_str())
+            .is_some_and(|link_type| link_type.starts_with("internal:"))
+        {
+            return Err(());
+        }
         entry_from_trajectory_value(&dir, &path, &value, source_hint).map_err(|e| {
             tracing::debug!("Skipping non-indexable trajectory {:?}: {}", path, e);
         })
     })
     .await
-    .ok()
-    .and_then(Result::ok)
+    {
+        Ok(Ok(entry)) => SingleTrajectoryIndexResult::Indexed(entry),
+        Ok(Err(())) => SingleTrajectoryIndexResult::Skipped,
+        Err(_) => SingleTrajectoryIndexResult::TransientFailure,
+    }
+}
+
+enum SingleTrajectoryIndexResult {
+    Indexed(TrajectoryIndexEntry),
+    Skipped,
+    TransientFailure,
+}
+
+async fn scan_trajectory_index_data(
+    dir: &Path,
+    source_hint: Option<TrajectorySourceIdentity>,
+) -> Result<(Vec<TrajectoryIndexEntry>, Vec<TrajectoryIndexSkippedFile>), String> {
+    let disk_files = scan_trajectory_dir_files(dir).await?;
+    let mut entries = Vec::new();
+    let mut skipped_files = Vec::new();
+    for disk in disk_files {
+        let path = dir.join(&disk.file_name);
+        match read_and_index_single_trajectory(dir, &path, source_hint.clone()).await {
+            SingleTrajectoryIndexResult::Indexed(entry) => entries.push(entry),
+            SingleTrajectoryIndexResult::Skipped => {
+                skipped_files.push(TrajectoryIndexSkippedFile {
+                    file_name: disk.file_name,
+                    file_len: disk.file_len,
+                    file_modified_unix_ms: disk.file_modified_unix_ms,
+                });
+            }
+            SingleTrajectoryIndexResult::TransientFailure => {}
+        }
+    }
+    Ok((dedupe_entries_by_id(entries), skipped_files))
 }
 
 pub async fn rebuild_trajectory_index_from_disk(
@@ -747,11 +756,12 @@ pub async fn rebuild_trajectory_index_from_disk(
 ) -> Result<Vec<TrajectoryIndexEntry>, String> {
     let lock = get_trajectory_index_lock(dir).await;
     let _guard = lock.lock().await;
-    let entries = scan_trajectory_entries(dir, source_hint).await?;
+    let (entries, skipped_files) = scan_trajectory_index_data(dir, source_hint).await?;
     let index = TrajectoryIndex {
         schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
         updated_at: Utc::now().to_rfc3339(),
         entries: entries.clone(),
+        skipped_files,
     };
     write_trajectory_index_atomic_owned(dir, index).await?;
     Ok(entries)
@@ -765,11 +775,17 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
     let _guard = lock.lock().await;
     let disk_files = scan_trajectory_dir_files(dir).await?;
 
-    let (existing_entries, index_unreadable) = match read_trajectory_index(dir).await {
-        Ok(Some(index)) => (index.entries, false),
-        Ok(None) => (Vec::new(), false),
-        Err(_) => (Vec::new(), true),
-    };
+    let (existing_entries, existing_skipped, index_unreadable) =
+        match read_trajectory_index(dir).await {
+            Ok(Some(index)) => (index.entries, index.skipped_files, false),
+            Ok(None) => (Vec::new(), Vec::new(), false),
+            Err(_) => (Vec::new(), Vec::new(), true),
+        };
+
+    let skipped_by_file: HashMap<String, TrajectoryIndexSkippedFile> = existing_skipped
+        .into_iter()
+        .map(|skipped| (skipped.file_name.clone(), skipped))
+        .collect();
 
     let by_file: HashMap<String, TrajectoryIndexEntry> = existing_entries
         .into_iter()
@@ -777,6 +793,7 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
         .collect();
 
     let mut new_entries: Vec<TrajectoryIndexEntry> = Vec::with_capacity(disk_files.len());
+    let mut new_skipped = Vec::new();
     let mut content_changed = index_unreadable;
 
     for disk in &disk_files {
@@ -788,16 +805,33 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
                 continue;
             }
         }
-        let was_indexed = by_file.contains_key(&disk.file_name);
+        if let Some(skipped) = skipped_by_file.get(&disk.file_name) {
+            if skipped.file_len == disk.file_len
+                && skipped.file_modified_unix_ms == disk.file_modified_unix_ms
+            {
+                new_skipped.push(skipped.clone());
+                continue;
+            }
+        }
         let path = dir.join(&disk.file_name);
         match read_and_index_single_trajectory(dir, &path, source_hint.clone()).await {
-            Some(entry) => {
+            SingleTrajectoryIndexResult::Indexed(entry) => {
                 new_entries.push(entry);
                 content_changed = true;
             }
-            None => {
-                if was_indexed {
-                    content_changed = true;
+            SingleTrajectoryIndexResult::Skipped => {
+                new_skipped.push(TrajectoryIndexSkippedFile {
+                    file_name: disk.file_name.clone(),
+                    file_len: disk.file_len,
+                    file_modified_unix_ms: disk.file_modified_unix_ms,
+                });
+                content_changed = true;
+            }
+            SingleTrajectoryIndexResult::TransientFailure => {
+                if let Some(entry) = by_file.get(&disk.file_name) {
+                    new_entries.push(entry.clone());
+                } else if let Some(skipped) = skipped_by_file.get(&disk.file_name) {
+                    new_skipped.push(skipped.clone());
                 }
             }
         }
@@ -810,6 +844,7 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
             .collect();
         content_changed = by_file
             .keys()
+            .chain(skipped_by_file.keys())
             .any(|file_name| !disk_names.contains(file_name.as_str()));
     }
 
@@ -820,6 +855,7 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
             schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
             updated_at: Utc::now().to_rfc3339(),
             entries: new_entries.clone(),
+            skipped_files: new_skipped,
         };
         write_trajectory_index_atomic_owned(dir, index).await?;
     }
@@ -1024,6 +1060,64 @@ mod tests {
                 "index must not be rewritten when nothing indexable changed"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn internal_trace_skip_is_cached_and_changed_visible_file_is_indexed() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("trace.json");
+        let internal = format!(
+            concat!(
+                "{{\n",
+                "  \"id\": \"trace\",\n",
+                "  \"title\": \"Trace\",\n",
+                "  \"created_at\": \"2026-01-01T00:00:00Z\",\n",
+                "  \"updated_at\": \"2026-01-01T00:00:01Z\",\n",
+                "  \"model\": \"test-model\",\n",
+                "  \"mode\": \"agent\",\n",
+                "  \"tool_use\": \"agent\",\n",
+                "  \"messages\": [{{\"role\":\"user\",\"content\":\"{}\"}}],\n",
+                "  \"link_type\": \"internal:tool-trace\"\n",
+                "}}"
+            ),
+            "x".repeat(128 * 1024)
+        );
+        fs::write(&path, internal).await.unwrap();
+
+        assert!(list_trajectory_entries_from_index_or_rebuild(&dir, None)
+            .await
+            .unwrap()
+            .is_empty());
+        let first_index = read_trajectory_index(&dir).await.unwrap().unwrap();
+        assert_eq!(first_index.skipped_files.len(), 1);
+        assert_eq!(first_index.skipped_files[0].file_name, "trace.json");
+        let marker = first_index.updated_at;
+
+        assert!(list_trajectory_entries_from_index_or_rebuild(&dir, None)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            read_trajectory_index(&dir)
+                .await
+                .unwrap()
+                .unwrap()
+                .updated_at,
+            marker
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        write_trajectory(&dir, "trace", "Visible", "agent").await;
+        let entries = list_trajectory_entries_from_index_or_rebuild(&dir, None)
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title, "Visible");
+        let final_index = read_trajectory_index(&dir).await.unwrap().unwrap();
+        assert!(final_index.skipped_files.is_empty());
+        assert_eq!(final_index.entries.len(), 1);
     }
 
     #[tokio::test]
