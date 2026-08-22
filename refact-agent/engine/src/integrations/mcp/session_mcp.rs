@@ -471,6 +471,7 @@ impl ClientHandler for McpClientHandler {
         let debug_name = self.debug_name.clone();
         let request_timeout = self.request_timeout;
         let handle_arc = self.tool_refresh_handle.clone();
+        let gcx = self.gcx.clone();
         async move {
             let mut handle = handle_arc.lock().await;
             if let Some(h) = handle.take() {
@@ -553,6 +554,9 @@ impl ClientHandler for McpClientHandler {
                     let added: Vec<_> = new_names.difference(&old_names).collect();
                     let removed: Vec<_> = old_names.difference(&new_names).collect();
                     session_downcasted.mcp_tools = new_tools;
+                    if let Some(gcx) = gcx.upgrade() {
+                        gcx.tool_catalog_generations.advance_mcp();
+                    }
                     format!(
                         "tools/list_changed: {} → {} tools, added: {:?}, removed: {:?}",
                         old_count, new_count, added, removed

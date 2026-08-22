@@ -763,6 +763,7 @@ pub async fn integration_config_save(
         serde_yaml::to_string(&sanitized_yaml).unwrap()
     );
     write_config_atomically(&config_path, &sanitized_yaml_string).await?;
+    gcx.tool_catalog_generations.advance_integrations();
 
     // If it is an mcp integration, ensure we restart or reconnect to the server
     if config_path
@@ -770,6 +771,7 @@ pub async fn integration_config_save(
         .and_then(|f| f.to_str())
         .is_some_and(|f| f.starts_with("mcp_"))
     {
+        gcx.tool_catalog_generations.advance_mcp();
         let _ = load_integrations(gcx.clone(), &["**/mcp_*".to_string()]).await;
     }
 

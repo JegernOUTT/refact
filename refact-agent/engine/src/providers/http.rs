@@ -41,6 +41,7 @@ async fn invalidate_caps(gcx: Arc<GlobalContext>) {
     let mut caps_state = caps_state.write().await;
     caps_state.caps = None;
     caps_state.last_attempted_ts = 0;
+    gcx.tool_catalog_generations.advance_capabilities();
 }
 use crate::providers::config::ProviderDefaults;
 use crate::providers::config_store;

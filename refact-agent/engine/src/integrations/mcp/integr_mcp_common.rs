@@ -165,6 +165,10 @@ pub fn tool_catalog_cache_store(config_path: &str, tools: &[rmcp::model::Tool]) 
     );
 }
 
+fn advance_mcp_catalog_generation(gcx: &Arc<GlobalContext>) {
+    gcx.tool_catalog_generations.advance_mcp();
+}
+
 pub fn tool_catalog_cache_get(config_path: &str) -> Option<Vec<rmcp::model::Tool>> {
     let mut guard = match MCP_TOOL_CATALOG_CACHE.lock() {
         Ok(guard) => guard,
@@ -935,6 +939,9 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 // The config changed: the old tool catalog must not be served
                 // for the new configuration.
                 tool_catalog_cache_remove(&config_path);
+                if let Some(gcx) = gcx_weak.upgrade() {
+                    advance_mcp_catalog_generation(&gcx);
+                }
                 tokio::spawn(super::mcp_resources::remove_indexed_resources(
                     gcx_weak.clone(),
                     config_path.clone(),
@@ -1154,6 +1161,9 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                 let arc = Arc::new(AMutex::new(Some(client)));
                 session_downcasted.mcp_client = Some(arc.clone());
                 tool_catalog_cache_store(&config_path, &tools);
+                if let Some(gcx) = gcx_weak.upgrade() {
+                    advance_mcp_catalog_generation(&gcx);
+                }
                 session_downcasted.mcp_tools = tools;
                 session_downcasted.mcp_resources = resources.clone();
                 session_downcasted.mcp_prompts = prompts;
@@ -1474,6 +1484,9 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
                 None => return false,
             };
             tool_catalog_cache_store(&mcp_session.config_path, &tools);
+            if let Some(gcx) = gcx_weak.upgrade() {
+                advance_mcp_catalog_generation(&gcx);
+            }
             mcp_session.mcp_tools = tools;
             mcp_session.connection_status = MCPConnectionStatus::Connected;
             mcp_session.last_logged_status = None;

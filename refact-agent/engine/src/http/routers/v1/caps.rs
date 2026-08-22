@@ -60,6 +60,7 @@ pub async fn handle_v1_model_capabilities(
         let mut caps_state = caps_state.write().await;
         caps_state.caps = None;
         caps_state.last_attempted_ts = 0;
+        gcx.tool_catalog_generations.advance_capabilities();
     }
 
     let body = if let Some(model_name) = query.model {

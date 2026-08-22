@@ -119,9 +119,13 @@ pub async fn load_privacy_if_needed(gcx: Arc<GlobalContext>) -> Arc<PrivacySetti
         return previous_settings;
     }
 
+    let policy_changed = previous_load.policy != loaded.policy;
     let new_privacy_settings = Arc::new(legacy_settings(&loaded.policy, current_time));
     *gcx.privacy_policy_load.write().unwrap() = loaded;
     *gcx.privacy_settings.write().unwrap() = new_privacy_settings.clone();
+    if policy_changed {
+        gcx.tool_catalog_generations.advance_privacy();
+    }
     new_privacy_settings
 }
 
@@ -167,6 +171,7 @@ pub async fn save_privacy_policy(
     let settings = Arc::new(legacy_settings(&loaded.policy, current_time));
     *gcx.privacy_policy_load.write().unwrap() = loaded;
     *gcx.privacy_settings.write().unwrap() = settings;
+    gcx.tool_catalog_generations.advance_privacy();
     Ok(())
 }
 

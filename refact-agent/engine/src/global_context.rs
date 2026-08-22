@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
@@ -17,7 +17,7 @@ use crate::agents::registry::BackgroundAgentRegistry;
 use crate::app_state::{
     AppActivitySink, AppBuddyEventSink, AppState, AppToolRegistry, BuddyServices, CapsState,
     ChatServices, EngineChatSessionFacade, IntegrationServices, ModelServices, PathServices,
-    RuntimeServices, TokenizerState, WorkspaceServices,
+    RuntimeServices, TokenizerState, ToolCatalogCache, WorkspaceServices,
 };
 use crate::caps::CodeAssistantCaps;
 use crate::caps::providers::get_latest_provider_mtime;
@@ -289,6 +289,37 @@ impl Default for ReviewCommandsConfig {
     }
 }
 
+#[derive(Default)]
+pub struct ToolCatalogGenerations {
+    pub customization: AtomicU64,
+    pub integrations: AtomicU64,
+    pub mcp: AtomicU64,
+    pub privacy: AtomicU64,
+    pub capabilities: AtomicU64,
+}
+
+impl ToolCatalogGenerations {
+    pub fn advance_customization(&self) {
+        self.customization.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn advance_integrations(&self) {
+        self.integrations.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn advance_mcp(&self) {
+        self.mcp.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn advance_privacy(&self) {
+        self.privacy.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn advance_capabilities(&self) {
+        self.capabilities.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 impl Default for EngineGlobalConfig {
     fn default() -> Self {
         Self {
@@ -348,6 +379,8 @@ pub struct GlobalContext {
     pub llm_stats_sender:
         Arc<StdMutex<Option<tokio::sync::mpsc::Sender<crate::stats::event::LlmCallEvent>>>>,
     pub ext_cache_generation: Arc<std::sync::atomic::AtomicU64>,
+    pub tool_catalog_generations: Arc<ToolCatalogGenerations>,
+    pub tool_catalog_cache: Arc<ToolCatalogCache>,
     pub buddy: Arc<AMutex<Option<crate::buddy::actor::BuddyService>>>,
     pub buddy_events_tx: Option<tokio::sync::broadcast::Sender<crate::buddy::events::BuddyEvent>>,
     pub user_activity: Arc<AMutex<crate::buddy::user_activity::UserActivityRing>>,
@@ -622,6 +655,7 @@ pub async fn try_load_caps_quickly_if_not_present(
             {
                 caps_state.caps = None;
                 caps_state.last_attempted_ts = 0;
+                gcx.tool_catalog_generations.advance_capabilities();
                 caps_last_attempted_ts = 0;
             } else {
                 if let Some(caps_arc) = caps_state.caps.clone() {
@@ -647,6 +681,7 @@ pub async fn try_load_caps_quickly_if_not_present(
                 Ok(caps) => {
                     caps_state.caps = Some(caps.clone());
                     caps_state.last_error = "".to_string();
+                    gcx.tool_catalog_generations.advance_capabilities();
                     Ok(caps)
                 }
                 Err(e) => {
@@ -682,6 +717,7 @@ pub async fn look_for_piggyback_fields(
                     );
                     caps_state.caps = None;
                     caps_state.last_attempted_ts = 0;
+                    gcx.tool_catalog_generations.advance_capabilities();
                 }
             }
         }
@@ -843,6 +879,8 @@ pub async fn create_global_context(
         knowledge_index: Arc::new(AMutex::new(KnowledgeIndex::empty())),
         llm_stats_sender: Arc::new(StdMutex::new(None)),
         ext_cache_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        tool_catalog_generations: Arc::new(ToolCatalogGenerations::default()),
+        tool_catalog_cache: Arc::new(ToolCatalogCache::default()),
         buddy: Arc::new(AMutex::new(None)),
         buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
         user_activity: Arc::new(AMutex::new(user_activity)),
@@ -1123,6 +1161,8 @@ pub mod tests {
             knowledge_index: Arc::new(AMutex::new(KnowledgeIndex::empty())),
             llm_stats_sender: Arc::new(StdMutex::new(None)),
             ext_cache_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            tool_catalog_generations: Arc::new(ToolCatalogGenerations::default()),
+            tool_catalog_cache: Arc::new(ToolCatalogCache::default()),
             buddy: Arc::new(AMutex::new(None)),
             buddy_events_tx: Some(tokio::sync::broadcast::channel(256).0),
             user_activity: Arc::new(AMutex::new(user_activity)),

@@ -8,8 +8,8 @@ use crate::yaml_configs::customization_registry::{
     get_project_registry, should_expose_subagent_as_config_tool,
 };
 
-use super::tools_description::{Tool, ToolDesc, ToolGroup, ToolGroupCategory, ToolSourceType};
 use super::tool_config_subagent::ToolConfigSubagent;
+use super::tools_description::{Tool, ToolDesc, ToolGroup, ToolGroupCategory, ToolSourceType};
 
 /// When MCP tool count exceeds this threshold, lazy loading activates.
 /// The full MCP schemas are replaced by two fixed proxy tools:
@@ -32,25 +32,12 @@ pub struct ToolsForMode {
     pub mcp_tool_index: Vec<(String, String)>,
 }
 
-/// Returns true for real MCP integration tools, false for the proxy builtins
-/// (`mcp_call`, `mcp_tool_search`) which share the "mcp" name prefix but have
-/// `ToolSourceType::Builtin`. This makes `apply_mcp_lazy_filter` idempotent.
 fn is_integration_mcp_tool(t: &Box<dyn Tool + Send>) -> bool {
     let d = t.tool_description();
     d.name.starts_with("mcp") && matches!(d.source.source_type, ToolSourceType::Integration)
 }
 
-/// Apply MCP lazy-loading to a flat tool list returned by `get_tools_for_mode`.
-///
-/// When there are more than `MCP_LAZY_THRESHOLD` MCP tools, ALL individual MCP
-/// schemas are replaced by two fixed proxy tools (`mcp_tool_search` + `mcp_call`).
-/// The tool list produced here NEVER changes during the session — cache-safe.
-///
-/// Safe to call multiple times: proxy tools have `ToolSourceType::Builtin` so they
-/// are never counted or removed by subsequent calls.
 pub fn apply_mcp_lazy_filter(mut tools: Vec<Box<dyn Tool + Send>>) -> ToolsForMode {
-    // Collect the index of ALL real MCP integration tools before filtering.
-    // Proxy builtins (mcp_call / mcp_tool_search) are excluded via source_type check.
     let mcp_tool_index: Vec<(String, String)> = tools
         .iter()
         .filter(|t| is_integration_mcp_tool(t))
@@ -64,9 +51,7 @@ pub fn apply_mcp_lazy_filter(mut tools: Vec<Box<dyn Tool + Send>>) -> ToolsForMo
     let mcp_lazy_mode = mcp_total_count > MCP_LAZY_THRESHOLD;
 
     if mcp_lazy_mode {
-        // Drop ALL individual MCP tool schemas (integration tools only).
         tools.retain(|t| !is_integration_mcp_tool(t));
-        // Inject two fixed proxies — tool list is now stable for the session.
         tools.push(Box::new(crate::tools::tool_mcp_search::ToolMcpSearch {}));
         tools.push(Box::new(crate::tools::tool_mcp_call::ToolMcpCall {}));
     }
@@ -169,6 +154,26 @@ fn tool_available(
         return false;
     }
     true
+}
+
+pub(crate) fn catalog_policy_for_tools(
+    tools: &[Box<dyn Tool + Send>],
+) -> Vec<refact_runtime_api::ToolPolicyInfo> {
+    tools
+        .iter()
+        .map(|tool| {
+            let desc = tool.tool_description();
+            let config_override = if !desc.source.config_path.is_empty() {
+                tool.config().ok().and_then(|config| config.allow_parallel)
+            } else {
+                None
+            };
+            refact_runtime_api::ToolPolicyInfo {
+                name: desc.name,
+                effective_allow_parallel: desc.allow_parallel && config_override.unwrap_or(true),
+            }
+        })
+        .collect()
 }
 
 async fn tool_available_from_gcx(

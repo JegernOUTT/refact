@@ -601,6 +601,7 @@ pub async fn invalidate_all_registry_caches(gcx: Arc<GlobalContext>) {
     if let Ok(mut cache) = cache_arc.write() {
         cache.cache.clear();
     };
+    gcx.tool_catalog_generations.advance_customization();
 }
 
 pub async fn get_mode_config(

@@ -929,6 +929,14 @@ fn path_triggers_registry_reload(path: &Path) -> bool {
     })
 }
 
+fn path_triggers_tool_catalog_reload(path: &Path) -> bool {
+    let is_integration = path
+        .components()
+        .any(|component| component == Component::Normal("integrations.d".as_ref()));
+    let is_privacy = path.file_name().is_some_and(|name| name == "privacy.yaml");
+    is_integration || is_privacy
+}
+
 fn is_valid_file_for_scan(
     path: &PathBuf,
     scan_root: &Path,
@@ -2190,6 +2198,25 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
                 gcx.clone(),
             )
             .await;
+        }
+        if event
+            .paths
+            .iter()
+            .any(|p| path_triggers_tool_catalog_reload(p))
+        {
+            if event.paths.iter().any(|p| {
+                p.components()
+                    .any(|component| component == Component::Normal("integrations.d".as_ref()))
+            }) {
+                gcx.tool_catalog_generations.advance_integrations();
+            }
+            if event
+                .paths
+                .iter()
+                .any(|path| path.file_name().is_some_and(|name| name == "privacy.yaml"))
+            {
+                gcx.tool_catalog_generations.advance_privacy();
+            }
         }
         let mut blocklist_roots = gcx
             .documents_state

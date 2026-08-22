@@ -515,6 +515,7 @@ async fn force_refresh_openai_codex_for_retry(
             let mut caps = app.model.caps.write().await;
             caps.caps = None;
             caps.last_attempted_ts = 0;
+            app.gcx.tool_catalog_generations.advance_capabilities();
         }
     }
 

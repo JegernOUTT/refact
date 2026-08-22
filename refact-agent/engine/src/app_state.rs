@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
@@ -309,6 +310,54 @@ pub struct AppToolRegistry {
     fixture_tool_factory: Option<FixtureToolFactory>,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ToolCatalogKey {
+    workspace_scope: String,
+    mode: String,
+    model: Option<String>,
+    customization_generation: u64,
+    integration_generation: u64,
+    mcp_generation: u64,
+    privacy_generation: u64,
+    capability_generation: u64,
+    extension_generation: u64,
+}
+
+#[derive(Clone)]
+pub struct ToolCatalogSnapshot {
+    pub index: ToolRegistryIndex,
+    pub policy: Vec<ToolPolicyInfo>,
+}
+
+#[derive(Default)]
+pub struct ToolCatalogCache {
+    snapshots: ARwLock<HashMap<ToolCatalogKey, Arc<ToolCatalogSnapshot>>>,
+    build_locks: AMutex<HashMap<ToolCatalogKey, Arc<AMutex<()>>>>,
+}
+
+impl ToolCatalogCache {
+    async fn acquire_build_lock(&self, key: &ToolCatalogKey) -> Arc<AMutex<()>> {
+        let mut locks = self.build_locks.lock().await;
+        locks
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(AMutex::new(())))
+            .clone()
+    }
+
+    async fn get(&self, key: &ToolCatalogKey) -> Option<Arc<ToolCatalogSnapshot>> {
+        self.snapshots.read().await.get(key).cloned()
+    }
+
+    async fn insert(&self, key: ToolCatalogKey, snapshot: Arc<ToolCatalogSnapshot>) {
+        self.snapshots.write().await.insert(key, snapshot);
+    }
+
+    #[cfg(test)]
+    async fn snapshot_count(&self) -> usize {
+        self.snapshots.read().await.len()
+    }
+}
+
 #[cfg(any(test, feature = "bench"))]
 pub type FixtureToolFactory =
     Arc<dyn Fn() -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> + Send + Sync>;
@@ -345,6 +394,114 @@ impl AppToolRegistry {
         }
         crate::tools::tools_list::get_tools_for_mode(gcx, mode, model_id).await
     }
+
+    fn snapshot_cache_enabled() -> bool {
+        !matches!(
+            env::var("REFACT_TOOL_CATALOG_SNAPSHOTS")
+                .as_deref()
+                .map(str::trim),
+            Ok("0") | Ok("false") | Ok("no") | Ok("off")
+        )
+    }
+
+    async fn catalog_key(
+        &self,
+        gcx: SharedGlobalContext,
+        mode: &str,
+        model_id: Option<&str>,
+    ) -> ToolCatalogKey {
+        let workspace_scope = crate::files_correction::get_active_project_path(gcx.clone())
+            .await
+            .unwrap_or_else(|| gcx.config_dir.clone())
+            .to_string_lossy()
+            .to_string();
+        let generations = &gcx.tool_catalog_generations;
+        ToolCatalogKey {
+            workspace_scope,
+            mode: mode.to_string(),
+            model: model_id.map(str::to_string),
+            customization_generation: generations.customization.load(Ordering::Acquire),
+            integration_generation: generations.integrations.load(Ordering::Acquire),
+            mcp_generation: generations.mcp.load(Ordering::Acquire),
+            privacy_generation: generations.privacy.load(Ordering::Acquire),
+            capability_generation: generations.capabilities.load(Ordering::Acquire),
+            extension_generation: gcx.ext_cache_generation.load(Ordering::Acquire),
+        }
+    }
+
+    async fn build_snapshot(
+        &self,
+        gcx: SharedGlobalContext,
+        mode: &str,
+        model_id: Option<&str>,
+    ) -> ToolCatalogSnapshot {
+        let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
+            self.tools_for_mode(gcx, mode, model_id).await,
+        );
+        let policy = crate::tools::tools_list::catalog_policy_for_tools(&tools.tools);
+        ToolCatalogSnapshot {
+            index: ToolRegistryIndex {
+                tools: tools
+                    .tools
+                    .into_iter()
+                    .map(|tool| tool.tool_description())
+                    .collect(),
+                mcp_lazy_mode: tools.mcp_lazy_mode,
+                mcp_total_count: tools.mcp_total_count,
+                mcp_tool_index: tools.mcp_tool_index,
+            },
+            policy,
+        }
+    }
+
+    async fn snapshot_for_mode(
+        &self,
+        gcx: SharedGlobalContext,
+        mode: &str,
+        model_id: Option<&str>,
+    ) -> Arc<ToolCatalogSnapshot> {
+        if !Self::snapshot_cache_enabled() {
+            let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
+            let snapshot = Arc::new(self.build_snapshot(gcx, mode, model_id).await);
+            span.finish_tool(
+                PerfOutcome::Success,
+                1,
+                snapshot.index.tools.len() as u64,
+                None,
+            );
+            return snapshot;
+        }
+        let key = self.catalog_key(gcx.clone(), mode, model_id).await;
+        if let Some(snapshot) = gcx.tool_catalog_cache.get(&key).await {
+            return snapshot;
+        }
+        let build_lock = gcx.tool_catalog_cache.acquire_build_lock(&key).await;
+        let _build_guard = build_lock.lock().await;
+        if let Some(snapshot) = gcx.tool_catalog_cache.get(&key).await {
+            return snapshot;
+        }
+        let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
+        let snapshot = Arc::new(self.build_snapshot(gcx.clone(), mode, model_id).await);
+        span.finish_tool(
+            PerfOutcome::Success,
+            1,
+            snapshot.index.tools.len() as u64,
+            None,
+        );
+        gcx.tool_catalog_cache.insert(key, snapshot.clone()).await;
+        snapshot
+    }
+
+    #[cfg(any(test, feature = "bench"))]
+    #[allow(dead_code)]
+    async fn snapshot_for_mode_for_test(
+        &self,
+        mode: &str,
+        model_id: Option<&str>,
+    ) -> Arc<ToolCatalogSnapshot> {
+        self.snapshot_for_mode(self.gcx.clone(), mode, model_id)
+            .await
+    }
 }
 
 #[async_trait]
@@ -354,15 +511,12 @@ impl ToolRegistry for AppToolRegistry {
         mode: &str,
         model_id: Option<&str>,
     ) -> Vec<refact_tool_api::ToolDesc> {
-        let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
-        let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
-            self.tools_for_mode(self.gcx.clone(), mode, model_id).await,
-        )
-        .tools
-        .into_iter()
-        .map(|tool| tool.tool_description())
-        .collect::<Vec<_>>();
-        span.finish_tool(PerfOutcome::Success, 1, tools.len() as u64, None);
+        let tools = self
+            .snapshot_for_mode(self.gcx.clone(), mode, model_id)
+            .await
+            .index
+            .tools
+            .clone();
         tools
     }
 
@@ -371,22 +525,11 @@ impl ToolRegistry for AppToolRegistry {
         mode: &str,
         model_id: Option<&str>,
     ) -> ToolRegistryIndex {
-        let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
-        let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
-            self.tools_for_mode(self.gcx.clone(), mode, model_id).await,
-        );
-        let tool_count = tools.tools.len() as u64;
-        let index = ToolRegistryIndex {
-            tools: tools
-                .tools
-                .into_iter()
-                .map(|tool| tool.tool_description())
-                .collect(),
-            mcp_lazy_mode: tools.mcp_lazy_mode,
-            mcp_total_count: tools.mcp_total_count,
-            mcp_tool_index: tools.mcp_tool_index,
-        };
-        span.finish_tool(PerfOutcome::Success, 1, tool_count, None);
+        let index = self
+            .snapshot_for_mode(self.gcx.clone(), mode, model_id)
+            .await
+            .index
+            .clone();
         index
     }
 
@@ -439,30 +582,11 @@ impl ToolRegistry for AppToolRegistry {
         mode: &str,
         model_id: Option<&str>,
     ) -> Vec<ToolPolicyInfo> {
-        let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
-        let raw_tools = self.tools_for_mode(self.gcx.clone(), mode, model_id).await;
-        let policy = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools)
-            .tools
-            .into_iter()
-            .map(|tool| {
-                let desc = tool.tool_description();
-                let config_override = if !desc.source.config_path.is_empty() {
-                    tool.config().ok().and_then(|c| c.allow_parallel)
-                } else {
-                    None
-                };
-                let effective_allow_parallel = if desc.allow_parallel {
-                    config_override.unwrap_or(true)
-                } else {
-                    false
-                };
-                ToolPolicyInfo {
-                    name: desc.name,
-                    effective_allow_parallel,
-                }
-            })
-            .collect::<Vec<_>>();
-        span.finish_tool(PerfOutcome::Success, 1, policy.len() as u64, None);
+        let policy = self
+            .snapshot_for_mode(self.gcx.clone(), mode, model_id)
+            .await
+            .policy
+            .clone();
         policy
     }
 
@@ -747,5 +871,135 @@ impl FromRef<AppState> for BuddyServices {
 impl FromRef<AppState> for IntegrationServices {
     fn from_ref(app: &AppState) -> Self {
         app.integrations.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
+
+    struct FixtureTool {
+        _build_number: usize,
+    }
+
+    #[async_trait]
+    impl Tool for FixtureTool {
+        async fn tool_execute(
+            &mut self,
+            _ccx: Arc<AMutex<crate::at_commands::at_commands::AtCommandsContext>>,
+            _tool_call_id: &String,
+            _args: &HashMap<String, serde_json::Value>,
+        ) -> Result<(bool, Vec<crate::call_validation::ContextEnum>), String> {
+            Ok((false, Vec::new()))
+        }
+
+        fn tool_description(&self) -> ToolDesc {
+            ToolDesc {
+                name: "fixture".to_string(),
+                experimental: false,
+                allow_parallel: true,
+                description: format!("fixture {}", self._build_number),
+                input_schema: serde_json::json!({"type":"object"}),
+                output_schema: None,
+                annotations: None,
+                display_name: "fixture".to_string(),
+                source: ToolSource {
+                    source_type: ToolSourceType::Builtin,
+                    config_path: String::new(),
+                },
+            }
+        }
+    }
+
+    fn fixture_registry(gcx: SharedGlobalContext, builds: Arc<AtomicUsize>) -> AppToolRegistry {
+        AppToolRegistry::with_fixture_tool_factory(
+            gcx,
+            Arc::new(move || {
+                let build_number = builds.fetch_add(1, Ordering::SeqCst);
+                vec![Box::new(FixtureTool {
+                    _build_number: build_number,
+                })]
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn tool_catalog_snapshot_single_flights_and_reuses_descriptors() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let registry = Arc::new(fixture_registry(gcx.clone(), builds.clone()));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let registry = registry.clone();
+            tasks.push(tokio::spawn(async move {
+                registry
+                    .snapshot_for_mode_for_test("agent", Some("provider/model"))
+                    .await
+            }));
+        }
+        let snapshots = futures::future::join_all(tasks)
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert!(snapshots
+            .iter()
+            .all(|snapshot| Arc::ptr_eq(snapshot, &snapshots[0])));
+        assert_eq!(gcx.tool_catalog_cache.snapshot_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn tool_catalog_generations_create_next_turn_snapshot_without_mutating_old_one() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let registry = fixture_registry(gcx.clone(), builds.clone());
+        let first = registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model"))
+            .await;
+        gcx.tool_catalog_generations.advance_privacy();
+        let second = registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model"))
+            .await;
+
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(first.index.tools[0].name, "fixture");
+        assert_eq!(second.index.tools[0].name, "fixture");
+    }
+
+    #[tokio::test]
+    async fn tool_catalog_key_isolates_mode_and_model_and_keeps_mutable_instances_fresh() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let registry = fixture_registry(gcx.clone(), builds.clone());
+        let first = registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model-a"))
+            .await;
+        let second = registry
+            .snapshot_for_mode_for_test("task_agent", Some("provider/model-a"))
+            .await;
+        let third = registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model-b"))
+            .await;
+        let mutable_a = registry
+            .tools_for_mode(gcx.clone(), "agent", Some("provider/model-a"))
+            .await;
+        let mutable_b = registry
+            .tools_for_mode(gcx.clone(), "agent", Some("provider/model-a"))
+            .await;
+
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &third));
+        assert_eq!(builds.load(Ordering::SeqCst), 5);
+        assert_eq!(gcx.tool_catalog_cache.snapshot_count().await, 3);
+        assert_ne!(
+            mutable_a[0].tool_description().description,
+            mutable_b[0].tool_description().description
+        );
     }
 }
