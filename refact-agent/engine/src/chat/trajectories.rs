@@ -2705,6 +2705,30 @@ pub async fn save_trajectory_snapshot(
     result
 }
 
+#[cfg(test)]
+static TEST_MESSAGE_SERIALIZATION_FAILURE_ID: std::sync::OnceLock<
+    std::sync::Mutex<Option<String>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn test_message_serialization_should_fail(message: &ChatMessage) -> bool {
+    TEST_MESSAGE_SERIALIZATION_FAILURE_ID
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|message_id| message_id.clone())
+        .as_deref()
+        == Some(message.message_id.as_str())
+}
+
+#[cfg(test)]
+fn set_test_message_serialization_failure(message_id: Option<String>) {
+    *TEST_MESSAGE_SERIALIZATION_FAILURE_ID
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("test serialization failure lock poisoned") = message_id;
+}
+
 async fn save_trajectory_snapshot_inner(
     gcx: Arc<GlobalContext>,
     mut snapshot: TrajectorySnapshot,
@@ -2743,10 +2767,58 @@ async fn save_trajectory_snapshot_inner(
         None,
     );
     let message_serialization = tokio::task::spawn_blocking(move || {
-        let messages_json: Vec<serde_json::Value> = messages
+        let messages_json: Result<Vec<serde_json::Value>, String> = messages
             .iter()
-            .map(|message| serde_json::to_value(message).unwrap_or_default())
+            .enumerate()
+            .map(|(index, message)| {
+                #[cfg(test)]
+                if test_message_serialization_should_fail(message) {
+                    return Err(format!(
+                        "Failed to serialize trajectory message at index {index} (id {}, role {}): test failure",
+                        message.message_id, message.role
+                    ));
+                }
+                serde_json::to_value(message).map_err(|error| {
+                    format!(
+                        "Failed to serialize trajectory message at index {index} (id {}, role {}): {error}",
+                        message.message_id, message.role
+                    )
+                })
+            })
             .collect();
+        messages_json.map(|messages_json| (messages, messages_json))
+    })
+    .await;
+    let (messages, messages_json) = match message_serialization {
+        Ok(Ok(result)) => {
+            serialize_span.pause();
+            result
+        }
+        Ok(Err(error)) => {
+            serialize_span.finish(
+                PerfOutcome::Failure,
+                None,
+                Some(message_count as u64),
+                Some(snapshot.version),
+                None,
+            );
+            return Err(error);
+        }
+        Err(error) => {
+            serialize_span.finish(
+                PerfOutcome::Failure,
+                None,
+                Some(message_count as u64),
+                Some(snapshot.version),
+                None,
+            );
+            return Err(format!(
+                "Trajectory message serialization task failed: {}",
+                error
+            ));
+        }
+    };
+    let metric_scan = tokio::task::spawn_blocking(move || {
         let background_messages_json = retain_background_messages.then(|| messages_json.clone());
         let line_changes =
             collect_metrics.then(|| calculate_line_changes_from_chat_messages(&messages));
@@ -2764,11 +2836,8 @@ async fn save_trajectory_snapshot_inner(
     })
     .await;
     let (messages_json, background_messages_json, line_changes, task_progress, token_totals) =
-        match message_serialization {
-            Ok(result) => {
-                serialize_span.pause();
-                result
-            }
+        match metric_scan {
+            Ok(result) => result,
             Err(error) => {
                 serialize_span.finish(
                     PerfOutcome::Failure,
@@ -2777,10 +2846,7 @@ async fn save_trajectory_snapshot_inner(
                     Some(snapshot.version),
                     None,
                 );
-                return Err(format!(
-                    "Trajectory message serialization task failed: {}",
-                    error
-                ));
+                return Err(format!("Trajectory metric scan task failed: {}", error));
             }
         };
 
@@ -2883,22 +2949,47 @@ async fn save_trajectory_snapshot_inner(
         trajectory["task_meta"] = serde_json::to_value(task_meta).unwrap_or_default();
     }
 
-    let file_path = if let Some(ref task_meta) = snapshot.task_meta {
-        safe_new_task_trajectory_file(gcx.clone(), task_meta, &snapshot.chat_id).await?
+    let file_path_result = if let Some(ref task_meta) = snapshot.task_meta {
+        safe_new_task_trajectory_file(gcx.clone(), task_meta, &snapshot.chat_id).await
     } else if snapshot.buddy_meta.is_some() {
-        safe_new_buddy_trajectory_file(gcx.clone(), &snapshot.chat_id).await?
+        safe_new_buddy_trajectory_file(gcx.clone(), &snapshot.chat_id).await
     } else if let Some(path) = existing_no_meta_path {
-        path
+        Ok(path)
     } else {
         safe_new_nested_trajectory_file(
             gcx.clone(),
             &snapshot.chat_id,
             snapshot.root_chat_id.as_deref(),
         )
-        .await?
+        .await
+    };
+    let file_path = match file_path_result {
+        Ok(path) => path,
+        Err(error) => {
+            serialize_span.finish(
+                PerfOutcome::Failure,
+                None,
+                Some(message_count as u64),
+                Some(snapshot.version),
+                None,
+            );
+            return Err(error);
+        }
     };
     let existing_trajectory =
-        read_existing_trajectory_object(&file_path, &snapshot.chat_id).await?;
+        match read_existing_trajectory_object(&file_path, &snapshot.chat_id).await {
+            Ok(existing_trajectory) => existing_trajectory,
+            Err(error) => {
+                serialize_span.finish(
+                    PerfOutcome::Failure,
+                    None,
+                    Some(message_count as u64),
+                    Some(snapshot.version),
+                    None,
+                );
+                return Err(error);
+            }
+        };
 
     let updated_at = chrono::Utc::now().to_rfc3339();
     trajectory["updated_at"] = serde_json::Value::String(updated_at.clone());
@@ -6305,6 +6396,10 @@ mod tests {
         )
     }
 
+    fn serial_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap()
+    }
+
     #[test]
     fn trajectory_snapshot_excludes_runtime_only_diagnostic_timestamps() {
         let mut session = ChatSession::new("runtime-only-diagnostics".to_string());
@@ -6676,6 +6771,7 @@ mod tests {
     #[serial]
     #[tokio::test]
     async fn performance_diagnostics_cover_snapshot_save_boundaries_without_raw_id_or_path() {
+        let _lock = serial_test_guard();
         let (_guard, sink, recorder) = install_perf_recorder();
         let dir = tempfile::tempdir().unwrap();
         let (gcx, app) = make_app_with_workspace(dir.path()).await;
@@ -6711,6 +6807,14 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(
+            events
+                .iter()
+                .find(|event| event.component == "trajectory.serialize")
+                .expect("serialize metric")
+                .elapsed_us,
+            2
+        );
         assert!(events.iter().all(|event| event.outcome == "success"));
         assert!(events.iter().all(|event| {
             !format!("{event:?}").contains(chat_id)
@@ -6725,6 +6829,7 @@ mod tests {
     #[serial]
     #[tokio::test]
     async fn performance_diagnostics_record_failed_trajectory_commit() {
+        let _lock = serial_test_guard();
         let (_guard, sink, _) = install_perf_recorder();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let result =
@@ -6736,6 +6841,124 @@ mod tests {
         assert_eq!(events[0].component, "trajectory.commit");
         assert_eq!(events[0].outcome, "failure");
         assert!(events[0].chat_id_hash.is_some());
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_metadata_path_failure_records_one_serialize_failure() {
+        let _lock = serial_test_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "serialize-path-failure";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(&path, "different-id", "Existing", "2024-01-01T00:00:00Z").await;
+        let before = tokio::fs::read_to_string(&path).await.unwrap();
+        let (_guard, sink, _) = install_perf_recorder();
+
+        let result = save_trajectory_snapshot(
+            gcx,
+            test_snapshot(
+                chat_id,
+                "New",
+                vec![ChatMessage::new("user".to_string(), "hi".to_string())],
+            ),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), before);
+        let serialize_events: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter(|event| event.component == "trajectory.serialize")
+            .collect();
+        assert_eq!(serialize_events.len(), 1);
+        assert_eq!(serialize_events[0].outcome, "failure");
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_message_serialization_failure_preserves_existing_file() {
+        let _lock = serial_test_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "serialize-message-failure";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file(&path, chat_id, "Durable", "2024-01-01T00:00:00Z").await;
+        let before = tokio::fs::read_to_string(&path).await.unwrap();
+        let (_guard, sink, _) = install_perf_recorder();
+        let message = ChatMessage {
+            message_id: "unserializable-message".to_string(),
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("private message content".to_string()),
+            ..Default::default()
+        };
+        set_test_message_serialization_failure(Some(message.message_id.clone()));
+
+        let error = save_trajectory_snapshot(gcx, test_snapshot(chat_id, "New", vec![message]))
+            .await
+            .unwrap_err();
+        set_test_message_serialization_failure(None);
+
+        assert!(error.contains("index 0"));
+        assert!(error.contains("unserializable-message"));
+        assert!(error.contains("assistant"));
+        assert!(!error.contains("private message content"));
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), before);
+        let serialize_events: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter(|event| event.component == "trajectory.serialize")
+            .collect();
+        assert_eq!(serialize_events.len(), 1);
+        assert_eq!(serialize_events[0].outcome, "failure");
+    }
+
+    #[tokio::test]
+    async fn trajectory_save_round_trips_every_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "serialize-all-messages";
+        let messages = vec![
+            ChatMessage {
+                message_id: "message-user".to_string(),
+                role: "user".to_string(),
+                content: ChatContent::SimpleText("question".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                message_id: "message-assistant".to_string(),
+                role: "assistant".to_string(),
+                content: ChatContent::SimpleText("answer".to_string()),
+                reasoning_content: Some("reasoning".to_string()),
+                ..Default::default()
+            },
+            ChatMessage {
+                message_id: "message-tool".to_string(),
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText("result".to_string()),
+                tool_call_id: "call-1".to_string(),
+                ..Default::default()
+            },
+        ];
+        let expected = serde_json::to_value(&messages).unwrap();
+
+        save_trajectory_snapshot(gcx, test_snapshot(chat_id, "All", messages))
+            .await
+            .unwrap();
+
+        let path = nested_trajectory_path(dir.path(), chat_id, chat_id);
+        let saved: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
+        assert_eq!(saved["messages"], expected);
     }
 
     #[tokio::test]
