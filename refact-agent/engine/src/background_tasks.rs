@@ -64,6 +64,8 @@ pub async fn start_background_tasks(
     let goal_monitor_app = app_state.clone();
     let background_agent_monitor_app = app_state.clone();
     let background_agent_monitor_shutdown = gcx.shutdown_flag.clone();
+    let trajectory_index_coordinator = gcx.trajectory_index_coordinator.clone();
+    let trajectory_index_shutdown = gcx.shutdown_flag.clone();
     let mut bg = BackgroundTasksHolder::new(vec![
         tokio::spawn(crate::files_in_workspace::files_in_workspace_init_task(
             gcx.clone(),
@@ -90,6 +92,12 @@ pub async fn start_background_tasks(
         crate::chat::notifications::spawn_notification_subscriber(gcx.clone()),
         tokio::spawn(crate::chat::start_agent_monitor(app_state)),
         tokio::spawn(crate::chat::start_goal_monitor(goal_monitor_app)),
+        tokio::spawn(
+            crate::chat::trajectory_index::trajectory_index_coordinator_background_task(
+                trajectory_index_coordinator,
+                trajectory_index_shutdown,
+            ),
+        ),
         tokio::spawn(crate::agents::monitor::run_background_agent_monitor(
             background_agent_monitor_app,
             background_agent_monitor_shutdown,

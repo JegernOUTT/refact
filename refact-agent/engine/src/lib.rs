@@ -278,6 +278,9 @@ pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
 
     chat::close_all_chat_sessions(crate::app_state::AppState::from_gcx(gcx.clone()).await).await;
     chat::verifier::shutdown_card_verifiers(gcx.clone()).await;
+    if let Err(error) = gcx.trajectory_index_coordinator.flush_all().await {
+        tracing::warn!("trajectory index coordinator shutdown flush failed: {error}");
+    }
     background_tasks.abort().await;
     git::checkpoints::abort_init_shadow_repos(gcx.clone()).await;
     let exec_cleanup = gcx

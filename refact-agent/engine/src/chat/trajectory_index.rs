@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,15 @@ use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 
 pub const TRAJECTORY_INDEX_SCHEMA_VERSION: u32 = 1;
 pub const TRAJECTORY_INDEX_FILE: &str = "index.json";
+pub const TRAJECTORY_INDEX_COORDINATOR_ENV: &str = "REFACT_TRAJECTORY_INDEX_COORDINATOR";
+pub const TRAJECTORY_INDEX_LOCK_ORDER: &str =
+    "release_global_and_session_locks_before_trajectory_index_io";
+
+pub fn trajectory_index_coordinator_rollout_enabled() -> bool {
+    std::env::var(TRAJECTORY_INDEX_COORDINATOR_ENV)
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TrajectoryIndex {
@@ -182,12 +191,538 @@ async fn get_trajectory_index_lock(dir: &Path) -> Arc<AMutex<()>> {
         .clone()
 }
 
+const INDEX_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const INDEX_LOCK_RETRY: Duration = Duration::from_millis(25);
+const COORDINATOR_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
+
+#[derive(Clone)]
+enum TrajectoryIndexMutation {
+    Upsert(TrajectoryIndexEntry),
+    Remove(HashSet<String>),
+    Reconcile(Option<TrajectorySourceIdentity>),
+}
+
+#[derive(Clone)]
+struct PendingTrajectoryIndexMutation {
+    sequence: u64,
+    mutation: TrajectoryIndexMutation,
+}
+
+#[derive(Default)]
+struct TrajectoryIndexDirectoryState {
+    index: Option<TrajectoryIndex>,
+    loaded: bool,
+    next_sequence: u64,
+    pending: Vec<PendingTrajectoryIndexMutation>,
+}
+
+#[derive(Clone)]
+pub struct TrajectoryIndexCoordinator {
+    directories: Arc<AMutex<HashMap<PathBuf, Arc<AMutex<TrajectoryIndexDirectoryState>>>>>,
+    lock_timeout: Duration,
+    lock_retry: Duration,
+}
+
+impl Default for TrajectoryIndexCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TrajectoryIndexCoordinator {
+    pub fn new() -> Self {
+        Self {
+            directories: Arc::new(AMutex::new(HashMap::new())),
+            lock_timeout: INDEX_LOCK_TIMEOUT,
+            lock_retry: INDEX_LOCK_RETRY,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_timing(lock_timeout: Duration, lock_retry: Duration) -> Self {
+        Self {
+            directories: Arc::new(AMutex::new(HashMap::new())),
+            lock_timeout,
+            lock_retry,
+        }
+    }
+
+    async fn directory_state(&self, dir: &Path) -> Arc<AMutex<TrajectoryIndexDirectoryState>> {
+        let key = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let mut directories = self.directories.lock().await;
+        directories
+            .entry(key)
+            .or_insert_with(|| Arc::new(AMutex::new(TrajectoryIndexDirectoryState::default())))
+            .clone()
+    }
+
+    async fn ensure_loaded(
+        &self,
+        dir: &Path,
+        source_hint: Option<TrajectorySourceIdentity>,
+    ) -> Result<Arc<AMutex<TrajectoryIndexDirectoryState>>, String> {
+        let state = self.directory_state(dir).await;
+        if state.lock().await.loaded {
+            return Ok(state);
+        }
+
+        let dir = dir.to_path_buf();
+        let loaded = tokio::task::spawn_blocking(move || {
+            load_trajectory_index_for_coordinator_sync(&dir, source_hint)
+        })
+        .await
+        .map_err(|error| format!("Trajectory index coordinator load task failed: {error}"))??;
+
+        let mut state_guard = state.lock().await;
+        if !state_guard.loaded {
+            state_guard.index = Some(loaded.index);
+            state_guard.loaded = true;
+            if loaded.needs_flush {
+                push_pending_mutation(
+                    &mut state_guard,
+                    TrajectoryIndexMutation::Reconcile(loaded.source_hint),
+                );
+            }
+        }
+        drop(state_guard);
+        Ok(state)
+    }
+
+    pub async fn snapshot(
+        &self,
+        dir: &Path,
+        source_hint: Option<TrajectorySourceIdentity>,
+    ) -> Result<TrajectoryIndex, String> {
+        let state = self.ensure_loaded(dir, source_hint).await?;
+        let snapshot = state
+            .lock()
+            .await
+            .index
+            .clone()
+            .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string());
+        snapshot
+    }
+
+    pub async fn upsert(&self, dir: &Path, entry: TrajectoryIndexEntry) -> Result<(), String> {
+        let state = self.ensure_loaded(dir, None).await?;
+        let mut state_guard = state.lock().await;
+        let index = state_guard
+            .index
+            .as_mut()
+            .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string())?;
+        apply_mutation_to_index(index, &TrajectoryIndexMutation::Upsert(entry.clone()))?;
+        push_pending_mutation(&mut state_guard, TrajectoryIndexMutation::Upsert(entry));
+        Ok(())
+    }
+
+    pub async fn remove(&self, dir: &Path, chat_ids: HashSet<String>) -> Result<(), String> {
+        if chat_ids.is_empty() {
+            return Ok(());
+        }
+        let state = self.ensure_loaded(dir, None).await?;
+        let mut state_guard = state.lock().await;
+        let index = state_guard
+            .index
+            .as_mut()
+            .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string())?;
+        apply_mutation_to_index(index, &TrajectoryIndexMutation::Remove(chat_ids.clone()))?;
+        push_pending_mutation(&mut state_guard, TrajectoryIndexMutation::Remove(chat_ids));
+        Ok(())
+    }
+
+    pub async fn reconcile(
+        &self,
+        dir: &Path,
+        source_hint: Option<TrajectorySourceIdentity>,
+    ) -> Result<TrajectoryIndex, String> {
+        let state = self.ensure_loaded(dir, source_hint.clone()).await?;
+        let index = state
+            .lock()
+            .await
+            .index
+            .clone()
+            .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string())?;
+        let dir = dir.to_path_buf();
+        let source_hint_for_reconcile = source_hint.clone();
+        let reconciled = tokio::task::spawn_blocking(move || {
+            reconcile_trajectory_index_sync(&dir, index, source_hint_for_reconcile)
+        })
+        .await
+        .map_err(|error| {
+            format!("Trajectory index coordinator reconcile task failed: {error}")
+        })??;
+
+        let mut state_guard = state.lock().await;
+        let mut index = reconciled.0;
+        for pending in &state_guard.pending {
+            if !matches!(pending.mutation, TrajectoryIndexMutation::Reconcile(_)) {
+                apply_mutation_to_index(&mut index, &pending.mutation)?;
+            }
+        }
+        state_guard.index = Some(index.clone());
+        if reconciled.1 {
+            push_pending_mutation(
+                &mut state_guard,
+                TrajectoryIndexMutation::Reconcile(source_hint),
+            );
+        }
+        Ok(index)
+    }
+
+    pub async fn flush_directory(&self, dir: &Path) -> Result<(), String> {
+        let state = self.ensure_loaded(dir, None).await?;
+        let (pending, last_sequence) = {
+            let state_guard = state.lock().await;
+            let Some(last) = state_guard.pending.last() else {
+                return Ok(());
+            };
+            (state_guard.pending.clone(), last.sequence)
+        };
+        let dir = dir.to_path_buf();
+        let lock_timeout = self.lock_timeout;
+        let lock_retry = self.lock_retry;
+        let flushed_index = tokio::task::spawn_blocking(move || {
+            flush_trajectory_index_mutations_sync(&dir, pending, lock_timeout, lock_retry)
+        })
+        .await
+        .map_err(|error| format!("Trajectory index coordinator flush task failed: {error}"))??;
+
+        let mut state_guard = state.lock().await;
+        state_guard
+            .pending
+            .retain(|pending| pending.sequence > last_sequence);
+        let mut index = flushed_index;
+        for pending in &state_guard.pending {
+            if !matches!(pending.mutation, TrajectoryIndexMutation::Reconcile(_)) {
+                apply_mutation_to_index(&mut index, &pending.mutation)?;
+            }
+        }
+        state_guard.index = Some(index);
+        Ok(())
+    }
+
+    pub async fn flush_all(&self) -> Result<(), String> {
+        let directories: Vec<PathBuf> = self.directories.lock().await.keys().cloned().collect();
+        let mut first_error = None;
+        for directory in directories {
+            if let Err(error) = self.flush_directory(&directory).await {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
+pub async fn trajectory_index_coordinator_background_task(
+    coordinator: Arc<TrajectoryIndexCoordinator>,
+    shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
+) {
+    while !shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
+        tokio::time::sleep(COORDINATOR_FLUSH_INTERVAL).await;
+        if let Err(error) = coordinator.flush_all().await {
+            tracing::warn!("trajectory index coordinator flush failed: {error}");
+        }
+    }
+    if let Err(error) = coordinator.flush_all().await {
+        tracing::warn!("trajectory index coordinator shutdown flush failed: {error}");
+    }
+}
+
+fn push_pending_mutation(
+    state: &mut TrajectoryIndexDirectoryState,
+    mutation: TrajectoryIndexMutation,
+) {
+    state.next_sequence += 1;
+    state.pending.push(PendingTrajectoryIndexMutation {
+        sequence: state.next_sequence,
+        mutation,
+    });
+}
+
 pub fn trajectory_index_path(dir: &Path) -> PathBuf {
     dir.join(TRAJECTORY_INDEX_FILE)
 }
 
 pub fn trajectory_file_path_for_entry(dir: &Path, entry: &TrajectoryIndexEntry) -> PathBuf {
     dir.join(&entry.file_name)
+}
+
+struct CoordinatorLoadResult {
+    index: TrajectoryIndex,
+    needs_flush: bool,
+    source_hint: Option<TrajectorySourceIdentity>,
+}
+
+fn load_trajectory_index_for_coordinator_sync(
+    dir: &Path,
+    source_hint: Option<TrajectorySourceIdentity>,
+) -> Result<CoordinatorLoadResult, String> {
+    match read_trajectory_index_sync(dir) {
+        Ok(Some(index)) => Ok(CoordinatorLoadResult {
+            index,
+            needs_flush: false,
+            source_hint,
+        }),
+        Ok(None) | Err(_) => {
+            let (entries, skipped_files) =
+                scan_trajectory_index_data_sync(dir, source_hint.clone())?;
+            Ok(CoordinatorLoadResult {
+                index: TrajectoryIndex {
+                    schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
+                    updated_at: Utc::now().to_rfc3339(),
+                    entries,
+                    skipped_files,
+                },
+                needs_flush: true,
+                source_hint,
+            })
+        }
+    }
+}
+
+fn read_trajectory_index_sync(dir: &Path) -> Result<Option<TrajectoryIndex>, String> {
+    let path = trajectory_index_path(dir);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "Failed to read trajectory index {:?}: {error}",
+                path
+            ))
+        }
+    };
+    let index = serde_json::from_str::<TrajectoryIndex>(&content)
+        .map_err(|error| format!("Failed to parse trajectory index {:?}: {error}", path))?;
+    if index.schema_version != TRAJECTORY_INDEX_SCHEMA_VERSION {
+        return Err(format!(
+            "Unsupported trajectory index schema version {} in {:?}",
+            index.schema_version, path
+        ));
+    }
+    Ok(Some(index))
+}
+
+fn apply_mutation_to_index(
+    index: &mut TrajectoryIndex,
+    mutation: &TrajectoryIndexMutation,
+) -> Result<(), String> {
+    match mutation {
+        TrajectoryIndexMutation::Upsert(entry) => {
+            if !index_entry_file_name_is_valid(&entry.file_name)
+                || Path::new(&entry.file_name)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    != Some(entry.id.as_str())
+            {
+                return Err(format!(
+                    "Invalid trajectory index entry path: {}",
+                    entry.file_name
+                ));
+            }
+            index.entries.retain(|existing| existing.id != entry.id);
+            index
+                .skipped_files
+                .retain(|skipped| skipped.file_name != entry.file_name);
+            index.entries.push(entry.clone());
+        }
+        TrajectoryIndexMutation::Remove(chat_ids) => {
+            index.entries.retain(|entry| !chat_ids.contains(&entry.id));
+        }
+        TrajectoryIndexMutation::Reconcile(_) => {}
+    }
+    index.schema_version = TRAJECTORY_INDEX_SCHEMA_VERSION;
+    index.updated_at = Utc::now().to_rfc3339();
+    Ok(())
+}
+
+fn reconcile_trajectory_index_sync(
+    dir: &Path,
+    index: TrajectoryIndex,
+    source_hint: Option<TrajectorySourceIdentity>,
+) -> Result<(TrajectoryIndex, bool), String> {
+    let disk_files = scan_trajectory_dir_files_sync(dir)?;
+    let skipped_by_file: HashMap<String, TrajectoryIndexSkippedFile> = index
+        .skipped_files
+        .iter()
+        .cloned()
+        .map(|skipped| (skipped.file_name.clone(), skipped))
+        .collect();
+    let entries_by_file: HashMap<String, TrajectoryIndexEntry> = index
+        .entries
+        .iter()
+        .cloned()
+        .map(|entry| (entry.file_name.clone(), entry))
+        .collect();
+    let mut entries = Vec::with_capacity(disk_files.len());
+    let mut skipped_files = Vec::new();
+    let mut changed = false;
+
+    for disk in &disk_files {
+        if let Some(entry) = entries_by_file.get(&disk.file_name) {
+            if entry.file_len == disk.file_len
+                && entry.file_modified_unix_ms == disk.file_modified_unix_ms
+            {
+                entries.push(entry.clone());
+                continue;
+            }
+        }
+        if let Some(skipped) = skipped_by_file.get(&disk.file_name) {
+            if skipped.file_len == disk.file_len
+                && skipped.file_modified_unix_ms == disk.file_modified_unix_ms
+            {
+                skipped_files.push(skipped.clone());
+                continue;
+            }
+        }
+        let path = dir.join(&disk.file_name);
+        match read_and_index_single_trajectory_sync(dir, &path, source_hint.clone()) {
+            SingleTrajectoryIndexResult::Indexed(entry) => {
+                entries.push(entry);
+                changed = true;
+            }
+            SingleTrajectoryIndexResult::Skipped => {
+                skipped_files.push(TrajectoryIndexSkippedFile {
+                    file_name: disk.file_name.clone(),
+                    file_len: disk.file_len,
+                    file_modified_unix_ms: disk.file_modified_unix_ms,
+                });
+                changed = true;
+            }
+            SingleTrajectoryIndexResult::TransientFailure => {
+                if let Some(entry) = entries_by_file.get(&disk.file_name) {
+                    entries.push(entry.clone());
+                } else if let Some(skipped) = skipped_by_file.get(&disk.file_name) {
+                    skipped_files.push(skipped.clone());
+                }
+            }
+        }
+    }
+
+    let disk_names: HashSet<&str> = disk_files
+        .iter()
+        .map(|disk| disk.file_name.as_str())
+        .collect();
+    changed |= entries_by_file
+        .keys()
+        .chain(skipped_by_file.keys())
+        .any(|file_name| !disk_names.contains(file_name.as_str()));
+    let entries = dedupe_entries_by_id(entries);
+    Ok((
+        TrajectoryIndex {
+            schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
+            updated_at: if changed {
+                Utc::now().to_rfc3339()
+            } else {
+                index.updated_at
+            },
+            entries,
+            skipped_files,
+        },
+        changed,
+    ))
+}
+
+fn with_trajectory_index_file_lock<T>(
+    dir: &Path,
+    timeout: Duration,
+    retry: Duration,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let lock_path = dir.join(format!(".{TRAJECTORY_INDEX_FILE}.lock"));
+    let mut lock = crate::daemon::lock::open_lock(&lock_path).map_err(|error| {
+        format!(
+            "Failed to open trajectory index lock {:?}: {error}",
+            lock_path
+        )
+    })?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match crate::daemon::lock::try_lock(&mut lock) {
+            Ok(_guard) => return operation(),
+            Err(error)
+                if crate::daemon::lock::is_already_locked(&error) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(retry);
+            }
+            Err(error) if crate::daemon::lock::is_already_locked(&error) => {
+                return Err(format!(
+                    "Timed out waiting for trajectory index lock {:?}",
+                    lock_path
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Failed to acquire trajectory index lock {:?}: {error}",
+                    lock_path
+                ));
+            }
+        }
+    }
+}
+
+fn flush_trajectory_index_mutations_sync(
+    dir: &Path,
+    pending: Vec<PendingTrajectoryIndexMutation>,
+    lock_timeout: Duration,
+    lock_retry: Duration,
+) -> Result<TrajectoryIndex, String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|error| format!("Failed to create trajectory directory {:?}: {error}", dir))?;
+    with_trajectory_index_file_lock(dir, lock_timeout, lock_retry, || {
+        let mut index = load_trajectory_index_for_coordinator_sync(dir, None)?.index;
+        for pending in pending {
+            match pending.mutation {
+                TrajectoryIndexMutation::Reconcile(source_hint) => {
+                    index = reconcile_trajectory_index_sync(dir, index, source_hint)?.0;
+                }
+                mutation => apply_mutation_to_index(&mut index, &mutation)?,
+            }
+        }
+        write_trajectory_index_atomic_sync(dir, &index)?;
+        Ok(index)
+    })
+}
+
+fn write_trajectory_index_atomic_sync(dir: &Path, index: &TrajectoryIndex) -> Result<(), String> {
+    let path = trajectory_index_path(dir);
+    let tmp_path = dir.join(format!(".{}.tmp-{}", TRAJECTORY_INDEX_FILE, Uuid::new_v4()));
+    let content = serde_json::to_string_pretty(index)
+        .map_err(|error| format!("Failed to serialize trajectory index {:?}: {error}", path))?;
+    let result = (|| {
+        std::fs::write(&tmp_path, content).map_err(|error| {
+            format!(
+                "Failed to write temporary trajectory index {:?}: {error}",
+                tmp_path
+            )
+        })?;
+        #[cfg(windows)]
+        if path.exists() {
+            let backup_path = dir.join(format!(
+                ".{}.replace-{}",
+                TRAJECTORY_INDEX_FILE,
+                Uuid::new_v4()
+            ));
+            std::fs::rename(&path, &backup_path).map_err(|error| {
+                format!("Failed to move trajectory index aside {:?}: {error}", path)
+            })?;
+            if let Err(error) = std::fs::rename(&tmp_path, &path) {
+                let _ = std::fs::rename(&backup_path, &path);
+                return Err(format!(
+                    "Failed to replace trajectory index {:?}: {error}",
+                    path
+                ));
+            }
+            let _ = std::fs::remove_file(backup_path);
+            return Ok(());
+        }
+        std::fs::rename(&tmp_path, &path)
+            .map_err(|error| format!("Failed to rename trajectory index {:?}: {error}", path))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
 }
 
 fn unix_modified_ms(metadata: &std::fs::Metadata) -> Result<i64, String> {
@@ -548,6 +1083,18 @@ pub async fn upsert_trajectory_index_entry(
     write_trajectory_index_atomic_owned(dir, index).await
 }
 
+pub async fn upsert_trajectory_index_entry_with_rollout(
+    coordinator: &TrajectoryIndexCoordinator,
+    dir: &Path,
+    entry: TrajectoryIndexEntry,
+) -> Result<(), String> {
+    if trajectory_index_coordinator_rollout_enabled() {
+        coordinator.upsert(dir, entry).await
+    } else {
+        upsert_trajectory_index_entry(dir, entry).await
+    }
+}
+
 pub async fn upsert_trajectory_index_entry_from_value(
     dir: &Path,
     path: &Path,
@@ -636,6 +1183,18 @@ pub async fn remove_trajectory_index_entry(dir: &Path, chat_id: &str) -> Result<
     write_trajectory_index_atomic_owned(dir, index).await
 }
 
+pub async fn remove_trajectory_index_entries_with_rollout(
+    coordinator: &TrajectoryIndexCoordinator,
+    dir: &Path,
+    chat_ids: &HashSet<String>,
+) -> Result<(), String> {
+    if trajectory_index_coordinator_rollout_enabled() {
+        coordinator.remove(dir, chat_ids.clone()).await
+    } else {
+        remove_trajectory_index_entries(dir, chat_ids).await
+    }
+}
+
 fn dedupe_entries_by_id(entries: Vec<TrajectoryIndexEntry>) -> Vec<TrajectoryIndexEntry> {
     let mut position_by_id: HashMap<String, usize> = HashMap::new();
     let mut deduped: Vec<TrajectoryIndexEntry> = Vec::with_capacity(entries.len());
@@ -659,6 +1218,130 @@ struct DiskTrajectoryFile {
     file_name: String,
     file_len: u64,
     file_modified_unix_ms: i64,
+}
+
+fn scan_trajectory_dir_files_sync(dir: &Path) -> Result<Vec<DiskTrajectoryFile>, String> {
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(read_dir) => read_dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "Failed to read trajectory directory {:?}: {error}",
+                dir
+            ))
+        }
+    };
+    let mut scan_targets = vec![(dir.to_path_buf(), None)];
+    for entry in read_dir.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() && !file_type.is_symlink() && !name.starts_with('.') {
+            scan_targets.push((entry.path(), Some(name)));
+        }
+    }
+    let mut files = Vec::new();
+    for (scan_dir, prefix) in scan_targets {
+        let Ok(entries) = std::fs::read_dir(scan_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if file_name == TRAJECTORY_INDEX_FILE
+                || file_name.starts_with('.')
+                || !file_name.ends_with(".json")
+            {
+                continue;
+            }
+            let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                continue;
+            }
+            let Ok(file_modified_unix_ms) = unix_modified_ms(&metadata) else {
+                continue;
+            };
+            let file_name = prefix
+                .as_ref()
+                .map(|prefix| format!("{prefix}/{file_name}"))
+                .unwrap_or(file_name);
+            files.push(DiskTrajectoryFile {
+                file_name,
+                file_len: metadata.len(),
+                file_modified_unix_ms,
+            });
+        }
+    }
+    Ok(files)
+}
+
+fn read_and_index_single_trajectory_sync(
+    dir: &Path,
+    path: &Path,
+    source_hint: Option<TrajectorySourceIdentity>,
+) -> SingleTrajectoryIndexResult {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
+        _ => return SingleTrajectoryIndexResult::TransientFailure,
+    };
+    if metadata.len() == 0 {
+        return SingleTrajectoryIndexResult::TransientFailure;
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => return SingleTrajectoryIndexResult::TransientFailure,
+    };
+    let value = match serde_json::from_str::<serde_json::Value>(&content) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!("Failed to parse trajectory {:?}: {}", path, error);
+            return SingleTrajectoryIndexResult::Skipped;
+        }
+    };
+    if value
+        .get("link_type")
+        .and_then(|value| value.as_str())
+        .is_some_and(|link_type| link_type.starts_with("internal:"))
+    {
+        return SingleTrajectoryIndexResult::Skipped;
+    }
+    match entry_from_trajectory_value(dir, path, &value, source_hint) {
+        Ok(entry) => SingleTrajectoryIndexResult::Indexed(entry),
+        Err(error) => {
+            tracing::debug!("Skipping non-indexable trajectory {:?}: {}", path, error);
+            SingleTrajectoryIndexResult::Skipped
+        }
+    }
+}
+
+fn scan_trajectory_index_data_sync(
+    dir: &Path,
+    source_hint: Option<TrajectorySourceIdentity>,
+) -> Result<(Vec<TrajectoryIndexEntry>, Vec<TrajectoryIndexSkippedFile>), String> {
+    let disk_files = scan_trajectory_dir_files_sync(dir)?;
+    let mut entries = Vec::new();
+    let mut skipped_files = Vec::new();
+    for disk in disk_files {
+        let path = dir.join(&disk.file_name);
+        match read_and_index_single_trajectory_sync(dir, &path, source_hint.clone()) {
+            SingleTrajectoryIndexResult::Indexed(entry) => entries.push(entry),
+            SingleTrajectoryIndexResult::Skipped => {
+                skipped_files.push(TrajectoryIndexSkippedFile {
+                    file_name: disk.file_name,
+                    file_len: disk.file_len,
+                    file_modified_unix_ms: disk.file_modified_unix_ms,
+                })
+            }
+            SingleTrajectoryIndexResult::TransientFailure => {}
+        }
+    }
+    Ok((dedupe_entries_by_id(entries), skipped_files))
 }
 
 async fn scan_trajectory_dir_files(dir: &Path) -> Result<Vec<DiskTrajectoryFile>, String> {
@@ -1532,5 +2215,321 @@ mod tests {
         assert_eq!(meta.task_role.as_deref(), Some("planner"));
         assert_eq!(meta.card_id.as_deref(), Some("card-1"));
         assert!(matches!(entry.source, TrajectoryIndexSource::Task { .. }));
+    }
+
+    async fn entry_for_path(dir: &Path, path: &Path) -> TrajectoryIndexEntry {
+        let value = serde_json::from_str(&fs::read_to_string(path).await.unwrap()).unwrap();
+        entry_from_trajectory_value(dir, path, &value, None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn coordinator_coalesces_last_upsert_and_shutdown_flush() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        write_trajectory(&dir, "chat-1", "Renamed", "agent").await;
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+        coordinator.flush_all().await.unwrap();
+
+        let index = read_trajectory_index(&dir).await.unwrap().unwrap();
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(index.entries[0].title, "Renamed");
+    }
+
+    #[tokio::test]
+    async fn coordinator_orders_remove_then_upsert_and_upsert_then_remove() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let entry = entry_for_path(&dir, &path).await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+        let ids = HashSet::from(["chat-1".to_string()]);
+
+        coordinator.remove(&dir, ids.clone()).await.unwrap();
+        coordinator.upsert(&dir, entry.clone()).await.unwrap();
+        coordinator.flush_all().await.unwrap();
+        assert_eq!(
+            read_trajectory_index(&dir)
+                .await
+                .unwrap()
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+
+        coordinator.upsert(&dir, entry).await.unwrap();
+        coordinator.remove(&dir, ids).await.unwrap();
+        coordinator.flush_all().await.unwrap();
+        assert!(read_trajectory_index(&dir)
+            .await
+            .unwrap()
+            .unwrap()
+            .entries
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn coordinator_failed_flush_retains_pending_mutations_for_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+
+        let blocker = crate::daemon::lock::open_lock(&dir.join(".index.json.lock")).unwrap();
+        let mut blocker = blocker;
+        let _guard = crate::daemon::lock::try_lock(&mut blocker).unwrap();
+        let fast = TrajectoryIndexCoordinator::with_timing(
+            Duration::from_millis(25),
+            Duration::from_millis(5),
+        );
+        fast.upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+        assert!(fast.flush_all().await.is_err());
+        drop(_guard);
+        fast.flush_all().await.unwrap();
+
+        assert_eq!(
+            read_trajectory_index(&dir)
+                .await
+                .unwrap()
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinator_reconciles_external_files_and_reuses_clean_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path_1 = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path_1).await)
+            .await
+            .unwrap();
+        coordinator.flush_all().await.unwrap();
+        let first = coordinator.snapshot(&dir, None).await.unwrap();
+        let second = coordinator.snapshot(&dir, None).await.unwrap();
+        assert_eq!(first.updated_at, second.updated_at);
+
+        write_trajectory(&dir, "chat-2", "Two", "agent").await;
+        let reconciled = coordinator.reconcile(&dir, None).await.unwrap();
+        assert_eq!(reconciled.entries.len(), 2);
+        coordinator.flush_all().await.unwrap();
+        assert_eq!(
+            read_trajectory_index(&dir)
+                .await
+                .unwrap()
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinator_merges_two_process_owned_instances_without_lost_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path_1 = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let path_2 = write_trajectory(&dir, "chat-2", "Two", "agent").await;
+        let first = TrajectoryIndexCoordinator::new();
+        let second = TrajectoryIndexCoordinator::new();
+        first
+            .upsert(&dir, entry_for_path(&dir, &path_1).await)
+            .await
+            .unwrap();
+        second
+            .upsert(&dir, entry_for_path(&dir, &path_2).await)
+            .await
+            .unwrap();
+
+        let (first_result, second_result) = tokio::join!(first.flush_all(), second.flush_all());
+        first_result.unwrap();
+        second_result.unwrap();
+        let index = read_trajectory_index(&dir).await.unwrap().unwrap();
+        assert_eq!(index.entries.len(), 2);
+        assert!(index.entries.iter().any(|entry| entry.id == "chat-1"));
+        assert!(index.entries.iter().any(|entry| entry.id == "chat-2"));
+    }
+
+    #[tokio::test]
+    async fn coordinator_cross_process_child_writer() {
+        let Ok(dir) = std::env::var("REFACT_TRAJECTORY_INDEX_CHILD_DIR") else {
+            return;
+        };
+        let id = std::env::var("REFACT_TRAJECTORY_INDEX_CHILD_ID").unwrap();
+        let dir = PathBuf::from(dir);
+        let path = dir.join(format!("{id}.json"));
+        let coordinator = TrajectoryIndexCoordinator::new();
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+        fs::write(dir.join(format!(".ready-{id}")), "ready")
+            .await
+            .unwrap();
+        let release = dir.join(".release");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !release.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        coordinator.flush_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn coordinator_cross_process_concurrent_writers_lose_zero_durable_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        write_trajectory(&dir, "chat-1", "One", "agent").await;
+        write_trajectory(&dir, "chat-2", "Two", "agent").await;
+        let executable = std::env::current_exe().unwrap();
+        let child_dir = dir.to_string_lossy().into_owned();
+        let spawn_child = |id: &'static str| {
+            let executable = executable.clone();
+            let child_dir = child_dir.clone();
+            tokio::task::spawn_blocking(move || {
+                std::process::Command::new(executable)
+                    .args([
+                        "--exact",
+                        "chat::trajectory_index::tests::coordinator_cross_process_child_writer",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env("REFACT_TRAJECTORY_INDEX_CHILD_DIR", child_dir)
+                    .env("REFACT_TRAJECTORY_INDEX_CHILD_ID", id)
+                    .status()
+                    .unwrap()
+            })
+        };
+        let first = spawn_child("chat-1");
+        let second = spawn_child("chat-2");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !dir.join(".ready-chat-1").exists() || !dir.join(".ready-chat-2").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        fs::write(dir.join(".release"), "release").await.unwrap();
+        assert!(first.await.unwrap().success());
+        assert!(second.await.unwrap().success());
+        let index = read_trajectory_index(&dir).await.unwrap().unwrap();
+        assert_eq!(index.entries.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn coordinator_matches_legacy_upsert_result() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy_dir = temp.path().join("legacy");
+        let coordinator_dir = temp.path().join("coordinator");
+        let legacy_path = write_trajectory(&legacy_dir, "chat-1", "One", "agent").await;
+        let coordinator_path = write_trajectory(&coordinator_dir, "chat-1", "One", "agent").await;
+        upsert_trajectory_index_entry(&legacy_dir, entry_for_path(&legacy_dir, &legacy_path).await)
+            .await
+            .unwrap();
+        let coordinator = TrajectoryIndexCoordinator::new();
+        coordinator
+            .upsert(
+                &coordinator_dir,
+                entry_for_path(&coordinator_dir, &coordinator_path).await,
+            )
+            .await
+            .unwrap();
+        coordinator.flush_all().await.unwrap();
+
+        let legacy = read_trajectory_index(&legacy_dir).await.unwrap().unwrap();
+        let coordinated = read_trajectory_index(&coordinator_dir)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(legacy.entries.len(), coordinated.entries.len());
+        assert_eq!(legacy.entries[0].id, coordinated.entries[0].id);
+        assert_eq!(
+            legacy.entries[0].file_name,
+            coordinated.entries[0].file_name
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinator_rebuilds_corrupt_index_and_retains_skipped_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        write_trajectory(&dir, "chat-1", "One", "agent").await;
+        fs::write(
+            dir.join("internal.json"),
+            json!({
+                "id": "internal",
+                "title": "Internal",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:01Z",
+                "model": "test-model",
+                "mode": "agent",
+                "tool_use": "agent",
+                "messages": [],
+                "link_type": "internal:test"
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        fs::write(trajectory_index_path(&dir), "corrupt")
+            .await
+            .unwrap();
+        let coordinator = TrajectoryIndexCoordinator::new();
+        let snapshot = coordinator.snapshot(&dir, None).await.unwrap();
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.skipped_files.len(), 1);
+        coordinator.flush_all().await.unwrap();
+        let persisted = read_trajectory_index(&dir).await.unwrap().unwrap();
+        assert_eq!(persisted.entries.len(), 1);
+        assert_eq!(persisted.skipped_files.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn coordinator_flush_replaces_a_parseable_schema_v1_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+        coordinator.flush_all().await.unwrap();
+
+        let raw = fs::read_to_string(trajectory_index_path(&dir))
+            .await
+            .unwrap();
+        let parsed: TrajectoryIndex = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed.schema_version, TRAJECTORY_INDEX_SCHEMA_VERSION);
+        assert!(!dir
+            .read_dir()
+            .expect("directory exists")
+            .any(|entry| entry.is_ok_and(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains(".index.json.tmp"))));
     }
 }

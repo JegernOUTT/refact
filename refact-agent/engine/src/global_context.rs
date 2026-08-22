@@ -339,6 +339,8 @@ pub struct GlobalContext {
         tokio::sync::broadcast::Sender<crate::http::routers::v1::sidebar::NotificationEvent>,
     >,
     pub chat_sessions: crate::chat::SessionsMap,
+    pub trajectory_index_coordinator:
+        Arc<crate::chat::trajectory_index::TrajectoryIndexCoordinator>,
     pub voice_service: SharedVoiceService,
     pub project_registry_cache: Arc<StdRwLock<RegistryCacheManager>>,
     pub providers: Arc<ARwLock<ProviderRegistry>>,
@@ -396,6 +398,7 @@ impl GlobalContext {
             chat: ChatServices {
                 sessions: self.chat_sessions.clone(),
                 facade: Arc::new(EngineChatSessionFacade::new(gcx.clone())),
+                trajectory_index_coordinator: self.trajectory_index_coordinator.clone(),
                 trajectory_events_tx: self
                     .trajectory_events_tx
                     .clone()
@@ -827,6 +830,9 @@ pub async fn create_global_context(
         task_events_seq: Some(Arc::new(std::sync::atomic::AtomicU64::new(0))),
         notification_events_tx: Some(tokio::sync::broadcast::channel(256).0),
         chat_sessions: crate::chat::create_sessions_map(),
+        trajectory_index_coordinator: Arc::new(
+            crate::chat::trajectory_index::TrajectoryIndexCoordinator::new(),
+        ),
         voice_service: crate::voice::VoiceService::new(),
         project_registry_cache: Arc::new(StdRwLock::new(RegistryCacheManager::new())),
         providers: Arc::new(ARwLock::new(
@@ -1108,6 +1114,9 @@ pub mod tests {
             task_events_seq: Some(Arc::new(std::sync::atomic::AtomicU64::new(0))),
             notification_events_tx: Some(tokio::sync::broadcast::channel(256).0),
             chat_sessions: crate::chat::create_sessions_map(),
+            trajectory_index_coordinator: Arc::new(
+                crate::chat::trajectory_index::TrajectoryIndexCoordinator::new(),
+            ),
             voice_service: crate::voice::VoiceService::new(),
             project_registry_cache: Arc::new(StdRwLock::new(RegistryCacheManager::new())),
             providers: Arc::new(ARwLock::new(ProviderRegistry::default())),

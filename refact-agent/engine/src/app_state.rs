@@ -20,6 +20,7 @@ use crate::buddy::actor::BuddyService;
 use crate::buddy::events::BuddyEvent;
 use crate::buddy::user_activity::UserActivityRing;
 use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
+use crate::chat::trajectory_index::TrajectoryIndexCoordinator;
 use crate::chat::types::EnqueueCommandOutcome;
 use crate::chat::trajectories::{self, TrajectoryEvent};
 use crate::chat::{self, process_command_queue, SessionsMap};
@@ -85,6 +86,7 @@ pub struct WorkspaceServices {
 pub struct ChatServices {
     pub sessions: SessionsMap,
     pub facade: Arc<dyn ChatSessionFacade>,
+    pub trajectory_index_coordinator: Arc<TrajectoryIndexCoordinator>,
     pub trajectory_events_tx: tokio::sync::broadcast::Sender<TrajectoryEvent>,
     pub workspace_changed_tx: tokio::sync::broadcast::Sender<()>,
     pub task_events_tx: tokio::sync::broadcast::Sender<TaskEventEnvelope>,
