@@ -144,6 +144,9 @@ pub async fn inject_priority_messages_if_any(
         let mut session = session_arc.lock().await;
         let requests = drain_priority_user_messages(&mut session.command_queue);
         if !requests.is_empty() {
+            for request in &requests {
+                session.record_command_queue_wait(&request.client_request_id);
+            }
             session.emit_queue_update();
         }
         requests
@@ -802,15 +805,24 @@ fn handle_update_goal_command(
 }
 
 fn purge_goal_generated_commands(session: &mut ChatSession) -> usize {
-    let before = session.command_queue.len();
+    let mut purged = Vec::new();
     session.command_queue.retain(|request| {
-        !(matches!(request.command, ChatCommand::Regenerate {})
+        let remove = matches!(request.command, ChatCommand::Regenerate {})
             && (request.client_request_id.starts_with("goal-nudge-")
                 || request
                     .client_request_id
-                    .starts_with("goal-verifier-regenerate-")))
+                    .starts_with("goal-verifier-regenerate-"));
+        if remove {
+            purged.push(request.clone());
+        }
+        !remove
     });
-    before - session.command_queue.len()
+    for request in &purged {
+        session
+            .command_enqueued_at
+            .remove(&request.client_request_id);
+    }
+    purged.len()
 }
 
 fn handle_goal_control_command(
@@ -1273,6 +1285,9 @@ pub async fn process_command_queue(
                     let mut session = session_arc.lock().await;
                     let msgs = drain_non_priority_user_messages(&mut session.command_queue);
                     if !msgs.is_empty() {
+                        for message in &msgs {
+                            session.record_command_queue_wait(&message.client_request_id);
+                        }
                         session.emit_queue_update();
                     }
                     msgs
@@ -1692,6 +1707,7 @@ pub async fn process_command_queue(
             ChatCommand::Abort {} => {
                 let mut session = session_arc.lock().await;
                 session.abort_stream();
+                session.command_enqueued_at.clear();
                 let goal_stopped = session.stop_goal_on_manual_abort();
                 drop(session);
                 if goal_stopped {
@@ -2195,9 +2211,6 @@ async fn handle_tool_decisions(
                 .chain(&rejected_ids)
                 .cloned()
                 .collect::<std::collections::HashSet<_>>();
-            if !decided.is_empty() {
-                session.record_confirmation_wait(Some(decided.len() as u64));
-            }
             let updates = session
                 .messages
                 .iter()
@@ -2224,6 +2237,7 @@ async fn handle_tool_decisions(
                 .cloned()
                 .collect::<Vec<_>>();
             if remaining.is_empty() {
+                session.complete_confirmation_wait();
                 session.set_runtime_state(SessionState::Generating, None);
                 true
             } else {
@@ -2251,9 +2265,6 @@ async fn handle_tool_decisions(
 
         {
             let mut session = session_arc.lock().await;
-            if !decisions.is_empty() {
-                session.record_confirmation_wait(Some(decisions.len() as u64));
-            }
             if accepted_any {
                 session.cache_guard_force_next = true;
             }
@@ -2274,6 +2285,7 @@ async fn handle_tool_decisions(
             session.runtime.accepted_tool_ids.clear();
             session.runtime.auto_approved_tool_ids.clear();
             session.runtime.paused_message_index = None;
+            session.complete_confirmation_wait();
             if accepted_any {
                 session.set_runtime_state(SessionState::Generating, None);
             } else {
@@ -4068,6 +4080,16 @@ mod tests {
             priority: false,
             command: ChatCommand::Regenerate {},
         });
+        let now = std::time::Instant::now();
+        session
+            .command_enqueued_at
+            .insert("goal-nudge-1".to_string(), now);
+        session
+            .command_enqueued_at
+            .insert("goal-verifier-regenerate-1".to_string(), now);
+        session
+            .command_enqueued_at
+            .insert("user-regenerate".to_string(), now);
 
         handle_goal_control_command(&mut session, "stop".to_string()).unwrap();
 
@@ -4076,6 +4098,11 @@ mod tests {
             session.command_queue.front().unwrap().client_request_id,
             "user-regenerate"
         );
+        assert!(!session.command_enqueued_at.contains_key("goal-nudge-1"));
+        assert!(!session
+            .command_enqueued_at
+            .contains_key("goal-verifier-regenerate-1"));
+        assert!(session.command_enqueued_at.contains_key("user-regenerate"));
         assert_eq!(session.goal_status, Some(GoalStatus::Stopped));
         let stop_events = session
             .messages

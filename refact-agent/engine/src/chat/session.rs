@@ -973,6 +973,7 @@ impl ChatSession {
     }
 
     pub fn reset_compaction_runtime_state(&mut self) {
+        self.clear_runtime_timestamps();
         self.last_prompt_messages.clear();
         self.tier1_compact_attempts = 0;
         self.tier1_compaction_disabled = false;
@@ -1070,6 +1071,7 @@ impl ChatSession {
     }
 
     pub fn close_event_channel(&mut self) {
+        self.clear_runtime_timestamps();
         self.closed = true;
         self.closed_flag.store(true, Ordering::Relaxed);
         if let Some(h) = self.stop_hook_handle.take() {
@@ -1309,9 +1311,6 @@ impl ChatSession {
     }
 
     pub(crate) fn record_command_queue_wait(&mut self, client_request_id: &str) {
-        if !perf_diagnostics::is_enabled() {
-            return;
-        }
         self.record_command_queue_wait_at(client_request_id, Instant::now());
     }
 
@@ -1319,6 +1318,9 @@ impl ChatSession {
         let Some(enqueued_at) = self.command_enqueued_at.remove(client_request_id) else {
             return;
         };
+        if !perf_diagnostics::is_enabled() {
+            return;
+        }
         perf_diagnostics::record(
             PerfComponent::CommandQueueWait,
             Some(&self.chat_id),
@@ -1331,6 +1333,12 @@ impl ChatSession {
             None,
             Some(self.command_queue.len() as u64),
         );
+    }
+
+    pub(crate) fn clear_runtime_timestamps(&mut self) {
+        self.command_enqueued_at.clear();
+        self.stream_started_at = None;
+        self.confirmation_paused_at = None;
     }
 
     pub fn add_message(&mut self, mut message: ChatMessage) {
@@ -1820,13 +1828,19 @@ impl ChatSession {
     pub fn set_runtime_state(&mut self, state: SessionState, error: Option<String>) {
         let old_state = self.runtime.state;
         let old_error = self.runtime.error.clone();
+        let should_clear_terminal_stream =
+            is_terminal_runtime_state(state) && self.stream_started_at.is_some();
         let should_clear_terminal_compression = is_terminal_runtime_state(state)
             && (self.is_compressing
                 || self.runtime.is_compressing
                 || self.active_compression_attempt.is_some()
                 || is_active_compression_phase(self.compression_phase)
                 || is_active_compression_phase(self.runtime.compression_phase));
-        if old_state == state && old_error == error && !should_clear_terminal_compression {
+        if old_state == state
+            && old_error == error
+            && !should_clear_terminal_stream
+            && !should_clear_terminal_compression
+        {
             return;
         }
 
@@ -1841,6 +1855,9 @@ impl ChatSession {
         }
         if state == SessionState::Generating && old_state != SessionState::Generating {
             self.last_stream_delta_at = None;
+        }
+        if should_clear_terminal_stream {
+            self.stream_started_at = None;
         }
 
         self.runtime.state = state;
@@ -1867,6 +1884,7 @@ impl ChatSession {
         self.touch();
 
         if state != SessionState::Paused && (was_paused || had_pause_reasons) {
+            self.complete_confirmation_wait();
             self.runtime.pause_reasons.clear();
             self.runtime.auto_approved_tool_ids.clear();
             self.runtime.accepted_tool_ids.clear();
@@ -2011,11 +2029,11 @@ impl ChatSession {
             .iter()
             .position(|r| !r.priority)
             .unwrap_or(self.command_queue.len());
-        self.command_queue.insert(insert_pos, request);
         if perf_diagnostics::is_enabled() {
-            let request_id = self.command_queue[insert_pos].client_request_id.clone();
-            self.command_enqueued_at.insert(request_id, Instant::now());
+            self.command_enqueued_at
+                .insert(request.client_request_id.clone(), Instant::now());
         }
+        self.command_queue.insert(insert_pos, request);
         self.touch();
         self.emit_queue_update();
         self.queue_notify.notify_one();
@@ -2028,11 +2046,21 @@ impl ChatSession {
         auto_approved_ids: Vec<String>,
         message_index: Option<usize>,
     ) {
+        let continues_existing_pause = self.runtime.state == SessionState::Paused
+            && self.confirmation_paused_at.is_some()
+            && self.runtime.pause_reasons.iter().any(|existing| {
+                reasons
+                    .iter()
+                    .any(|incoming| incoming.tool_call_id == existing.tool_call_id)
+            });
+        if !continues_existing_pause {
+            self.confirmation_paused_at =
+                perf_diagnostics::is_enabled().then(|| (Instant::now(), reasons.len() as u64));
+        }
         self.runtime.pause_reasons = reasons.clone();
         self.runtime.auto_approved_tool_ids = auto_approved_ids;
         self.runtime.accepted_tool_ids.clear();
         self.runtime.paused_message_index = message_index;
-        self.confirmation_paused_at = perf_diagnostics::is_enabled().then(Instant::now);
         self.emit(ChatEvent::PauseRequired { reasons });
         self.set_runtime_state(SessionState::Paused, None);
     }
@@ -2308,6 +2336,7 @@ impl ChatSession {
         }
         self.draft_usage = None;
         self.stream_started_at = None;
+        self.confirmation_paused_at = None;
         self.set_runtime_state(SessionState::Idle, None);
         self.touch();
         self.queue_notify.notify_one();
@@ -2356,6 +2385,7 @@ impl ChatSession {
             });
         }
         self.draft_usage = None;
+        self.stream_started_at = None;
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<String>> {
@@ -2464,8 +2494,8 @@ impl ChatSession {
         });
         let after_len = self.runtime.pause_reasons.len();
 
-        if before_len > after_len {
-            self.record_confirmation_wait(Some((before_len - after_len) as u64));
+        if before_len > after_len && after_len == 0 {
+            self.complete_confirmation_wait();
         }
 
         for denied_id in &denied_ids {
@@ -2522,17 +2552,17 @@ impl ChatSession {
         }
     }
 
-    pub(crate) fn record_confirmation_wait(&mut self, item_count: Option<u64>) {
+    pub(crate) fn complete_confirmation_wait(&mut self) {
+        self.complete_confirmation_wait_at(Instant::now());
+    }
+
+    pub(crate) fn complete_confirmation_wait_at(&mut self, now: Instant) {
+        let Some((paused_at, item_count)) = self.confirmation_paused_at.take() else {
+            return;
+        };
         if !perf_diagnostics::is_enabled() {
             return;
         }
-        self.record_confirmation_wait_at(item_count, Instant::now());
-    }
-
-    pub(crate) fn record_confirmation_wait_at(&mut self, item_count: Option<u64>, now: Instant) {
-        let Some(paused_at) = self.confirmation_paused_at.take() else {
-            return;
-        };
         perf_diagnostics::record(
             PerfComponent::ToolConfirmationWait,
             Some(&self.chat_id),
@@ -2542,7 +2572,7 @@ impl ChatSession {
                 .try_into()
                 .unwrap_or(u64::MAX),
             None,
-            item_count,
+            Some(item_count),
             None,
         );
     }
@@ -2619,6 +2649,37 @@ mod tests {
     }
 
     #[test]
+    fn perf_diagnostics_ordinary_and_priority_queue_waits_are_cleaned_up() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, sink) = install_perf_recorder();
+        let mut session = make_session();
+
+        session.enqueue_accepted_command(CommandRequest {
+            client_request_id: "ordinary".to_string(),
+            priority: false,
+            command: ChatCommand::Regenerate {},
+        });
+        session.enqueue_accepted_priority_command(CommandRequest {
+            client_request_id: "priority".to_string(),
+            priority: true,
+            command: ChatCommand::Regenerate {},
+        });
+
+        assert_eq!(session.command_enqueued_at.len(), 2);
+        let now = Instant::now();
+        session.record_command_queue_wait_at("priority", now);
+        session.record_command_queue_wait_at("ordinary", now);
+
+        assert!(session.command_enqueued_at.is_empty());
+        let events: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter(|event| event.component == "command.queue_wait")
+            .collect();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
     fn perf_diagnostics_first_delta_records_once_and_skips_empty_deltas() {
         let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
         let (_guard, sink) = install_perf_recorder();
@@ -2672,16 +2733,14 @@ mod tests {
         let (_guard, sink) = install_perf_recorder();
         let mut session = make_session();
         let paused_at = Instant::now();
-        session.confirmation_paused_at = Some(paused_at);
+        session.confirmation_paused_at = Some((paused_at, 2));
 
-        session.record_confirmation_wait_at(
-            Some(2),
+        session.complete_confirmation_wait_at(
             paused_at
                 .checked_add(std::time::Duration::from_micros(55))
                 .unwrap(),
         );
-        session.record_confirmation_wait_at(
-            Some(2),
+        session.complete_confirmation_wait_at(
             paused_at
                 .checked_add(std::time::Duration::from_micros(110))
                 .unwrap(),
@@ -2692,6 +2751,128 @@ mod tests {
         assert_eq!(events[0].component, "tool.confirmation_wait");
         assert_eq!(events[0].elapsed_us, 55);
         assert_eq!(events[0].item_count, Some(2));
+    }
+
+    #[test]
+    fn perf_diagnostics_partial_tool_decisions_preserve_pause_until_final_resolution() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, sink) = install_perf_recorder();
+        let mut session = make_session();
+        let paused_at = Instant::now();
+        session.runtime.pause_reasons = vec![make_pause_reason("tc1"), make_pause_reason("tc2")];
+        session.runtime.state = SessionState::Paused;
+        session.confirmation_paused_at = Some((paused_at, 2));
+
+        session.process_tool_decisions(&[ToolDecisionItem {
+            tool_call_id: "tc1".to_string(),
+            accepted: true,
+        }]);
+
+        assert_eq!(session.confirmation_paused_at, Some((paused_at, 2)));
+        assert!(sink
+            .events()
+            .iter()
+            .all(|event| event.component != "tool.confirmation_wait"));
+
+        session.process_tool_decisions(&[ToolDecisionItem {
+            tool_call_id: "tc2".to_string(),
+            accepted: false,
+        }]);
+
+        let events: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter(|event| event.component == "tool.confirmation_wait")
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].component, "tool.confirmation_wait");
+        assert_eq!(events[0].item_count, Some(2));
+        assert!(session.confirmation_paused_at.is_none());
+    }
+
+    #[test]
+    fn abort_stream_clears_stream_and_confirmation_timestamps() {
+        let mut session = make_session();
+        let now = Instant::now();
+        session.stream_started_at = Some(now);
+        session.confirmation_paused_at = Some((now, 1));
+        session.runtime.pause_reasons = vec![make_pause_reason("tc1")];
+        session.runtime.state = SessionState::Paused;
+
+        session.abort_stream();
+
+        assert!(session.stream_started_at.is_none());
+        assert!(session.confirmation_paused_at.is_none());
+        assert!(session.runtime.pause_reasons.is_empty());
+    }
+
+    #[test]
+    fn unrelated_pause_starts_a_new_confirmation_episode() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, _) = install_perf_recorder();
+        let mut session = make_session();
+        let paused_at = Instant::now();
+        session.runtime.state = SessionState::Paused;
+        session.runtime.pause_reasons = vec![make_pause_reason("tc1")];
+        session.confirmation_paused_at = Some((paused_at, 1));
+
+        session.set_paused_with_reasons_and_auto_approved(
+            vec![make_pause_reason("tc2")],
+            Vec::new(),
+            None,
+        );
+
+        assert_ne!(session.confirmation_paused_at, Some((paused_at, 1)));
+        assert_eq!(
+            session.confirmation_paused_at.map(|(_, count)| count),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn close_event_channel_clears_runtime_timestamps() {
+        let mut session = make_session();
+        let now = Instant::now();
+
+        session
+            .command_enqueued_at
+            .insert("queued".to_string(), now);
+        session.stream_started_at = Some(now);
+        session.confirmation_paused_at = Some((now, 1));
+        session.close_event_channel();
+
+        assert!(session.command_enqueued_at.is_empty());
+        assert!(session.stream_started_at.is_none());
+        assert!(session.confirmation_paused_at.is_none());
+    }
+
+    #[test]
+    fn no_delta_abort_clears_stream_timestamp() {
+        let mut session = make_session();
+        session.start_stream();
+        assert!(session.stream_started_at.is_some());
+
+        session.abort_stream();
+
+        assert!(session.stream_started_at.is_none());
+    }
+
+    #[test]
+    fn terminal_stream_paths_clear_stream_timestamp() {
+        let mut finished = make_session();
+        finished.start_stream();
+        finished.finish_stream(None);
+        assert!(finished.stream_started_at.is_none());
+
+        let mut errored = make_session();
+        errored.start_stream();
+        errored.finish_stream_with_error("failed".to_string());
+        assert!(errored.stream_started_at.is_none());
+
+        let mut reset = make_session();
+        reset.start_stream();
+        reset.reset_compaction_runtime_state();
+        assert!(reset.stream_started_at.is_none());
     }
 
     #[test]

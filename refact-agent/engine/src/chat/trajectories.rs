@@ -6313,7 +6313,7 @@ mod tests {
             .command_enqueued_at
             .insert("request-1".to_string(), now);
         session.stream_started_at = Some(now);
-        session.confirmation_paused_at = Some(now);
+        session.confirmation_paused_at = Some((now, 1));
 
         let serialized = serde_json::to_string(&trajectory_snapshot_from_session(&session))
             .expect("trajectory snapshot serializes");

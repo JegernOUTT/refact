@@ -296,6 +296,7 @@ pub async fn handle_v1_chat_command(
 
     if matches!(request.command, ChatCommand::Abort {}) {
         session.abort_stream();
+        session.command_enqueued_at.clear();
         session.clear_pending_tool_calls_for_interruption();
         session.stop_goal_on_manual_abort();
         let should_save_trajectory = session.trajectory_dirty;
@@ -778,5 +779,43 @@ mod tests {
             trajectory["messages"][1]["tool_calls"],
             serde_json::Value::Null
         );
+    }
+
+    #[tokio::test]
+    async fn cancel_queued_command_clears_queue_wait_timestamp() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+        let chat_id = "cancel-queued";
+        let session_arc = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
+            chat_id.to_string(),
+        )));
+        {
+            let mut session = session_arc.lock().await;
+            session.command_queue.push_back(CommandRequest {
+                client_request_id: "queued-request".to_string(),
+                priority: false,
+                command: ChatCommand::Regenerate {},
+            });
+            session
+                .command_enqueued_at
+                .insert("queued-request".to_string(), Instant::now());
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        let response = handle_v1_chat_cancel_queued(
+            State(app),
+            Path((chat_id.to_string(), "queued-request".to_string())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let session = session_arc.lock().await;
+        assert!(session.command_queue.is_empty());
+        assert!(session.command_enqueued_at.is_empty());
     }
 }
