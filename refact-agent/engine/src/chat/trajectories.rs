@@ -3225,16 +3225,6 @@ pub async fn try_save_trajectory_with_intent(
     if !intent.persists() {
         return Ok(true);
     }
-    let save_mutex = {
-        let session = session_arc.lock().await;
-        if !session.trajectory_dirty {
-            return Ok(true);
-        }
-        session.trajectory_save_mutex.clone()
-    };
-
-    let _save_guard = save_mutex.lock().await;
-
     let snapshot = {
         let session = session_arc.lock().await;
         if !session.trajectory_dirty {
@@ -3243,16 +3233,52 @@ pub async fn try_save_trajectory_with_intent(
         trajectory_snapshot_from_session(&session)
     };
 
+    commit_trajectory_snapshot_for_session(app.gcx.clone(), session_arc.clone(), snapshot, intent)
+        .await?;
+    let session = session_arc.lock().await;
+    Ok(!session.trajectory_dirty)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionTrajectoryCommitOutcome {
+    Committed,
+    SkippedStale,
+    SkippedEphemeral,
+}
+
+async fn commit_trajectory_snapshot_for_session(
+    gcx: Arc<GlobalContext>,
+    session_arc: Arc<AMutex<ChatSession>>,
+    snapshot: TrajectorySnapshot,
+    intent: TrajectoryCommitIntent,
+) -> Result<SessionTrajectoryCommitOutcome, String> {
+    if !intent.persists() {
+        return Ok(SessionTrajectoryCommitOutcome::SkippedEphemeral);
+    }
     let saved_version = snapshot.version;
     let chat_id = snapshot.chat_id.clone();
+    let save_mutex = {
+        let session = session_arc.lock().await;
+        session.trajectory_save_mutex.clone()
+    };
+    let _save_guard = save_mutex.lock().await;
+    {
+        let session = session_arc.lock().await;
+        if !session.trajectory_commit_can_write(saved_version) {
+            return Ok(SessionTrajectoryCommitOutcome::SkippedStale);
+        }
+    }
 
-    save_trajectory_snapshot(app.gcx.clone(), snapshot)
+    save_trajectory_snapshot(gcx, snapshot)
         .await
-        .map_err(|e| format!("Failed to save trajectory for {}: {}", chat_id, e))?;
+        .map_err(|error| format!("Failed to save trajectory for {}: {}", chat_id, error))?;
 
     let mut session = session_arc.lock().await;
-    session.complete_trajectory_commit(saved_version);
-    Ok(!session.trajectory_dirty)
+    if session.complete_trajectory_commit(saved_version) {
+        Ok(SessionTrajectoryCommitOutcome::Committed)
+    } else {
+        Ok(SessionTrajectoryCommitOutcome::SkippedStale)
+    }
 }
 
 pub fn maybe_save_trajectory_background(app: AppState, session_arc: Arc<AMutex<ChatSession>>) {
@@ -3274,7 +3300,7 @@ pub fn maybe_save_trajectory_background_with_intent(
     let gcx = app.gcx.clone();
     tokio::spawn(async move {
         loop {
-            let save_mutex = {
+            {
                 let mut session = session_arc.lock().await;
                 if !session.trajectory_dirty {
                     session.trajectory_save_in_flight = false;
@@ -3287,10 +3313,7 @@ pub fn maybe_save_trajectory_background_with_intent(
                 }
                 session.trajectory_save_in_flight = true;
                 session.trajectory_save_queued = false;
-                session.trajectory_save_mutex.clone()
-            };
-
-            let _save_guard = save_mutex.lock().await;
+            }
 
             let snapshot = {
                 let mut session = session_arc.lock().await;
@@ -3308,17 +3331,17 @@ pub fn maybe_save_trajectory_background_with_intent(
                 trajectory_snapshot_from_session(&session)
             };
 
-            let saved_version = snapshot.version;
-            let chat_id = snapshot.chat_id.clone();
-            let result = save_trajectory_snapshot(gcx.clone(), snapshot)
-                .await
-                .map_err(|e| format!("Failed to save trajectory for {}: {}", chat_id, e));
+            let result = commit_trajectory_snapshot_for_session(
+                gcx.clone(),
+                session_arc.clone(),
+                snapshot,
+                intent,
+            )
+            .await;
 
             let mut session = session_arc.lock().await;
             match result {
-                Ok(()) => {
-                    session.complete_trajectory_commit(saved_version);
-                }
+                Ok(_) => {}
                 Err(e) => {
                     warn!("{}", e);
                     session.trajectory_dirty = true;
@@ -3381,6 +3404,14 @@ fn trajectory_commit_contract() -> [(&'static str, TrajectoryCommitIntent); 7] {
         ),
         ("stream delta", TrajectoryCommitIntent::Ephemeral),
     ]
+}
+
+#[cfg(test)]
+pub(crate) fn trajectory_commit_contract_for_test(boundary: &str) -> TrajectoryCommitIntent {
+    trajectory_commit_contract()
+        .into_iter()
+        .find_map(|(name, intent)| (name == boundary).then_some(intent))
+        .expect("known trajectory commit boundary")
 }
 
 pub(crate) async fn persist_loaded_trajectory_repair_raw(
@@ -6554,6 +6585,61 @@ mod tests {
         assert!(chat_a.trajectory_dirty);
         assert_eq!(chat_b.trajectory_committed_version, 2);
         assert!(!chat_b.trajectory_dirty);
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_commit_rejects_a_stale_snapshot_before_file_write() {
+        let _lock = serial_test_guard();
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "trajectory-commit-file-barrier";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+
+        let stale = {
+            let mut session = session_arc.lock().await;
+            session.add_message(ChatMessage::new("user".to_string(), "older".to_string()));
+            trajectory_snapshot_from_session(&session)
+        };
+        {
+            let mut session = session_arc.lock().await;
+            session.add_message(ChatMessage::new("user".to_string(), "newer".to_string()));
+        }
+        let current = {
+            let session = session_arc.lock().await;
+            trajectory_snapshot_from_session(&session)
+        };
+
+        assert_eq!(
+            commit_trajectory_snapshot_for_session(
+                gcx.clone(),
+                session_arc.clone(),
+                current,
+                TrajectoryCommitIntent::Required,
+            )
+            .await
+            .unwrap(),
+            SessionTrajectoryCommitOutcome::Committed
+        );
+        assert_eq!(
+            commit_trajectory_snapshot_for_session(
+                gcx.clone(),
+                session_arc.clone(),
+                stale,
+                TrajectoryCommitIntent::Required,
+            )
+            .await
+            .unwrap(),
+            SessionTrajectoryCommitOutcome::SkippedStale
+        );
+
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        let content = loaded
+            .messages
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .collect::<Vec<_>>();
+        assert_eq!(content, vec!["older", "newer"]);
     }
 
     fn assert_same_path(left: &Path, right: &Path) {

@@ -642,6 +642,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn close_and_cleanup_retain_required_commit_boundaries() {
+        let mut session = make_session();
+        session.last_activity =
+            Instant::now() - session_idle_timeout() - std::time::Duration::from_secs(1);
+
+        assert_eq!(
+            super::super::trajectories::trajectory_commit_contract_for_test("close"),
+            TrajectoryCommitIntent::Required
+        );
+        assert_eq!(
+            super::super::trajectories::trajectory_commit_contract_for_test("graceful shutdown"),
+            TrajectoryCommitIntent::Required
+        );
+        assert!(close_idle_session_for_cleanup(&mut session));
+        assert!(session.closed);
+    }
+
+    #[tokio::test]
     async fn cleanup_save_failure_keeps_session_mapped_and_open() {
         let workspace = tempfile::tempdir().unwrap();
         let (app, _config_dir) = test_app_with_workspace(workspace.path()).await;
