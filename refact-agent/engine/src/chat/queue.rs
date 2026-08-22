@@ -805,7 +805,7 @@ fn handle_update_goal_command(
 }
 
 fn purge_goal_generated_commands(session: &mut ChatSession) -> usize {
-    let mut purged = Vec::new();
+    let mut purged_ids = Vec::new();
     session.command_queue.retain(|request| {
         let remove = matches!(request.command, ChatCommand::Regenerate {})
             && (request.client_request_id.starts_with("goal-nudge-")
@@ -813,16 +813,14 @@ fn purge_goal_generated_commands(session: &mut ChatSession) -> usize {
                     .client_request_id
                     .starts_with("goal-verifier-regenerate-"));
         if remove {
-            purged.push(request.clone());
+            purged_ids.push(request.client_request_id.clone());
         }
         !remove
     });
-    for request in &purged {
-        session
-            .command_enqueued_at
-            .remove(&request.client_request_id);
+    for request_id in &purged_ids {
+        session.clear_queue_timestamp(request_id);
     }
-    purged.len()
+    purged_ids.len()
 }
 
 fn handle_goal_control_command(
@@ -1707,7 +1705,6 @@ pub async fn process_command_queue(
             ChatCommand::Abort {} => {
                 let mut session = session_arc.lock().await;
                 session.abort_stream();
-                session.command_enqueued_at.clear();
                 let goal_stopped = session.stop_goal_on_manual_abort();
                 drop(session);
                 if goal_stopped {

@@ -174,7 +174,7 @@ fn get_trajectory_index_locks() -> &'static AMutex<HashMap<String, Arc<AMutex<()
 }
 
 async fn get_trajectory_index_lock(dir: &Path) -> Arc<AMutex<()>> {
-    let key = trajectory_index_path(dir).to_string_lossy().to_string();
+    let key = dir.to_string_lossy().to_string();
     let mut locks = get_trajectory_index_locks().lock().await;
     locks
         .entry(key)
@@ -343,6 +343,9 @@ pub fn entry_from_trajectory_value(
 }
 
 pub async fn read_trajectory_index(dir: &Path) -> Result<Option<TrajectoryIndex>, String> {
+    if !perf_diagnostics::is_enabled() {
+        return read_trajectory_index_inner(dir).await;
+    }
     let path = trajectory_index_path(dir);
     let span = perf_diagnostics::span(PerfComponent::TrajectoryIndexRead, None, Some(&path));
     let result = read_trajectory_index_inner(dir).await;
@@ -398,6 +401,9 @@ async fn write_trajectory_index_atomic_owned(
     dir: &Path,
     index: TrajectoryIndex,
 ) -> Result<(), String> {
+    if !perf_diagnostics::is_enabled() {
+        return write_trajectory_index_atomic_owned_inner(dir, index).await;
+    }
     let path = trajectory_index_path(dir);
     let entry_count = index.entries.len() as u64;
     let span = perf_diagnostics::span(PerfComponent::TrajectoryIndexWrite, None, Some(&path));
@@ -507,14 +513,20 @@ pub async fn upsert_trajectory_index_entry(
     dir: &Path,
     entry: TrajectoryIndexEntry,
 ) -> Result<(), String> {
+    let diagnostics_enabled = perf_diagnostics::is_enabled();
+    let lock_span = diagnostics_enabled.then(|| {
+        let index_path = trajectory_index_path(dir);
+        perf_diagnostics::span(
+            PerfComponent::TrajectoryIndexLockWait,
+            Some(&entry.id),
+            Some(&index_path),
+        )
+    });
     let lock = get_trajectory_index_lock(dir).await;
-    let lock_span = perf_diagnostics::span(
-        PerfComponent::TrajectoryIndexLockWait,
-        Some(&entry.id),
-        Some(&trajectory_index_path(dir)),
-    );
     let _guard = lock.lock().await;
-    lock_span.finish(PerfOutcome::Success, None, None, None, None);
+    if let Some(lock_span) = lock_span {
+        lock_span.finish(PerfOutcome::Success, None, None, None, None);
+    }
     let mut index = match read_trajectory_index(dir).await {
         Ok(Some(index)) => index,
         Ok(None) | Err(_) => {
@@ -569,14 +581,20 @@ pub async fn remove_trajectory_index_entries(
     if chat_ids.is_empty() {
         return Ok(());
     }
+    let diagnostics_enabled = perf_diagnostics::is_enabled();
+    let lock_span = diagnostics_enabled.then(|| {
+        let index_path = trajectory_index_path(dir);
+        perf_diagnostics::span(
+            PerfComponent::TrajectoryIndexLockWait,
+            None,
+            Some(&index_path),
+        )
+    });
     let lock = get_trajectory_index_lock(dir).await;
-    let lock_span = perf_diagnostics::span(
-        PerfComponent::TrajectoryIndexLockWait,
-        None,
-        Some(&trajectory_index_path(dir)),
-    );
     let _guard = lock.lock().await;
-    lock_span.finish(PerfOutcome::Success, None, None, None, None);
+    if let Some(lock_span) = lock_span {
+        lock_span.finish(PerfOutcome::Success, None, None, None, None);
+    }
     let mut index = match read_trajectory_index(dir).await? {
         Some(index) => index,
         None => return Ok(()),
@@ -591,14 +609,20 @@ pub async fn remove_trajectory_index_entries(
 }
 
 pub async fn remove_trajectory_index_entry(dir: &Path, chat_id: &str) -> Result<(), String> {
+    let diagnostics_enabled = perf_diagnostics::is_enabled();
+    let lock_span = diagnostics_enabled.then(|| {
+        let index_path = trajectory_index_path(dir);
+        perf_diagnostics::span(
+            PerfComponent::TrajectoryIndexLockWait,
+            Some(chat_id),
+            Some(&index_path),
+        )
+    });
     let lock = get_trajectory_index_lock(dir).await;
-    let lock_span = perf_diagnostics::span(
-        PerfComponent::TrajectoryIndexLockWait,
-        Some(chat_id),
-        Some(&trajectory_index_path(dir)),
-    );
     let _guard = lock.lock().await;
-    lock_span.finish(PerfOutcome::Success, None, None, None, None);
+    if let Some(lock_span) = lock_span {
+        lock_span.finish(PerfOutcome::Success, None, None, None, None);
+    }
     let mut index = match read_trajectory_index(dir).await? {
         Some(index) => index,
         None => return Ok(()),
@@ -817,10 +841,14 @@ pub async fn rebuild_trajectory_index_from_disk(
     dir: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<Vec<TrajectoryIndexEntry>, String> {
+    if !perf_diagnostics::is_enabled() {
+        return rebuild_trajectory_index_from_disk_inner(dir, source_hint).await;
+    }
+    let index_path = trajectory_index_path(dir);
     let span = perf_diagnostics::span(
         PerfComponent::TrajectoryIndexRebuild,
         None,
-        Some(&trajectory_index_path(dir)),
+        Some(&index_path),
     );
     let result = rebuild_trajectory_index_from_disk_inner(dir, source_hint).await;
     span.finish(
@@ -841,14 +869,20 @@ async fn rebuild_trajectory_index_from_disk_inner(
     dir: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<Vec<TrajectoryIndexEntry>, String> {
+    let diagnostics_enabled = perf_diagnostics::is_enabled();
+    let lock_span = diagnostics_enabled.then(|| {
+        let index_path = trajectory_index_path(dir);
+        perf_diagnostics::span(
+            PerfComponent::TrajectoryIndexLockWait,
+            None,
+            Some(&index_path),
+        )
+    });
     let lock = get_trajectory_index_lock(dir).await;
-    let lock_span = perf_diagnostics::span(
-        PerfComponent::TrajectoryIndexLockWait,
-        None,
-        Some(&trajectory_index_path(dir)),
-    );
     let _guard = lock.lock().await;
-    lock_span.finish(PerfOutcome::Success, None, None, None, None);
+    if let Some(lock_span) = lock_span {
+        lock_span.finish(PerfOutcome::Success, None, None, None, None);
+    }
     let (entries, skipped_files) = scan_trajectory_index_data(dir, source_hint).await?;
     let index = TrajectoryIndex {
         schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
@@ -864,14 +898,20 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
     dir: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<Vec<TrajectoryIndexEntry>, String> {
+    let diagnostics_enabled = perf_diagnostics::is_enabled();
+    let lock_span = diagnostics_enabled.then(|| {
+        let index_path = trajectory_index_path(dir);
+        perf_diagnostics::span(
+            PerfComponent::TrajectoryIndexLockWait,
+            None,
+            Some(&index_path),
+        )
+    });
     let lock = get_trajectory_index_lock(dir).await;
-    let lock_span = perf_diagnostics::span(
-        PerfComponent::TrajectoryIndexLockWait,
-        None,
-        Some(&trajectory_index_path(dir)),
-    );
     let _guard = lock.lock().await;
-    lock_span.finish(PerfOutcome::Success, None, None, None, None);
+    if let Some(lock_span) = lock_span {
+        lock_span.finish(PerfOutcome::Success, None, None, None, None);
+    }
     let disk_files = scan_trajectory_dir_files(dir).await?;
 
     let (existing_entries, existing_skipped, index_unreadable) =
@@ -1105,6 +1145,7 @@ mod tests {
     #[serial_test::serial]
     #[tokio::test]
     async fn performance_diagnostics_cover_index_success_and_failure_boundaries() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
         let (_guard, sink) = install_perf_recorder();
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("trajectories");

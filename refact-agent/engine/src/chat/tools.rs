@@ -625,6 +625,7 @@ mod tests {
         registry: DeterministicToolRegistry,
         tool_calls: Vec<ChatToolCall>,
     ) -> (ToolStepOutcome, Arc<MemoryPerfSink>) {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
         let (_guard, sink) = install_perf_recorder();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let base_app = AppState::from_gcx(gcx).await;
@@ -995,7 +996,9 @@ mod tests {
     #[serial]
     #[tokio::test]
     async fn test_resolve_tool_call_aliases_handles_mixed_cc_batch_per_call() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
         let (_guard, sink) = install_perf_recorder();
+
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx).await;
         let calls = vec![
@@ -1202,6 +1205,8 @@ mod tests {
     #[serial]
     #[tokio::test]
     async fn invalid_escalation_argument_is_still_denied() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+
         let (_guard, sink) = install_perf_recorder();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx).await;
@@ -1869,12 +1874,10 @@ pub async fn process_tool_calls_once(
 
     let (session_id, project_dir) = {
         let session = session_arc.lock().await;
-        let id = session.chat_id.clone();
+        let session_id = session.chat_id.clone();
         drop(session);
-        let pd = get_project_dir_string(app.clone()).await;
-        (id, pd)
+        (session_id, get_project_dir_string(app.clone()).await)
     };
-
     let mut pre_hook_blocked_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     let pre_hook_item_count = tools_to_execute.len() as u64;
@@ -2488,12 +2491,9 @@ async fn execute_single_tool(
 
     info!("Executing tool: {}({:?})", tool_call.function.name, args);
 
-    let (session_id, project_dir) = {
+    let session_id = {
         let cgcx = ccx.lock().await;
-        let sid = cgcx.chat_id.clone();
-        drop(cgcx);
-        let pd = get_project_dir_string(app.clone()).await;
-        (sid, pd)
+        cgcx.chat_id.clone()
     };
 
     if let Some(session_arc) = {
@@ -2606,6 +2606,7 @@ async fn execute_single_tool(
         .collect::<Vec<_>>()
         .join("\n");
 
+    let project_dir = get_project_dir_string(app.clone()).await;
     let args_value: Option<serde_json::Value> = tool_call
         .function
         .parse_args()

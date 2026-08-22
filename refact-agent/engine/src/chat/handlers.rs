@@ -296,7 +296,6 @@ pub async fn handle_v1_chat_command(
 
     if matches!(request.command, ChatCommand::Abort {}) {
         session.abort_stream();
-        session.command_enqueued_at.clear();
         session.clear_pending_tool_calls_for_interruption();
         session.stop_goal_on_manual_abort();
         let should_save_trajectory = session.trajectory_dirty;

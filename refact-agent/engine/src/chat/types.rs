@@ -294,7 +294,7 @@ pub struct ChatSession {
     pub last_stream_delta_at: Option<Instant>,
     pub command_enqueued_at: HashMap<String, Instant>,
     pub stream_started_at: Option<Instant>,
-    pub confirmation_paused_at: Option<(Instant, u64)>,
+    pub confirmation_paused_at: Option<(Instant, HashSet<String>)>,
     pub last_tool_started_at: Option<Instant>,
     pub last_tool_progress_at: Option<Instant>,
     pub trajectory_dirty: bool,

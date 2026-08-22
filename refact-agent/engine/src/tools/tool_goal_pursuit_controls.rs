@@ -35,15 +35,23 @@ fn tool_message(tool_call_id: &str, content: String) -> Result<(bool, Vec<Contex
 }
 
 fn purge_goal_generated_regenerates(session: &mut ChatSession) {
+    let mut purged_ids = Vec::new();
     session.command_queue.retain(|request| {
-        !(matches!(
+        let remove = matches!(
             request.command,
             crate::chat::types::ChatCommand::Regenerate {}
         ) && (request.client_request_id.starts_with("goal-nudge-")
             || request
                 .client_request_id
-                .starts_with("goal-verifier-regenerate-")))
+                .starts_with("goal-verifier-regenerate-"));
+        if remove {
+            purged_ids.push(request.client_request_id.clone());
+        }
+        !remove
     });
+    for request_id in purged_ids {
+        session.clear_queue_timestamp(&request_id);
+    }
 }
 
 fn require_pursuable_goal(session: &ChatSession) -> Result<(), String> {
@@ -302,9 +310,19 @@ mod tests {
                 command: crate::chat::types::ChatCommand::Regenerate {},
             });
 
+        let now = std::time::Instant::now();
+        session
+            .command_enqueued_at
+            .insert("goal-nudge-x".to_string(), now);
+        session
+            .command_enqueued_at
+            .insert("user-x".to_string(), now);
+
         purge_goal_generated_regenerates(&mut session);
 
         assert_eq!(session.command_queue.len(), 1);
+        assert!(!session.command_enqueued_at.contains_key("goal-nudge-x"));
+        assert!(session.command_enqueued_at.contains_key("user-x"));
         assert_eq!(
             session.command_queue.front().unwrap().client_request_id,
             "user-x"

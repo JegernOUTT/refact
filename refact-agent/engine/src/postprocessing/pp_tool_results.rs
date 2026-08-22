@@ -35,10 +35,14 @@ pub async fn postprocess_tool_results(
         truncation_exempt_tool_call_ids,
     )
     .await;
-    if let Err(error) = crate::privacy::records::attach_declared_output_files(&gcx, &mut messages) {
-        tracing::error!("failed to attach file privacy records: {error}");
-    }
-    span.finish_tool(PerfOutcome::Success, 1, item_count, None);
+    let outcome = match crate::privacy::records::attach_declared_output_files(&gcx, &mut messages) {
+        Ok(()) => PerfOutcome::Success,
+        Err(error) => {
+            tracing::error!("failed to attach file privacy records: {error}");
+            PerfOutcome::Failure
+        }
+    };
+    span.finish_tool(outcome, 1, item_count, None);
     messages
 }
 
