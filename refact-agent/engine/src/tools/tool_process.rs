@@ -692,11 +692,7 @@ impl Tool for ToolProcessWait {
             (exec_registry.wait(&process_id).await?, false)
         };
         let read = exec_registry.read(&process_id, 0, None).await;
-        let title = if timed_out {
-            "Process wait timed out"
-        } else {
-            "Process wait completed"
-        };
+        let (title, timed_out) = process_wait_outcome(&snapshot.status, timed_out);
         let mut content = format_process_snapshot(title, &snapshot);
         content.push_str(&format!(
             "\nnext_seq: {}\nlatest_seq: {}\n",
@@ -707,10 +703,14 @@ impl Tool for ToolProcessWait {
             ProcessStreamSelection::All,
             &OutputFilter::no_limits(),
         ));
+        let mut extra = exec_extra(&snapshot, Some(&read), None, None);
+        if let Some(exec) = extra.get_mut("exec").and_then(Value::as_object_mut) {
+            exec.insert("wait_timed_out".to_string(), Value::Bool(timed_out));
+        }
         let mut result_message = tool_message(
             tool_call_id,
             content,
-            Some(exec_extra(&snapshot, Some(&read), None, None)),
+            Some(extra),
             tool_failed_for_status(&snapshot.status),
         );
         if let Some(observation) = process_observation_status(
@@ -759,6 +759,14 @@ impl Tool for ToolProcessWait {
 
     fn has_config_path(&self) -> Option<String> {
         Some(self.config_path.clone())
+    }
+}
+
+fn process_wait_outcome(status: &ExecStatus, caller_timed_out: bool) -> (&'static str, bool) {
+    if caller_timed_out && !status.is_terminal() {
+        ("Process still running", true)
+    } else {
+        ("Process wait completed", false)
     }
 }
 
@@ -1994,6 +2002,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn process_wait_timeout_uses_refreshed_terminal_status() {
+        assert_eq!(
+            process_wait_outcome(&ExecStatus::Running, true),
+            ("Process still running", true)
+        );
+        assert_eq!(
+            process_wait_outcome(&ExecStatus::Exited { exit_code: Some(0) }, true),
+            ("Process wait completed", false)
+        );
+        assert_eq!(
+            process_wait_outcome(&ExecStatus::Killed, true),
+            ("Process wait completed", false)
+        );
+    }
+
     #[tokio::test]
     async fn tool_processes_are_registered_in_system_group() {
         let names = crate::tools::tools_list::builtin_system_tools(String::new())
@@ -2804,8 +2828,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(text(&timed_out).contains("Process wait timed out"));
+        assert!(text(&timed_out).contains("Process still running"));
         assert_eq!(exec(&timed_out)["status"], "running");
+        assert_eq!(exec(&timed_out)["wait_timed_out"], true);
 
         let mut kill = ToolProcessKill {
             config_path: String::new(),
@@ -2845,6 +2870,7 @@ mod tests {
         assert!(text(&completed).contains("Process wait completed"));
         assert_eq!(exec(&completed)["status"], "exited");
         assert_eq!(exec(&completed)["exit_code"], 0);
+        assert_eq!(exec(&completed)["wait_timed_out"], false);
     }
 
     #[test]

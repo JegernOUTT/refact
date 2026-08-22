@@ -37,11 +37,104 @@ describe("parseEngineAnalysisJson", () => {
     }));
   it("rejects invalid JSON", () =>
     expect(parseEngineAnalysisJson("not json")).toBeNull());
+  it("rejects valid JSON followed by prose", () =>
+    expect(
+      parseEngineAnalysisJson(
+        '{"tool":"dead_code","summary":"done"}\nTruncated: too many tokens',
+      ),
+    ).toBeNull());
   it("rejects a JSON scalar", () =>
     expect(parseEngineAnalysisJson("42")).toBeNull());
 });
 
 describe("buildAnalysisReport", () => {
+  it("builds a useful report from a generic truncated envelope", () => {
+    const result = buildAnalysisReport("dead_code", {
+      tool: "dead_code",
+      summary: "Dead code analysis was truncated",
+      truncated: true,
+      warning: "Response reduced to fit the context token budget.",
+    });
+
+    expect(result).toMatchObject({
+      headline: "Dead code analysis was truncated",
+      warnings: ["Response reduced to fit the context token budget."],
+      facts: [],
+      sections: [],
+      isEmpty: true,
+    });
+  });
+
+  it("retains dead_code facts and rows from a truncated payload", () => {
+    const result = report("dead_code", {
+      truncated: true,
+      warning: "Only the highest-confidence candidates are shown.",
+      entries: [
+        {
+          name: "unused",
+          path: "/home/u/app/src/a.ts",
+          line: 9,
+          reason: "No callers",
+          confidence: 0.91,
+          git_recency: 40,
+          incoming_edges: 0,
+        },
+      ],
+      shown: 1,
+      total_candidates: 4,
+      index_state: { queued: 0 },
+      partial: true,
+    });
+
+    expect(result.warnings).toEqual([
+      "Only the highest-confidence candidates are shown.",
+    ]);
+    expect(result.facts).toContainEqual({ key: "Matching", value: "4" });
+    expect(result.sections[0]?.rows[0]).toMatchObject({
+      title: "unused",
+      detail: "No callers",
+    });
+    expect(result.isEmpty).toBe(false);
+  });
+
+  it("retains code_health facts and rows from a truncated payload", () => {
+    const result = report("code_health", {
+      truncated: true,
+      warning: "Additional files were omitted.",
+      index_state: { queued: 0 },
+      aggregate: { file_count: 1, grade: "B", avg_score: 78 },
+      files: [
+        {
+          path: "/home/u/app/src/a.ts",
+          functions: [
+            {
+              name: "run",
+              line1: 3,
+              complexity: 2,
+              nesting: 1,
+              loc: 8,
+              maintainability_index: 80,
+            },
+          ],
+          findings: [],
+          health_impact: [],
+          refactorings: [],
+        },
+      ],
+      call_graph: [],
+    });
+
+    expect(result.warnings).toEqual(["Additional files were omitted."]);
+    expect(result.facts).toContainEqual({ key: "Grade", value: "B" });
+    expect(
+      result.sections.find((section) => section.title === "Functions")?.rows[0],
+    ).toMatchObject({
+      title: "run",
+      paths: ["/home/u/app/src/a.ts"],
+    });
+    expect(result.isEmpty).toBe(false);
+  });
+
   it("maps codegraph_overview structurally", () => {
     const result = report("codegraph_overview", {
       counts: { nodes: 10, edges: 20, files: 2 },
@@ -78,7 +171,7 @@ describe("buildAnalysisReport", () => {
   it("maps git_risk tags, severity, and details", () => {
     const result = report("git_risk", {
       commits_analyzed: 100,
-      agent_authored_pct: 2,
+      agent_authored_pct: 0.02,
       hotspots: [
         {
           path: "/home/u/app/src/a.ts",

@@ -521,6 +521,58 @@ pub fn is_worktree_only_path(execution_scope: &ExecutionScope, path: &Path) -> b
         .is_file()
 }
 
+pub struct WorktreeOnlyListingLimited {
+    pub files: Vec<String>,
+    pub candidate_truncated: bool,
+    pub traversal_truncated: bool,
+}
+
+/// Resolve a scope with a hard traversal budget, then apply the candidate cap only after
+/// privacy/ignore filtering and source-to-worktree mapping have established that a file exists
+/// solely in the active worktree.
+pub async fn resolve_worktree_only_scope_limited(
+    gcx: Arc<GlobalContext>,
+    execution_scope: &ExecutionScope,
+    scope: &str,
+    max_candidates: usize,
+    max_visited_entries: usize,
+    abort: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<WorktreeOnlyListingLimited, String> {
+    let traversal_notice = truncation_notice(max_visited_entries);
+    let scoped = resolve_scope_with_execution_scope_limited(
+        gcx,
+        Some(execution_scope),
+        scope,
+        max_visited_entries,
+        abort,
+    )
+    .await?;
+    let traversal_truncated = scoped
+        .notices
+        .iter()
+        .any(|notice| notice == &traversal_notice);
+    let mut files = Vec::new();
+    for (idx, file) in scoped.files.into_iter().enumerate() {
+        if (idx & 0x3f) == 0
+            && abort.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            return Err("⚠️ Worktree-only file listing was aborted before completion.".to_string());
+        }
+        if is_worktree_only_path(execution_scope, Path::new(&file)) {
+            files.push(file);
+        }
+    }
+    files.sort();
+    let candidate_truncated = files.len() > max_candidates;
+    files.truncate(max_candidates);
+
+    Ok(WorktreeOnlyListingLimited {
+        files,
+        candidate_truncated,
+        traversal_truncated,
+    })
+}
+
 pub async fn create_scope_filter_with_execution_scope(
     gcx: Arc<GlobalContext>,
     execution_scope: Option<&ExecutionScope>,
@@ -1031,10 +1083,7 @@ mod worktree_scope_read_tools {
         let (_corrections, results) = tool.tool_execute(ccx, &tool_call_id, &args).await.unwrap();
         let text = tool_text(&results);
 
-        assert!(
-            text.contains("Absolute path used in active worktree"),
-            "{text}"
-        );
+        assert!(!text.contains("Worktree scope notices"), "{text}");
         assert!(text.contains("lib.rs"), "{text}");
         assert!(text.contains("worktree_only.rs"), "{text}");
         assert!(!text.contains("No files found"), "{text}");
@@ -1078,10 +1127,7 @@ mod worktree_scope_read_tools {
         let text = tool_text(&results);
 
         assert_eq!(replacement, "");
-        assert!(
-            text.contains("Absolute path used in active worktree"),
-            "{text}"
-        );
+        assert!(!text.contains("Worktree scope notices"), "{text}");
         assert!(text.contains("lib.rs"), "{text}");
         assert!(text.contains("worktree_only.rs"), "{text}");
         assert!(!text.contains("tree(): directory is empty"), "{text}");
@@ -1177,10 +1223,7 @@ mod worktree_scope_read_tools {
         let text = tool_text(&results);
         let names = context_file_names(&results);
 
-        assert!(
-            text.contains("Absolute path used in active worktree"),
-            "{text}"
-        );
+        assert!(!text.contains("Worktree scope notices"), "{text}");
         assert_eq!(names, vec![norm_str(&path)]);
     }
 
@@ -1405,15 +1448,15 @@ mod worktree_scope_read_tools {
                 ("scope".to_string(), Value::String("workspace".to_string())),
             ]);
 
-            let err = tool
-                .tool_execute(ccx, &tool_call_id, &args)
-                .await
-                .unwrap_err();
+            let (corrections, results) =
+                tool.tool_execute(ccx, &tool_call_id, &args).await.unwrap();
+            let text = tool_text(&results);
 
-            assert!(err.contains("No matches found"), "{err}");
+            assert!(!corrections);
+            assert!(text.contains("No matches found"), "{text}");
             assert!(
-                !norm_str(&err).contains(&norm(fixture.source.clone())),
-                "{err}"
+                !norm_str(&text).contains(&norm(fixture.source.clone())),
+                "{text}"
             );
         }
     }

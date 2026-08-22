@@ -372,7 +372,57 @@ impl<T: Serialize> ToolJson<T> {
         }
     }
     pub fn to_text(&self) -> String {
-        serde_json::to_string_pretty(self)
-            .unwrap_or_else(|e| format!("{{\"error\":\"serialization failed: {e}\"}}"))
+        serde_json::to_string_pretty(self).unwrap_or_else(|error| {
+            serde_json::json!({
+                "tool": self.tool,
+                "summary": &self.summary,
+                "error": {
+                    "kind": "serialization_failed",
+                    "message": error.to_string(),
+                },
+            })
+            .to_string()
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToolJson;
+    use serde::{Serialize, Serializer};
+
+    struct SerializationFailure;
+
+    impl Serialize for SerializationFailure {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            Err(<S::Error as serde::ser::Error>::custom(
+                "deliberate serialization failure",
+            ))
+        }
+    }
+
+    #[test]
+    fn tool_json_serialization_failure_returns_attributable_valid_json() {
+        let output = ToolJson::new(
+            "code_intel_test",
+            "summary with a \"quote\" and newline\n",
+            SerializationFailure,
+        )
+        .to_text();
+
+        let fallback: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(fallback["tool"], "code_intel_test");
+        assert_eq!(
+            fallback["summary"],
+            "summary with a \"quote\" and newline\n"
+        );
+        assert_eq!(
+            fallback["error"]["message"],
+            "deliberate serialization failure"
+        );
+        assert_eq!(fallback["error"]["kind"], "serialization_failed");
     }
 }

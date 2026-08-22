@@ -353,7 +353,7 @@ describe("ToolsContent routing", () => {
         tool: "git_risk",
         summary: "Git risk",
         commits_analyzed: 1000,
-        agent_authored_pct: 2,
+        agent_authored_pct: 0.02,
         hotspots: [
           {
             path: "src/app.rs",

@@ -46,12 +46,27 @@ async fn planner_context(
             tool_name
         ));
     }
-    let task_id = args
-        .get("task_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| ccx_lock.task_meta.as_ref().map(|m| m.task_id.clone()))
+    let explicit_task_id = match args.get("task_id") {
+        None => None,
+        Some(Value::String(task_id)) if !task_id.trim().is_empty() => Some(task_id.clone()),
+        Some(Value::String(_)) => return Err("'task_id' must be a non-empty string".to_string()),
+        Some(_) => return Err("'task_id' must be a string".to_string()),
+    };
+    let bound_task_id = ccx_lock
+        .task_meta
+        .as_ref()
+        .map(|m| m.task_id.as_str())
+        .filter(|s| !s.is_empty());
+    if let (Some(explicit), Some(bound)) = (explicit_task_id.as_deref(), bound_task_id) {
+        if explicit != bound {
+            return Err(format!(
+                "task_id '{}' does not match planner's bound task '{}'",
+                explicit, bound
+            ));
+        }
+    }
+    let task_id = explicit_task_id
+        .or_else(|| bound_task_id.map(str::to_string))
         .or_else(|| storage::infer_task_id_from_chat_id(&ccx_lock.chat_id))
         .ok_or_else(|| "Missing 'task_id' (and chat is not bound to a task)".to_string())?;
     Ok((ccx_lock.app.gcx.clone(), task_id))
@@ -155,6 +170,30 @@ fn usize_arg(args: &HashMap<String, Value>, key: &str, default: usize) -> Result
         Some(Value::Null) | None => Ok(default),
         Some(_) => Err(format!("'{}' must be a non-negative integer", key)),
     }
+}
+
+fn auto_revert_arg(args: &HashMap<String, Value>) -> Result<bool, String> {
+    match args.get("auto_revert") {
+        None => Ok(false),
+        Some(value) => refact_tool_api::coerce_bool(value)
+            .ok_or_else(|| "'auto_revert' must be a boolean".to_string()),
+    }
+}
+
+fn auto_revert_timeout_secs_arg(args: &HashMap<String, Value>) -> Result<u64, String> {
+    let Some(value) = args.get("auto_revert_timeout_secs") else {
+        return Ok(crate::chat::post_merge_check::DEFAULT_POST_MERGE_CHECK_TIMEOUT_SECS);
+    };
+    let secs = match value {
+        Value::Number(number) => number
+            .as_u64()
+            .ok_or_else(|| "auto_revert_timeout_secs must be a positive integer".to_string())?,
+        _ => return Err("auto_revert_timeout_secs must be a positive integer".to_string()),
+    };
+    if secs == 0 {
+        return Err("auto_revert_timeout_secs must be greater than zero".to_string());
+    }
+    Ok(secs)
 }
 
 #[derive(Clone, Debug)]
@@ -355,12 +394,16 @@ fn merge_result_from_tool(
             let text = contexts_text(&contexts);
             let conflict = text.contains("Merge Conflicts Detected")
                 || text.contains("Merge Already In Progress");
-            let merged = text.contains("Agent Work Merged");
+            let auto_reverted = text.contains("**Auto-reverted:** true");
+            let merged = text.contains("Agent Work Merged") && !auto_reverted;
             MergeBatchResult {
                 card_id,
                 merged,
                 conflict,
-                error: None,
+                error: auto_reverted.then(|| {
+                    "Merge was automatically reverted after post-merge verification failed"
+                        .to_string()
+                }),
             }
         }
         Err(error) => MergeBatchResult {
@@ -373,7 +416,7 @@ fn merge_result_from_tool(
 }
 
 fn should_continue_merges(result: &MergeBatchResult, stop_on_conflict: bool) -> bool {
-    !(stop_on_conflict && result.conflict)
+    result.merged && !(stop_on_conflict && result.conflict)
 }
 
 fn find_cycle_ids(items: &[BoardCreateBatchItem], active_ids: &HashSet<String>) -> HashSet<String> {
@@ -625,6 +668,25 @@ fn mark_args(task_id: &str, card_id: &str, key: &str, text: &str) -> HashMap<Str
     args
 }
 
+fn merge_args(
+    task_id: &str,
+    card_id: &str,
+    strategy: &str,
+    auto_revert: bool,
+    auto_revert_timeout_secs: u64,
+) -> HashMap<String, Value> {
+    HashMap::from([
+        ("task_id".to_string(), json!(task_id)),
+        ("card_id".to_string(), json!(card_id)),
+        ("strategy".to_string(), json!(strategy)),
+        ("auto_revert".to_string(), json!(auto_revert)),
+        (
+            "auto_revert_timeout_secs".to_string(),
+            json!(auto_revert_timeout_secs),
+        ),
+    ])
+}
+
 pub struct ToolSpawnAgentsBatch;
 pub struct ToolMergeReadyInOrder;
 pub struct ToolMarkDoneBatch;
@@ -824,7 +886,9 @@ impl Tool for ToolMergeReadyInOrder {
                     "task_id": { "type": "string", "description": "Task UUID (optional in planner context)" },
                     "strategy": { "type": "string", "enum": ["merge", "squash"], "default": "squash" },
                     "stop_on_conflict": { "type": "boolean", "default": true },
-                    "max_merges": { "type": "integer", "default": MAX_MERGE_BATCH }
+                    "max_merges": { "type": "integer", "default": MAX_MERGE_BATCH },
+                    "auto_revert": { "type": "boolean", "default": false, "description": "Opt in to post-merge verification and automatic git revert on deterministic regression" },
+                    "auto_revert_timeout_secs": { "type": "integer", "default": crate::chat::post_merge_check::DEFAULT_POST_MERGE_CHECK_TIMEOUT_SECS, "description": "Timeout for post-merge verification and revert commands" }
                 }
             }),
             output_schema: None,
@@ -854,15 +918,20 @@ impl Tool for ToolMergeReadyInOrder {
             .and_then(refact_tool_api::coerce_bool)
             .unwrap_or(true);
         let max_merges = usize_arg(args, "max_merges", MAX_MERGE_BATCH)?.min(MAX_MERGE_BATCH);
+        let auto_revert = auto_revert_arg(args)?;
+        let auto_revert_timeout_secs = auto_revert_timeout_secs_arg(args)?;
         let board = storage::load_board(gcx, &task_id).await?;
         let candidates = dependency_ordered_done_agent_cards(&board, max_merges);
         let mut results = Vec::new();
 
         for card_id in candidates {
-            let mut single_args = HashMap::new();
-            single_args.insert("task_id".to_string(), json!(task_id));
-            single_args.insert("card_id".to_string(), json!(card_id));
-            single_args.insert("strategy".to_string(), json!(strategy));
+            let single_args = merge_args(
+                &task_id,
+                &card_id,
+                strategy,
+                auto_revert,
+                auto_revert_timeout_secs,
+            );
             let call_id = format!("{}:{}", tool_call_id, card_id);
             let mut tool = ToolTaskMergeAgent::new();
             let result = merge_result_from_tool(
@@ -1266,6 +1335,72 @@ mod tests {
         serde_json::from_str(&text).unwrap()
     }
 
+    fn rendered_merge_result(message: &str) -> Result<(bool, Vec<ContextEnum>), String> {
+        Ok((
+            false,
+            vec![ContextEnum::ChatMessage(ChatMessage {
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(message.to_string()),
+                ..Default::default()
+            })],
+        ))
+    }
+
+    #[tokio::test]
+    async fn planner_context_rejects_task_id_mismatching_bound_task() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let ccx = planner_ccx(gcx).await;
+        let args = HashMap::from([("task_id".to_string(), json!("task-2"))]);
+
+        let error = match planner_context(&ccx, &args, "batch_tool").await {
+            Ok(_) => panic!("mismatching task_id should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("task-2"));
+        assert!(error.contains("task-1"));
+        assert!(error.contains("does not match"));
+    }
+
+    #[tokio::test]
+    async fn planner_context_accepts_task_id_matching_bound_task() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let ccx = planner_ccx(gcx).await;
+        let args = HashMap::from([("task_id".to_string(), json!("task-1"))]);
+
+        let (_, task_id) = planner_context(&ccx, &args, "batch_tool").await.unwrap();
+
+        assert_eq!(task_id, "task-1");
+    }
+
+    #[tokio::test]
+    async fn planner_context_rejects_non_string_task_id() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let ccx = planner_ccx(gcx).await;
+        let args = HashMap::from([("task_id".to_string(), json!(123))]);
+
+        let error = match planner_context(&ccx, &args, "batch_tool").await {
+            Ok(_) => panic!("non-string task_id should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("must be a string"));
+    }
+
+    #[tokio::test]
+    async fn planner_context_rejects_blank_task_id() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let ccx = planner_ccx(gcx).await;
+        let args = HashMap::from([("task_id".to_string(), json!("  \n  "))]);
+
+        let error = match planner_context(&ccx, &args, "batch_tool").await {
+            Ok(_) => panic!("blank task_id should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("non-empty string"));
+    }
+
     #[test]
     fn spawn_agents_batch_with_3_valid_cards() {
         let board = TaskBoard {
@@ -1343,6 +1478,131 @@ mod tests {
 
         assert_eq!(candidates, vec!["T-1", "T-2", "T-3"]);
         assert_eq!(processed, vec!["T-1", "T-2"]);
+    }
+
+    #[test]
+    fn merge_result_reports_rendered_auto_revert_as_not_merged() {
+        let rendered = r#"# Agent Work Merged
+
+The agent's work has been successfully merged back to the target branch.
+
+## Post-merge regression detected
+
+**Verification:** `cargo test` failed with exit code 1
+**Auto-reverted:** true
+**Merge commit:** abc123
+**Revert commit:** def456"#;
+
+        let result = merge_result_from_tool("T-1".to_string(), rendered_merge_result(rendered));
+
+        assert!(!result.merged);
+        assert!(!result.conflict);
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("automatically reverted")));
+        assert!(!should_continue_merges(&result, false));
+    }
+
+    #[test]
+    fn merge_result_reports_rendered_non_reverted_merge_as_merged() {
+        let rendered = r#"# Agent Work Merged
+
+The agent's work has been successfully merged back to the target branch.
+
+**Post-merge check:** `cargo test` passed"#;
+
+        let result = merge_result_from_tool("T-1".to_string(), rendered_merge_result(rendered));
+
+        assert!(result.merged);
+        assert!(!result.conflict);
+        assert_eq!(result.error, None);
+        assert!(should_continue_merges(&result, true));
+    }
+
+    #[test]
+    fn merge_ready_in_order_stops_after_generic_non_merge() {
+        let result = MergeBatchResult {
+            card_id: "T-1".to_string(),
+            merged: false,
+            conflict: false,
+            error: Some("merge failed".to_string()),
+        };
+
+        assert!(!should_continue_merges(&result, false));
+    }
+
+    #[test]
+    fn merge_ready_in_order_conflict_setting_only_controls_conflicts() {
+        let result = MergeBatchResult {
+            card_id: "T-1".to_string(),
+            merged: true,
+            conflict: true,
+            error: None,
+        };
+
+        assert!(!should_continue_merges(&result, true));
+        assert!(should_continue_merges(&result, false));
+    }
+
+    #[test]
+    fn merge_ready_in_order_exposes_post_merge_verification_schema() {
+        let schema = ToolMergeReadyInOrder::new().tool_description().input_schema;
+        let properties = schema["properties"].as_object().unwrap();
+
+        assert_eq!(properties["auto_revert"]["type"], json!("boolean"));
+        assert_eq!(properties["auto_revert"]["default"], json!(false));
+        assert_eq!(
+            properties["auto_revert_timeout_secs"]["type"],
+            json!("integer")
+        );
+        assert_eq!(
+            properties["auto_revert_timeout_secs"]["default"],
+            json!(crate::chat::post_merge_check::DEFAULT_POST_MERGE_CHECK_TIMEOUT_SECS)
+        );
+        assert!(!properties.contains_key("force"));
+    }
+
+    #[test]
+    fn merge_ready_in_order_forwards_post_merge_verification_args() {
+        let requested = HashMap::from([
+            ("auto_revert".to_string(), json!(true)),
+            ("auto_revert_timeout_secs".to_string(), json!(120)),
+        ]);
+        let auto_revert = auto_revert_arg(&requested).unwrap();
+        let timeout = auto_revert_timeout_secs_arg(&requested).unwrap();
+
+        let forwarded = merge_args("task-1", "T-1", "squash", auto_revert, timeout);
+
+        assert_eq!(forwarded["auto_revert"], json!(true));
+        assert_eq!(forwarded["auto_revert_timeout_secs"], json!(120));
+        assert!(!forwarded.contains_key("force"));
+    }
+
+    #[test]
+    fn merge_ready_in_order_post_merge_verification_args_match_merge_agent_semantics() {
+        let empty = HashMap::new();
+        assert!(!auto_revert_arg(&empty).unwrap());
+        assert_eq!(
+            auto_revert_timeout_secs_arg(&empty).unwrap(),
+            crate::chat::post_merge_check::DEFAULT_POST_MERGE_CHECK_TIMEOUT_SECS
+        );
+
+        let invalid_bool = HashMap::from([("auto_revert".to_string(), json!("sometimes"))]);
+        assert!(auto_revert_arg(&invalid_bool)
+            .unwrap_err()
+            .contains("must be a boolean"));
+
+        let invalid_timeout =
+            HashMap::from([("auto_revert_timeout_secs".to_string(), json!("120"))]);
+        assert!(auto_revert_timeout_secs_arg(&invalid_timeout)
+            .unwrap_err()
+            .contains("positive integer"));
+
+        let zero_timeout = HashMap::from([("auto_revert_timeout_secs".to_string(), json!(0))]);
+        assert!(auto_revert_timeout_secs_arg(&zero_timeout)
+            .unwrap_err()
+            .contains("greater than zero"));
     }
 
     #[tokio::test]

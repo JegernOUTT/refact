@@ -5,6 +5,7 @@ use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 use serde::{Deserialize, Serialize};
 
+use crate::analytics::GraphData;
 use crate::store::Store;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,41 +44,66 @@ pub fn blast_radius(
     changed_files: &[String],
     max_depth: usize,
 ) -> Result<BlastReport, String> {
+    if changed_files.is_empty() || max_depth == 0 {
+        return Ok(empty_report(changed_files));
+    }
+    let data = GraphData {
+        nodes: store.node_names()?,
+        edges: store.graph_edges()?,
+    };
+    Ok(blast_radius_from_data(&data, changed_files, max_depth))
+}
+
+pub(crate) fn empty_report(changed_files: &[String]) -> BlastReport {
+    let changed_files = changed_files
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    BlastReport {
+        changed_files,
+        directly_impacted: Vec::new(),
+        transitively_impacted: Vec::new(),
+        impacted_file_count: 0,
+        risk_score: 0.0,
+    }
+}
+
+pub fn blast_radius_from_data(
+    data: &GraphData,
+    changed_files: &[String],
+    max_depth: usize,
+) -> BlastReport {
     let changed_set: BTreeSet<String> = changed_files.iter().cloned().collect();
     let changed_files: Vec<String> = changed_set.iter().cloned().collect();
 
     if changed_set.is_empty() || max_depth == 0 {
-        return Ok(BlastReport {
-            changed_files,
-            directly_impacted: Vec::new(),
-            transitively_impacted: Vec::new(),
-            impacted_file_count: 0,
-            risk_score: 0.0,
-        });
+        return empty_report(&changed_files);
     }
 
-    let nodes = store.node_names()?;
     let mut graph: DiGraph<i64, String> = DiGraph::new();
     let mut id_to_index: HashMap<i64, NodeIndex> = HashMap::new();
     let mut info_by_id: HashMap<i64, NodeInfo> = HashMap::new();
 
-    for (id, name, path) in nodes {
+    for (id, name, path) in &data.nodes {
+        let (id, name, path) = (*id, name.clone(), path.clone());
         let index = *id_to_index.entry(id).or_insert_with(|| graph.add_node(id));
         graph[index] = id;
         info_by_id.insert(id, NodeInfo { name, path });
     }
 
-    for (src, dst, kind) in store.graph_edges()? {
-        if !is_blast_edge(&kind) {
+    for (src, dst, kind) in &data.edges {
+        if !is_blast_edge(kind) {
             continue;
         }
-        let Some(&src_index) = id_to_index.get(&src) else {
+        let Some(&src_index) = id_to_index.get(src) else {
             continue;
         };
-        let Some(&dst_index) = id_to_index.get(&dst) else {
+        let Some(&dst_index) = id_to_index.get(dst) else {
             continue;
         };
-        graph.add_edge(src_index, dst_index, kind);
+        graph.add_edge(src_index, dst_index, kind.clone());
     }
 
     let mut starts: Vec<NodeIndex> = graph
@@ -181,13 +207,13 @@ pub fn blast_radius(
     let (directly_impacted, transitively_impacted): (Vec<_>, Vec<_>) =
         impacts.into_iter().partition(|impact| impact.distance == 1);
 
-    Ok(BlastReport {
+    BlastReport {
         changed_files,
         directly_impacted,
         transitively_impacted,
         impacted_file_count,
         risk_score,
-    })
+    }
 }
 
 fn is_blast_edge(kind: &str) -> bool {

@@ -65,44 +65,59 @@ fn append_post_merge_check_message(
     message: &mut String,
     result: &crate::chat::post_merge_check::PostMergeCheckResult,
 ) {
+    use crate::tasks::types::VerificationOutcome;
+
     if !result.checked {
         if let Some(reason) = result.skipped_reason.as_deref() {
             message.push_str(&format!("\n\n**Post-merge check:** skipped ({})", reason));
         }
         return;
     }
-    if result.auto_reverted {
-        message.push_str(&format!(
-            "\n\n## Post-merge regression detected\n\n**Verification:** `{}` failed{}\n**Auto-reverted:** true\n**Merge commit:** {}\n**Revert commit:** {}\n**Fix card:** {}\n\n{}",
-            result.command.as_deref().unwrap_or("unknown"),
-            result
-                .exit_code
-                .map(|code| format!(" with exit code {}", code))
-                .unwrap_or_default(),
-            result.merge_commit.as_deref().unwrap_or("unknown"),
-            result.revert_commit.as_deref().unwrap_or("unknown"),
-            result.fix_card_id.as_deref().unwrap_or("created"),
-            crate::chat::post_merge_check::first_error_line(&result.output_tail)
-        ));
-    } else if let Some(reason) = result.revert_skipped_reason.as_deref() {
-        message.push_str(&format!(
-            "\n\n## Post-merge regression detected\n\n**Verification:** `{}` failed{}\n**Auto-reverted:** false ({})\n**Merge commit:** {}\n**Fix card:** {}\n\n{}",
-            result.command.as_deref().unwrap_or("unknown"),
-            result
-                .exit_code
-                .map(|code| format!(" with exit code {}", code))
-                .unwrap_or_default(),
-            reason,
-            result.merge_commit.as_deref().unwrap_or("unknown"),
-            result.fix_card_id.as_deref().unwrap_or("created"),
-            crate::chat::post_merge_check::first_error_line(&result.output_tail)
-        ));
-    } else {
-        message.push_str(&format!(
-            "\n\n**Post-merge check:** `{}` passed",
-            result.command.as_deref().unwrap_or("unknown")
-        ));
+    let command = result.command.as_deref().unwrap_or("unknown");
+    if result.outcome == VerificationOutcome::Passed {
+        message.push_str(&format!("\n\n**Post-merge check:** `{}` passed", command));
+        return;
     }
+    if result.outcome != VerificationOutcome::CommandFailed {
+        let label = match result.outcome {
+            VerificationOutcome::Rejected => "rejected by the command filter",
+            VerificationOutcome::PolicyDenied => "denied by command policy",
+            VerificationOutcome::InfrastructureFailed => {
+                "could not run due to infrastructure failure"
+            }
+            VerificationOutcome::NoCommands => "found no verification commands",
+            VerificationOutcome::Unknown => "returned an unknown result",
+            VerificationOutcome::Passed | VerificationOutcome::CommandFailed => unreachable!(),
+        };
+        message.push_str(&format!(
+            "\n\n**Post-merge check:** `{}` {}\n\n{}",
+            command,
+            label,
+            crate::chat::post_merge_check::first_error_line(&result.output_tail)
+        ));
+        return;
+    }
+    message.push_str(&format!(
+        "\n\n## Post-merge regression detected\n\n**Verification:** `{}` failed{}\n**Auto-reverted:** {}\n**Merge commit:** {}",
+        command,
+        result.exit_code.map(|code| format!(" with exit code {}", code)).unwrap_or_default(),
+        if result.auto_reverted {
+            "true".to_string()
+        } else {
+            format!("false ({})", result.revert_skipped_reason.as_deref().unwrap_or("not attempted"))
+        },
+        result.merge_commit.as_deref().unwrap_or("unknown"),
+    ));
+    if let Some(revert_commit) = result.revert_commit.as_deref() {
+        message.push_str(&format!("\n**Revert commit:** {}", revert_commit));
+    }
+    if let Some(fix_card_id) = result.fix_card_id.as_deref() {
+        message.push_str(&format!("\n**Fix card:** {}", fix_card_id));
+    }
+    message.push_str(&format!(
+        "\n\n{}",
+        crate::chat::post_merge_check::first_error_line(&result.output_tail)
+    ));
 }
 
 fn append_merge_warnings(message: &mut String, warnings: &[String]) {
@@ -128,9 +143,6 @@ fn merge_response_message(
     response: &MergeWorktreeResponse,
     post_merge_check: Option<&crate::chat::post_merge_check::PostMergeCheckResult>,
 ) -> String {
-    if response.conflict.is_some() || response.status == "nothing_to_merge" {
-        let _ = post_merge_check;
-    }
     if let Some(conflict) = response.conflict.as_ref() {
         let mut message = format!(
             "# Merge Conflicts Detected\n\n**Card:** {}\n**Branch:** {} → {}\n**Strategy:** {}\n**Aborted:** {}\n\n## Conflicting Files\n{}\n\n{}",
@@ -336,10 +348,6 @@ fn registered_record_matches_card(
         .any(|reference| reference_matches_card(task_id, card, reference))
 }
 
-fn registered_error_allows_legacy_fallback(err: &str) -> bool {
-    !err.contains("does not match task")
-}
-
 async fn worktree_id_is_valid_for_card(
     service: &WorktreeService,
     worktree_id: &str,
@@ -369,7 +377,7 @@ fn verifier_merge_block_message(card_id: &str, concerns: &[String]) -> String {
             .join("\n")
     };
     format!(
-        "Card {} verifier failed. Refusing merge unless force=true. Concerns:\n{}",
+        "Card {} verifier failed with a genuine or unclassified verification failure. Refusing merge; force=true cannot bypass verification failures. Concerns:\n{}",
         card_id, rendered
     )
 }
@@ -397,6 +405,18 @@ fn append_verifier_warning(message: &mut String, warning: Option<&str>) {
     }
 }
 
+fn concern_is_launch_failure(concern: &str) -> bool {
+    concern.starts_with("Verifier failed to launch; human review recommended:")
+}
+
+fn concern_is_infrastructure_only(concern: &str, infrastructure_commands: &[&str]) -> bool {
+    concern_is_launch_failure(concern)
+        || concern.starts_with("Verifier review subchat unavailable; human review recommended:")
+        || infrastructure_commands
+            .iter()
+            .any(|command| concern.strip_prefix("Verification command failed: ") == Some(*command))
+}
+
 fn ensure_verifier_allows_merge(
     card: &crate::tasks::types::BoardCard,
     force: bool,
@@ -404,12 +424,62 @@ fn ensure_verifier_allows_merge(
     let Some(report) = card.verifier_report.as_ref() else {
         return Ok(None);
     };
-    if report.passed {
-        return Ok(None);
+    use crate::tasks::types::{VerificationOutcome, VerifierReportClassification};
+
+    let explicit_infrastructure_concerns = !report.concerns.is_empty()
+        && report
+            .concerns
+            .iter()
+            .all(|concern| concern_is_infrastructure_only(concern, &[]));
+    let legacy_launch_failure = !report.passed
+        && report.classification == VerifierReportClassification::Unknown
+        && report.recommendation == "human-review"
+        && report.command_results.is_empty()
+        && report
+            .concerns
+            .iter()
+            .any(|concern| concern_is_launch_failure(concern))
+        && explicit_infrastructure_concerns;
+    if force && legacy_launch_failure {
+        return Ok(Some(verifier_force_warning(&card.id, &report.concerns)));
     }
-    if force {
-        return Ok((report.recommendation == "human-review")
-            .then(|| verifier_force_warning(&card.id, &report.concerns)));
+    let infrastructure_commands = report
+        .command_results
+        .iter()
+        .filter(|result| result.outcome == VerificationOutcome::InfrastructureFailed)
+        .map(|result| result.command.as_str())
+        .collect::<Vec<_>>();
+    let forceable_human_review = !report.passed
+        && report.classification == VerifierReportClassification::HumanReview
+        && (!infrastructure_commands.is_empty()
+            || (report.command_results.is_empty()
+                && report
+                    .concerns
+                    .iter()
+                    .any(|concern| concern_is_launch_failure(concern))))
+        && report.command_results.iter().all(|result| {
+            matches!(
+                result.outcome,
+                VerificationOutcome::Passed | VerificationOutcome::InfrastructureFailed
+            ) && (result.passed == (result.outcome == VerificationOutcome::Passed))
+        })
+        && !report.concerns.is_empty()
+        && report
+            .concerns
+            .iter()
+            .all(|concern| concern_is_infrastructure_only(concern, &infrastructure_commands));
+    if force && forceable_human_review {
+        return Ok(Some(verifier_force_warning(&card.id, &report.concerns)));
+    }
+    let consistent_pass = report.passed
+        && report.classification == VerifierReportClassification::Passed
+        && !report.command_results.is_empty()
+        && report
+            .command_results
+            .iter()
+            .all(|result| result.passed && result.outcome == VerificationOutcome::Passed);
+    if consistent_pass {
+        return Ok(None);
     }
     Err(verifier_merge_block_message(&card.id, &report.concerns))
 }
@@ -467,6 +537,55 @@ fn force_merge_card_matches_current(
 ) -> bool {
     card.assignee.as_deref() == expected_assignee
         && card.agent_chat_id.as_deref() == expected_agent_chat_id
+}
+
+fn force_merge_post_check_passed_or_absent(
+    result: &Result<Option<crate::chat::post_merge_check::PostMergeCheckResult>, String>,
+) -> bool {
+    use crate::tasks::types::VerificationOutcome;
+
+    match result {
+        Ok(None) => true,
+        Ok(Some(check)) => check.checked && check.outcome == VerificationOutcome::Passed,
+        Err(_) => false,
+    }
+}
+
+fn retained_post_merge_verification_failure(
+    result: &Result<Option<crate::chat::post_merge_check::PostMergeCheckResult>, String>,
+) -> Option<String> {
+    use crate::tasks::types::VerificationOutcome;
+
+    let check = result.as_ref().ok()?.as_ref()?;
+    if check.auto_reverted || (check.checked && check.outcome == VerificationOutcome::Passed) {
+        return None;
+    }
+    let outcome = match check.outcome {
+        VerificationOutcome::CommandFailed => "verification command failed",
+        VerificationOutcome::Rejected => "verification command was rejected",
+        VerificationOutcome::PolicyDenied => "verification was denied by policy",
+        VerificationOutcome::InfrastructureFailed => "verification infrastructure failed",
+        VerificationOutcome::NoCommands => "no verification commands were available",
+        VerificationOutcome::Unknown => "verification returned an unknown outcome",
+        VerificationOutcome::Passed => "verification was not explicitly checked",
+    };
+    Some(format!(
+        "Forced merge remains applied, but post-merge verification did not pass: {}. Stale agent ownership was cleared; the merged work is retained and the card was not marked done.",
+        outcome
+    ))
+}
+
+fn retain_force_merge_without_finalizing(
+    card: &mut crate::tasks::types::BoardCard,
+    message: &str,
+) -> bool {
+    card.assignee = None;
+    card.agent_chat_id = None;
+    card.status_updates.push(crate::tasks::types::StatusUpdate {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        message: message.to_string(),
+    });
+    true
 }
 
 fn finalize_force_merge_card_if_current(
@@ -528,20 +647,60 @@ async fn clear_board_mirrors_after_registered_merge(
     card_id: &str,
     response: &MergeWorktreeResponse,
     force: bool,
+    finalize_force_merge: bool,
+    force_merge_auto_reverted: bool,
+    retained_verification_failure: Option<String>,
+    post_merge_check_error: Option<String>,
     expected_assignee: Option<String>,
     expected_agent_chat_id: Option<String>,
 ) -> Result<(), String> {
-    let clear_ownership = force && (response.merged || response.status == "nothing_to_merge");
+    let clear_ownership = force
+        && (response.merged || response.status == "nothing_to_merge")
+        && (finalize_force_merge
+            || force_merge_auto_reverted
+            || retained_verification_failure.is_some()
+            || post_merge_check_error.is_some());
     let Some(cleanup) = response.cleanup.as_ref() else {
         if clear_ownership {
-            finalize_force_merge_card_after_merge(
-                gcx,
-                task_id,
-                card_id,
-                expected_assignee,
-                expected_agent_chat_id,
-            )
-            .await?;
+            if force_merge_auto_reverted
+                || retained_verification_failure.is_some()
+                || post_merge_check_error.is_some()
+            {
+                let card_id_owned = card_id.to_string();
+                let retained_verification_failure = retained_verification_failure.clone();
+                let post_merge_check_error = post_merge_check_error.clone();
+                let (_, changed) =
+                    storage::update_board_atomic(gcx.clone(), task_id, move |board| {
+                        let Some(card) = board.get_card_mut(&card_id_owned) else {
+                            return Ok(false);
+                        };
+                        if !force_merge_card_matches_current(
+                            card,
+                            expected_assignee.as_deref(),
+                            expected_agent_chat_id.as_deref(),
+                        ) {
+                            return Ok(false);
+                        }
+                        let message = retained_verification_failure
+                            .clone()
+                            .or_else(|| post_merge_check_error.as_deref().map(|error| format!("Forced merge remains applied, but post-merge verification failed to run: {}. Stale agent ownership was cleared; merge success was not inferred from verification.", error)))
+                            .unwrap_or_else(|| "Forced merge was auto-reverted after post-merge verification failed; the original card was not marked done and stale agent ownership was cleared.".to_string());
+                        Ok(retain_force_merge_without_finalizing(card, &message))
+                    })
+                    .await?;
+                if changed {
+                    storage::update_task_stats(gcx, task_id).await?;
+                }
+            } else {
+                finalize_force_merge_card_after_merge(
+                    gcx,
+                    task_id,
+                    card_id,
+                    expected_assignee,
+                    expected_agent_chat_id,
+                )
+                .await?;
+            }
         }
         return Ok(());
     };
@@ -555,15 +714,15 @@ async fn clear_board_mirrors_after_registered_merge(
     let card_id_owned = card_id.to_string();
     let clear_worktree = cleanup.worktree_deleted || cleanup.registry_deleted;
     let clear_branch = cleanup.branch_deleted;
+    let retained_verification_failure_for_update = retained_verification_failure.clone();
+    let post_merge_check_error_for_update = post_merge_check_error.clone();
     let (_, stats_changed) = storage::update_board_atomic(gcx.clone(), task_id, move |board| {
         if let Some(card) = board.get_card_mut(&card_id_owned) {
-            if clear_ownership
-                && !force_merge_card_matches_current(
-                    card,
-                    expected_assignee.as_deref(),
-                    expected_agent_chat_id.as_deref(),
-                )
-            {
+            if !force_merge_card_matches_current(
+                card,
+                expected_assignee.as_deref(),
+                expected_agent_chat_id.as_deref(),
+            ) {
                 return Ok(false);
             }
             if clear_branch {
@@ -574,6 +733,16 @@ async fn clear_board_mirrors_after_registered_merge(
                 card.agent_worktree_name = None;
             }
             if clear_ownership {
+                if force_merge_auto_reverted
+                    || retained_verification_failure_for_update.is_some()
+                    || post_merge_check_error_for_update.is_some()
+                {
+                    let message = retained_verification_failure_for_update
+                        .clone()
+                        .or_else(|| post_merge_check_error_for_update.as_deref().map(|error| format!("Forced merge remains applied, but post-merge verification failed to run: {}. Stale worktree, branch, and agent ownership references were cleared; merge success was not inferred from verification.", error)))
+                        .unwrap_or_else(|| "Forced merge was auto-reverted after post-merge verification failed; the original card was not marked done and stale worktree, branch, and agent ownership references were cleared.".to_string());
+                    return Ok(retain_force_merge_without_finalizing(card, &message));
+                }
                 return Ok(finalize_force_merge_card_if_current(
                     card,
                     expected_assignee.as_deref(),
@@ -652,6 +821,11 @@ async fn merge_registered_task_worktree(
             }
         }
     };
+    let post_merge_expected_state = if auto_revert {
+        Some(load_expected_card_state(gcx.clone(), task_id, card_id).await?)
+    } else {
+        None
+    };
     let response = service
         .merge_worktree(
             &worktree_id,
@@ -665,7 +839,52 @@ async fn merge_registered_task_worktree(
             },
         )
         .await?;
-    if response.merged && !changed_files.is_empty() {
+    let post_merge_check_result = match (response.merge_commit.as_ref(), post_merge_expected_state)
+    {
+        (Some(merge_commit), Some(expected_card_state)) if response.merged && auto_revert => {
+            crate::chat::post_merge_check::post_merge_check(
+                gcx.clone(),
+                crate::chat::post_merge_check::PostMergeCheckRequest {
+                    task_id: task_id.to_string(),
+                    card_id: card_id.to_string(),
+                    workspace_root: workspace_root.to_path_buf(),
+                    enabled: true,
+                    timeout: auto_revert_timeout,
+                    expected_merge_commit: merge_commit.clone(),
+                    expected_card_state: Some(expected_card_state),
+                },
+            )
+            .await
+            .map(Some)
+        }
+        _ => Ok(None),
+    };
+    let force_merge_auto_reverted = post_merge_check_result
+        .as_ref()
+        .ok()
+        .and_then(|result| result.as_ref())
+        .map(|result| result.auto_reverted)
+        .unwrap_or(false);
+    let finalize_force_merge = force_merge_post_check_passed_or_absent(&post_merge_check_result);
+    let retained_verification_failure =
+        retained_post_merge_verification_failure(&post_merge_check_result);
+    let post_merge_check_error = post_merge_check_result.as_ref().err().cloned();
+    clear_board_mirrors_after_registered_merge(
+        gcx.clone(),
+        task_id,
+        card_id,
+        &response,
+        force,
+        finalize_force_merge,
+        force_merge_auto_reverted,
+        retained_verification_failure,
+        post_merge_check_error,
+        expected_assignee,
+        expected_agent_chat_id,
+    )
+    .await?;
+    let post_merge_check = post_merge_check_result?;
+    if response.merged && !force_merge_auto_reverted && !changed_files.is_empty() {
         let _ = crate::chat::task_agent_monitor::append_card_target_files(
             crate::app_state::AppState::from_gcx(gcx.clone()).await,
             task_id,
@@ -674,40 +893,6 @@ async fn merge_registered_task_worktree(
         )
         .await;
     }
-    clear_board_mirrors_after_registered_merge(
-        gcx.clone(),
-        task_id,
-        card_id,
-        &response,
-        force,
-        expected_assignee,
-        expected_agent_chat_id,
-    )
-    .await?;
-    let post_merge_expected_state =
-        if response.merge_commit.is_some() && response.merged && auto_revert {
-            Some(load_expected_card_state(gcx.clone(), task_id, card_id).await?)
-        } else {
-            None
-        };
-    let post_merge_check = match (response.merge_commit.as_ref(), post_merge_expected_state) {
-        (Some(merge_commit), Some(expected_card_state)) if response.merged && auto_revert => Some(
-            crate::chat::post_merge_check::post_merge_check(
-                gcx,
-                crate::chat::post_merge_check::PostMergeCheckRequest {
-                    task_id: task_id.to_string(),
-                    card_id: card_id.to_string(),
-                    workspace_root: workspace_root.to_path_buf(),
-                    enabled: auto_revert,
-                    timeout: auto_revert_timeout,
-                    expected_merge_commit: merge_commit.clone(),
-                    expected_card_state: Some(expected_card_state),
-                },
-            )
-            .await?,
-        ),
-        _ => None,
-    };
     let mut message = merge_response_message(card_id, &response, post_merge_check.as_ref());
     append_verifier_warning(&mut message, verifier_warning.as_deref());
     append_completion_warning(&mut message, completion_warning.as_deref());
@@ -744,7 +929,7 @@ impl Tool for ToolTaskMergeAgent {
             experimental: false,
             allow_parallel: false,
             description: "Merge an agent's work back to the main branch and always cleanup the worktree after a successful merge or no-op merged state. The agent must have completed work on a card with an associated git branch and worktree.".to_string(),
-            input_schema: json_schema_from_params(&[("card_id", "string", "Card ID whose agent branch to merge"), ("strategy", "string", "Merge strategy: 'squash' (default) or 'merge'"), ("force", "boolean", "Override a failed verifier_report and merge anyway"), ("auto_revert", "boolean", "Opt in to post-merge verification and automatic git revert on deterministic regression"), ("auto_revert_timeout_secs", "integer", "Timeout for post-merge verification and revert commands, default 300 seconds")], &["card_id"]),
+            input_schema: json_schema_from_params(&[("card_id", "string", "Card ID whose agent branch to merge"), ("strategy", "string", "Merge strategy: 'squash' (default) or 'merge'"), ("force", "boolean", "Bypass verifier human-review infrastructure failures only; genuine verification failures remain blocked"), ("auto_revert", "boolean", "Opt in to post-merge verification and automatic git revert on deterministic regression"), ("auto_revert_timeout_secs", "integer", "Timeout for post-merge verification and revert commands, default 300 seconds")], &["card_id"]),
             output_schema: None,
             annotations: None,
         }
@@ -817,7 +1002,7 @@ impl Tool for ToolTaskMergeAgent {
             .as_ref()
             .ok_or("Task has no base branch set")?;
 
-        let registered_merge_error = if card.agent_worktree_name.is_some() {
+        if card.agent_worktree_name.is_some() {
             match merge_registered_task_worktree(
                 gcx.clone(),
                 workspace_root,
@@ -833,19 +1018,8 @@ impl Tool for ToolTaskMergeAgent {
             .await
             {
                 Ok(Some(result)) => return Ok(result),
-                Ok(None) => None,
-                Err(err) => Some(err),
-            }
-        } else {
-            None
-        };
-
-        if let Some(error) = registered_merge_error.as_deref() {
-            if !registered_error_allows_legacy_fallback(error)
-                || card.agent_branch.is_none()
-                || card.agent_worktree.is_none()
-            {
-                return Err(error.to_string());
+                Ok(None) => {}
+                Err(err) => return Err(err),
             }
         }
 
@@ -872,15 +1046,7 @@ impl Tool for ToolTaskMergeAgent {
             }
         };
 
-        ensure_legacy_agent_worktree_checkout(workspace_root, agent_worktree, agent_branch)
-            .map_err(|legacy_err| {
-                registered_merge_error
-                    .as_deref()
-                    .map(|registered_err| {
-                        format!("{}; legacy fallback failed: {}", registered_err, legacy_err)
-                    })
-                    .unwrap_or(legacy_err)
-            })?;
+        ensure_legacy_agent_worktree_checkout(workspace_root, agent_worktree, agent_branch)?;
 
         let merge_in_progress = run_git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok();
         if merge_in_progress {
@@ -1037,13 +1203,11 @@ Then call `merge_agent` again."#,
                         let Some(card) = board.get_card_mut(&card_id_owned) else {
                             return Ok(false);
                         };
-                        if force
-                            && !force_merge_card_matches_current(
-                                card,
-                                expected_assignee.as_deref(),
-                                expected_agent_chat_id.as_deref(),
-                            )
-                        {
+                        if !force_merge_card_matches_current(
+                            card,
+                            expected_assignee.as_deref(),
+                            expected_agent_chat_id.as_deref(),
+                        ) {
                             return Ok(false);
                         }
                         if clear_branch {
@@ -1106,6 +1270,12 @@ Then call `merge_agent` again."#,
                 Ok(msg) if !msg.trim().is_empty() => msg,
                 _ => format!("Card {}: {}", card_id, card.title),
             };
+
+        let post_merge_expected_state = if auto_revert {
+            Some(load_expected_card_state(gcx.clone(), &task_id, card_id).await?)
+        } else {
+            None
+        };
 
         let _guard = git_merge_lock().lock().await;
 
@@ -1208,6 +1378,7 @@ Use `cat <file>` to see conflict markers in each file."#,
             return Err(format!("Merge failed: {}", e));
         }
 
+        let mut squash_nothing_to_commit = false;
         if strategy == "squash" {
             let commit_result = crate::worktrees::git::run_git_with_refact_author(
                 workspace_root,
@@ -1217,12 +1388,18 @@ Use `cat <file>` to see conflict markers in each file."#,
                 if !e.contains("nothing to commit") {
                     return Err(format!("Failed to commit squash merge: {}", e));
                 }
+                squash_nothing_to_commit = true;
             }
         }
 
-        let merge_commit = run_git(&["rev-parse", "HEAD"])
-            .map(|head| head.trim().to_string())
-            .unwrap_or_default();
+        let merge_commit = if squash_nothing_to_commit {
+            None
+        } else {
+            run_git(&["rev-parse", "HEAD"])
+                .map(|head| head.trim().to_string())
+                .ok()
+                .filter(|head| !head.is_empty())
+        };
 
         let agent_worktree_dirty = if agent_branch != base_branch {
             match Command::new("git")
@@ -1250,35 +1427,50 @@ Use `cat <file>` to see conflict markers in each file."#,
 
         drop(_guard);
 
-        let post_merge_check = if auto_revert && !merge_commit.is_empty() {
-            let expected_card_state =
-                load_expected_card_state(gcx.clone(), &task_id, card_id).await?;
-            Some(
-                crate::chat::post_merge_check::post_merge_check(
-                    gcx.clone(),
-                    crate::chat::post_merge_check::PostMergeCheckRequest {
-                        task_id: task_id.clone(),
-                        card_id: card_id.to_string(),
-                        workspace_root: workspace_root.to_path_buf(),
-                        enabled: true,
-                        timeout: auto_revert_timeout,
-                        expected_merge_commit: merge_commit,
-                        expected_card_state: Some(expected_card_state),
-                    },
-                )
-                .await?,
-            )
+        let post_merge_check_result = if auto_revert {
+            match merge_commit {
+                Some(merge_commit) => {
+                    let expected_card_state = post_merge_expected_state
+                        .expect("post-merge state is captured whenever auto-revert is enabled");
+                    crate::chat::post_merge_check::post_merge_check(
+                        gcx.clone(),
+                        crate::chat::post_merge_check::PostMergeCheckRequest {
+                            task_id: task_id.clone(),
+                            card_id: card_id.to_string(),
+                            workspace_root: workspace_root.to_path_buf(),
+                            enabled: true,
+                            timeout: auto_revert_timeout,
+                            expected_merge_commit: merge_commit,
+                            expected_card_state: Some(expected_card_state),
+                        },
+                    )
+                    .await
+                    .map(Some)
+                }
+                None => Ok(None),
+            }
         } else {
-            None
+            Ok(None)
         };
+        let merge_auto_reverted = post_merge_check_result
+            .as_ref()
+            .ok()
+            .and_then(|result| result.as_ref())
+            .map(|result| result.auto_reverted)
+            .unwrap_or(false);
+        let post_merge_check_error = post_merge_check_result.as_ref().err().cloned();
+        let retained_verification_failure =
+            retained_post_merge_verification_failure(&post_merge_check_result);
 
-        let _ = crate::chat::task_agent_monitor::append_card_target_files(
-            crate::app_state::AppState::from_gcx(gcx.clone()).await,
-            &task_id,
-            card_id,
-            changed_files,
-        )
-        .await;
+        if !merge_auto_reverted && !squash_nothing_to_commit {
+            let _ = crate::chat::task_agent_monitor::append_card_target_files(
+                crate::app_state::AppState::from_gcx(gcx.clone()).await,
+                &task_id,
+                card_id,
+                changed_files,
+            )
+            .await;
+        }
 
         if worktree_removed || branch_deleted || force {
             let card_id_owned = card_id.to_string();
@@ -1286,18 +1478,17 @@ Use `cat <file>` to see conflict markers in each file."#,
             let clear_branch = branch_deleted;
             let expected_assignee = expected_assignee.clone();
             let expected_agent_chat_id = expected_agent_chat_id.clone();
+            let finalize_force = force_merge_post_check_passed_or_absent(&post_merge_check_result);
             let (_, stats_changed) =
                 storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
                     let Some(card) = board.get_card_mut(&card_id_owned) else {
                         return Ok(false);
                     };
-                    if force
-                        && !force_merge_card_matches_current(
-                            card,
-                            expected_assignee.as_deref(),
-                            expected_agent_chat_id.as_deref(),
-                        )
-                    {
+                    if !force_merge_card_matches_current(
+                        card,
+                        expected_assignee.as_deref(),
+                        expected_agent_chat_id.as_deref(),
+                    ) {
                         return Ok(false);
                     }
                     if clear_branch {
@@ -1307,7 +1498,31 @@ Use `cat <file>` to see conflict markers in each file."#,
                         card.agent_worktree = None;
                         card.agent_worktree_name = None;
                     }
+                    if force && merge_auto_reverted {
+                        card.assignee = None;
+                        card.agent_chat_id = None;
+                        card.status_updates.push(crate::tasks::types::StatusUpdate {
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            message: "Forced merge was auto-reverted after post-merge verification failed; the original card was not marked done and stale worktree, branch, and agent ownership references were cleared.".to_string(),
+                        });
+                        return Ok(true);
+                    }
+                    if force {
+                        if let Some(message) = retained_verification_failure.as_deref() {
+                            return Ok(retain_force_merge_without_finalizing(card, message));
+                        }
+                        if let Some(error) = post_merge_check_error.as_deref() {
+                            card.assignee = None;
+                            card.agent_chat_id = None;
+                            card.status_updates.push(crate::tasks::types::StatusUpdate {
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                message: format!("Forced merge remains applied, but post-merge verification failed to run: {}. Stale worktree, branch, and agent ownership references were cleared; merge success was not inferred from verification.", error),
+                            });
+                            return Ok(true);
+                        }
+                    }
                     Ok(force
+                        && finalize_force
                         && finalize_force_merge_card_if_current(
                             card,
                             expected_assignee.as_deref(),
@@ -1319,6 +1534,8 @@ Use `cat <file>` to see conflict markers in each file."#,
                 storage::update_task_stats(gcx.clone(), &task_id).await?;
             }
         }
+
+        let post_merge_check = post_merge_check_result?;
 
         let cleanup_info = if agent_branch != base_branch {
             if agent_worktree_dirty {
@@ -1338,8 +1555,14 @@ Use `cat <file>` to see conflict markers in each file."#,
             "Cleanup skipped because agent branch matches base branch.".to_string()
         };
 
-        let mut result_message = format!(
-            r#"# Agent Work Merged
+        let mut result_message = if squash_nothing_to_commit {
+            format!(
+                "# Nothing to Merge\n\n**Card:** {}\n**Branch:** {} → {}\n\n**Cleanup:** {}",
+                card_id, agent_branch, base_branch, cleanup_info
+            )
+        } else {
+            format!(
+                r#"# Agent Work Merged
 
 **Card:** {}
 **Strategy:** {}
@@ -1347,8 +1570,9 @@ Use `cat <file>` to see conflict markers in each file."#,
 **Cleanup:** {}
 
 The agent's work has been successfully merged back to the main branch."#,
-            card_id, strategy, agent_branch, base_branch, cleanup_info
-        );
+                card_id, strategy, agent_branch, base_branch, cleanup_info
+            )
+        };
         append_verifier_warning(&mut result_message, verifier_warning.as_deref());
         append_completion_warning(&mut result_message, completion_warning.as_deref());
         if let Some(post_merge_check) = post_merge_check.as_ref() {
@@ -1566,6 +1790,73 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
+    fn post_merge_message_only_labels_command_failures_as_regressions() {
+        use crate::chat::post_merge_check::PostMergeCheckResult;
+        use crate::tasks::types::VerificationOutcome;
+
+        for (outcome, expected) in [
+            (
+                VerificationOutcome::Rejected,
+                "rejected by the command filter",
+            ),
+            (
+                VerificationOutcome::PolicyDenied,
+                "denied by command policy",
+            ),
+            (
+                VerificationOutcome::InfrastructureFailed,
+                "infrastructure failure",
+            ),
+            (VerificationOutcome::NoCommands, "no verification commands"),
+            (VerificationOutcome::Unknown, "unknown result"),
+        ] {
+            let result = PostMergeCheckResult {
+                checked: true,
+                auto_reverted: false,
+                command: Some("cargo test".to_string()),
+                exit_code: None,
+                output_tail: "details".to_string(),
+                merge_commit: None,
+                revert_commit: None,
+                fix_card_id: None,
+                skipped_reason: None,
+                revert_skipped_reason: None,
+                outcome,
+            };
+            let mut message = String::new();
+            append_post_merge_check_message(&mut message, &result);
+            assert!(message.contains(expected), "{message}");
+            assert!(!message.contains("regression"), "{message}");
+            assert!(!message.contains("Fix card"), "{message}");
+        }
+    }
+
+    #[test]
+    fn post_merge_message_does_not_invent_fix_card() {
+        use crate::chat::post_merge_check::PostMergeCheckResult;
+        use crate::tasks::types::VerificationOutcome;
+
+        let result = PostMergeCheckResult {
+            checked: true,
+            auto_reverted: false,
+            command: Some("cargo test".to_string()),
+            exit_code: Some(1),
+            output_tail: "test failed".to_string(),
+            merge_commit: Some("abc".to_string()),
+            revert_commit: None,
+            fix_card_id: None,
+            skipped_reason: None,
+            revert_skipped_reason: Some("HEAD changed".to_string()),
+            outcome: VerificationOutcome::CommandFailed,
+        };
+        let mut message = String::new();
+        append_post_merge_check_message(&mut message, &result);
+
+        assert!(message.contains("Post-merge regression"));
+        assert!(!message.contains("Fix card"));
+    }
+
+    #[test]
     fn merge_agent_strategy_arg_defaults_to_squash() {
         assert_eq!(strategy_arg(&HashMap::new()).unwrap(), "squash");
     }
@@ -1647,7 +1938,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[test]
-    fn merge_agent_proceeds_when_force_true() {
+    fn merge_agent_force_cannot_bypass_genuine_failure() {
         let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
         card.verifier_report = Some(VerifierReport {
             passed: false,
@@ -1656,7 +1947,49 @@ mod worktree_merge_tool_tests {
             ..Default::default()
         });
 
-        assert!(ensure_verifier_allows_merge(&card, true).is_ok());
+        assert!(ensure_verifier_allows_merge(&card, true).is_err());
+    }
+
+    #[test]
+    fn merge_agent_blocks_contradictory_passed_report() {
+        use crate::tasks::types::{
+            VerificationOutcome, VerificationResult, VerifierReportClassification,
+        };
+
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(VerifierReport {
+            passed: true,
+            classification: VerifierReportClassification::Passed,
+            command_results: vec![VerificationResult {
+                command: "cargo test".to_string(),
+                passed: false,
+                outcome: VerificationOutcome::CommandFailed,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        assert!(ensure_verifier_allows_merge(&card, false).is_err());
+        assert!(ensure_verifier_allows_merge(&card, true).is_err());
+    }
+
+    #[test]
+    fn merge_agent_fails_closed_for_ambiguous_legacy_unknown_result() {
+        use crate::tasks::types::{VerificationResult, VerifierReportClassification};
+
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(VerifierReport {
+            passed: true,
+            classification: VerifierReportClassification::Unknown,
+            command_results: vec![VerificationResult {
+                command: "cargo test".to_string(),
+                passed: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        assert!(ensure_verifier_allows_merge(&card, true).is_err());
     }
 
     #[test]
@@ -1669,6 +2002,149 @@ mod worktree_merge_tool_tests {
         assert!(err.contains("verifier failed"));
         assert!(err.contains("Verifier failed to launch"));
         assert!(err.contains("force=true"));
+    }
+
+    #[test]
+    fn merge_agent_force_allows_legacy_launch_failure_only() {
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(launch_failure_verifier_report());
+        assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_some());
+
+        card.verifier_report = Some(VerifierReport {
+            passed: false,
+            recommendation: "human-review".to_string(),
+            concerns: vec!["unknown legacy failure".to_string()],
+            ..Default::default()
+        });
+        assert!(ensure_verifier_allows_merge(&card, true).is_err());
+    }
+
+    #[test]
+    fn merge_agent_force_blocks_mixed_legacy_launch_failure_concerns() {
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        let mut report = launch_failure_verifier_report();
+        report
+            .concerns
+            .push("Implementation does not satisfy the requested behavior".to_string());
+        card.verifier_report = Some(report);
+
+        assert!(ensure_verifier_allows_merge(&card, true).is_err());
+    }
+
+    #[test]
+    fn merge_agent_force_blocks_empty_typed_infrastructure_human_review() {
+        use crate::tasks::types::{
+            VerificationOutcome, VerificationResult, VerifierReportClassification,
+        };
+
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(VerifierReport {
+            passed: false,
+            recommendation: "human-review".to_string(),
+            classification: VerifierReportClassification::HumanReview,
+            command_results: vec![VerificationResult {
+                command: "cargo test".to_string(),
+                passed: false,
+                outcome: VerificationOutcome::InfrastructureFailed,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        assert!(ensure_verifier_allows_merge(&card, true).is_err());
+    }
+
+    #[test]
+    fn merge_agent_force_allows_typed_launch_failure_without_command_results() {
+        use crate::tasks::types::VerifierReportClassification;
+
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        let mut report = launch_failure_verifier_report();
+        report.classification = VerifierReportClassification::HumanReview;
+        card.verifier_report = Some(report);
+
+        assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_some());
+    }
+
+    #[test]
+    fn merge_agent_force_blocks_semantic_typed_infrastructure_human_review() {
+        use crate::tasks::types::{
+            VerificationOutcome, VerificationResult, VerifierReportClassification,
+        };
+
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(VerifierReport {
+            passed: false,
+            concerns: vec!["Implementation does not satisfy the requested behavior".to_string()],
+            recommendation: "human-review".to_string(),
+            classification: VerifierReportClassification::HumanReview,
+            command_results: vec![VerificationResult {
+                command: "cargo test".to_string(),
+                passed: false,
+                outcome: VerificationOutcome::InfrastructureFailed,
+                ..Default::default()
+            }],
+        });
+
+        assert!(ensure_verifier_allows_merge(&card, true).is_err());
+    }
+
+    #[test]
+    fn merge_agent_force_blocks_passing_commands_with_semantic_concern() {
+        use crate::tasks::types::{
+            VerificationOutcome, VerificationResult, VerifierReportClassification,
+        };
+
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(VerifierReport {
+            passed: false,
+            concerns: vec!["Implementation does not satisfy the requested behavior".to_string()],
+            recommendation: "human-review".to_string(),
+            classification: VerifierReportClassification::HumanReview,
+            command_results: vec![VerificationResult {
+                command: "cargo test".to_string(),
+                passed: true,
+                outcome: VerificationOutcome::Passed,
+                ..Default::default()
+            }],
+        });
+
+        assert!(ensure_verifier_allows_merge(&card, true).is_err());
+    }
+
+    #[test]
+    fn merge_agent_force_allows_mixed_passed_and_infrastructure_human_review() {
+        use crate::tasks::types::{
+            VerificationOutcome, VerificationResult, VerifierReportClassification,
+        };
+
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(VerifierReport {
+            passed: false,
+            concerns: vec![
+                "Verification command failed: cargo clippy".to_string(),
+                "Verifier review subchat unavailable; human review recommended: no model configured"
+                    .to_string(),
+            ],
+            recommendation: "human-review".to_string(),
+            classification: VerifierReportClassification::HumanReview,
+            command_results: vec![
+                VerificationResult {
+                    command: "cargo test".to_string(),
+                    passed: true,
+                    outcome: VerificationOutcome::Passed,
+                    ..Default::default()
+                },
+                VerificationResult {
+                    command: "cargo clippy".to_string(),
+                    passed: false,
+                    outcome: VerificationOutcome::InfrastructureFailed,
+                    ..Default::default()
+                },
+            ],
+        });
+
+        assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_some());
     }
 
     #[test]
@@ -2442,7 +2918,7 @@ mod worktree_merge_tool_tests {
     }
 
     #[tokio::test]
-    async fn worktree_merge_falls_back_to_legacy_metadata_when_registry_id_is_stale() {
+    async fn worktree_merge_registered_error_does_not_fall_back_to_legacy_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
         std::fs::create_dir_all(&source).unwrap();
@@ -2477,23 +2953,28 @@ mod worktree_merge_tool_tests {
         let ccx = planner_ccx(gcx.clone()).await;
         let args = HashMap::from([("card_id".to_string(), json!("T-1"))]);
 
-        let result = ToolTaskMergeAgent::new()
+        let head_before = run_git(&source, &["rev-parse", "HEAD"]);
+        let err = ToolTaskMergeAgent::new()
             .tool_execute(ccx, &"call".to_string(), &args)
             .await
-            .unwrap();
+            .unwrap_err();
 
+        assert!(!err.is_empty());
+        assert_eq!(run_git(&source, &["rev-parse", "HEAD"]), head_before);
         assert_eq!(
             std::fs::read_to_string(source.join("file.txt")).unwrap(),
-            "legacy fallback\n"
+            "hello\n"
         );
-        assert!(!agent_worktree.exists());
-        assert!(!branch_exists(&source, branch));
+        assert!(agent_worktree.exists());
+        assert!(branch_exists(&source, branch));
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         let card = board.get_card("T-1").unwrap();
-        assert!(card.agent_branch.is_none());
-        assert!(card.agent_worktree.is_none());
-        assert!(card.agent_worktree_name.is_none());
-        assert!(tool_text(&result).contains("merged"));
+        assert_eq!(card.agent_branch.as_deref(), Some(branch));
+        assert!(card.agent_worktree.is_some());
+        assert_eq!(
+            card.agent_worktree_name.as_deref(),
+            Some("missing-registry-id")
+        );
     }
 
     #[tokio::test]
@@ -2648,6 +3129,362 @@ mod worktree_merge_tool_tests {
         assert!(card.status_updates.iter().any(|update| update
             .message
             .contains("Force-merged by planner without the normal agent_finish path")));
+    }
+
+    #[tokio::test]
+    async fn registered_force_merge_finalizes_after_post_merge_check_passes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.column = "doing".to_string();
+        card.completed_at = None;
+        write_task(gcx.clone(), &source, card).await;
+        let mut response = merged_response_with_cleanup_warning();
+        response.cleanup.as_mut().unwrap().branch_deleted = true;
+
+        clear_board_mirrors_after_registered_merge(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            &response,
+            true,
+            true,
+            false,
+            None,
+            None,
+            Some("agent-1".to_string()),
+            Some("agent-chat-1".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(card.column, "done");
+        assert!(card.assignee.is_none());
+        assert!(card.agent_chat_id.is_none());
+        assert!(card.agent_branch.is_none());
+        assert!(card.agent_worktree.is_none());
+        assert!(card.agent_worktree_name.is_none());
+    }
+
+    #[tokio::test]
+    async fn registered_force_merge_auto_revert_clears_stale_refs_without_finishing_card() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.column = "doing".to_string();
+        card.completed_at = None;
+        write_task(gcx.clone(), &source, card).await;
+        let mut response = merged_response_with_cleanup_warning();
+        response.cleanup.as_mut().unwrap().branch_deleted = true;
+
+        clear_board_mirrors_after_registered_merge(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            &response,
+            true,
+            false,
+            true,
+            None,
+            None,
+            Some("agent-1".to_string()),
+            Some("agent-chat-1".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(card.column, "doing");
+        assert!(card.completed_at.is_none());
+        assert!(card.assignee.is_none());
+        assert!(card.agent_chat_id.is_none());
+        assert!(card.agent_branch.is_none());
+        assert!(card.agent_worktree.is_none());
+        assert!(card.agent_worktree_name.is_none());
+        assert!(card
+            .status_updates
+            .iter()
+            .any(|update| update.message.contains("Forced merge was auto-reverted")));
+        assert!(!card
+            .status_updates
+            .iter()
+            .any(|update| update.message.contains("marked done for manual review")));
+    }
+
+    #[tokio::test]
+    async fn registered_force_merge_retains_typed_failure_without_finishing_card() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.column = "doing".to_string();
+        card.completed_at = None;
+        write_task(gcx.clone(), &source, card).await;
+        let mut response = merged_response_with_cleanup_warning();
+        response.cleanup.as_mut().unwrap().branch_deleted = true;
+
+        clear_board_mirrors_after_registered_merge(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            &response,
+            true,
+            false,
+            false,
+            Some("Forced merge remains applied, but post-merge verification did not pass: verification was denied by policy. Stale agent ownership was cleared; the merged work is retained and the card was not marked done.".to_string()),
+            None,
+            Some("agent-1".to_string()),
+            Some("agent-chat-1".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(card.column, "doing");
+        assert!(card.completed_at.is_none());
+        assert!(card.assignee.is_none());
+        assert!(card.agent_chat_id.is_none());
+        assert!(card.agent_branch.is_none());
+        assert!(card.agent_worktree.is_none());
+        assert!(card.agent_worktree_name.is_none());
+        assert!(card
+            .status_updates
+            .iter()
+            .any(|update| update.message.contains("merged work is retained")));
+    }
+
+    #[test]
+    fn force_merge_finalization_requires_typed_pass_or_absent_check() {
+        use crate::chat::post_merge_check::PostMergeCheckResult;
+        use crate::tasks::types::VerificationOutcome;
+
+        let result = |checked, outcome| PostMergeCheckResult {
+            checked,
+            outcome,
+            auto_reverted: false,
+            command: Some("cargo test".to_string()),
+            exit_code: None,
+            output_tail: String::new(),
+            merge_commit: Some("abc".to_string()),
+            revert_commit: None,
+            fix_card_id: None,
+            skipped_reason: None,
+            revert_skipped_reason: None,
+        };
+
+        assert!(force_merge_post_check_passed_or_absent(&Ok(None)));
+        assert!(force_merge_post_check_passed_or_absent(&Ok(Some(result(
+            true,
+            VerificationOutcome::Passed,
+        )))));
+        for outcome in [
+            VerificationOutcome::CommandFailed,
+            VerificationOutcome::Rejected,
+            VerificationOutcome::PolicyDenied,
+            VerificationOutcome::InfrastructureFailed,
+            VerificationOutcome::NoCommands,
+        ] {
+            let checked_failure = Ok(Some(result(true, outcome)));
+            assert!(!force_merge_post_check_passed_or_absent(&checked_failure));
+            let audit = retained_post_merge_verification_failure(&checked_failure).unwrap();
+            assert!(audit.contains("merged work is retained"), "{audit}");
+        }
+        assert!(!force_merge_post_check_passed_or_absent(&Ok(Some(result(
+            false,
+            VerificationOutcome::Passed,
+        )))));
+        assert!(!force_merge_post_check_passed_or_absent(&Err(
+            "verification unavailable".to_string()
+        )));
+    }
+
+    #[test]
+    fn legacy_typed_failure_without_revert_clears_ownership_but_does_not_finalize() {
+        use crate::chat::post_merge_check::PostMergeCheckResult;
+        use crate::tasks::types::VerificationOutcome;
+
+        let result = Ok(Some(PostMergeCheckResult {
+            checked: true,
+            outcome: VerificationOutcome::InfrastructureFailed,
+            auto_reverted: false,
+            command: Some("cargo test".to_string()),
+            exit_code: None,
+            output_tail: "runner unavailable".to_string(),
+            merge_commit: Some("abc".to_string()),
+            revert_commit: None,
+            fix_card_id: None,
+            skipped_reason: None,
+            revert_skipped_reason: Some("not deterministic".to_string()),
+        }));
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.column = "doing".to_string();
+        card.completed_at = None;
+
+        let message = retained_post_merge_verification_failure(&result).unwrap();
+        assert!(!force_merge_post_check_passed_or_absent(&result));
+        assert!(retain_force_merge_without_finalizing(&mut card, &message));
+        assert_eq!(card.column, "doing");
+        assert!(card.completed_at.is_none());
+        assert!(card.assignee.is_none());
+        assert!(card.agent_chat_id.is_none());
+        assert!(card.status_updates[0]
+            .message
+            .contains("merged work is retained"));
+    }
+
+    #[tokio::test]
+    async fn registered_post_merge_check_error_still_reconciles_cleanup_without_finalizing() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.column = "doing".to_string();
+        card.completed_at = None;
+        write_task(gcx.clone(), &source, card).await;
+        let mut response = merged_response_with_cleanup_warning();
+        response.cleanup.as_mut().unwrap().branch_deleted = true;
+
+        // finalize_force_merge=false models an errored verification result: cleanup has
+        // already happened in git, so its mirrors must be reconciled before returning it.
+        clear_board_mirrors_after_registered_merge(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            &response,
+            true,
+            false,
+            false,
+            None,
+            Some("verification service unavailable".to_string()),
+            Some("agent-1".to_string()),
+            Some("agent-chat-1".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(card.column, "doing");
+        assert!(card.assignee.is_none());
+        assert!(card.agent_chat_id.is_none());
+        assert!(card.agent_branch.is_none());
+        assert!(card.agent_worktree.is_none());
+        assert!(card.agent_worktree_name.is_none());
+        assert!(card.status_updates.iter().any(|update| update
+            .message
+            .contains("post-merge verification failed to run")));
+    }
+
+    #[tokio::test]
+    async fn registered_non_force_cleanup_preserves_rebound_card_pointers() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut card = test_card("wt-new", "agent-new", Path::new("/tmp/worktree-new"));
+        card.assignee = Some("agent-2".to_string());
+        card.agent_chat_id = Some("agent-chat-2".to_string());
+        write_task(gcx.clone(), &source, card).await;
+        let mut response = merged_response_with_cleanup_warning();
+        response.cleanup.as_mut().unwrap().branch_deleted = true;
+
+        clear_board_mirrors_after_registered_merge(
+            gcx.clone(),
+            "task-1",
+            "T-1",
+            &response,
+            false,
+            false,
+            false,
+            None,
+            None,
+            Some("agent-1".to_string()),
+            Some("agent-chat-1".to_string()),
+        )
+        .await
+        .unwrap();
+
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert_eq!(card.assignee.as_deref(), Some("agent-2"));
+        assert_eq!(card.agent_chat_id.as_deref(), Some("agent-chat-2"));
+        assert_eq!(card.agent_branch.as_deref(), Some("agent-new"));
+        assert_eq!(card.agent_worktree.as_deref(), Some("/tmp/worktree-new"));
+        assert_eq!(card.agent_worktree_name.as_deref(), Some("wt-new"));
+    }
+
+    #[tokio::test]
+    async fn legacy_squash_nothing_to_commit_does_not_verify_or_revert_existing_head() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let agent_worktree = temp.path().join("agent-worktree-squash-noop");
+        let branch = "refact/task/task-1/card/T-1/squash-noop";
+        create_legacy_agent_worktree(&source, &agent_worktree, branch);
+        commit_file(
+            &agent_worktree,
+            "file.txt",
+            "temporary\n",
+            "temporary change",
+        );
+        commit_file(
+            &agent_worktree,
+            "file.txt",
+            "hello\n",
+            "restore base content",
+        );
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        set_workspace(gcx.clone(), &source).await;
+        write_task(
+            gcx.clone(),
+            &source,
+            test_card_with_branch(None, branch, &agent_worktree),
+        )
+        .await;
+        let head_before = run_git(&source, &["rev-parse", "HEAD"]);
+        let ccx = planner_ccx(gcx.clone()).await;
+        let args = HashMap::from([
+            ("card_id".to_string(), json!("T-1")),
+            ("strategy".to_string(), json!("squash")),
+            ("auto_revert".to_string(), json!(true)),
+        ]);
+
+        let result = ToolTaskMergeAgent::new()
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+
+        assert_eq!(run_git(&source, &["rev-parse", "HEAD"]), head_before);
+        assert_eq!(
+            std::fs::read_to_string(source.join("file.txt")).unwrap(),
+            "hello\n"
+        );
+        assert!(tool_text(&result).contains("Nothing to Merge"));
+        assert!(!tool_text(&result).contains("Post-merge check"));
+        assert!(!agent_worktree.exists());
+        assert!(!branch_exists(&source, branch));
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-1").unwrap();
+        assert!(card.agent_branch.is_none());
+        assert!(card.agent_worktree.is_none());
+        assert!(card.agent_worktree_name.is_none());
     }
 
     #[tokio::test]

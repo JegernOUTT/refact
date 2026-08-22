@@ -61,11 +61,6 @@ pub fn scoped_path_notices(scoped: &ScopedPath) -> Vec<String> {
             "⚠️ STRONG NOTICE: absolute path is outside active worktree; content comes from outside active worktree: {}",
             scoped.path.display()
         )]
-    } else if scoped.used_absolute_path {
-        vec![format!(
-            "⚠️ Absolute path used in active worktree: {}",
-            scoped.path.display()
-        )]
     } else {
         vec![]
     }
@@ -252,13 +247,7 @@ mod tests {
                 outside.display()
             )]
         );
-        assert_eq!(
-            scoped_path_notices(&scoped_path(worktree.clone(), true, None, false)),
-            vec![format!(
-                "⚠️ Absolute path used in active worktree: {}",
-                worktree.display()
-            )]
-        );
+        assert!(scoped_path_notices(&scoped_path(worktree.clone(), true, None, false)).is_empty());
         assert!(scoped_path_notices(&scoped_path(worktree, false, None, false)).is_empty());
     }
 

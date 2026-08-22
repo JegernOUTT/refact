@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
-use std::time::Duration;
+use std::future::Future;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use reqwest::header::{CONTENT_TYPE, USER_AGENT};
 use reqwest::Client;
@@ -41,6 +43,9 @@ const CROSSREF_BACKEND_NAME: &str = "crossref";
 const CROSSREF_WORKS_API_URL: &str = "https://api.crossref.org/works";
 const HACKER_NEWS_BACKEND_NAME: &str = "hacker_news";
 const HACKER_NEWS_SEARCH_API_URL: &str = "https://hn.algolia.com/api/v1/search";
+const BACKEND_FAILURE_THRESHOLD: u32 = 3;
+const BACKEND_FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
+const BACKEND_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
 const DEFAULT_SEARXNG_INSTANCES: &[&str] = &[
     "https://search.inetol.net/search",
@@ -81,6 +86,167 @@ impl SearchBackendError {
             detail: detail.into(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BackendFailureState {
+    consecutive_failures: u32,
+    cooldown_until: Option<Instant>,
+    recovery_mode: bool,
+    next_attempt: u64,
+    latest_completed_attempt: u64,
+    probe_attempt: Option<u64>,
+}
+
+impl Default for BackendFailureState {
+    fn default() -> Self {
+        Self {
+            consecutive_failures: 0,
+            cooldown_until: None,
+            recovery_mode: false,
+            next_attempt: 1,
+            latest_completed_attempt: 0,
+            probe_attempt: None,
+        }
+    }
+}
+
+fn backend_failure_states() -> &'static Mutex<HashMap<String, BackendFailureState>> {
+    static STATES: OnceLock<Mutex<HashMap<String, BackendFailureState>>> = OnceLock::new();
+    STATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn backend_cooldown_remaining(backend: &str, now: Instant) -> Option<Duration> {
+    let states = backend_failure_states()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let state = states.get(backend).copied()?;
+    match state.cooldown_until {
+        Some(until) if until > now => Some(until.duration_since(now)),
+        Some(_) => None,
+        None => None,
+    }
+}
+
+enum BackendAttemptLease {
+    Run(u64),
+    Skip(String),
+}
+
+struct BackendAttemptGuard {
+    backend: &'static str,
+    attempt: u64,
+}
+
+impl Drop for BackendAttemptGuard {
+    fn drop(&mut self) {
+        let mut states = backend_failure_states()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(state) = states.get_mut(self.backend) {
+            if state.probe_attempt == Some(self.attempt) {
+                state.probe_attempt = None;
+            }
+        }
+    }
+}
+
+fn lease_backend_attempt(backend: &str, now: Instant) -> BackendAttemptLease {
+    let mut states = backend_failure_states()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let state = states.entry(backend.to_string()).or_default();
+    if let Some(until) = state.cooldown_until {
+        if until > now {
+            return BackendAttemptLease::Skip(format!(
+                "temporarily skipped after repeated failures; retry in {}s",
+                until.duration_since(now).as_secs().max(1)
+            ));
+        }
+    }
+    if state.recovery_mode && state.probe_attempt.is_some() {
+        return BackendAttemptLease::Skip(
+            "temporarily skipped while a recovery probe is in progress".to_string(),
+        );
+    }
+
+    let attempt = state.next_attempt;
+    state.next_attempt = state.next_attempt.saturating_add(1);
+    if state.recovery_mode {
+        state.probe_attempt = Some(attempt);
+    }
+    BackendAttemptLease::Run(attempt)
+}
+
+fn error_needs_long_cooldown(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("429")
+        || detail.contains("rate limit")
+        || detail.contains("too many requests")
+        || detail.contains("usage limit")
+        || detail.contains("captcha")
+        || detail.contains("bot-detection")
+        || detail.contains("bot detection")
+        || detail.contains("verify you are human")
+        || detail.contains("verify you're human")
+}
+
+fn record_backend_result(
+    backend: &str,
+    attempt: u64,
+    result: &Result<Vec<SearchResult>, SearchBackendError>,
+) {
+    let mut states = backend_failure_states()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let state = states.entry(backend.to_string()).or_default();
+    let was_recovery_probe = state.probe_attempt == Some(attempt);
+    if was_recovery_probe {
+        state.probe_attempt = None;
+    }
+    if attempt <= state.latest_completed_attempt {
+        return;
+    }
+    state.latest_completed_attempt = attempt;
+    match result {
+        Ok(_) => {
+            state.consecutive_failures = 0;
+            state.cooldown_until = None;
+            state.recovery_mode = false;
+        }
+        Err(error) => {
+            state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+            let cooldown = if error_needs_long_cooldown(&error.detail) {
+                Some(BACKEND_RATE_LIMIT_COOLDOWN)
+            } else if state.consecutive_failures >= BACKEND_FAILURE_THRESHOLD {
+                Some(BACKEND_FAILURE_COOLDOWN)
+            } else {
+                None
+            };
+            if let Some(cooldown) = cooldown {
+                state.cooldown_until = Some(Instant::now() + cooldown);
+                state.recovery_mode = true;
+            }
+        }
+    }
+}
+
+async fn run_search_backend<F>(
+    backend: &'static str,
+    search: F,
+) -> Result<Vec<SearchResult>, SearchBackendError>
+where
+    F: Future<Output = Result<Vec<SearchResult>, SearchBackendError>>,
+{
+    let attempt = match lease_backend_attempt(backend, Instant::now()) {
+        BackendAttemptLease::Run(attempt) => attempt,
+        BackendAttemptLease::Skip(detail) => return Err(SearchBackendError::new(backend, detail)),
+    };
+    let _attempt_guard = BackendAttemptGuard { backend, attempt };
+    let result = search.await;
+    record_backend_result(backend, attempt, &result);
+    result
 }
 
 fn normalize_text(text: &str) -> String {
@@ -317,13 +483,46 @@ fn deduplicate_search_results(results: Vec<SearchResult>) -> Vec<SearchResult> {
 
 fn contains_ddg_block_page(body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
-    lower.contains("captcha")
-        || lower.contains("verify you're human")
-        || lower.contains("verify you are human")
-        || lower.contains("automated requests")
-        || lower.contains("unusual traffic")
+    let concrete_block_phrases = [
+        "captcha",
+        "verify you're human",
+        "verify you are human",
+        "verify-human",
+        "automated requests",
+        "automated-requests",
+        "unusual traffic",
+        "unusual-traffic",
+    ];
+    let generic_bot_phrases = [
+        "are you a bot",
+        "are you a robot",
+        "not a robot",
+        "bot detection",
+        "bot-detection",
+        "bot challenge",
+        "bot-challenge",
+        "detected as a bot",
+        "bots use duckduckgo",
+    ];
+    let supporting_challenge_markers = [
+        "access denied",
+        "complete the challenge",
+        "please try again",
+        "security check",
+    ];
+    let contains_generic_bot_phrase = generic_bot_phrases
+        .iter()
+        .any(|phrase| lower.contains(phrase));
+
+    concrete_block_phrases
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+        || contains_generic_bot_phrase
+            && (body.len() < 4000
+                || supporting_challenge_markers
+                    .iter()
+                    .any(|marker| lower.contains(marker)))
         || lower.contains("please try again") && body.len() < 4000
-        || lower.contains("bot") && body.len() < 4000
 }
 
 fn contains_searxng_block_page(body: &str) -> bool {
@@ -2065,19 +2264,55 @@ pub async fn execute_web_search_results(
         crossref_result,
         hacker_news_result,
     ) = tokio::join!(
-        search_keenable(&client, &query, num_results),
-        search_tavily(&client, &query, num_results),
-        search_brave(&client, &query, num_results),
-        search_searxng(&client, &query, num_results),
-        search_duckduckgo(&client, &query, num_results),
-        search_wikipedia(&client, &query, num_results),
-        search_github_issues(&client, &query, num_results),
-        search_github_repositories(&client, &query, num_results),
-        search_stack_overflow(&client, &query, num_results),
-        search_npm(&client, &query, num_results),
-        search_openalex(&client, &query, num_results),
-        search_crossref(&client, &query, num_results),
-        search_hacker_news(&client, &query, num_results),
+        run_search_backend(
+            KEENABLE_BACKEND_NAME,
+            search_keenable(&client, &query, num_results)
+        ),
+        run_search_backend(
+            TAVILY_BACKEND_NAME,
+            search_tavily(&client, &query, num_results)
+        ),
+        run_search_backend(
+            BRAVE_BACKEND_NAME,
+            search_brave(&client, &query, num_results)
+        ),
+        run_search_backend(
+            SEARXNG_BACKEND_NAME,
+            search_searxng(&client, &query, num_results)
+        ),
+        run_search_backend(
+            DDG_BACKEND_NAME,
+            search_duckduckgo(&client, &query, num_results)
+        ),
+        run_search_backend(
+            WIKIPEDIA_BACKEND_NAME,
+            search_wikipedia(&client, &query, num_results)
+        ),
+        run_search_backend(
+            GITHUB_ISSUES_BACKEND_NAME,
+            search_github_issues(&client, &query, num_results)
+        ),
+        run_search_backend(
+            GITHUB_REPOS_BACKEND_NAME,
+            search_github_repositories(&client, &query, num_results)
+        ),
+        run_search_backend(
+            STACK_EXCHANGE_BACKEND_NAME,
+            search_stack_overflow(&client, &query, num_results)
+        ),
+        run_search_backend(NPM_BACKEND_NAME, search_npm(&client, &query, num_results)),
+        run_search_backend(
+            OPENALEX_BACKEND_NAME,
+            search_openalex(&client, &query, num_results)
+        ),
+        run_search_backend(
+            CROSSREF_BACKEND_NAME,
+            search_crossref(&client, &query, num_results)
+        ),
+        run_search_backend(
+            HACKER_NEWS_BACKEND_NAME,
+            search_hacker_news(&client, &query, num_results)
+        ),
     );
 
     let mut merged_results = Vec::new();
@@ -2174,6 +2409,9 @@ pub async fn execute_web_search_results(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::Notify;
 
     const DDG_HTML_FIXTURE: &str = r#"
 <!DOCTYPE html>
@@ -2228,6 +2466,97 @@ mod tests {
     fn test_parse_ddg_html_empty() {
         let results = parse_ddg_html("<html><body></body></html>");
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_ddg_block_page_allows_ordinary_bot_substrings() {
+        for body in [
+            "<html><body>Robots help automate warehouse work.</body></html>",
+            "<html><body>See /robots.txt for crawler rules.</body></html>",
+            "<html><body>Our robotics club meets every Tuesday.</body></html>",
+            "<html><body>Continue at the bottom of the page.</body></html>",
+        ] {
+            assert!(!contains_ddg_block_page(body), "unexpected block: {body}");
+        }
+    }
+
+    #[test]
+    fn test_ddg_block_page_allows_generic_bot_phrases_in_large_results() {
+        for phrase in [
+            "Are you a robot?",
+            "not a robot",
+            "Are you a bot?",
+            "bot detection",
+            "bot-detection",
+            "bot challenge",
+            "bot-challenge",
+            "detected as a bot",
+            "bots use DuckDuckGo",
+        ] {
+            let body = format!(
+                "<html><body><div class=\"results\">{}<p>{phrase} This article explains the question.</p></div></body></html>",
+                "Ordinary search result content. ".repeat(200)
+            );
+            assert!(
+                !contains_ddg_block_page(&body),
+                "unexpected block: {phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ddg_block_page_detects_concrete_challenges() {
+        for body in [
+            "<html><body>Please complete this CAPTCHA.</body></html>",
+            "<html><body>Verify you are human to continue.</body></html>",
+            "<html><body>We detected automated requests.</body></html>",
+            "<html><body>Unusual traffic was detected.</body></html>",
+            "<html><body>Bot-detection challenge in progress.</body></html>",
+            "<html><body>Are you a robot?</body></html>",
+            "<html><body>Please try again later.</body></html>",
+        ] {
+            assert!(contains_ddg_block_page(body), "missed block: {body}");
+        }
+
+        for phrase in [
+            "Please complete this CAPTCHA.",
+            "Verify you're human.",
+            "A verify-human interstitial.",
+            "Automated requests were detected.",
+            "Automated-requests protection.",
+            "Unusual traffic was detected.",
+            "Unusual-traffic protection.",
+        ] {
+            let large_concrete_challenge = format!(
+                "<html><body>{phrase}{}</body></html>",
+                " challenge padding".repeat(300)
+            );
+            assert!(contains_ddg_block_page(&large_concrete_challenge));
+        }
+
+        let large_generic_challenge = format!(
+            "<html><body><h1>Security check</h1><p>Are you a bot?</p>{}</body></html>",
+            " challenge padding".repeat(300)
+        );
+        assert!(contains_ddg_block_page(&large_generic_challenge));
+
+        for phrase in [
+            "Bot detection",
+            "bot-detection",
+            "bot challenge",
+            "bot-challenge",
+            "detected as a bot",
+            "bots use DuckDuckGo",
+        ] {
+            let large_supported_challenge = format!(
+                "<html><body><h1>Access denied</h1><p>{phrase}</p>{}</body></html>",
+                " challenge padding".repeat(300)
+            );
+            assert!(
+                contains_ddg_block_page(&large_supported_challenge),
+                "missed supported challenge: {phrase}"
+            );
+        }
     }
 
     #[test]
@@ -2540,6 +2869,221 @@ This guide covers 15 best practices that separate production-quality TypeScript.
         assert_eq!(clamp_num_results(0), 1);
         assert_eq!(clamp_num_results(5), 5);
         assert_eq!(clamp_num_results(999), MAX_NUM_RESULTS);
+    }
+
+    #[tokio::test]
+    async fn backend_rate_limit_opens_circuit_and_skips_next_call() {
+        let backend = "test_rate_limit_backend";
+        backend_failure_states()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(backend);
+        let calls = AtomicUsize::new(0);
+        let first = run_search_backend(backend, async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Err(SearchBackendError::new(backend, "429 Too Many Requests"))
+        })
+        .await;
+        assert!(first.is_err());
+
+        let second = run_search_backend(backend, async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Vec::new())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(second.detail.contains("temporarily skipped"));
+    }
+
+    #[tokio::test]
+    async fn backend_success_resets_failure_count() {
+        let backend = "test_recovered_backend";
+        backend_failure_states()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(backend);
+        for _ in 0..2 {
+            let _ = run_search_backend(backend, async {
+                Err(SearchBackendError::new(backend, "temporary network error"))
+            })
+            .await;
+        }
+        run_search_backend(backend, async { Ok(Vec::new()) })
+            .await
+            .unwrap();
+        assert!(backend_cooldown_remaining(backend, Instant::now()).is_none());
+        let state = backend_failure_states()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(backend)
+            .copied()
+            .unwrap();
+        assert_eq!(state.consecutive_failures, 0);
+        assert!(state.cooldown_until.is_none());
+        assert!(!state.recovery_mode);
+    }
+
+    #[tokio::test]
+    async fn backend_allows_only_one_probe_after_cooldown() {
+        let backend = "test_single_probe_backend";
+        backend_failure_states()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                backend.to_string(),
+                BackendFailureState {
+                    consecutive_failures: BACKEND_FAILURE_THRESHOLD,
+                    cooldown_until: Some(Instant::now() - Duration::from_secs(1)),
+                    recovery_mode: true,
+                    ..Default::default()
+                },
+            );
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let probe = tokio::spawn({
+            let calls = calls.clone();
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                run_search_backend(backend, async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(Vec::new())
+                })
+                .await
+            }
+        });
+        started.notified().await;
+
+        let skipped = run_search_backend(backend, async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(skipped.detail.contains("probe is in progress"));
+
+        release.notify_one();
+        probe.await.unwrap().unwrap();
+
+        let first = lease_backend_attempt(backend, Instant::now());
+        let second = lease_backend_attempt(backend, Instant::now());
+        assert!(matches!(first, BackendAttemptLease::Run(_)));
+        assert!(matches!(second, BackendAttemptLease::Run(_)));
+        let state = backend_failure_states()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(backend)
+            .copied()
+            .unwrap();
+        assert!(!state.recovery_mode);
+    }
+
+    #[tokio::test]
+    async fn failed_probe_without_new_cooldown_remains_single_probe_gated() {
+        let backend = "test_failed_probe_remains_single_probe_backend";
+        backend_failure_states()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                backend.to_string(),
+                BackendFailureState {
+                    cooldown_until: Some(Instant::now() - Duration::from_secs(1)),
+                    recovery_mode: true,
+                    ..Default::default()
+                },
+            );
+
+        let probe = run_search_backend(backend, async {
+            Err(SearchBackendError::new(backend, "temporary network error"))
+        })
+        .await;
+        assert!(probe.is_err());
+
+        let first = lease_backend_attempt(backend, Instant::now());
+        let second = lease_backend_attempt(backend, Instant::now());
+        assert!(matches!(first, BackendAttemptLease::Run(_)));
+        assert!(matches!(second, BackendAttemptLease::Skip(_)));
+        let state = backend_failure_states()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(backend)
+            .copied()
+            .unwrap();
+        assert!(state.recovery_mode);
+        assert!(state.probe_attempt.is_some());
+    }
+
+    #[tokio::test]
+    async fn rate_limited_probe_reopens_cooldown() {
+        let backend = "test_rate_limited_probe_backend";
+        backend_failure_states()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                backend.to_string(),
+                BackendFailureState {
+                    cooldown_until: Some(Instant::now() - Duration::from_secs(1)),
+                    recovery_mode: true,
+                    ..Default::default()
+                },
+            );
+
+        let probe = run_search_backend(backend, async {
+            Err(SearchBackendError::new(backend, "429 Too Many Requests"))
+        })
+        .await;
+        assert!(probe.is_err());
+        assert!(backend_cooldown_remaining(backend, Instant::now()).is_some());
+    }
+
+    #[tokio::test]
+    async fn stale_success_cannot_clear_newer_failure_cooldown() {
+        let backend = "test_stale_success_backend";
+        backend_failure_states()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(backend);
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let stale_success = tokio::spawn({
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                run_search_backend(backend, async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(Vec::new())
+                })
+                .await
+            }
+        });
+        started.notified().await;
+
+        let newer_failure = run_search_backend(backend, async {
+            Err(SearchBackendError::new(backend, "429 Too Many Requests"))
+        })
+        .await;
+        assert!(newer_failure.is_err());
+        release.notify_one();
+        stale_success.await.unwrap().unwrap();
+
+        assert!(backend_cooldown_remaining(backend, Instant::now()).is_some());
+        let state = backend_failure_states()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(backend)
+            .copied()
+            .unwrap();
+        assert_eq!(state.latest_completed_attempt, 2);
+        assert_eq!(state.consecutive_failures, 1);
+        assert!(state.recovery_mode);
     }
 
     #[test]

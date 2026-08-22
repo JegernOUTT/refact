@@ -662,6 +662,7 @@ pub async fn handle_v1_code_intel_git_risk(
             let assembly = crate::tools::tool_codegraph::build_git_risk_assembly(
                 &intel,
                 &repo_root,
+                None,
                 Some(&service),
                 limit,
                 filter.as_deref(),

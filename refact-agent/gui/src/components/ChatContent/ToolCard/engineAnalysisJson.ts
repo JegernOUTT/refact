@@ -37,6 +37,8 @@ export interface AnalysisReport {
 interface BaseResult {
   tool: string;
   summary: string;
+  truncated?: boolean;
+  warning?: string;
 }
 export interface UiProbeResult extends BaseResult {
   matrix: Record<string, unknown>[];
@@ -1537,6 +1539,26 @@ export function buildAnalysisReport(
   const warningValue = value.warning;
   if (warningValue !== undefined && typeof warningValue !== "string")
     return null;
+  const truncatedValue = value.truncated;
+  if (truncatedValue !== undefined && typeof truncatedValue !== "boolean")
+    return null;
+  const supportsStructuredReport =
+    toolName === "codegraph_overview" ||
+    toolName === "git_risk" ||
+    toolName === "code_duplication" ||
+    toolName === "pr_blast" ||
+    toolName === "dead_code" ||
+    toolName === "security_scan" ||
+    toolName === "code_health" ||
+    toolName === "code_why" ||
+    toolName === "code_map" ||
+    toolName === "design_system" ||
+    toolName === "ui_probe" ||
+    toolName === "mark_elements" ||
+    toolName === "contrast_audit" ||
+    toolName === "image_region" ||
+    toolName === "visual_diff";
+  if (!supportsStructuredReport) return null;
   let built: Built | null = null;
   if (toolName === "codegraph_overview") built = overview(value);
   else if (toolName === "git_risk") built = gitRisk(value);
@@ -1548,14 +1570,18 @@ export function buildAnalysisReport(
   else if (toolName === "code_why") built = codeWhy(value);
   else if (toolName === "code_map") built = codeMap(value);
   else if (toolName === "design_system") built = designSystem(value);
-  else if (
-    toolName === "ui_probe" ||
-    toolName === "mark_elements" ||
-    toolName === "contrast_audit" ||
-    toolName === "image_region" ||
-    toolName === "visual_diff"
-  )
-    built = designTool(value, toolName);
+  else built = designTool(value, toolName);
+  if (!built && truncatedValue === true)
+    return {
+      warnings: typeof warningValue === "string" ? [warningValue] : [],
+      headline,
+      indexState: [],
+      indexStateRaw: null,
+      facts: [],
+      sections: [],
+      pathPrefix: null,
+      isEmpty: true,
+    };
   if (!built) return null;
   let nextLine = 1;
   const sections = built.sections.map(

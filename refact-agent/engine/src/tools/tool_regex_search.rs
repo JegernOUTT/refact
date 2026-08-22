@@ -450,10 +450,13 @@ impl Tool for ToolRegexSearch {
             files_total,
             stopped_early,
         } = search_outcome;
-        all_content.push_str("\nText matches inside files:\n");
         if search_results.is_empty() {
-            all_content.push_str("  No text matches found in any file.\n");
+            all_content.push_str(&format!(
+                "\nNo matches found for pattern '{}' in {}. 💡 Try broader scope ('workspace'), a simpler pattern, or use (?i) for case-insensitive search.\n",
+                pattern, scope
+            ));
         } else {
+            all_content.push_str("\nText matches inside files:\n");
             let mut file_results: HashMap<String, Vec<&RegexMatch>> = HashMap::new();
             search_results.iter().for_each(|rec| {
                 file_results
@@ -522,10 +525,6 @@ impl Tool for ToolRegexSearch {
             ));
         }
 
-        if all_search_results.is_empty() {
-            return Err("⚠️ No matches found for pattern or path. 💡 Try broader scope ('workspace'), simpler pattern, or use (?i) for case-insensitive".to_string());
-        }
-
         // Append related memories (short form) based on the matched file paths.
         let related_section = {
             let idx_arc = { gcx.knowledge_index.clone() };
@@ -584,6 +583,108 @@ mod tests {
             loaded_ts: u64::MAX / 2,
         });
         gcx
+    }
+
+    async fn make_ccx(gcx: Arc<GlobalContext>) -> Arc<AMutex<AtCommandsContext>> {
+        Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                crate::app_state::AppState::from_gcx(gcx).await,
+                4096,
+                20,
+                false,
+                vec![],
+                "chat".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ))
+    }
+
+    #[tokio::test]
+    async fn tool_execute_returns_successful_message_for_zero_matches() {
+        let gcx = make_gcx().await;
+        let temp = tempfile::Builder::new()
+            .prefix("refact-regex-no-match-")
+            .tempdir()
+            .unwrap();
+        let file = temp.path().join("search.rs");
+        fs::write(&file, "fn present() {}\n").unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        *gcx.documents_state.workspace_files.lock().unwrap() = vec![file];
+        let ccx = make_ccx(gcx).await;
+        let mut tool = ToolRegexSearch {
+            config_path: String::new(),
+        };
+        let args = HashMap::from_iter([
+            ("pattern".to_string(), Value::String("absent".to_string())),
+            ("scope".to_string(), Value::String("workspace".to_string())),
+        ]);
+
+        let (corrections, results) = tool
+            .tool_execute(ccx, &"search-call".to_string(), &args)
+            .await
+            .unwrap();
+
+        assert!(!corrections);
+        assert_eq!(results.len(), 1);
+        let ContextEnum::ChatMessage(message) = &results[0] else {
+            panic!("zero-match result must be a tool message");
+        };
+        let ChatContent::SimpleText(text) = &message.content else {
+            panic!("zero-match result must contain text");
+        };
+        assert!(text.contains("No matches found for pattern 'absent' in workspace."));
+        assert!(text.contains("Try broader scope"));
+        assert!(message.output_filter.is_some());
+    }
+
+    #[tokio::test]
+    async fn tool_execute_keeps_invalid_regex_and_path_as_errors() {
+        let gcx = make_gcx().await;
+        let temp = tempfile::Builder::new()
+            .prefix("refact-regex-invalid-input-")
+            .tempdir()
+            .unwrap();
+        let file = temp.path().join("search.rs");
+        fs::write(&file, "fn present() {}\n").unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        *gcx.documents_state.workspace_files.lock().unwrap() = vec![file];
+        let mut tool = ToolRegexSearch {
+            config_path: String::new(),
+        };
+        let invalid_regex_args = HashMap::from_iter([
+            ("pattern".to_string(), Value::String("[".to_string())),
+            ("scope".to_string(), Value::String("workspace".to_string())),
+        ]);
+
+        let regex_error = tool
+            .tool_execute(
+                make_ccx(gcx.clone()).await,
+                &"search-call".to_string(),
+                &invalid_regex_args,
+            )
+            .await
+            .unwrap_err();
+        assert!(regex_error.contains("Invalid regex"), "{regex_error}");
+
+        let missing_path = temp.path().join("missing.rs").to_string_lossy().to_string();
+        let invalid_path_args = HashMap::from_iter([
+            ("pattern".to_string(), Value::String("anything".to_string())),
+            ("scope".to_string(), Value::String(missing_path)),
+        ]);
+        assert!(
+            tool.tool_execute(
+                make_ccx(gcx).await,
+                &"search-call".to_string(),
+                &invalid_path_args,
+            )
+            .await
+            .is_err(),
+            "invalid path must remain a tool error"
+        );
     }
 
     #[tokio::test]

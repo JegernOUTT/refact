@@ -46,6 +46,8 @@ const CODE_MAP_MIN_MODULE_SIZE: u64 = 2;
 const CODE_MAP_LINK_EDGE_KINDS: [&str; 3] = ["calls", "inherits", "route_handler"];
 const HEALTH_SNAPSHOT_META_KEY: &str = "health_snapshots";
 const HEALTH_SNAPSHOT_LIMIT: usize = 30;
+const HEALTH_ANALYSIS_CACHE_CAPACITY: usize = 256;
+const HEALTH_GRAPH_SNAPSHOT_MAX_ATTEMPTS: usize = 2;
 
 type GitCacheKey = (PathBuf, Option<Oid>, usize);
 
@@ -135,7 +137,7 @@ pub(crate) struct HealthFileAnalysis {
     pub(crate) cache_hit: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub(crate) struct HealthAnalysisContext<'a> {
     pub(crate) repo_root: Option<&'a Path>,
     pub(crate) intel: Option<&'a refact_git_intel::GitIntel>,
@@ -160,11 +162,24 @@ struct HealthFileCore {
 
 #[derive(Default)]
 struct HealthAnalysisCache {
-    files: HashMap<String, HealthCacheEntry>,
+    files: HashMap<HealthCacheKey, HealthCacheEntry>,
+    lru: VecDeque<HealthCacheKey>,
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct HealthCacheKey {
+    path: String,
+    graph_service_identity: Option<usize>,
+    graph_generation: Option<u64>,
+    graph_scope_signature: String,
 }
 
 #[derive(Clone)]
 struct HealthCacheEntry {
+    graph_service: Option<Weak<refact_codegraph::CodeGraphService>>,
+    graph_service_identity: Option<usize>,
+    graph_generation: Option<u64>,
+    graph_scope_signature: String,
     content_hash: String,
     git_generation: Option<String>,
     coverage_signature: Option<String>,
@@ -378,6 +393,7 @@ struct ResolvedCodegraphFile {
 struct CodegraphProjectRoots {
     git_root: PathBuf,
     indexed_root: PathBuf,
+    analytics_scope_enforced: bool,
 }
 
 async fn resolve_codegraph_file(
@@ -513,6 +529,7 @@ fn scoped_codegraph_project_roots(
     Ok(Some(CodegraphProjectRoots {
         git_root: scope.effective_root().to_path_buf(),
         indexed_root: scope.source_workspace_root().to_path_buf(),
+        analytics_scope_enforced: true,
     }))
 }
 
@@ -529,7 +546,167 @@ async fn codegraph_project_roots(
     Ok(project_dir(gcx).await.map(|root| CodegraphProjectRoots {
         git_root: root.clone(),
         indexed_root: root,
+        analytics_scope_enforced: false,
     }))
+}
+
+fn analytics_scope_root(roots: Option<&CodegraphProjectRoots>) -> Option<&Path> {
+    roots
+        .filter(|roots| roots.analytics_scope_enforced)
+        .map(|roots| roots.indexed_root.as_path())
+}
+
+const CODE_INTEL_NOISE_DIRS: [&str; 10] = [
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    "coverage",
+    ".next",
+    "storybook-static",
+    ".storybook-static",
+    "vendor",
+];
+
+fn code_intel_relative_path(indexed_root: &Path, path: &str) -> Option<PathBuf> {
+    let normalized = PathBuf::from(path.replace('\\', "/"));
+    let relative = if normalized.is_absolute() {
+        normalized.strip_prefix(indexed_root).ok()?.to_path_buf()
+    } else {
+        normalized
+    };
+    if relative.as_os_str().is_empty()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    Some(relative)
+}
+
+fn code_intel_path_allowed(indexed_root: &Path, path: &str) -> bool {
+    let Some(relative) = code_intel_relative_path(indexed_root, path) else {
+        return false;
+    };
+    !relative.components().any(|component| {
+        let component = component.as_os_str().to_string_lossy();
+        CODE_INTEL_NOISE_DIRS
+            .iter()
+            .any(|noise| component.eq_ignore_ascii_case(noise))
+    })
+}
+
+#[cfg(test)]
+fn scoped_graph_data(
+    data: &refact_codegraph::analytics::GraphData,
+    indexed_root: &Path,
+) -> refact_codegraph::analytics::GraphData {
+    let nodes = data
+        .nodes
+        .iter()
+        .filter(|(_, _, path)| code_intel_path_allowed(indexed_root, path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let ids = nodes.iter().map(|(id, _, _)| *id).collect::<HashSet<_>>();
+    let edges = data
+        .edges
+        .iter()
+        .filter(|(src, dst, _)| ids.contains(src) && ids.contains(dst))
+        .cloned()
+        .collect();
+    refact_codegraph::analytics::GraphData { nodes, edges }
+}
+
+fn scoped_graph_paths(
+    data: &refact_codegraph::analytics::GraphData,
+    indexed_root: &Path,
+) -> HashSet<String> {
+    data.nodes
+        .iter()
+        .filter(|(_, _, path)| code_intel_path_allowed(indexed_root, path))
+        .map(|(_, _, path)| path.clone())
+        .collect()
+}
+
+async fn scoped_clone_analysis(
+    analysis: &CloneAnalysis,
+    indexed_root: &Path,
+) -> Result<CloneAnalysis, String> {
+    let text_by_path = analysis
+        .text_by_path
+        .iter()
+        .filter(|(path, _)| code_intel_path_allowed(indexed_root, path))
+        .map(|(path, text)| (path.clone(), text.clone()))
+        .collect::<HashMap<_, _>>();
+    let generation = analysis.generation;
+    let triples = text_by_path
+        .iter()
+        .map(|(path, (lang, text))| (path.clone(), lang.clone(), text.clone()))
+        .collect::<Vec<_>>();
+    tokio::task::spawn_blocking(move || {
+        let scoped = refact_codehealth::duplication::cross_file_analysis(&triples);
+        CloneAnalysis {
+            generation,
+            clones: scoped.clones,
+            duplication_pct: scoped.duplication_pct,
+            files: text_by_path.len(),
+            text_by_path,
+            tokens_by_path: scoped.tokens_by_path,
+            duplicated_tokens_by_path: scoped.duplicated_tokens_by_path,
+        }
+    })
+    .await
+    .map_err(|e| format!("scoped cross-file clone analysis join: {e}"))
+}
+
+#[cfg(test)]
+fn scoped_dead_symbols(
+    dead: Vec<refact_codegraph::dead_code::DeadSymbol>,
+    indexed_root: Option<&Path>,
+) -> Vec<refact_codegraph::dead_code::DeadSymbol> {
+    dead.into_iter()
+        .filter(|symbol| {
+            indexed_root.is_none_or(|root| code_intel_path_allowed(root, &symbol.path))
+        })
+        .collect()
+}
+
+fn scoped_code_map_inputs(
+    indexed_root: &Path,
+    files_text: Vec<(String, String)>,
+    node_records: Vec<(i64, String, String, String, Option<String>)>,
+    edges: Vec<refact_codegraph::analytics::GraphEdge>,
+    centrality: refact_codegraph::analytics::FileCentrality,
+) -> (
+    Vec<(String, String)>,
+    Vec<(i64, String, String, String, Option<String>)>,
+    Vec<refact_codegraph::analytics::GraphEdge>,
+    refact_codegraph::analytics::FileCentrality,
+) {
+    let files_text = files_text
+        .into_iter()
+        .filter(|(path, _)| code_intel_path_allowed(indexed_root, path))
+        .collect();
+    let node_records = node_records
+        .into_iter()
+        .filter(|(_, _, _, path, _)| code_intel_path_allowed(indexed_root, path))
+        .collect::<Vec<_>>();
+    let ids = node_records
+        .iter()
+        .map(|(id, _, _, _, _)| *id)
+        .collect::<HashSet<_>>();
+    let edges: Vec<refact_codegraph::analytics::GraphEdge> = edges
+        .into_iter()
+        .filter(|(src, dst, _)| ids.contains(src) && ids.contains(dst))
+        .collect();
+    (files_text, node_records, edges, centrality)
 }
 
 pub(crate) async fn project_dir(gcx: Arc<crate::global_context::GlobalContext>) -> Option<PathBuf> {
@@ -862,6 +1039,7 @@ pub(crate) async fn dead_code_report(
         min_confidence,
         repo_dir.as_deref(),
         repo_dir.as_deref(),
+        None,
     )
     .await
 }
@@ -873,6 +1051,7 @@ async fn dead_code_report_with_roots(
     min_confidence: f64,
     git_root: Option<&Path>,
     indexed_root: Option<&Path>,
+    analytics_scope_root: Option<&Path>,
 ) -> Result<DeadCodeReport, String> {
     let service = gcx
         .codegraph
@@ -883,7 +1062,18 @@ async fn dead_code_report_with_roots(
     let readiness = service.index_readiness().await?;
     let index_state = dead_code_index_state(&readiness);
     let warning = dead_code_partial_warning(&index_state);
-    let dead = service.dead_code().await?;
+    let dead = match analytics_scope_root {
+        Some(root) => {
+            let cached = service.cached_graph_analytics().await?;
+            let paths = scoped_graph_paths(&cached.data, root);
+            service
+                .scoped_graph_analytics(&paths)
+                .await?
+                .dead_code
+                .clone()
+        }
+        None => service.dead_code().await?,
+    };
     let intel = match git_root {
         Some(dir) => cached_mine_history_async(dir, DEAD_CODE_HISTORY_COMMITS)
             .await
@@ -893,10 +1083,17 @@ async fn dead_code_report_with_roots(
     let now_ts = current_unix_ts();
     let facts = {
         let dead = dead.clone();
+        let git_root = git_root.map(Path::to_path_buf);
         let indexed_root = indexed_root.map(Path::to_path_buf);
         let intel = intel.clone();
         tokio::task::spawn_blocking(move || {
-            dead_code_git_facts_by_node(&dead, indexed_root.as_deref(), intel.as_ref(), now_ts)
+            dead_code_git_facts_by_node(
+                &dead,
+                git_root.as_deref(),
+                indexed_root.as_deref(),
+                intel.as_ref(),
+                now_ts,
+            )
         })
         .await
         .map_err(|e| format!("dead code git facts join: {e}"))?
@@ -1009,6 +1206,7 @@ fn dead_code_git_recency(facts: &DeadCodeGitFacts) -> String {
 fn dead_code_git_facts_by_node(
     dead: &[refact_codegraph::dead_code::DeadSymbol],
     repo_root: Option<&Path>,
+    indexed_root: Option<&Path>,
     intel: Option<&refact_git_intel::GitIntel>,
     now_ts: i64,
 ) -> HashMap<i64, DeadCodeGitFacts> {
@@ -1031,7 +1229,7 @@ fn dead_code_git_facts_by_node(
     let mut facts_by_node = HashMap::new();
     let mut ranges_by_path: HashMap<String, Vec<(String, usize, usize)>> = HashMap::new();
     for symbol in dead {
-        let key = dead_code_git_key(&symbol.path, repo_root);
+        let key = dead_code_git_key(&symbol.path, indexed_root.or(repo_root));
         let facts = DeadCodeGitFacts {
             last_touched_days: None,
             file_churn: intel
@@ -1160,13 +1358,33 @@ pub(crate) fn analyze_health_file_shared(
     text: String,
     ctx: &HealthAnalysisContext<'_>,
 ) -> Result<HealthFileAnalysis, String> {
+    analyze_health_file_shared_for_path(path, text, None, ctx)
+}
+
+fn analyze_health_file_shared_for_path(
+    path: String,
+    text: String,
+    coverage_path: Option<&Path>,
+    ctx: &HealthAnalysisContext<'_>,
+) -> Result<HealthFileAnalysis, String> {
     let lang = refact_codegraph::lang_from_path(&path).to_string();
     let content_hash = health_content_hash(&text, &lang);
     let git_generation = health_git_generation(ctx.intel);
-    let coverage_signature = health_coverage_signature(ctx.coverage, &path, ctx.repo_root);
+    let coverage_signature =
+        health_coverage_signature(ctx.coverage, &path, coverage_path, ctx.repo_root);
     let trend_signature = health_trend_signature(ctx.trend_findings, &path, ctx.repo_root);
+    let graph_generation = ctx.graph.map(|graph| graph.graph_generation);
+    let graph_service_identity = ctx.graph.map(|graph| graph.service_identity);
+    let graph_scope_signature = ctx
+        .graph
+        .map(|graph| graph.scope_signature.clone())
+        .unwrap_or_else(|| "no-graph".to_string());
     if let Some(core) = health_cache_lookup(
         &path,
+        ctx.graph.map(|graph| &graph.service),
+        graph_service_identity,
+        graph_generation,
+        &graph_scope_signature,
         &content_hash,
         &git_generation,
         &coverage_signature,
@@ -1175,9 +1393,13 @@ pub(crate) fn analyze_health_file_shared(
         return Ok(health_analysis_from_core(core, true));
     }
 
-    let core = compute_health_core(path, text, lang, ctx)?;
+    let core = compute_health_core(path, text, lang, coverage_path, ctx)?;
     health_cache_store(
         &core.path,
+        ctx.graph.map(|graph| graph.service.clone()),
+        graph_service_identity,
+        graph_generation,
+        graph_scope_signature,
         content_hash,
         git_generation,
         coverage_signature,
@@ -1223,35 +1445,90 @@ fn health_git_generation(intel: Option<&refact_git_intel::GitIntel>) -> Option<S
 
 fn health_cache_lookup(
     path: &str,
+    graph_service: Option<&Arc<refact_codegraph::CodeGraphService>>,
+    graph_service_identity: Option<usize>,
+    graph_generation: Option<u64>,
+    graph_scope_signature: &str,
     content_hash: &str,
     git_generation: &Option<String>,
     coverage_signature: &Option<String>,
     trend_signature: &str,
 ) -> Option<HealthFileCore> {
-    let cache = health_analysis_cache().lock().unwrap();
-    cache
+    let mut cache = health_analysis_cache().lock().unwrap();
+    let key = HealthCacheKey {
+        path: path.to_string(),
+        graph_service_identity,
+        graph_generation,
+        graph_scope_signature: graph_scope_signature.to_string(),
+    };
+    let core = cache
         .files
-        .get(path)
+        .get(&key)
         .filter(|entry| {
-            entry.content_hash == content_hash
+            let same_service = match (graph_service, entry.graph_service.as_ref()) {
+                (Some(service), Some(weak)) => weak
+                    .upgrade()
+                    .is_some_and(|cached| Arc::ptr_eq(&cached, service)),
+                (None, None) => true,
+                _ => false,
+            };
+            same_service
+                && entry.graph_service_identity == graph_service_identity
+                && entry.graph_generation == graph_generation
+                && entry.graph_scope_signature == graph_scope_signature
+                && entry.content_hash == content_hash
                 && &entry.git_generation == git_generation
                 && &entry.coverage_signature == coverage_signature
                 && entry.trend_signature == trend_signature
         })
-        .map(|entry| entry.core.clone())
+        .map(|entry| entry.core.clone());
+    if core.is_some() {
+        cache.lru.retain(|cached_key| cached_key != &key);
+        cache.lru.push_back(key);
+    }
+    core
 }
 
 fn health_cache_store(
     path: &str,
+    graph_service: Option<Arc<refact_codegraph::CodeGraphService>>,
+    graph_service_identity: Option<usize>,
+    graph_generation: Option<u64>,
+    graph_scope_signature: String,
     content_hash: String,
     git_generation: Option<String>,
     coverage_signature: Option<String>,
     trend_signature: String,
     core: HealthFileCore,
 ) {
-    health_analysis_cache().lock().unwrap().files.insert(
-        path.to_string(),
+    let key = HealthCacheKey {
+        path: path.to_string(),
+        graph_service_identity,
+        graph_generation,
+        graph_scope_signature: graph_scope_signature.clone(),
+    };
+    let mut cache = health_analysis_cache().lock().unwrap();
+    cache.files.retain(|cached_key, entry| {
+        entry
+            .graph_service
+            .as_ref()
+            .is_none_or(|weak| weak.upgrade().is_some())
+            && !(graph_service_identity.is_some()
+                && cached_key.graph_service_identity == graph_service_identity
+                && cached_key.graph_generation != graph_generation)
+    });
+    let live_keys = cache.files.keys().cloned().collect::<HashSet<_>>();
+    cache
+        .lru
+        .retain(|cached_key| live_keys.contains(cached_key));
+    cache.lru.retain(|cached_key| cached_key != &key);
+    cache.files.insert(
+        key.clone(),
         HealthCacheEntry {
+            graph_service: graph_service.as_ref().map(Arc::downgrade),
+            graph_service_identity,
+            graph_generation,
+            graph_scope_signature,
             content_hash,
             git_generation,
             coverage_signature,
@@ -1259,12 +1536,21 @@ fn health_cache_store(
             core,
         },
     );
+    cache.lru.push_back(key);
+    while cache.files.len() > HEALTH_ANALYSIS_CACHE_CAPACITY {
+        if let Some(oldest) = cache.lru.pop_front() {
+            cache.files.remove(&oldest);
+        } else {
+            break;
+        }
+    }
 }
 
 fn compute_health_core(
     path: String,
     text: String,
     lang: String,
+    coverage_path: Option<&Path>,
     ctx: &HealthAnalysisContext<'_>,
 ) -> Result<HealthFileCore, String> {
     let health = refact_codehealth::analyze(&lang, &text);
@@ -1277,6 +1563,7 @@ fn compute_health_core(
     findings.extend(health_git_findings(&path, ctx, &health)?);
     findings.extend(health_coverage_findings(
         &path,
+        coverage_path,
         ctx.coverage,
         ctx.repo_root,
         ctx.intel,
@@ -1430,8 +1717,20 @@ fn health_git_findings(
     let (Some(intel), Some(repo_root)) = (ctx.intel, ctx.repo_root) else {
         return Ok(Vec::new());
     };
-    let repo_root_str = repo_root.to_string_lossy();
-    let path_key = refact_git_intel::paths::repo_relative_or_basename(path, &repo_root_str);
+    let path_key = ctx
+        .graph
+        .and_then(|graph| graph.file_nodes(path).first().copied())
+        .and_then(|(_, _, stored_path)| {
+            ctx.graph
+                .and_then(|graph| graph.import_index.as_ref())
+                .and_then(|index| {
+                    code_intel_relative_path(Path::new(&index.indexed_root), stored_path)
+                })
+                .map(|path| path.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| {
+            refact_git_intel::paths::repo_relative_or_basename(path, &repo_root.to_string_lossy())
+        });
     let ranges = if ctx.git_function_fact_paths.contains(&path_key) {
         health
             .functions
@@ -1460,6 +1759,7 @@ fn health_git_findings(
 
 fn health_coverage_findings(
     path: &str,
+    coverage_path: Option<&Path>,
     coverage: Option<&refact_codehealth::coverage::CoverageReport>,
     repo_root: Option<&Path>,
     intel: Option<&refact_git_intel::GitIntel>,
@@ -1468,7 +1768,7 @@ fn health_coverage_findings(
     let Some(coverage) = coverage else {
         return Vec::new();
     };
-    let Some(file) = coverage_file_for_path(coverage, path, repo_root) else {
+    let Some(file) = coverage_file_for_path(coverage, path, coverage_path, repo_root) else {
         return Vec::new();
     };
     let mut complexity_by_file = HashMap::new();
@@ -1490,29 +1790,88 @@ fn health_coverage_findings(
 
 fn coverage_file_for_path(
     coverage: &refact_codehealth::coverage::CoverageReport,
-    path: &str,
+    indexed_path: &str,
+    coverage_path: Option<&Path>,
     repo_root: Option<&Path>,
 ) -> Option<refact_codehealth::coverage::FileCoverage> {
+    let worktree_path = coverage_path.map(|path| path.to_string_lossy().to_string());
+    let project_relative = coverage_path.and_then(|path| {
+        repo_root
+            .and_then(|root| path.strip_prefix(root).ok())
+            .map(|path| path.to_string_lossy().to_string())
+    });
+    let targets = [
+        Some(indexed_path.to_string()),
+        worktree_path,
+        project_relative,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
     let matches = coverage
         .files
         .iter()
-        .filter(|file| health_paths_refer_to_same_file(&file.path, path, repo_root))
+        .filter(|file| {
+            targets
+                .iter()
+                .any(|target| coverage_paths_match_strongly(&file.path, target, repo_root))
+        })
         .cloned()
         .collect::<Vec<_>>();
     if matches.len() == 1 {
-        matches.into_iter().next()
-    } else {
-        None
+        return matches.into_iter().next();
     }
+    if !matches.is_empty() {
+        return None;
+    }
+
+    let requested_basenames = targets
+        .iter()
+        .map(|path| graph_path_basename(path))
+        .collect::<HashSet<_>>();
+    let fallback = coverage
+        .files
+        .iter()
+        .filter(|file| requested_basenames.contains(&graph_path_basename(&file.path)))
+        .collect::<Vec<_>>();
+    (fallback.len() == 1).then(|| fallback[0].clone())
+}
+
+fn coverage_paths_match_strongly(a: &str, b: &str, repo_root: Option<&Path>) -> bool {
+    let normalized_a = normalize_health_path(a);
+    let normalized_b = normalize_health_path(b);
+    if normalized_a == normalized_b {
+        return true;
+    }
+    let Some(root) = repo_root else {
+        return false;
+    };
+    let root = root.to_string_lossy();
+    let relative_a = refact_git_intel::paths::repo_relative(&normalized_a, &root)
+        .map(refact_git_intel::paths::normalize_separators);
+    let relative_b = refact_git_intel::paths::repo_relative(&normalized_b, &root)
+        .map(refact_git_intel::paths::normalize_separators);
+    relative_a.as_deref() == Some(normalized_b.as_str())
+        || relative_b.as_deref() == Some(normalized_a.as_str())
+        || relative_a.is_some() && relative_a == relative_b
+}
+
+fn normalize_health_path(path: &str) -> String {
+    let mut normalized = refact_git_intel::paths::normalize_separators(path);
+    while let Some(stripped) = normalized.strip_prefix("./") {
+        normalized = stripped.to_string();
+    }
+    normalized
 }
 
 fn health_coverage_signature(
     coverage: Option<&refact_codehealth::coverage::CoverageReport>,
     path: &str,
+    coverage_path: Option<&Path>,
     repo_root: Option<&Path>,
 ) -> Option<String> {
     coverage.map(|coverage| {
-        let file = coverage_file_for_path(coverage, path, repo_root);
+        let file = coverage_file_for_path(coverage, path, coverage_path, repo_root);
         serde_json::to_string(&(coverage.format.as_str(), file))
             .map(hash_string)
             .unwrap_or_else(|_| "coverage-unserializable".to_string())
@@ -1640,7 +1999,7 @@ pub(crate) fn build_git_meta(
     let repo_function_mod_p80 = function_mod_p80(&functions);
     let import_edges = graph
         .and_then(|graph| graph.import_index.as_ref())
-        .map(|index| index.import_edges(&repo_root.to_string_lossy(), path_repo_relative))
+        .map(|index| index.import_edges(path_repo_relative))
         .unwrap_or_default();
 
     refact_codehealth::git_biomarkers::GitMeta {
@@ -1695,16 +2054,38 @@ pub(crate) fn build_git_meta(
 
 pub(crate) async fn build_git_risk_assembly(
     intel: &refact_git_intel::GitIntel,
-    repo_root: &Path,
+    git_root: &Path,
+    analytics_scope_root: Option<&Path>,
     service: Option<&Arc<refact_codegraph::CodeGraphService>>,
     limit: usize,
     filter: Option<&str>,
 ) -> GitRiskAssembly {
-    let graph = health_graph_snapshot(service, Some(repo_root))
+    build_git_risk_assembly_with_roots(
+        intel,
+        git_root,
+        git_root,
+        analytics_scope_root,
+        service,
+        limit,
+        filter,
+    )
+    .await
+}
+
+async fn build_git_risk_assembly_with_roots(
+    intel: &refact_git_intel::GitIntel,
+    git_root: &Path,
+    indexed_root: &Path,
+    analytics_scope_root: Option<&Path>,
+    service: Option<&Arc<refact_codegraph::CodeGraphService>>,
+    limit: usize,
+    filter: Option<&str>,
+) -> GitRiskAssembly {
+    let graph = health_graph_snapshot_with_scope(service, Some(indexed_root), analytics_scope_root)
         .await
         .map(Arc::new);
     let intel_owned = intel.clone();
-    let repo_root = repo_root.to_path_buf();
+    let repo_root = git_root.to_path_buf();
     let filter = filter.map(str::to_string);
     tokio::task::spawn_blocking(move || {
         build_git_risk_assembly_blocking(
@@ -1920,6 +2301,7 @@ fn function_mod_p80(
 }
 
 struct HealthImportIndex {
+    indexed_root: String,
     distinct_paths: Vec<String>,
     import_dsts_by_src_path: HashMap<String, BTreeSet<String>>,
 }
@@ -1955,18 +2337,19 @@ impl HealthImportIndex {
         }
 
         Self {
+            indexed_root: repo_root.to_string(),
             distinct_paths: distinct_paths.into_iter().collect(),
             import_dsts_by_src_path,
         }
     }
 
-    fn import_edges(&self, repo_root: &str, path_repo_relative: &str) -> HashSet<String> {
+    fn import_edges(&self, path_repo_relative: &str) -> HashSet<String> {
         let mut out = HashSet::new();
         for path in &self.distinct_paths {
             if refact_git_intel::paths::paths_refer_to_same_file(
                 path,
                 path_repo_relative,
-                repo_root,
+                &self.indexed_root,
             ) {
                 if let Some(dsts) = self.import_dsts_by_src_path.get(path) {
                     out.extend(dsts.iter().cloned());
@@ -2112,7 +2495,7 @@ pub(crate) fn git_risk_response(
         .collect();
     GitRiskResponse {
         commits_analyzed: intel.commits_analyzed,
-        agent_authored_pct: intel.agent_authored_pct() * 100.0,
+        agent_authored_pct: intel.agent_authored_pct(),
         hotspots,
         ownership,
         co_change,
@@ -2149,6 +2532,7 @@ impl Tool for ToolCodegraphOverview {
         _args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let gcx = ccx.lock().await.app.gcx.clone();
+        let roots = codegraph_project_roots(ccx.clone()).await?;
         let service = gcx
             .codegraph
             .lock()
@@ -2158,9 +2542,18 @@ impl Tool for ToolCodegraphOverview {
         let readiness = service.index_readiness().await?;
         let index_state = pr_blast_index_state(&readiness);
         let cached = service.cached_graph_analytics().await?;
-        let overview = cached.analytics.overview.truncated(15);
+        let view = match analytics_scope_root(roots.as_ref()) {
+            Some(root) => {
+                let paths = scoped_graph_paths(&cached.data, root);
+                service.scoped_graph_analytics(&paths).await?
+            }
+            None => cached,
+        };
+        let graph = view.data.clone();
+        let analytics = &view.analytics;
+        let overview = analytics.overview.truncated(15);
         let warning = pr_blast_partial_warning(&index_state);
-        let mut communities = cached.communities.clone();
+        let mut communities = view.communities.clone();
         communities.sort_by(|a, b| b.members.len().cmp(&a.members.len()));
         let community_count = communities.len();
         let communities = communities
@@ -2172,9 +2565,7 @@ impl Tool for ToolCodegraphOverview {
                 cohesion: community.cohesion,
             })
             .collect();
-        let execution_flows = service
-            .execution_flows(5)
-            .await
+        let execution_flows = refact_codegraph::communities::execution_flows_from_data(&graph, 5)
             .unwrap_or_default()
             .into_iter()
             .map(|flow| OverviewExecutionFlow {
@@ -2183,7 +2574,7 @@ impl Tool for ToolCodegraphOverview {
                 depth: flow.depth,
             })
             .collect();
-        let mut dead = cached.dead_code.clone();
+        let mut dead = view.dead_code.clone();
         dead.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
         let dead_code_count = dead.len();
         let dead_code = dead
@@ -2196,8 +2587,17 @@ impl Tool for ToolCodegraphOverview {
                 confidence: symbol.confidence,
             })
             .collect();
-        let all_files = service.all_files_with_text().await.unwrap_or_default();
-        let centrality = cached.analytics.file_centrality.truncated(100);
+        let all_files = service
+            .all_files_with_text()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(path, _)| {
+                analytics_scope_root(roots.as_ref())
+                    .is_none_or(|root| code_intel_path_allowed(root, path))
+            })
+            .collect::<Vec<_>>();
+        let centrality = analytics.file_centrality.truncated(100);
         let pr: HashMap<String, f64> = centrality.top_pagerank.iter().cloned().collect();
         let bt: HashMap<String, f64> = centrality.top_betweenness.iter().cloned().collect();
         let candidates: Vec<(String, f64, f64)> = all_files
@@ -2338,6 +2738,10 @@ struct HealthGraphContext {
 
 pub(crate) struct HealthGraphSnapshot {
     cached: Arc<refact_codegraph::CachedGraphAnalytics>,
+    service: Arc<refact_codegraph::CodeGraphService>,
+    service_identity: usize,
+    graph_generation: u64,
+    scope_signature: String,
     node_indices_by_basename: HashMap<String, Vec<usize>>,
     call_sources_by_dst: HashMap<i64, Vec<i64>>,
     hot_node_ids: BTreeSet<i64>,
@@ -2347,7 +2751,9 @@ pub(crate) struct HealthGraphSnapshot {
 impl HealthGraphSnapshot {
     pub(crate) fn build(
         cached: Arc<refact_codegraph::CachedGraphAnalytics>,
-        repo_root: Option<&Path>,
+        service: Arc<refact_codegraph::CodeGraphService>,
+        indexed_root: Option<&Path>,
+        analytics_scope_root: Option<&Path>,
     ) -> Self {
         let mut node_indices_by_basename: HashMap<String, Vec<usize>> = HashMap::new();
         for (index, (_id, _name, path)) in cached.data.nodes.iter().enumerate() {
@@ -2369,10 +2775,17 @@ impl HealthGraphSnapshot {
         }
 
         let hot_node_ids = hot_path_node_ids(&cached.data, 3);
-        let import_index = repo_root.map(|repo_root| HealthImportIndex::build(&cached, repo_root));
+        let import_index = indexed_root.map(|root| HealthImportIndex::build(&cached, root));
+        let graph_generation = cached.generation;
+        let service_identity = Arc::as_ptr(&service) as usize;
+        let scope_signature = health_graph_scope_signature(indexed_root, analytics_scope_root);
 
         Self {
             cached,
+            service,
+            service_identity,
+            graph_generation,
+            scope_signature,
             node_indices_by_basename,
             call_sources_by_dst,
             hot_node_ids,
@@ -2405,11 +2818,106 @@ fn graph_path_basename(path: &str) -> String {
 
 pub(crate) async fn health_graph_snapshot(
     service: Option<&Arc<refact_codegraph::CodeGraphService>>,
-    repo_root: Option<&Path>,
+    indexed_root: Option<&Path>,
+) -> Option<HealthGraphSnapshot> {
+    health_graph_snapshot_with_scope(service, indexed_root, None).await
+}
+
+async fn health_graph_snapshot_with_scope(
+    service: Option<&Arc<refact_codegraph::CodeGraphService>>,
+    indexed_root: Option<&Path>,
+    analytics_scope_root: Option<&Path>,
 ) -> Option<HealthGraphSnapshot> {
     let service = service?;
-    let cached = service.cached_graph_analytics().await.ok()?;
-    Some(HealthGraphSnapshot::build(cached, repo_root))
+    for _ in 0..HEALTH_GRAPH_SNAPSHOT_MAX_ATTEMPTS {
+        let full = service.cached_graph_analytics().await.ok()?;
+        let cached = match analytics_scope_root {
+            Some(root) => {
+                let paths = scoped_graph_paths(&full.data, root);
+                let scoped = service.scoped_graph_analytics(&paths).await.ok()?;
+                if scoped.generation != full.generation {
+                    continue;
+                }
+                scoped
+            }
+            None => full,
+        };
+        if cached.generation != service.graph_generation() {
+            continue;
+        }
+        return Some(HealthGraphSnapshot::build(
+            cached,
+            service.clone(),
+            indexed_root,
+            analytics_scope_root,
+        ));
+    }
+    None
+}
+
+fn health_graph_scope_signature(
+    indexed_root: Option<&Path>,
+    analytics_scope_root: Option<&Path>,
+) -> String {
+    let indexed = indexed_root
+        .map(|root| root.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| "<none>".to_string());
+    match analytics_scope_root {
+        None => format!("unscoped:indexed={indexed}"),
+        Some(root) => format!(
+            "scoped:{}:indexed={indexed}",
+            root.to_string_lossy().replace('\\', "/")
+        ),
+    }
+}
+
+fn health_call_graph(
+    snapshot: &HealthGraphSnapshot,
+    file_path: &str,
+    indexed_root: Option<&Path>,
+) -> Vec<CallGraphEdge> {
+    let cached = &snapshot.cached;
+    let graph = refact_codewiki::graph_intelligence::CodeGraph {
+        nodes: cached
+            .data
+            .nodes
+            .iter()
+            .map(
+                |(id, _name, path)| refact_codewiki::graph_intelligence::GraphNode {
+                    id: id.to_string(),
+                    node_type: "symbol".to_string(),
+                    file_path: path.clone(),
+                },
+            )
+            .collect(),
+        edges: cached
+            .data
+            .edges
+            .iter()
+            .map(
+                |(src, dst, kind)| refact_codewiki::graph_intelligence::GraphEdge {
+                    src: src.to_string(),
+                    dst: dst.to_string(),
+                    edge_type: kind.clone(),
+                },
+            )
+            .collect(),
+    };
+    let Some(stored_path) = health_stored_path_for_request(
+        cached.data.nodes.iter().map(|(_, _, path)| path.clone()),
+        file_path,
+        indexed_root,
+    ) else {
+        return Vec::new();
+    };
+    refact_codewiki::graph_intelligence::extract_call_graph(&stored_path, &graph)
+        .into_iter()
+        .take(12)
+        .map(|call| CallGraphEdge {
+            caller: call.caller,
+            callee: call.callee,
+        })
+        .collect()
 }
 
 pub(crate) fn enrich_health_findings(
@@ -2636,6 +3144,7 @@ impl Tool for ToolDeadCode {
             min_confidence,
             roots.as_ref().map(|roots| roots.git_root.as_path()),
             roots.as_ref().map(|roots| roots.indexed_root.as_path()),
+            analytics_scope_root(roots.as_ref()),
         )
         .await?;
         let shown = report.entries.len();
@@ -2741,6 +3250,7 @@ impl Tool for ToolCodeHealth {
         let requested_file_path = string_arg(args, "file_path")?;
         let resolved_file = resolve_codegraph_file(ccx.clone(), &requested_file_path).await?;
         let file_path = resolved_file.indexed_path;
+        let coverage_path = resolved_file.read_path.clone();
         let gcx = ccx.lock().await.app.gcx.clone();
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
         let mut record_paths = vec![resolved_file.read_path.clone()];
@@ -2765,7 +3275,8 @@ impl Tool for ToolCodeHealth {
         };
         let service = gcx.codegraph.lock().await.clone();
         let roots = codegraph_project_roots(ccx.clone()).await?;
-        let repo_root = roots.as_ref().map(|roots| roots.indexed_root.clone());
+        let git_root = roots.as_ref().map(|roots| roots.git_root.clone());
+        let indexed_root = roots.as_ref().map(|roots| roots.indexed_root.clone());
         let intel = match roots.as_ref().map(|roots| roots.git_root.as_path()) {
             Some(dir) => cached_mine_history_async(dir, GIT_HISTORY_MAX_COMMITS)
                 .await
@@ -2779,13 +3290,18 @@ impl Tool for ToolCodeHealth {
         };
         let trend_findings = refact_codehealth::trends::evaluate_trends(&snapshots);
         let git_function_fact_paths = top_git_function_fact_paths(intel.as_deref());
-        let graph = health_graph_snapshot(service.as_ref(), repo_root.as_deref())
-            .await
-            .map(Arc::new);
+        let graph = health_graph_snapshot_with_scope(
+            service.as_ref(),
+            indexed_root.as_deref(),
+            analytics_scope_root(roots.as_ref()),
+        )
+        .await
+        .map(Arc::new);
         let coverage = coverage.map(Arc::new);
         let analysis = {
             let file_path = file_path.clone();
-            let repo_root = repo_root.clone();
+            let coverage_path = coverage_path.clone();
+            let repo_root = git_root.clone();
             let intel = intel.clone();
             let graph = graph.clone();
             let coverage = coverage.clone();
@@ -2798,19 +3314,23 @@ impl Tool for ToolCodeHealth {
                     trend_findings: &trend_findings,
                     git_function_fact_paths: &git_function_fact_paths,
                 };
-                analyze_health_file_shared(file_path, text, &ctx)
+                analyze_health_file_shared_for_path(file_path, text, Some(&coverage_path), &ctx)
             })
             .await
             .map_err(|e| format!("health analysis join: {e}"))??
         };
         if analysis.functions.is_empty() {
+            let index_state = match service.as_ref() {
+                Some(service) => pr_blast_index_state(&service.index_readiness().await?),
+                None => PrBlastIndexState {
+                    queued: 0,
+                    cross_file_edges: 0,
+                    cross_file_ready: false,
+                },
+            };
             let data = HealthToolResponse {
                 response: HealthResponse {
-                    index_state: PrBlastIndexState {
-                        queued: 0,
-                        cross_file_edges: 0,
-                        cross_file_ready: false,
-                    },
+                    index_state,
                     aggregate: HealthAggregateResponse {
                         file_count: 1,
                         function_count: 0,
@@ -2862,61 +3382,18 @@ impl Tool for ToolCodeHealth {
                 .to_string();
         let file_role =
             refact_codewiki::well_known::well_known_role(&file_path).map(|role| role.to_string());
-        let mut call_graph = Vec::new();
-        if let Some(service) = service.as_ref() {
-            if let Ok(cached) = service.cached_graph_analytics().await {
-                let graph = refact_codewiki::graph_intelligence::CodeGraph {
-                    nodes: cached
-                        .data
-                        .nodes
-                        .iter()
-                        .map(
-                            |(id, _name, path)| refact_codewiki::graph_intelligence::GraphNode {
-                                id: id.to_string(),
-                                node_type: "symbol".to_string(),
-                                file_path: path.clone(),
-                            },
-                        )
-                        .collect(),
-                    edges: cached
-                        .data
-                        .edges
-                        .iter()
-                        .map(
-                            |(src, dst, kind)| refact_codewiki::graph_intelligence::GraphEdge {
-                                src: src.to_string(),
-                                dst: dst.to_string(),
-                                edge_type: kind.clone(),
-                            },
-                        )
-                        .collect(),
-                };
-                let stored_path = health_stored_path_for_request(
-                    cached.data.nodes.iter().map(|(_, _, path)| path.clone()),
-                    &file_path,
-                    repo_root.as_deref(),
-                );
-                if let Some(stored_path) = stored_path {
-                    let calls = refact_codewiki::graph_intelligence::extract_call_graph(
-                        &stored_path,
-                        &graph,
-                    );
-                    if !calls.is_empty() {
-                        call_graph = calls
-                            .iter()
-                            .take(12)
-                            .map(|call| CallGraphEdge {
-                                caller: call.caller.clone(),
-                                callee: call.callee.clone(),
-                            })
-                            .collect();
-                    }
-                }
-            }
-        }
+        let call_graph = graph
+            .as_deref()
+            .map(|graph| health_call_graph(graph, &file_path, indexed_root.as_deref()))
+            .unwrap_or_default();
         let mut coverage_summary = None;
         if let Some(report) = coverage.as_deref() {
-            if let Some(file) = coverage_file_for_path(report, &file_path, repo_root.as_deref()) {
+            if let Some(file) = coverage_file_for_path(
+                report,
+                &file_path,
+                Some(&coverage_path),
+                git_root.as_deref(),
+            ) {
                 let single = refact_codehealth::coverage::CoverageReport {
                     format: report.format.clone(),
                     files: vec![file],
@@ -3093,8 +3570,16 @@ impl Tool for ToolGitRisk {
             ));
         }
         let service = gcx.codegraph.lock().await.clone();
-        let assembly =
-            build_git_risk_assembly(&intel, &roots.indexed_root, service.as_ref(), 15, None).await;
+        let assembly = build_git_risk_assembly_with_roots(
+            &intel,
+            &roots.git_root,
+            &roots.indexed_root,
+            analytics_scope_root(Some(&roots)),
+            service.as_ref(),
+            15,
+            None,
+        )
+        .await;
         let response = git_risk_response(&intel, &assembly);
         let summary = format!(
             "Git risk over {} commits: {} hotspots",
@@ -3651,20 +4136,13 @@ fn code_why_response(
 ) -> Option<CodeWhyResponse> {
     let candidates = code_why_candidates(sources);
     let decisions = corroborated_code_why_decisions(&candidates);
-    let needle = query.to_lowercase();
+    let query_tokens = code_why_tokens(query);
     let mut all_scored: Vec<ScoredCodeWhyDecision> =
         decisions.into_iter().map(score_code_why_decision).collect();
     sort_scored_code_why_decisions(&mut all_scored);
     let mut matched: Vec<ScoredCodeWhyDecision> = all_scored
         .iter()
-        .filter(|scored| {
-            scored
-                .item
-                .decision
-                .statement
-                .to_lowercase()
-                .contains(&needle)
-        })
+        .filter(|scored| code_why_statement_matches(&scored.item.decision.statement, &query_tokens))
         .cloned()
         .collect();
     matched.truncate(CODE_WHY_MATCH_LIMIT);
@@ -3717,6 +4195,17 @@ fn code_why_response(
         decisions,
         related,
     })
+}
+
+fn code_why_tokens(text: &str) -> BTreeSet<String> {
+    text.split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_lowercase())
+        .collect()
+}
+
+fn code_why_statement_matches(statement: &str, query_tokens: &BTreeSet<String>) -> bool {
+    !query_tokens.is_empty() && query_tokens.is_subset(&code_why_tokens(statement))
 }
 
 #[async_trait]
@@ -3807,7 +4296,13 @@ impl Tool for ToolCodeDuplication {
         _args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let gcx = ccx.lock().await.app.gcx.clone();
-        let analysis = cached_cross_file_clones(gcx.clone()).await?;
+        let roots = codegraph_project_roots(ccx.clone()).await?;
+        let global_analysis = cached_cross_file_clones(gcx.clone()).await?;
+        let analysis = match analytics_scope_root(roots.as_ref()) {
+            Some(root) => Some(scoped_clone_analysis(&global_analysis, root).await?),
+            None => None,
+        };
+        let analysis = analysis.as_ref().unwrap_or(global_analysis.as_ref());
         if analysis.clones.is_empty() {
             let data = DuplicationResponse {
                 aggregate: DuplicationAggregateResponse {
@@ -3830,7 +4325,6 @@ impl Tool for ToolCodeDuplication {
             ));
         }
         let dup_pct = analysis.duplication_pct * 100.0;
-        let roots = codegraph_project_roots(ccx.clone()).await?;
         let project_root = roots.as_ref().map(|roots| roots.indexed_root.as_path());
         let intel = match roots.as_ref().map(|roots| roots.git_root.as_path()) {
             Some(dir) => cached_mine_history_async(dir, 1000).await.ok(),
@@ -4149,8 +4643,17 @@ impl Tool for ToolPrBlast {
         let readiness = service.index_readiness().await?;
         let index_state = pr_blast_index_state(&readiness);
         let warning = pr_blast_partial_warning(&index_state);
-        let report = service.pr_blast(&resolved_changed_files, max_depth).await?;
         let roots = codegraph_project_roots(ccx.clone()).await?;
+        let report = match analytics_scope_root(roots.as_ref()) {
+            Some(root) => {
+                let cached = service.cached_graph_analytics().await?;
+                let paths = scoped_graph_paths(&cached.data, root);
+                service
+                    .pr_blast_scoped(&resolved_changed_files, max_depth, &paths)
+                    .await?
+            }
+            None => service.pr_blast(&resolved_changed_files, max_depth).await?,
+        };
         let intel = match roots.as_ref().map(|roots| roots.git_root.as_path()) {
             Some(dir) => cached_mine_history_async(dir, 1000).await.ok(),
             None => None,
@@ -5056,6 +5559,26 @@ impl Tool for ToolCodeMap {
         let node_records = service.graph_node_records().await?;
         let readiness = service.index_readiness().await?;
         let roots = codegraph_project_roots(ccx.clone()).await?;
+        let (files_text, node_records, edges, centrality) =
+            match analytics_scope_root(roots.as_ref()) {
+                Some(root) => {
+                    let paths = scoped_graph_paths(&cached.data, root);
+                    let scoped = service.scoped_graph_analytics(&paths).await?;
+                    scoped_code_map_inputs(
+                        root,
+                        files_text,
+                        node_records,
+                        scoped.data.edges.clone(),
+                        scoped.analytics.file_centrality.truncated(5000),
+                    )
+                }
+                None => (
+                    files_text,
+                    node_records,
+                    cached.data.edges.clone(),
+                    cached.analytics.file_centrality.truncated(5000),
+                ),
+            };
         let intel = match roots.as_ref().map(|roots| roots.git_root.as_path()) {
             Some(dir) => cached_mine_history_async(dir, 1000).await.ok(),
             None => None,
@@ -5063,8 +5586,8 @@ impl Tool for ToolCodeMap {
         let data = assemble_code_map_response(
             files_text,
             node_records,
-            cached.data.edges.clone(),
-            cached.analytics.file_centrality.truncated(5000),
+            edges,
+            centrality,
             Some(pr_blast_index_state(&readiness)),
             intel.as_ref(),
             roots.as_ref().map(|roots| roots.indexed_root.as_path()),
@@ -5182,6 +5705,173 @@ mod tests {
             source_absolute
         );
         assert!(scoped_indexed_path(&scope, temp.path().join("outside.rs").as_path()).is_err());
+    }
+
+    #[test]
+    fn code_intel_scope_accepts_root_paths_and_rejects_noise_and_outside_paths() {
+        let root = Path::new("/workspace/refact");
+        assert!(code_intel_path_allowed(root, "src/main.rs"));
+        assert!(code_intel_path_allowed(
+            root,
+            "/workspace/refact/src/main.rs"
+        ));
+        assert!(!code_intel_path_allowed(root, "target/debug/generated.rs"));
+        assert!(!code_intel_path_allowed(
+            root,
+            "web/node_modules/pkg/index.js"
+        ));
+        assert!(code_intel_path_allowed(
+            root,
+            "competitors/rival/src/lib.rs"
+        ));
+        assert!(!code_intel_path_allowed(
+            root,
+            "/workspace/other/src/main.rs"
+        ));
+
+        let competitor_root = Path::new("/workspace/refact/competitors/rival");
+        assert!(code_intel_path_allowed(competitor_root, "src/lib.rs"));
+        assert!(code_intel_path_allowed(
+            competitor_root,
+            "/workspace/refact/competitors/rival/src/lib.rs"
+        ));
+    }
+
+    #[test]
+    fn scoped_graph_removes_noise_outside_nodes_and_incident_edges() {
+        let graph = refact_codegraph::analytics::GraphData {
+            nodes: vec![
+                (1, "main".into(), "/workspace/refact/src/main.rs".into()),
+                (2, "generated".into(), "dist/bundle.js".into()),
+                (3, "rival".into(), "competitors/rival/src/lib.rs".into()),
+                (4, "outside".into(), "/workspace/other/src/lib.rs".into()),
+            ],
+            edges: vec![
+                (1, 2, "calls".into()),
+                (1, 3, "calls".into()),
+                (1, 4, "calls".into()),
+            ],
+        };
+        let scoped = scoped_graph_data(&graph, Path::new("/workspace/refact"));
+        let analytics = refact_codegraph::analytics::compute_graph_analytics_from_data(&scoped);
+
+        assert_eq!(
+            scoped.nodes,
+            vec![
+                (1, "main".into(), "/workspace/refact/src/main.rs".into()),
+                (3, "rival".into(), "competitors/rival/src/lib.rs".into()),
+            ]
+        );
+        assert_eq!(scoped.edges, vec![(1, 3, "calls".into())]);
+        assert_eq!(analytics.overview.node_count, 2);
+        assert_eq!(analytics.overview.edge_count, 1);
+        assert!(analytics.overview.top_pagerank.iter().all(
+            |entry| !entry.path.contains("dist/") && !entry.path.contains("/workspace/other/")
+        ));
+    }
+
+    #[test]
+    fn scoped_dead_symbols_remove_noise_before_enrichment() {
+        let symbol = |node_id, path: &str| refact_codegraph::dead_code::DeadSymbol {
+            node_id,
+            name: format!("dead_{node_id}"),
+            path: path.into(),
+            line: 1,
+            reason: "unreachable".into(),
+            confidence: 0.8,
+            incoming_edges: 0,
+        };
+        let scoped = scoped_dead_symbols(
+            vec![
+                symbol(1, "src/dead.rs"),
+                symbol(2, "dist/generated.rs"),
+                symbol(3, "/workspace/other/dead.rs"),
+            ],
+            Some(Path::new("/workspace/refact")),
+        );
+
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].path, "src/dead.rs");
+    }
+
+    #[tokio::test]
+    async fn scoped_clone_view_recomputes_counts_and_percentage() {
+        let duplicate = branchy_hotspot_source(1, 2, 3).repeat(8);
+        let analysis = CloneAnalysis {
+            generation: 1,
+            clones: Vec::new(),
+            duplication_pct: 0.9,
+            files: 3,
+            text_by_path: HashMap::from([
+                ("src/a.rs".into(), ("rust".into(), duplicate.clone())),
+                ("src/b.rs".into(), ("rust".into(), duplicate.clone())),
+                ("dist/generated.rs".into(), ("rust".into(), duplicate)),
+            ]),
+            tokens_by_path: HashMap::new(),
+            duplicated_tokens_by_path: HashMap::new(),
+        };
+
+        let scoped = scoped_clone_analysis(&analysis, Path::new("/workspace/refact"))
+            .await
+            .unwrap();
+        assert_eq!(scoped.files, 2);
+        assert!(!scoped.clones.is_empty());
+        assert!(scoped.duplication_pct > 0.0);
+        assert!(scoped
+            .duplicated_tokens_by_path
+            .values()
+            .all(|tokens| *tokens > 0));
+        assert!(!scoped.text_by_path.contains_key("dist/generated.rs"));
+    }
+
+    #[tokio::test]
+    async fn scoped_clone_view_drops_duplication_with_only_excluded_counterpart() {
+        let duplicate = branchy_hotspot_source(1, 2, 3).repeat(8);
+        let analysis = CloneAnalysis {
+            generation: 1,
+            clones: Vec::new(),
+            duplication_pct: 1.0,
+            files: 2,
+            text_by_path: HashMap::from([
+                ("src/a.rs".into(), ("rust".into(), duplicate.clone())),
+                ("dist/generated.rs".into(), ("rust".into(), duplicate)),
+            ]),
+            tokens_by_path: HashMap::new(),
+            duplicated_tokens_by_path: HashMap::from([("src/a.rs".into(), 500)]),
+        };
+
+        let scoped = scoped_clone_analysis(&analysis, Path::new("/workspace/refact"))
+            .await
+            .unwrap();
+
+        assert_eq!(scoped.files, 1);
+        assert!(scoped.clones.is_empty());
+        assert_eq!(scoped.duplication_pct, 0.0);
+        assert_eq!(scoped.duplicated_tokens_by_path.get("src/a.rs"), Some(&0));
+    }
+
+    #[test]
+    fn code_why_matching_is_token_aware_and_order_independent() {
+        assert!(code_why_statement_matches(
+            "Use the CAT service",
+            &code_why_tokens("cat")
+        ));
+        assert!(code_why_statement_matches(
+            "Cache invalidation: use event-driven updates.",
+            &code_why_tokens("updates, cache")
+        ));
+        assert!(code_why_statement_matches(
+            "Unicode café routing is enabled",
+            &code_why_tokens("routing café")
+        ));
+        assert!(!code_why_statement_matches(
+            "Concatenate the values",
+            &code_why_tokens("cat")
+        ));
+        assert!(!code_why_statement_matches(
+            "anything",
+            &code_why_tokens("...")
+        ));
     }
 
     fn commit_file(repo: &Repository, path: &str, contents: &str, msg: &str) -> git2::Oid {
@@ -5310,6 +6000,55 @@ mod tests {
             None,
             &args,
         )
+    }
+
+    #[test]
+    fn scoped_code_map_inputs_remove_noise_pages_and_links() {
+        let root = Path::new("/workspace/refact");
+        let (files, nodes, edges, centrality) = scoped_code_map_inputs(
+            root,
+            vec![
+                ("src/main.rs".into(), "fn main() {}".into()),
+                ("dist/generated.js".into(), "function generated() {}".into()),
+                (
+                    "/workspace/other/outside.rs".into(),
+                    "fn outside() {}".into(),
+                ),
+            ],
+            vec![
+                code_map_node_record(1, "function", "main", "src/main.rs"),
+                code_map_node_record(2, "function", "generated", "dist/generated.js"),
+                code_map_node_record(3, "function", "outside", "/workspace/other/outside.rs"),
+            ],
+            vec![(1, 2, "calls".into()), (2, 3, "calls".into())],
+            code_map_centrality(&[("src/main.rs", 0.123)], &[]),
+        );
+        assert_eq!(centrality.top_pagerank, vec![("src/main.rs".into(), 0.123)]);
+        let output = assemble_code_map_response(
+            files,
+            nodes,
+            edges,
+            centrality,
+            None,
+            None,
+            Some(root),
+            &code_map_markdown_args(2_000),
+        );
+
+        assert_eq!(output.files_count, 1);
+        assert!(output.pages.iter().all(|page| {
+            page.paths.iter().all(|path| path == "src/main.rs")
+                && page
+                    .links
+                    .iter()
+                    .all(|link| link.target_path == "src/main.rs")
+        }));
+        assert!(output
+            .pages
+            .iter()
+            .flat_map(|page| page.links.iter())
+            .next()
+            .is_none());
     }
 
     #[test]
@@ -5960,6 +6699,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_health_graph_excludes_generated_fanin_and_hot_path() {
+        let active = brain_method_source(0);
+        let excluded = r#"
+fn main() { brain(0); }
+fn caller_1() { brain(1); }
+fn caller_2() { brain(2); }
+fn caller_3() { brain(3); }
+fn caller_4() { brain(4); }
+fn caller_5() { brain(5); }
+"#;
+        let service = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        service
+            .index_file("src/a.rs", &active, "rust")
+            .await
+            .unwrap();
+        service
+            .index_file("dist/generated.rs", excluded, "rust")
+            .await
+            .unwrap();
+        service.connect_usages().await.unwrap();
+        let health = refact_codehealth::analyze("rust", &active);
+        let brain = health
+            .functions
+            .iter()
+            .find(|function| function.name == "brain")
+            .unwrap();
+        let key = function_key(brain);
+
+        let unscoped = health_graph_snapshot(Some(&service), None).await.unwrap();
+        let unscoped_context = health_graph_context(&unscoped, "src/a.rs", &health.functions);
+        assert!(unscoped_context.fan_in.get(&key).copied().unwrap_or(0) >= 5);
+        assert!(unscoped_context.hot_path.contains(&key));
+
+        let scoped = health_graph_snapshot_with_scope(
+            Some(&service),
+            Some(Path::new("/workspace/refact")),
+            Some(Path::new("/workspace/refact")),
+        )
+        .await
+        .unwrap();
+        let scoped_context = health_graph_context(&scoped, "src/a.rs", &health.functions);
+        assert_eq!(scoped_context.fan_in.get(&key), Some(&0));
+        assert!(!scoped_context.hot_path.contains(&key));
+        assert!(scoped
+            .cached
+            .data
+            .nodes
+            .iter()
+            .all(|(_, _, path)| !path.contains("dist/")));
+    }
+
+    #[tokio::test]
     async fn perf_finding_hot_path_from_route() {
         let text = r#"
 from fastapi import FastAPI
@@ -6174,7 +6965,7 @@ def orphan():
         );
         let intel = refact_git_intel::mine_history(dir.path(), 20).unwrap();
 
-        let assembly = build_git_risk_assembly(&intel, dir.path(), None, 1, None).await;
+        let assembly = build_git_risk_assembly(&intel, dir.path(), None, None, 1, None).await;
         let finding_names = assembly.files[0]
             .findings
             .iter()
@@ -6184,6 +6975,41 @@ def orphan():
         assert!(finding_names.contains("prior_defect"));
         assert!(finding_names.contains("function_hotspot"));
         assert!(finding_names.contains("code_age_volatility"));
+    }
+
+    #[test]
+    fn git_meta_reads_worktree_when_indexed_root_differs() {
+        let temp = tempfile::tempdir().unwrap();
+        let git_root = temp.path().join("worktree");
+        let indexed_root = temp.path().join("source");
+        std::fs::create_dir_all(git_root.join("src")).unwrap();
+        std::fs::create_dir_all(indexed_root.join("src")).unwrap();
+        let repo = Repository::init(&git_root).unwrap();
+        commit_file_at(
+            &repo,
+            "src/a.rs",
+            "fn worktree_only() {\n    if true {}\n}\n",
+            "active",
+            "Alice",
+            "alice@example.com",
+            1_700_000_000,
+        );
+        std::fs::write(indexed_root.join("src/a.rs"), "fn source_only() {}\n").unwrap();
+        let intel = refact_git_intel::mine_history(&git_root, 20).unwrap();
+        let ranges = function_ranges_from_disk(&git_root, "src/a.rs");
+
+        let meta = build_git_meta(&intel, &git_root, "src/a.rs", None, Some(&ranges));
+
+        assert_eq!(meta.nloc, 3);
+        assert!(ranges.iter().any(|(name, _, _)| name == "worktree_only"));
+        assert!(!ranges.iter().any(|(name, _, _)| name == "source_only"));
+        assert_eq!(
+            code_intel_relative_path(
+                &indexed_root,
+                &indexed_root.join("src/a.rs").to_string_lossy()
+            ),
+            Some(PathBuf::from("src/a.rs"))
+        );
     }
 
     fn shared_clone_body(name: &str) -> String {
@@ -6376,6 +7202,204 @@ def orphan():
         // per-call cache_hit flags above are the race-free proof of hit/invalidate.
     }
 
+    #[test]
+    fn health_cache_is_bounded_and_uses_lru_eviction() {
+        reset_health_cache_for_tests();
+        let trends = Vec::new();
+        let git_paths = HashSet::new();
+        let ctx = empty_health_ctx(&trends, &git_paths);
+        let text = "fn probe() {}\n".to_string();
+
+        for index in 0..=HEALTH_ANALYSIS_CACHE_CAPACITY {
+            analyze_health_file_shared(format!("src/cache_{index}.rs"), text.clone(), &ctx)
+                .unwrap();
+        }
+
+        let cache = health_analysis_cache().lock().unwrap();
+        assert!(cache.files.len() <= HEALTH_ANALYSIS_CACHE_CAPACITY);
+        assert!(cache.lru.len() <= HEALTH_ANALYSIS_CACHE_CAPACITY);
+    }
+
+    #[tokio::test]
+    async fn health_cache_separates_graph_scope_and_generation() {
+        reset_health_cache_for_tests();
+        let text = brain_method_source(0);
+        let service = service_with_file("src/health_graph_cache_probe.rs", &text, "rust").await;
+        let trends = Vec::new();
+        let git_paths = HashSet::new();
+
+        let global = health_graph_snapshot(Some(&service), Some(Path::new("/workspace/refact")))
+            .await
+            .unwrap();
+        let global_ctx = HealthAnalysisContext {
+            repo_root: None,
+            intel: None,
+            graph: Some(&global),
+            coverage: None,
+            trend_findings: &trends,
+            git_function_fact_paths: &git_paths,
+        };
+        let first = analyze_health_file_shared(
+            "src/health_graph_cache_probe.rs".into(),
+            text.clone(),
+            &global_ctx,
+        )
+        .unwrap();
+        let global_hit = analyze_health_file_shared(
+            "src/health_graph_cache_probe.rs".into(),
+            text.clone(),
+            &global_ctx,
+        )
+        .unwrap();
+
+        let scoped = health_graph_snapshot_with_scope(
+            Some(&service),
+            Some(Path::new("/workspace/refact")),
+            Some(Path::new("/workspace/refact")),
+        )
+        .await
+        .unwrap();
+        let scoped_ctx = HealthAnalysisContext {
+            graph: Some(&scoped),
+            ..global_ctx
+        };
+        let scoped_first = analyze_health_file_shared(
+            "src/health_graph_cache_probe.rs".into(),
+            text.clone(),
+            &scoped_ctx,
+        )
+        .unwrap();
+
+        let other_indexed_root =
+            health_graph_snapshot(Some(&service), Some(Path::new("/workspace/other")))
+                .await
+                .unwrap();
+        let other_indexed_ctx = HealthAnalysisContext {
+            graph: Some(&other_indexed_root),
+            ..global_ctx
+        };
+        let other_indexed_first = analyze_health_file_shared(
+            "src/health_graph_cache_probe.rs".into(),
+            text.clone(),
+            &other_indexed_ctx,
+        )
+        .unwrap();
+
+        service
+            .index_file(
+                "src/health_graph_generation_probe.rs",
+                "fn changed() {}",
+                "rust",
+            )
+            .await
+            .unwrap();
+        let next_generation =
+            health_graph_snapshot(Some(&service), Some(Path::new("/workspace/refact")))
+                .await
+                .unwrap();
+        let next_generation_ctx = HealthAnalysisContext {
+            graph: Some(&next_generation),
+            ..global_ctx
+        };
+        let generation_first = analyze_health_file_shared(
+            "src/health_graph_cache_probe.rs".into(),
+            text,
+            &next_generation_ctx,
+        )
+        .unwrap();
+
+        assert!(!first.cache_hit);
+        assert!(global_hit.cache_hit);
+        assert!(!scoped_first.cache_hit);
+        assert!(!other_indexed_first.cache_hit);
+        assert!(!generation_first.cache_hit);
+        assert_ne!(global.scope_signature, scoped.scope_signature);
+        assert_ne!(global.scope_signature, other_indexed_root.scope_signature);
+        assert_ne!(global.graph_generation, next_generation.graph_generation);
+        assert_eq!(
+            global
+                .import_index
+                .as_ref()
+                .map(|index| index.indexed_root.as_str()),
+            Some("/workspace/refact")
+        );
+    }
+
+    #[tokio::test]
+    async fn health_cache_separates_codegraph_service_instances() {
+        reset_health_cache_for_tests();
+        let text = brain_method_source(0);
+        let first_service =
+            service_with_file("src/health_service_cache_probe.rs", &text, "rust").await;
+        let second_service =
+            service_with_file("src/health_service_cache_probe.rs", &text, "rust").await;
+        let first_graph =
+            health_graph_snapshot(Some(&first_service), Some(Path::new("/workspace/refact")))
+                .await
+                .unwrap();
+        let second_graph =
+            health_graph_snapshot(Some(&second_service), Some(Path::new("/workspace/refact")))
+                .await
+                .unwrap();
+        assert_eq!(first_graph.graph_generation, second_graph.graph_generation);
+        assert_eq!(first_graph.scope_signature, second_graph.scope_signature);
+        assert_ne!(first_graph.service_identity, second_graph.service_identity);
+
+        let trends = Vec::new();
+        let git_paths = HashSet::new();
+        let first_ctx = HealthAnalysisContext {
+            repo_root: None,
+            intel: None,
+            graph: Some(&first_graph),
+            coverage: None,
+            trend_findings: &trends,
+            git_function_fact_paths: &git_paths,
+        };
+        let second_ctx = HealthAnalysisContext {
+            graph: Some(&second_graph),
+            ..first_ctx
+        };
+        let first = analyze_health_file_shared(
+            "src/health_service_cache_probe.rs".into(),
+            text.clone(),
+            &first_ctx,
+        )
+        .unwrap();
+        let second = analyze_health_file_shared(
+            "src/health_service_cache_probe.rs".into(),
+            text,
+            &second_ctx,
+        )
+        .unwrap();
+
+        assert!(!first.cache_hit);
+        assert!(!second.cache_hit);
+    }
+
+    #[tokio::test]
+    async fn health_cache_does_not_pin_codegraph_service() {
+        reset_health_cache_for_tests();
+        let text = "fn cached() {}\n".to_string();
+        let service = service_with_file("src/weak_cache_probe.rs", &text, "rust").await;
+        let weak = Arc::downgrade(&service);
+        let graph = health_graph_snapshot(Some(&service), None).await.unwrap();
+        let trends = Vec::new();
+        let git_paths = HashSet::new();
+        let ctx = HealthAnalysisContext {
+            repo_root: None,
+            intel: None,
+            graph: Some(&graph),
+            coverage: None,
+            trend_findings: &trends,
+            git_function_fact_paths: &git_paths,
+        };
+        analyze_health_file_shared("src/weak_cache_probe.rs".into(), text, &ctx).unwrap();
+
+        drop(graph);
+        drop(service);
+        assert!(weak.upgrade().is_none());
+    }
+
     #[tokio::test]
     async fn health_scores_include_git_and_dry_categories() {
         reset_health_cache_for_tests();
@@ -6441,6 +7465,72 @@ def orphan():
             finding.finding.category != "test_coverage"
                 && finding.finding.category != "coverage_gradient"
         }));
+    }
+
+    #[test]
+    fn worktree_coverage_matches_relative_and_worktree_absolute_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let indexed_root = temp.path().join("source");
+        let worktree_root = temp.path().join("worktree");
+        let relative_worktree_path = worktree_root.join("src/relative.rs");
+        let absolute_worktree_path = worktree_root.join("src/absolute.rs");
+        let lcov = format!(
+            "TN:\nSF:src/relative.rs\nDA:1,0\nend_of_record\nTN:\nSF:{}\nDA:1,0\nend_of_record\n",
+            absolute_worktree_path.to_string_lossy()
+        );
+        let coverage = refact_codehealth::coverage::detect_and_parse(&lcov).unwrap();
+
+        let relative = coverage_file_for_path(
+            &coverage,
+            &indexed_root.join("src/relative.rs").to_string_lossy(),
+            Some(&relative_worktree_path),
+            Some(&worktree_root),
+        )
+        .unwrap();
+        let absolute = coverage_file_for_path(
+            &coverage,
+            &indexed_root.join("src/absolute.rs").to_string_lossy(),
+            Some(&absolute_worktree_path),
+            Some(&worktree_root),
+        )
+        .unwrap();
+
+        assert_eq!(relative.path.replace('\\', "/"), "src/relative.rs");
+        assert_eq!(Path::new(&absolute.path), absolute_worktree_path.as_path());
+    }
+
+    #[test]
+    fn coverage_basename_fallback_requires_report_wide_uniqueness() {
+        let ambiguous = refact_codehealth::coverage::detect_and_parse(
+            "TN:\nSF:src/shared.rs\nDA:1,0\nend_of_record\nTN:\nSF:tests/shared.rs\nDA:1,1\nend_of_record\n",
+        )
+        .unwrap();
+        let unique = refact_codehealth::coverage::detect_and_parse(
+            "TN:\nSF:generated/shared.rs\nDA:1,0\nend_of_record\nTN:\nSF:other.rs\nDA:1,1\nend_of_record\n",
+        )
+        .unwrap();
+
+        assert!(
+            coverage_file_for_path(&ambiguous, "/indexed/worktree/shared.rs", None, None,)
+                .is_none()
+        );
+        assert_eq!(
+            coverage_file_for_path(&unique, "/indexed/worktree/shared.rs", None, None)
+                .unwrap()
+                .path,
+            "generated/shared.rs"
+        );
+    }
+
+    #[test]
+    fn coverage_prefers_exact_directory_match_over_same_basename() {
+        let coverage = refact_codehealth::coverage::detect_and_parse(
+            "TN:\nSF:src/shared.rs\nDA:1,0\nend_of_record\nTN:\nSF:tests/shared.rs\nDA:1,1\nend_of_record\n",
+        )
+        .unwrap();
+
+        let matched = coverage_file_for_path(&coverage, "src/shared.rs", None, None).unwrap();
+        assert_eq!(matched.path, "src/shared.rs");
     }
 
     #[tokio::test]

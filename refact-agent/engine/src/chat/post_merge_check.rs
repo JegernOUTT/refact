@@ -7,11 +7,11 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::process::Command;
 
-use crate::chat::verify_cmd::parse_restricted_argv;
+use crate::chat::verify_cmd::{parse_restricted_argv, verification_commands};
 use crate::chat::verifier::ExpectedCardState;
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
-use crate::tasks::types::{BoardCard, BoardColumn, StatusUpdate};
+use crate::tasks::types::{BoardCard, BoardColumn, StatusUpdate, VerificationOutcome};
 
 pub const DEFAULT_POST_MERGE_CHECK_TIMEOUT_SECS: u64 = 300;
 const MAX_OUTPUT_TAIL_CHARS: usize = 6000;
@@ -40,6 +40,7 @@ pub struct PostMergeCheckResult {
     pub fix_card_id: Option<String>,
     pub skipped_reason: Option<String>,
     pub revert_skipped_reason: Option<String>,
+    pub outcome: VerificationOutcome,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +57,7 @@ pub struct PostMergeCommandOutput {
     pub exit_code: Option<i32>,
     pub success: bool,
     pub output: String,
+    pub outcome: VerificationOutcome,
 }
 
 #[async_trait]
@@ -68,7 +70,9 @@ pub trait PostMergeCommandRunner: Send {
     ) -> PostMergeCommandOutput;
 }
 
-struct SystemPostMergeCommandRunner;
+struct SystemPostMergeCommandRunner {
+    gcx: Arc<GlobalContext>,
+}
 
 #[async_trait]
 impl PostMergeCommandRunner for SystemPostMergeCommandRunner {
@@ -81,20 +85,30 @@ impl PostMergeCommandRunner for SystemPostMergeCommandRunner {
         match command {
             PostMergeCommand::Verify { cwd, argv } => {
                 let label = argv.join(" ");
-                let Some(program) = argv.first() else {
+                if argv.is_empty() {
                     return PostMergeCommandOutput {
                         exit_code: None,
                         success: false,
                         output: "empty verification command".to_string(),
+                        outcome: VerificationOutcome::Rejected,
                     };
-                };
-                let mut cmd = Command::new(program);
-                cmd.args(&argv[1..]);
-                cmd.current_dir(cwd.map_or_else(
-                    || workspace_root.to_path_buf(),
-                    |cwd| workspace_root.join(cwd),
-                ));
-                run_command(cmd, &label, timeout).await
+                }
+                let result = crate::chat::verifier::run_verification_argv_impl(
+                    self.gcx.clone(),
+                    workspace_root,
+                    &label,
+                    cwd,
+                    argv,
+                    timeout,
+                    Duration::from_secs(10),
+                )
+                .await;
+                PostMergeCommandOutput {
+                    exit_code: result.exit_code,
+                    success: result.passed,
+                    output: result.output_tail,
+                    outcome: result.outcome,
+                }
             }
             PostMergeCommand::Git(args) => {
                 let label = format!("git {}", args.join(" "));
@@ -114,7 +128,24 @@ async fn run_command(
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
-    match tokio::time::timeout(timeout, command.output()).await {
+    command.kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return PostMergeCommandOutput {
+                exit_code: None,
+                success: false,
+                output: format!("failed to execute command '{}': {}", command_label, error),
+                outcome: VerificationOutcome::InfrastructureFailed,
+            };
+        }
+    };
+    let child_id = child.id();
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(output)) => {
             let text = format!(
                 "{}{}",
@@ -125,22 +156,37 @@ async fn run_command(
                 exit_code: output.status.code(),
                 success: output.status.success(),
                 output: text,
+                outcome: if output.status.success() {
+                    VerificationOutcome::Passed
+                } else {
+                    VerificationOutcome::CommandFailed
+                },
             }
         }
         Ok(Err(error)) => PostMergeCommandOutput {
             exit_code: None,
             success: false,
             output: format!("failed to execute command '{}': {}", command_label, error),
+            outcome: VerificationOutcome::InfrastructureFailed,
         },
-        Err(_) => PostMergeCommandOutput {
-            exit_code: None,
-            success: false,
-            output: format!(
-                "command '{}' timed out after {} seconds",
-                command_label,
-                timeout.as_secs()
-            ),
-        },
+        Err(_) => {
+            #[cfg(unix)]
+            if let Some(child_id) = child_id {
+                unsafe {
+                    libc::kill(-(child_id as i32), libc::SIGKILL);
+                }
+            }
+            PostMergeCommandOutput {
+                exit_code: None,
+                success: false,
+                output: format!(
+                    "command '{}' timed out after {} seconds",
+                    command_label,
+                    timeout.as_secs()
+                ),
+                outcome: VerificationOutcome::InfrastructureFailed,
+            }
+        }
     }
 }
 
@@ -148,7 +194,7 @@ pub async fn post_merge_check(
     gcx: Arc<GlobalContext>,
     request: PostMergeCheckRequest,
 ) -> Result<PostMergeCheckResult, String> {
-    let mut runner = SystemPostMergeCommandRunner;
+    let mut runner = SystemPostMergeCommandRunner { gcx: gcx.clone() };
     post_merge_check_with_runner(gcx, request, &mut runner).await
 }
 
@@ -174,41 +220,51 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
         }
     }
     let card = card.clone();
-    let commands = extract_verification_commands(&card.instructions);
+    let commands = verification_commands(&card);
     if commands.is_empty() {
-        return Ok(skipped_result("no verification command found"));
+        return Ok(failed_without_revert(
+            None,
+            VerificationOutcome::NoCommands,
+            "no verification command found".to_string(),
+        ));
     }
-    let mut rejected = None;
-    let mut selected = None;
+    let mut parsed = Vec::new();
     for command in commands {
         match parse_restricted_argv(&command) {
-            Ok((cwd, argv)) => {
-                selected = Some((command, cwd, argv));
-                break;
-            }
+            Ok((cwd, argv)) => parsed.push((command, cwd, argv)),
             Err(reason) => {
-                rejected.get_or_insert((command, reason));
+                return Ok(failed_without_revert(
+                    Some(command),
+                    VerificationOutcome::Rejected,
+                    format!("Rejected by command filter: {}", reason),
+                ));
             }
         }
     }
-    let Some((command, cwd, argv)) = selected else {
-        if let Some((command, reason)) = rejected {
-            return Ok(rejected_result(command, reason));
-        }
-        return Ok(skipped_result(
-            "no supported deterministic verification command found",
-        ));
+    let mut command = String::new();
+    let mut verification = PostMergeCommandOutput {
+        exit_code: Some(0),
+        success: true,
+        output: String::new(),
+        outcome: VerificationOutcome::Passed,
     };
-    let verification = runner
-        .run(
-            &request.workspace_root,
-            PostMergeCommand::Verify { cwd, argv },
-            request.timeout,
-        )
-        .await;
+    for (next_command, cwd, argv) in parsed {
+        command = next_command;
+        verification = runner
+            .run(
+                &request.workspace_root,
+                PostMergeCommand::Verify { cwd, argv },
+                request.timeout,
+            )
+            .await;
+        if !verification.success {
+            break;
+        }
+    }
     let exit_code = verification.exit_code;
     let verification_success = verification.success;
     let output_tail = tail_chars(&verification.output, MAX_OUTPUT_TAIL_CHARS);
+    let verification_outcome = verification.outcome;
     if verification_success {
         return Ok(PostMergeCheckResult {
             checked: true,
@@ -221,7 +277,15 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
             fix_card_id: None,
             skipped_reason: None,
             revert_skipped_reason: None,
+            outcome: VerificationOutcome::Passed,
         });
+    }
+    if verification_outcome != VerificationOutcome::CommandFailed {
+        return Ok(failed_without_revert(
+            Some(command),
+            verification_outcome,
+            output_tail,
+        ));
     }
 
     let expected_merge_commit = request.expected_merge_commit.trim().to_string();
@@ -266,6 +330,7 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
             fix_card_id,
             skipped_reason: None,
             revert_skipped_reason: Some(reason.to_string()),
+            outcome: VerificationOutcome::CommandFailed,
         });
     };
     if current_head != expected_merge_commit {
@@ -299,6 +364,7 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
             fix_card_id,
             skipped_reason: None,
             revert_skipped_reason: Some(reason.to_string()),
+            outcome: VerificationOutcome::CommandFailed,
         });
     }
 
@@ -346,17 +412,47 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
             fix_card_id,
             skipped_reason: None,
             revert_skipped_reason: Some(reason.to_string()),
+            outcome: VerificationOutcome::CommandFailed,
         });
     }
 
-    let revert_output = runner
+    let parents = runner
         .run(
             &request.workspace_root,
             PostMergeCommand::Git(vec![
-                "revert".to_string(),
-                "--no-edit".to_string(),
+                "rev-list".to_string(),
+                "--parents".to_string(),
+                "-n".to_string(),
+                "1".to_string(),
                 expected_merge_commit.clone(),
             ]),
+            request.timeout,
+        )
+        .await;
+    let parent_count = if parents.success {
+        parents.output.split_whitespace().count().checked_sub(1)
+    } else {
+        None
+    };
+    let Some(parent_count) = parent_count else {
+        return Ok(failed_without_revert(
+            Some(command),
+            VerificationOutcome::InfrastructureFailed,
+            format!(
+                "unable to determine merge commit parents: {}",
+                parents.output.trim()
+            ),
+        ));
+    };
+    let mut revert_args = vec!["revert".to_string()];
+    if parent_count > 1 {
+        revert_args.extend(["-m".to_string(), "1".to_string()]);
+    }
+    revert_args.extend(["--no-edit".to_string(), expected_merge_commit.clone()]);
+    let revert_output = runner
+        .run(
+            &request.workspace_root,
+            PostMergeCommand::Git(revert_args),
             request.timeout,
         )
         .await;
@@ -424,6 +520,7 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
         fix_card_id,
         skipped_reason: None,
         revert_skipped_reason: None,
+        outcome: VerificationOutcome::CommandFailed,
     })
 }
 
@@ -439,21 +536,28 @@ fn skipped_result(reason: &str) -> PostMergeCheckResult {
         fix_card_id: None,
         skipped_reason: Some(reason.to_string()),
         revert_skipped_reason: None,
+
+        outcome: VerificationOutcome::Unknown,
     }
 }
 
-fn rejected_result(command: String, reason: String) -> PostMergeCheckResult {
+fn failed_without_revert(
+    command: Option<String>,
+    outcome: VerificationOutcome,
+    output_tail: String,
+) -> PostMergeCheckResult {
     PostMergeCheckResult {
         checked: true,
         auto_reverted: false,
-        command: Some(command),
+        command,
         exit_code: None,
-        output_tail: format!("Rejected by command filter: {}", reason),
+        output_tail,
         merge_commit: None,
         revert_commit: None,
         fix_card_id: None,
         skipped_reason: None,
-        revert_skipped_reason: None,
+        revert_skipped_reason: Some("verification was not a genuine command failure".to_string()),
+        outcome,
     }
 }
 
@@ -462,95 +566,6 @@ fn git_text(output: PostMergeCommandOutput) -> Option<String> {
         .success
         .then(|| output.output.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-pub fn extract_verification_commands(instructions: &str) -> Vec<String> {
-    let mut commands = Vec::new();
-    let mut in_acceptance = false;
-    let mut in_fence = false;
-    for line in instructions.lines() {
-        let trimmed = line.trim();
-        let heading = trimmed.trim_start_matches('#').trim().to_lowercase();
-        if trimmed.starts_with('#') {
-            in_acceptance = heading.contains("acceptance criteria")
-                || heading == "verify"
-                || heading.contains("verification");
-            continue;
-        }
-        if trimmed.starts_with("```") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if let Some(command) = parse_verify_line(trimmed) {
-            push_unique(&mut commands, command);
-            continue;
-        }
-        if in_acceptance && in_fence && !trimmed.is_empty() {
-            push_unique(&mut commands, stripped_command(trimmed));
-            continue;
-        }
-        if in_acceptance && looks_like_verification_command(trimmed) {
-            push_unique(&mut commands, stripped_command(trimmed));
-        }
-    }
-    commands
-}
-
-fn parse_verify_line(line: &str) -> Option<String> {
-    let lower = line.to_lowercase();
-    let index = lower.find("verify:")?;
-    let command = &line[index + "verify:".len()..];
-    Some(stripped_command(command)).filter(|command| !command.is_empty())
-}
-
-fn stripped_command(command: &str) -> String {
-    let command = command.trim();
-    if let Some(start) = command.find('`') {
-        if let Some(end) = command[start + 1..].find('`') {
-            return command[start + 1..start + 1 + end].trim().to_string();
-        }
-    }
-    command
-        .trim_matches('`')
-        .trim_matches('"')
-        .trim_end_matches('.')
-        .trim()
-        .to_string()
-}
-
-fn push_unique(commands: &mut Vec<String>, command: String) {
-    let command = command.trim();
-    if command.is_empty() {
-        return;
-    }
-    if !commands.iter().any(|existing| existing == command) {
-        commands.push(command.to_string());
-    }
-}
-
-fn looks_like_verification_command(line: &str) -> bool {
-    let line = line
-        .trim_start_matches(['-', '*', ' ', '\t'])
-        .trim_matches('`')
-        .trim();
-    line.starts_with("cargo ")
-        || line.starts_with("npm test")
-        || line.starts_with("npm run lint")
-        || line.starts_with("cd ")
-}
-
-pub fn is_supported_deterministic_command(command: &str) -> bool {
-    let command = command.trim();
-    if command.is_empty()
-        || command.contains(';')
-        || command.contains('|')
-        || command.contains('>')
-        || command.contains('<')
-        || command.contains('\n')
-    {
-        return false;
-    }
-    parse_restricted_argv(command).is_ok()
 }
 
 async fn store_regression_result(
@@ -856,7 +871,33 @@ mod tests {
             success,
             exit_code,
             output: text.to_string(),
+            outcome: if success {
+                VerificationOutcome::Passed
+            } else if exit_code.is_some() {
+                VerificationOutcome::CommandFailed
+            } else {
+                VerificationOutcome::InfrastructureFailed
+            },
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn system_runner_timeout_kills_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("descendant-survived");
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            &format!("(sleep 1; touch '{}') & wait", marker.display()),
+        ]);
+
+        let result = run_command(command, "timeout process group", Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+
+        assert_eq!(result.outcome, VerificationOutcome::InfrastructureFailed);
+        assert!(result.output.contains("timed out"));
+        assert!(!marker.exists(), "timed-out descendant survived");
     }
 
     fn card(instructions: &str) -> BoardCard {
@@ -939,37 +980,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn post_merge_check_extracts_verification_command() {
-        let instructions = "## Acceptance Criteria\n- post_merge_check.rs implements logic\n- Verify: `cargo test --lib -p refact-lsp -- post_merge_check`";
-
-        assert_eq!(
-            extract_verification_commands(instructions),
-            vec!["cargo test --lib -p refact-lsp -- post_merge_check".to_string()]
-        );
-    }
-
-    #[test]
-    fn post_merge_check_allows_only_supported_commands() {
-        assert!(is_supported_deterministic_command("cargo test --lib"));
-        assert!(is_supported_deterministic_command(
-            "cd refact-agent/engine && npm test -- --run"
-        ));
-        assert!(is_supported_deterministic_command(
-            "npm run lint -- --quiet"
-        ));
-        assert!(is_supported_deterministic_command("pytest -q"));
-        assert!(!is_supported_deterministic_command(
-            "cargo test && rm -rf target"
-        ));
-        assert!(!is_supported_deterministic_command("cargo test > out.txt"));
-        assert!(!is_supported_deterministic_command(
-            "cargo test && cd refact-agent/engine"
-        ));
-    }
-
     #[tokio::test]
-    async fn post_merge_check_no_command_is_noop() {
+    async fn post_merge_check_no_command_is_checked_failure_without_revert() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         write_task(gcx.clone(), temp.path(), card("No verify command")).await;
@@ -979,8 +991,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.checked);
+        assert!(result.checked);
         assert!(!result.auto_reverted);
+        assert_eq!(result.outcome, VerificationOutcome::NoCommands);
+        assert_eq!(
+            result.revert_skipped_reason.as_deref(),
+            Some("verification was not a genuine command failure")
+        );
         assert!(runner.calls.is_empty());
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         assert_eq!(board.get_card("T-1").unwrap().column, "done");
@@ -1155,6 +1172,7 @@ mod tests {
                 output(false, Some(1), "running\nerror: regression failed\n"),
                 output(true, Some(0), "mergehash\n"),
                 output(true, Some(0), ""),
+                output(true, Some(0), "mergehash parenthash\n"),
                 output(true, Some(0), "revert ok\n"),
                 output(true, Some(0), "reverthash\n"),
             ]),
@@ -1182,6 +1200,42 @@ mod tests {
             .iter()
             .any(|update| update.message == "Auto-reverted: error: regression failed"));
         assert!(board.columns.iter().any(|column| column.id == "regressed"));
+    }
+
+    #[tokio::test]
+    async fn post_merge_check_reverts_merge_commit_with_mainline() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        write_task(
+            gcx.clone(),
+            temp.path(),
+            card("## Acceptance Criteria\n- Verify: `cargo test --lib`"),
+        )
+        .await;
+        let mut runner = MockRunner {
+            outputs: VecDeque::from([
+                output(false, Some(1), "error: regression\n"),
+                output(true, Some(0), "mergehash\n"),
+                output(true, Some(0), ""),
+                output(true, Some(0), "mergehash parent1 parent2\n"),
+                output(true, Some(0), "revert ok\n"),
+                output(true, Some(0), "reverthash\n"),
+            ]),
+            calls: Vec::new(),
+        };
+
+        let result = post_merge_check_with_runner(gcx, request(temp.path()), &mut runner)
+            .await
+            .unwrap();
+
+        assert!(result.auto_reverted);
+        assert!(runner.calls.contains(&PostMergeCommand::Git(vec![
+            "revert".to_string(),
+            "-m".to_string(),
+            "1".to_string(),
+            "--no-edit".to_string(),
+            "mergehash".to_string(),
+        ])));
     }
 
     #[tokio::test]
@@ -1278,6 +1332,7 @@ mod tests {
                 output(false, Some(1), "running\nerror: regression failed\n"),
                 output(true, Some(0), "mergehash\n"),
                 output(true, Some(0), ""),
+                output(true, Some(0), "mergehash parenthash\n"),
                 output(false, Some(1), "CONFLICT in src/lib.rs\n"),
             ]),
             calls: Vec::new(),
@@ -1328,6 +1383,7 @@ mod tests {
                 output(false, Some(1), "FAIL test_a\nexpected true\n"),
                 output(true, Some(0), "abc123\n"),
                 output(true, Some(0), ""),
+                output(true, Some(0), "abc123 parenthash\n"),
                 output(true, Some(0), "reverted\n"),
                 output(true, Some(0), "def456\n"),
             ]),

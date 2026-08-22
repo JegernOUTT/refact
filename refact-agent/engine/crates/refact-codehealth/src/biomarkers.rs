@@ -108,6 +108,7 @@ const MEMBER_ACCESS_KINDS: &[&str] = &[
 ];
 
 pub fn detect_biomarkers(lang: &str, text: &str) -> Vec<Finding> {
+    let lang = refact_codegraph_parsers::normalize_lang(lang);
     let Some(tree) = refact_codegraph_parsers::parse_tree(lang, text) else {
         return Vec::new();
     };
@@ -125,7 +126,7 @@ pub fn detect_biomarkers(lang: &str, text: &str) -> Vec<Finding> {
     for c in &classes {
         detect_class_biomarkers(c, &mut out);
     }
-    collect_error_handling(root, bytes, text, &mut out);
+    collect_error_handling(lang, root, bytes, text, &mut out);
     out.sort_by(|a, b| a.line.cmp(&b.line).then(a.biomarker.cmp(&b.biomarker)));
     out
 }
@@ -693,7 +694,14 @@ fn count_file_nloc(text: &str) -> u32 {
     text.lines().filter(|l| !l.trim().is_empty()).count() as u32
 }
 
-fn collect_error_handling(root: Node<'_>, bytes: &[u8], text: &str, out: &mut Vec<Finding>) {
+fn collect_error_handling(
+    lang: &str,
+    root: Node<'_>,
+    bytes: &[u8],
+    text: &str,
+    out: &mut Vec<Finding>,
+) {
+    let is_rust = lang == "rust";
     let mut stack = vec![root];
     while let Some(cur) = stack.pop() {
         let kind = cur.kind();
@@ -719,7 +727,10 @@ fn collect_error_handling(root: Node<'_>, bytes: &[u8], text: &str, out: &mut Ve
                 ));
             }
         }
-        if kind == "macro_invocation" && cur.utf8_text(bytes).unwrap_or("").starts_with("panic!") {
+        if is_rust
+            && kind == "macro_invocation"
+            && cur.utf8_text(bytes).unwrap_or("").starts_with("panic!")
+        {
             out.push(finding(
                 "error_handling",
                 "error_handling",
@@ -729,7 +740,7 @@ fn collect_error_handling(root: Node<'_>, bytes: &[u8], text: &str, out: &mut Ve
                 "panic turns a recoverable error into a crash".to_string(),
             ));
         }
-        if matches!(kind, "call_expression" | "method_invocation") {
+        if is_rust && matches!(kind, "call_expression" | "method_invocation") {
             let t = cur.utf8_text(bytes).unwrap_or("");
             if t.contains(".unwrap(") || t.contains(".expect(") {
                 out.push(finding(
@@ -747,17 +758,19 @@ fn collect_error_handling(root: Node<'_>, bytes: &[u8], text: &str, out: &mut Ve
             stack.push(child);
         }
     }
-    for (idx, line) in text.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed == "panic!()" || trimmed.starts_with("panic!(") {
-            out.push(finding(
-                "error_handling",
-                "error_handling",
-                Dimension::Maintainability,
-                Severity::Low,
-                idx + 1,
-                "panic turns a recoverable error into a crash".to_string(),
-            ));
+    if is_rust {
+        for (idx, line) in text.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed == "panic!()" || trimmed.starts_with("panic!(") {
+                out.push(finding(
+                    "error_handling",
+                    "error_handling",
+                    Dimension::Maintainability,
+                    Severity::Low,
+                    idx + 1,
+                    "panic turns a recoverable error into a crash".to_string(),
+                ));
+            }
         }
     }
 }
@@ -784,6 +797,39 @@ mod tests {
     fn trivial_function_has_no_findings() {
         let findings = detect_biomarkers("rust", "fn simple() -> i32 { 1 }\n");
         assert!(findings.is_empty(), "got {findings:?}");
+    }
+
+    #[test]
+    fn rust_crash_idioms_emit_error_handling_findings() {
+        let src =
+            "fn fail(result: Result<(), &str>) {\n    result.unwrap();\n    panic!(\"boom\");\n}\n";
+        let findings = detect_biomarkers("rust", src);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.detail == "unwrap/expect turns a recoverable error into a crash"),
+            "got {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.detail == "panic turns a recoverable error into a crash"),
+            "got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn tsx_calls_are_not_treated_as_rust_crash_idioms() {
+        let src = "async function save(policy: Policy) {\n    await updatePolicy(policy).unwrap();\n    expect(policy).toBeDefined();\n}\n";
+        let findings = detect_biomarkers("tsx", src);
+
+        assert!(
+            findings.iter().all(|f| f.detail
+                != "unwrap/expect turns a recoverable error into a crash"
+                && f.detail != "panic turns a recoverable error into a crash"),
+            "got {findings:?}"
+        );
     }
 
     #[test]

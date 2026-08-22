@@ -12,7 +12,7 @@ pub mod symbols_fmt;
 
 pub use retrieval::CodeHit;
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -63,6 +63,26 @@ pub struct CachedGraphAnalytics {
     pub dead_code: Vec<dead_code::DeadSymbol>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScopedAnalyticsKey {
+    generation: u64,
+    allowed_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ScopedAnalyticsCache {
+    entries: VecDeque<ScopedAnalyticsCacheEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct ScopedAnalyticsCacheEntry {
+    key: ScopedAnalyticsKey,
+    value: Arc<CachedGraphAnalytics>,
+}
+
+const SCOPED_ANALYTICS_CACHE_CAPACITY: usize = 4;
+const SCOPED_ANALYTICS_MAX_REBUILD_ATTEMPTS: usize = 2;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IndexReadiness {
     pub queued: usize,
@@ -82,7 +102,9 @@ pub struct CodeGraphService {
     initial_index_done: AtomicBool,
     graph_generation: AtomicU64,
     analytics_cache: AMutex<Option<Arc<CachedGraphAnalytics>>>,
+    scoped_analytics_cache: AMutex<ScopedAnalyticsCache>,
     analytics_rebuild_count: AtomicUsize,
+    scoped_analytics_rebuild_count: AtomicUsize,
 }
 
 fn normalize_indexed_path(path: &str) -> String {
@@ -159,6 +181,30 @@ enum AnalyticsRebuildPause {
     Gate(std::sync::Arc<AnalyticsRebuildGate>),
 }
 
+enum ScopedAnalyticsRebuildPause {
+    None,
+    #[cfg(test)]
+    Gate(Option<std::sync::Arc<AnalyticsRebuildGate>>),
+    #[cfg(test)]
+    AdvanceGeneration,
+}
+
+impl ScopedAnalyticsRebuildPause {
+    async fn after_rebuild(&mut self, _service: &CodeGraphService) {
+        match self {
+            ScopedAnalyticsRebuildPause::None => {}
+            #[cfg(test)]
+            ScopedAnalyticsRebuildPause::Gate(gate) => {
+                if let Some(gate) = gate.take() {
+                    gate.pause().await;
+                }
+            }
+            #[cfg(test)]
+            ScopedAnalyticsRebuildPause::AdvanceGeneration => _service.bump_graph_generation(),
+        }
+    }
+}
+
 impl AnalyticsRebuildPause {
     async fn wait(self) {
         match self {
@@ -187,7 +233,7 @@ impl QueuedPath {
 #[cfg(test)]
 struct AnalyticsRebuildGate {
     after_rebuild: tokio::sync::Barrier,
-    resume: Notify,
+    resume: tokio::sync::Semaphore,
 }
 
 #[cfg(test)]
@@ -195,13 +241,17 @@ impl AnalyticsRebuildGate {
     fn new() -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             after_rebuild: tokio::sync::Barrier::new(2),
-            resume: Notify::new(),
+            resume: tokio::sync::Semaphore::new(0),
         })
     }
 
     async fn pause(&self) {
         self.after_rebuild.wait().await;
-        self.resume.notified().await;
+        self.resume
+            .acquire()
+            .await
+            .expect("gate remains open")
+            .forget();
     }
 
     async fn wait_paused(&self) {
@@ -209,7 +259,7 @@ impl AnalyticsRebuildGate {
     }
 
     fn resume(&self) {
-        self.resume.notify_waiters();
+        self.resume.add_permits(1);
     }
 }
 #[derive(Default)]
@@ -273,7 +323,11 @@ impl CodeGraphService {
             initial_index_done: AtomicBool::new(false),
             graph_generation: AtomicU64::new(0),
             analytics_cache: AMutex::new(None),
+            scoped_analytics_cache: AMutex::new(ScopedAnalyticsCache {
+                entries: VecDeque::new(),
+            }),
             analytics_rebuild_count: AtomicUsize::new(0),
+            scoped_analytics_rebuild_count: AtomicUsize::new(0),
         })
     }
 
@@ -289,7 +343,11 @@ impl CodeGraphService {
             initial_index_done: AtomicBool::new(true),
             graph_generation: AtomicU64::new(0),
             analytics_cache: AMutex::new(None),
+            scoped_analytics_cache: AMutex::new(ScopedAnalyticsCache {
+                entries: VecDeque::new(),
+            }),
             analytics_rebuild_count: AtomicUsize::new(0),
+            scoped_analytics_rebuild_count: AtomicUsize::new(0),
         })
     }
 
@@ -417,6 +475,11 @@ impl CodeGraphService {
     #[cfg(test)]
     pub fn analytics_rebuild_count(&self) -> usize {
         self.analytics_rebuild_count.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn scoped_analytics_rebuild_count(&self) -> usize {
+        self.scoped_analytics_rebuild_count.load(Ordering::Relaxed)
     }
 
     pub async fn index_file(&self, path: &str, text: &str, lang: &str) -> Result<(), String> {
@@ -617,6 +680,34 @@ impl CodeGraphService {
         self.with_read_store(|store| store.all_paths()).await
     }
 
+    async fn filtered_graph_data(
+        &self,
+        allowed_paths: &HashSet<String>,
+    ) -> Result<analytics::GraphData, String> {
+        self.with_read_store(|store| {
+            store.read_snapshot(|store| Self::filtered_graph_data_from_store(store, allowed_paths))
+        })
+        .await
+    }
+
+    fn filtered_graph_data_from_store(
+        store: &Store,
+        allowed_paths: &HashSet<String>,
+    ) -> Result<analytics::GraphData, String> {
+        let nodes = store
+            .node_names()?
+            .into_iter()
+            .filter(|(_, _, path)| allowed_paths.contains(path))
+            .collect::<Vec<_>>();
+        let ids = nodes.iter().map(|(id, _, _)| *id).collect::<HashSet<_>>();
+        let edges = store
+            .graph_edges()?
+            .into_iter()
+            .filter(|(src, dst, _)| ids.contains(src) && ids.contains(dst))
+            .collect();
+        Ok(analytics::GraphData { nodes, edges })
+    }
+
     pub async fn graph_nodes(&self) -> Result<Vec<analytics::GraphNode>, String> {
         Ok(self.cached_graph_analytics().await?.data.nodes.clone())
     }
@@ -659,6 +750,157 @@ impl CodeGraphService {
         Ok(self.cached_graph_analytics().await?.dead_code.clone())
     }
 
+    pub async fn scoped_graph_analytics(
+        &self,
+        allowed_paths: &HashSet<String>,
+    ) -> Result<Arc<CachedGraphAnalytics>, String> {
+        self.scoped_graph_analytics_with_pause(allowed_paths, ScopedAnalyticsRebuildPause::None)
+            .await
+    }
+
+    #[cfg(test)]
+    async fn scoped_graph_analytics_with_gate(
+        &self,
+        allowed_paths: &HashSet<String>,
+        gate: std::sync::Arc<AnalyticsRebuildGate>,
+    ) -> Result<Arc<CachedGraphAnalytics>, String> {
+        self.scoped_graph_analytics_with_pause(
+            allowed_paths,
+            ScopedAnalyticsRebuildPause::Gate(Some(gate)),
+        )
+        .await
+    }
+
+    async fn scoped_graph_analytics_with_pause(
+        &self,
+        allowed_paths: &HashSet<String>,
+        mut pause: ScopedAnalyticsRebuildPause,
+    ) -> Result<Arc<CachedGraphAnalytics>, String> {
+        let allowed_paths = allowed_paths.clone();
+        let mut stable_paths = allowed_paths.iter().cloned().collect::<Vec<_>>();
+        stable_paths.sort();
+        for attempt in 0..SCOPED_ANALYTICS_MAX_REBUILD_ATTEMPTS {
+            let (generation, key) = {
+                let mut cache = self.scoped_analytics_cache.lock().await;
+                let generation = self.graph_generation();
+                let key = ScopedAnalyticsKey {
+                    generation,
+                    allowed_paths: stable_paths.clone(),
+                };
+                cache
+                    .entries
+                    .retain(|entry| entry.key.generation == generation);
+                if let Some(position) = cache.entries.iter().position(|entry| entry.key == key) {
+                    let cached = cache.entries.remove(position).expect("cache entry exists");
+                    let value = cached.value.clone();
+                    cache.entries.push_back(cached);
+                    return Ok(value);
+                }
+                (generation, key)
+            };
+
+            let rebuilt = self
+                .rebuild_scoped_graph_analytics(generation, &allowed_paths)
+                .await?;
+            pause.after_rebuild(self).await;
+
+            let mut cache = self.scoped_analytics_cache.lock().await;
+            let current_generation = self.graph_generation();
+            cache
+                .entries
+                .retain(|entry| entry.key.generation == current_generation);
+            if let Some(cached) = cache.entries.iter().find(|entry| {
+                entry.key.generation == current_generation
+                    && entry.key.allowed_paths == stable_paths
+            }) {
+                return Ok(cached.value.clone());
+            }
+            if current_generation == generation {
+                cache.entries.push_back(ScopedAnalyticsCacheEntry {
+                    key,
+                    value: rebuilt.clone(),
+                });
+                while cache.entries.len() > SCOPED_ANALYTICS_CACHE_CAPACITY {
+                    cache.entries.pop_front();
+                }
+                return Ok(rebuilt);
+            }
+            drop(cache);
+            if attempt + 1 == SCOPED_ANALYTICS_MAX_REBUILD_ATTEMPTS {
+                return Err(format!(
+                    "codegraph generation changed while rebuilding scoped analytics (rebuilt {}, current {})",
+                    rebuilt.generation,
+                    self.graph_generation()
+                ));
+            }
+        }
+        unreachable!("scoped analytics rebuild attempts are non-zero")
+    }
+
+    async fn rebuild_scoped_graph_analytics(
+        &self,
+        generation: u64,
+        allowed_paths: &HashSet<String>,
+    ) -> Result<Arc<CachedGraphAnalytics>, String> {
+        let (data, symbols, dcp_pairs, fts_docs) = self
+            .with_read_store(|store| {
+                store.read_snapshot(|store| {
+                    let data = Self::filtered_graph_data_from_store(store, allowed_paths)?;
+                    let ids = data
+                        .nodes
+                        .iter()
+                        .map(|(id, _, _)| *id)
+                        .collect::<HashSet<_>>();
+                    let symbols = store
+                        .symbol_records()?
+                        .into_iter()
+                        .filter(|symbol| ids.contains(&symbol.node_id))
+                        .collect();
+                    let dcp_pairs = store
+                        .all_symbols()?
+                        .into_iter()
+                        .filter(|(_, id)| ids.contains(id))
+                        .collect();
+                    let fts_docs = store
+                        .all_paths()?
+                        .into_iter()
+                        .filter(|path| allowed_paths.contains(path))
+                        .count() as i64;
+                    Ok((data, symbols, dcp_pairs, fts_docs))
+                })
+            })
+            .await?;
+        self.scoped_analytics_rebuild_count
+            .fetch_add(1, Ordering::Relaxed);
+        tokio::task::spawn_blocking(move || -> Result<_, String> {
+            let files = data
+                .nodes
+                .iter()
+                .map(|(_, _, path)| path)
+                .collect::<HashSet<_>>()
+                .len();
+            let counts = Counts {
+                nodes: data.nodes.len() as i64,
+                edges: data.edges.len() as i64,
+                files: files as i64,
+                fts_docs,
+            };
+            let analytics = analytics::compute_graph_analytics_from_data(&data);
+            let communities = communities::detect_communities_from_data(&data)?;
+            let dead_code = dead_code::dead_code_from_parts(symbols, dcp_pairs, &data.edges);
+            Ok(Arc::new(CachedGraphAnalytics {
+                generation,
+                counts,
+                data,
+                analytics,
+                communities,
+                dead_code,
+            }))
+        })
+        .await
+        .map_err(|e| format!("scoped codegraph analytics join: {e}"))?
+    }
+
     pub async fn security_scan(
         &self,
         _path: &str,
@@ -673,12 +915,35 @@ impl CodeGraphService {
         changed_files: &[String],
         max_depth: usize,
     ) -> Result<pr_blast::BlastReport, String> {
+        if changed_files.is_empty() || max_depth == 0 {
+            return Ok(pr_blast::empty_report(changed_files));
+        }
         self.with_read_store(|store| {
             let indexed_paths = store.all_paths()?;
             let changed_files = resolve_indexed_paths(changed_files, &indexed_paths);
             pr_blast::blast_radius(store, &changed_files, max_depth)
         })
         .await
+    }
+
+    pub async fn pr_blast_scoped(
+        &self,
+        changed_files: &[String],
+        max_depth: usize,
+        allowed_paths: &HashSet<String>,
+    ) -> Result<pr_blast::BlastReport, String> {
+        if changed_files.is_empty() || max_depth == 0 {
+            return Ok(pr_blast::empty_report(changed_files));
+        }
+        let mut indexed_paths = allowed_paths.iter().cloned().collect::<Vec<_>>();
+        indexed_paths.sort();
+        let changed_files = resolve_indexed_paths(changed_files, &indexed_paths);
+        let data = self.filtered_graph_data(allowed_paths).await?;
+        Ok(pr_blast::blast_radius_from_data(
+            &data,
+            &changed_files,
+            max_depth,
+        ))
     }
 
     pub async fn type_hierarchy(&self, subtree_of: &str) -> Result<String, String> {
@@ -1100,6 +1365,288 @@ mod tests {
         assert!(report.directly_impacted.is_empty());
         assert!(report.transitively_impacted.is_empty());
         assert_eq!(report.risk_score, 0.0);
+    }
+
+    #[tokio::test]
+    async fn pr_blast_early_return_does_not_wait_for_store() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+        let store_guard = service.store.lock().await;
+
+        let empty = tokio::time::timeout(Duration::from_millis(50), service.pr_blast(&[], 2))
+            .await
+            .expect("empty blast must not read the store")
+            .unwrap();
+        let zero_depth = tokio::time::timeout(
+            Duration::from_millis(50),
+            service.pr_blast(&["src/a.rs".to_string()], 0),
+        )
+        .await
+        .expect("zero-depth blast must not read the store")
+        .unwrap();
+        let scoped = tokio::time::timeout(
+            Duration::from_millis(50),
+            service.pr_blast_scoped(
+                &["src/a.rs".to_string()],
+                0,
+                &HashSet::from(["src/a.rs".to_string()]),
+            ),
+        )
+        .await
+        .expect("zero-depth scoped blast must not read the store")
+        .unwrap();
+        drop(store_guard);
+
+        assert!(empty.changed_files.is_empty());
+        assert_eq!(zero_depth.changed_files, vec!["src/a.rs".to_string()]);
+        assert_eq!(zero_depth.impacted_file_count, 0);
+        assert_eq!(scoped.changed_files, vec!["src/a.rs".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn scoped_pr_blast_resolves_basename_only_within_allowed_paths() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+        service
+            .index_file("src/core.rs", "pub fn scoped_core() {}\n", "rust")
+            .await
+            .unwrap();
+        service
+            .index_file(
+                "src/caller.rs",
+                "fn scoped_caller() { scoped_core(); }\n",
+                "rust",
+            )
+            .await
+            .unwrap();
+        service
+            .index_file("examples/core.rs", "pub fn other_core() {}\n", "rust")
+            .await
+            .unwrap();
+        service.connect_usages().await.unwrap();
+
+        let allowed = HashSet::from(["src/core.rs".to_string(), "src/caller.rs".to_string()]);
+        let report = service
+            .pr_blast_scoped(&["core.rs".to_string()], 1, &allowed)
+            .await
+            .unwrap();
+
+        assert_eq!(report.changed_files, vec!["src/core.rs".to_string()]);
+        assert!(report
+            .directly_impacted
+            .iter()
+            .any(|impact| impact.path == "src/caller.rs" && impact.symbol == "scoped_caller"));
+        assert!(report
+            .directly_impacted
+            .iter()
+            .all(|impact| impact.path != "examples/core.rs"));
+    }
+
+    #[tokio::test]
+    async fn scoped_analytics_recomputes_dead_code_and_pr_blast() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+        service
+            .index_file("src/core.rs", "fn main() {}\nfn orphan() {}\n", "rust")
+            .await
+            .unwrap();
+        service
+            .index_file(
+                "dist/generated.rs",
+                "fn main() { orphan(); }\nfn generated_caller() { orphan(); }\n",
+                "rust",
+            )
+            .await
+            .unwrap();
+        service.connect_usages().await.unwrap();
+        assert!(!service
+            .dead_code()
+            .await
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol.name == "orphan"));
+
+        let allowed = HashSet::from(["src/core.rs".to_string()]);
+        let scoped = service.scoped_graph_analytics(&allowed).await.unwrap();
+        assert!(scoped
+            .dead_code
+            .iter()
+            .any(|symbol| symbol.name == "orphan"));
+        assert!(scoped
+            .analytics
+            .file_centrality
+            .top_pagerank
+            .iter()
+            .all(|(path, _)| path == "src/core.rs"));
+
+        let report = service
+            .pr_blast_scoped(&["src/core.rs".to_string()], 2, &allowed)
+            .await
+            .unwrap();
+        assert!(report.directly_impacted.is_empty());
+        assert_eq!(report.impacted_file_count, 0);
+        assert_eq!(report.risk_score, 0.0);
+    }
+
+    #[tokio::test]
+    async fn scoped_analytics_cache_reuses_set_and_invalidates_on_generation() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+        service
+            .index_file("src/a.rs", "pub fn a() {}\n", "rust")
+            .await
+            .unwrap();
+        let allowed = HashSet::from(["src/a.rs".to_string()]);
+
+        let first = service.scoped_graph_analytics(&allowed).await.unwrap();
+        let second = service.scoped_graph_analytics(&allowed).await.unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(service.scoped_analytics_rebuild_count(), 1);
+
+        service
+            .index_file("src/b.rs", "pub fn b() {}\n", "rust")
+            .await
+            .unwrap();
+        let third = service.scoped_graph_analytics(&allowed).await.unwrap();
+        assert!(!Arc::ptr_eq(&first, &third));
+        assert_eq!(service.scoped_analytics_rebuild_count(), 2);
+        assert_eq!(third.generation, service.graph_generation());
+    }
+
+    #[tokio::test]
+    async fn scoped_analytics_counts_match_scoped_graph_and_fts_documents() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+        service
+            .index_file("src/a.rs", "pub fn a() {}\n", "rust")
+            .await
+            .unwrap();
+        service
+            .index_file("excluded/b.rs", "pub fn b() {}\n", "rust")
+            .await
+            .unwrap();
+        let allowed = HashSet::from(["src/a.rs".to_string()]);
+
+        let scoped = service.scoped_graph_analytics(&allowed).await.unwrap();
+        let scoped_files = scoped
+            .data
+            .nodes
+            .iter()
+            .map(|(_, _, path)| path)
+            .collect::<HashSet<_>>()
+            .len() as i64;
+
+        assert_eq!(scoped.counts.nodes, scoped.data.nodes.len() as i64);
+        assert_eq!(scoped.counts.edges, scoped.data.edges.len() as i64);
+        assert_eq!(scoped.counts.files, scoped_files);
+        assert_eq!(scoped.counts.files, 1);
+        assert_eq!(scoped.counts.fts_docs, 1);
+        assert_eq!(service.counts().await.unwrap().fts_docs, 2);
+    }
+
+    #[tokio::test]
+    async fn scoped_analytics_cache_keeps_multiple_scopes_and_evicts_oldest() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+        for index in 0..=SCOPED_ANALYTICS_CACHE_CAPACITY {
+            service
+                .index_file(
+                    &format!("src/{index}.rs"),
+                    &format!("pub fn item_{index}() {{}}\n"),
+                    "rust",
+                )
+                .await
+                .unwrap();
+        }
+
+        let scopes = (0..=SCOPED_ANALYTICS_CACHE_CAPACITY)
+            .map(|index| HashSet::from([format!("src/{index}.rs")]))
+            .collect::<Vec<_>>();
+        let mut snapshots = Vec::new();
+        for scope in &scopes[..SCOPED_ANALYTICS_CACHE_CAPACITY] {
+            snapshots.push(service.scoped_graph_analytics(scope).await.unwrap());
+        }
+        for (scope, snapshot) in scopes[..SCOPED_ANALYTICS_CACHE_CAPACITY]
+            .iter()
+            .zip(&snapshots)
+        {
+            let cached = service.scoped_graph_analytics(scope).await.unwrap();
+            assert!(Arc::ptr_eq(snapshot, &cached));
+        }
+        assert_eq!(
+            service.scoped_analytics_rebuild_count(),
+            SCOPED_ANALYTICS_CACHE_CAPACITY
+        );
+
+        service
+            .scoped_graph_analytics(&scopes[SCOPED_ANALYTICS_CACHE_CAPACITY])
+            .await
+            .unwrap();
+        let cache = service.scoped_analytics_cache.lock().await;
+        assert_eq!(cache.entries.len(), SCOPED_ANALYTICS_CACHE_CAPACITY);
+        assert!(cache
+            .entries
+            .iter()
+            .all(|entry| entry.key.allowed_paths != vec!["src/0.rs".to_string()]));
+        drop(cache);
+
+        service.scoped_graph_analytics(&scopes[0]).await.unwrap();
+        assert_eq!(
+            service.scoped_analytics_rebuild_count(),
+            SCOPED_ANALYTICS_CACHE_CAPACITY + 2
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scoped_analytics_rebuild_does_not_hold_cache_mutex() {
+        let service = Arc::new(CodeGraphService::open_in_memory().unwrap());
+        service
+            .index_file("src/a.rs", "pub fn a() {}\n", "rust")
+            .await
+            .unwrap();
+        let allowed = HashSet::from(["src/a.rs".to_string()]);
+        let gate = AnalyticsRebuildGate::new();
+        let rebuild = {
+            let service = service.clone();
+            let allowed = allowed.clone();
+            let gate = gate.clone();
+            tokio::spawn(async move {
+                service
+                    .scoped_graph_analytics_with_gate(&allowed, gate)
+                    .await
+            })
+        };
+        gate.wait_paused().await;
+
+        assert!(service.scoped_analytics_cache.try_lock().is_ok());
+        let concurrent = service.scoped_graph_analytics(&allowed).await.unwrap();
+        gate.resume();
+        let paused = rebuild.await.unwrap().unwrap();
+        assert!(Arc::ptr_eq(&concurrent, &paused));
+    }
+
+    #[tokio::test]
+    async fn scoped_analytics_generation_churn_returns_explicit_error() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+        service
+            .index_file("src/a.rs", "pub fn a() {}\n", "rust")
+            .await
+            .unwrap();
+        let allowed = HashSet::from(["src/a.rs".to_string()]);
+
+        let error = service
+            .scoped_graph_analytics_with_pause(
+                &allowed,
+                ScopedAnalyticsRebuildPause::AdvanceGeneration,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            service.scoped_analytics_rebuild_count(),
+            SCOPED_ANALYTICS_MAX_REBUILD_ATTEMPTS
+        );
+        assert!(error.contains("generation changed"), "{error}");
+        assert!(service
+            .scoped_analytics_cache
+            .lock()
+            .await
+            .entries
+            .is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

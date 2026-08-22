@@ -10,12 +10,15 @@ use serde_json::{json, Value};
 
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::verifier_diff::{git_changed_files_summary, resolve_verifier_diff_base};
-use crate::chat::verify_cmd::parse_restricted_argv;
+use crate::chat::verify_cmd::{parse_restricted_argv, verification_commands};
 use crate::exec::command_policy::{build_exec_request, CommandKind, CommandPolicyInput, ExecSource};
 use crate::exec::{ExecOutputStream, ExecStatus};
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
 use crate::tasks::storage;
-use crate::tasks::types::{BoardCard, StatusUpdate, VerificationResult, VerifierReport};
+use crate::tasks::types::{
+    BoardCard, StatusUpdate, VerificationOutcome, VerificationResult, VerifierReport,
+    VerifierReportClassification,
+};
 
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(600);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -303,10 +306,11 @@ pub async fn verify_card(
     }
 
     let commands = verification_commands(&card);
+    let no_commands = commands.is_empty();
     let mut command_results = Vec::new();
     let mut concerns = Vec::new();
 
-    if commands.is_empty() {
+    if no_commands {
         concerns.push(
             "No verification commands found in card instructions or final report".to_string(),
         );
@@ -325,27 +329,29 @@ pub async fn verify_card(
         .await
         .unwrap_or_else(|error| format!("diff unavailable: {}", error));
     let prompt = verifier_prompt(&card, &command_results, &diff);
-    let model_concerns = run_verifier_review(gcx.clone(), prompt, card.agent_chat_id.as_deref())
-        .await
-        .unwrap_or_else(|error| {
-            vec![format!(
-                "Verifier review subchat unavailable; human review recommended: {}",
-                error
-            )]
-        });
+    let review = run_verifier_review(gcx.clone(), prompt, card.agent_chat_id.as_deref()).await;
+    let review_unavailable = review.is_err();
+    let model_concerns = review.unwrap_or_else(|error| {
+        vec![format!(
+            "Verifier review subchat unavailable; human review recommended: {}",
+            error
+        )]
+    });
+    let review_has_concerns = !review_unavailable && !model_concerns.is_empty();
     concerns.extend(model_concerns);
 
-    let failed_commands = command_results.iter().any(|result| !result.passed);
-    let review_blocked = concerns
-        .iter()
-        .any(|concern| !concern.to_lowercase().contains("human review recommended"));
-    let passed = !failed_commands && !review_blocked;
-    let recommendation = if passed {
-        "merge"
-    } else if failed_commands || review_blocked {
-        "fix-needed"
-    } else {
-        "human-review"
+    let classification = classify_verifier_report(
+        no_commands,
+        &command_results,
+        review_unavailable,
+        review_has_concerns,
+    );
+    let passed = classification == VerifierReportClassification::Passed;
+    let recommendation = match classification {
+        VerifierReportClassification::Passed => "merge",
+        VerifierReportClassification::HumanReview => "human-review",
+        VerifierReportClassification::VerificationFailed
+        | VerifierReportClassification::Unknown => "fix-needed",
     }
     .to_string();
 
@@ -354,6 +360,7 @@ pub async fn verify_card(
         command_results,
         concerns,
         recommendation,
+        classification,
     };
     let stored = store_verifier_report(
         gcx,
@@ -369,6 +376,46 @@ pub async fn verify_card(
     Ok(report)
 }
 
+fn classify_verifier_report(
+    no_commands: bool,
+    command_results: &[VerificationResult],
+    review_unavailable: bool,
+    review_has_concerns: bool,
+) -> VerifierReportClassification {
+    let command_verification_failed = no_commands
+        || command_results.iter().any(|result| {
+            matches!(
+                result.outcome,
+                VerificationOutcome::CommandFailed
+                    | VerificationOutcome::Rejected
+                    | VerificationOutcome::PolicyDenied
+                    | VerificationOutcome::NoCommands
+            ) || (!result.passed && result.outcome != VerificationOutcome::InfrastructureFailed)
+        });
+    if command_verification_failed || review_has_concerns {
+        return VerifierReportClassification::VerificationFailed;
+    }
+    let infrastructure_failed = command_results.iter().any(|result| {
+        result.outcome == VerificationOutcome::InfrastructureFailed || !result.passed
+    });
+    if infrastructure_failed || review_unavailable {
+        return VerifierReportClassification::HumanReview;
+    }
+    if !command_results.is_empty()
+        && command_results.iter().all(|result| {
+            result.passed
+                && matches!(
+                    result.outcome,
+                    VerificationOutcome::Passed | VerificationOutcome::Unknown
+                )
+        })
+    {
+        VerifierReportClassification::Passed
+    } else {
+        VerifierReportClassification::VerificationFailed
+    }
+}
+
 fn launch_failure_report(error: String) -> VerifierReport {
     VerifierReport {
         passed: false,
@@ -378,98 +425,8 @@ fn launch_failure_report(error: String) -> VerifierReport {
             error
         )],
         recommendation: "human-review".to_string(),
+        classification: VerifierReportClassification::HumanReview,
     }
-}
-
-fn verification_commands(card: &BoardCard) -> Vec<String> {
-    let mut commands = Vec::new();
-    for command in commands_from_instructions(&card.instructions) {
-        push_unique(&mut commands, command);
-    }
-    if let Some(report) = card.final_report_structured.as_ref() {
-        for result in &report.verification {
-            push_unique(&mut commands, result.command.clone());
-        }
-    }
-    commands
-}
-
-fn push_unique(commands: &mut Vec<String>, command: String) {
-    let command = command.trim();
-    if command.is_empty() {
-        return;
-    }
-    if !commands.iter().any(|existing| existing == command) {
-        commands.push(command.to_string());
-    }
-}
-
-fn commands_from_instructions(instructions: &str) -> Vec<String> {
-    let lines = instructions.lines().collect::<Vec<_>>();
-    let mut commands = Vec::new();
-    let mut in_acceptance = false;
-    let mut in_fence = false;
-    let mut fence_lines: Vec<String> = Vec::new();
-
-    for line in lines {
-        let trimmed = line.trim();
-        let heading = trimmed.trim_start_matches('#').trim().to_lowercase();
-        if trimmed.starts_with('#') {
-            in_acceptance = heading.contains("acceptance criteria") || heading.contains("verify");
-            continue;
-        }
-        if !in_acceptance
-            && (trimmed.eq_ignore_ascii_case("acceptance criteria")
-                || trimmed.eq_ignore_ascii_case("verify:"))
-        {
-            in_acceptance = true;
-            continue;
-        }
-        if !in_acceptance {
-            continue;
-        }
-        if trimmed.starts_with("```") {
-            if in_fence {
-                for command in &fence_lines {
-                    push_unique(&mut commands, command.clone());
-                }
-                fence_lines.clear();
-                in_fence = false;
-            } else {
-                in_fence = true;
-            }
-            continue;
-        }
-        if in_fence {
-            if !trimmed.is_empty() {
-                fence_lines.push(trimmed.to_string());
-            }
-            continue;
-        }
-        if let Some(command) = parse_verify_line(trimmed) {
-            push_unique(&mut commands, command);
-        }
-    }
-    commands
-}
-
-fn parse_verify_line(line: &str) -> Option<String> {
-    let line = line.trim_start_matches(['-', '*', ' ']).trim();
-    let lower = line.to_lowercase();
-    if let Some((_, command)) = line.split_once("Verify:") {
-        return Some(command.trim().trim_matches('`').to_string()).filter(|s| !s.is_empty());
-    }
-    if let Some((_, command)) = line.split_once("verify:") {
-        return Some(command.trim().trim_matches('`').to_string()).filter(|s| !s.is_empty());
-    }
-    if lower.contains("cargo ")
-        || lower.contains("npm ")
-        || lower.contains("pytest")
-        || lower.contains("bun ")
-    {
-        return Some(line.trim_matches('`').to_string());
-    }
-    None
 }
 
 async fn run_verification_command(
@@ -494,6 +451,7 @@ async fn run_verification_command_with_runner<R: VerificationCommandRunner>(
                 exit_code: None,
                 passed: false,
                 output_tail: format!("Rejected by command filter: {}", reason),
+                outcome: VerificationOutcome::Rejected,
             };
         }
     };
@@ -519,7 +477,7 @@ async fn run_verification_argv(
     .await
 }
 
-async fn run_verification_argv_impl(
+pub(crate) async fn run_verification_argv_impl(
     gcx: Arc<GlobalContext>,
     worktree: &Path,
     command: &str,
@@ -534,6 +492,7 @@ async fn run_verification_argv_impl(
             exit_code: None,
             passed: false,
             output_tail: "empty verification command".to_string(),
+            outcome: VerificationOutcome::Rejected,
         };
     };
     let effective_cwd = cwd.map_or_else(|| worktree.to_path_buf(), |cwd| worktree.join(cwd));
@@ -543,6 +502,7 @@ async fn run_verification_argv_impl(
             exit_code: None,
             passed: false,
             output_tail: reason,
+            outcome: VerificationOutcome::InfrastructureFailed,
         };
     }
     let request = match build_exec_request(
@@ -569,6 +529,7 @@ async fn run_verification_argv_impl(
                 exit_code: None,
                 passed: false,
                 output_tail: format!("failed to spawn command: {}", error.message),
+                outcome: VerificationOutcome::PolicyDenied,
             };
         }
     };
@@ -580,6 +541,7 @@ async fn run_verification_argv_impl(
                 exit_code: None,
                 passed: false,
                 output_tail: format!("failed to spawn command: {}", error),
+                outcome: VerificationOutcome::InfrastructureFailed,
             };
         }
     };
@@ -596,35 +558,50 @@ async fn run_verification_argv_impl(
         }
     }
     let mut output = format!("{stdout}{stderr}");
-    let (exit_code, passed) = match &result.snapshot.status {
-        ExecStatus::Exited { exit_code } => (*exit_code, exit_code == &Some(0)),
+    let (exit_code, passed, outcome) = match &result.snapshot.status {
+        ExecStatus::Exited { exit_code } => (
+            *exit_code,
+            exit_code == &Some(0),
+            if exit_code == &Some(0) {
+                VerificationOutcome::Passed
+            } else {
+                VerificationOutcome::CommandFailed
+            },
+        ),
         ExecStatus::SandboxLauncherFailed { exit_code } => {
             output.push_str(&format!(
                 "sandbox launcher failed before command execution with exit code {exit_code}"
             ));
-            (Some(*exit_code), false)
+            (
+                Some(*exit_code),
+                false,
+                VerificationOutcome::InfrastructureFailed,
+            )
         }
         ExecStatus::TimedOut => {
             output.push_str(&format!(
                 "command timed out after {} seconds",
                 timeout.as_secs()
             ));
-            (None, false)
+            (None, false, VerificationOutcome::InfrastructureFailed)
         }
         ExecStatus::Failed { message } => {
             if !output.is_empty() {
                 output.push('\n');
             }
             output.push_str(message);
-            (None, false)
+            (None, false, VerificationOutcome::InfrastructureFailed)
         }
-        ExecStatus::Killed | ExecStatus::Starting | ExecStatus::Running => (None, false),
+        ExecStatus::Killed | ExecStatus::Starting | ExecStatus::Running => {
+            (None, false, VerificationOutcome::InfrastructureFailed)
+        }
     };
     VerificationResult {
         command: command.to_string(),
         exit_code,
         passed,
         output_tail: tail_chars(&output, MAX_OUTPUT_TAIL_CHARS),
+        outcome,
     }
 }
 
@@ -754,6 +731,7 @@ mod tests {
                 exit_code: Some(0),
                 passed: true,
                 output_tail: "ok".to_string(),
+                outcome: VerificationOutcome::Unknown,
             }
         }
     }
@@ -795,6 +773,7 @@ mod tests {
                 exit_code: Some(if passed { 0 } else { 1 }),
                 passed,
                 output_tail: "ok".to_string(),
+                outcome: VerificationOutcome::Unknown,
             }],
             concerns: if passed {
                 Vec::new()
@@ -802,6 +781,11 @@ mod tests {
                 vec!["failed".to_string()]
             },
             recommendation: if passed { "merge" } else { "fix-needed" }.to_string(),
+            classification: if passed {
+                VerifierReportClassification::Passed
+            } else {
+                VerifierReportClassification::VerificationFailed
+            },
         }
     }
 
@@ -865,6 +849,7 @@ mod tests {
                 exit_code: Some(0),
                 passed: true,
                 output_tail: "ok".to_string(),
+                outcome: VerificationOutcome::Unknown,
             }],
             ..Default::default()
         });
@@ -881,6 +866,7 @@ mod tests {
         let pass = VerifierReport {
             passed: true,
             recommendation: "merge".to_string(),
+            classification: VerifierReportClassification::Passed,
             ..Default::default()
         };
         append_verifier_status(&mut pass_card, &pass);
@@ -891,6 +877,7 @@ mod tests {
             passed: false,
             concerns: vec!["command failed".to_string()],
             recommendation: "fix-needed".to_string(),
+            classification: VerifierReportClassification::VerificationFailed,
             ..Default::default()
         };
         append_verifier_status(&mut fail_card, &fail);
@@ -912,6 +899,58 @@ mod tests {
     }
 
     #[test]
+    fn typed_classification_does_not_infer_state_from_concern_text() {
+        let infrastructure = VerificationResult {
+            command: "cargo test".to_string(),
+            passed: false,
+            outcome: VerificationOutcome::InfrastructureFailed,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_verifier_report(false, &[infrastructure], false, false),
+            VerifierReportClassification::HumanReview
+        );
+        let passed = VerificationResult {
+            command: "cargo test".to_string(),
+            passed: true,
+            outcome: VerificationOutcome::Passed,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_verifier_report(false, &[passed.clone()], true, false),
+            VerifierReportClassification::HumanReview
+        );
+        assert_eq!(
+            classify_verifier_report(false, &[passed], false, true),
+            VerifierReportClassification::VerificationFailed
+        );
+    }
+
+    #[test]
+    fn typed_classification_requires_commands_and_real_success() {
+        assert_eq!(
+            classify_verifier_report(true, &[], false, false),
+            VerifierReportClassification::VerificationFailed
+        );
+        for outcome in [
+            VerificationOutcome::CommandFailed,
+            VerificationOutcome::Rejected,
+            VerificationOutcome::PolicyDenied,
+        ] {
+            let result = VerificationResult {
+                command: "cargo test".to_string(),
+                passed: false,
+                outcome,
+                ..Default::default()
+            };
+            assert_eq!(
+                classify_verifier_report(false, &[result], false, false),
+                VerifierReportClassification::VerificationFailed
+            );
+        }
+    }
+
+    #[test]
     fn mock_verifier_passed_case_recommends_merge() {
         let report = VerifierReport {
             passed: true,
@@ -920,9 +959,11 @@ mod tests {
                 exit_code: Some(0),
                 passed: true,
                 output_tail: "ok".to_string(),
+                outcome: VerificationOutcome::Unknown,
             }],
             concerns: Vec::new(),
             recommendation: "merge".to_string(),
+            classification: VerifierReportClassification::Passed,
         };
 
         assert!(report.passed);
@@ -938,9 +979,11 @@ mod tests {
                 exit_code: Some(1),
                 passed: false,
                 output_tail: "failed".to_string(),
+                outcome: VerificationOutcome::Unknown,
             }],
             concerns: vec!["Verification command failed: cargo test".to_string()],
             recommendation: "fix-needed".to_string(),
+            classification: VerifierReportClassification::VerificationFailed,
         };
 
         assert!(!report.passed);

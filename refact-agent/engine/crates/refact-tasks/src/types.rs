@@ -129,6 +129,20 @@ pub struct VerificationResult {
     pub exit_code: Option<i32>,
     pub passed: bool,
     pub output_tail: String,
+    pub outcome: VerificationOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationOutcome {
+    #[default]
+    Unknown,
+    Passed,
+    CommandFailed,
+    Rejected,
+    PolicyDenied,
+    InfrastructureFailed,
+    NoCommands,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -138,6 +152,17 @@ pub struct VerifierReport {
     pub command_results: Vec<VerificationResult>,
     pub concerns: Vec<String>,
     pub recommendation: String,
+    pub classification: VerifierReportClassification,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifierReportClassification {
+    #[default]
+    Unknown,
+    Passed,
+    VerificationFailed,
+    HumanReview,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -844,6 +869,7 @@ mod tests {
                 exit_code: Some(0),
                 passed: true,
                 output_tail: "test result: ok".into(),
+                outcome: VerificationOutcome::Unknown,
             }],
             followup_cards: vec![SuggestedCard {
                 title: "Render structured reports in GUI".into(),
@@ -870,15 +896,32 @@ mod tests {
                 exit_code: Some(1),
                 passed: false,
                 output_tail: "test failed".into(),
+                outcome: VerificationOutcome::Unknown,
             }],
             concerns: vec!["Diff removes a required guard".into()],
             recommendation: "fix-needed".into(),
+            classification: VerifierReportClassification::VerificationFailed,
         };
 
         let encoded = serde_json::to_string(&report).unwrap();
         let decoded: VerifierReport = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(decoded, report);
+    }
+
+    #[test]
+    fn legacy_verification_metadata_defaults_to_unknown() {
+        let result: VerificationResult = serde_json::from_str(
+            r#"{"command":"cargo test","exit_code":0,"passed":true,"output_tail":"ok"}"#,
+        )
+        .unwrap();
+        let report: VerifierReport = serde_json::from_str(
+            r#"{"passed":false,"command_results":[],"concerns":[],"recommendation":"human-review"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(result.outcome, VerificationOutcome::Unknown);
+        assert_eq!(report.classification, VerifierReportClassification::Unknown);
     }
 
     #[test]
@@ -893,6 +936,7 @@ mod tests {
                 exit_code: Some(1),
                 passed: false,
                 output_tail: "failure tail".into(),
+                outcome: VerificationOutcome::Unknown,
             }],
             followup_cards: vec![SuggestedCard {
                 title: "Fix follow-up".into(),
@@ -928,6 +972,7 @@ mod tests {
                 exit_code: Some(0),
                 passed: true,
                 output_tail: String::new(),
+                outcome: VerificationOutcome::Unknown,
             }],
             ..Default::default()
         };
@@ -946,6 +991,7 @@ mod tests {
                 exit_code: Some(1),
                 passed: false,
                 output_tail: "before\n```\n## Fake Section\n```\nafter".into(),
+                outcome: VerificationOutcome::Unknown,
             }],
             ..Default::default()
         };

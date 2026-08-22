@@ -68,11 +68,19 @@ pub fn tokenize(lang: &str, text: &str) -> Vec<Token> {
     };
 
     let mut tokens = Vec::new();
-    collect_tokens(tree.root_node(), text.as_bytes(), &mut tokens);
+    collect_tokens(
+        refact_codegraph_parsers::normalize_lang(lang),
+        tree.root_node(),
+        text.as_bytes(),
+        &mut tokens,
+    );
     tokens
 }
 
-fn collect_tokens(node: Node<'_>, bytes: &[u8], out: &mut Vec<Token>) {
+fn collect_tokens(lang: &str, node: Node<'_>, bytes: &[u8], out: &mut Vec<Token>) {
+    if is_import_subtree(lang, node) {
+        return;
+    }
     if node.is_named() && node.named_child_count() == 0 {
         let kind_hash = normalized_token_hash(node, bytes);
         out.push(Token {
@@ -84,7 +92,25 @@ fn collect_tokens(node: Node<'_>, bytes: &[u8], out: &mut Vec<Token>) {
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_tokens(child, bytes, out);
+        collect_tokens(lang, child, bytes, out);
+    }
+}
+
+fn is_import_subtree(lang: &str, node: Node<'_>) -> bool {
+    let kind = node.kind();
+    match lang {
+        "rust" => matches!(kind, "use_declaration" | "extern_crate_declaration"),
+        "javascript" | "jsx" | "typescript" | "tsx" => kind == "import_statement",
+        "python" => matches!(kind, "import_statement" | "import_from_statement"),
+        "java" => kind == "import_declaration",
+        "kotlin" => kind == "import",
+        "c" | "cpp" => kind == "preproc_include",
+        "go" => kind == "import_declaration",
+        "csharp" => kind == "using_directive",
+        "haskell" => kind == "import",
+        "php" => kind == "namespace_use_declaration",
+        "scala" | "swift" => kind == "import_declaration",
+        _ => false,
     }
 }
 
@@ -917,6 +943,160 @@ fn {name}({param}: i32) -> i32 {{
             "got {clones:?}"
         );
         assert!(cross_file_duplication_pct(&files) > 0.0);
+    }
+
+    #[test]
+    fn import_only_files_do_not_produce_cross_file_clones() {
+        let imports = (0..30)
+            .map(|idx| format!("use crate::shared::module_{idx}::Item;\n"))
+            .collect::<String>();
+        let files = vec![
+            ("a.rs".to_string(), "rust".to_string(), imports.clone()),
+            ("b.rs".to_string(), "rust".to_string(), imports),
+        ];
+
+        assert!(detect_cross_file_clones(&files).is_empty());
+        assert_eq!(cross_file_duplication_pct(&files), 0.0);
+    }
+
+    #[test]
+    fn jsx_and_tsx_import_only_files_do_not_produce_cross_file_clones() {
+        for (lang, extension, import) in [
+            ("jsx", "jsx", "import { Item } from './shared';\n"),
+            ("tsx", "tsx", "import type { Item } from './shared';\n"),
+        ] {
+            let imports = import.repeat(30);
+            let tree = refact_codegraph_parsers::parse_tree(lang, &imports)
+                .unwrap_or_else(|| panic!("{lang} parser mode must be supported"));
+            let mut raw_mode_tokens = Vec::new();
+            collect_tokens(
+                lang,
+                tree.root_node(),
+                imports.as_bytes(),
+                &mut raw_mode_tokens,
+            );
+            let files = vec![
+                (format!("a.{extension}"), lang.to_string(), imports.clone()),
+                (format!("b.{extension}"), lang.to_string(), imports),
+            ];
+
+            assert!(raw_mode_tokens.is_empty(), "{lang}");
+            assert!(tokenize(lang, &files[0].2).is_empty(), "{lang}");
+            assert!(detect_cross_file_clones(&files).is_empty(), "{lang}");
+            assert_eq!(cross_file_duplication_pct(&files), 0.0, "{lang}");
+        }
+    }
+
+    #[test]
+    fn supported_language_import_subtrees_are_excluded() {
+        let cases = [
+            (
+                "rust",
+                "use crate::shared::Item;\nextern crate shared_dependency;\n",
+            ),
+            ("javascript", "import { item } from './shared.js';\n"),
+            ("typescript", "import type { Item } from './shared';\n"),
+            ("python", "import shared\nfrom package import item\n"),
+            ("java", "import java.util.List;\n"),
+            ("kotlin", "import kotlin.collections.List\n"),
+            ("c", "#include <stdio.h>\n"),
+            ("cpp", "#include <vector>\n"),
+            ("go", "import \"fmt\"\n"),
+            ("csharp", "using System.Collections.Generic;\n"),
+            ("haskell", "import Data.List\n"),
+            ("scala", "import scala.collection.mutable\n"),
+            ("swift", "import Foundation\n"),
+        ];
+
+        for (lang, source) in cases {
+            assert!(tokenize(lang, source).is_empty(), "{lang}");
+        }
+    }
+
+    #[test]
+    fn php_namespace_use_declarations_are_excluded() {
+        let without_imports = tokenize("php", "<?php\n");
+        let with_imports = tokenize(
+            "php",
+            "<?php\nuse Vendor\\Package\\Item;\nuse Vendor\\Package\\OtherItem as Alias;\n",
+        );
+
+        assert_eq!(with_imports, without_imports);
+    }
+
+    #[test]
+    fn rust_include_macros_remain_analyzable_as_clones() {
+        for macro_name in ["include", "include_str", "include_bytes"] {
+            let source = (0..30)
+                .map(|idx| format!("{macro_name}!(\"shared_{idx}.inc\");\n"))
+                .collect::<String>();
+            let files = vec![
+                ("a.rs".to_string(), "rust".to_string(), source.clone()),
+                ("b.rs".to_string(), "rust".to_string(), source),
+            ];
+
+            assert!(
+                tokenize("rust", &files[0].2).len() >= MIN_CLONE_TOKENS,
+                "{macro_name}! invocations must be tokenized"
+            );
+            assert!(
+                !detect_cross_file_clones(&files).is_empty(),
+                "{macro_name}! invocations must remain clone-analyzable"
+            );
+        }
+    }
+
+    #[test]
+    fn php_include_and_require_expressions_remain_analyzable_as_clones() {
+        for keyword in ["include", "include_once", "require", "require_once"] {
+            let mut source = "<?php\n".to_string();
+            for idx in 0..60 {
+                source.push_str(&format!("{keyword} 'shared_{idx}.php';\n"));
+            }
+            let files = vec![
+                ("a.php".to_string(), "php".to_string(), source.clone()),
+                ("b.php".to_string(), "php".to_string(), source),
+            ];
+
+            assert!(
+                tokenize("php", &files[0].2).len() >= MIN_CLONE_TOKENS,
+                "{keyword} expressions must be tokenized"
+            );
+            assert!(
+                !detect_cross_file_clones(&files).is_empty(),
+                "{keyword} expressions must remain clone-analyzable"
+            );
+        }
+    }
+
+    #[test]
+    fn renamed_function_bodies_still_clone_after_import_exclusion() {
+        let files = vec![
+            (
+                "a.rs".to_string(),
+                "rust".to_string(),
+                format!(
+                    "use crate::first::Dependency;\n{}",
+                    cross_file_rust_source("compute_alpha", "input")
+                ),
+            ),
+            (
+                "b.rs".to_string(),
+                "rust".to_string(),
+                format!(
+                    "use crate::second::OtherDependency;\n{}",
+                    cross_file_rust_source("compute_beta", "value")
+                ),
+            ),
+        ];
+
+        let clones = detect_cross_file_clones(&files);
+        assert!(
+            clones
+                .iter()
+                .any(|clone| clone.token_len >= MIN_CLONE_TOKENS),
+            "got {clones:?}"
+        );
     }
 
     #[test]

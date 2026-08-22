@@ -16,8 +16,8 @@ use crate::files_in_workspace::{
 };
 use crate::global_context::GlobalContext;
 use crate::tools::scope_utils::{
-    create_scope_filter_with_execution_scope, format_scope_notices, is_worktree_only_path,
-    remap_context_files_for_execution_scope, resolve_scope_with_execution_scope_limited,
+    create_scope_filter_with_execution_scope, format_scope_notices,
+    remap_context_files_for_execution_scope, resolve_worktree_only_scope_limited,
 };
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
@@ -41,6 +41,7 @@ const CAP_MAX_RECS_PER_FILE: usize = 1000;
 const CAP_MAX_TOTAL_RECS: usize = 10000;
 
 const FALLBACK_MAX_CANDIDATE_FILES: usize = 5000;
+const FALLBACK_MAX_VISITED_ENTRIES: usize = 50_000;
 const MAX_SEARCH_FILE_BYTES: usize = 4 * 1024 * 1024;
 
 const ABORTED_ERROR: &str =
@@ -146,10 +147,27 @@ fn append_unseen_context_files(
     added
 }
 
+fn semantic_no_match_result(tool_call_id: &str, mut content: String) -> (bool, Vec<ContextEnum>) {
+    content.push_str(
+        "\nNo semantic matches found. Try different or more specific keywords, broaden scope to 'workspace', or use search_pattern() for an exact/regex search.\n",
+    );
+    (
+        false,
+        vec![ContextEnum::ChatMessage(ChatMessage {
+            role: "tool".to_string(),
+            content: ChatContent::SimpleText(content),
+            tool_calls: None,
+            tool_call_id: tool_call_id.to_string(),
+            ..Default::default()
+        })],
+    )
+}
+
 #[derive(Debug)]
 struct FallbackOutcome {
     context_files: Vec<ContextFile>,
-    truncated: bool,
+    candidate_truncated: bool,
+    traversal_truncated: bool,
 }
 
 async fn direct_worktree_fallback_search(
@@ -164,7 +182,8 @@ async fn direct_worktree_fallback_search(
 ) -> Result<FallbackOutcome, String> {
     let empty = FallbackOutcome {
         context_files: Vec::new(),
-        truncated: false,
+        candidate_truncated: false,
+        traversal_truncated: false,
     };
     let Some(execution_scope) = execution_scope else {
         return Ok(empty);
@@ -182,22 +201,19 @@ async fn direct_worktree_fallback_search(
         return Ok(empty);
     }
 
-    let scoped_files = resolve_scope_with_execution_scope_limited(
+    let listing = resolve_worktree_only_scope_limited(
         gcx.clone(),
-        Some(execution_scope),
+        execution_scope,
         scope,
         FALLBACK_MAX_CANDIDATE_FILES,
+        FALLBACK_MAX_VISITED_ENTRIES,
         Some(abort_flag),
     )
     .await?;
-    let mut files = scoped_files.files;
-    files.sort();
 
     let mut context_files = Vec::new();
-    let mut candidates_inspected: usize = 0;
-    let mut truncated = !scoped_files.notices.is_empty();
 
-    for (idx, file) in files.iter().enumerate() {
+    for (idx, file) in listing.files.iter().enumerate() {
         if (idx & 0x3F) == 0 && abort_flag.load(Ordering::Relaxed) {
             return Err(ABORTED_ERROR.to_string());
         }
@@ -205,14 +221,6 @@ async fn direct_worktree_fallback_search(
             break;
         }
         let file_path = PathBuf::from(file);
-        if !is_worktree_only_path(execution_scope, &file_path) {
-            continue;
-        }
-        if candidates_inspected >= FALLBACK_MAX_CANDIDATE_FILES {
-            truncated = true;
-            break;
-        }
-        candidates_inspected += 1;
         let file_content = match get_file_text_from_memory_or_disk_with_context(
             gcx.clone(),
             &file_path,
@@ -243,7 +251,8 @@ async fn direct_worktree_fallback_search(
 
     Ok(FallbackOutcome {
         context_files,
-        truncated,
+        candidate_truncated: listing.candidate_truncated,
+        traversal_truncated: listing.traversal_truncated,
     })
 }
 
@@ -292,7 +301,8 @@ async fn execute_att_search(
     .await?;
     let FallbackOutcome {
         context_files: fallback_context_files,
-        truncated,
+        candidate_truncated,
+        traversal_truncated,
     } = fallback_outcome;
     let added = append_unseen_context_files(&mut context_files, fallback_context_files);
     if added > 0 {
@@ -301,10 +311,16 @@ async fn execute_att_search(
             added
         ));
     }
-    if truncated {
+    if candidate_truncated {
         notices.push(format!(
-            "⚠️ Direct worktree filesystem fallback inspected only the first {} worktree-only candidate file(s); results may be incomplete. Narrow the scope for a complete fallback.",
+            "⚠️ Direct worktree filesystem fallback selected only the first {} worktree-only candidate file(s); results may be incomplete. Narrow the scope for a complete fallback.",
             FALLBACK_MAX_CANDIDATE_FILES
+        ));
+    }
+    if traversal_truncated {
+        notices.push(format!(
+            "⚠️ Direct worktree filesystem fallback stopped after visiting {} directory entries; results may be incomplete. Narrow the scope for a complete fallback.",
+            FALLBACK_MAX_VISITED_ENTRIES
         ));
     }
     Ok((context_files, notices))
@@ -493,7 +509,7 @@ impl Tool for ToolSearch {
         }
 
         if all_context_files.is_empty() {
-            return Err("⚠️ All searches produced no results. 💡 Try different keywords, broaden scope to 'workspace', or use search_pattern() for regex search".to_string());
+            return Ok(semantic_no_match_result(tool_call_id, all_content));
         }
 
         // Append related memories (short form) based on involved file paths.
@@ -555,6 +571,7 @@ mod tests {
         _temp: tempfile::TempDir,
         worktree: WorktreeMeta,
         root: PathBuf,
+        source: PathBuf,
     }
 
     fn make_fallback_fixture() -> FallbackFixture {
@@ -592,6 +609,7 @@ mod tests {
             _temp: temp,
             worktree,
             root,
+            source,
         }
     }
 
@@ -614,6 +632,23 @@ mod tests {
             .unwrap(),
             Some(7)
         );
+    }
+
+    #[test]
+    fn semantic_no_match_is_a_successful_typed_tool_response() {
+        let (stop, responses) = semantic_no_match_result("call-1", String::new());
+        assert!(!stop);
+        assert_eq!(responses.len(), 1);
+        let ContextEnum::ChatMessage(message) = &responses[0] else {
+            panic!("expected a tool chat message");
+        };
+        assert_eq!(message.role, "tool");
+        assert_eq!(message.tool_call_id, "call-1");
+        let ChatContent::SimpleText(content) = &message.content else {
+            panic!("expected text content");
+        };
+        assert!(content.contains("No semantic matches found"));
+        assert!(content.contains("search_pattern()"));
     }
 
     #[tokio::test]
@@ -646,7 +681,8 @@ mod tests {
             outcome.context_files.is_empty(),
             "oversized worktree-only file must be skipped by the capped read"
         );
-        assert!(!outcome.truncated);
+        assert!(!outcome.candidate_truncated);
+        assert!(!outcome.traversal_truncated);
     }
 
     #[tokio::test]
@@ -676,10 +712,46 @@ mod tests {
         .unwrap();
 
         assert!(
-            outcome.truncated,
+            outcome.candidate_truncated,
             "candidate budget must stop the fallback and flag truncation"
         );
+        assert!(!outcome.traversal_truncated);
         assert!(outcome.context_files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fallback_candidate_cap_is_applied_after_worktree_only_filtering() {
+        let gcx = make_gcx().await;
+        let fixture = make_fallback_fixture();
+        for idx in 0..(FALLBACK_MAX_CANDIDATE_FILES + 5) {
+            let name = format!("source_backed_{idx:05}.rs");
+            fs::write(fixture.root.join("src").join(&name), "shared content\n").unwrap();
+            fs::write(fixture.source.join("src").join(name), "shared content\n").unwrap();
+        }
+        let late = fixture.root.join("src").join("zzzzz_worktree_only.rs");
+        fs::write(&late, "late worktree needle\n").unwrap();
+
+        let scope = ExecutionScope::from_worktree(&fixture.worktree);
+        let read_context = prepare_file_read_context(gcx.clone()).await;
+        let abort = AtomicBool::new(false);
+
+        let outcome = direct_worktree_fallback_search(
+            gcx,
+            Some(&scope),
+            &read_context,
+            "workspace",
+            "needle",
+            0,
+            50,
+            &abort,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.context_files.len(), 1);
+        assert_eq!(PathBuf::from(&outcome.context_files[0].file_name), late);
+        assert!(!outcome.candidate_truncated);
+        assert!(!outcome.traversal_truncated);
     }
 
     #[tokio::test]

@@ -68,7 +68,6 @@ fn declining_finding(path: &str, series: &[(i64, f64)]) -> Option<Finding> {
         Some(finding(
             "health_declining",
             Severity::High,
-            tail[3].0,
             format!(
                 "{path}: health dropped {:.2} points across 3 consecutive drops ({:.2} -> {:.2} -> {:.2} -> {:.2})",
                 total_drop, tail[0].1, tail[1].1, tail[2].1, tail[3].1
@@ -93,7 +92,6 @@ fn predicted_decline_finding(path: &str, series: &[(i64, f64)]) -> Option<Findin
         Some(finding(
             "predicted_decline",
             Severity::Medium,
-            current.0,
             format!(
                 "{path}: health trend projects below {:.1} within 3 snapshots ({:.2} -> {:.2})",
                 PREDICTED_DECLINE_LIMIT, current.1, projected
@@ -122,13 +120,13 @@ fn linear_slope(series: &[(i64, f64)]) -> f64 {
     }
 }
 
-fn finding(biomarker: &str, severity: Severity, ts: i64, detail: String) -> Finding {
+fn finding(biomarker: &str, severity: Severity, detail: String) -> Finding {
     Finding {
         biomarker: biomarker.to_string(),
         category: CATEGORY.to_string(),
         dimension: Dimension::Maintainability,
         severity,
-        line: ts.max(0) as usize,
+        line: 1,
         detail,
         deduction: None,
     }
@@ -172,6 +170,14 @@ mod tests {
                 .any(|f| { f.biomarker == "health_declining" && f.detail.contains("src/a.rs") }),
             "{findings:?}"
         );
+        assert_eq!(
+            findings
+                .iter()
+                .find(|f| f.biomarker == "health_declining")
+                .unwrap()
+                .line,
+            1
+        );
     }
 
     #[test]
@@ -190,6 +196,14 @@ mod tests {
                 .iter()
                 .any(|f| { f.biomarker == "predicted_decline" && f.detail.contains("src/a.rs") }),
             "{findings:?}"
+        );
+        assert_eq!(
+            findings
+                .iter()
+                .find(|f| f.biomarker == "predicted_decline")
+                .unwrap()
+                .line,
+            1
         );
     }
 

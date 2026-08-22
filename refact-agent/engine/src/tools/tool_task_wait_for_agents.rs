@@ -8,6 +8,7 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
+use crate::chat::types::ChatSession;
 use crate::tools::task_tool_helpers::require_bound_planner_task;
 use crate::tools::tool_task_check_agents::{
     AgentStatus, agent_status_input_schema, format_agent_statuses, get_agent_statuses,
@@ -86,6 +87,11 @@ pub(crate) fn resolve_waiting_card_ids(statuses: &[&AgentStatus]) -> Vec<String>
 fn status_filter_was_explicit(args: &HashMap<String, Value>) -> bool {
     args.get("status_filter")
         .is_some_and(|value| !value.is_null())
+}
+
+fn replace_session_wake_up_at(session: &mut ChatSession, wake_up_after_secs: Option<u64>) {
+    session.wake_up_at =
+        wake_up_after_secs.map(|secs| Utc::now() + chrono::Duration::seconds(secs as i64));
 }
 
 pub struct ToolTaskWaitForAgents;
@@ -185,9 +191,7 @@ impl Tool for ToolTaskWaitForAgents {
             let sessions = app.chat.sessions.read().await;
             if let Some(session_arc) = sessions.get(&chat_id) {
                 let mut session = session_arc.lock().await;
-                if let Some(secs) = wake_up_secs {
-                    session.wake_up_at = Some(Utc::now() + chrono::Duration::seconds(secs as i64));
-                }
+                replace_session_wake_up_at(&mut session, wake_up_secs);
                 session.waiting_for_card_ids = resolved_card_ids;
                 session.mark_persisted_runtime_changed();
             }
@@ -266,7 +270,6 @@ mod tests {
     #[tokio::test]
     async fn wait_agents_records_wake_up_at_on_session_when_argument_present() {
         use crate::app_state::AppState;
-        use crate::chat::types::ChatSession;
 
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx.clone()).await;
@@ -312,6 +315,33 @@ mod tests {
         let args: HashMap<String, Value> = HashMap::new();
         let result = parse_wake_up_after_secs(&args).unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn wait_agents_replaces_timed_wait_with_indefinite_wait() {
+        let mut session = ChatSession::new("planner-timed-to-indefinite".to_string());
+        replace_session_wake_up_at(&mut session, Some(120));
+        assert!(session.wake_up_at.is_some());
+
+        replace_session_wake_up_at(&mut session, None);
+
+        assert_eq!(session.wake_up_at, None);
+    }
+
+    #[test]
+    fn wait_agents_replaces_indefinite_wait_with_timed_wait() {
+        let mut session = ChatSession::new("planner-indefinite-to-timed".to_string());
+        replace_session_wake_up_at(&mut session, None);
+        assert_eq!(session.wake_up_at, None);
+
+        let before = Utc::now();
+        replace_session_wake_up_at(&mut session, Some(120));
+
+        let stored = session
+            .wake_up_at
+            .expect("timed wait should set wake_up_at");
+        let expected = before + chrono::Duration::seconds(120);
+        assert!((stored - expected).num_seconds().abs() <= 1);
     }
 
     #[test]
