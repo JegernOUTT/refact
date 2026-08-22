@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 
 use refact_core::chat_types::{ChatContent, ChatMessage, ChatUsage};
 use refact_privacy::Cleared;
@@ -58,20 +59,18 @@ impl LlmWireAdapter for GoogleCloudCodeAdapter {
             );
         }
 
+        let mut has_tools = false;
         if settings.supports_tools {
             if let Some(tools) = req.tools.as_ref() {
                 let declarations = convert_tools(tools);
                 if !declarations.is_empty() {
+                    has_tools = true;
                     inner.insert(
                         "tools".to_string(),
                         json!([{"functionDeclarations": declarations}]),
                     );
                 }
             }
-        }
-
-        if let Some(choice) = req.tool_choice.as_ref() {
-            inner.insert("toolConfig".to_string(), tool_config(choice));
         }
 
         let generation_config = generation_config(req, settings);
@@ -87,6 +86,13 @@ impl LlmWireAdapter for GoogleCloudCodeAdapter {
                 inner.insert(key.clone(), value.clone());
             }
         }
+        if has_tools {
+            inner.insert(
+                "toolConfig".to_string(),
+                tool_config(req.tool_choice.as_ref()),
+            );
+        }
+        inner.insert("sessionId".to_string(), json!(session_id(&req.messages)));
 
         tracing::debug!(
             antigravity_version = ANTIGRAVITY_VERSION,
@@ -105,6 +111,7 @@ impl LlmWireAdapter for GoogleCloudCodeAdapter {
                 "model": settings.model_name,
                 "project": project,
                 "requestId": uuid::Uuid::new_v4().to_string(),
+                "requestType": "agent",
                 "userAgent": "antigravity",
                 "request": Value::Object(inner),
             }),
@@ -373,6 +380,23 @@ fn push_merged_content(contents: &mut Vec<Value>, role: &str, parts: Vec<Value>)
     contents.push(json!({"role": role, "parts": parts}));
 }
 
+fn session_id(messages: &[ChatMessage]) -> String {
+    let first_user_text = messages
+        .iter()
+        .find(|message| message.role == "user")
+        .map(|message| message.content.content_text_only())
+        .filter(|text| !text.is_empty());
+
+    let Some(text) = first_user_text else {
+        return uuid::Uuid::new_v4().to_string();
+    };
+
+    let digest = Sha256::digest(text.as_bytes());
+    uuid::Uuid::from_slice(&digest[..16])
+        .expect("SHA-256 prefix has UUID length")
+        .to_string()
+}
+
 fn convert_tools(tools: &[Value]) -> Vec<Value> {
     tools
         .iter()
@@ -540,14 +564,9 @@ fn merge_union(target: &mut Map<String, Value>, variants: Vec<Value>) {
     }
 }
 
-fn tool_config(choice: &CanonicalToolChoice) -> Value {
-    let mode = match choice {
-        CanonicalToolChoice::Auto => "AUTO",
-        CanonicalToolChoice::Required | CanonicalToolChoice::Function { .. } => "ANY",
-        CanonicalToolChoice::None => "NONE",
-    };
-    let mut config = json!({"functionCallingConfig": {"mode": mode}});
-    if let CanonicalToolChoice::Function { name } = choice {
+fn tool_config(choice: Option<&CanonicalToolChoice>) -> Value {
+    let mut config = json!({"functionCallingConfig": {"mode": "VALIDATED"}});
+    if let Some(CanonicalToolChoice::Function { name }) = choice {
         config["functionCallingConfig"]["allowedFunctionNames"] = json!([name]);
     }
     config
@@ -635,22 +654,16 @@ fn parse_usage(usage: &Value) -> ChatUsage {
 mod tests {
     use super::*;
 
-    #[test]
-    fn build_http_uses_cloudcode_envelope_with_request_attribution() {
-        let auth_token = "oauth-token-must-not-be-in-body";
-        let request = LlmRequest::new(
-            "google/ignored-request-model".to_string(),
-            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
-        );
+    fn cloudcode_settings(supports_tools: bool, auth_token: &str) -> AdapterSettings {
         let mut extra_headers = HashMap::new();
         extra_headers.insert(PROJECT_HEADER.to_string(), "cloud-project-123".to_string());
-        let settings = AdapterSettings {
+        AdapterSettings {
             api_key: String::new(),
             auth_token: auth_token.to_string(),
             endpoint: "https://cloudcode-pa.googleapis.com".to_string(),
             extra_headers,
             model_name: "gemini-2.5-pro".to_string(),
-            supports_tools: false,
+            supports_tools,
             supports_reasoning: false,
             reasoning_type: None,
             supports_temperature: false,
@@ -658,10 +671,27 @@ mod tests {
             eof_is_done: false,
             supports_web_search: false,
             supports_cache_control: false,
-        };
+        }
+    }
 
+    #[test]
+    fn build_http_uses_cloudcode_envelope_with_request_attribution() {
+        let auth_token = "oauth-token-must-not-be-in-body";
+        let request = LlmRequest::new(
+            "google/ignored-request-model".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hello".to_string())],
+        );
+        let settings = cloudcode_settings(false, auth_token);
+
+        let repeated_request = request.clone();
         let http = GoogleCloudCodeAdapter
             .build_http(&refact_privacy::testing::cleared(request), &settings)
+            .unwrap();
+        let repeated_http = GoogleCloudCodeAdapter
+            .build_http(
+                &refact_privacy::testing::cleared(repeated_request),
+                &settings,
+            )
             .unwrap();
 
         assert_eq!(
@@ -671,6 +701,7 @@ mod tests {
         let request_id = http.body["requestId"].as_str().unwrap();
         assert!(!request_id.is_empty());
         assert!(uuid::Uuid::parse_str(request_id).is_ok());
+        assert_eq!(http.body["requestType"], "agent");
         assert_eq!(http.body["userAgent"], "antigravity");
         assert_eq!(http.body["model"], "gemini-2.5-pro");
         assert_eq!(http.body["project"], "cloud-project-123");
@@ -678,7 +709,48 @@ mod tests {
             http.body["request"]["contents"],
             json!([{"role": "user", "parts": [{"text": "Hello"}]}])
         );
+        let first_session_id = http.body["request"]["sessionId"].as_str().unwrap();
+        assert!(!first_session_id.is_empty());
+        assert!(!first_session_id.contains("Hello"));
+        assert!(uuid::Uuid::parse_str(first_session_id).is_ok());
+        assert_eq!(
+            first_session_id,
+            repeated_http.body["request"]["sessionId"].as_str().unwrap()
+        );
+        assert!(http.body["request"].get("tools").is_none());
+        assert!(http.body["request"].get("toolConfig").is_none());
         assert!(!http.body.to_string().contains(auth_token));
+    }
+
+    #[test]
+    fn build_http_uses_validated_tool_config_when_tools_are_present() {
+        let request = LlmRequest::new(
+            "google/ignored-request-model".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Find it".to_string())],
+        )
+        .with_tools(
+            vec![json!({
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "parameters": {"type": "object"}
+                }
+            })],
+            Some(CanonicalToolChoice::Auto),
+        );
+
+        let http = GoogleCloudCodeAdapter
+            .build_http(
+                &refact_privacy::testing::cleared(request),
+                &cloudcode_settings(true, "oauth-token"),
+            )
+            .unwrap();
+
+        assert!(http.body["request"]["tools"].is_array());
+        assert_eq!(
+            http.body["request"]["toolConfig"]["functionCallingConfig"]["mode"],
+            "VALIDATED"
+        );
     }
 
     fn assert_no_forbidden_schema_keys(value: &Value) {
