@@ -2737,30 +2737,52 @@ async fn save_trajectory_snapshot_inner(
         .is_some_and(|task_meta| task_meta.role == "planner");
     let retain_background_messages = should_generate_title || should_generate_task_name;
     let messages = std::mem::take(&mut snapshot.messages);
+    let mut serialize_span = perf_diagnostics::span(
+        PerfComponent::TrajectorySerialize,
+        Some(&snapshot.chat_id),
+        None,
+    );
+    let message_serialization = tokio::task::spawn_blocking(move || {
+        let messages_json: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|message| serde_json::to_value(message).unwrap_or_default())
+            .collect();
+        let background_messages_json = retain_background_messages.then(|| messages_json.clone());
+        let line_changes =
+            collect_metrics.then(|| calculate_line_changes_from_chat_messages(&messages));
+        let task_progress =
+            collect_metrics.then(|| calculate_task_progress_from_chat_messages(&messages));
+        let token_totals =
+            collect_metrics.then(|| calculate_token_totals_from_chat_messages(&messages));
+        (
+            messages_json,
+            background_messages_json,
+            line_changes,
+            task_progress,
+            token_totals,
+        )
+    })
+    .await;
     let (messages_json, background_messages_json, line_changes, task_progress, token_totals) =
-        tokio::task::spawn_blocking(move || {
-            let messages_json: Vec<serde_json::Value> = messages
-                .iter()
-                .map(|message| serde_json::to_value(message).unwrap_or_default())
-                .collect();
-            let background_messages_json =
-                retain_background_messages.then(|| messages_json.clone());
-            let line_changes =
-                collect_metrics.then(|| calculate_line_changes_from_chat_messages(&messages));
-            let task_progress =
-                collect_metrics.then(|| calculate_task_progress_from_chat_messages(&messages));
-            let token_totals =
-                collect_metrics.then(|| calculate_token_totals_from_chat_messages(&messages));
-            (
-                messages_json,
-                background_messages_json,
-                line_changes,
-                task_progress,
-                token_totals,
-            )
-        })
-        .await
-        .map_err(|e| format!("Trajectory message serialization task failed: {}", e))?;
+        match message_serialization {
+            Ok(result) => {
+                serialize_span.pause();
+                result
+            }
+            Err(error) => {
+                serialize_span.finish(
+                    PerfOutcome::Failure,
+                    None,
+                    Some(message_count as u64),
+                    Some(snapshot.version),
+                    None,
+                );
+                return Err(format!(
+                    "Trajectory message serialization task failed: {}",
+                    error
+                ));
+            }
+        };
 
     let mut trajectory = json!({
         "id": snapshot.chat_id,
@@ -2883,11 +2905,7 @@ async fn save_trajectory_snapshot_inner(
     preserve_existing_trajectory_metadata(&mut trajectory, existing_trajectory);
 
     let tmp_path = unique_trajectory_tmp_path(&file_path);
-    let serialize_span = perf_diagnostics::span(
-        PerfComponent::TrajectorySerialize,
-        Some(&snapshot.chat_id),
-        Some(&file_path),
-    );
+    serialize_span.resume();
     let serialized = tokio::task::spawn_blocking(move || {
         let json_result = serde_json::to_string_pretty(&trajectory)
             .map_err(|e| format!("Failed to serialize trajectory: {}", e));
@@ -6668,6 +6686,13 @@ mod tests {
         assert!(components.contains("trajectory.serialize"));
         assert!(components.contains("trajectory.atomic_write"));
         assert!(components.contains("trajectory.commit"));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.component == "trajectory.serialize")
+                .count(),
+            1
+        );
         assert!(events.iter().all(|event| event.outcome == "success"));
         assert!(events.iter().all(|event| {
             !format!("{event:?}").contains(chat_id)

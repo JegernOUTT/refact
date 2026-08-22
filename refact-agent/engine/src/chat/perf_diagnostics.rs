@@ -179,7 +179,8 @@ impl PerfRecorder {
 pub struct ActivePerfSpan {
     recorder: Arc<PerfRecorder>,
     component: PerfComponent,
-    started_us: u64,
+    active_started_us: Option<u64>,
+    accumulated_us: u64,
     chat_id_hash: Option<String>,
     path_hash: Option<String>,
 }
@@ -190,6 +191,27 @@ pub enum PerfSpan {
 }
 
 impl PerfSpan {
+    pub fn pause(&mut self) {
+        let Self::Active(active) = self else {
+            return;
+        };
+        let Some(started_us) = active.active_started_us.take() else {
+            return;
+        };
+        active.accumulated_us = active
+            .accumulated_us
+            .saturating_add(active.recorder.clock.now_us().saturating_sub(started_us));
+    }
+
+    pub fn resume(&mut self) {
+        let Self::Active(active) = self else {
+            return;
+        };
+        if active.active_started_us.is_none() {
+            active.active_started_us = Some(active.recorder.clock.now_us());
+        }
+    }
+
     pub fn finish(
         self,
         outcome: PerfOutcome,
@@ -201,11 +223,12 @@ impl PerfSpan {
         let Self::Active(active) = self else {
             return;
         };
-        let elapsed_us = active
-            .recorder
-            .clock
-            .now_us()
-            .saturating_sub(active.started_us);
+        let elapsed_us = active.accumulated_us.saturating_add(
+            active
+                .active_started_us
+                .map(|started_us| active.recorder.clock.now_us().saturating_sub(started_us))
+                .unwrap_or(0),
+        );
         active.recorder.sink.record(PerfEvent {
             schema_version: PERFORMANCE_DIAGNOSTICS_SCHEMA_VERSION,
             component: active.component.as_str(),
@@ -276,7 +299,8 @@ fn span_with_recorder(
     let chat_id_hash = chat_id.map(|chat_id| recorder.hash_bytes(chat_id.as_bytes()));
     let path_hash = path.map(|path| recorder.hash_path(path));
     PerfSpan::Active(ActivePerfSpan {
-        started_us: recorder.clock.now_us(),
+        active_started_us: Some(recorder.clock.now_us()),
+        accumulated_us: 0,
         recorder,
         component,
         chat_id_hash,
@@ -417,6 +441,34 @@ mod tests {
         let rendered = format!("{event:?}");
         assert!(!rendered.contains(chat_id));
         assert!(!rendered.contains(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn paused_span_accumulates_only_active_time() {
+        let clock = Arc::new(TestClock::new(100));
+        let sink = Arc::new(MemoryPerfSink::new());
+        let recorder = Arc::new(PerfRecorder::with_salt(
+            clock.clone(),
+            sink.clone(),
+            [7; 32],
+        ));
+        let mut span = span_with_recorder(
+            Some(recorder),
+            PerfComponent::TrajectorySerialize,
+            None,
+            None,
+        );
+
+        clock.advance(7);
+        span.pause();
+        clock.advance(100);
+        span.resume();
+        clock.advance(11);
+        span.finish(PerfOutcome::Success, None, None, None, None);
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].elapsed_us, 18);
     }
 
     #[test]
