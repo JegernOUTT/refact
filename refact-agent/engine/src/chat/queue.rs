@@ -2208,6 +2208,17 @@ async fn handle_tool_decisions(
                 .chain(&rejected_ids)
                 .cloned()
                 .collect::<std::collections::HashSet<_>>();
+            let remaining = session
+                .runtime
+                .pause_reasons
+                .iter()
+                .filter(|reason| !decided.contains(&reason.tool_call_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            if remaining.is_empty() {
+                session.complete_confirmation_wait();
+            }
+
             let updates = session
                 .messages
                 .iter()
