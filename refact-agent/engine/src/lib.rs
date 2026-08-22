@@ -119,6 +119,8 @@ pub mod voice;
 const EXEC_SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
+    chat::perf_diagnostics::initialize_from_environment();
+
     unsafe {
         sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
 

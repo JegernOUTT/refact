@@ -25,6 +25,7 @@ use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeMeta;
 
 use refact_chat_api::{GoalLedgerEntry, GoalSnapshot, GoalStatus};
+use super::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 
 pub async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
     #[cfg(windows)]
@@ -317,6 +318,11 @@ impl LoadedTrajectory {
 pub use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 
 fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot {
+    let span = perf_diagnostics::span(
+        PerfComponent::TrajectorySnapshot,
+        Some(&session.chat_id),
+        None,
+    );
     let messages = session
         .messages
         .iter()
@@ -336,6 +342,13 @@ fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot
     snapshot.goal = session.goal.clone();
     snapshot.goal_ledger = session.goal_ledger.clone();
     snapshot.goal_verification_blocked_until_ms = session.goal_verification_blocked_until_ms;
+    span.finish(
+        PerfOutcome::Success,
+        None,
+        Some(snapshot.messages.len() as u64),
+        Some(session.trajectory_version),
+        Some(session.command_queue.len() as u64),
+    );
     snapshot
 }
 
@@ -2556,6 +2569,32 @@ pub async fn save_trajectory_as(
 
 pub async fn save_trajectory_snapshot(
     gcx: Arc<GlobalContext>,
+    snapshot: TrajectorySnapshot,
+) -> Result<(), String> {
+    let message_count = snapshot.messages.len() as u64;
+    let trajectory_version = snapshot.version;
+    let span = perf_diagnostics::span(
+        PerfComponent::TrajectoryCommit,
+        Some(&snapshot.chat_id),
+        None,
+    );
+    let result = save_trajectory_snapshot_inner(gcx, snapshot).await;
+    span.finish(
+        if result.is_ok() {
+            PerfOutcome::Success
+        } else {
+            PerfOutcome::Failure
+        },
+        None,
+        Some(message_count),
+        Some(trajectory_version),
+        None,
+    );
+    result
+}
+
+async fn save_trajectory_snapshot_inner(
+    gcx: Arc<GlobalContext>,
     mut snapshot: TrajectorySnapshot,
 ) -> Result<(), String> {
     validate_trajectory_id(&snapshot.chat_id).map_err(|e| e.message)?;
@@ -2729,20 +2768,67 @@ pub async fn save_trajectory_snapshot(
     preserve_existing_trajectory_metadata(&mut trajectory, existing_trajectory);
 
     let tmp_path = unique_trajectory_tmp_path(&file_path);
-    let (trajectory, json_result) = tokio::task::spawn_blocking(move || {
+    let serialize_span = perf_diagnostics::span(
+        PerfComponent::TrajectorySerialize,
+        Some(&snapshot.chat_id),
+        Some(&file_path),
+    );
+    let serialized = tokio::task::spawn_blocking(move || {
         let json_result = serde_json::to_string_pretty(&trajectory)
             .map_err(|e| format!("Failed to serialize trajectory: {}", e));
         (trajectory, json_result)
     })
-    .await
-    .map_err(|e| format!("Trajectory serialization task failed: {}", e))?;
-    atomic_write_json_with_tmp_path(
+    .await;
+    let (trajectory, json_result) = match serialized {
+        Ok((trajectory, json_result)) => {
+            serialize_span.finish(
+                if json_result.is_ok() {
+                    PerfOutcome::Success
+                } else {
+                    PerfOutcome::Failure
+                },
+                json_result.as_ref().ok().map(|json| json.len() as u64),
+                Some(message_count as u64),
+                Some(snapshot.version),
+                None,
+            );
+            (trajectory, json_result)
+        }
+        Err(error) => {
+            serialize_span.finish(
+                PerfOutcome::Failure,
+                None,
+                Some(message_count as u64),
+                Some(snapshot.version),
+                None,
+            );
+            return Err(format!("Trajectory serialization task failed: {}", error));
+        }
+    };
+    let atomic_write_span = perf_diagnostics::span(
+        PerfComponent::TrajectoryAtomicWrite,
+        Some(&snapshot.chat_id),
+        Some(&file_path),
+    );
+    let atomic_write_result = atomic_write_json_with_tmp_path(
         &file_path,
         &tmp_path,
         json_result,
         Some("Failed to write trajectory"),
     )
-    .await?;
+    .await;
+    atomic_write_span.finish(
+        if atomic_write_result.is_ok() {
+            PerfOutcome::Success
+        } else {
+            PerfOutcome::Failure
+        },
+        None,
+        Some(message_count as u64),
+        Some(snapshot.version),
+        None,
+    );
+    atomic_write_result?;
 
     info!(
         "Saved trajectory for chat {} ({} messages) to {:?}",
@@ -6018,6 +6104,7 @@ pub async fn handle_v1_trajectories_subscribe(
 mod tests {
     use super::*;
     use crate::chat::diagnostics::{is_ui_only_message, make_ui_only_error_message};
+    use crate::chat::perf_diagnostics::{self, MemoryPerfSink, PerfClock, PerfRecorder};
     use crate::chat::types::{
         ActiveCommandContext, BurstGuard, ChatEvent, CompressionPhase, CompressionReason,
         EventEnvelope,
@@ -6027,11 +6114,49 @@ mod tests {
         GoalStatus,
     };
     use serial_test::serial;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
     fn normalized_test_path(path: &Path) -> PathBuf {
         crate::files_correction::canonicalize_normalized_path(path.to_path_buf())
+    }
+
+    struct TestPerfClock {
+        now: AtomicU64,
+    }
+
+    impl TestPerfClock {
+        fn new() -> Self {
+            Self {
+                now: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl PerfClock for TestPerfClock {
+        fn now_us(&self) -> u64 {
+            self.now.fetch_add(1, Ordering::SeqCst)
+        }
+    }
+
+    fn install_perf_recorder() -> (
+        perf_diagnostics::TestRecorderGuard,
+        Arc<MemoryPerfSink>,
+        Arc<PerfRecorder>,
+    ) {
+        let sink = Arc::new(MemoryPerfSink::new());
+        let recorder = Arc::new(PerfRecorder::with_salt(
+            Arc::new(TestPerfClock::new()),
+            sink.clone(),
+            [5; 32],
+        ));
+        (
+            perf_diagnostics::install_test_recorder(recorder.clone()),
+            sink,
+            recorder,
+        )
     }
 
     fn assert_same_path(left: &Path, right: &Path) {
@@ -6382,6 +6507,64 @@ mod tests {
             .join(format!("{chat_id}.json"));
         assert!(!tokio::fs::try_exists(&flat).await.unwrap());
         assert!(load_trajectory_for_chat(gcx, chat_id).await.is_some());
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn performance_diagnostics_cover_snapshot_save_boundaries_without_raw_id_or_path() {
+        let (_guard, sink, recorder) = install_perf_recorder();
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "performance-save-chat";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.messages.push(ChatMessage::new(
+                "user".to_string(),
+                "diagnostic content remains private".to_string(),
+            ));
+            session.increment_version();
+        }
+
+        let snapshot = {
+            let session = session_arc.lock().await;
+            trajectory_snapshot_from_session(&session)
+        };
+        save_trajectory_snapshot(gcx, snapshot).await.unwrap();
+        drop(app);
+
+        let events = sink.events();
+        let components: std::collections::HashSet<_> =
+            events.iter().map(|event| event.component).collect();
+        assert!(components.contains("trajectory.snapshot"));
+        assert!(components.contains("trajectory.serialize"));
+        assert!(components.contains("trajectory.atomic_write"));
+        assert!(components.contains("trajectory.commit"));
+        assert!(events.iter().all(|event| event.outcome == "success"));
+        assert!(events.iter().all(|event| {
+            !format!("{event:?}").contains(chat_id)
+                && !format!("{event:?}").contains(dir.path().to_str().unwrap())
+        }));
+        let expected_chat_hash = recorder.hash_identity_for_test(chat_id);
+        assert!(events
+            .iter()
+            .any(|event| { event.chat_id_hash.as_deref() == Some(expected_chat_hash.as_str()) }));
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn performance_diagnostics_record_failed_trajectory_commit() {
+        let (_guard, sink, _) = install_perf_recorder();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let result =
+            save_trajectory_snapshot(gcx, test_snapshot("invalid/id", "Bad", Vec::new())).await;
+
+        assert!(result.is_err());
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].component, "trajectory.commit");
+        assert_eq!(events[0].outcome, "failure");
+        assert!(events[0].chat_id_hash.is_some());
     }
 
     #[tokio::test]

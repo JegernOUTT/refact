@@ -17,6 +17,7 @@ use crate::chat::trajectories::{
     trajectory_list_data_is_displayable_chat, trajectory_meta_title,
 };
 use crate::chat::types::{TrajectorySourceIdentity, WorktreeMeta};
+use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 
 pub const TRAJECTORY_INDEX_SCHEMA_VERSION: u32 = 1;
 pub const TRAJECTORY_INDEX_FILE: &str = "index.json";
@@ -343,6 +344,28 @@ pub fn entry_from_trajectory_value(
 
 pub async fn read_trajectory_index(dir: &Path) -> Result<Option<TrajectoryIndex>, String> {
     let path = trajectory_index_path(dir);
+    let span = perf_diagnostics::span(PerfComponent::TrajectoryIndexRead, None, Some(&path));
+    let result = read_trajectory_index_inner(dir).await;
+    span.finish(
+        if result.is_ok() {
+            PerfOutcome::Success
+        } else {
+            PerfOutcome::Failure
+        },
+        None,
+        result
+            .as_ref()
+            .ok()
+            .and_then(|index| index.as_ref())
+            .map(|index| index.entries.len() as u64),
+        None,
+        None,
+    );
+    result
+}
+
+async fn read_trajectory_index_inner(dir: &Path) -> Result<Option<TrajectoryIndex>, String> {
+    let path = trajectory_index_path(dir);
     let content = match fs::read_to_string(&path).await {
         Ok(content) => content,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -372,6 +395,28 @@ pub async fn write_trajectory_index_atomic(
 }
 
 async fn write_trajectory_index_atomic_owned(
+    dir: &Path,
+    index: TrajectoryIndex,
+) -> Result<(), String> {
+    let path = trajectory_index_path(dir);
+    let entry_count = index.entries.len() as u64;
+    let span = perf_diagnostics::span(PerfComponent::TrajectoryIndexWrite, None, Some(&path));
+    let result = write_trajectory_index_atomic_owned_inner(dir, index).await;
+    span.finish(
+        if result.is_ok() {
+            PerfOutcome::Success
+        } else {
+            PerfOutcome::Failure
+        },
+        None,
+        Some(entry_count),
+        None,
+        None,
+    );
+    result
+}
+
+async fn write_trajectory_index_atomic_owned_inner(
     dir: &Path,
     index: TrajectoryIndex,
 ) -> Result<(), String> {
@@ -463,7 +508,13 @@ pub async fn upsert_trajectory_index_entry(
     entry: TrajectoryIndexEntry,
 ) -> Result<(), String> {
     let lock = get_trajectory_index_lock(dir).await;
+    let lock_span = perf_diagnostics::span(
+        PerfComponent::TrajectoryIndexLockWait,
+        Some(&entry.id),
+        Some(&trajectory_index_path(dir)),
+    );
     let _guard = lock.lock().await;
+    lock_span.finish(PerfOutcome::Success, None, None, None, None);
     let mut index = match read_trajectory_index(dir).await {
         Ok(Some(index)) => index,
         Ok(None) | Err(_) => {
@@ -519,7 +570,13 @@ pub async fn remove_trajectory_index_entries(
         return Ok(());
     }
     let lock = get_trajectory_index_lock(dir).await;
+    let lock_span = perf_diagnostics::span(
+        PerfComponent::TrajectoryIndexLockWait,
+        None,
+        Some(&trajectory_index_path(dir)),
+    );
     let _guard = lock.lock().await;
+    lock_span.finish(PerfOutcome::Success, None, None, None, None);
     let mut index = match read_trajectory_index(dir).await? {
         Some(index) => index,
         None => return Ok(()),
@@ -535,7 +592,13 @@ pub async fn remove_trajectory_index_entries(
 
 pub async fn remove_trajectory_index_entry(dir: &Path, chat_id: &str) -> Result<(), String> {
     let lock = get_trajectory_index_lock(dir).await;
+    let lock_span = perf_diagnostics::span(
+        PerfComponent::TrajectoryIndexLockWait,
+        Some(chat_id),
+        Some(&trajectory_index_path(dir)),
+    );
     let _guard = lock.lock().await;
+    lock_span.finish(PerfOutcome::Success, None, None, None, None);
     let mut index = match read_trajectory_index(dir).await? {
         Some(index) => index,
         None => return Ok(()),
@@ -754,8 +817,38 @@ pub async fn rebuild_trajectory_index_from_disk(
     dir: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<Vec<TrajectoryIndexEntry>, String> {
+    let span = perf_diagnostics::span(
+        PerfComponent::TrajectoryIndexRebuild,
+        None,
+        Some(&trajectory_index_path(dir)),
+    );
+    let result = rebuild_trajectory_index_from_disk_inner(dir, source_hint).await;
+    span.finish(
+        if result.is_ok() {
+            PerfOutcome::Success
+        } else {
+            PerfOutcome::Failure
+        },
+        None,
+        result.as_ref().ok().map(|entries| entries.len() as u64),
+        None,
+        None,
+    );
+    result
+}
+
+async fn rebuild_trajectory_index_from_disk_inner(
+    dir: &Path,
+    source_hint: Option<TrajectorySourceIdentity>,
+) -> Result<Vec<TrajectoryIndexEntry>, String> {
     let lock = get_trajectory_index_lock(dir).await;
+    let lock_span = perf_diagnostics::span(
+        PerfComponent::TrajectoryIndexLockWait,
+        None,
+        Some(&trajectory_index_path(dir)),
+    );
     let _guard = lock.lock().await;
+    lock_span.finish(PerfOutcome::Success, None, None, None, None);
     let (entries, skipped_files) = scan_trajectory_index_data(dir, source_hint).await?;
     let index = TrajectoryIndex {
         schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
@@ -772,7 +865,13 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<Vec<TrajectoryIndexEntry>, String> {
     let lock = get_trajectory_index_lock(dir).await;
+    let lock_span = perf_diagnostics::span(
+        PerfComponent::TrajectoryIndexLockWait,
+        None,
+        Some(&trajectory_index_path(dir)),
+    );
     let _guard = lock.lock().await;
+    lock_span.finish(PerfOutcome::Success, None, None, None, None);
     let disk_files = scan_trajectory_dir_files(dir).await?;
 
     let (existing_entries, existing_skipped, index_unreadable) =
@@ -929,7 +1028,38 @@ pub fn meta_from_entry(_dir: &Path, entry: &TrajectoryIndexEntry) -> TrajectoryM
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::perf_diagnostics::{self, MemoryPerfSink, PerfClock, PerfComponent, PerfRecorder};
     use serde_json::json;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct TestClock {
+        now: AtomicU64,
+    }
+
+    impl TestClock {
+        fn new() -> Self {
+            Self {
+                now: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl PerfClock for TestClock {
+        fn now_us(&self) -> u64 {
+            self.now.fetch_add(1, Ordering::SeqCst)
+        }
+    }
+
+    fn install_perf_recorder() -> (perf_diagnostics::TestRecorderGuard, Arc<MemoryPerfSink>) {
+        let sink = Arc::new(MemoryPerfSink::new());
+        let recorder = Arc::new(PerfRecorder::with_salt(
+            Arc::new(TestClock::new()),
+            sink.clone(),
+            [3; 32],
+        ));
+        (perf_diagnostics::install_test_recorder(recorder), sink)
+    }
 
     async fn write_trajectory(dir: &Path, id: &str, title: &str, mode: &str) -> PathBuf {
         fs::create_dir_all(dir).await.unwrap();
@@ -970,6 +1100,42 @@ mod tests {
             .entries
             .iter()
             .all(|entry| entry.file_name != TRAJECTORY_INDEX_FILE));
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn performance_diagnostics_cover_index_success_and_failure_boundaries() {
+        let (_guard, sink) = install_perf_recorder();
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        write_trajectory(&dir, "chat-1", "One", "agent").await;
+
+        let entry = entry_from_trajectory_value(
+            &dir,
+            &dir.join("chat-1.json"),
+            &serde_json::from_str(&fs::read_to_string(dir.join("chat-1.json")).await.unwrap())
+                .unwrap(),
+            None,
+        )
+        .unwrap();
+        upsert_trajectory_index_entry(&dir, entry).await.unwrap();
+        rebuild_trajectory_index_from_disk(&dir, None)
+            .await
+            .unwrap();
+
+        fs::write(trajectory_index_path(&dir), "not-json")
+            .await
+            .unwrap();
+        assert!(read_trajectory_index(&dir).await.is_err());
+
+        let events = sink.events();
+        let components: Vec<_> = events.iter().map(|event| event.component).collect();
+        assert!(components.contains(&PerfComponent::TrajectoryIndexLockWait.as_str()));
+        assert!(components.contains(&PerfComponent::TrajectoryIndexRead.as_str()));
+        assert!(components.contains(&PerfComponent::TrajectoryIndexWrite.as_str()));
+        assert!(components.contains(&PerfComponent::TrajectoryIndexRebuild.as_str()));
+        assert!(events.iter().any(|event| event.outcome == "failure"));
+        assert!(events.iter().all(|event| event.path_hash.is_some()));
     }
 
     #[tokio::test]
