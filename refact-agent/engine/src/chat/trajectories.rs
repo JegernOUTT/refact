@@ -6305,6 +6305,24 @@ mod tests {
         )
     }
 
+    #[test]
+    fn trajectory_snapshot_excludes_runtime_only_diagnostic_timestamps() {
+        let mut session = ChatSession::new("runtime-only-diagnostics".to_string());
+        let now = Instant::now();
+        session
+            .command_enqueued_at
+            .insert("request-1".to_string(), now);
+        session.stream_started_at = Some(now);
+        session.confirmation_paused_at = Some(now);
+
+        let serialized = serde_json::to_string(&trajectory_snapshot_from_session(&session))
+            .expect("trajectory snapshot serializes");
+
+        assert!(!serialized.contains("command_enqueued_at"));
+        assert!(!serialized.contains("stream_started_at"));
+        assert!(!serialized.contains("confirmation_paused_at"));
+    }
+
     fn assert_same_path(left: &Path, right: &Path) {
         assert_eq!(normalized_test_path(left), normalized_test_path(right));
     }
@@ -14300,6 +14318,9 @@ mod tests {
             queue_notify: Arc::new(Notify::new()),
             last_activity: Instant::now(),
             last_stream_delta_at: None,
+            command_enqueued_at: std::collections::HashMap::new(),
+            stream_started_at: None,
+            confirmation_paused_at: None,
             last_tool_started_at: None,
             last_tool_progress_at: None,
             trajectory_dirty: false,
@@ -14403,6 +14424,9 @@ mod tests {
             queue_notify: Arc::new(Notify::new()),
             last_activity: Instant::now(),
             last_stream_delta_at: None,
+            command_enqueued_at: std::collections::HashMap::new(),
+            stream_started_at: None,
+            confirmation_paused_at: None,
             last_tool_started_at: None,
             last_tool_progress_at: None,
             trajectory_dirty: false,

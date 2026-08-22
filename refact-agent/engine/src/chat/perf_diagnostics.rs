@@ -22,10 +22,16 @@ pub enum PerfComponent {
     TrajectoryIndexRead,
     TrajectoryIndexWrite,
     TrajectoryIndexRebuild,
+    CommandQueueWait,
+    StreamFirstDelta,
+    SseSerialize,
+    SseBroadcast,
+    SseLagged,
+    ToolConfirmationWait,
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 14] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -34,6 +40,12 @@ impl PerfComponent {
         Self::TrajectoryIndexRead,
         Self::TrajectoryIndexWrite,
         Self::TrajectoryIndexRebuild,
+        Self::CommandQueueWait,
+        Self::StreamFirstDelta,
+        Self::SseSerialize,
+        Self::SseBroadcast,
+        Self::SseLagged,
+        Self::ToolConfirmationWait,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -46,6 +58,12 @@ impl PerfComponent {
             Self::TrajectoryIndexRead => "trajectory.index_read",
             Self::TrajectoryIndexWrite => "trajectory.index_write",
             Self::TrajectoryIndexRebuild => "trajectory.index_rebuild",
+            Self::CommandQueueWait => "command.queue_wait",
+            Self::StreamFirstDelta => "stream.first_delta",
+            Self::SseSerialize => "sse.serialize",
+            Self::SseBroadcast => "sse.broadcast",
+            Self::SseLagged => "sse.lagged",
+            Self::ToolConfirmationWait => "tool.confirmation_wait",
         }
     }
 }
@@ -283,9 +301,42 @@ fn active_recorder() -> Option<Arc<PerfRecorder>> {
     })
 }
 
+pub fn is_enabled() -> bool {
+    active_recorder().is_some()
+}
+
 pub fn span(component: PerfComponent, chat_id: Option<&str>, path: Option<&Path>) -> PerfSpan {
     span_with_recorder(active_recorder(), component, chat_id, path)
 }
+
+pub fn record(
+    component: PerfComponent,
+    chat_id: Option<&str>,
+    outcome: PerfOutcome,
+    elapsed_us: u64,
+    size_bytes: Option<u64>,
+    item_count: Option<u64>,
+    queue_depth: Option<u64>,
+) {
+    let Some(recorder) = active_recorder() else {
+        return;
+    };
+    recorder.sink.record(PerfEvent {
+        schema_version: PERFORMANCE_DIAGNOSTICS_SCHEMA_VERSION,
+        component: component.as_str(),
+        outcome: outcome.as_str(),
+        elapsed_us,
+        size_bytes,
+        item_count,
+        trajectory_version: None,
+        queue_depth,
+        chat_id_hash: chat_id.map(|chat_id| recorder.hash_bytes(chat_id.as_bytes())),
+        path_hash: None,
+    });
+}
+
+#[cfg(test)]
+pub(crate) static PERF_RECORDER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn span_with_recorder(
     recorder: Option<Arc<PerfRecorder>>,
@@ -393,6 +444,7 @@ mod tests {
 
     #[test]
     fn disabled_span_does_not_touch_clock_or_sink() {
+        let _lock = PERF_RECORDER_TEST_LOCK.lock().unwrap();
         let span = span_with_recorder(None, PerfComponent::TrajectoryCommit, None, None);
         assert!(matches!(span, PerfSpan::Disabled));
         span.finish(PerfOutcome::Success, None, None, None, None);
@@ -400,6 +452,7 @@ mod tests {
 
     #[test]
     fn recorder_hashes_identity_and_records_injected_elapsed_time() {
+        let _lock = PERF_RECORDER_TEST_LOCK.lock().unwrap();
         let clock = Arc::new(TestClock::new(100));
         let sink = Arc::new(MemoryPerfSink::new());
         let recorder = Arc::new(PerfRecorder::with_salt(
@@ -445,6 +498,7 @@ mod tests {
 
     #[test]
     fn paused_span_accumulates_only_active_time() {
+        let _lock = PERF_RECORDER_TEST_LOCK.lock().unwrap();
         let clock = Arc::new(TestClock::new(100));
         let sink = Arc::new(MemoryPerfSink::new());
         let recorder = Arc::new(PerfRecorder::with_salt(
@@ -472,13 +526,51 @@ mod tests {
     }
 
     #[test]
+    fn record_accepts_injected_elapsed_time_without_a_cross_turn_span() {
+        let _lock = PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let clock = Arc::new(TestClock::new(100));
+        let sink = Arc::new(MemoryPerfSink::new());
+        let recorder = Arc::new(PerfRecorder::with_salt(
+            clock.clone(),
+            sink.clone(),
+            [7; 32],
+        ));
+        let _guard = install_test_recorder(recorder);
+
+        clock.advance(42);
+        record(
+            PerfComponent::CommandQueueWait,
+            None,
+            PerfOutcome::Success,
+            42,
+            None,
+            Some(1),
+            Some(2),
+        );
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].component, "command.queue_wait");
+        assert_eq!(events[0].elapsed_us, 42);
+        assert_eq!(events[0].item_count, Some(1));
+        assert_eq!(events[0].queue_depth, Some(2));
+    }
+
+    #[test]
     fn component_and_outcome_labels_are_bounded_to_the_schema() {
+        let _lock = PERF_RECORDER_TEST_LOCK.lock().unwrap();
         let labels: Vec<_> = PerfComponent::ALL
             .iter()
             .map(|component| component.as_str())
             .collect();
-        assert_eq!(labels.len(), 8);
+        assert_eq!(labels.len(), 14);
         assert!(labels.iter().all(|label| label.len() <= 32));
+        assert!(labels.contains(&"command.queue_wait"));
+        assert!(labels.contains(&"stream.first_delta"));
+        assert!(labels.contains(&"sse.serialize"));
+        assert!(labels.contains(&"sse.broadcast"));
+        assert!(labels.contains(&"sse.lagged"));
+        assert!(labels.contains(&"tool.confirmation_wait"));
         assert_eq!(PerfOutcome::Success.as_str(), "success");
         assert_eq!(PerfOutcome::Failure.as_str(), "failure");
     }

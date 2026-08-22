@@ -5,10 +5,12 @@ use axum::http::{Response, StatusCode};
 use axum::extract::State;
 use hyper::Body;
 use tokio::sync::broadcast;
+use std::time::Instant;
 
 use crate::app_state::AppState;
 use crate::custom_error::ScratchError;
 
+use super::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 use super::types::*;
 use super::queue::{
     add_mode_switch_event_and_plan_if_changed, resolve_worktree_setparams_update,
@@ -38,6 +40,35 @@ fn spawn_pending_background_agent_flush(app: AppState, chat_id: String) {
     tokio::spawn(async move {
         let _ = crate::agents::push::flush_pending_pushes_for_parent(app, &chat_id).await;
     });
+}
+
+fn record_lagged_recovery(chat_id: &str, outcome: PerfOutcome, elapsed_us: u64, skipped: u64) {
+    perf_diagnostics::record(
+        PerfComponent::SseLagged,
+        Some(chat_id),
+        outcome,
+        elapsed_us,
+        None,
+        Some(skipped),
+        None,
+    );
+}
+
+fn record_sse_serialize(
+    chat_id: &str,
+    outcome: PerfOutcome,
+    elapsed_us: u64,
+    size_bytes: Option<u64>,
+) {
+    perf_diagnostics::record(
+        PerfComponent::SseSerialize,
+        Some(chat_id),
+        outcome,
+        elapsed_us,
+        size_bytes,
+        None,
+        None,
+    );
 }
 
 pub async fn handle_v1_chat_subscribe(
@@ -71,9 +102,36 @@ pub async fn handle_v1_chat_subscribe(
         event: snapshot,
     };
 
+    let initial_serialize_started_at = perf_diagnostics::is_enabled().then(Instant::now);
     let initial_json = match serde_json::to_string(&initial_envelope) {
-        Ok(j) => j,
+        Ok(j) => {
+            if let Some(initial_serialize_started_at) = initial_serialize_started_at {
+                record_sse_serialize(
+                    &chat_id,
+                    PerfOutcome::Success,
+                    initial_serialize_started_at
+                        .elapsed()
+                        .as_micros()
+                        .try_into()
+                        .unwrap_or(u64::MAX),
+                    Some(j.len() as u64),
+                );
+            }
+            j
+        }
         Err(e) => {
+            if let Some(initial_serialize_started_at) = initial_serialize_started_at {
+                record_sse_serialize(
+                    &chat_id,
+                    PerfOutcome::Failure,
+                    initial_serialize_started_at
+                        .elapsed()
+                        .as_micros()
+                        .try_into()
+                        .unwrap_or(u64::MAX),
+                    None,
+                );
+            }
             tracing::error!(
                 "Failed to serialize initial SSE snapshot for {}: {}",
                 chat_id,
@@ -104,6 +162,7 @@ pub async fn handle_v1_chat_subscribe(
                             yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            let recovery_started_at = perf_diagnostics::is_enabled().then(Instant::now);
                             tracing::info!("SSE subscriber lagged, skipped {} events, sending fresh snapshot", skipped);
                             let session = session_for_stream.lock().await;
                             if session.closed {
@@ -125,9 +184,60 @@ pub async fn handle_v1_chat_subscribe(
                                 seq: recovery_seq,
                                 event: recovery_snapshot,
                             };
+                            let recovery_serialize_started_at = recovery_started_at.map(|_| Instant::now());
                             match serde_json::to_string(&recovery_envelope) {
-                                Ok(json) => yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json)),
+                                Ok(json) => {
+                                    if let (Some(recovery_started_at), Some(recovery_serialize_started_at)) =
+                                        (recovery_started_at, recovery_serialize_started_at)
+                                    {
+                                        record_sse_serialize(
+                                            &chat_id_for_stream,
+                                            PerfOutcome::Success,
+                                            recovery_serialize_started_at
+                                                .elapsed()
+                                                .as_micros()
+                                                .try_into()
+                                                .unwrap_or(u64::MAX),
+                                            Some(json.len() as u64),
+                                        );
+                                        record_lagged_recovery(
+                                            &chat_id_for_stream,
+                                            PerfOutcome::Success,
+                                            recovery_started_at
+                                                .elapsed()
+                                                .as_micros()
+                                                .try_into()
+                                                .unwrap_or(u64::MAX),
+                                            skipped as u64,
+                                        );
+                                    }
+                                    yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", json));
+                                }
                                 Err(e) => {
+                                    if let (Some(recovery_started_at), Some(recovery_serialize_started_at)) =
+                                        (recovery_started_at, recovery_serialize_started_at)
+                                    {
+                                        record_sse_serialize(
+                                            &chat_id_for_stream,
+                                            PerfOutcome::Failure,
+                                            recovery_serialize_started_at
+                                                .elapsed()
+                                                .as_micros()
+                                                .try_into()
+                                                .unwrap_or(u64::MAX),
+                                            None,
+                                        );
+                                        record_lagged_recovery(
+                                            &chat_id_for_stream,
+                                            PerfOutcome::Failure,
+                                            recovery_started_at
+                                                .elapsed()
+                                                .as_micros()
+                                                .try_into()
+                                                .unwrap_or(u64::MAX),
+                                            skipped as u64,
+                                        );
+                                    }
                                     tracing::error!("Failed to serialize SSE recovery snapshot for {}: {}", chat_id_for_stream, e);
                                     break;
                                 }
@@ -488,6 +598,7 @@ pub async fn handle_v1_chat_cancel_queued(
     session
         .command_queue
         .retain(|r| r.client_request_id != client_request_id);
+    session.command_enqueued_at.remove(&client_request_id);
 
     if session.command_queue.len() < initial_len {
         session.touch();
@@ -509,10 +620,68 @@ pub async fn handle_v1_chat_cancel_queued(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::perf_diagnostics::{self, MemoryPerfSink, PerfClock, PerfRecorder};
     use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ChatToolFunction};
     use crate::chat::types::SessionState;
     use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+
+    struct TestClock {
+        now: AtomicU64,
+    }
+
+    impl PerfClock for TestClock {
+        fn now_us(&self) -> u64 {
+            self.now.load(Ordering::SeqCst)
+        }
+    }
+
+    fn install_perf_recorder() -> (perf_diagnostics::TestRecorderGuard, Arc<MemoryPerfSink>) {
+        let sink = Arc::new(MemoryPerfSink::new());
+        let recorder = Arc::new(PerfRecorder::with_salt(
+            Arc::new(TestClock {
+                now: AtomicU64::new(0),
+            }),
+            sink.clone(),
+            [11; 32],
+        ));
+        (perf_diagnostics::install_test_recorder(recorder), sink)
+    }
+
+    #[test]
+    fn perf_diagnostics_lagged_recovery_records_skip_count() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, sink) = install_perf_recorder();
+
+        record_lagged_recovery("chat-lag", PerfOutcome::Success, 47, 3);
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].component, "sse.lagged");
+        assert_eq!(events[0].elapsed_us, 47);
+        assert_eq!(events[0].item_count, Some(3));
+    }
+
+    #[test]
+    fn perf_diagnostics_initial_and_recovery_sse_serialization_record_outcomes() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, sink) = install_perf_recorder();
+
+        record_sse_serialize("initial-chat", PerfOutcome::Success, 17, Some(23));
+        record_sse_serialize("recovery-chat", PerfOutcome::Failure, 19, None);
+
+        let events = sink.events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].component, "sse.serialize");
+        assert_eq!(events[0].outcome, "success");
+        assert_eq!(events[0].elapsed_us, 17);
+        assert_eq!(events[0].size_bytes, Some(23));
+        assert_eq!(events[1].component, "sse.serialize");
+        assert_eq!(events[1].outcome, "failure");
+        assert_eq!(events[1].elapsed_us, 19);
+        assert_eq!(events[1].size_bytes, None);
+    }
 
     async fn test_app_with_workspace(root: &std::path::Path) -> AppState {
         let gcx = crate::global_context::tests::make_test_gcx().await;

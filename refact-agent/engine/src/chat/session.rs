@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::call_validation::{ChatContent, ChatMessage, ChatUsage};
 use crate::chat::diagnostics::make_ui_only_error_message;
 use crate::chat::internal_roles::{event, EventSubkind, GOAL_ROLE};
+use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 
 use super::types::*;
 use super::types::session_idle_timeout;
@@ -434,6 +435,9 @@ impl ChatSession {
             queue_notify: Arc::new(Notify::new()),
             last_activity: Instant::now(),
             last_stream_delta_at: None,
+            command_enqueued_at: HashMap::new(),
+            stream_started_at: None,
+            confirmation_paused_at: None,
             last_tool_started_at: None,
             last_tool_progress_at: None,
             trajectory_dirty: false,
@@ -532,6 +536,9 @@ impl ChatSession {
             queue_notify: Arc::new(Notify::new()),
             last_activity: Instant::now(),
             last_stream_delta_at: None,
+            command_enqueued_at: HashMap::new(),
+            stream_started_at: None,
+            confirmation_paused_at: None,
             last_tool_started_at: None,
             last_tool_progress_at: None,
             external_reload_pending: None,
@@ -1073,6 +1080,7 @@ impl ChatSession {
     }
 
     pub fn emit(&mut self, event: ChatEvent) {
+        let serialize_started_at = perf_diagnostics::is_enabled().then(Instant::now);
         self.event_seq += 1;
         let envelope = EventEnvelope {
             chat_id: self.chat_id.clone(),
@@ -1081,10 +1089,65 @@ impl ChatSession {
         };
         match serde_json::to_string(&envelope) {
             Ok(json) => {
+                let broadcast_started_at = serialize_started_at.map(|_| Instant::now());
+                let size_bytes = serialize_started_at.map(|_| json.len() as u64);
                 let _ = self.event_tx.send(Arc::new(json));
+                if let (Some(serialize_started_at), Some(broadcast_started_at), Some(size_bytes)) =
+                    (serialize_started_at, broadcast_started_at, size_bytes)
+                {
+                    let serialize_us = serialize_started_at
+                        .elapsed()
+                        .as_micros()
+                        .try_into()
+                        .unwrap_or(u64::MAX);
+                    let broadcast_us = broadcast_started_at
+                        .elapsed()
+                        .as_micros()
+                        .try_into()
+                        .unwrap_or(u64::MAX);
+                    self.record_sse_timing(serialize_us, broadcast_us, size_bytes);
+                }
             }
-            Err(e) => tracing::error!("Failed to serialize SSE event for {}: {}", self.chat_id, e),
+            Err(e) => {
+                if let Some(serialize_started_at) = serialize_started_at {
+                    perf_diagnostics::record(
+                        PerfComponent::SseSerialize,
+                        Some(&self.chat_id),
+                        PerfOutcome::Failure,
+                        serialize_started_at
+                            .elapsed()
+                            .as_micros()
+                            .try_into()
+                            .unwrap_or(u64::MAX),
+                        None,
+                        None,
+                        None,
+                    );
+                }
+                tracing::error!("Failed to serialize SSE event for {}: {}", self.chat_id, e);
+            }
         }
+    }
+
+    fn record_sse_timing(&self, serialize_us: u64, broadcast_us: u64, size_bytes: u64) {
+        perf_diagnostics::record(
+            PerfComponent::SseSerialize,
+            Some(&self.chat_id),
+            PerfOutcome::Success,
+            serialize_us,
+            Some(size_bytes),
+            None,
+            None,
+        );
+        perf_diagnostics::record(
+            PerfComponent::SseBroadcast,
+            Some(&self.chat_id),
+            PerfOutcome::Success,
+            broadcast_us,
+            None,
+            None,
+            None,
+        );
     }
 
     pub fn upsert_background_agent(&mut self, agent: BackgroundAgentSummary) {
@@ -1223,12 +1286,51 @@ impl ChatSession {
         if request.priority {
             self.enqueue_accepted_priority_command(request)
         } else {
+            if perf_diagnostics::is_enabled() {
+                self.command_enqueued_at
+                    .insert(request.client_request_id.clone(), Instant::now());
+            }
             self.command_queue.push_back(request);
             self.touch();
             self.emit_queue_update();
             self.queue_notify.notify_one();
             EnqueueCommandOutcome::Accepted
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_sse_timing_for_test(
+        &self,
+        serialize_us: u64,
+        broadcast_us: u64,
+        size_bytes: u64,
+    ) {
+        self.record_sse_timing(serialize_us, broadcast_us, size_bytes);
+    }
+
+    pub(crate) fn record_command_queue_wait(&mut self, client_request_id: &str) {
+        if !perf_diagnostics::is_enabled() {
+            return;
+        }
+        self.record_command_queue_wait_at(client_request_id, Instant::now());
+    }
+
+    pub(crate) fn record_command_queue_wait_at(&mut self, client_request_id: &str, now: Instant) {
+        let Some(enqueued_at) = self.command_enqueued_at.remove(client_request_id) else {
+            return;
+        };
+        perf_diagnostics::record(
+            PerfComponent::CommandQueueWait,
+            Some(&self.chat_id),
+            PerfOutcome::Success,
+            now.duration_since(enqueued_at)
+                .as_micros()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            None,
+            None,
+            Some(self.command_queue.len() as u64),
+        );
     }
 
     pub fn add_message(&mut self, mut message: ChatMessage) {
@@ -1910,6 +2012,10 @@ impl ChatSession {
             .position(|r| !r.priority)
             .unwrap_or(self.command_queue.len());
         self.command_queue.insert(insert_pos, request);
+        if perf_diagnostics::is_enabled() {
+            let request_id = self.command_queue[insert_pos].client_request_id.clone();
+            self.command_enqueued_at.insert(request_id, Instant::now());
+        }
         self.touch();
         self.emit_queue_update();
         self.queue_notify.notify_one();
@@ -1926,6 +2032,7 @@ impl ChatSession {
         self.runtime.auto_approved_tool_ids = auto_approved_ids;
         self.runtime.accepted_tool_ids.clear();
         self.runtime.paused_message_index = message_index;
+        self.confirmation_paused_at = perf_diagnostics::is_enabled().then(Instant::now);
         self.emit(ChatEvent::PauseRequired { reasons });
         self.set_runtime_state(SessionState::Paused, None);
     }
@@ -1944,6 +2051,7 @@ impl ChatSession {
             ..Default::default()
         });
         self.draft_usage = None;
+        self.stream_started_at = perf_diagnostics::is_enabled().then(Instant::now);
         self.set_runtime_state(SessionState::Generating, None);
         self.emit(ChatEvent::StreamStarted {
             message_id: message_id.clone(),
@@ -1953,6 +2061,10 @@ impl ChatSession {
     }
 
     pub fn emit_stream_delta(&mut self, ops: Vec<DeltaOp>) {
+        self.emit_stream_delta_at(ops, Instant::now());
+    }
+
+    pub(crate) fn emit_stream_delta_at(&mut self, ops: Vec<DeltaOp>, now: Instant) {
         let (message_id, applied) = match &mut self.draft_message {
             Some(draft) => {
                 let mut applied = false;
@@ -2037,6 +2149,20 @@ impl ChatSession {
         };
         self.emit(ChatEvent::StreamDelta { message_id, ops });
         if applied {
+            if let Some(started_at) = self.stream_started_at.take() {
+                perf_diagnostics::record(
+                    PerfComponent::StreamFirstDelta,
+                    Some(&self.chat_id),
+                    PerfOutcome::Success,
+                    now.duration_since(started_at)
+                        .as_micros()
+                        .try_into()
+                        .unwrap_or(u64::MAX),
+                    None,
+                    None,
+                    None,
+                );
+            }
             self.mark_stream_delta();
         }
     }
@@ -2050,6 +2176,7 @@ impl ChatSession {
         finish_reason: Option<String>,
         next_state: SessionState,
     ) {
+        self.stream_started_at = None;
         if let Some(mut draft) = self.draft_message.take() {
             let should_keep_draft = has_displayable_assistant_content(&draft);
 
@@ -2082,6 +2209,7 @@ impl ChatSession {
             });
         }
         self.draft_usage = None;
+        self.stream_started_at = None;
         self.set_runtime_state(SessionState::Idle, None);
         self.touch();
     }
@@ -2155,6 +2283,7 @@ impl ChatSession {
                 });
             }
         }
+        self.stream_started_at = None;
         self.append_error_message_deduped(&error);
         self.set_runtime_state(SessionState::Error, Some(error.clone()));
         self.touch();
@@ -2178,6 +2307,7 @@ impl ChatSession {
             });
         }
         self.draft_usage = None;
+        self.stream_started_at = None;
         self.set_runtime_state(SessionState::Idle, None);
         self.touch();
         self.queue_notify.notify_one();
@@ -2334,6 +2464,10 @@ impl ChatSession {
         });
         let after_len = self.runtime.pause_reasons.len();
 
+        if before_len > after_len {
+            self.record_confirmation_wait(Some((before_len - after_len) as u64));
+        }
+
         for denied_id in &denied_ids {
             let has_matching_tool_call = self
                 .messages
@@ -2387,18 +2521,195 @@ impl ChatSession {
             denied_ids,
         }
     }
+
+    pub(crate) fn record_confirmation_wait(&mut self, item_count: Option<u64>) {
+        if !perf_diagnostics::is_enabled() {
+            return;
+        }
+        self.record_confirmation_wait_at(item_count, Instant::now());
+    }
+
+    pub(crate) fn record_confirmation_wait_at(&mut self, item_count: Option<u64>, now: Instant) {
+        let Some(paused_at) = self.confirmation_paused_at.take() else {
+            return;
+        };
+        perf_diagnostics::record(
+            PerfComponent::ToolConfirmationWait,
+            Some(&self.chat_id),
+            PerfOutcome::Success,
+            now.duration_since(paused_at)
+                .as_micros()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            None,
+            item_count,
+            None,
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use super::super::types::{ChatCommand, CommandRequest};
+    use crate::chat::perf_diagnostics::{self, MemoryPerfSink, PerfClock, PerfRecorder};
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
     use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
     use std::time::Instant;
 
     fn make_session() -> ChatSession {
         ChatSession::new("test-chat".to_string())
+    }
+
+    struct TestClock {
+        now: AtomicU64,
+    }
+
+    impl TestClock {
+        fn new(now: u64) -> Self {
+            Self {
+                now: AtomicU64::new(now),
+            }
+        }
+    }
+
+    impl PerfClock for TestClock {
+        fn now_us(&self) -> u64 {
+            self.now.load(Ordering::SeqCst)
+        }
+    }
+
+    fn install_perf_recorder() -> (perf_diagnostics::TestRecorderGuard, Arc<MemoryPerfSink>) {
+        let sink = Arc::new(MemoryPerfSink::new());
+        let recorder = Arc::new(PerfRecorder::with_salt(
+            Arc::new(TestClock::new(0)),
+            sink.clone(),
+            [9; 32],
+        ));
+        (perf_diagnostics::install_test_recorder(recorder), sink)
+    }
+
+    #[test]
+    fn perf_diagnostics_queue_wait_records_once_with_controlled_timestamp() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, sink) = install_perf_recorder();
+        let mut session = make_session();
+        let now = Instant::now();
+        session
+            .command_enqueued_at
+            .insert("queued".to_string(), now);
+
+        session.record_command_queue_wait_at(
+            "queued",
+            now.checked_add(std::time::Duration::from_micros(42))
+                .unwrap(),
+        );
+        session.record_command_queue_wait_at(
+            "queued",
+            now.checked_add(std::time::Duration::from_micros(84))
+                .unwrap(),
+        );
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].component, "command.queue_wait");
+        assert_eq!(events[0].elapsed_us, 42);
+    }
+
+    #[test]
+    fn perf_diagnostics_first_delta_records_once_and_skips_empty_deltas() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, sink) = install_perf_recorder();
+        let mut session = make_session();
+        let started_at = Instant::now();
+        session.start_stream();
+        session.stream_started_at = Some(started_at);
+
+        session.emit_stream_delta_at(Vec::new(), started_at);
+        assert_eq!(session.stream_started_at, Some(started_at));
+        session.emit_stream_delta_at(
+            vec![DeltaOp::AppendContent {
+                text: "first".to_string(),
+            }],
+            started_at
+                .checked_add(std::time::Duration::from_micros(31))
+                .unwrap(),
+        );
+        session.emit_stream_delta_at(
+            vec![DeltaOp::AppendContent {
+                text: "second".to_string(),
+            }],
+            started_at
+                .checked_add(std::time::Duration::from_micros(62))
+                .unwrap(),
+        );
+
+        let events: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter(|event| event.component == "stream.first_delta")
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].elapsed_us, 31);
+
+        session.finish_stream(None);
+        session.start_stream();
+        session.finish_stream(None);
+        assert_eq!(
+            sink.events()
+                .iter()
+                .filter(|event| event.component == "stream.first_delta")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn perf_diagnostics_confirmation_wait_consumes_pause_once() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, sink) = install_perf_recorder();
+        let mut session = make_session();
+        let paused_at = Instant::now();
+        session.confirmation_paused_at = Some(paused_at);
+
+        session.record_confirmation_wait_at(
+            Some(2),
+            paused_at
+                .checked_add(std::time::Duration::from_micros(55))
+                .unwrap(),
+        );
+        session.record_confirmation_wait_at(
+            Some(2),
+            paused_at
+                .checked_add(std::time::Duration::from_micros(110))
+                .unwrap(),
+        );
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].component, "tool.confirmation_wait");
+        assert_eq!(events[0].elapsed_us, 55);
+        assert_eq!(events[0].item_count, Some(2));
+    }
+
+    #[test]
+    fn perf_diagnostics_sse_serialize_and_broadcast_are_distinct() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, sink) = install_perf_recorder();
+        let session = make_session();
+
+        session.record_sse_timing_for_test(7, 11, 13);
+
+        let events = sink.events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].component, "sse.serialize");
+        assert_eq!(events[0].elapsed_us, 7);
+        assert_eq!(events[0].size_bytes, Some(13));
+        assert_eq!(events[1].component, "sse.broadcast");
+        assert_eq!(events[1].elapsed_us, 11);
+        assert_eq!(events[1].size_bytes, None);
     }
 
     mod goal_budget {

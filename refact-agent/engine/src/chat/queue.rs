@@ -1077,6 +1077,9 @@ pub async fn process_command_queue(
             if state == SessionState::WaitingIde {
                 if let Some(idx) = find_allowed_command_while_waiting_ide(&session.command_queue) {
                     let cmd = session.command_queue.remove(idx);
+                    if let Some(request) = cmd.as_ref() {
+                        session.record_command_queue_wait(&request.client_request_id);
+                    }
                     session.emit_queue_update();
                     cmd
                 } else {
@@ -1087,6 +1090,9 @@ pub async fn process_command_queue(
             } else if state == SessionState::Paused {
                 if let Some(idx) = find_allowed_command_while_paused(&session.command_queue) {
                     let cmd = session.command_queue.remove(idx);
+                    if let Some(request) = cmd.as_ref() {
+                        session.record_command_queue_wait(&request.client_request_id);
+                    }
                     session.emit_queue_update();
                     cmd
                 } else {
@@ -1120,6 +1126,7 @@ pub async fn process_command_queue(
             } else {
                 let cmd = session.command_queue.pop_front();
                 if let Some(ref req) = cmd {
+                    session.record_command_queue_wait(&req.client_request_id);
                     if command_triggers_generation(&req.command) {
                         session.set_runtime_state(SessionState::Generating, None);
                     }
@@ -2188,6 +2195,9 @@ async fn handle_tool_decisions(
                 .chain(&rejected_ids)
                 .cloned()
                 .collect::<std::collections::HashSet<_>>();
+            if !decided.is_empty() {
+                session.record_confirmation_wait(Some(decided.len() as u64));
+            }
             let updates = session
                 .messages
                 .iter()
@@ -2241,6 +2251,9 @@ async fn handle_tool_decisions(
 
         {
             let mut session = session_arc.lock().await;
+            if !decisions.is_empty() {
+                session.record_confirmation_wait(Some(decisions.len() as u64));
+            }
             if accepted_any {
                 session.cache_guard_force_next = true;
             }
