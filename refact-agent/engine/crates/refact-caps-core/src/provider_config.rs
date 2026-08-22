@@ -8,7 +8,9 @@ use refact_core::llm_types::{
     CompletionEndpointStyle, EmbeddingEndpointStyle, EmbeddingModelRecord, HasBaseModelRecord,
     WireFormat, default_true,
 };
-use refact_core::provider_types::{extra_headers_mapping_to_hash_map, parse_extra_headers_value};
+use refact_core::provider_types::{
+    CredentialSpec, extra_headers_mapping_to_hash_map, parse_extra_headers_value,
+};
 
 use super::model_records::{ChatModelRecord, CompletionModelRecord, DefaultModels, normalize_string};
 
@@ -45,6 +47,8 @@ pub struct CapsProvider {
 
     #[serde(default)]
     pub api_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<CredentialSpec>,
 
     #[serde(default)]
     pub tokenizer_api_key: String,
@@ -89,6 +93,16 @@ pub struct CapsProvider {
 }
 
 impl CapsProvider {
+    pub fn validate_credential_config(&self) -> Result<(), String> {
+        if let Some(credential) = &self.credential {
+            credential.validate()?;
+            if !self.api_key.trim().is_empty() {
+                return Err("api_key and credential are mutually exclusive".to_string());
+            }
+        }
+        Ok(())
+    }
+
     pub fn defaults(&self) -> DefaultModels {
         DefaultModels {
             completion_default_model: self.completion_default_model.clone(),
@@ -130,6 +144,7 @@ impl CapsProvider {
         set_field_if_exists::<String>(&mut self.chat_endpoint, "chat_endpoint", &value)?;
         set_field_if_exists::<String>(&mut self.embedding_endpoint, "embedding_endpoint", &value)?;
         set_field_if_exists::<String>(&mut self.api_key, "api_key", &value)?;
+        set_field_if_exists::<Option<CredentialSpec>>(&mut self.credential, "credential", &value)?;
         set_field_if_exists::<String>(&mut self.tokenizer_api_key, "tokenizer_api_key", &value)?;
         set_field_if_exists::<usize>(
             &mut self.code_completion_n_ctx,
@@ -200,7 +215,7 @@ impl CapsProvider {
             Err(e) => return Err(e.to_string()),
         }
 
-        Ok(())
+        self.validate_credential_config()
     }
 
     pub fn effective_completion_endpoint_style(&self) -> Result<CompletionEndpointStyle, String> {
@@ -236,6 +251,7 @@ impl Default for CapsProvider {
             chat_endpoint: String::new(),
             embedding_endpoint: String::new(),
             api_key: String::new(),
+            credential: None,
             tokenizer_api_key: String::new(),
             extra_headers: HashMap::new(),
             code_completion_n_ctx: 0,

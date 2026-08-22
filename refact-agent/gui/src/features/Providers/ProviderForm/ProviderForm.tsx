@@ -607,7 +607,6 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
   const hasCredentials =
     detailedProvider?.has_credentials ?? currentProvider.has_credentials;
   const isReadonly = formValues.readonly;
-
   return (
     <div className={styles.providerForm}>
       <div className={styles.formSection}>

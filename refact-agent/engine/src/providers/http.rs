@@ -824,6 +824,14 @@ pub async fn handle_v1_provider_update(
                     model_config_fields,
                 )?;
             }
+            provider_from_yaml(&identity.instance_id, merged_settings.clone()).map_err(
+                |error| {
+                    ScratchError::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        format!("Invalid provider settings: {}", error.message),
+                    )
+                },
+            )?;
             *identity_cell.lock().expect("identity lock poisoned") = Some(identity);
             Ok(merged_settings)
         },
@@ -841,6 +849,7 @@ pub async fn handle_v1_provider_update(
         })?;
 
     reload_provider_from_disk(gcx.clone(), &identity.instance_id, &config_dir).await?;
+    refact_providers::credential::invalidate(&identity.instance_id);
 
     invalidate_caps(gcx).await;
 
@@ -921,6 +930,7 @@ pub async fn handle_v1_provider_delete(
         let mut registry = gcx.providers.write().await;
         registry.remove(&params.name);
     }
+    refact_providers::credential::invalidate(&params.name);
 
     invalidate_caps(gcx).await;
 
@@ -1940,9 +1950,13 @@ fn merge_yaml_preserving_secrets_for_provider(
             for (key, new_value) in new_map {
                 let replace_custom_extra_headers =
                     provider_name == "custom" && key.as_str() == Some("extra_headers");
+                let replace_custom_credential =
+                    provider_name == "custom" && key.as_str() == Some("credential");
                 let existing_value = existing_map.remove(&key);
                 let merged_value = if replace_custom_extra_headers {
                     merge_custom_extra_headers_replace(existing_value.as_ref(), &new_value)?
+                } else if replace_custom_credential {
+                    strip_masked_secrets(new_value)
                 } else if let Some(existing_value) = existing_value {
                     merge_yaml_preserving_secrets_for_provider(
                         provider_name,
@@ -3960,6 +3974,31 @@ api_key: "***"
 
         assert_eq!(merged["api_key"], "sk-old");
         assert_eq!(merged["extra_headers"]["X-Secret"], "old-secret");
+    }
+
+    #[test]
+    fn custom_provider_merge_replaces_credential_object() {
+        let merged = merged_settings_json(
+            "custom",
+            r#"
+credential:
+  type: command
+  command: old-helper
+  args: [token]
+  cwd: /old/path
+  env_passthrough: [PROFILE]
+"#,
+            r#"
+credential:
+  type: command
+  command: new-helper
+  args: [token]
+"#,
+        );
+
+        assert_eq!(merged["credential"]["command"], "new-helper");
+        assert!(merged["credential"].get("cwd").is_none());
+        assert!(merged["credential"].get("env_passthrough").is_none());
     }
 
     #[test]

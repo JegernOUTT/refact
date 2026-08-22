@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use refact_core::llm_types::WireFormat;
+use refact_core::provider_types::CredentialSpec;
 use crate::config::resolve_env_var;
 use crate::traits::{
     CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
@@ -16,6 +17,8 @@ use crate::traits::{
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CustomProvider {
     pub api_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<CredentialSpec>,
     pub chat_endpoint: String,
     pub completion_endpoint: String,
     pub embedding_endpoint: String,
@@ -77,6 +80,14 @@ fields:
     f_type: string_long
     f_desc: "API key for the custom endpoint"
     f_label: "API Key"
+  credential:
+    f_type: string_long
+    f_object: true
+    f_desc: "Optional command-backed bearer credential as a YAML/JSON object. Clear API Key before enabling it. The command is executed directly without a shell, and its output is never stored."
+    f_label: "Credential Command"
+    f_placeholder: "type: command\ncommand: credential-helper\nargs: [token]"
+    f_confirmation: true
+    f_extra: true
   chat_endpoint:
     f_type: string_long
     f_desc: "Chat completions endpoint URL"
@@ -120,11 +131,28 @@ available:
     }
 
     fn provider_settings_apply(&mut self, yaml: serde_yaml::Value) -> Result<(), String> {
+        let mut next_api_key = self.api_key.clone();
+        let mut next_credential = self.credential.clone();
         if let Some(api_key) = yaml.get("api_key").and_then(|v| v.as_str()) {
             if api_key != "***" {
-                self.api_key = api_key.to_string();
+                next_api_key = api_key.to_string();
             }
         }
+        if let Some(credential) = yaml.get("credential") {
+            next_credential = if credential.is_null() {
+                None
+            } else {
+                let spec: CredentialSpec = serde_yaml::from_value(credential.clone())
+                    .map_err(|_| "invalid credential configuration".to_string())?;
+                spec.validate()?;
+                Some(spec)
+            };
+        }
+        if !next_api_key.trim().is_empty() && next_credential.is_some() {
+            return Err("api_key and credential are mutually exclusive".to_string());
+        }
+        self.api_key = next_api_key;
+        self.credential = next_credential;
         if let Some(chat_endpoint) = yaml.get("chat_endpoint").and_then(|v| v.as_str()) {
             self.chat_endpoint = chat_endpoint.to_string();
         }
@@ -169,6 +197,7 @@ available:
 
         json!({
             "api_key": if self.api_key.is_empty() { "" } else { "***" },
+            "credential": self.credential,
             "chat_endpoint": self.chat_endpoint,
             "completion_endpoint": self.completion_endpoint,
             "embedding_endpoint": self.embedding_endpoint,
@@ -182,6 +211,12 @@ available:
     }
 
     fn build_runtime(&self) -> Result<ProviderRuntime, String> {
+        if !self.api_key.trim().is_empty() && self.credential.is_some() {
+            return Err("api_key and credential are mutually exclusive".to_string());
+        }
+        if let Some(credential) = &self.credential {
+            credential.validate()?;
+        }
         let api_key = resolve_env_var(&self.api_key, "", "custom api_key");
 
         Ok(ProviderRuntime {
@@ -204,6 +239,10 @@ available:
             completion_models: Vec::new(),
             embedding_model: None,
         })
+    }
+
+    fn credential(&self) -> Option<&CredentialSpec> {
+        self.credential.as_ref()
     }
 
     fn has_credentials(&self) -> bool {
@@ -449,5 +488,60 @@ extra_headers: |
         let schema = CustomProvider::default().provider_schema();
         assert!(schema.contains("extra_headers:"));
         assert!(schema.contains("f_label: \"Extra Headers\""));
+    }
+
+    #[test]
+    fn custom_provider_schema_exposes_confirmed_command_credential() {
+        let schema = CustomProvider::default().provider_schema();
+        assert!(schema.contains("credential:"));
+        assert!(schema.contains("f_object: true"));
+        assert!(schema.contains("f_label: \"Credential Command\""));
+        assert!(schema.contains("f_confirmation: true"));
+    }
+
+    #[test]
+    fn custom_provider_accepts_valid_command_credential() {
+        let mut provider = CustomProvider::default();
+        provider
+            .provider_settings_apply(
+                serde_yaml::from_str(
+                    "credential:\n  type: command\n  command: helper\n  args: [token]\n",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let CredentialSpec::Command {
+            timeout_ms,
+            refresh_interval_ms,
+            ..
+        } = provider.credential.as_ref().unwrap();
+        assert_eq!(*timeout_ms, 5_000);
+        assert_eq!(*refresh_interval_ms, 300_000);
+    }
+
+    #[test]
+    fn custom_provider_rejects_static_and_command_credentials_together() {
+        let mut provider = CustomProvider::default();
+        let error = provider
+            .provider_settings_apply(
+                serde_yaml::from_str(
+                    "api_key: secret\ncredential:\n  type: command\n  command: helper\n",
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert!(error.contains("mutually exclusive"));
+        assert!(provider.api_key.is_empty());
+        assert!(provider.credential.is_none());
+    }
+
+    #[test]
+    fn custom_provider_static_api_key_compatibility_is_unchanged() {
+        let mut provider = CustomProvider::default();
+        provider.api_key = "static-token".to_string();
+        let runtime = provider.build_runtime().unwrap();
+        assert_eq!(runtime.api_key, "static-token");
+        assert!(provider.credential.is_none());
     }
 }

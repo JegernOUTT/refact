@@ -10,27 +10,101 @@ use refact_core::chat_types::SamplingParameters;
 use refact_core::custom_error::MapErrToString;
 use refact_core::llm_types::BaseModelRecord;
 
+#[derive(Debug)]
+pub struct OpenAiEndpointError {
+    pub status: Option<reqwest::StatusCode>,
+    pub message: String,
+}
+
+impl OpenAiEndpointError {
+    pub fn is_auth_rejection(&self) -> bool {
+        matches!(
+            self.status,
+            Some(reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN)
+        )
+    }
+}
+
+impl std::fmt::Display for OpenAiEndpointError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(f)
+    }
+}
+
+impl std::error::Error for OpenAiEndpointError {}
+
+fn redact_credential(text: String, bearer_credential: Option<&str>) -> String {
+    match bearer_credential.filter(|value| !value.is_empty()) {
+        Some(value) => text.replace(value, "[REDACTED]"),
+        None => text,
+    }
+}
+
+fn endpoint_error(
+    status: Option<reqwest::StatusCode>,
+    message: String,
+    bearer_credential: Option<&str>,
+) -> OpenAiEndpointError {
+    OpenAiEndpointError {
+        status,
+        message: redact_credential(message, bearer_credential),
+    }
+}
+
 pub async fn forward_to_openai_style_endpoint(
     model_rec: &BaseModelRecord,
     prompt: &str,
     client: &reqwest::Client,
     sampling_parameters: &SamplingParameters,
 ) -> Result<serde_json::Value, String> {
+    let bearer = (!model_rec.api_key.is_empty()).then_some(model_rec.api_key.as_str());
+    forward_to_openai_style_endpoint_with_bearer(
+        model_rec,
+        prompt,
+        client,
+        sampling_parameters,
+        bearer,
+    )
+    .await
+    .map_err(|error| error.message)
+}
+
+pub async fn forward_to_openai_style_endpoint_with_bearer(
+    model_rec: &BaseModelRecord,
+    prompt: &str,
+    client: &reqwest::Client,
+    sampling_parameters: &SamplingParameters,
+    bearer_credential: Option<&str>,
+) -> Result<serde_json::Value, OpenAiEndpointError> {
     if model_rec.endpoint.is_empty() {
-        return Err(format!("No endpoint configured for {}", model_rec.id));
+        return Err(endpoint_error(
+            None,
+            format!("No endpoint configured for {}", model_rec.id),
+            bearer_credential,
+        ));
     }
 
     let mut headers = HeaderMap::new();
     headers.insert(
         CONTENT_TYPE,
-        HeaderValue::from_str("application/json")
-            .map_err(|e| format!("invalid content-type header: {}", e))?,
+        HeaderValue::from_str("application/json").map_err(|e| {
+            endpoint_error(
+                None,
+                format!("invalid content-type header: {}", e),
+                bearer_credential,
+            )
+        })?,
     );
-    if !model_rec.api_key.is_empty() {
+    if let Some(bearer_credential) = bearer_credential.filter(|value| !value.is_empty()) {
         headers.insert(
             AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", model_rec.api_key))
-                .map_err(|e| format!("invalid api_key for authorization header: {}", e))?,
+            HeaderValue::from_str(&format!("Bearer {}", bearer_credential)).map_err(|e| {
+                endpoint_error(
+                    None,
+                    format!("invalid bearer credential for authorization header: {}", e),
+                    Some(bearer_credential),
+                )
+            })?,
         );
     }
     let mut data = json!({
@@ -81,32 +155,44 @@ pub async fn forward_to_openai_style_endpoint(
         .body(data.to_string())
         .send()
         .await;
-    let resp = req.map_err_to_string()?;
-    let status_code = resp.status().as_u16();
-    let response_txt = resp
-        .text()
-        .await
-        .map_err(|e| format!("reading from socket {}: {}", model_rec.endpoint, e))?;
+    let resp = req
+        .map_err_to_string()
+        .map_err(|message| endpoint_error(None, message, bearer_credential))?;
+    let status = resp.status();
+    let status_code = status.as_u16();
+    let response_txt = resp.text().await.map_err(|e| {
+        endpoint_error(
+            Some(status),
+            format!("reading from socket {}: {}", model_rec.endpoint, e),
+            bearer_credential,
+        )
+    })?;
     if status_code != 200 && status_code != 400 {
-        return Err(format!(
-            "{} status={} text {}",
-            model_rec.endpoint, status_code, response_txt
+        return Err(endpoint_error(
+            Some(status),
+            format!(
+                "{} status={} text {}",
+                model_rec.endpoint, status_code, response_txt
+            ),
+            bearer_credential,
         ));
     }
     if status_code != 200 {
+        let safe_response_txt = redact_credential(response_txt.clone(), bearer_credential);
         tracing::info!(
             "forward_to_openai_style_endpoint: {} {}\n{}",
             model_rec.endpoint,
             status_code,
-            response_txt
+            safe_response_txt
         );
     }
     let parsed_json: serde_json::Value = match serde_json::from_str(&response_txt) {
         Ok(json) => json,
         Err(e) => {
-            return Err(format!(
-                "Failed to parse JSON response: {}\n{}",
-                e, response_txt
+            return Err(endpoint_error(
+                Some(status),
+                format!("Failed to parse JSON response: {}\n{}", e, response_txt),
+                bearer_credential,
             ))
         }
     };
@@ -119,17 +205,46 @@ pub async fn forward_to_openai_style_endpoint_streaming(
     client: &reqwest::Client,
     sampling_parameters: &SamplingParameters,
 ) -> Result<reqwest::Response, String> {
+    let bearer = (!model_rec.api_key.is_empty()).then_some(model_rec.api_key.as_str());
+    forward_to_openai_style_endpoint_streaming_with_bearer(
+        model_rec,
+        prompt,
+        client,
+        sampling_parameters,
+        bearer,
+    )
+    .await
+    .map_err(|error| error.message)
+}
+
+pub async fn forward_to_openai_style_endpoint_streaming_with_bearer(
+    model_rec: &BaseModelRecord,
+    prompt: &str,
+    client: &reqwest::Client,
+    sampling_parameters: &SamplingParameters,
+    bearer_credential: Option<&str>,
+) -> Result<reqwest::Response, OpenAiEndpointError> {
     let mut headers = HeaderMap::new();
     headers.insert(
         CONTENT_TYPE,
-        HeaderValue::from_str("application/json")
-            .map_err(|e| format!("invalid content-type header: {}", e))?,
+        HeaderValue::from_str("application/json").map_err(|e| {
+            endpoint_error(
+                None,
+                format!("invalid content-type header: {}", e),
+                bearer_credential,
+            )
+        })?,
     );
-    if !model_rec.api_key.is_empty() {
+    if let Some(bearer_credential) = bearer_credential.filter(|value| !value.is_empty()) {
         headers.insert(
             AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", model_rec.api_key))
-                .map_err(|e| format!("invalid api_key for authorization header: {}", e))?,
+            HeaderValue::from_str(&format!("Bearer {}", bearer_credential)).map_err(|e| {
+                endpoint_error(
+                    None,
+                    format!("invalid bearer credential for authorization header: {}", e),
+                    Some(bearer_credential),
+                )
+            })?,
         );
     }
 
@@ -180,7 +295,11 @@ pub async fn forward_to_openai_style_endpoint_streaming(
     );
 
     if model_rec.endpoint.is_empty() {
-        return Err(format!("No endpoint configured for {}", model_rec.id));
+        return Err(endpoint_error(
+            None,
+            format!("No endpoint configured for {}", model_rec.id),
+            bearer_credential,
+        ));
     }
     let response = client
         .post(&model_rec.endpoint)
@@ -188,13 +307,20 @@ pub async fn forward_to_openai_style_endpoint_streaming(
         .body(data.to_string())
         .send()
         .await
-        .map_err(|e| format!("can't stream from {}: {}", model_rec.endpoint, e))?;
+        .map_err(|e| {
+            endpoint_error(
+                None,
+                format!("can't stream from {}: {}", model_rec.endpoint, e),
+                bearer_credential,
+            )
+        })?;
     let status = response.status();
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "HTTP {} from {}: {}",
-            status, model_rec.endpoint, text
+        return Err(endpoint_error(
+            Some(status),
+            format!("HTTP {} from {}: {}", status, model_rec.endpoint, text),
+            bearer_credential,
         ));
     }
     Ok(response)

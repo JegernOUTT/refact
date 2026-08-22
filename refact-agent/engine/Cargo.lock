@@ -4591,6 +4591,7 @@ dependencies = [
  "indexmap 1.9.3",
  "lazy_static",
  "oauth2",
+ "process-wrap 8.2.1",
  "rand 0.8.5",
  "refact-core",
  "refact-llm",

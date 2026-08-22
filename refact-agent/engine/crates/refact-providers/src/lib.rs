@@ -1,5 +1,6 @@
 pub mod config;
 pub mod config_store;
+pub mod credential;
 pub mod identity;
 pub mod instance;
 pub mod llm_http_retry;

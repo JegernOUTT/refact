@@ -59,6 +59,8 @@ async function parseSchema(yamlStr: string): Promise<ParsedSchema> {
             : undefined,
         f_extra: Boolean(def.f_extra),
         f_secret: Boolean(def.f_secret),
+        f_object: Boolean(def.f_object),
+        f_confirmation: Boolean(def.f_confirmation),
         smartlinks: Array.isArray(def.smartlinks)
           ? def.smartlinks.map((sl: Record<string, unknown>) => ({
               sl_label: String(sl.sl_label ?? ""),

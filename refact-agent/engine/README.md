@@ -95,6 +95,29 @@ The engine uses these local locations by default:
 
 Provider setup is normally handled from the GUI, but the engine ultimately loads YAML files from `providers.d`. Current provider families include OpenAI-compatible APIs, Anthropic, OpenRouter, Ollama, LM Studio, vLLM, Groq, DeepSeek, Doubao, xAI, Google Gemini, Qwen, Kimi, Zhipu, MiniMax, GitHub Copilot, Claude Code, and custom endpoints. Available models are derived from provider config and provider/runtime catalogs instead of a fixed hard-coded model list.
 
+### Custom-provider command credentials
+
+Custom providers may obtain a credential from a command in their **user-level** `~/.config/refact/providers.d/*.yaml` config:
+
+```yaml
+base_provider: custom
+api_key: ""
+credential:
+  type: command
+  command: credential-helper
+  args: ["token"]
+  timeout_ms: 5000
+  refresh_interval_ms: 300000
+  # cwd: /optional/working/directory
+  # env_passthrough: ["PROFILE_NAME", "CREDENTIAL_*"]
+```
+
+`credential` and a non-empty `api_key` are mutually exclusive. Existing static `api_key` values and `$ENV_VAR` references remain supported unchanged. The helper is executed directly with the listed arguments, never through a shell; use a shell executable and explicit arguments only when shell behavior is intentional. `cwd` and `env_passthrough` are optional, while `timeout_ms` and `refresh_interval_ms` default to 5,000 ms and 300,000 ms if omitted.
+
+Helper stdout is trimmed and used only as the credential. It is cached in process memory until the refresh TTL, then regenerated; after a provider returns 401 or 403, the engine regenerates it and retries once. Helper output is never persisted or included in errors. The child starts with a scrubbed environment containing a small platform-safe baseline; add only required names or wildcard patterns to `env_passthrough`. Command credentials are not accepted from project-level configuration.
+
+Failures are deliberately sanitized. Check the executable path, `cwd`, timeout, exit status, non-empty UTF-8 stdout, output size, and required `env_passthrough` entries locally; helper stdout and stderr are not echoed in diagnostics.
+
 ## API overview
 
 Selected HTTP endpoints under `/v1`:

@@ -7,7 +7,7 @@ use regex::Regex;
 
 pub use refact_core::model_caps::ModelCapabilities;
 pub use refact_core::provider_types::{
-    AvailableModel, CustomModelConfig, ModelPricing, ModelPricingTier, ModelSource,
+    AvailableModel, CredentialSpec, CustomModelConfig, ModelPricing, ModelPricingTier, ModelSource,
     ModelTypeDefaults, ProviderDefaults, ProviderModel, ProviderRuntime, ProviderVariant,
     derive_endpoint_from_chat_url, extra_headers_mapping_to_hash_map, is_legacy_refact_model,
     merge_custom_models, normalize_endpoint, parse_custom_models, parse_enabled_models,
@@ -74,6 +74,10 @@ pub trait ProviderTrait: Send + Sync {
     fn provider_settings_as_json(&self) -> serde_json::Value;
 
     fn build_runtime(&self) -> Result<ProviderRuntime, String>;
+
+    fn credential(&self) -> Option<&CredentialSpec> {
+        None
+    }
 
     fn is_readonly(&self) -> bool {
         false

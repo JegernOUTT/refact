@@ -11,7 +11,7 @@ use crate::caps::providers::{
     CapsProvider,
 };
 use refact_core::provider_types::{
-    ImageTokenMode, ModelTypeDefaults, ProviderDefaults, is_legacy_refact_model,
+    CredentialSpec, ImageTokenMode, ModelTypeDefaults, ProviderDefaults, is_legacy_refact_model,
 };
 use crate::caps::model_caps::{
     get_model_caps, model_caps_pricing_metadata, resolve_model_caps, ModelCapabilities,
@@ -111,6 +111,7 @@ fn build_chat_model_record(
     runtime_auth_token: &str,
     runtime_tokenizer_api_key: &str,
     runtime_extra_headers: &HashMap<String, String>,
+    runtime_credential: Option<&CredentialSpec>,
     runtime_supports_cache_control: bool,
 ) -> ChatModelRecord {
     let prefix = format!("{}/", provider_name);
@@ -303,6 +304,7 @@ fn build_chat_model_record(
             embedding_endpoint_style: String::new(),
             wire_format: effective_wire_format,
             api_key: runtime_api_key.to_string(),
+            credential: runtime_credential.cloned(),
             auth_token: runtime_auth_token.to_string(),
             tokenizer_api_key: runtime_tokenizer_api_key.to_string(),
             extra_headers,
@@ -421,6 +423,8 @@ pub async fn populate_chat_models_from_providers(
             }
         };
 
+        let runtime_credential = provider.credential();
+
         for model in available_models {
             if !model.enabled {
                 continue;
@@ -437,6 +441,7 @@ pub async fn populate_chat_models_from_providers(
                 &runtime.auth_token,
                 &runtime.tokenizer_api_key,
                 &runtime.extra_headers,
+                runtime_credential,
                 runtime.supports_cache_control,
             );
 
@@ -1352,6 +1357,7 @@ mod tests {
             "",
             "",
             &HashMap::new(),
+            None,
             true,
         );
 
@@ -1411,6 +1417,7 @@ mod tests {
             "",
             "",
             &HashMap::new(),
+            None,
             true,
         );
         assert_eq!(openai_record.base.tokenizer, "fake");
@@ -1428,6 +1435,7 @@ mod tests {
             "",
             "",
             &HashMap::new(),
+            None,
             true,
         );
         assert_eq!(instance_record.base.tokenizer, "fake");
@@ -1453,6 +1461,7 @@ mod tests {
             "",
             "",
             &HashMap::new(),
+            None,
             true,
         );
         assert_eq!(explicit_record.base.tokenizer, "hf://custom/tokenizer");
@@ -1470,6 +1479,7 @@ mod tests {
             "",
             "",
             &HashMap::new(),
+            None,
             true,
         );
         assert_eq!(unknown_record.base.tokenizer, "fake");
@@ -1528,6 +1538,7 @@ mod tests {
             "",
             "",
             &HashMap::new(),
+            None,
             true,
         );
 
@@ -1544,6 +1555,7 @@ mod tests {
             "",
             "",
             &HashMap::new(),
+            None,
             false,
         );
 
@@ -1611,6 +1623,7 @@ mod tests {
             "",
             "",
             &HashMap::new(),
+            None,
             false,
         );
 
@@ -1649,6 +1662,7 @@ mod tests {
             "",
             "",
             &HashMap::new(),
+            None,
             true,
         );
 
@@ -1659,5 +1673,43 @@ mod tests {
             "https://dashscope.aliyuncs.com/model-specific/v1/responses"
         );
         assert_eq!(record.base.api_key, "test-key");
+    }
+
+    #[test]
+    fn custom_chat_record_carries_command_credential_without_executing_it() {
+        let model = AvailableModel::from_caps(
+            "custom-model",
+            &ModelCapabilities {
+                n_ctx: 8_192,
+                tokenizer: "fake".to_string(),
+                ..Default::default()
+            },
+            true,
+            None,
+        );
+        let credential: CredentialSpec =
+            serde_yaml::from_str("type: command\ncommand: helper-that-must-not-run-during-caps\n")
+                .unwrap();
+
+        let record = build_chat_model_record(
+            "custom_2",
+            &["custom".to_string()],
+            &model,
+            &HashMap::new(),
+            WireFormat::OpenaiChatCompletions,
+            "https://example.com/v1/chat/completions",
+            "",
+            "",
+            "",
+            &HashMap::new(),
+            Some(&credential),
+            true,
+        );
+
+        assert_eq!(record.base.credential, Some(credential));
+        assert!(serde_json::to_value(&record.base)
+            .unwrap()
+            .get("credential")
+            .is_none());
     }
 }

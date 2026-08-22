@@ -15,7 +15,7 @@ use refact_core::vecdb_types::{
 use crate::fetch_embedding;
 use crate::vdb_emb_aux;
 use crate::vdb_sqlite::VecDBSqlite;
-use crate::vdb_structs::{VecdbConstants};
+use crate::vdb_structs::VecdbConstants;
 use crate::vdb_thread::{vecdb_start_background_tasks, vectorizer_enqueue_files, FileVectorizerService};
 
 fn build_embedding_http_client_builder() -> reqwest::ClientBuilder {
@@ -34,6 +34,7 @@ impl VecDb {
         let embedding_mb = fetch_embedding::get_embedding_with_retries(
             self.vecdb_emb_client.clone(),
             &self.constants.embedding_model,
+            self.constants.embedding_credential_resolver.as_ref(),
             vec![query.to_string()],
             5,
         )
@@ -215,6 +216,10 @@ impl VecdbSearch for VecDb {
         )
     }
 
+    fn has_embedding_credential_resolver(&self) -> bool {
+        self.constants.embedding_credential_resolver.is_some()
+    }
+
     async fn embed_query(&self, query: &str) -> Result<Vec<f32>, String> {
         VecDb::embed_query(self, query).await
     }
@@ -275,7 +280,7 @@ mod tests {
         ));
 
         let error =
-            fetch_embedding::get_embedding(client, &model, vec!["private file".to_string()])
+            fetch_embedding::get_embedding(client, &model, None, vec!["private file".to_string()])
                 .await
                 .unwrap_err();
         assert!(error.contains("Embedding request failed with status 307 Temporary Redirect"));

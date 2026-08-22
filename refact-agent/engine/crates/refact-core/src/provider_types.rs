@@ -6,6 +6,88 @@ use serde::{Deserialize, Serialize};
 use crate::llm_types::WireFormat;
 use crate::model_caps::ModelCapabilities;
 
+pub const DEFAULT_CREDENTIAL_TIMEOUT_MS: u64 = 5_000;
+pub const DEFAULT_CREDENTIAL_REFRESH_INTERVAL_MS: u64 = 300_000;
+pub const MIN_CREDENTIAL_TIMEOUT_MS: u64 = 100;
+pub const MAX_CREDENTIAL_TIMEOUT_MS: u64 = 60_000;
+pub const MIN_CREDENTIAL_REFRESH_INTERVAL_MS: u64 = 1_000;
+pub const MAX_CREDENTIAL_REFRESH_INTERVAL_MS: u64 = 86_400_000;
+
+fn default_credential_timeout_ms() -> u64 {
+    DEFAULT_CREDENTIAL_TIMEOUT_MS
+}
+
+fn default_credential_refresh_interval_ms() -> u64 {
+    DEFAULT_CREDENTIAL_REFRESH_INTERVAL_MS
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CredentialSpec {
+    Command {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default = "default_credential_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default = "default_credential_refresh_interval_ms")]
+        refresh_interval_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        env_passthrough: Vec<String>,
+    },
+}
+
+impl CredentialSpec {
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Command {
+                command,
+                timeout_ms,
+                refresh_interval_ms,
+                env_passthrough,
+                ..
+            } => {
+                if command.trim().is_empty() {
+                    return Err("credential command must not be empty".to_string());
+                }
+                if !(MIN_CREDENTIAL_TIMEOUT_MS..=MAX_CREDENTIAL_TIMEOUT_MS).contains(timeout_ms) {
+                    return Err(format!(
+                        "credential timeout_ms must be between {MIN_CREDENTIAL_TIMEOUT_MS} and {MAX_CREDENTIAL_TIMEOUT_MS}"
+                    ));
+                }
+                if !(MIN_CREDENTIAL_REFRESH_INTERVAL_MS..=MAX_CREDENTIAL_REFRESH_INTERVAL_MS)
+                    .contains(refresh_interval_ms)
+                {
+                    return Err(format!(
+                        "credential refresh_interval_ms must be between {MIN_CREDENTIAL_REFRESH_INTERVAL_MS} and {MAX_CREDENTIAL_REFRESH_INTERVAL_MS}"
+                    ));
+                }
+                if env_passthrough.iter().any(|pattern| pattern.is_empty()) {
+                    return Err("credential env_passthrough patterns must not be empty".to_string());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub fn timeout_ms(&self) -> u64 {
+        match self {
+            Self::Command { timeout_ms, .. } => *timeout_ms,
+        }
+    }
+
+    pub fn refresh_interval_ms(&self) -> u64 {
+        match self {
+            Self::Command {
+                refresh_interval_ms,
+                ..
+            } => *refresh_interval_ms,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageTokenMode {
@@ -760,7 +842,30 @@ pub fn set_model_enabled_impl(enabled_models: &mut Vec<String>, model_id: &str, 
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelTypeDefaults, ProviderDefaults};
+    use super::{
+        CredentialSpec, DEFAULT_CREDENTIAL_REFRESH_INTERVAL_MS, DEFAULT_CREDENTIAL_TIMEOUT_MS,
+        ModelTypeDefaults, ProviderDefaults,
+    };
+
+    #[test]
+    fn credential_command_serde_defaults_and_validation() {
+        let spec: CredentialSpec =
+            serde_yaml::from_str("type: command\ncommand: credential-helper\nargs: [token]\n")
+                .unwrap();
+        assert_eq!(spec.timeout_ms(), DEFAULT_CREDENTIAL_TIMEOUT_MS);
+        assert_eq!(
+            spec.refresh_interval_ms(),
+            DEFAULT_CREDENTIAL_REFRESH_INTERVAL_MS
+        );
+        spec.validate().unwrap();
+
+        assert!(serde_yaml::from_str::<CredentialSpec>("type: file\npath: token\n").is_err());
+        let invalid: CredentialSpec = serde_yaml::from_str(
+            "type: command\ncommand: helper\ntimeout_ms: 1\nrefresh_interval_ms: 1000\n",
+        )
+        .unwrap();
+        assert!(invalid.validate().is_err());
+    }
 
     #[test]
     fn clear_legacy_refact_models_resets_only_refact_models_to_none() {

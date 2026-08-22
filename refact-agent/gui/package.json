@@ -67,6 +67,7 @@
     "debug": "^4.3.7",
     "dompurify": "^3.3.1",
     "framer-motion": "^12.10.4",
+    "js-yaml": "^4.1.0",
     "lucide-react": "^0.468.0",
     "mermaid": "^11.12.3",
     "qrcode": "^1.5.4",

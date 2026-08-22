@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tracing;
 
-use crate::provider_types::ImageTokenMode;
+use crate::provider_types::{CredentialSpec, ImageTokenMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -133,6 +133,8 @@ pub struct BaseModelRecord {
     pub wire_format: WireFormat,
     #[serde(default, skip_serializing)]
     pub api_key: String,
+    #[serde(skip)]
+    pub credential: Option<CredentialSpec>,
     #[serde(default, skip_serializing)]
     pub auth_token: String,
     #[serde(default, skip_serializing)]

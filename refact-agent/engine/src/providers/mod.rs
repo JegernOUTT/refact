@@ -1,9 +1,11 @@
 pub mod http;
 pub mod oauth_refresh;
 pub mod pricing;
+pub mod runtime_credential;
 
 pub use refact_providers::config;
 pub use refact_providers::config_store;
+pub use refact_providers::credential;
 pub use refact_providers::identity;
 pub use refact_providers::instance;
 pub use refact_providers::llm_http_retry;

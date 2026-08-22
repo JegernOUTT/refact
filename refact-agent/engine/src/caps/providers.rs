@@ -260,6 +260,16 @@ pub async fn read_providers_d(
             }
         };
 
+        if identity.base_provider != "custom" && config_file_value.get("credential").is_some() {
+            error_log.push(YamlError {
+                path: yaml_path.to_string_lossy().to_string(),
+                error_line: 0,
+                error_msg: "command credentials are supported only for custom providers"
+                    .to_string(),
+            });
+            continue;
+        }
+
         let provider = if let Some(template) = provider_templates.get(&identity.base_provider) {
             let mut provider = template.clone();
             if let Err(e) = provider.apply_override(config_file_value) {
@@ -289,6 +299,24 @@ pub async fn read_providers_d(
             provider.base_provider = identity.base_provider;
             provider
         };
+
+        if provider.credential.is_some() && provider.base_provider != "custom" {
+            error_log.push(YamlError {
+                path: yaml_path.to_string_lossy().to_string(),
+                error_line: 0,
+                error_msg: "command credentials are supported only for custom providers"
+                    .to_string(),
+            });
+            continue;
+        }
+        if let Err(error_msg) = provider.validate_credential_config() {
+            error_log.push(YamlError {
+                path: yaml_path.to_string_lossy().to_string(),
+                error_line: 0,
+                error_msg,
+            });
+            continue;
+        }
 
         providers.push(provider);
     }
@@ -360,19 +388,30 @@ pub fn add_models_to_caps(
         model_name: &str,
         endpoint: &str,
     ) {
-        base_model_rec.api_key = provider.api_key.clone();
-        base_model_rec.tokenizer_api_key = provider.tokenizer_api_key.clone();
         base_model_rec.endpoint = endpoint.replace("$MODEL", model_name);
         base_model_rec.endpoint_style = provider.endpoint_style.clone();
         base_model_rec.wire_format = provider.wire_format;
-        base_model_rec.extra_headers = provider.extra_headers.clone();
         base_model_rec.supports_cache_control =
             base_model_rec.supports_cache_control && provider.supports_cache_control;
+    }
+
+    fn inherit_provider_auth(base_model_rec: &mut BaseModelRecord, provider: &CapsProvider) {
+        if base_model_rec.api_key.is_empty() && base_model_rec.credential.is_none() {
+            base_model_rec.api_key = provider.api_key.clone();
+            base_model_rec.credential = provider.credential.clone();
+        }
+        if base_model_rec.tokenizer_api_key.is_empty() {
+            base_model_rec.tokenizer_api_key = provider.tokenizer_api_key.clone();
+        }
+        let model_headers = std::mem::take(&mut base_model_rec.extra_headers);
+        base_model_rec.extra_headers = provider.extra_headers.clone();
+        base_model_rec.extra_headers.extend(model_headers);
     }
 
     for mut provider in providers {
         let completion_models = std::mem::take(&mut provider.completion_models);
         for (model_name, mut model_rec) in completion_models {
+            inherit_provider_auth(&mut model_rec.base, &provider);
             model_rec.base.supports_cache_control =
                 model_rec.base.supports_cache_control && provider.supports_cache_control;
             if model_rec.base.endpoint.is_empty() {
@@ -402,6 +441,7 @@ pub fn add_models_to_caps(
 
         let chat_models = std::mem::take(&mut provider.chat_models);
         for (model_name, mut model_rec) in chat_models {
+            inherit_provider_auth(&mut model_rec.base, &provider);
             model_rec.base.supports_cache_control =
                 model_rec.base.supports_cache_control && provider.supports_cache_control;
             if model_rec.base.endpoint.is_empty() {
@@ -419,6 +459,7 @@ pub fn add_models_to_caps(
 
         if provider.embedding_model.is_configured() && provider.embedding_model.base.enabled {
             let mut embedding_model = std::mem::take(&mut provider.embedding_model);
+            inherit_provider_auth(&mut embedding_model.base, &provider);
             embedding_model.base.supports_cache_control =
                 embedding_model.base.supports_cache_control && provider.supports_cache_control;
 
@@ -1010,6 +1051,102 @@ mod tests {
         assert_eq!(openai_2.base.wire_format, WireFormat::OpenaiChatCompletions);
         assert_eq!(openai.base.api_key, "sk-main");
         assert_eq!(openai_2.base.api_key, "sk-two");
+    }
+
+    #[tokio::test]
+    async fn providers_d_rejects_invalid_dual_and_non_custom_command_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        for (name, yaml) in [
+            (
+                "invalid_custom.yaml",
+                "base_provider: custom\ncredential:\n  type: command\n  command: ''\n",
+            ),
+            (
+                "dual_custom.yaml",
+                "base_provider: custom\napi_key: secret\ncredential:\n  type: command\n  command: helper\n",
+            ),
+            (
+                "openai_command.yaml",
+                "base_provider: openai\ncredential:\n  type: command\n  command: helper\n",
+            ),
+        ] {
+            write_provider_config(&temp, name, yaml).await;
+        }
+
+        let (providers, errors) = read_providers_d(Vec::new(), temp.path(), false).await;
+
+        assert!(providers.is_empty());
+        assert_eq!(errors.len(), 3);
+        let messages: Vec<&str> = errors
+            .iter()
+            .map(|error| error.error_msg.as_str())
+            .collect();
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("must not be empty")));
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("mutually exclusive")));
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("only for custom providers")));
+    }
+
+    #[test]
+    fn command_credential_reaches_completion_and_embedding_records_without_execution() {
+        let credential: refact_core::provider_types::CredentialSpec =
+            serde_yaml::from_str("type: command\ncommand: helper-that-must-not-run-during-caps\n")
+                .unwrap();
+        let mut provider = CapsProvider {
+            name: "custom_runtime".to_string(),
+            credential: Some(credential.clone()),
+            completion_endpoint: "https://example.com/v1/completions".to_string(),
+            embedding_endpoint: "https://example.com/v1/embeddings".to_string(),
+            completion_models: indexmap::indexmap! {
+                "completion".to_string() => CompletionModelRecord {
+                    base: BaseModelRecord {
+                        id: "custom_runtime/completion".to_string(),
+                        name: "completion".to_string(),
+                        endpoint: "https://model.example/v1/completions".to_string(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            },
+            embedding_model: EmbeddingModelRecord {
+                base: BaseModelRecord {
+                    id: "custom_runtime/embedding".to_string(),
+                    name: "embedding".to_string(),
+                    n_ctx: 512,
+                    endpoint: "https://model.example/v1/embeddings".to_string(),
+                    enabled: true,
+                    ..Default::default()
+                },
+                embedding_size: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        add_name_and_id_to_model_records(&mut provider);
+        let mut caps = CodeAssistantCaps::default();
+        let embeddings = add_models_to_caps(&mut caps, vec![provider]);
+
+        assert_eq!(
+            caps.completion_models["custom_runtime/completion"]
+                .base
+                .credential,
+            Some(credential.clone())
+        );
+        assert_eq!(
+            caps.embedding_model.base.credential,
+            Some(credential.clone())
+        );
+        assert_eq!(embeddings[0].base.credential, Some(credential));
+        assert!(caps.completion_models["custom_runtime/completion"]
+            .base
+            .api_key
+            .is_empty());
     }
 
     #[tokio::test]

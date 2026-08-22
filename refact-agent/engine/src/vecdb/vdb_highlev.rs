@@ -10,6 +10,7 @@ use crate::background_tasks::BackgroundTasksHolder;
 use crate::global_context::GlobalContext;
 use crate::privacy::destinations::DestinationExt;
 use crate::vecdb::vdb_structs::{EmbeddingModelConfig, VecDbStatus, VecdbConstants};
+use refact_vecdb::vdb_structs::EmbeddingCredentialResolver;
 
 pub use refact_vecdb::vdb_highlev::VecDb;
 
@@ -64,9 +65,60 @@ async fn do_i_need_to_reload_vecdb(gcx: Arc<GlobalContext>) -> (bool, Option<Vec
     let vecdb_max_files = gcx.cmdline.vecdb_max_files;
     let embedding_config = EmbeddingModelConfig::from(&caps.embedding_model);
     let splitter_window_size = caps.embedding_model.base.n_ctx / 2;
+    let embedding_credential_resolver: Option<EmbeddingCredentialResolver> =
+        caps.embedding_model.base.credential.as_ref().map(|_| {
+            let gcx = gcx.clone();
+            let model_id = caps.embedding_model.base.id.clone();
+            Arc::new(move |rejected_value: Option<String>| {
+                let gcx = gcx.clone();
+                let model_id = model_id.clone();
+                let future: std::pin::Pin<
+                    Box<dyn std::future::Future<Output = Result<String, String>> + Send>,
+                > = Box::pin(async move {
+                    let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx, 0)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let current_model = &caps.embedding_model.base;
+                    if current_model.id != model_id {
+                        return Err(
+                            "embedding model changed while refreshing credentials".to_string()
+                        );
+                    }
+                    let credential = current_model
+                        .credential
+                        .as_ref()
+                        .ok_or_else(|| "embedding command credential is unavailable".to_string())?;
+                    let provider_id = current_model
+                        .id
+                        .split_once('/')
+                        .map(|(provider_id, _)| provider_id)
+                        .filter(|provider_id| !provider_id.is_empty())
+                        .ok_or_else(|| {
+                            "embedding command credential provider identity is unavailable"
+                                .to_string()
+                        })?;
+                    match rejected_value {
+                        Some(rejected_value) => {
+                            refact_providers::credential::refresh_after_rejection(
+                                provider_id,
+                                credential,
+                                &rejected_value,
+                            )
+                            .await
+                        }
+                        None => {
+                            refact_providers::credential::resolve(provider_id, credential, false)
+                                .await
+                        }
+                    }
+                });
+                future
+            }) as EmbeddingCredentialResolver
+        });
 
     let mut consts = VecdbConstants {
         embedding_model: embedding_config.clone(),
+        embedding_credential_resolver,
         tokenizer: None,
         splitter_window_size,
         vecdb_max_files,
@@ -79,6 +131,8 @@ async fn do_i_need_to_reload_vecdb(gcx: Arc<GlobalContext>) -> (bool, Option<Vec
             let (current_emb, current_splitter_window_size) = db.current_constants();
             if current_emb == consts.embedding_model
                 && current_splitter_window_size == consts.splitter_window_size
+                && db.has_embedding_credential_resolver()
+                    == consts.embedding_credential_resolver.is_some()
             {
                 return (false, None);
             }

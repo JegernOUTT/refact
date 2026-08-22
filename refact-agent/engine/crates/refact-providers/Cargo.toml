@@ -10,7 +10,7 @@ refact-llm = { path = "../refact-llm" }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "sync", "process"] }
+tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "sync", "process", "time"] }
 indexmap.workspace = true
 regex.workspace = true
 uuid.workspace = true
@@ -30,6 +30,7 @@ chrono = { version = "0.4.31", features = ["serde"] }
 which = "7.0.2"
 home = "0.5"
 fs2 = "0.4.3"
+process-wrap = { version = "8.0.2", features = ["tokio1"] }
 
 [dev-dependencies]
 tempfile = "3.8"

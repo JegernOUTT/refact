@@ -33,6 +33,9 @@ pub trait VecdbSearch: Send + Sync {
         roots: MemoryPlaneRoots,
     );
     fn current_constants(&self) -> (EmbeddingModelConfig, usize);
+    fn has_embedding_credential_resolver(&self) -> bool {
+        false
+    }
     async fn embed_query(&self, query: &str) -> Result<Vec<f32>, String>;
     async fn vecdb_search_with_embedding(
         &self,

@@ -65,6 +65,27 @@ refact ui --no-open    # Print the URL, skip browser launch
 
 These are useful for scripts, Docker containers, or remote machines where you just need the URL to paste into a browser on another device.
 
+### Custom-provider command credentials
+
+For a custom provider whose credential comes from a local helper, use this shape in its **user-level** `~/.config/refact/providers.d/*.yaml` file:
+
+```yaml
+base_provider: custom
+api_key: ""
+credential:
+  type: command
+  command: credential-helper
+  args: ["token"]
+  timeout_ms: 5000
+  refresh_interval_ms: 300000
+  # cwd: /optional/working/directory
+  # env_passthrough: ["PROFILE_NAME", "CREDENTIAL_*"]
+```
+
+The command credential is mutually exclusive with a non-empty `api_key`; static keys and existing `$ENV_VAR` key references continue to work unchanged. `cwd` and `env_passthrough` are optional. If omitted, `timeout_ms` defaults to 5,000 ms and `refresh_interval_ms` to 300,000 ms. The helper runs directly with `args`, without a shell, and receives a scrubbed, platform-safe baseline environment plus only the variables explicitly selected by `env_passthrough`. Command credentials are restricted to user-level provider configs, not project configuration.
+
+The credential is cached only in memory, refreshed when its TTL expires, and refreshed once more after a provider responds with 401 or 403 before that request is retried. Helper output is never persisted, returned by the GUI, or shown in errors. For failures, check the executable path, `cwd`, timeout, exit status, non-empty UTF-8 stdout, output size, and required passthrough variables by running the helper locally; diagnostics intentionally do not echo its stdout or stderr.
+
 ## Workspace panels: Files, Git, Terminal
 
 Once a project is open in the dashboard, three workspace panels provide IDE-grade surface area without leaving the browser:

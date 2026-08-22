@@ -11,6 +11,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use crate::app_state::AppState;
 use crate::call_validation::ChatUsage;
 use crate::caps::BaseModelRecord;
+use crate::chat::diagnostics::safe_provider_error_diagnostic;
 use crate::llm::{LlmRequest, LlmStreamDelta, WireFormat, get_adapter, safe_truncate};
 use crate::llm::adapter::{AdapterSettings, HttpParts, StreamParseError};
 use crate::privacy::destinations::clear_for_model;
@@ -336,7 +337,7 @@ fn should_commit_cache_guard_after_http_success(status: reqwest::StatusCode, tex
         return true;
     }
     !matches!(
-        classify_llm_error_for_retry(&format_llm_error_body(&format!("{}", status), text)),
+        classify_llm_error_for_retry(&format_llm_error_body(&format!("{}", status), text, None)),
         RetryDecision::Retry { .. } | RetryDecision::ContextLimit { .. }
     )
 }
@@ -424,7 +425,7 @@ fn set_bearer_authorization_header(
     access_token: &str,
 ) -> Result<(), String> {
     let auth_value = reqwest::header::HeaderValue::from_str(&format!("Bearer {access_token}"))
-        .map_err(|e| format!("Refreshed OAuth token cannot be used: {e}"))?;
+        .map_err(|e| format!("Bearer credential cannot be used: {e}"))?;
     headers.insert(reqwest::header::AUTHORIZATION, auth_value);
     Ok(())
 }
@@ -2248,7 +2249,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
         supports_cache_control: params.model_rec.supports_cache_control,
     };
 
-    let http_parts = build_http_for_attempt(
+    let mut http_parts = build_http_for_attempt(
         &app,
         &params.llm_request,
         &params.model_rec,
@@ -2256,6 +2257,19 @@ pub async fn run_llm_stream<C: StreamCollector>(
         &adapter_settings,
     )
     .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+
+    let mut command_credential = tokio::select! {
+        result = crate::providers::runtime_credential::resolve(&params.model_rec) => result,
+        _ = wait_for_abort_signal(params.abort_flag.clone(), params.abort_notify.clone()) => {
+            return Err(LlmStreamError::new(ABORT_ERROR_MESSAGE, partial_output_emitted));
+        }
+    }
+    .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+    let mut rejected_command_credential: Option<String> = None;
+    if let Some(value) = command_credential.as_deref() {
+        set_bearer_authorization_header(&mut http_parts.headers, value)
+            .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+    }
 
     crate::chat::cache_diagnostics::log_provider_request_hashes(
         params.chat_id.as_deref(),
@@ -2471,6 +2485,52 @@ pub async fn run_llm_stream<C: StreamCollector>(
             reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
         )
     {
+        if let Some(rejected_value) = command_credential.as_deref() {
+            let refreshed = tokio::select! {
+                result = crate::providers::runtime_credential::refresh_after_rejection(&params.model_rec, rejected_value) => result,
+                _ = wait_for_abort_signal(params.abort_flag.clone(), params.abort_notify.clone()) => {
+                    return Err(LlmStreamError::new(ABORT_ERROR_MESSAGE, partial_output_emitted));
+                }
+            }
+            .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?
+            .ok_or_else(|| {
+                LlmStreamError::new(
+                    "Command credential refresh was unavailable",
+                    partial_output_emitted,
+                )
+            })?;
+            let mut retry_parts = HttpParts {
+                url: http_parts.url.clone(),
+                headers: http_parts.headers.clone(),
+                body: http_parts.body.clone(),
+            };
+            set_bearer_authorization_header(&mut retry_parts.headers, &refreshed)
+                .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+            rejected_command_credential = command_credential.replace(refreshed);
+            response = if let Some((response_header_timeout, max_attempts)) = header_retry_config {
+                send_llm_http_request_with_header_timeout(
+                    &client,
+                    &retry_parts,
+                    wire_format,
+                    params.abort_flag.clone(),
+                    params.abort_notify.clone(),
+                    response_header_timeout,
+                    max_attempts,
+                )
+                .await
+            } else {
+                send_llm_http_request(
+                    &client,
+                    &retry_parts,
+                    wire_format,
+                    params.abort_flag.clone(),
+                    params.abort_notify.clone(),
+                )
+                .await
+            }
+            .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+            status = response.status();
+        }
         if let Some(provider_instance_id) = claude_code_instance_id(&params.model_rec) {
             let refresh_outcome = tokio::select! {
                 result = force_refresh_claude_code_for_retry(
@@ -2596,8 +2656,12 @@ pub async fn run_llm_stream<C: StreamCollector>(
             )
             .await;
         }
+        let text = crate::providers::runtime_credential::redact(
+            text,
+            rejected_command_credential.as_deref(),
+        );
         return Err(LlmStreamError::new(
-            format_llm_error_body(&format!("{}", status), &text),
+            format_llm_error_body(&format!("{}", status), &text, command_credential.as_deref()),
             partial_output_emitted,
         ));
     }
@@ -2922,8 +2986,13 @@ async fn read_error_body_bounded(response: reqwest::Response) -> String {
     text
 }
 
-fn format_llm_error_body(status_label: &str, text: &str) -> String {
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
+fn format_llm_error_body(status_label: &str, text: &str, secret: Option<&str>) -> String {
+    let redacted = match secret.filter(|secret| !secret.is_empty()) {
+        Some(secret) => text.replace(secret, "[REDACTED]"),
+        None => text.to_string(),
+    };
+    let redacted = safe_provider_error_diagnostic(&redacted);
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&redacted) {
         if let Some(detail) = json.get("detail") {
             return format!("LLM error ({}): {}", status_label, detail);
         }
@@ -2934,7 +3003,7 @@ fn format_llm_error_body(status_label: &str, text: &str) -> String {
             return format!("LLM error ({}): {}", status_label, err_obj);
         }
     }
-    let preview = safe_truncate(text, 500);
+    let preview = safe_truncate(&redacted, 500);
     format!("LLM error ({}): {}", status_label, preview)
 }
 
@@ -2942,6 +3011,10 @@ fn format_llm_error_body(status_label: &str, text: &str) -> String {
 mod tests {
     use super::*;
     use crate::call_validation::ChatMessage;
+    #[cfg(unix)]
+    use refact_core::provider_types::{
+        CredentialSpec, DEFAULT_CREDENTIAL_REFRESH_INTERVAL_MS, DEFAULT_CREDENTIAL_TIMEOUT_MS,
+    };
     use refact_privacy::{Attribution, FileRecord, PolicyLoad, PrivacyPolicy, PrivacyRecord};
     use refact_privacy::{ShellBehavior, SubagentPolicy, Zone};
 
@@ -3087,6 +3160,91 @@ mod tests {
         };
         assert!(first_error.starts_with("Output withheld by user privacy policy"));
         assert_eq!(second.unwrap().body["model"], allowed.name);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_credential_retries_once_after_unauthorized() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let provider_id = "custom_helper";
+        crate::providers::credential::invalidate(provider_id);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (expected_token, status, body) in [
+                ("1", "401 Unauthorized", ""),
+                (
+                    "2",
+                    "200 OK",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                ),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                assert!(request.contains(&format!("authorization: bearer {expected_token}")));
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let count = dir.path().join("token-count");
+        let helper = format!(
+            "n=$(cat '{}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{}'; echo $n",
+            count.display(),
+            count.display()
+        );
+        let mut model = model_record(provider_id);
+        model.endpoint = format!("http://{address}/v1/chat/completions");
+        model.credential = Some(CredentialSpec::Command {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), helper],
+            timeout_ms: DEFAULT_CREDENTIAL_TIMEOUT_MS,
+            refresh_interval_ms: DEFAULT_CREDENTIAL_REFRESH_INTERVAL_MS,
+            cwd: None,
+            env_passthrough: Vec::new(),
+        });
+        let params = StreamRunParams {
+            llm_request: LlmRequest::new(
+                model.id.clone(),
+                vec![ChatMessage::new("user".to_string(), "hello".to_string())],
+            ),
+            model_rec: model,
+            chat_id: None,
+            allow_websocket: false,
+            abort_flag: None,
+            abort_notify: None,
+            supports_tools: false,
+            supports_reasoning: false,
+            reasoning_type: None,
+            supports_temperature: true,
+        };
+        let app = app_with_privacy_policy(privacy_policy(provider_id)).await;
+        let mut collector = ReplayCollector::default();
+
+        let result = run_llm_stream(app, params, &mut collector).await.unwrap();
+        match result {
+            LlmStreamOutcome::Choices(choices) => assert_eq!(choices[0].content, "ok"),
+            LlmStreamOutcome::PausedForCacheGuard => panic!("unexpected cache guard pause"),
+        }
+        server.await.unwrap();
+        crate::providers::credential::invalidate(provider_id);
     }
 
     #[test]

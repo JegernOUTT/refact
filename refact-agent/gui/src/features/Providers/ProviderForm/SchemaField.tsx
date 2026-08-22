@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import { ExternalLink, Eye, EyeOff, X } from "lucide-react";
+import { dump, load } from "js-yaml";
 
 import {
   FieldText,
@@ -22,6 +23,8 @@ export type SchemaFieldDef = {
   f_default?: string;
   f_extra?: boolean;
   f_secret?: boolean;
+  f_object?: boolean;
+  f_confirmation?: boolean;
   smartlinks?: { sl_label: string; sl_goto: string }[];
 };
 
@@ -121,6 +124,13 @@ function resetStatusLater(
   );
 }
 
+function confirmFieldSave(field: SchemaFieldDef): boolean {
+  return (
+    !field.f_confirmation ||
+    window.confirm(`Save changes to ${field.f_label ?? field.key}?`)
+  );
+}
+
 const NumberField: React.FC<SchemaFieldProps> = ({
   field,
   value,
@@ -151,6 +161,7 @@ const NumberField: React.FC<SchemaFieldProps> = ({
       return;
     }
     const nextValue = field.f_type === "integer" ? Math.trunc(parsed) : parsed;
+    if (!confirmFieldSave(field)) return;
     setSaveState("saving");
     try {
       await onSave(field.key, nextValue);
@@ -160,7 +171,7 @@ const NumberField: React.FC<SchemaFieldProps> = ({
       setSaveState("error");
       resetStatusLater(timerRef, setSaveState, "error");
     }
-  }, [field.f_type, field.key, localValue, onSave, valueToString]);
+  }, [field, localValue, onSave, valueToString]);
 
   return (
     <SettingItem
@@ -198,6 +209,7 @@ const BooleanField: React.FC<SchemaFieldProps> = ({
 
   const handleChange = useCallback(
     async (checked: boolean) => {
+      if (!confirmFieldSave(field)) return;
       setSaveState("saving");
       try {
         await onSave(field.key, checked);
@@ -208,7 +220,7 @@ const BooleanField: React.FC<SchemaFieldProps> = ({
         resetStatusLater(timerRef, setSaveState, "error");
       }
     },
-    [field.key, onSave],
+    [field, onSave],
   );
 
   return (
@@ -260,6 +272,7 @@ const SecretField: React.FC<SchemaFieldProps> = ({
       setEditing(false);
       return;
     }
+    if (!confirmFieldSave(field)) return;
     setSaveState("saving");
     try {
       await onSave(field.key, localValue);
@@ -270,9 +283,10 @@ const SecretField: React.FC<SchemaFieldProps> = ({
       setSaveState("error");
       resetStatusLater(timerRef, setSaveState, "error");
     }
-  }, [editing, localValue, isMasked, field.key, onSave]);
+  }, [editing, localValue, isMasked, field, onSave]);
 
   const handleClear = useCallback(async () => {
+    if (!confirmFieldSave(field)) return;
     setSaveState("saving");
     try {
       await onSave(field.key, "");
@@ -284,7 +298,7 @@ const SecretField: React.FC<SchemaFieldProps> = ({
       setSaveState("error");
       resetStatusLater(timerRef, setSaveState, "error");
     }
-  }, [field.key, onSave]);
+  }, [field, onSave]);
 
   const displayValue = editing
     ? localValue
@@ -347,9 +361,20 @@ const StringField: React.FC<SchemaFieldProps> = ({
   disabled,
   onSave,
 }) => {
-  const [localValue, setLocalValue] = useState(
-    String(value ?? field.f_default ?? ""),
+  const valueToString = useCallback(
+    (candidate: unknown) => {
+      if (
+        candidate !== null &&
+        typeof candidate === "object" &&
+        !Array.isArray(candidate)
+      ) {
+        return dump(candidate, { noRefs: true, sortKeys: true }).trimEnd();
+      }
+      return String(candidate ?? field.f_default ?? "");
+    },
+    [field.f_default],
   );
+  const [localValue, setLocalValue] = useState(valueToString(value));
   const [saveState, setSaveState] = useState<FieldSaveState>("idle");
   const originalValueRef = useRef(value);
   const timerRef = useRef<ReturnType<typeof setTimeout>>();
@@ -357,21 +382,48 @@ const StringField: React.FC<SchemaFieldProps> = ({
 
   useEffect(() => {
     originalValueRef.current = value;
-    setLocalValue(String(value ?? field.f_default ?? ""));
-  }, [value, field.f_default]);
+    setLocalValue(valueToString(value));
+  }, [value, valueToString]);
 
   const handleBlur = useCallback(async () => {
-    if (localValue === String(originalValueRef.current ?? "")) return;
+    if (localValue === valueToString(originalValueRef.current)) return;
+    let nextValue: unknown = localValue;
+    const expectsObject =
+      originalValueRef.current !== null &&
+      typeof originalValueRef.current === "object" &&
+      !Array.isArray(originalValueRef.current);
+    if (expectsObject || field.f_object) {
+      if (localValue.trim() === "") {
+        nextValue = null;
+      } else {
+        try {
+          const parsed = load(localValue);
+          const isObject =
+            parsed !== null &&
+            typeof parsed === "object" &&
+            !Array.isArray(parsed);
+          if (!isObject) {
+            throw new Error("Expected an object");
+          }
+          nextValue = parsed;
+        } catch {
+          setSaveState("error");
+          resetStatusLater(timerRef, setSaveState, "error");
+          return;
+        }
+      }
+    }
+    if (!confirmFieldSave(field)) return;
     setSaveState("saving");
     try {
-      await onSave(field.key, localValue);
+      await onSave(field.key, nextValue);
       setSaveState("saved");
       resetStatusLater(timerRef, setSaveState, "saved");
     } catch {
       setSaveState("error");
       resetStatusLater(timerRef, setSaveState, "error");
     }
-  }, [localValue, field.key, onSave]);
+  }, [localValue, valueToString, field, onSave]);
 
   const isLong = field.f_type === "string_long" || localValue.length > 80;
 

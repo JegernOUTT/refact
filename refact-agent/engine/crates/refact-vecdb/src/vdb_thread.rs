@@ -73,6 +73,7 @@ async fn vectorize_batch_from_q(
     let batch_result = match get_embedding_with_retries(
         client.clone(),
         &constants.embedding_model,
+        constants.embedding_credential_resolver.as_ref(),
         batch.iter().map(|x| x.window_text.clone()).collect(),
         10,
     )
@@ -729,6 +730,7 @@ mod tests {
                 embedding_batch: 16,
                 n_ctx: 64,
             },
+            embedding_credential_resolver: None,
             tokenizer: None,
             splitter_window_size: 32,
             vecdb_max_files: 10,

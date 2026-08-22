@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use refact_core::model_caps::ModelCapabilities;
 use refact_core::llm_types::WireFormat;
 use crate::traits::{
-    AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
+    AvailableModel, CredentialSpec, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime,
+    ProviderTrait,
 };
 
 pub struct ProviderInstance {
@@ -121,6 +122,10 @@ impl ProviderTrait for ProviderInstance {
         runtime.name = self.instance_id.clone();
         runtime.display_name = self.display_name.clone();
         Ok(runtime)
+    }
+
+    fn credential(&self) -> Option<&CredentialSpec> {
+        self.inner.credential()
     }
 
     fn is_readonly(&self) -> bool {

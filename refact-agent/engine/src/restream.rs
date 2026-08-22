@@ -21,6 +21,108 @@ use crate::nicer_logs;
 use crate::scratchpad_abstract::{FinishReason, ScratchpadAbstract, ScratchpadPromptInput};
 use crate::at_commands::at_commands::AtCommandsContext;
 
+fn static_bearer(model_rec: &BaseModelRecord) -> Option<&str> {
+    (!model_rec.api_key.is_empty()).then_some(model_rec.api_key.as_str())
+}
+
+async fn completion_request_with_runtime_credential(
+    model_rec: &BaseModelRecord,
+    prompt: &str,
+    client: &reqwest::Client,
+    parameters: &SamplingParameters,
+) -> Result<serde_json::Value, String> {
+    let command_credential = crate::providers::runtime_credential::resolve(model_rec).await?;
+    let bearer = command_credential
+        .as_deref()
+        .or_else(|| static_bearer(model_rec));
+    let first = crate::forward_to_openai_endpoint::forward_to_openai_style_endpoint_with_bearer(
+        model_rec, prompt, client, parameters, bearer,
+    )
+    .await;
+
+    match first {
+        Ok(value) => Ok(value),
+        Err(error) if error.is_auth_rejection() && command_credential.is_some() => {
+            let rejected = command_credential.as_deref().unwrap_or_default();
+            let refreshed =
+                crate::providers::runtime_credential::refresh_after_rejection(model_rec, rejected)
+                    .await?
+                    .ok_or_else(|| "Command credential refresh was unavailable".to_string())?;
+            crate::forward_to_openai_endpoint::forward_to_openai_style_endpoint_with_bearer(
+                model_rec,
+                prompt,
+                client,
+                parameters,
+                Some(&refreshed),
+            )
+            .await
+            .map_err(|retry_error| {
+                crate::providers::runtime_credential::redact(
+                    crate::providers::runtime_credential::redact(
+                        retry_error.message,
+                        Some(&refreshed),
+                    ),
+                    Some(rejected),
+                )
+            })
+        }
+        Err(error) => Err(crate::providers::runtime_credential::redact(
+            error.message,
+            command_credential.as_deref(),
+        )),
+    }
+}
+
+async fn streaming_completion_request_with_runtime_credential(
+    model_rec: &BaseModelRecord,
+    prompt: &str,
+    client: &reqwest::Client,
+    parameters: &SamplingParameters,
+) -> Result<(reqwest::Response, Vec<String>), String> {
+    let command_credential = crate::providers::runtime_credential::resolve(model_rec).await?;
+    let bearer = command_credential
+        .as_deref()
+        .or_else(|| static_bearer(model_rec));
+    let first =
+        crate::forward_to_openai_endpoint::forward_to_openai_style_endpoint_streaming_with_bearer(
+            model_rec, prompt, client, parameters, bearer,
+        )
+        .await;
+
+    match first {
+        Ok(response) => Ok((response, command_credential.into_iter().collect())),
+        Err(error) if error.is_auth_rejection() && command_credential.is_some() => {
+            let rejected = command_credential.as_deref().unwrap_or_default();
+            let refreshed =
+                crate::providers::runtime_credential::refresh_after_rejection(model_rec, rejected)
+                    .await?
+                    .ok_or_else(|| "Command credential refresh was unavailable".to_string())?;
+            let response = crate::forward_to_openai_endpoint::forward_to_openai_style_endpoint_streaming_with_bearer(
+                model_rec,
+                prompt,
+                client,
+                parameters,
+                Some(&refreshed),
+            )
+            .await
+            .map_err(|retry_error| {
+                crate::providers::runtime_credential::redact(
+                    crate::providers::runtime_credential::redact(
+                        retry_error.message,
+                        Some(&refreshed),
+                    ),
+                    Some(rejected),
+                )
+            })?;
+            Ok((response, vec![rejected.to_string(), refreshed]))
+        }
+        Err(error) => Err(crate::providers::runtime_credential::redact(
+            error.message,
+            command_credential.as_deref(),
+        )),
+    }
+}
+
 pub async fn scratchpad_interaction_not_stream_json(
     ccx: Arc<AMutex<AtCommandsContext>>,
     scratchpad: &mut Box<dyn ScratchpadAbstract>,
@@ -41,7 +143,7 @@ pub async fn scratchpad_interaction_not_stream_json(
     } else if model_rec.endpoint_style == "hf" {
         Err("HuggingFace endpoint style is no longer supported. Please use 'openai' endpoint_style.".to_string())
     } else {
-        crate::forward_to_openai_endpoint::forward_to_openai_style_endpoint(
+        completion_request_with_runtime_credential(
             &model_rec,
             prompt,
             &client,
@@ -345,14 +447,14 @@ pub async fn scratchpad_interaction_stream(
             let event_source_maybe = if model_rec.endpoint_style == "hf" {
                 Err("HuggingFace endpoint style is no longer supported. Please use 'openai' endpoint_style.".to_string())
             } else {
-                crate::forward_to_openai_endpoint::forward_to_openai_style_endpoint_streaming(
+                streaming_completion_request_with_runtime_credential(
                     &model_rec,
                     &prompt,
                     &client,
                     &my_parameters
                 ).await
             };
-            let response = match event_source_maybe {
+            let (response, dynamic_credentials) = match event_source_maybe {
                 Ok(resp) => resp,
                 Err(e) => {
                     let e_str = format!("forward_to_endpoint: {:?}", e);
@@ -422,6 +524,9 @@ pub async fn scratchpad_interaction_stream(
                                 yield Result::<_, String>::Ok(value_str);
                             },
                             Err(err_str) => {
+                                let err_str = dynamic_credentials.iter().fold(err_str, |error, credential| {
+                                    crate::providers::runtime_credential::redact(error, Some(credential))
+                                });
                                 tracing::error!("unexpected error: {}", err_str);
                                 let value_str = format!("data: {}\n\n", serde_json::to_string(&json!({"detail": err_str})).unwrap());
                                 yield Result::<_, String>::Ok(value_str);
@@ -434,7 +539,9 @@ pub async fn scratchpad_interaction_stream(
                             // "restream error: Stream ended"
                             break;
                         }
-                        let problem_str = format!("{}", err);
+                        let problem_str = dynamic_credentials.iter().fold(format!("{}", err), |error, credential| {
+                            crate::providers::runtime_credential::redact(error, Some(credential))
+                        });
                         tracing::error!("restream error: {}\n", problem_str);
                         yield Result::<_, String>::Ok(format!("data: {}\n\n", serde_json::to_string(&json!({"detail": problem_str})).unwrap()));
                         return;
@@ -585,4 +692,87 @@ pub async fn cached_stream(
         .body(Body::wrap_stream(evstream))
         .unwrap();
     return Ok(response);
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use refact_core::provider_types::{
+        CredentialSpec, DEFAULT_CREDENTIAL_REFRESH_INTERVAL_MS, DEFAULT_CREDENTIAL_TIMEOUT_MS,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn completion_command_credential_refreshes_once_after_unauthorized() {
+        let provider_id = "completion_helper";
+        crate::providers::credential::invalidate(provider_id);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (token, status, body) in [
+                ("1", "401 Unauthorized", "rejected 1"),
+                (
+                    "2",
+                    "200 OK",
+                    r#"{"choices":[{"text":"ok","finish_reason":"stop"}]}"#,
+                ),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let count = socket.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..count]);
+                    if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                assert!(request.contains(&format!("authorization: bearer {token}")));
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let counter = dir.path().join("count");
+        let helper = format!(
+            "n=$(cat '{}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{}'; echo $n",
+            counter.display(),
+            counter.display()
+        );
+        let model = BaseModelRecord {
+            id: format!("{provider_id}/completion"),
+            name: "completion".to_string(),
+            endpoint: format!("http://{address}/v1/completions"),
+            credential: Some(CredentialSpec::Command {
+                command: "sh".to_string(),
+                args: vec!["-c".to_string(), helper],
+                timeout_ms: DEFAULT_CREDENTIAL_TIMEOUT_MS,
+                refresh_interval_ms: DEFAULT_CREDENTIAL_REFRESH_INTERVAL_MS,
+                cwd: None,
+                env_passthrough: Vec::new(),
+            }),
+            ..Default::default()
+        };
+
+        let result = completion_request_with_runtime_credential(
+            &model,
+            "prompt",
+            &reqwest::Client::new(),
+            &SamplingParameters::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["choices"][0]["text"], "ok");
+        assert_eq!(
+            tokio::fs::read_to_string(counter).await.unwrap().trim(),
+            "2"
+        );
+        server.await.unwrap();
+        crate::providers::credential::invalidate(provider_id);
+    }
 }
