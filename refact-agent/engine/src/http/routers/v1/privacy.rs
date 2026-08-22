@@ -21,6 +21,7 @@ pub struct PrivacyPolicyResponse {
     pub policy: PrivacyPolicy,
     pub destinations: Vec<Destination>,
     pub match_counts: BTreeMap<String, usize>,
+    pub discovery_deferred: bool,
     pub error: Option<String>,
     pub source_paths: Vec<String>,
     pub has_project_overrides: bool,
@@ -93,7 +94,7 @@ pub async fn handle_v1_privacy_policy_post(
     crate::privacy::save_privacy_policy(app.gcx.clone(), policy)
         .await
         .map_err(|error| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
-    Ok(Json(build_policy_response(&app).await?))
+    Ok(Json(build_saved_policy_response(&app).await))
 }
 
 pub async fn handle_v1_privacy_status(State(app): State<AppState>) -> Json<PrivacyStatusResponse> {
@@ -181,13 +182,41 @@ async fn build_policy_response(app: &AppState) -> Result<PrivacyPolicyResponse, 
     let policy = crate::privacy::global_only_policy(app.gcx.clone())
         .await
         .unwrap_or_else(|| effective.clone());
-    let has_project_overrides = policy != effective;
     let destinations = collect_destinations(app, &effective).await;
     let match_counts = live_match_counts(app, &effective)?;
-    Ok(PrivacyPolicyResponse {
+    Ok(policy_response(
+        policy,
+        effective,
+        load,
+        destinations,
+        match_counts,
+        false,
+    ))
+}
+
+async fn build_saved_policy_response(app: &AppState) -> PrivacyPolicyResponse {
+    let load = app.gcx.privacy_policy_load.read().unwrap().clone();
+    let effective = load.policy.as_ref().clone();
+    let policy = crate::privacy::global_only_policy(app.gcx.clone())
+        .await
+        .unwrap_or_else(|| effective.clone());
+    policy_response(policy, effective, load, Vec::new(), BTreeMap::new(), true)
+}
+
+fn policy_response(
+    policy: PrivacyPolicy,
+    effective: PrivacyPolicy,
+    load: refact_privacy::PolicyLoad,
+    destinations: Vec<Destination>,
+    match_counts: BTreeMap<String, usize>,
+    discovery_deferred: bool,
+) -> PrivacyPolicyResponse {
+    let has_project_overrides = policy != effective;
+    PrivacyPolicyResponse {
         policy,
         destinations,
         match_counts,
+        discovery_deferred,
         error: load.error,
         source_paths: load
             .source_paths
@@ -195,7 +224,7 @@ async fn build_policy_response(app: &AppState) -> Result<PrivacyPolicyResponse, 
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
         has_project_overrides,
-    })
+    }
 }
 
 async fn collect_destinations(app: &AppState, policy: &PrivacyPolicy) -> Vec<Destination> {
@@ -415,7 +444,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn privacy_policy_roundtrip_preserves_other_config_and_counts_live_files() {
+    async fn privacy_policy_post_defers_discovery_and_get_returns_complete_response() {
         let (_cache, config, app) = test_app().await;
         let secret = config.path().join("secret.env");
         let normal = config.path().join("normal.rs");
@@ -439,13 +468,19 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(posted["policy"]["zones"][0]["name"], "secrets");
-        assert_eq!(posted["match_counts"]["secrets"], 1);
-        assert_eq!(posted["match_counts"]["normal"], 1);
-        assert!(posted["destinations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|destination| destination["id"] == "trusted"));
+        assert_eq!(posted["match_counts"], json!({}));
+        assert_eq!(posted["destinations"], json!([]));
+        assert_eq!(posted["discovery_deferred"], true);
+        assert!(posted["error"].is_null());
+        assert_eq!(
+            posted["source_paths"],
+            json!([config
+                .path()
+                .join("privacy.yaml")
+                .to_string_lossy()
+                .into_owned()])
+        );
+        assert_eq!(posted["has_project_overrides"], false);
 
         let (status, loaded) = json_request(
             router,
@@ -457,6 +492,14 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(loaded["policy"], posted["policy"]);
+        assert_eq!(loaded["discovery_deferred"], false);
+        assert_eq!(loaded["match_counts"]["secrets"], 1);
+        assert_eq!(loaded["match_counts"]["normal"], 1);
+        assert!(loaded["destinations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|destination| destination["id"] == "trusted"));
         let saved = tokio::fs::read_to_string(config.path().join("privacy.yaml"))
             .await
             .unwrap();

@@ -26,7 +26,7 @@ test.describe("privacy surfaces", () => {
     });
   });
 
-  test("renders the zone grid and saves a destination toggle", async ({
+  test("renders the zone grid and saves a destination toggle explicitly", async ({
     page,
   }) => {
     await page.goto(privacySettingsPath);
@@ -48,6 +48,7 @@ test.describe("privacy surfaces", () => {
     await page.getByRole("button", { name: /MCP servers/ }).click();
     await page.getByRole("button", { name: /Build MCP/ }).click();
     await page.getByLabel("Send secrets to Build MCP").click();
+    await page.getByRole("button", { name: "Save changes" }).click();
 
     await expect
       .poll(async () => {

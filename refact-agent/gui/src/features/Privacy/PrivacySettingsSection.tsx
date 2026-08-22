@@ -98,11 +98,28 @@ function nextZoneName(zones: PrivacyZone[]) {
   return candidate;
 }
 
+function zonesEqual(left: PrivacyZone[], right: PrivacyZone[]) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function policiesEqual(left: PrivacyPolicy, right: PrivacyPolicy) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 export function PrivacySettingsSection() {
   const policyQuery = useGetPrivacyPolicyQuery(undefined);
   const statusQuery = useGetPrivacyStatusQuery(undefined);
   const [updatePolicy, updateState] = useUpdatePrivacyPolicyMutation();
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [serverPolicy, setServerPolicy] = useState<PrivacyPolicy | null>(null);
+  const [draftZones, setDraftZones] = useState<PrivacyZone[] | null>(null);
+  const draftZonesRef = useRef<PrivacyZone[] | null>(null);
+  const [baselineZones, setBaselineZones] = useState<PrivacyZone[] | null>(
+    null,
+  );
+  const baselineZonesRef = useRef<PrivacyZone[] | null>(null);
+  const queriedPolicyRef = useRef<PrivacyPolicy | null>(null);
+  const pendingSavedPolicyRef = useRef<PrivacyPolicy | null>(null);
   const [matrixOpen, setMatrixOpen] = useState(false);
   const matrixRef = useRef<HTMLDivElement>(null);
   const matrixWasOpenRef = useRef(false);
@@ -120,6 +137,54 @@ export function PrivacySettingsSection() {
 
   const data = policyQuery.data;
 
+  const setZoneDraft = useCallback((zones: PrivacyZone[]) => {
+    draftZonesRef.current = zones;
+    setDraftZones(zones);
+  }, []);
+
+  const setZoneBaseline = useCallback(
+    (zones: PrivacyZone[]) => {
+      baselineZonesRef.current = zones;
+      setBaselineZones(zones);
+      setZoneDraft(zones);
+    },
+    [setZoneDraft],
+  );
+
+  useEffect(() => {
+    if (!data || data.policy === queriedPolicyRef.current) return;
+
+    const pendingSavedPolicy = pendingSavedPolicyRef.current;
+    if (pendingSavedPolicy && !policiesEqual(data.policy, pendingSavedPolicy)) {
+      return;
+    }
+
+    pendingSavedPolicyRef.current = null;
+    queriedPolicyRef.current = data.policy;
+    setServerPolicy(data.policy);
+    const currentZones = draftZonesRef.current;
+    const currentBaseline = baselineZonesRef.current;
+    if (
+      currentZones === null ||
+      currentBaseline === null ||
+      zonesEqual(currentZones, currentBaseline)
+    ) {
+      setZoneBaseline(data.policy.zones);
+    }
+  }, [data, setZoneBaseline]);
+
+  const currentZones = useMemo(
+    () => draftZones ?? serverPolicy?.zones ?? data?.policy.zones ?? [],
+    [data?.policy.zones, draftZones, serverPolicy?.zones],
+  );
+  const zonesDirty =
+    baselineZones !== null && !zonesEqual(currentZones, baselineZones);
+  const currentPolicy = serverPolicy ?? data?.policy ?? null;
+  const policyWithDraft = useMemo(
+    () => (currentPolicy ? { ...currentPolicy, zones: currentZones } : null),
+    [currentPolicy, currentZones],
+  );
+
   const mcpServers = useMemo(
     () =>
       (data?.destinations ?? [])
@@ -129,77 +194,72 @@ export function PrivacySettingsSection() {
   );
 
   const save = useCallback(
-    async (policy: PrivacyPolicy) => {
+    async (policy: PrivacyPolicy, replaceZoneBaseline = false) => {
       setSaveError(null);
       try {
-        await updatePolicy(policy).unwrap();
+        const response = await updatePolicy(policy).unwrap();
+        pendingSavedPolicyRef.current = response.policy;
+        setServerPolicy(response.policy);
+        if (replaceZoneBaseline) {
+          setZoneBaseline(response.policy.zones);
+        }
       } catch (error) {
         setSaveError(errorText(error));
       }
     },
-    [updatePolicy],
+    [setZoneBaseline, updatePolicy],
   );
 
   const handleZoneToggle = useCallback(
     (zoneName: string, destinationId: string) => {
-      if (!data) return;
-      void save(
+      if (!data || !policyWithDraft) return;
+      setZoneDraft(
         toggleDestination(
-          data.policy,
+          policyWithDraft,
           zoneName,
           destinationId,
           data.destinations.map((destination) => destination.id),
-        ),
+        ).zones,
       );
     },
-    [data, save],
+    [data, policyWithDraft, setZoneDraft],
   );
 
   const handleMcpToggle = useCallback(
     (providerId: string, server: string) => {
-      if (!data) return;
-      void save(toggleMcpAccess(data.policy, providerId, server, mcpServers));
+      if (!currentPolicy) return;
+      void save(toggleMcpAccess(currentPolicy, providerId, server, mcpServers));
     },
-    [data, mcpServers, save],
+    [currentPolicy, mcpServers, save],
   );
 
   const updateZone = useCallback(
     (zoneName: string, patch: Partial<PrivacyZone>) => {
-      if (!data) return;
-      void save({
-        ...data.policy,
-        zones: data.policy.zones.map((zone) =>
+      setZoneDraft(
+        currentZones.map((zone) =>
           zone.name === zoneName ? { ...zone, ...patch } : zone,
         ),
-      });
+      );
     },
-    [data, save],
+    [currentZones, setZoneDraft],
   );
 
   const removeZone = useCallback(
     (zoneName: string) => {
-      if (!data) return;
-      void save({
-        ...data.policy,
-        zones: data.policy.zones.filter((zone) => zone.name !== zoneName),
-      });
+      setZoneDraft(currentZones.filter((zone) => zone.name !== zoneName));
     },
-    [data, save],
+    [currentZones, setZoneDraft],
   );
 
   const addZone = useCallback(() => {
-    if (!data) return;
     const zone: PrivacyZone = {
-      name: nextZoneName(data.policy.zones),
+      name: nextZoneName(currentZones),
       patterns: [],
       send_to: [],
       on_shell_read: "withhold",
     };
-    void save({
-      ...data.policy,
-      zones: [zone, ...data.policy.zones],
-    });
-  }, [data, save]);
+    setZoneDraft([zone, ...currentZones]);
+  }, [currentZones, setZoneDraft]);
 
   if (policyQuery.isLoading) {
     return (
@@ -232,6 +292,7 @@ export function PrivacySettingsSection() {
     );
   }
 
+  const displayedPolicy = policyWithDraft ?? data.policy;
   const configError = data.error ?? statusQuery.data?.config_error;
   const observation = statusQuery.data?.observation;
   const observationDescription = statusQuery.isError
@@ -271,6 +332,8 @@ export function PrivacySettingsSection() {
       : updateState.isError
         ? "error"
         : "idle";
+  const zoneSaveStatus =
+    zonesDirty && !updateState.isLoading ? "idle" : saveStatus;
 
   const blockedProviders = data.destinations.filter(
     (destination) =>
@@ -278,7 +341,7 @@ export function PrivacySettingsSection() {
       mcpServers.some(
         (server) =>
           !mcpAllowedForProvider(
-            data.policy.tool_access,
+            currentPolicy?.tool_access ?? data.policy.tool_access,
             destination.id,
             server,
           ),
@@ -339,18 +402,16 @@ export function PrivacySettingsSection() {
         description="A zone is a set of files matched by glob patterns. A file belongs to the first zone listed here whose patterns match it, so put narrow zones above broad ones."
       >
         <div className={styles.groupContent}>
-          <SaveStatus state={saveStatus} />
+          <SaveStatus state={zoneSaveStatus} />
           <div className={styles.zoneStack}>
             <div className={styles.zoneCards}>
-              {data.policy.zones.map((zone) => (
+              {currentZones.map((zone) => (
                 <ZoneCard
                   key={zone.name}
                   matchCount={data.match_counts[zone.name] ?? 0}
-                  removable={
-                    data.policy.zones.length > 1 && !isCatchAllZone(zone)
-                  }
+                  removable={currentZones.length > 1 && !isCatchAllZone(zone)}
                   saving={updateState.isLoading}
-                  takenNames={data.policy.zones
+                  takenNames={currentZones
                     .map((other) => other.name)
                     .filter((other) => other !== zone.name)}
                   zone={zone}
@@ -368,6 +429,13 @@ export function PrivacySettingsSection() {
             >
               Add zone
             </Button>
+            <Button
+              disabled={!zonesDirty || updateState.isLoading}
+              size="sm"
+              onClick={() => void save(displayedPolicy, true)}
+            >
+              Save changes
+            </Button>
           </div>
         </div>
       </SettingsGroup>
@@ -381,9 +449,11 @@ export function PrivacySettingsSection() {
             addLabel="Add blocked pattern"
             disabled={updateState.isLoading}
             emptyLabel="Nothing is globally blocked"
-            patterns={data.policy.blocked}
+            patterns={currentPolicy?.blocked ?? data.policy.blocked}
             placeholder="e.g. id_rsa"
-            onChange={(blocked) => void save({ ...data.policy, blocked })}
+            onChange={(blocked) =>
+              void save({ ...(currentPolicy ?? data.policy), blocked })
+            }
           />
         </div>
       </SettingsGroup>
@@ -399,8 +469,8 @@ export function PrivacySettingsSection() {
             matchCounts={data.match_counts}
             mcpServers={mcpServers}
             saving={updateState.isLoading}
-            toolAccess={data.policy.tool_access}
-            zones={data.policy.zones}
+            toolAccess={currentPolicy?.tool_access ?? data.policy.tool_access}
+            zones={currentZones}
             onToggleMcp={handleMcpToggle}
             onToggleZone={handleZoneToggle}
           />
@@ -422,11 +492,11 @@ export function PrivacySettingsSection() {
           control={
             <Switch
               aria-label="Subagent reports declassify"
-              checked={data.policy.subagents.report_declassifies}
+              checked={currentPolicy?.subagents.report_declassifies ?? false}
               disabled={updateState.isLoading}
               onCheckedChange={(report_declassifies) =>
                 void save({
-                  ...data.policy,
+                  ...(currentPolicy ?? data.policy),
                   subagents: { report_declassifies },
                 })
               }
@@ -453,7 +523,7 @@ export function PrivacySettingsSection() {
               containerRef={matrixRef}
               destinations={data.destinations}
               matchCounts={data.match_counts}
-              zones={data.policy.zones}
+              zones={currentZones}
             />
           ) : null}
         </div>

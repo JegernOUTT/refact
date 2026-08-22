@@ -61,12 +61,16 @@ const status: PrivacyStatusResponse = {
 };
 
 function mockPolicyEndpoints(onSave: (policy: PrivacyPolicy) => void) {
+  let currentPolicy = policy;
   server.use(
-    http.get("*/v1/privacy/policy", () => HttpResponse.json(response)),
+    http.get("*/v1/privacy/policy", () =>
+      HttpResponse.json({ ...response, policy: currentPolicy }),
+    ),
     http.get("*/v1/privacy/status", () => HttpResponse.json(status)),
     http.post("*/v1/privacy/policy", async ({ request }) => {
       const saved = (await request.json()) as PrivacyPolicy;
       onSave(saved);
+      currentPolicy = saved;
       return HttpResponse.json({
         ...response,
         policy: saved,
@@ -76,7 +80,7 @@ function mockPolicyEndpoints(onSave: (policy: PrivacyPolicy) => void) {
 }
 
 describe("PrivacySettingsSection", () => {
-  it("groups destinations by kind and saves a zone toggle from a destination row", async () => {
+  it("groups destinations by kind and saves a zone toggle only after Save changes", async () => {
     let savedPolicy: PrivacyPolicy | null = null;
     mockPolicyEndpoints((saved) => {
       savedPolicy = saved;
@@ -99,6 +103,10 @@ describe("PrivacySettingsSection", () => {
     await view.user.click(
       screen.getByRole("switch", { name: "Send secrets to trusted" }),
     );
+
+    expect(savedPolicy).toBeNull();
+
+    await view.user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
       expect(savedPolicy).not.toBeNull();
@@ -161,6 +169,107 @@ describe("PrivacySettingsSection", () => {
     expect(savedPolicy).toEqual({
       ...policy,
       blocked: ["*.blocked", "id_rsa"],
+    });
+  });
+
+  it("defers adding a zone until Save changes is clicked", async () => {
+    const savedPolicies: PrivacyPolicy[] = [];
+    mockPolicyEndpoints((saved) => savedPolicies.push(saved));
+
+    const view = render(<PrivacySettingsSection />);
+
+    await view.user.click(
+      await screen.findByRole("button", { name: "Add zone" }),
+    );
+
+    expect(savedPolicies).toHaveLength(0);
+    expect(
+      screen.getByRole("textbox", { name: "Zone name for new_zone" }),
+    ).toBeInTheDocument();
+
+    await view.user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(savedPolicies).toHaveLength(1));
+    expect(savedPolicies[0]?.zones[0]).toEqual({
+      name: "new_zone",
+      patterns: [],
+      send_to: [],
+      on_shell_read: "withhold",
+    });
+  });
+
+  it("defers zone name and pattern edits until Save changes is clicked", async () => {
+    const savedPolicies: PrivacyPolicy[] = [];
+    mockPolicyEndpoints((saved) => savedPolicies.push(saved));
+
+    const view = render(<PrivacySettingsSection />);
+    const name = await screen.findByRole("textbox", {
+      name: "Zone name for secrets",
+    });
+
+    await view.user.clear(name);
+    await view.user.type(name, "credentials{Enter}");
+    await view.user.click(
+      screen.getAllByRole("button", { name: "Add pattern" })[0],
+    );
+    await view.user.type(
+      screen.getByRole("textbox", { name: "Add pattern" }),
+      "*.pem{Enter}",
+    );
+
+    expect(savedPolicies).toHaveLength(0);
+
+    await view.user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(savedPolicies).toHaveLength(1));
+    expect(savedPolicies[0]?.zones[0]).toEqual({
+      ...policy.zones[0],
+      name: "credentials",
+      patterns: [".env*", "*.pem"],
+    });
+  });
+
+  it("preserves an unsaved added zone during an immediate blocked-pattern save", async () => {
+    const savedPolicies: PrivacyPolicy[] = [];
+    mockPolicyEndpoints((saved) => savedPolicies.push(saved));
+
+    const view = render(<PrivacySettingsSection />);
+
+    await view.user.click(
+      await screen.findByRole("button", { name: "Add zone" }),
+    );
+    await view.user.click(
+      screen.getByRole("button", { name: "Add blocked pattern" }),
+    );
+    await view.user.type(
+      screen.getByRole("textbox", { name: "Add blocked pattern" }),
+      "id_rsa{Enter}",
+    );
+
+    await waitFor(() => expect(savedPolicies).toHaveLength(1));
+    expect(savedPolicies[0]).toEqual({
+      ...policy,
+      blocked: ["*.blocked", "id_rsa"],
+    });
+    expect(
+      screen.getByRole("textbox", { name: "Zone name for new_zone" }),
+    ).toBeInTheDocument();
+
+    await view.user.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => expect(savedPolicies).toHaveLength(2));
+    expect(savedPolicies[1]).toEqual({
+      ...policy,
+      blocked: ["*.blocked", "id_rsa"],
+      zones: [
+        {
+          name: "new_zone",
+          patterns: [],
+          send_to: [],
+          on_shell_read: "withhold",
+        },
+        ...policy.zones,
+      ],
     });
   });
 

@@ -49,6 +49,7 @@ export type PrivacyPolicyResponse = {
   policy: PrivacyPolicy;
   destinations: PrivacyDestination[];
   match_counts: PrivacyMatchCounts;
+  discovery_deferred?: boolean;
   error: string | null;
   source_paths: string[];
   has_project_overrides: boolean;
