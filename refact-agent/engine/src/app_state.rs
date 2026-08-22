@@ -19,6 +19,7 @@ use crate::agents::registry::BackgroundAgentRegistry;
 use crate::buddy::actor::BuddyService;
 use crate::buddy::events::BuddyEvent;
 use crate::buddy::user_activity::UserActivityRing;
+use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 use crate::chat::types::EnqueueCommandOutcome;
 use crate::chat::trajectories::{self, TrajectoryEvent};
 use crate::chat::{self, process_command_queue, SessionsMap};
@@ -316,13 +317,16 @@ impl ToolRegistry for AppToolRegistry {
         mode: &str,
         model_id: Option<&str>,
     ) -> Vec<refact_tool_api::ToolDesc> {
-        crate::tools::tools_list::apply_mcp_lazy_filter(
+        let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
+        let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
             crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await,
         )
         .tools
         .into_iter()
         .map(|tool| tool.tool_description())
-        .collect()
+        .collect::<Vec<_>>();
+        span.finish_tool(PerfOutcome::Success, 1, tools.len() as u64, None);
+        tools
     }
 
     async fn get_tools_index_for_mode(
@@ -330,10 +334,12 @@ impl ToolRegistry for AppToolRegistry {
         mode: &str,
         model_id: Option<&str>,
     ) -> ToolRegistryIndex {
+        let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
             crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await,
         );
-        ToolRegistryIndex {
+        let tool_count = tools.tools.len() as u64;
+        let index = ToolRegistryIndex {
             tools: tools
                 .tools
                 .into_iter()
@@ -342,7 +348,9 @@ impl ToolRegistry for AppToolRegistry {
             mcp_lazy_mode: tools.mcp_lazy_mode,
             mcp_total_count: tools.mcp_total_count,
             mcp_tool_index: tools.mcp_tool_index,
-        }
+        };
+        span.finish_tool(PerfOutcome::Success, 1, tool_count, None);
+        index
     }
 
     async fn check_tool_confirmation(
@@ -363,9 +371,11 @@ impl ToolRegistry for AppToolRegistry {
                 ))
             }
         };
+        let catalog_span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
         let raw_tools =
             crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await;
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools).tools;
+        catalog_span.finish_tool(PerfOutcome::Success, 1, tools.len() as u64, None);
         let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
         for tool in tools {
             let desc = tool.tool_description();
@@ -393,9 +403,10 @@ impl ToolRegistry for AppToolRegistry {
         mode: &str,
         model_id: Option<&str>,
     ) -> Vec<ToolPolicyInfo> {
+        let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
         let raw_tools =
             crate::tools::tools_list::get_tools_for_mode(self.gcx.clone(), mode, model_id).await;
-        crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools)
+        let policy = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools)
             .tools
             .into_iter()
             .map(|tool| {
@@ -415,7 +426,9 @@ impl ToolRegistry for AppToolRegistry {
                     effective_allow_parallel,
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+        span.finish_tool(PerfOutcome::Success, 1, policy.len() as u64, None);
+        policy
     }
 
     async fn execute_tool(
@@ -435,9 +448,11 @@ impl ToolRegistry for AppToolRegistry {
             let cgcx = ccx.lock().await;
             cgcx.app.gcx.clone()
         };
+        let catalog_span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
         let raw_tools =
             crate::tools::tools_list::get_tools_for_mode(gcx.clone(), mode, model_id).await;
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools).tools;
+        catalog_span.finish_tool(PerfOutcome::Success, 1, tools.len() as u64, None);
         let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
         for mut tool in tools {
             let desc = tool.tool_description();

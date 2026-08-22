@@ -16,6 +16,7 @@ use crate::call_validation::{
 };
 use crate::constants::CHAT_TOP_N;
 use crate::postprocessing::pp_tool_results::{postprocess_tool_results, ToolBudget};
+use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome, ToolExecutionClass};
 use crate::yaml_configs::customization_registry::{
     get_mode_config, map_legacy_mode_to_id, match_tool_confirm_action,
 };
@@ -239,10 +240,13 @@ pub async fn resolve_tool_call_aliases(
     let needs_cc_native = tool_calls
         .iter()
         .any(|tc| matches!(tc.function.name.as_str(), "Grep" | "Glob"));
+    let item_count = tool_calls.len() as u64;
+    let span = perf_diagnostics::span(PerfComponent::ToolAliasResolution, None, None);
     if !registry.needs_aliasing() && !needs_cc && !needs_cc_native {
+        span.finish_tool(PerfOutcome::Success, 1, item_count, None);
         return tool_calls;
     }
-    tool_calls
+    let resolved = tool_calls
         .into_iter()
         .map(|mut tc| {
             if matches!(tc.function.name.as_str(), "Grep" | "Glob") {
@@ -285,7 +289,9 @@ pub async fn resolve_tool_call_aliases(
             }
             tc
         })
-        .collect()
+        .collect::<Vec<_>>();
+    span.finish_tool(PerfOutcome::Success, 1, item_count, None);
+    resolved
 }
 
 const EDITING_TOOLS: &[&str] = &[
@@ -489,6 +495,37 @@ fn spawn_subchat_bridge(
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use crate::chat::perf_diagnostics::{MemoryPerfSink, PerfClock, PerfRecorder};
+    use serial_test::serial;
+
+    struct TestPerfClock {
+        now: AtomicU64,
+    }
+
+    impl TestPerfClock {
+        fn new() -> Self {
+            Self {
+                now: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl PerfClock for TestPerfClock {
+        fn now_us(&self) -> u64 {
+            self.now.fetch_add(1, AtomicOrdering::SeqCst)
+        }
+    }
+
+    fn install_perf_recorder() -> (perf_diagnostics::TestRecorderGuard, Arc<MemoryPerfSink>) {
+        let sink = Arc::new(MemoryPerfSink::new());
+        let recorder = Arc::new(PerfRecorder::with_salt(
+            Arc::new(TestPerfClock::new()),
+            sink.clone(),
+            [9; 32],
+        ));
+        (perf_diagnostics::install_test_recorder(recorder), sink)
+    }
 
     fn sample_worktree() -> (tempfile::TempDir, crate::worktrees::types::WorktreeMeta) {
         let temp = tempfile::tempdir().unwrap();
@@ -699,8 +736,10 @@ mod tests {
         assert_eq!(grep.function.name, "search_pattern");
     }
 
+    #[serial]
     #[tokio::test]
     async fn test_resolve_tool_call_aliases_handles_mixed_cc_batch_per_call() {
+        let (_guard, sink) = install_perf_recorder();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx).await;
         let calls = vec![
@@ -743,6 +782,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["cat", "tree", "glob"]);
+        let components: Vec<_> = sink.events().iter().map(|event| event.component).collect();
+        assert!(components.contains(&PerfComponent::ToolCatalogBuild.as_str()));
+        assert!(components.contains(&PerfComponent::ToolAliasResolution.as_str()));
     }
 
     #[test]
@@ -901,8 +943,10 @@ mod tests {
         assert!(session.post_tool_side_effects.is_empty());
     }
 
+    #[serial]
     #[tokio::test]
     async fn invalid_escalation_argument_is_still_denied() {
+        let (_guard, sink) = install_perf_recorder();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let app = AppState::from_gcx(gcx).await;
         let thread = ThreadParams {
@@ -947,6 +991,9 @@ mod tests {
         assert!(confirmations.is_empty());
         assert_eq!(denials.len(), 1);
         assert!(denials[0].rule.contains("justification"));
+        let components: Vec<_> = sink.events().iter().map(|event| event.component).collect();
+        assert!(components.contains(&PerfComponent::ToolConfirmationPreflight.as_str()));
+        assert!(components.contains(&PerfComponent::ToolPolicyLookup.as_str()));
     }
 
     #[test]
@@ -1574,6 +1621,8 @@ pub async fn process_tool_calls_once(
 
     let mut pre_hook_blocked_ids: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    let pre_hook_item_count = tools_to_execute.len() as u64;
+    let pre_hook_span = perf_diagnostics::span(PerfComponent::ToolPreHook, None, None);
     for tc in &tools_to_execute {
         let args_value: Option<serde_json::Value> = tc
             .function
@@ -1605,6 +1654,16 @@ pub async fn process_tool_calls_once(
             session.add_message(block_message);
         }
     }
+    pre_hook_span.finish_tool(
+        if pre_hook_blocked_ids.is_empty() {
+            PerfOutcome::Success
+        } else {
+            PerfOutcome::Failure
+        },
+        pre_hook_item_count,
+        pre_hook_item_count,
+        Some(ToolExecutionClass::Serial),
+    );
     if !pre_hook_blocked_ids.is_empty() {
         tools_to_execute.retain(|tc| !pre_hook_blocked_ids.contains(&tc.id));
     }
@@ -1844,6 +1903,9 @@ pub async fn check_tools_confirmation(
     allowed_tools: &[String],
     _source_command: &str,
 ) -> (Vec<PauseReason>, Vec<PauseReason>) {
+    let preflight_span =
+        perf_diagnostics::span(PerfComponent::ToolConfirmationPreflight, None, None);
+    let item_count = tool_calls.len() as u64;
     let mut confirmations = Vec::new();
     let mut denials = Vec::new();
 
@@ -1864,11 +1926,18 @@ pub async fn check_tools_confirmation(
     ));
 
     let mode_id = map_legacy_mode_to_id(mode_id);
+    let policy_span = perf_diagnostics::span(PerfComponent::ToolPolicyLookup, None, None);
     let mode_config = get_mode_config(app.gcx.clone(), mode_id, model_id).await;
     let tool_confirm_rules = mode_config
         .as_ref()
         .map(|m| m.tool_confirm.rules.as_slice())
         .unwrap_or(&[]);
+    policy_span.finish_tool(
+        PerfOutcome::Success,
+        1,
+        tool_confirm_rules.len() as u64,
+        None,
+    );
 
     for tool_call in tool_calls {
         if thread.autonomous_no_confirm && !allowed_tools.is_empty() {
@@ -2006,6 +2075,7 @@ pub async fn check_tools_confirmation(
         }
     }
 
+    preflight_span.finish_tool(PerfOutcome::Success, item_count, item_count, None);
     (confirmations, denials)
 }
 
@@ -2128,6 +2198,7 @@ async fn execute_single_tool(
     tool_call: ChatToolCall,
     serial_registry: Arc<SerialToolRegistry>,
     allow_parallel: bool,
+    batch_size: usize,
     mode_id: &str,
     model_id: Option<&str>,
 ) -> (usize, bool, Vec<ChatMessage>, Vec<ContextFile>) {
@@ -2203,6 +2274,12 @@ async fn execute_single_tool(
         }
     }
 
+    let execution_class = if allow_parallel {
+        ToolExecutionClass::Parallel
+    } else {
+        ToolExecutionClass::Serial
+    };
+    let runtime_span = perf_diagnostics::span(PerfComponent::ToolRuntime, None, None);
     let (idx, had_corrections, mut msgs, files) = match app
         .tool_registry
         .execute_tool(
@@ -2222,6 +2299,12 @@ async fn execute_single_tool(
             result.context_files,
         ),
         Ok(None) => {
+            runtime_span.finish_tool(
+                PerfOutcome::Failure,
+                batch_size as u64,
+                1,
+                Some(execution_class),
+            );
             return (
                 idx,
                 true,
@@ -2241,6 +2324,12 @@ async fn execute_single_tool(
         }
         Err(e) => {
             info!("Tool execution failed: {}: {}", tool_call.function.name, e);
+            runtime_span.finish_tool(
+                PerfOutcome::Failure,
+                batch_size as u64,
+                1,
+                Some(execution_class),
+            );
             return (
                 idx,
                 true,
@@ -2256,6 +2345,12 @@ async fn execute_single_tool(
             );
         }
     };
+    runtime_span.finish_tool(
+        PerfOutcome::Success,
+        batch_size as u64,
+        1,
+        Some(execution_class),
+    );
 
     for msg in &mut msgs {
         if msg.message_id.is_empty() {
@@ -2288,8 +2383,15 @@ async fn execute_single_tool(
         user_prompt: None,
         extra: std::collections::HashMap::new(),
     };
+    let post_hook_span = perf_diagnostics::span(PerfComponent::ToolPostHook, None, None);
     let post_results = run_hooks(app.clone(), HookEvent::PostToolUse, post_payload).await;
     if let Some(reason) = first_block_reason(&post_results) {
+        post_hook_span.finish_tool(
+            PerfOutcome::Failure,
+            batch_size as u64,
+            1,
+            Some(execution_class),
+        );
         return (
             idx,
             true,
@@ -2304,6 +2406,12 @@ async fn execute_single_tool(
             vec![],
         );
     }
+    post_hook_span.finish_tool(
+        PerfOutcome::Success,
+        batch_size as u64,
+        1,
+        Some(execution_class),
+    );
 
     (idx, had_corrections, msgs, files)
 }
@@ -2320,10 +2428,12 @@ async fn execute_tools_inner(
 ) -> (Vec<ChatMessage>, bool) {
     let max_parallel = limits().max_parallel_tools.max(1);
 
+    let policy_span = perf_diagnostics::span(PerfComponent::ToolPolicyLookup, None, None);
     let available_tools = app
         .tool_registry
         .get_tool_policy_info(mode_id, model_id)
         .await;
+    policy_span.finish_tool(PerfOutcome::Success, 1, available_tools.len() as u64, None);
 
     let mut tool_allow_parallel: std::collections::HashMap<String, bool> =
         std::collections::HashMap::new();
@@ -2418,6 +2528,7 @@ async fn execute_tools_inner(
                 tool_call.clone(),
                 serial_registry.clone(),
                 false,
+                1,
                 mode_id,
                 model_id,
             )
@@ -2440,6 +2551,7 @@ async fn execute_tools_inner(
         all_results.extend(batch_results);
     }
 
+    let merge_span = perf_diagnostics::span(PerfComponent::ToolResultMerge, None, None);
     all_results.sort_by_key(|(idx, _, _, _)| *idx);
 
     let mut tool_messages: Vec<ChatMessage> = Vec::new();
@@ -2452,6 +2564,13 @@ async fn execute_tools_inner(
         tool_messages.extend(msgs);
         context_files.extend(files);
     }
+    let merged_item_count = tool_messages.len().saturating_add(context_files.len()) as u64;
+    merge_span.finish_tool(
+        PerfOutcome::Success,
+        tool_calls.len() as u64,
+        merged_item_count,
+        None,
+    );
 
     let pp_settings = options.postprocess_settings.unwrap_or_default();
 
@@ -2491,6 +2610,7 @@ async fn execute_parallel_batch(
     model_id: Option<&str>,
 ) -> Vec<(usize, bool, Vec<ChatMessage>, Vec<ContextFile>)> {
     let semaphore = Arc::new(Semaphore::new(max_parallel));
+    let batch_size = batch.len();
 
     let futures: Vec<_> = batch
         .iter()
@@ -2501,11 +2621,20 @@ async fn execute_parallel_batch(
             let serial_registry = serial_registry.clone();
             let tool_call = tool_call.clone();
             let idx = *idx;
+            let batch_size = batch_size;
             let mode_id = mode_id.to_string();
             let model_id = model_id.map(|s| s.to_string());
 
             async move {
+                let semaphore_span =
+                    perf_diagnostics::span(PerfComponent::ToolSemaphoreWait, None, None);
                 let _permit = semaphore.acquire().await.unwrap();
+                semaphore_span.finish_tool(
+                    PerfOutcome::Success,
+                    batch_size as u64,
+                    1,
+                    Some(ToolExecutionClass::Parallel),
+                );
                 execute_single_tool(
                     gcx,
                     ccx,
@@ -2513,6 +2642,7 @@ async fn execute_parallel_batch(
                     tool_call,
                     serial_registry,
                     true,
+                    batch_size,
                     &mode_id,
                     model_id.as_deref(),
                 )

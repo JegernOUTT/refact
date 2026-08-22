@@ -28,10 +28,20 @@ pub enum PerfComponent {
     SseBroadcast,
     SseLagged,
     ToolConfirmationWait,
+    ToolCatalogBuild,
+    ToolAliasResolution,
+    ToolConfirmationPreflight,
+    ToolPolicyLookup,
+    ToolSemaphoreWait,
+    ToolRuntime,
+    ToolPreHook,
+    ToolPostHook,
+    ToolResultPostprocess,
+    ToolResultMerge,
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 24] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -46,6 +56,16 @@ impl PerfComponent {
         Self::SseBroadcast,
         Self::SseLagged,
         Self::ToolConfirmationWait,
+        Self::ToolCatalogBuild,
+        Self::ToolAliasResolution,
+        Self::ToolConfirmationPreflight,
+        Self::ToolPolicyLookup,
+        Self::ToolSemaphoreWait,
+        Self::ToolRuntime,
+        Self::ToolPreHook,
+        Self::ToolPostHook,
+        Self::ToolResultPostprocess,
+        Self::ToolResultMerge,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -64,7 +84,30 @@ impl PerfComponent {
             Self::SseBroadcast => "sse.broadcast",
             Self::SseLagged => "sse.lagged",
             Self::ToolConfirmationWait => "tool.confirmation_wait",
+            Self::ToolCatalogBuild => "tool.catalog_build",
+            Self::ToolAliasResolution => "tool.alias_resolution",
+            Self::ToolConfirmationPreflight => "tool.confirmation_preflight",
+            Self::ToolPolicyLookup => "tool.policy_lookup",
+            Self::ToolSemaphoreWait => "tool.semaphore_wait",
+            Self::ToolRuntime => "tool.runtime",
+            Self::ToolPreHook => "tool.pre_hook",
+            Self::ToolPostHook => "tool.post_hook",
+            Self::ToolResultPostprocess => "tool.result_postprocess",
+            Self::ToolResultMerge => "tool.result_merge",
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ToolExecutionClass {
+    Serial = 0,
+    Parallel = 1,
+}
+
+impl ToolExecutionClass {
+    pub const fn as_u8(self) -> u8 {
+        self as u8
     }
 }
 
@@ -97,6 +140,10 @@ pub struct PerfEvent {
     pub trajectory_version: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_depth: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_class: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_id_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -147,6 +194,8 @@ impl PerfSink for TracingSink {
             item_count = ?event.item_count,
             trajectory_version = ?event.trajectory_version,
             queue_depth = ?event.queue_depth,
+            batch_size = ?event.batch_size,
+            execution_class = ?event.execution_class,
             chat_id_hash = ?event.chat_id_hash,
             path_hash = ?event.path_hash,
             "trajectory_performance"
@@ -238,6 +287,45 @@ impl PerfSpan {
         trajectory_version: Option<u64>,
         queue_depth: Option<u64>,
     ) {
+        self.finish_with_metrics(
+            outcome,
+            size_bytes,
+            item_count,
+            trajectory_version,
+            queue_depth,
+            None,
+            None,
+        );
+    }
+
+    pub fn finish_tool(
+        self,
+        outcome: PerfOutcome,
+        batch_size: u64,
+        item_count: u64,
+        execution_class: Option<ToolExecutionClass>,
+    ) {
+        self.finish_with_metrics(
+            outcome,
+            None,
+            Some(item_count),
+            None,
+            None,
+            Some(batch_size),
+            execution_class.map(ToolExecutionClass::as_u8),
+        );
+    }
+
+    fn finish_with_metrics(
+        self,
+        outcome: PerfOutcome,
+        size_bytes: Option<u64>,
+        item_count: Option<u64>,
+        trajectory_version: Option<u64>,
+        queue_depth: Option<u64>,
+        batch_size: Option<u64>,
+        execution_class: Option<u8>,
+    ) {
         let Self::Active(active) = self else {
             return;
         };
@@ -256,6 +344,8 @@ impl PerfSpan {
             item_count,
             trajectory_version,
             queue_depth,
+            batch_size,
+            execution_class,
             chat_id_hash: active.chat_id_hash,
             path_hash: active.path_hash,
         });
@@ -330,6 +420,8 @@ pub fn record(
         item_count,
         trajectory_version: None,
         queue_depth,
+        batch_size: None,
+        execution_class: None,
         chat_id_hash: chat_id.map(|chat_id| recorder.hash_bytes(chat_id.as_bytes())),
         path_hash: None,
     });
@@ -563,7 +655,7 @@ mod tests {
             .iter()
             .map(|component| component.as_str())
             .collect();
-        assert_eq!(labels.len(), 14);
+        assert_eq!(labels.len(), 24);
         assert!(labels.iter().all(|label| label.len() <= 32));
         assert!(labels.contains(&"command.queue_wait"));
         assert!(labels.contains(&"stream.first_delta"));
@@ -573,5 +665,35 @@ mod tests {
         assert!(labels.contains(&"tool.confirmation_wait"));
         assert_eq!(PerfOutcome::Success.as_str(), "success");
         assert_eq!(PerfOutcome::Failure.as_str(), "failure");
+    }
+
+    #[test]
+    fn tool_span_records_numeric_batch_and_execution_class() {
+        let clock = Arc::new(TestClock::new(100));
+        let sink = Arc::new(MemoryPerfSink::new());
+        let recorder = Arc::new(PerfRecorder::with_salt(
+            clock.clone(),
+            sink.clone(),
+            [7; 32],
+        ));
+        let span = span_with_recorder(Some(recorder), PerfComponent::ToolRuntime, None, None);
+
+        clock.advance(7);
+        span.finish_tool(
+            PerfOutcome::Success,
+            3,
+            1,
+            Some(ToolExecutionClass::Parallel),
+        );
+
+        let event = sink.events().pop().expect("tool event");
+        assert_eq!(event.component, "tool.runtime");
+        assert_eq!(event.elapsed_us, 7);
+        assert_eq!(event.batch_size, Some(3));
+        assert_eq!(event.item_count, Some(1));
+        assert_eq!(
+            event.execution_class,
+            Some(ToolExecutionClass::Parallel.as_u8())
+        );
     }
 }
