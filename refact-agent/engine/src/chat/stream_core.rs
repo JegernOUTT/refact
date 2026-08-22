@@ -1082,12 +1082,20 @@ fn process_stream_event_data<C: StreamCollector>(
                 });
             }
             LlmStreamDelta::AddCitation { citation } => {
-                acc.citations.push(citation.clone());
-                ops.push(DeltaOp::AddCitation { citation });
+                let dedupe =
+                    citation.get("provider").and_then(Value::as_str) == Some("google_cloud_code");
+                if !dedupe || !acc.citations.contains(&citation) {
+                    acc.citations.push(citation.clone());
+                    ops.push(DeltaOp::AddCitation { citation });
+                }
             }
             LlmStreamDelta::AddServerContentBlock { block } => {
-                acc.server_content_blocks.push(block.clone());
-                ops.push(DeltaOp::AddServerContentBlock { block });
+                let dedupe = block.get("type").and_then(Value::as_str)
+                    == Some("google_cloud_code_inline_data");
+                if !dedupe || !acc.server_content_blocks.contains(&block) {
+                    acc.server_content_blocks.push(block.clone());
+                    ops.push(DeltaOp::AddServerContentBlock { block });
+                }
             }
             LlmStreamDelta::SetUsage { usage } => {
                 acc.usage = Some(merge_usage(acc.usage.take(), usage.clone()));
@@ -4697,6 +4705,43 @@ mod tests {
             dst.len(),
             2,
             "Blocks with no dedup key should always append"
+        );
+    }
+
+    #[test]
+    fn merge_extra_appends_google_cloud_code_parts_across_chunks() {
+        let adapter = get_adapter(WireFormat::GoogleCloudCode);
+        let mut accumulators = vec![ChoiceAccumulator::default()];
+        let mut collector = ReplayCollector::default();
+        let first = json!({
+            "response": {"candidates": [{"content": {"parts": [{"text": "first"}]}}]}
+        });
+        let second = json!({
+            "response": {"candidates": [{"content": {"parts": [{"text": "second"}]}}]}
+        });
+
+        assert!(!process_stream_event_data(
+            adapter,
+            "",
+            &first.to_string(),
+            &mut accumulators,
+            &mut collector,
+            true,
+        )
+        .unwrap());
+        assert!(!process_stream_event_data(
+            adapter,
+            "",
+            &second.to_string(),
+            &mut accumulators,
+            &mut collector,
+            true,
+        )
+        .unwrap());
+
+        assert_eq!(
+            accumulators[0].extra["_google_cloud_code_parts"],
+            json!([{"text": "first"}, {"text": "second"}])
         );
     }
 

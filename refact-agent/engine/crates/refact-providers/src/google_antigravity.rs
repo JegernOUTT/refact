@@ -17,11 +17,11 @@ use crate::traits::{
 };
 
 const CLOUDCODE_PROJECT_HEADER: &str = "x-refact-internal-cloudcode-project";
-const CLOUDCODE_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
+const CLOUDCODE_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
 const CLOUDCODE_MODELS_URL: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 const CLOUDCODE_QUOTA_URL: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GoogleAntigravityQuotaSummary {
@@ -202,8 +202,23 @@ impl GoogleAntigravityProvider {
                     n_ctx: 128_000,
                     supports_tools: true,
                     supports_parallel_tools: true,
+                    supports_thinking_budget: true,
                     ..Default::default()
                 });
+            let mut caps = caps;
+            let supports_thinking = metadata
+                .get("supportsThinking")
+                .or_else(|| metadata.get("supports_thinking"))
+                .and_then(|value| value.as_bool());
+            caps.supports_thinking_budget = supports_thinking.unwrap_or_else(|| {
+                caps.supports_thinking_budget
+                    || id.starts_with("claude-")
+                    || id.starts_with("gemini-")
+            });
+            if supports_thinking == Some(false) {
+                caps.supports_adaptive_thinking_budget = false;
+            }
+            caps.supports_cache_control = false;
             let pricing = self
                 .custom_model_pricing(id)
                 .or_else(|| caps.pricing.clone());
@@ -419,7 +434,7 @@ available:
             auth_token,
             tokenizer_api_key: String::new(),
             extra_headers,
-            supports_cache_control: true,
+            supports_cache_control: false,
             chat_models: Vec::new(),
             completion_models: Vec::new(),
             embedding_model: None,
@@ -469,6 +484,20 @@ available:
         self.custom_models
             .get(model_id)
             .and_then(|config| config.pricing.clone())
+    }
+
+    fn get_available_models_from_caps(
+        &self,
+        model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
+        let mut models = crate::traits::available_models_from_caps_for_provider(self, model_caps);
+        for model in &mut models {
+            if model.id.starts_with("claude-") || model.id.starts_with("gemini-") {
+                model.supports_thinking_budget = true;
+            }
+            model.supports_cache_control = false;
+        }
+        models
     }
 
     async fn fetch_available_models(
@@ -595,6 +624,49 @@ mod tests {
         assert_eq!(claude.display_name.as_deref(), Some("Claude Opus 4.6"));
         assert!(claude.enabled);
         assert!(claude.supports_tools);
+        assert!(claude.supports_thinking_budget);
+        assert!(!claude.supports_cache_control);
+    }
+
+    #[test]
+    fn live_catalog_honors_explicit_thinking_false() {
+        let provider = GoogleAntigravityProvider::default();
+        let response = json!({
+            "models": {
+                "gemini-plain": {
+                    "displayName": "Gemini Plain",
+                    "supportsThinking": false
+                }
+            }
+        });
+
+        let models = provider
+            .available_models_from_live_response(&response, &HashMap::new())
+            .unwrap();
+
+        assert!(!models[0].supports_thinking_budget);
+        assert!(!models[0].supports_adaptive_thinking_budget);
+    }
+
+    #[test]
+    fn fallback_catalog_enables_signed_reasoning_for_antigravity_models() {
+        let provider = GoogleAntigravityProvider {
+            enabled_models: vec!["claude-sonnet-4-6".to_string()],
+            ..Default::default()
+        };
+        let caps = HashMap::from([(
+            "google_antigravity/claude-sonnet-4-6".to_string(),
+            ModelCapabilities {
+                n_ctx: 128_000,
+                supports_tools: true,
+                ..Default::default()
+            },
+        )]);
+
+        let models = provider.get_available_models_from_caps(&caps);
+
+        assert!(models[0].supports_thinking_budget);
+        assert!(!models[0].supports_cache_control);
     }
 
     #[test]
@@ -612,14 +684,17 @@ mod tests {
 
         let runtime = provider.build_runtime().unwrap();
 
-        assert_eq!(runtime.chat_endpoint, "https://cloudcode-pa.googleapis.com");
+        assert_eq!(
+            runtime.chat_endpoint,
+            "https://daily-cloudcode-pa.googleapis.com"
+        );
         assert_eq!(
             CLOUDCODE_MODELS_URL,
-            "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
         );
         assert_eq!(
             CLOUDCODE_QUOTA_URL,
-            "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+            "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
         );
         assert_eq!(runtime.auth_token, "oauth-access-token");
         assert_eq!(

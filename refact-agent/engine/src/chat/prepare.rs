@@ -636,10 +636,31 @@ fn strip_thinking_blocks_if_disabled(
         || model_record.supports_thinking_budget
         || model_record.supports_adaptive_thinking_budget;
     if !has_reasoning || !is_thinking_enabled(sampling_parameters) {
+        let preserve_cloud_code_signatures =
+            model_record.base.wire_format == WireFormat::GoogleCloudCode;
         messages
             .into_iter()
             .map(|mut msg| {
-                msg.thinking_blocks = None;
+                msg.thinking_blocks = if preserve_cloud_code_signatures {
+                    msg.thinking_blocks
+                        .take()
+                        .map(|blocks| {
+                            blocks
+                                .into_iter()
+                                .filter(|block| {
+                                    block.get("provider").and_then(Value::as_str)
+                                        == Some("google_cloud_code")
+                                        && block
+                                            .get("signature")
+                                            .and_then(Value::as_str)
+                                            .is_some_and(|signature| !signature.is_empty())
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .filter(|blocks| !blocks.is_empty())
+                } else {
+                    None
+                };
                 msg.reasoning_content = None;
                 msg
             })
@@ -1465,6 +1486,38 @@ mod tests {
         assert_eq!(result[0].reasoning_content, None);
         assert_eq!(result[0].citations.len(), 1);
         assert!(result[0].thinking_blocks.is_none());
+    }
+
+    #[test]
+    fn test_strip_thinking_blocks_preserves_cloud_code_signatures() {
+        let mut model = make_model_record_no_reasoning();
+        model.base.wire_format = WireFormat::GoogleCloudCode;
+        let params = make_sampling_params();
+        let msgs = vec![ChatMessage {
+            reasoning_content: Some("hidden reasoning".into()),
+            thinking_blocks: Some(vec![
+                serde_json::json!({
+                    "type": "thinking",
+                    "provider": "google_cloud_code",
+                    "thinking": "signed reasoning",
+                    "signature": "sig-google"
+                }),
+                serde_json::json!({
+                    "type": "thinking",
+                    "thinking": "unsigned reasoning"
+                }),
+            ]),
+            content: ChatContent::SimpleText("answer".into()),
+            ..Default::default()
+        }];
+
+        let result = strip_thinking_blocks_if_disabled(msgs, &params, &model);
+
+        assert_eq!(result[0].reasoning_content, None);
+        let blocks = result[0].thinking_blocks.as_ref().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["provider"], "google_cloud_code");
+        assert_eq!(blocks[0]["signature"], "sig-google");
     }
 
     #[test]

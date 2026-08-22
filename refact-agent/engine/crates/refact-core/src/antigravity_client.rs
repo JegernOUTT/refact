@@ -1,4 +1,5 @@
-pub const ANTIGRAVITY_VERSION: &str = "1.1.16";
+pub const ANTIGRAVITY_VERSION: &str = "1.1.18";
+pub const ANTIGRAVITY_CLIENT_REVISION: &str = "968774718";
 
 pub fn antigravity_platform() -> &'static str {
     antigravity_platform_for(std::env::consts::OS, std::env::consts::ARCH)
@@ -15,37 +16,37 @@ fn antigravity_platform_for(os: &str, arch: &str) -> &'static str {
     }
 }
 
-pub fn antigravity_user_agent_platform() -> &'static str {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("windows", _) => "windows/amd64",
-        ("macos", "aarch64") => "darwin/arm64",
-        ("macos", _) => "darwin/amd64",
-        _ => "linux/amd64",
+fn antigravity_user_agent_os(os: &str) -> &'static str {
+    match os {
+        "windows" => "windows",
+        "macos" => "darwin",
+        _ => "linux",
     }
 }
 
+fn antigravity_user_agent_arch(arch: &str) -> &'static str {
+    match arch {
+        "aarch64" => "arm64",
+        _ => "amd64",
+    }
+}
+
+pub fn antigravity_user_agent() -> String {
+    antigravity_user_agent_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn antigravity_user_agent_for(os: &str, arch: &str) -> String {
+    format!(
+        "antigravity/cli/{} (aidev_client; os_type={}; arch={}; cl={}; auth_method=consumer)",
+        ANTIGRAVITY_VERSION,
+        antigravity_user_agent_os(os),
+        antigravity_user_agent_arch(arch),
+        ANTIGRAVITY_CLIENT_REVISION,
+    )
+}
+
 pub fn antigravity_headers() -> Vec<(String, String)> {
-    vec![
-        (
-            "User-Agent".to_string(),
-            format!(
-                "antigravity/{} {}",
-                ANTIGRAVITY_VERSION,
-                antigravity_user_agent_platform()
-            ),
-        ),
-        (
-            "X-Goog-Api-Client".to_string(),
-            "google-cloud-sdk vscode_cloudshelleditor/0.1".to_string(),
-        ),
-        (
-            "Client-Metadata".to_string(),
-            format!(
-                "{{\"ideType\":\"ANTIGRAVITY\",\"platform\":\"{}\",\"pluginType\":\"GEMINI\"}}",
-                antigravity_platform()
-            ),
-        ),
-    ]
+    vec![("User-Agent".to_string(), antigravity_user_agent())]
 }
 
 #[cfg(test)]
@@ -69,22 +70,17 @@ mod tests {
     }
 
     #[test]
-    fn client_metadata_uses_the_platform_enum() {
-        let metadata = antigravity_headers()
-            .into_iter()
-            .find_map(|(name, value)| (name == "Client-Metadata").then_some(value))
-            .unwrap();
-        let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
-        let platform = metadata["platform"].as_str().unwrap();
-
-        assert!(matches!(
-            platform,
-            "WINDOWS_AMD64"
-                | "DARWIN_AMD64"
-                | "DARWIN_ARM64"
-                | "LINUX_AMD64"
-                | "LINUX_ARM64"
-                | "PLATFORM_UNSPECIFIED"
-        ));
+    fn headers_match_the_official_cli_fingerprint() {
+        assert_eq!(
+            antigravity_user_agent_for("linux", "x86_64"),
+            "antigravity/cli/1.1.18 (aidev_client; os_type=linux; arch=amd64; cl=968774718; auth_method=consumer)"
+        );
+        assert_eq!(
+            antigravity_user_agent_for("macos", "aarch64"),
+            "antigravity/cli/1.1.18 (aidev_client; os_type=darwin; arch=arm64; cl=968774718; auth_method=consumer)"
+        );
+        let headers = antigravity_headers();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].0, "User-Agent");
     }
 }
