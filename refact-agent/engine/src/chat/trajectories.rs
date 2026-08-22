@@ -319,7 +319,7 @@ impl LoadedTrajectory {
 
 pub use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 
-fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot {
+pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> TrajectorySnapshot {
     let span = perf_diagnostics::span(
         PerfComponent::TrajectorySnapshot,
         Some(&session.chat_id),

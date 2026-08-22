@@ -1,10 +1,33 @@
 use std::collections::BTreeSet;
-use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use tokio::runtime::Builder;
+use tokio::sync::Mutex as AMutex;
+
+use crate::app_state::{AppState, AppToolRegistry, FixtureToolFactory};
+use crate::at_commands::at_commands::AtCommandsContext;
+use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
+use crate::chat::perf_diagnostics::{
+    self, MemoryPerfSink, PerfClock, PerfComponent, PerfEvent, PerfRecorder,
+};
+use crate::chat::prepare::build_canonical_openai_tools;
+use crate::chat::trajectories::{
+    find_trajectory_path, load_trajectory_for_chat, save_trajectory_snapshot,
+    trajectory_snapshot_from_session,
+};
+use crate::chat::trajectory_index::{
+    rebuild_trajectory_index_from_disk, upsert_trajectory_index_entry_from_owned_value,
+};
+use crate::files_correction::canonicalize_normalized_path;
+use crate::global_context::SharedGlobalContext;
+use crate::tools::tools_description::{
+    MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
+};
 
 pub const CONCURRENT_CHAT_BENCHMARK_SCHEMA: &str = "refact.concurrent_chat_benchmark.v1";
 const QUICK_HISTORY_BYTES_CAP: usize = 8 * 1024;
@@ -26,24 +49,6 @@ impl HarnessMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HarnessVariant {
-    Legacy,
-    Optimized,
-}
-
-impl HarnessVariant {
-    pub const ALL: [Self; 2] = [Self::Legacy, Self::Optimized];
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Legacy => "legacy",
-            Self::Optimized => "optimized",
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConcurrentChatWorkload {
     pub id: String,
@@ -51,12 +56,8 @@ pub struct ConcurrentChatWorkload {
     pub chat_count: u8,
     pub history_mib: u8,
     pub tool_descriptors: u16,
-    pub same_directory_writes: bool,
-    pub different_directory_writes: bool,
-    pub rapid_subchat_checkpoints: u64,
-    pub active_chats: u8,
-    pub background_chats: u8,
-    pub sequence_gap_snapshot_recovery: bool,
+    pub same_index_directory_contention: bool,
+    pub rapid_same_chat_checkpoints: u64,
 }
 
 impl ConcurrentChatWorkload {
@@ -88,12 +89,8 @@ impl ConcurrentChatWorkload {
             chat_count,
             history_mib,
             tool_descriptors,
-            same_directory_writes: true,
-            different_directory_writes: true,
-            rapid_subchat_checkpoints: RAPID_CHECKPOINTS_PER_CHAT,
-            active_chats: 1,
-            background_chats: chat_count.saturating_sub(1),
-            sequence_gap_snapshot_recovery: true,
+            same_index_directory_contention: true,
+            rapid_same_chat_checkpoints: RAPID_CHECKPOINTS_PER_CHAT,
         }
     }
 
@@ -155,33 +152,73 @@ impl BenchmarkOptions {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct BenchmarkCounters {
-    pub write_count: u64,
-    pub write_bytes: u64,
-    pub same_directory_writes: u64,
-    pub different_directory_writes: u64,
-    pub subchat_checkpoints: u64,
-    pub index_waits: u64,
-    pub index_rewrites: u64,
+    pub save_calls: u64,
+    pub rapid_checkpoint_saves: u64,
+    pub trajectory_files: u64,
+    pub measured_files_written: u64,
+    pub measured_bytes_written: u64,
+    pub index_rebuilds: u64,
     pub catalog_builds: u64,
-    pub tool_descriptor_visits: u64,
-    pub watcher_events: u64,
-    pub vecdb_enqueues: u64,
-    pub gui_flushes: u64,
-    pub gui_reducer_events: u64,
-    pub sequence_gap_snapshot_recoveries: u64,
+    pub catalog_tool_descriptors: u64,
+    pub catalog_policy_entries: u64,
     pub errors: u64,
-    pub lost_events: u64,
-    pub duplicate_events: u64,
-    pub out_of_order_events: u64,
 }
 
 impl BenchmarkCounters {
     fn operations(&self) -> u64 {
-        self.write_count
-            .saturating_add(self.tool_descriptor_visits)
-            .saturating_add(self.gui_reducer_events)
+        self.save_calls
+            .saturating_add(self.index_rebuilds)
+            .saturating_add(self.catalog_builds)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct DiagnosticCounters {
+    pub trajectory_snapshot: u64,
+    pub trajectory_serialize: u64,
+    pub trajectory_atomic_write: u64,
+    pub trajectory_commit: u64,
+    pub trajectory_index_lock_wait: u64,
+    pub trajectory_index_read: u64,
+    pub trajectory_index_write: u64,
+    pub trajectory_index_rebuild: u64,
+    pub tool_catalog_build: u64,
+}
+
+impl DiagnosticCounters {
+    fn count(events: &[PerfEvent], component: PerfComponent) -> u64 {
+        events
+            .iter()
+            .filter(|event| event.component == component.as_str())
+            .count() as u64
+    }
+
+    fn from_events(events: &[PerfEvent]) -> Self {
+        Self {
+            trajectory_snapshot: Self::count(events, PerfComponent::TrajectorySnapshot),
+            trajectory_serialize: Self::count(events, PerfComponent::TrajectorySerialize),
+            trajectory_atomic_write: Self::count(events, PerfComponent::TrajectoryAtomicWrite),
+            trajectory_commit: Self::count(events, PerfComponent::TrajectoryCommit),
+            trajectory_index_lock_wait: Self::count(events, PerfComponent::TrajectoryIndexLockWait),
+            trajectory_index_read: Self::count(events, PerfComponent::TrajectoryIndexRead),
+            trajectory_index_write: Self::count(events, PerfComponent::TrajectoryIndexWrite),
+            trajectory_index_rebuild: Self::count(events, PerfComponent::TrajectoryIndexRebuild),
+            tool_catalog_build: Self::count(events, PerfComponent::ToolCatalogBuild),
+        }
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        self.trajectory_snapshot += other.trajectory_snapshot;
+        self.trajectory_serialize += other.trajectory_serialize;
+        self.trajectory_atomic_write += other.trajectory_atomic_write;
+        self.trajectory_commit += other.trajectory_commit;
+        self.trajectory_index_lock_wait += other.trajectory_index_lock_wait;
+        self.trajectory_index_read += other.trajectory_index_read;
+        self.trajectory_index_write += other.trajectory_index_write;
+        self.trajectory_index_rebuild += other.trajectory_index_rebuild;
+        self.tool_catalog_build += other.tool_catalog_build;
     }
 }
 
@@ -248,11 +285,18 @@ pub struct MachineMetrics {
 pub struct VariantBenchmarkReport {
     pub variant: String,
     pub workload_signature: String,
+    pub logical_history_bytes: u64,
     pub materialized_history_bytes: usize,
     pub counters: BenchmarkCounters,
-    pub latency: LatencySummary,
-    pub gui_flush_latency: LatencySummary,
-    pub gui_reducer_latency: LatencySummary,
+    pub diagnostics: DiagnosticCounters,
+    pub snapshot_latency: LatencySummary,
+    pub serialize_latency: LatencySummary,
+    pub atomic_write_latency: LatencySummary,
+    pub commit_latency: LatencySummary,
+    pub index_wait_latency: LatencySummary,
+    pub index_write_latency: LatencySummary,
+    pub catalog_acquisition_latency: LatencySummary,
+    pub total_operation_latency: LatencySummary,
     pub throughput_operations_per_sec: f64,
     pub machine: MachineMetrics,
 }
@@ -274,37 +318,102 @@ pub struct ConcurrentChatBenchmarkReport {
 
 struct Sample {
     counters: BenchmarkCounters,
-    elapsed_us: u64,
-    gui_flush_elapsed_us: u64,
-    gui_reducer_elapsed_us: u64,
+    diagnostics: DiagnosticCounters,
+    snapshot_elapsed_us: u64,
+    serialize_elapsed_us: u64,
+    atomic_write_elapsed_us: u64,
+    commit_elapsed_us: u64,
+    index_wait_elapsed_us: u64,
+    index_write_elapsed_us: u64,
+    catalog_elapsed_us: u64,
+    total_elapsed_us: u64,
+}
+
+#[derive(Clone)]
+struct BenchmarkFixture {
+    _temp_dir: Arc<tempfile::TempDir>,
+    workspace: PathBuf,
+    gcx: SharedGlobalContext,
+    app: AppState,
+}
+
+impl BenchmarkFixture {
+    async fn new(tool_count: usize) -> Result<Self, String> {
+        let temp_dir = Arc::new(
+            tempfile::tempdir()
+                .map_err(|error| format!("failed to create benchmark fixture: {error}"))?,
+        );
+        let workspace = temp_dir.path().join("workspace");
+        let cache_dir = temp_dir.path().join("cache");
+        let config_dir = temp_dir.path().join("config");
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .map_err(|error| format!("failed to create benchmark workspace: {error}"))?;
+        tokio::fs::create_dir_all(workspace.join(".refact").join("trajectories"))
+            .await
+            .map_err(|error| format!("failed to create benchmark trajectories root: {error}"))?;
+        let gcx =
+            crate::global_context::tests::make_test_gcx_with_dirs(cache_dir, config_dir).await;
+        *gcx.documents_state
+            .workspace_folders
+            .lock()
+            .map_err(|_| "benchmark workspace folders lock poisoned".to_string())? =
+            vec![canonicalize_normalized_path(workspace.clone())];
+        let mut app = AppState::from_gcx(gcx.clone()).await;
+        app.tool_registry = Arc::new(AppToolRegistry::with_fixture_tool_factory(
+            gcx.clone(),
+            deterministic_tool_factory(tool_count),
+        ));
+        Ok(Self {
+            _temp_dir: temp_dir,
+            workspace,
+            gcx,
+            app,
+        })
+    }
 }
 
 pub fn run_benchmark(options: BenchmarkOptions) -> Result<ConcurrentChatBenchmarkReport, String> {
     if options.measured_samples == 0 {
         return Err("measured_samples must be greater than zero".to_string());
     }
-    let workloads = ConcurrentChatWorkload::fixed_matrix()
-        .into_iter()
-        .map(|workload| run_workload(&workload, &options))
-        .collect::<Result<Vec<_>, _>>()?;
+    Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("failed to start benchmark Tokio runtime: {error}"))?
+        .block_on(run_benchmark_async(options))
+}
+
+async fn run_benchmark_async(
+    options: BenchmarkOptions,
+) -> Result<ConcurrentChatBenchmarkReport, String> {
+    let workloads = ConcurrentChatWorkload::fixed_matrix();
+    let mut reports = Vec::with_capacity(workloads.len());
+    for workload in workloads {
+        reports.push(run_workload(&workload, &options).await?);
+    }
     Ok(ConcurrentChatBenchmarkReport {
         schema: CONCURRENT_CHAT_BENCHMARK_SCHEMA,
         mode: options.mode.as_str().to_string(),
         warmup_samples: options.warmup_samples,
         measured_samples: options.measured_samples,
-        workloads,
+        workloads: reports,
     })
 }
 
 pub fn run_ci_fixture() -> Result<WorkloadBenchmarkReport, String> {
-    run_workload(
-        &ConcurrentChatWorkload::ci_fixture(),
-        &BenchmarkOptions {
-            mode: HarnessMode::Quick,
-            warmup_samples: 1,
-            measured_samples: 2,
-        },
-    )
+    Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("failed to start benchmark Tokio runtime: {error}"))?
+        .block_on(run_workload(
+            &ConcurrentChatWorkload::ci_fixture(),
+            &BenchmarkOptions {
+                mode: HarnessMode::Quick,
+                warmup_samples: 0,
+                measured_samples: 1,
+            },
+        ))
 }
 
 pub fn render_json(report: &ConcurrentChatBenchmarkReport) -> Result<String, String> {
@@ -339,73 +448,74 @@ pub fn validate_report_json(json: &str) -> Result<(), String> {
         let workload = workload
             .as_object()
             .ok_or_else(|| "benchmark workload must be an object".to_string())?;
-        if !workload.contains_key("workload") || !workload.contains_key("variants") {
-            return Err("benchmark workload is incomplete".to_string());
-        }
         let variants = workload
             .get("variants")
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| "benchmark variants must be an array".to_string())?;
-        if variants.len() != HarnessVariant::ALL.len() {
-            return Err("benchmark workload must include both feature variants".to_string());
+        if variants.len() != 1
+            || variants[0]
+                .get("variant")
+                .and_then(serde_json::Value::as_str)
+                != Some("legacy")
+        {
+            return Err("benchmark workload must include exactly the legacy variant".to_string());
         }
-        for variant in variants {
-            let variant = variant
-                .as_object()
-                .ok_or_else(|| "benchmark variant must be an object".to_string())?;
-            for key in [
-                "variant",
-                "workload_signature",
-                "counters",
-                "latency",
-                "gui_flush_latency",
-                "gui_reducer_latency",
-                "throughput_operations_per_sec",
-                "machine",
-            ] {
-                if !variant.contains_key(key) {
-                    return Err(format!("benchmark variant is missing {key}"));
-                }
+        for key in [
+            "logical_history_bytes",
+            "materialized_history_bytes",
+            "counters",
+            "diagnostics",
+            "snapshot_latency",
+            "serialize_latency",
+            "atomic_write_latency",
+            "commit_latency",
+            "index_wait_latency",
+            "index_write_latency",
+            "catalog_acquisition_latency",
+            "total_operation_latency",
+            "machine",
+        ] {
+            if !variants[0].get(key).is_some() {
+                return Err(format!("benchmark variant is missing {key}"));
             }
         }
     }
     Ok(())
 }
 
-pub fn assert_ci_invariants(counters: &BenchmarkCounters) -> Result<(), String> {
-    if counters.catalog_builds != 1 {
-        return Err(format!(
-            "expected exactly one tool catalog build, got {}",
-            counters.catalog_builds
-        ));
-    }
-    if counters.index_rewrites != 2 {
-        return Err(format!(
-            "expected exactly two full index rewrites, got {}",
-            counters.index_rewrites
-        ));
-    }
-    if counters.index_waits != 2 {
-        return Err(format!(
-            "expected exactly two index waits, got {}",
-            counters.index_waits
-        ));
-    }
-    if counters.errors != 0
-        || counters.lost_events != 0
-        || counters.duplicate_events != 0
-        || counters.out_of_order_events != 0
+pub fn assert_ci_invariants(
+    counters: &BenchmarkCounters,
+    diagnostics: &DiagnosticCounters,
+) -> Result<(), String> {
+    if counters.save_calls == 0
+        || counters.trajectory_files == 0
+        || counters.measured_files_written == 0
     {
-        return Err("event stream lost, duplicated, reordered, or failed events".to_string());
+        return Err("benchmark did not persist measured trajectory files".to_string());
     }
-    if counters.sequence_gap_snapshot_recoveries != 1 {
+    if counters.measured_bytes_written == 0 {
+        return Err("benchmark did not observe trajectory bytes written".to_string());
+    }
+    if counters.catalog_builds != diagnostics.tool_catalog_build {
         return Err(format!(
-            "expected one sequence-gap snapshot recovery, got {}",
-            counters.sequence_gap_snapshot_recoveries
+            "catalog counter {} does not match observed diagnostics {}",
+            counters.catalog_builds, diagnostics.tool_catalog_build
         ));
     }
-    if counters.watcher_events != counters.vecdb_enqueues {
-        return Err("watcher and VecDB counters diverged".to_string());
+    if diagnostics.trajectory_commit < counters.save_calls
+        || diagnostics.trajectory_atomic_write < counters.save_calls
+        || diagnostics.trajectory_serialize < counters.save_calls
+    {
+        return Err("trajectory diagnostics do not cover every real save".to_string());
+    }
+    if diagnostics.trajectory_index_write == 0 || diagnostics.trajectory_index_read == 0 {
+        return Err("index diagnostics did not observe real index activity".to_string());
+    }
+    if counters.errors != 0 {
+        return Err(format!(
+            "benchmark recorded {} operation errors",
+            counters.errors
+        ));
     }
     Ok(())
 }
@@ -428,266 +538,456 @@ pub fn workload_matrix_is_complete(workloads: &[ConcurrentChatWorkload]) -> bool
         && descriptors == BTreeSet::from([10, 50, 200])
         && workloads.len() == 45
         && workloads.iter().all(|workload| {
-            workload.same_directory_writes
-                && workload.different_directory_writes
-                && workload.rapid_subchat_checkpoints == RAPID_CHECKPOINTS_PER_CHAT
-                && workload.active_chats == 1
-                && workload.background_chats == workload.chat_count.saturating_sub(1)
-                && workload.sequence_gap_snapshot_recovery
+            workload.same_index_directory_contention
+                && workload.rapid_same_chat_checkpoints == RAPID_CHECKPOINTS_PER_CHAT
         })
 }
 
-fn run_workload(
+async fn run_workload(
     workload: &ConcurrentChatWorkload,
     options: &BenchmarkOptions,
 ) -> Result<WorkloadBenchmarkReport, String> {
-    let variants = HarnessVariant::ALL
-        .iter()
-        .copied()
-        .map(|variant| run_variant(workload, options, variant))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(WorkloadBenchmarkReport {
-        workload: workload.clone(),
-        variants,
-    })
-}
-
-fn run_variant(
-    workload: &ConcurrentChatWorkload,
-    options: &BenchmarkOptions,
-    variant: HarnessVariant,
-) -> Result<VariantBenchmarkReport, String> {
     for _ in 0..options.warmup_samples {
-        let sample = run_sample(workload, options.mode, variant)?;
-        assert_ci_invariants(&sample.counters)?;
+        let sample = run_sample(workload, options.mode).await?;
+        assert_ci_invariants(&sample.counters, &sample.diagnostics)?;
     }
 
-    let samples = (0..options.measured_samples)
-        .map(|_| run_sample(workload, options.mode, variant))
-        .collect::<Result<Vec<_>, _>>()?;
-    let counters = samples
+    let sample_futures = (0..options.measured_samples)
+        .map(|_| run_sample(workload, options.mode))
+        .collect::<Vec<_>>();
+    let mut samples = Vec::with_capacity(sample_futures.len());
+    for sample in sample_futures {
+        samples.push(sample.await?);
+    }
+    let first_counters = samples
         .first()
         .map(|sample| sample.counters.clone())
         .ok_or_else(|| "benchmark produced no samples".to_string())?;
-    assert_ci_invariants(&counters)?;
-    if samples.iter().any(|sample| sample.counters != counters) {
-        return Err(format!("non-deterministic counters for {}", workload.id));
-    }
+    let first_diagnostics = samples
+        .first()
+        .map(|sample| sample.diagnostics.clone())
+        .ok_or_else(|| "benchmark produced no diagnostics".to_string())?;
+    assert_ci_invariants(&first_counters, &first_diagnostics)?;
+    let counters = aggregate_counters(&samples);
+    let diagnostics = aggregate_diagnostics(&samples);
+    let throughput_operations_per_sec = counters.operations() as f64;
 
-    let elapsed_samples = samples
+    let mean_total_us = samples
         .iter()
-        .map(|sample| sample.elapsed_us)
-        .collect::<Vec<_>>();
-    let flush_samples = samples
-        .iter()
-        .map(|sample| sample.gui_flush_elapsed_us)
-        .collect::<Vec<_>>();
-    let reducer_samples = samples
-        .iter()
-        .map(|sample| sample.gui_reducer_elapsed_us)
-        .collect::<Vec<_>>();
-    let latency = LatencySummary::from_samples(&elapsed_samples)?;
-    let mean_seconds = (latency.mean_us / 1_000_000.0).max(0.000_001);
-
-    Ok(VariantBenchmarkReport {
-        variant: variant.as_str().to_string(),
+        .map(|sample| sample.total_elapsed_us as f64)
+        .sum::<f64>()
+        / samples.len() as f64;
+    let variant = VariantBenchmarkReport {
+        variant: "legacy".to_string(),
         workload_signature: workload.fixture_signature(options.mode),
+        logical_history_bytes: workload.logical_history_bytes(),
         materialized_history_bytes: workload.materialized_history_bytes(options.mode),
-        counters: counters.clone(),
-        latency,
-        gui_flush_latency: LatencySummary::from_samples(&flush_samples)?,
-        gui_reducer_latency: LatencySummary::from_samples(&reducer_samples)?,
-        throughput_operations_per_sec: counters.operations() as f64 / mean_seconds,
+        counters,
+        diagnostics,
+        snapshot_latency: latency_for(&samples, |sample| sample.snapshot_elapsed_us)?,
+        serialize_latency: latency_for(&samples, |sample| sample.serialize_elapsed_us)?,
+        atomic_write_latency: latency_for(&samples, |sample| sample.atomic_write_elapsed_us)?,
+        commit_latency: latency_for(&samples, |sample| sample.commit_elapsed_us)?,
+        index_wait_latency: LatencySummary::from_samples(
+            &samples
+                .iter()
+                .map(|sample| sample.index_wait_elapsed_us)
+                .collect::<Vec<_>>(),
+        )?,
+        index_write_latency: LatencySummary::from_samples(
+            &samples
+                .iter()
+                .map(|sample| sample.index_write_elapsed_us)
+                .collect::<Vec<_>>(),
+        )?,
+        catalog_acquisition_latency: LatencySummary::from_samples(
+            &samples
+                .iter()
+                .map(|sample| sample.catalog_elapsed_us)
+                .collect::<Vec<_>>(),
+        )?,
+        total_operation_latency: LatencySummary::from_samples(
+            &samples
+                .iter()
+                .map(|sample| sample.total_elapsed_us)
+                .collect::<Vec<_>>(),
+        )?,
+        throughput_operations_per_sec: throughput_operations_per_sec
+            / (mean_total_us / 1_000_000.0).max(0.000_001),
         machine: sample_machine_metrics(),
+    };
+    Ok(WorkloadBenchmarkReport {
+        workload: workload.clone(),
+        variants: vec![variant],
     })
 }
 
-fn run_sample(
+async fn run_sample(
     workload: &ConcurrentChatWorkload,
     mode: HarnessMode,
-    _variant: HarnessVariant,
 ) -> Result<Sample, String> {
-    let started = Instant::now();
-    let temp_dir = tempfile::tempdir()
-        .map_err(|error| format!("failed to create benchmark fixture: {error}"))?;
-    let same_dir = temp_dir.path().join("same-directory");
-    let different_dir = temp_dir.path().join("different-directory");
-    fs::create_dir_all(&same_dir)
-        .and_then(|()| fs::create_dir_all(&different_dir))
-        .map_err(|error| format!("failed to create benchmark directories: {error}"))?;
+    let fixture = BenchmarkFixture::new(workload.tool_descriptors as usize).await?;
+    let _diagnostic_lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK
+        .lock()
+        .map_err(|_| "performance recorder test lock poisoned".to_string())?;
+    let sink = Arc::new(MemoryPerfSink::new());
+    let recorder = Arc::new(PerfRecorder::with_salt(
+        Arc::new(BenchmarkClock::default()),
+        sink.clone(),
+        [11; 32],
+    ));
+    let _recorder_guard = perf_diagnostics::install_test_recorder(recorder);
+    let total_started = Instant::now();
+    let before = filesystem_snapshot(&fixture.workspace).await?;
 
-    let mut counters = BenchmarkCounters {
-        catalog_builds: 1,
-        tool_descriptor_visits: u64::from(workload.tool_descriptors),
-        ..Default::default()
+    let history = deterministic_payload(workload.seed, workload.materialized_history_bytes(mode));
+    let saves = save_workload_trajectories(&fixture, workload, &history).await?;
+    let index_started = Instant::now();
+    let index_dir = fixture.workspace.join(".refact").join("trajectories");
+    rebuild_trajectory_index_from_disk(&index_dir, None).await?;
+    let _index_elapsed_us = elapsed_us(index_started);
+
+    let catalog_started = Instant::now();
+    let catalog = fixture
+        .app
+        .tool_registry
+        .get_tools_index_for_mode("agent", None)
+        .await;
+    let canonical =
+        build_canonical_openai_tools(fixture.gcx.clone(), &catalog.tools, false, true).await;
+    let policies = fixture
+        .app
+        .tool_registry
+        .get_tool_policy_info("agent", None)
+        .await;
+    let catalog_elapsed_us = elapsed_us(catalog_started);
+    if canonical.tools.len() != workload.tool_descriptors as usize
+        || policies.len() != workload.tool_descriptors as usize
+    {
+        return Err(
+            "fixture tool registry did not materialize the deterministic local catalog".to_string(),
+        );
+    }
+
+    let after = filesystem_snapshot(&fixture.workspace).await?;
+    let (files_written, bytes_written) = filesystem_delta(&before, &after);
+    let trajectory_files = count_trajectory_files(&fixture.workspace).await?;
+    let events = sink.events();
+    let diagnostics = DiagnosticCounters::from_events(&events);
+    let counters = BenchmarkCounters {
+        save_calls: saves.total,
+        rapid_checkpoint_saves: saves.checkpoints,
+        trajectory_files,
+        measured_files_written: files_written,
+        measured_bytes_written: bytes_written,
+        index_rebuilds: diagnostics.trajectory_index_rebuild,
+        catalog_builds: diagnostics.tool_catalog_build,
+        catalog_tool_descriptors: catalog.tools.len() as u64,
+        catalog_policy_entries: policies.len() as u64,
+        errors: terminal_operation_failures(&events),
     };
-    let catalog_fingerprint = build_tool_catalog(workload);
-    let history_bytes = workload.materialized_history_bytes(mode);
-
-    for chat_index in 0..workload.chat_count {
-        let payload = deterministic_payload(
-            workload.seed ^ u64::from(chat_index) ^ catalog_fingerprint,
-            history_bytes,
-        );
-        write_fixture(
-            &same_dir.join(format!("chat-{chat_index}.json")),
-            &payload,
-            &mut counters,
-        )?;
-        counters.same_directory_writes += 1;
-        write_fixture(
-            &different_dir.join(format!("chat-{chat_index}.json")),
-            &payload,
-            &mut counters,
-        )?;
-        counters.different_directory_writes += 1;
-        for checkpoint in 0..workload.rapid_subchat_checkpoints {
-            let checkpoint_payload = format!(
-                "{{\"chat\":{chat_index},\"checkpoint\":{checkpoint},\"seed\":{}}}",
-                workload.seed
-            );
-            write_fixture(
-                &same_dir.join(format!("checkpoint-{chat_index}-{checkpoint}.json")),
-                checkpoint_payload.as_bytes(),
-                &mut counters,
-            )?;
-            counters.subchat_checkpoints += 1;
-        }
-    }
-
-    for directory in [&same_dir, &different_dir] {
-        let index_payload = format!(
-            "{{\"workload\":\"{}\",\"catalog\":{catalog_fingerprint}}}",
-            workload.id
-        );
-        write_fixture(
-            &directory.join("index.json"),
-            index_payload.as_bytes(),
-            &mut counters,
-        )?;
-        counters.index_waits += 1;
-        counters.index_rewrites += 1;
-    }
-
-    let (gui_flush_elapsed_us, gui_reducer_elapsed_us) =
-        run_gui_mix(workload, &mut counters, catalog_fingerprint);
-    counters.watcher_events = counters
-        .same_directory_writes
-        .saturating_add(counters.different_directory_writes)
-        .saturating_add(counters.subchat_checkpoints);
-    counters.vecdb_enqueues = counters.watcher_events;
-    counters.errors = u64::from(catalog_fingerprint == 0);
     Ok(Sample {
         counters,
-        elapsed_us: elapsed_us(started),
-        gui_flush_elapsed_us,
-        gui_reducer_elapsed_us,
+        diagnostics,
+        snapshot_elapsed_us: elapsed_for(&events, PerfComponent::TrajectorySnapshot),
+        serialize_elapsed_us: elapsed_for(&events, PerfComponent::TrajectorySerialize),
+        atomic_write_elapsed_us: elapsed_for(&events, PerfComponent::TrajectoryAtomicWrite),
+        commit_elapsed_us: elapsed_for(&events, PerfComponent::TrajectoryCommit),
+        index_wait_elapsed_us: elapsed_for(&events, PerfComponent::TrajectoryIndexLockWait),
+        index_write_elapsed_us: elapsed_for(&events, PerfComponent::TrajectoryIndexWrite),
+        catalog_elapsed_us,
+        total_elapsed_us: elapsed_us(total_started),
     })
 }
 
-fn build_tool_catalog(workload: &ConcurrentChatWorkload) -> u64 {
-    (0..workload.tool_descriptors).fold(workload.seed, |hash, descriptor| {
-        hash.rotate_left(7)
-            ^ u64::from(descriptor).wrapping_mul(0x9e37_79b9)
-            ^ workload.logical_history_bytes()
-    })
+struct SaveCounts {
+    total: u64,
+    checkpoints: u64,
 }
 
-fn run_gui_mix(
+async fn save_workload_trajectories(
+    fixture: &BenchmarkFixture,
     workload: &ConcurrentChatWorkload,
-    counters: &mut BenchmarkCounters,
-    catalog_fingerprint: u64,
-) -> (u64, u64) {
-    let reducer_started = Instant::now();
-    for chat_index in 0..workload.chat_count {
-        let mut tracker = SequenceTracker::default();
-        tracker.snapshot(0);
-        let mut next_seq = 1;
-        for _ in 0..4 {
-            tracker.apply(next_seq);
-            counters.gui_reducer_events += 1;
-            next_seq += 1;
+    history: &[u8],
+) -> Result<SaveCounts, String> {
+    let shared_payload = String::from_utf8_lossy(history).to_string();
+    let primary_chat_id = format!("bench-{}-0", workload.fixture_signature(HarnessMode::Quick));
+    let save_tasks = (0..workload.chat_count)
+        .map(|chat_index| {
+            let chat_id = format!(
+                "bench-{}-{chat_index}",
+                workload.fixture_signature(HarnessMode::Quick)
+            );
+            let payload = shared_payload.clone();
+            let gcx = fixture.gcx.clone();
+            async move { save_real_session_snapshot(gcx, &chat_id, &payload).await }
+        })
+        .collect::<Vec<_>>();
+    for result in futures::future::join_all(save_tasks).await {
+        result?;
+    }
+
+    let chat_id = primary_chat_id;
+    for checkpoint in 0..workload.rapid_same_chat_checkpoints {
+        save_real_session_snapshot(
+            fixture.gcx.clone(),
+            &chat_id,
+            &format!(
+                "checkpoint-{checkpoint}-{}",
+                &shared_payload[..shared_payload.len().min(256)]
+            ),
+        )
+        .await?;
+    }
+
+    let file_path = find_trajectory_path(fixture.gcx.clone(), &chat_id)
+        .await
+        .ok_or_else(|| "real trajectory save did not expose a trajectory path".to_string())?;
+    let value = serde_json::from_str(
+        &tokio::fs::read_to_string(&file_path)
+            .await
+            .map_err(|error| format!("failed to read real trajectory fixture: {error}"))?,
+    )
+    .map_err(|error| format!("failed to parse real trajectory fixture: {error}"))?;
+    let index_dir = fixture.workspace.join(".refact").join("trajectories");
+    upsert_trajectory_index_entry_from_owned_value(&index_dir, &file_path, value, None).await?;
+
+    let loaded = load_trajectory_for_chat(fixture.gcx.clone(), &chat_id)
+        .await
+        .ok_or_else(|| "real trajectory fixture could not be reloaded".to_string())?;
+    if loaded.messages.len() != 1 {
+        return Err("real trajectory fixture lost or corrupted messages".to_string());
+    }
+
+    Ok(SaveCounts {
+        total: u64::from(workload.chat_count) + workload.rapid_same_chat_checkpoints,
+        checkpoints: workload.rapid_same_chat_checkpoints,
+    })
+}
+
+async fn save_real_session_snapshot(
+    gcx: SharedGlobalContext,
+    chat_id: &str,
+    payload: &str,
+) -> Result<(), String> {
+    let mut session = crate::chat::types::ChatSession::new(chat_id.to_string());
+    session.thread.title = "Concurrent benchmark".to_string();
+    session.thread.model = "benchmark-local".to_string();
+    session.thread.mode = "agent".to_string();
+    session.thread.include_project_info = false;
+    session.thread.auto_enrichment_enabled = Some(false);
+    session.add_message(ChatMessage {
+        role: "user".to_string(),
+        content: ChatContent::SimpleText(payload.to_string()),
+        ..Default::default()
+    });
+    let snapshot = trajectory_snapshot_from_session(&session);
+    save_trajectory_snapshot(gcx, snapshot).await
+}
+
+struct BenchmarkClock {
+    origin: Instant,
+}
+
+impl Default for BenchmarkClock {
+    fn default() -> Self {
+        Self {
+            origin: Instant::now(),
         }
-        if workload.sequence_gap_snapshot_recovery && chat_index == 0 {
-            let gap_seq = next_seq + 1;
-            if tracker.gap_detected(gap_seq) {
-                counters.sequence_gap_snapshot_recoveries += 1;
-                tracker.snapshot(0);
-                next_seq = 1;
+    }
+}
+
+impl PerfClock for BenchmarkClock {
+    fn now_us(&self) -> u64 {
+        self.origin
+            .elapsed()
+            .as_micros()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+}
+
+struct BenchmarkTool {
+    name: String,
+}
+
+#[async_trait]
+impl Tool for BenchmarkTool {
+    async fn tool_execute(
+        &mut self,
+        _ccx: Arc<AMutex<AtCommandsContext>>,
+        tool_call_id: &String,
+        _args: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let mut message = ChatMessage::new("tool".to_string(), "benchmark result".to_string());
+        message.tool_call_id = tool_call_id.clone();
+        Ok((false, vec![ContextEnum::ChatMessage(message)]))
+    }
+
+    fn tool_description(&self) -> ToolDesc {
+        ToolDesc {
+            name: self.name.clone(),
+            experimental: false,
+            allow_parallel: true,
+            description: format!("Deterministic local {} tool", self.name),
+            input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            output_schema: None,
+            annotations: None,
+            display_name: self.name.clone(),
+            source: ToolSource {
+                source_type: ToolSourceType::Builtin,
+                config_path: String::new(),
+            },
+        }
+    }
+
+    async fn match_against_confirm_deny(
+        &self,
+        _ccx: Arc<AMutex<AtCommandsContext>>,
+        _args: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<MatchConfirmDeny, String> {
+        Ok(MatchConfirmDeny {
+            result: MatchConfirmDenyResult::PASS,
+            command: self.name.clone(),
+            rule: "benchmark fixture".to_string(),
+        })
+    }
+}
+
+fn deterministic_tool_factory(tool_count: usize) -> FixtureToolFactory {
+    Arc::new(move || {
+        (0..tool_count)
+            .map(|index| {
+                Box::new(BenchmarkTool {
+                    name: format!("benchmark_tool_{index}"),
+                }) as Box<dyn Tool + Send>
+            })
+            .collect()
+    })
+}
+
+async fn filesystem_snapshot(
+    root: &Path,
+) -> Result<std::collections::BTreeMap<PathBuf, u64>, String> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut files = std::collections::BTreeMap::new();
+        let mut pending = vec![root];
+        while let Some(path) = pending.pop() {
+            let entries = match std::fs::read_dir(&path) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(format!("failed to walk benchmark files: {error}")),
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let metadata = match std::fs::symlink_metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
+                };
+                if metadata.file_type().is_symlink() {
+                    continue;
+                }
+                if metadata.is_dir() {
+                    pending.push(path);
+                } else if metadata.is_file() {
+                    files.insert(path, metadata.len());
+                }
             }
         }
-        for _ in 0..4 {
-            tracker.apply(next_seq);
-            counters.gui_reducer_events += 1;
-            next_seq += 1;
-        }
-        counters.duplicate_events += tracker.duplicates;
-        counters.out_of_order_events += tracker.out_of_order;
-        counters.lost_events += tracker.lost;
-        let flushes: u64 = if chat_index < workload.active_chats {
-            4
-        } else {
-            1
-        };
-        counters.gui_flushes += flushes;
-    }
-    let reducer_elapsed_us = elapsed_us(reducer_started);
-    let flush_started = Instant::now();
-    let mut flush_hash = catalog_fingerprint;
-    for flush in 0..counters.gui_flushes {
-        flush_hash = flush_hash.rotate_left(3) ^ flush;
-    }
-    if flush_hash == 0 {
-        counters.errors += 1;
-    }
-    (elapsed_us(flush_started), reducer_elapsed_us)
+        Ok(files)
+    })
+    .await
+    .map_err(|error| format!("benchmark file snapshot task failed: {error}"))?
 }
 
-#[derive(Default)]
-struct SequenceTracker {
-    last_seq: u64,
-    duplicates: u64,
-    out_of_order: u64,
-    lost: u64,
+fn filesystem_delta(
+    before: &std::collections::BTreeMap<PathBuf, u64>,
+    after: &std::collections::BTreeMap<PathBuf, u64>,
+) -> (u64, u64) {
+    after
+        .iter()
+        .fold((0, 0), |(files, bytes), (path, after_len)| {
+            let before_len = before.get(path).copied().unwrap_or(0);
+            if before.get(path) != Some(after_len) {
+                (
+                    files + 1,
+                    bytes.saturating_add(after_len.saturating_sub(before_len)),
+                )
+            } else {
+                (files, bytes)
+            }
+        })
 }
 
-impl SequenceTracker {
-    fn snapshot(&mut self, seq: u64) {
-        self.last_seq = seq;
-    }
-
-    fn apply(&mut self, seq: u64) {
-        if seq <= self.last_seq {
-            self.duplicates += 1;
-        } else if seq > self.last_seq + 1 {
-            self.out_of_order += 1;
-            self.lost += seq - self.last_seq - 1;
-        } else {
-            self.last_seq = seq;
-        }
-    }
-
-    fn gap_detected(&self, seq: u64) -> bool {
-        seq > self.last_seq + 1
-    }
+async fn count_trajectory_files(workspace: &Path) -> Result<u64, String> {
+    let root = workspace.join(".refact").join("trajectories");
+    let snapshot = filesystem_snapshot(&root).await?;
+    Ok(snapshot
+        .keys()
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+        .filter(|path| path.file_name().and_then(|name| name.to_str()) != Some("index.json"))
+        .count() as u64)
 }
 
-fn write_fixture(
-    path: &Path,
-    payload: &[u8],
-    counters: &mut BenchmarkCounters,
-) -> Result<(), String> {
-    fs::write(path, payload).map_err(|error| {
-        format!(
-            "failed to write benchmark fixture {}: {error}",
-            path.display()
-        )
-    })?;
-    counters.write_count += 1;
-    counters.write_bytes = counters
-        .write_bytes
-        .saturating_add(u64::try_from(payload.len()).unwrap_or(u64::MAX));
-    Ok(())
+fn aggregate_counters(samples: &[Sample]) -> BenchmarkCounters {
+    samples
+        .iter()
+        .fold(BenchmarkCounters::default(), |mut total, sample| {
+            total.save_calls += sample.counters.save_calls;
+            total.rapid_checkpoint_saves += sample.counters.rapid_checkpoint_saves;
+            total.trajectory_files += sample.counters.trajectory_files;
+            total.measured_files_written += sample.counters.measured_files_written;
+            total.measured_bytes_written += sample.counters.measured_bytes_written;
+            total.index_rebuilds += sample.counters.index_rebuilds;
+            total.catalog_builds += sample.counters.catalog_builds;
+            total.catalog_tool_descriptors += sample.counters.catalog_tool_descriptors;
+            total.catalog_policy_entries += sample.counters.catalog_policy_entries;
+            total.errors += sample.counters.errors;
+            total
+        })
+}
+
+fn aggregate_diagnostics(samples: &[Sample]) -> DiagnosticCounters {
+    samples
+        .iter()
+        .fold(DiagnosticCounters::default(), |mut total, sample| {
+            total.add_assign(&sample.diagnostics);
+            total
+        })
+}
+
+fn latency_for(
+    samples: &[Sample],
+    elapsed: impl Fn(&Sample) -> u64,
+) -> Result<LatencySummary, String> {
+    LatencySummary::from_samples(&samples.iter().map(elapsed).collect::<Vec<_>>())
+}
+
+fn elapsed_for(events: &[PerfEvent], component: PerfComponent) -> u64 {
+    events
+        .iter()
+        .filter(|event| event.component == component.as_str())
+        .map(|event| event.elapsed_us)
+        .sum::<u64>()
+        .max(1)
+}
+
+fn terminal_operation_failures(events: &[PerfEvent]) -> u64 {
+    events
+        .iter()
+        .filter(|event| event.outcome == "failure")
+        .filter(|event| {
+            matches!(
+                event.component,
+                "trajectory.serialize"
+                    | "trajectory.atomic_write"
+                    | "trajectory.commit"
+                    | "trajectory.index_rebuild"
+                    | "tool.catalog_build"
+            )
+        })
+        .count() as u64
 }
 
 fn deterministic_payload(seed: u64, bytes: usize) -> Vec<u8> {
@@ -738,31 +1038,6 @@ fn sample_machine_metrics() -> MachineMetrics {
     }
 }
 
-impl Default for BenchmarkCounters {
-    fn default() -> Self {
-        Self {
-            write_count: 0,
-            write_bytes: 0,
-            same_directory_writes: 0,
-            different_directory_writes: 0,
-            subchat_checkpoints: 0,
-            index_waits: 0,
-            index_rewrites: 0,
-            catalog_builds: 0,
-            tool_descriptor_visits: 0,
-            watcher_events: 0,
-            vecdb_enqueues: 0,
-            gui_flushes: 0,
-            gui_reducer_events: 0,
-            sequence_gap_snapshot_recoveries: 0,
-            errors: 0,
-            lost_events: 0,
-            duplicate_events: 0,
-            out_of_order_events: 0,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -789,6 +1064,19 @@ mod tests {
     }
 
     #[test]
+    fn fixed_fixture_repeats_structural_counters_without_requiring_identical_wall_clock() {
+        let first = run_ci_fixture().expect("first fixture run succeeds");
+        let second = run_ci_fixture().expect("second fixture run succeeds");
+        let first_variant = &first.variants[0];
+        let second_variant = &second.variants[0];
+        assert_eq!(first.workload, second.workload);
+        assert_eq!(first_variant.counters, second_variant.counters);
+        assert_eq!(first_variant.diagnostics, second_variant.diagnostics);
+        assert_ne!(first_variant.total_operation_latency.sample_count, 0);
+        assert_ne!(second_variant.total_operation_latency.sample_count, 0);
+    }
+
+    #[test]
     fn fixed_workload_matrix_covers_every_required_dimension() {
         assert!(workload_matrix_is_complete(
             &ConcurrentChatWorkload::fixed_matrix()
@@ -796,41 +1084,61 @@ mod tests {
     }
 
     #[test]
-    fn ci_fixture_catches_extra_full_index_or_catalog_operations() {
+    fn ci_fixture_measures_real_saves_and_diagnostics() {
         let report = run_ci_fixture().expect("CI fixture should run");
-        for variant in report.variants {
-            assert_ci_invariants(&variant.counters).expect("fixture invariants");
-            let mut extra_catalog = variant.counters.clone();
-            extra_catalog.catalog_builds += 1;
-            assert!(assert_ci_invariants(&extra_catalog).is_err());
-            let mut extra_index = variant.counters;
-            extra_index.index_rewrites += 1;
-            assert!(assert_ci_invariants(&extra_index).is_err());
-        }
+        assert_eq!(report.variants.len(), 1);
+        let variant = &report.variants[0];
+        assert_eq!(variant.variant, "legacy");
+        assert!(variant.counters.measured_files_written >= variant.counters.trajectory_files);
+        assert!(variant.counters.measured_bytes_written > 0);
+        assert!(variant.diagnostics.trajectory_commit >= variant.counters.save_calls);
+        assert!(variant.diagnostics.trajectory_index_write > 0);
+        assert_ci_invariants(&variant.counters, &variant.diagnostics).expect("fixture invariants");
     }
 
     #[test]
-    fn ci_fixture_has_no_lost_duplicate_or_out_of_order_events() {
-        let report = run_ci_fixture().expect("CI fixture should run");
-        for variant in report.variants {
-            assert_eq!(variant.counters.errors, 0);
-            assert_eq!(variant.counters.lost_events, 0);
-            assert_eq!(variant.counters.duplicate_events, 0);
-            assert_eq!(variant.counters.out_of_order_events, 0);
-            assert_eq!(variant.counters.sequence_gap_snapshot_recoveries, 1);
-        }
+    fn repeated_real_saves_scale_observed_save_and_diagnostic_counts() {
+        let mut workload = ConcurrentChatWorkload::ci_fixture();
+        workload.rapid_same_chat_checkpoints = 7;
+        let report = Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime starts")
+            .block_on(run_workload(
+                &workload,
+                &BenchmarkOptions {
+                    mode: HarnessMode::Quick,
+                    warmup_samples: 0,
+                    measured_samples: 1,
+                },
+            ))
+            .expect("real workload runs");
+        let variant = &report.variants[0];
+        assert_eq!(variant.counters.save_calls, 8);
+        assert!(variant.diagnostics.trajectory_commit >= variant.counters.save_calls);
+        assert!(variant.counters.measured_bytes_written > 0);
     }
 
     #[test]
-    fn report_json_has_the_documented_schema() {
+    fn extra_real_operation_changes_measured_counters() {
+        let report = run_ci_fixture().expect("CI fixture should run");
+        let variant = &report.variants[0];
+        let mut diagnostics = variant.diagnostics.clone();
+        diagnostics.tool_catalog_build += 1;
+        assert!(assert_ci_invariants(&variant.counters, &diagnostics).is_err());
+    }
+
+    #[test]
+    fn report_only_includes_legacy_until_an_optimized_switch_exists() {
         let report = ConcurrentChatBenchmarkReport {
             schema: CONCURRENT_CHAT_BENCHMARK_SCHEMA,
             mode: HarnessMode::Quick.as_str().to_string(),
-            warmup_samples: 1,
+            warmup_samples: 0,
             measured_samples: 1,
             workloads: vec![run_ci_fixture().expect("CI fixture should run")],
         };
         let json = render_json(&report).expect("report serializes");
         validate_report_json(&json).expect("report schema validates");
+        assert!(!json.contains("\"optimized\""));
     }
 }

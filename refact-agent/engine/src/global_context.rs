@@ -854,9 +854,10 @@ pub async fn create_global_context(
     (gcx, ask_shutdown_receiver)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 pub mod tests {
     use super::*;
+    #[cfg(test)]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]

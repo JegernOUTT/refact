@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 use std::sync::RwLock;
 use std::time::Instant;
 
@@ -216,7 +216,7 @@ impl PerfRecorder {
         Self { clock, sink, salt }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn with_salt(
         clock: Arc<dyn PerfClock>,
         sink: Arc<dyn PerfSink>,
@@ -355,10 +355,10 @@ impl PerfSpan {
 static PROCESS_RECORDER: OnceLock<Arc<PerfRecorder>> = OnceLock::new();
 static PROCESS_RECORDER_INITIALIZED: OnceLock<()> = OnceLock::new();
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 static TEST_RECORDER: OnceLock<RwLock<Option<Arc<PerfRecorder>>>> = OnceLock::new();
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 fn test_recorder_slot() -> &'static RwLock<Option<Arc<PerfRecorder>>> {
     TEST_RECORDER.get_or_init(|| RwLock::new(None))
 }
@@ -379,14 +379,14 @@ pub fn initialize_from_environment() {
 
 fn active_recorder() -> Option<Arc<PerfRecorder>> {
     PROCESS_RECORDER.get().cloned().or_else(|| {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "bench"))]
         {
             return test_recorder_slot()
                 .read()
                 .ok()
                 .and_then(|recorder| recorder.clone());
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "bench")))]
         None
     })
 }
@@ -427,7 +427,7 @@ pub fn record(
     });
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 pub(crate) static PERF_RECORDER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn span_with_recorder(
@@ -451,12 +451,12 @@ fn span_with_recorder(
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 pub(crate) struct TestRecorderGuard {
     previous: Option<Arc<PerfRecorder>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 impl Drop for TestRecorderGuard {
     fn drop(&mut self) {
         *test_recorder_slot()
@@ -465,7 +465,7 @@ impl Drop for TestRecorderGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 pub(crate) fn install_test_recorder(recorder: Arc<PerfRecorder>) -> TestRecorderGuard {
     let mut slot = test_recorder_slot()
         .write()
@@ -474,12 +474,12 @@ pub(crate) fn install_test_recorder(recorder: Arc<PerfRecorder>) -> TestRecorder
     TestRecorderGuard { previous }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 pub(crate) struct MemoryPerfSink {
     events: std::sync::Mutex<Vec<PerfEvent>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 impl MemoryPerfSink {
     pub(crate) fn new() -> Self {
         Self {
@@ -495,7 +495,7 @@ impl MemoryPerfSink {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 impl PerfSink for MemoryPerfSink {
     fn record(&self, event: PerfEvent) {
         self.events

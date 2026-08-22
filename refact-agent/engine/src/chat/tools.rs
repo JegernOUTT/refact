@@ -631,10 +631,12 @@ mod tests {
         let base_app = AppState::from_gcx(gcx).await;
         let test_tools = registry.clone();
         let app = AppState {
-            tool_registry: Arc::new(crate::app_state::AppToolRegistry::with_test_tool_factory(
-                base_app.gcx.clone(),
-                Arc::new(move || test_tools.tools()),
-            )),
+            tool_registry: Arc::new(
+                crate::app_state::AppToolRegistry::with_fixture_tool_factory(
+                    base_app.gcx.clone(),
+                    Arc::new(move || test_tools.tools()),
+                ),
+            ),
             ..base_app
         };
         let session = Arc::new(AMutex::new(ChatSession::new("same-turn-tools".to_string())));

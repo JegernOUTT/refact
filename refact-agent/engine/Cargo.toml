@@ -192,6 +192,7 @@ name = "concurrent_chat_bench"
 path = "tools/concurrent_chat_bench.rs"
 test = false
 bench = false
+required-features = ["bench"]
 
 [[bin]]
 name = "refact"
@@ -200,8 +201,9 @@ test = false
 bench = false
 
 [features]
-default = ["voice"]
+default = ["voice", "bench"]
 voice = ["refact-voice/voice"]
+bench = []
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [build-dependencies]

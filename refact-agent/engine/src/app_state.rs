@@ -302,31 +302,31 @@ impl ActivitySink for AppActivitySink {
 
 pub struct AppToolRegistry {
     gcx: SharedGlobalContext,
-    #[cfg(test)]
-    test_tool_factory: Option<TestToolFactory>,
+    #[cfg(any(test, feature = "bench"))]
+    fixture_tool_factory: Option<FixtureToolFactory>,
 }
 
-#[cfg(test)]
-type TestToolFactory =
+#[cfg(any(test, feature = "bench"))]
+pub type FixtureToolFactory =
     Arc<dyn Fn() -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> + Send + Sync>;
 
 impl AppToolRegistry {
     pub fn new(gcx: SharedGlobalContext) -> Self {
         Self {
             gcx,
-            #[cfg(test)]
-            test_tool_factory: None,
+            #[cfg(any(test, feature = "bench"))]
+            fixture_tool_factory: None,
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_test_tool_factory(
+    #[cfg(any(test, feature = "bench"))]
+    pub fn with_fixture_tool_factory(
         gcx: SharedGlobalContext,
-        test_tool_factory: TestToolFactory,
+        fixture_tool_factory: FixtureToolFactory,
     ) -> Self {
         Self {
             gcx,
-            test_tool_factory: Some(test_tool_factory),
+            fixture_tool_factory: Some(fixture_tool_factory),
         }
     }
 
@@ -336,9 +336,9 @@ impl AppToolRegistry {
         mode: &str,
         model_id: Option<&str>,
     ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
-        #[cfg(test)]
-        if let Some(test_tool_factory) = &self.test_tool_factory {
-            return test_tool_factory();
+        #[cfg(any(test, feature = "bench"))]
+        if let Some(fixture_tool_factory) = &self.fixture_tool_factory {
+            return fixture_tool_factory();
         }
         crate::tools::tools_list::get_tools_for_mode(gcx, mode, model_id).await
     }
