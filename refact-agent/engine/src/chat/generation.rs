@@ -349,26 +349,38 @@ fn maybe_inject_token_budget_instruction(
     true
 }
 
-fn build_mcp_index_message(index: &[(String, String)], total: usize) -> String {
-    let mut lines = vec![
-        format!(
-            "💿 MCP Tools — Lazy Mode Active ({} tools available). \
-             You MUST call `mcp_tool_search` before using any MCP tool. \
-             Example: mcp_tool_search({{\"query\": \"github.*pull|pr\"}})",
-            total
-        ),
-        String::new(),
-        "Available MCP tools (name: description):".to_string(),
-    ];
-    for (name, desc) in index {
-        let short = if desc.chars().count() > 100 {
-            format!("{}…", desc.chars().take(100).collect::<String>())
-        } else {
-            desc.clone()
-        };
-        lines.push(format!("- {}: {}", name, short));
+fn build_mcp_lazy_hint(total: usize) -> String {
+    format!(
+        "💿 MCP Tools — Lazy Mode Active ({total} tools available). \
+         You MUST call `mcp_tool_search` before using any MCP tool. \
+         Search by capability or provider, or use \
+         mcp_tool_search({{\"query\": \".\", \"max_results\": {total}}}) to list all available MCP tools."
+    )
+}
+
+fn inject_mcp_lazy_hint(session: &mut ChatSession, total: usize) -> bool {
+    if session.messages.iter().any(|message| {
+        message.role == "cd_instruction" && message.tool_call_id == MCP_LAZY_INDEX_MARKER
+    }) {
+        return false;
     }
-    lines.join("\n")
+
+    let insert_pos = session
+        .messages
+        .iter()
+        .position(|message| message.role == "system")
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    session.insert_message(
+        insert_pos,
+        ChatMessage {
+            role: "cd_instruction".to_string(),
+            tool_call_id: MCP_LAZY_INDEX_MARKER.to_string(),
+            content: ChatContent::SimpleText(build_mcp_lazy_hint(total)),
+            ..Default::default()
+        },
+    );
+    true
 }
 
 pub async fn prepare_session_preamble_and_knowledge(
@@ -397,8 +409,8 @@ pub async fn prepare_session_preamble_and_knowledge(
 
     let needs_preamble = !has_system || (!has_project_context && thread.include_project_info);
 
-    // Populated inside `needs_preamble`; used after to inject the MCP index hint message.
-    let mut mcp_for_index: Option<(Vec<(String, String)>, usize)> = None;
+    // Populated inside `needs_preamble`; used after to inject the MCP lazy-mode hint message.
+    let mut mcp_lazy_total: Option<usize> = None;
 
     if needs_preamble {
         let caps = match crate::global_context::try_load_caps_quickly_if_not_present(gcx.clone(), 0)
@@ -431,10 +443,7 @@ pub async fn prepare_session_preamble_and_knowledge(
             )
             .await;
         if tools_for_mode.mcp_lazy_mode {
-            mcp_for_index = Some((
-                tools_for_mode.mcp_tool_index.clone(),
-                tools_for_mode.mcp_total_count,
-            ));
+            mcp_lazy_total = Some(tools_for_mode.mcp_total_count);
         }
         let tool_names: std::collections::HashSet<String> = tools_for_mode
             .tools
@@ -543,34 +552,15 @@ pub async fn prepare_session_preamble_and_knowledge(
         }
     }
 
-    // Inject MCP lazy-mode index hint (once per session, idempotent via marker)
-    if let Some((mcp_index, mcp_total)) = mcp_for_index {
-        let already_has_index = {
-            let session = session_arc.lock().await;
-            session
-                .messages
-                .iter()
-                .any(|m| m.role == "cd_instruction" && m.tool_call_id == MCP_LAZY_INDEX_MARKER)
-        };
-        if !already_has_index {
-            let index_text = build_mcp_index_message(&mcp_index, mcp_total);
+    // Inject MCP lazy-mode discovery hint (once per session, idempotent via marker).
+    // Detailed names and schemas are returned only when mcp_tool_search is called.
+    if let Some(mcp_total) = mcp_lazy_total {
+        let inserted = {
             let mut session = session_arc.lock().await;
-            let insert_pos = session
-                .messages
-                .iter()
-                .position(|m| m.role == "system")
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            session.insert_message(
-                insert_pos,
-                ChatMessage {
-                    role: "cd_instruction".to_string(),
-                    tool_call_id: MCP_LAZY_INDEX_MARKER.to_string(),
-                    content: ChatContent::SimpleText(index_text),
-                    ..Default::default()
-                },
-            );
-            info!("Injected MCP lazy index hint with {} tools", mcp_total);
+            inject_mcp_lazy_hint(&mut session, mcp_total)
+        };
+        if inserted {
+            info!("Injected MCP lazy discovery hint with {} tools", mcp_total);
         }
     }
 
@@ -3066,6 +3056,27 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn mcp_lazy_hint_is_inserted_once_without_inlining_the_catalog() {
+        let mut session = ChatSession::new("mcp-lazy".to_string());
+        session.add_message(ChatMessage::new("system".to_string(), "system".to_string()));
+        session.add_message(make_user_msg("hello"));
+
+        assert!(inject_mcp_lazy_hint(&mut session, 52));
+        assert!(!inject_mcp_lazy_hint(&mut session, 52));
+
+        let hint = &session.messages[1];
+        assert_eq!(hint.role, "cd_instruction");
+        assert_eq!(hint.tool_call_id, MCP_LAZY_INDEX_MARKER);
+        let text = hint.content.content_text_only();
+        assert!(text.contains("52 tools available"));
+        assert!(text.contains("mcp_tool_search"));
+        assert!(text.contains("\"query\": \".\""));
+        assert!(text.contains("\"max_results\": 52"));
+        assert!(!text.contains("Available MCP tools"));
+        assert!(text.len() < 300);
     }
 
     #[test]

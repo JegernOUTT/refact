@@ -27,8 +27,10 @@ pub struct ToolsForMode {
     pub mcp_lazy_mode: bool,
     /// Total count of all MCP tools (for the hint message).
     pub mcp_total_count: usize,
-    /// (name, description) index for ALL MCP tools — used to build the `cd_instruction` hint.
-    /// Empty when lazy mode is inactive.
+    /// (name, description) index for all MCP tools.
+    ///
+    /// Retained in the catalog for callers that need a local MCP index; the chat preamble
+    /// deliberately keeps discovery on demand via `mcp_tool_search`.
     pub mcp_tool_index: Vec<(String, String)>,
 }
 
@@ -40,13 +42,12 @@ fn is_integration_mcp_tool(t: &Box<dyn Tool + Send>) -> bool {
 pub fn apply_mcp_lazy_filter(mut tools: Vec<Box<dyn Tool + Send>>) -> ToolsForMode {
     let mcp_tool_index: Vec<(String, String)> = tools
         .iter()
-        .filter(|t| is_integration_mcp_tool(t))
-        .map(|t| {
-            let d = t.tool_description();
-            (d.name, d.description)
+        .filter(|tool| is_integration_mcp_tool(tool))
+        .map(|tool| {
+            let description = tool.tool_description();
+            (description.name, description.description)
         })
         .collect();
-
     let mcp_total_count = mcp_tool_index.len();
     let mcp_lazy_mode = mcp_total_count > MCP_LAZY_THRESHOLD;
 
@@ -63,7 +64,7 @@ pub fn apply_mcp_lazy_filter(mut tools: Vec<Box<dyn Tool + Send>>) -> ToolsForMo
         mcp_tool_index: if mcp_lazy_mode {
             mcp_tool_index
         } else {
-            vec![]
+            Vec::new()
         },
     }
 }
@@ -857,6 +858,24 @@ mod tests {
         )
     }
 
+    struct TestTool(ToolDesc);
+
+    #[async_trait::async_trait]
+    impl Tool for TestTool {
+        async fn tool_execute(
+            &mut self,
+            _ccx: Arc<tokio::sync::Mutex<crate::at_commands::at_commands::AtCommandsContext>>,
+            _tool_call_id: &String,
+            _args: &HashMap<String, serde_json::Value>,
+        ) -> Result<(bool, Vec<crate::call_validation::ContextEnum>), String> {
+            unreachable!("test tools are only used to build the lazy catalog")
+        }
+
+        fn tool_description(&self) -> ToolDesc {
+            self.0.clone()
+        }
+    }
+
     fn policy_limiting(provider: &str, servers: &[&str]) -> refact_privacy::PrivacyPolicy {
         refact_privacy::PrivacyPolicy {
             tool_access: refact_privacy::ToolAccess {
@@ -877,6 +896,28 @@ mod tests {
         assert_eq!(provider_of_model("ollama/llama3:8b"), "ollama");
         assert_eq!(provider_of_model("bare-model"), "bare-model");
         assert_eq!(provider_of_model(""), "");
+    }
+
+    #[test]
+    fn lazy_filter_replaces_large_mcp_catalog_with_proxy_tools() {
+        let mut tools: Vec<Box<dyn Tool + Send>> = vec![Box::new(TestTool(builtin_desc("cat")))];
+        tools.extend((0..=MCP_LAZY_THRESHOLD).map(|index| {
+            Box::new(TestTool(mcp_desc(
+                "mcp_stdio_test.yaml",
+                &format!("mcp_test_{index}"),
+            ))) as Box<dyn Tool + Send>
+        }));
+
+        let filtered = apply_mcp_lazy_filter(tools);
+        let names: Vec<_> = filtered
+            .tools
+            .iter()
+            .map(|tool| tool.tool_description().name)
+            .collect();
+
+        assert!(filtered.mcp_lazy_mode);
+        assert_eq!(filtered.mcp_total_count, MCP_LAZY_THRESHOLD + 1);
+        assert_eq!(names, vec!["cat", "mcp_tool_search", "mcp_call"]);
     }
 
     #[test]

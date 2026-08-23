@@ -173,7 +173,7 @@ Refact does not run one generic chatbot forever; it shifts between purpose-built
 ![MCP, skills, and subagents](media/mcp-skills-dark.png#gh-dark-mode-only)
 Plug in almost anything — local CLIs, HTTP/SSE services, project rituals, specialist agents, reusable prompts — without dumping the whole universe into the model. Refact keeps the surface sharp: discover late, load only what matters, and fan out focused workers when the job wants a swarm.
 
-- **MCP without context spam:** connect stdio servers or Streamable HTTP/SSE endpoints, including OAuth-capable configs, then let lazy discovery do the heavy lifting: `tool_search` finds the right capability and `mcp_call` runs it only when needed.
+- **MCP without context spam:** connect stdio servers or Streamable HTTP/SSE endpoints, including OAuth-capable configs, then let lazy discovery do the heavy lifting: `mcp_tool_search` finds the right capability and `mcp_call` runs it only when needed.
 - **Skills on demand:** focused instruction packs stay out of the prompt until the task calls for them; load a skill with `load_skill`, work inside its guidance, then `deload_skill` to compact the run back into a clean report.
 - **Slash-command workflows:** project and installed commands turn repeatable rituals into one-keystroke launches — reviews, migrations, diagnostics, release prep, or whatever your team keeps retyping.
 - **Hooks for automation seams:** pre/post-tool and lifecycle hooks let extensions react around tool calls, sessions, and subagent runs, so policy, logging, formatting, and handoff glue can live beside the workflow instead of inside the chat.
