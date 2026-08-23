@@ -995,7 +995,7 @@ impl ChatSession {
 
     pub fn reset_compaction_runtime_state(&mut self) {
         self.clear_stream_and_confirmation_timestamps();
-        self.last_prompt_messages.clear();
+        self.release_turn_only_state();
         self.tier1_compact_attempts = 0;
         self.tier1_compaction_disabled = false;
         self.compression_insufficient_hashes.clear();
@@ -1020,7 +1020,6 @@ impl ChatSession {
 
     pub fn replace_messages(&mut self, messages: Vec<ChatMessage>) {
         self.messages = messages;
-        self.turn_tool_pool = None;
         self.compression_retry_after_ms.clear();
         self.rebuild_goal_projection_from_messages();
         self.reset_compaction_runtime_state();
@@ -1095,6 +1094,7 @@ impl ChatSession {
     pub fn close_event_channel(&mut self) {
         self.clear_discarded_queue_timestamps();
         self.clear_stream_and_confirmation_timestamps();
+        self.release_turn_only_state();
         self.closed = true;
         self.closed_flag.store(true, Ordering::Relaxed);
         for handle in self.post_turn_task_handles.drain(..) {
@@ -1108,6 +1108,14 @@ impl ChatSession {
         self.post_turn_task_handles
             .retain(|task| !task.is_finished());
         self.post_turn_task_handles.push(handle);
+    }
+
+    pub(crate) fn release_turn_only_state(&mut self) {
+        self.last_prompt_messages = Vec::new();
+        self.tool_catalog = None;
+        self.turn_tool_pool = None;
+        self.post_turn_task_handles
+            .retain(|task| !task.is_finished());
     }
 
     pub fn emit(&mut self, event: ChatEvent) {
@@ -1907,9 +1915,6 @@ impl ChatSession {
             self.last_tool_started_at = None;
             self.last_tool_progress_at = None;
         }
-        if !matches!(state, SessionState::ExecutingTools | SessionState::Paused) {
-            self.turn_tool_pool = None;
-        }
         if state == SessionState::Generating && old_state != SessionState::Generating {
             self.last_stream_delta_at = None;
         }
@@ -1922,6 +1927,13 @@ impl ChatSession {
         self.runtime.error = error.clone();
         self.runtime.queue_size = self.command_queue.len();
         self.runtime.queued_items = self.build_queued_items();
+        if matches!(
+            state,
+            SessionState::Completed | SessionState::Error | SessionState::WaitingUserInput
+        ) && self.post_tool_side_effects.is_empty()
+        {
+            self.release_turn_only_state();
+        }
         if should_clear_terminal_compression {
             if let Some(abort_flag) = self.compression_abort_flag.take() {
                 abort_flag.store(true, Ordering::SeqCst);
@@ -2190,7 +2202,6 @@ impl ChatSession {
         }
         self.abort_flag.store(false, Ordering::SeqCst);
         self.user_interrupt_flag.store(false, Ordering::SeqCst);
-        self.turn_tool_pool = None;
         let message_id = Uuid::new_v4().to_string();
         self.draft_message = Some(ChatMessage {
             message_id: message_id.clone(),
@@ -2358,10 +2369,10 @@ impl ChatSession {
                 });
             }
         }
-        if next_state != SessionState::ExecutingTools {
-            self.tool_catalog = None;
-        }
         self.set_runtime_state(next_state, None);
+        if next_state != SessionState::ExecutingTools {
+            self.release_turn_only_state();
+        }
         self.touch();
     }
 
@@ -2472,7 +2483,9 @@ impl ChatSession {
         self.draft_usage = None;
         self.stream_started_at = None;
         self.confirmation_paused_at = None;
+        self.clear_post_tool_side_effects();
         self.set_runtime_state(SessionState::Idle, None);
+        self.release_turn_only_state();
         self.touch();
         self.queue_notify.notify_one();
     }
@@ -2726,6 +2739,54 @@ mod tests {
 
     fn make_session() -> ChatSession {
         ChatSession::new("test-chat".to_string())
+    }
+
+    fn turn_memory_catalog() -> Arc<refact_runtime_api::ToolCatalogSnapshot> {
+        let tools = (0..8)
+            .map(|index| refact_tool_api::ToolDesc {
+                name: format!("turn_memory_tool_{index}"),
+                experimental: false,
+                allow_parallel: true,
+                description: "descriptor".repeat(256),
+                input_schema: json!({"type": "object", "properties": {}}),
+                output_schema: None,
+                annotations: None,
+                display_name: format!("Turn memory tool {index}"),
+                source: refact_tool_api::ToolSource {
+                    source_type: refact_tool_api::ToolSourceType::Builtin,
+                    config_path: String::new(),
+                },
+            })
+            .collect::<Vec<_>>();
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        Arc::new(refact_runtime_api::ToolCatalogSnapshot {
+            index: refact_runtime_api::ToolRegistryIndex {
+                tools,
+                mcp_lazy_mode: false,
+                mcp_total_count: 0,
+                mcp_tool_index: Vec::new(),
+            },
+            policy: Vec::new(),
+            aliases: refact_tool_api::build_registry_from_names(&names),
+        })
+    }
+
+    fn install_turn_memory_state(session: &mut ChatSession) {
+        session.last_prompt_messages = vec![ChatMessage::new(
+            "user".to_string(),
+            "prepared prompt".repeat(16_384),
+        )];
+        session.tool_catalog = Some(turn_memory_catalog());
+        session.turn_tool_pool = Some(refact_runtime_api::TurnToolPool::new(()));
+    }
+
+    fn assert_turn_memory_released(session: &ChatSession) {
+        assert!(session.last_prompt_messages.is_empty());
+        assert!(session.tool_catalog.is_none());
+        assert!(session.turn_tool_pool.is_none());
     }
 
     struct TestClock {
@@ -3975,6 +4036,192 @@ mod tests {
         assert_eq!(session.thread.title, "Old Chat");
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.created_at, "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn turn_memory_no_tool_completion_releases_without_mutating_history() {
+        let mut session = make_session();
+        session.add_message(ChatMessage::new(
+            "user".to_string(),
+            "canonical".to_string(),
+        ));
+        install_turn_memory_state(&mut session);
+
+        session.start_stream();
+        session.emit_stream_delta(vec![DeltaOp::AppendContent {
+            text: "completed".to_string(),
+        }]);
+        session.finish_stream(None);
+
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert_turn_memory_released(&session);
+        assert_eq!(
+            session
+                .messages
+                .iter()
+                .map(|message| message.content.content_text_only())
+                .collect::<Vec<_>>(),
+            vec!["canonical", "completed"]
+        );
+    }
+
+    #[test]
+    fn turn_memory_active_tool_confirmation_and_ide_waits_preserve_state() {
+        let mut session = make_session();
+        install_turn_memory_state(&mut session);
+
+        session.set_runtime_state(SessionState::ExecutingTools, None);
+        assert!(session.tool_catalog.is_some());
+        assert!(session.turn_tool_pool.is_some());
+        assert!(!session.last_prompt_messages.is_empty());
+
+        session.set_paused_with_reasons_and_auto_approved(
+            vec![make_pause_reason("tool-1")],
+            Vec::new(),
+            None,
+        );
+        assert!(session.tool_catalog.is_some());
+        assert!(session.turn_tool_pool.is_some());
+        assert!(!session.last_prompt_messages.is_empty());
+
+        session.set_runtime_state(SessionState::WaitingIde, None);
+        assert!(session.tool_catalog.is_some());
+        assert!(session.turn_tool_pool.is_some());
+        assert!(!session.last_prompt_messages.is_empty());
+    }
+
+    #[test]
+    fn turn_memory_terminal_abort_error_restore_and_replacement_release_state() {
+        let mut aborted = make_session();
+        install_turn_memory_state(&mut aborted);
+        aborted.abort_stream();
+        assert_turn_memory_released(&aborted);
+
+        let mut errored = make_session();
+        install_turn_memory_state(&mut errored);
+        errored.finish_stream_with_error("failed".to_string());
+        assert_turn_memory_released(&errored);
+
+        let mut replaced = make_session();
+        install_turn_memory_state(&mut replaced);
+        replaced.replace_messages(vec![ChatMessage::new(
+            "user".to_string(),
+            "restored".to_string(),
+        )]);
+        assert_turn_memory_released(&replaced);
+        assert_eq!(replaced.messages[0].content.content_text_only(), "restored");
+    }
+
+    #[test]
+    fn turn_memory_retry_keeps_prepared_context_until_a_terminal_boundary() {
+        let mut session = make_session();
+        install_turn_memory_state(&mut session);
+        session.start_stream();
+
+        session.clear_stream_for_retry();
+
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert!(session.tool_catalog.is_some());
+        assert!(session.turn_tool_pool.is_some());
+        assert!(!session.last_prompt_messages.is_empty());
+
+        session.start_stream();
+        session.finish_stream(None);
+        assert_turn_memory_released(&session);
+    }
+
+    #[test]
+    fn turn_memory_next_turn_reacquires_equivalent_context_and_catalog() {
+        let mut session = make_session();
+        session.add_message(ChatMessage::new(
+            "user".to_string(),
+            "canonical".to_string(),
+        ));
+        install_turn_memory_state(&mut session);
+        let initial_prompt = session.last_prompt_messages.clone();
+        let initial_catalog = session.tool_catalog.clone().unwrap();
+
+        session.start_stream();
+        session.finish_stream(None);
+        assert_turn_memory_released(&session);
+
+        session.last_prompt_messages = initial_prompt;
+        session.tool_catalog = Some(initial_catalog.clone());
+        session.turn_tool_pool = Some(refact_runtime_api::TurnToolPool::new(()));
+
+        assert_eq!(
+            session.last_prompt_messages[0].content.content_text_only(),
+            "prepared prompt".repeat(16_384)
+        );
+        assert_eq!(
+            session.tool_catalog.unwrap().index.tools.len(),
+            initial_catalog.index.tools.len()
+        );
+        assert!(session.turn_tool_pool.is_some());
+    }
+
+    #[test]
+    fn turn_memory_fleet_releases_at_least_ninety_percent_after_completion() {
+        for chat_count in crate::chat::perf_harness::TURN_MEMORY_FLEET_CHAT_COUNTS {
+            let sessions = (0..chat_count)
+                .map(|index| {
+                    let mut session = ChatSession::new(format!("turn-memory-{chat_count}-{index}"));
+                    session.add_message(ChatMessage::new(
+                        "user".to_string(),
+                        "canonical history".repeat(256),
+                    ));
+                    install_turn_memory_state(&mut session);
+                    session
+                })
+                .collect::<Vec<_>>();
+            let before = crate::chat::perf_harness::aggregate_turn_memory_retained_bytes(
+                sessions
+                    .iter()
+                    .map(|session| session.retained_bytes_for_turn_memory()),
+            );
+            let canonical_before = before.canonical_messages;
+            let mut completed = sessions;
+            for session in &mut completed {
+                session.start_stream();
+                session.finish_stream(None);
+            }
+            let after = crate::chat::perf_harness::aggregate_turn_memory_retained_bytes(
+                completed
+                    .iter()
+                    .map(|session| session.retained_bytes_for_turn_memory()),
+            );
+
+            assert_eq!(
+                after.canonical_messages, canonical_before,
+                "{chat_count} chats"
+            );
+            assert_eq!(after.last_prompt_messages, 0, "{chat_count} chats");
+            assert_eq!(
+                after.catalog_descriptors_and_aliases, 0,
+                "{chat_count} chats"
+            );
+            assert_eq!(after.pool_vectors, 0, "{chat_count} chats");
+            assert!(after.total() * 10 <= before.total(), "{chat_count} chats");
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_memory_release_prunes_finished_handles_without_aborting_live_tasks() {
+        let mut session = make_session();
+        let finished = tokio::spawn(async {});
+        tokio::task::yield_now().await;
+        assert!(finished.is_finished());
+        let live = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        });
+        session.post_turn_task_handles.push(finished);
+        session.post_turn_task_handles.push(live);
+
+        session.release_turn_only_state();
+
+        assert_eq!(session.post_turn_task_handles.len(), 1);
+        assert!(!session.post_turn_task_handles[0].is_finished());
+        session.post_turn_task_handles.pop().unwrap().abort();
     }
 
     #[test]

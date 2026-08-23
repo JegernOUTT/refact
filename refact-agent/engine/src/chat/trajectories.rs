@@ -4297,8 +4297,8 @@ fn is_active_buddy_session(session: &ChatSession) -> bool {
 }
 
 fn apply_external_delete_to_session(session: &mut ChatSession, chat_id: &str) {
+    session.release_turn_only_state();
     session.messages.clear();
-    session.turn_tool_pool = None;
     session.thread = ThreadParams {
         id: chat_id.to_string(),
         ..Default::default()
@@ -4320,8 +4320,8 @@ fn apply_loaded_external_update_to_session(
     loaded: LoadedTrajectory,
     transition_identity_repaired: bool,
 ) -> Option<u64> {
+    session.release_turn_only_state();
     session.messages = loaded.messages;
-    session.turn_tool_pool = None;
     session.thread = loaded.thread;
     session.compression_retry_after_ms = loaded.compression_retry_after_ms;
     session.reset_compaction_runtime_state();

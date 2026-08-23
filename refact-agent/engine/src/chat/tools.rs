@@ -1937,6 +1937,7 @@ pub async fn process_tool_calls_once(
         if !server_tool_calls.is_empty() {
             let mut session = session_arc.lock().await;
             session.set_runtime_state(SessionState::Idle, None);
+            session.release_turn_only_state();
         }
         return ToolStepOutcome::NoToolCalls;
     }
@@ -2074,6 +2075,7 @@ pub async fn process_tool_calls_once(
 
     if tools_to_execute.is_empty() {
         let mut session = session_arc.lock().await;
+        session.release_turn_only_state();
         session.set_runtime_state(SessionState::Generating, None);
         drop(session);
         maybe_save_trajectory_background_with_intent(
@@ -2141,6 +2143,7 @@ pub async fn process_tool_calls_once(
 
     if tools_to_execute.is_empty() {
         let mut session = session_arc.lock().await;
+        session.release_turn_only_state();
         session.set_runtime_state(SessionState::Generating, None);
         drop(session);
         maybe_save_trajectory_background_with_intent(
@@ -2263,7 +2266,9 @@ pub async fn process_tool_calls_once(
         } else if was_aborted {
             // User abort during regular tools: transition to Idle so UI stops animating
             session.set_runtime_state(SessionState::Idle, None);
+            session.release_turn_only_state();
         } else {
+            session.release_turn_only_state();
             session.set_runtime_state(SessionState::Generating, None);
         }
     }

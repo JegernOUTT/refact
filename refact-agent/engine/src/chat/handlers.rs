@@ -433,6 +433,9 @@ pub async fn handle_v1_chat_command(
         if session.thread.model != old_model {
             sanitize_messages_for_model_switch(&mut session.messages);
         }
+        if session.thread.model != old_model || mode_changed {
+            session.release_turn_only_state();
+        }
         let title_in_patch = patch.get("title").and_then(|v| v.as_str());
         let is_gen_in_patch = patch.get("is_title_generated").and_then(|v| v.as_bool());
         if let Some(title) = title_in_patch {

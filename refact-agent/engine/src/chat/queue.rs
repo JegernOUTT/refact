@@ -1801,6 +1801,7 @@ pub async fn process_command_queue(
                     }
                 };
                 let mut session = session_arc.lock().await;
+                let old_model = session.thread.model.clone();
                 let old_mode = session.thread.mode.clone();
                 let (mut changed, sanitized_patch) =
                     apply_setparams_patch(&mut session.thread, &patch);
@@ -1853,6 +1854,9 @@ pub async fn process_command_queue(
                         "chat.session",
                     )
                     .await;
+                }
+                if mode_changed || session.thread.model != old_model {
+                    session.release_turn_only_state();
                 }
                 if let Some(message) = worktree_message {
                     session.add_message(message);
@@ -1942,6 +1946,7 @@ pub async fn process_command_queue(
                 let mut session = session_arc.lock().await;
                 let completed = session.record_ide_tool_result(tool_call_id, content, tool_failed);
                 if completed {
+                    session.release_turn_only_state();
                     session.set_runtime_state(SessionState::Generating, None);
                 }
                 drop(session);
@@ -2037,6 +2042,7 @@ pub async fn process_command_queue(
             }
             ChatCommand::RestoreMessages { messages } => {
                 let mut session = session_arc.lock().await;
+                session.release_turn_only_state();
                 for msg_value in messages {
                     if let Ok(msg) = serde_json::from_value::<ChatMessage>(msg_value) {
                         if !is_allowed_for_restore(&msg) {
@@ -2447,6 +2453,7 @@ async fn handle_tool_decisions(
                 .collect::<Vec<_>>();
             if remaining.is_empty() {
                 session.complete_confirmation_wait();
+                session.release_turn_only_state();
                 session.set_runtime_state(SessionState::Generating, None);
                 true
             } else {
@@ -2496,9 +2503,11 @@ async fn handle_tool_decisions(
             session.runtime.paused_message_index = None;
             session.complete_confirmation_wait();
             if accepted_any {
+                session.release_turn_only_state();
                 session.set_runtime_state(SessionState::Generating, None);
             } else {
                 session.set_runtime_state(SessionState::Idle, None);
+                session.release_turn_only_state();
             }
         }
 
@@ -2740,7 +2749,9 @@ async fn handle_tool_decisions(
                 }
             } else if was_aborted {
                 session.set_runtime_state(SessionState::Idle, None);
+                session.release_turn_only_state();
             } else {
+                session.release_turn_only_state();
                 session.set_runtime_state(SessionState::Generating, None);
             }
         }
@@ -2811,6 +2822,7 @@ async fn handle_tool_decisions(
         {
             let mut session = session_arc.lock().await;
             session.set_runtime_state(SessionState::Idle, None);
+            session.release_turn_only_state();
         }
         maybe_save_trajectory_with_intent(app, session_arc, TrajectoryCommitIntent::Required).await;
     } else if had_tool_calls {
@@ -2821,6 +2833,7 @@ async fn handle_tool_decisions(
         {
             let mut session = session_arc.lock().await;
             session.set_runtime_state(SessionState::Idle, None);
+            session.release_turn_only_state();
         }
         maybe_save_trajectory_with_intent(app, session_arc, TrajectoryCommitIntent::Required).await;
     }
