@@ -2905,8 +2905,9 @@ mod subchat_tests {
         resolve_subchat_model, resolve_subchat_params, resolve_subchat_worktree,
         safe_context_limit_error_for_log, should_compact_context_limit_error,
         should_persist_subchat_trajectory, stateful_thread_from_config, subchat_retries_allowed,
-        subchat_trajectory_commit_intent, SubchatConfig, SubchatTrajectoryCommitPhase, ToolsPolicy,
-        TraceParent, GUARDED_REPORT_INSTRUCTION, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        subchat_trajectory_commit_intent, trace_thread_from_config, save_failed_subchat_trajectory,
+        SubchatConfig, SubchatTrajectoryCommitPhase, ToolsPolicy, TraceParent,
+        GUARDED_REPORT_INSTRUCTION, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
@@ -2933,7 +2934,7 @@ mod subchat_tests {
     use std::fs;
     use std::path::Path;
     use std::process::Command;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn chat_model_record(id: &str, n_ctx: usize, endpoint: &str) -> Arc<ChatModelRecord> {
@@ -3066,6 +3067,43 @@ mod subchat_tests {
         for (phase, expected) in cases {
             assert_eq!(subchat_trajectory_commit_intent(phase), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn final_and_failed_subchat_snapshots_use_required_durable_commits() {
+        let workspace = tempfile::tempdir().unwrap();
+        let gcx = make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let chat_id = "subchat-required-final-failed";
+        let config = test_subchat_config();
+        let thread = trace_thread_from_config(chat_id, &config);
+        let final_messages = vec![ChatMessage::new(
+            "assistant".to_string(),
+            "final".to_string(),
+        )];
+
+        save_trajectory_as_with_intent(
+            gcx.clone(),
+            &thread,
+            &final_messages,
+            subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Final),
+        )
+        .await;
+        let final_saved = crate::chat::trajectories::load_trajectory_for_chat(gcx.clone(), chat_id)
+            .await
+            .expect("final subchat snapshot should be durable");
+        assert_eq!(final_saved.messages[0].content.content_text_only(), "final");
+
+        let progress = Arc::new(StdMutex::new(final_messages));
+        save_failed_subchat_trajectory(gcx.clone(), chat_id, &config, &progress, "failed").await;
+        let failed_saved = crate::chat::trajectories::load_trajectory_for_chat(gcx, chat_id)
+            .await
+            .expect("failed subchat snapshot should be durable");
+        assert!(failed_saved.messages.iter().any(|message| message
+            .content
+            .content_text_only()
+            .contains("Subchat run failed")));
     }
 
     #[test]
@@ -3813,6 +3851,19 @@ mod subchat_tests {
         )
         .await;
 
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if parent_thread_worktree(gcx.clone(), &parent_chat_id)
+                    .await
+                    .is_some()
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("checkpoint should persist the parent worktree");
         assert_eq!(
             parent_thread_worktree(gcx, &parent_chat_id).await,
             Some(worktree)

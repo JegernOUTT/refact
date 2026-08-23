@@ -17,7 +17,7 @@ use crate::chat::perf_diagnostics::{
 };
 use crate::chat::prepare::build_canonical_openai_tools;
 use crate::chat::trajectories::{
-    find_trajectory_path, load_trajectory_for_chat, save_trajectory_snapshot,
+    find_trajectory_path, load_trajectory_for_chat, persist_trajectory_snapshot_with_intent,
     trajectory_snapshot_from_session,
 };
 use crate::chat::trajectory_index::{
@@ -156,6 +156,7 @@ impl BenchmarkOptions {
 pub struct BenchmarkCounters {
     pub save_calls: u64,
     pub rapid_checkpoint_saves: u64,
+    pub required_commits: u64,
     pub trajectory_files: u64,
     pub measured_files_written: u64,
     pub measured_bytes_written: u64,
@@ -296,6 +297,8 @@ pub struct VariantBenchmarkReport {
     pub index_wait_latency: LatencySummary,
     pub index_write_latency: LatencySummary,
     pub catalog_acquisition_latency: LatencySummary,
+    pub checkpoint_return_latency: LatencySummary,
+    pub background_flush_latency: LatencySummary,
     pub total_operation_latency: LatencySummary,
     pub throughput_operations_per_sec: f64,
     pub machine: MachineMetrics,
@@ -326,6 +329,8 @@ struct Sample {
     index_wait_elapsed_us: u64,
     index_write_elapsed_us: u64,
     catalog_elapsed_us: u64,
+    checkpoint_return_elapsed_us: u64,
+    background_flush_elapsed_us: u64,
     total_elapsed_us: u64,
 }
 
@@ -452,13 +457,19 @@ pub fn validate_report_json(json: &str) -> Result<(), String> {
             .get("variants")
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| "benchmark variants must be an array".to_string())?;
-        if variants.len() != 1
+        if variants.len() != 2
             || variants[0]
                 .get("variant")
                 .and_then(serde_json::Value::as_str)
                 != Some("legacy")
+            || variants[1]
+                .get("variant")
+                .and_then(serde_json::Value::as_str)
+                != Some("coalesced")
         {
-            return Err("benchmark workload must include exactly the legacy variant".to_string());
+            return Err(
+                "benchmark workload must include legacy and coalesced variants".to_string(),
+            );
         }
         for key in [
             "logical_history_bytes",
@@ -472,10 +483,12 @@ pub fn validate_report_json(json: &str) -> Result<(), String> {
             "index_wait_latency",
             "index_write_latency",
             "catalog_acquisition_latency",
+            "checkpoint_return_latency",
+            "background_flush_latency",
             "total_operation_latency",
             "machine",
         ] {
-            if !variants[0].get(key).is_some() {
+            if variants.iter().any(|variant| variant.get(key).is_none()) {
                 return Err(format!("benchmark variant is missing {key}"));
             }
         }
@@ -496,17 +509,19 @@ pub fn assert_ci_invariants(
     if counters.measured_bytes_written == 0 {
         return Err("benchmark did not observe trajectory bytes written".to_string());
     }
+    if counters.required_commits == 0 {
+        return Err("benchmark did not await a required trajectory commit".to_string());
+    }
     if counters.catalog_builds != diagnostics.tool_catalog_build {
         return Err(format!(
             "catalog counter {} does not match observed diagnostics {}",
             counters.catalog_builds, diagnostics.tool_catalog_build
         ));
     }
-    if diagnostics.trajectory_commit < counters.save_calls
-        || diagnostics.trajectory_atomic_write < counters.save_calls
-        || diagnostics.trajectory_serialize < counters.save_calls
+    if diagnostics.trajectory_atomic_write < counters.required_commits
+        || diagnostics.trajectory_serialize < counters.required_commits
     {
-        return Err("trajectory diagnostics do not cover every real save".to_string());
+        return Err("trajectory diagnostics do not cover required commits".to_string());
     }
     if diagnostics.trajectory_index_write == 0 || diagnostics.trajectory_index_read == 0 {
         return Err("index diagnostics did not observe real index activity".to_string());
@@ -547,13 +562,30 @@ async fn run_workload(
     workload: &ConcurrentChatWorkload,
     options: &BenchmarkOptions,
 ) -> Result<WorkloadBenchmarkReport, String> {
+    let variants = [("legacy", false), ("coalesced", true)];
+    let mut reports = Vec::with_capacity(variants.len());
+    for (variant_name, writer_enabled) in variants {
+        reports.push(run_variant_workload(workload, options, variant_name, writer_enabled).await?);
+    }
+    Ok(WorkloadBenchmarkReport {
+        workload: workload.clone(),
+        variants: reports,
+    })
+}
+
+async fn run_variant_workload(
+    workload: &ConcurrentChatWorkload,
+    options: &BenchmarkOptions,
+    variant_name: &str,
+    writer_enabled: bool,
+) -> Result<VariantBenchmarkReport, String> {
     for _ in 0..options.warmup_samples {
-        let sample = run_sample(workload, options.mode).await?;
+        let sample = run_sample(workload, options.mode, writer_enabled).await?;
         assert_ci_invariants(&sample.counters, &sample.diagnostics)?;
     }
 
     let sample_futures = (0..options.measured_samples)
-        .map(|_| run_sample(workload, options.mode))
+        .map(|_| run_sample(workload, options.mode, writer_enabled))
         .collect::<Vec<_>>();
     let mut samples = Vec::with_capacity(sample_futures.len());
     for sample in sample_futures {
@@ -578,7 +610,7 @@ async fn run_workload(
         .sum::<f64>()
         / samples.len() as f64;
     let variant = VariantBenchmarkReport {
-        variant: "legacy".to_string(),
+        variant: variant_name.to_string(),
         workload_signature: workload.fixture_signature(options.mode),
         logical_history_bytes: workload.logical_history_bytes(),
         materialized_history_bytes: workload.materialized_history_bytes(options.mode),
@@ -606,6 +638,12 @@ async fn run_workload(
                 .map(|sample| sample.catalog_elapsed_us)
                 .collect::<Vec<_>>(),
         )?,
+        checkpoint_return_latency: latency_for(&samples, |sample| {
+            sample.checkpoint_return_elapsed_us
+        })?,
+        background_flush_latency: latency_for(&samples, |sample| {
+            sample.background_flush_elapsed_us
+        })?,
         total_operation_latency: LatencySummary::from_samples(
             &samples
                 .iter()
@@ -616,20 +654,19 @@ async fn run_workload(
             / (mean_total_us / 1_000_000.0).max(0.000_001),
         machine: sample_machine_metrics(),
     };
-    Ok(WorkloadBenchmarkReport {
-        workload: workload.clone(),
-        variants: vec![variant],
-    })
+    Ok(variant)
 }
 
 async fn run_sample(
     workload: &ConcurrentChatWorkload,
     mode: HarnessMode,
+    writer_enabled: bool,
 ) -> Result<Sample, String> {
     let fixture = BenchmarkFixture::new(workload.tool_descriptors as usize).await?;
     let _diagnostic_lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK
         .lock()
         .map_err(|_| "performance recorder test lock poisoned".to_string())?;
+    let _writer_env_guard = TrajectoryWriterEnvGuard::set(writer_enabled);
     let sink = Arc::new(MemoryPerfSink::new());
     let recorder = Arc::new(PerfRecorder::with_salt(
         Arc::new(BenchmarkClock::default()),
@@ -677,6 +714,7 @@ async fn run_sample(
     let counters = BenchmarkCounters {
         save_calls: saves.total,
         rapid_checkpoint_saves: saves.checkpoints,
+        required_commits: saves.required_commits,
         trajectory_files,
         measured_files_written: files_written,
         measured_bytes_written: bytes_written,
@@ -696,6 +734,8 @@ async fn run_sample(
         index_wait_elapsed_us: elapsed_for(&events, PerfComponent::TrajectoryIndexLockWait),
         index_write_elapsed_us: elapsed_for(&events, PerfComponent::TrajectoryIndexWrite),
         catalog_elapsed_us,
+        checkpoint_return_elapsed_us: saves.checkpoint_return_elapsed_us,
+        background_flush_elapsed_us: saves.background_flush_elapsed_us,
         total_elapsed_us: elapsed_us(total_started),
     })
 }
@@ -703,6 +743,34 @@ async fn run_sample(
 struct SaveCounts {
     total: u64,
     checkpoints: u64,
+    required_commits: u64,
+    checkpoint_return_elapsed_us: u64,
+    background_flush_elapsed_us: u64,
+}
+
+struct TrajectoryWriterEnvGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl TrajectoryWriterEnvGuard {
+    fn set(enabled: bool) -> Self {
+        let previous = std::env::var_os(crate::chat::trajectories::TRAJECTORY_WRITER_ENV);
+        std::env::set_var(
+            crate::chat::trajectories::TRAJECTORY_WRITER_ENV,
+            if enabled { "1" } else { "0" },
+        );
+        Self { previous }
+    }
+}
+
+impl Drop for TrajectoryWriterEnvGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            std::env::set_var(crate::chat::trajectories::TRAJECTORY_WRITER_ENV, previous);
+        } else {
+            std::env::remove_var(crate::chat::trajectories::TRAJECTORY_WRITER_ENV);
+        }
+    }
 }
 
 async fn save_workload_trajectories(
@@ -728,7 +796,9 @@ async fn save_workload_trajectories(
     }
 
     let chat_id = primary_chat_id;
+    let mut checkpoint_return_samples = Vec::new();
     for checkpoint in 0..workload.rapid_same_chat_checkpoints {
+        let checkpoint_started = Instant::now();
         save_real_session_snapshot(
             fixture.gcx.clone(),
             &chat_id,
@@ -738,7 +808,17 @@ async fn save_workload_trajectories(
             ),
         )
         .await?;
+        checkpoint_return_samples.push(elapsed_us(checkpoint_started));
     }
+    let checkpoint_return_elapsed_us = percentile_us(&checkpoint_return_samples, 95);
+    let flush_started = Instant::now();
+    persist_trajectory_snapshot_with_intent(
+        fixture.gcx.clone(),
+        snapshot_for_payload(&chat_id, &format!("final-{shared_payload}")),
+        crate::chat::types::TrajectoryCommitIntent::Required,
+    )
+    .await?;
+    let background_flush_elapsed_us = elapsed_us(flush_started);
 
     let file_path = find_trajectory_path(fixture.gcx.clone(), &chat_id)
         .await
@@ -760,8 +840,11 @@ async fn save_workload_trajectories(
     }
 
     Ok(SaveCounts {
-        total: u64::from(workload.chat_count) + workload.rapid_same_chat_checkpoints,
+        total: u64::from(workload.chat_count) + workload.rapid_same_chat_checkpoints + 1,
         checkpoints: workload.rapid_same_chat_checkpoints,
+        required_commits: 1,
+        checkpoint_return_elapsed_us,
+        background_flush_elapsed_us,
     })
 }
 
@@ -770,6 +853,18 @@ async fn save_real_session_snapshot(
     chat_id: &str,
     payload: &str,
 ) -> Result<(), String> {
+    persist_trajectory_snapshot_with_intent(
+        gcx,
+        snapshot_for_payload(chat_id, payload),
+        crate::chat::types::TrajectoryCommitIntent::Checkpoint,
+    )
+    .await
+}
+
+fn snapshot_for_payload(
+    chat_id: &str,
+    payload: &str,
+) -> crate::chat::trajectories::TrajectorySnapshot {
     let mut session = crate::chat::types::ChatSession::new(chat_id.to_string());
     session.thread.title = "Concurrent benchmark".to_string();
     session.thread.model = "benchmark-local".to_string();
@@ -781,8 +876,7 @@ async fn save_real_session_snapshot(
         content: ChatContent::SimpleText(payload.to_string()),
         ..Default::default()
     });
-    let snapshot = trajectory_snapshot_from_session(&session);
-    save_trajectory_snapshot(gcx, snapshot).await
+    trajectory_snapshot_from_session(&session)
 }
 
 struct BenchmarkClock {
@@ -936,6 +1030,7 @@ fn aggregate_counters(samples: &[Sample]) -> BenchmarkCounters {
         .fold(BenchmarkCounters::default(), |mut total, sample| {
             total.save_calls += sample.counters.save_calls;
             total.rapid_checkpoint_saves += sample.counters.rapid_checkpoint_saves;
+            total.required_commits += sample.counters.required_commits;
             total.trajectory_files += sample.counters.trajectory_files;
             total.measured_files_written += sample.counters.measured_files_written;
             total.measured_bytes_written += sample.counters.measured_bytes_written;
@@ -1069,6 +1164,8 @@ mod tests {
         let second = run_ci_fixture().expect("second fixture run succeeds");
         let first_variant = &first.variants[0];
         let second_variant = &second.variants[0];
+        assert_eq!(first.variants.len(), 2);
+        assert_eq!(second.variants.len(), 2);
         assert_eq!(first.workload, second.workload);
         assert_eq!(first_variant.counters, second_variant.counters);
         assert_eq!(first_variant.diagnostics, second_variant.diagnostics);
@@ -1086,12 +1183,13 @@ mod tests {
     #[test]
     fn ci_fixture_measures_real_saves_and_diagnostics() {
         let report = run_ci_fixture().expect("CI fixture should run");
-        assert_eq!(report.variants.len(), 1);
+        assert_eq!(report.variants.len(), 2);
         let variant = &report.variants[0];
         assert_eq!(variant.variant, "legacy");
         assert!(variant.counters.measured_files_written >= variant.counters.trajectory_files);
         assert!(variant.counters.measured_bytes_written > 0);
-        assert!(variant.diagnostics.trajectory_commit >= variant.counters.save_calls);
+        assert!(variant.counters.required_commits > 0);
+        assert!(variant.diagnostics.trajectory_atomic_write >= variant.counters.required_commits);
         assert!(variant.diagnostics.trajectory_index_write > 0);
         assert_ci_invariants(&variant.counters, &variant.diagnostics).expect("fixture invariants");
     }
@@ -1114,8 +1212,8 @@ mod tests {
             ))
             .expect("real workload runs");
         let variant = &report.variants[0];
-        assert_eq!(variant.counters.save_calls, 8);
-        assert!(variant.diagnostics.trajectory_commit >= variant.counters.save_calls);
+        assert_eq!(variant.counters.save_calls, 9);
+        assert!(variant.diagnostics.trajectory_atomic_write >= variant.counters.required_commits);
         assert!(variant.counters.measured_bytes_written > 0);
     }
 
@@ -1129,7 +1227,7 @@ mod tests {
     }
 
     #[test]
-    fn report_only_includes_legacy_until_an_optimized_switch_exists() {
+    fn report_compares_legacy_and_coalesced_writer_variants() {
         let report = ConcurrentChatBenchmarkReport {
             schema: CONCURRENT_CHAT_BENCHMARK_SCHEMA,
             mode: HarnessMode::Quick.as_str().to_string(),
@@ -1139,6 +1237,7 @@ mod tests {
         };
         let json = render_json(&report).expect("report serializes");
         validate_report_json(&json).expect("report schema validates");
-        assert!(!json.contains("\"optimized\""));
+        assert!(json.contains("\"legacy\""));
+        assert!(json.contains("\"coalesced\""));
     }
 }

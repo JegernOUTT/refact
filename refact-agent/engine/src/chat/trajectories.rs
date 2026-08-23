@@ -2,7 +2,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::sync::atomic::Ordering;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::extract::Path as AxumPath;
 use axum::http::{Response, StatusCode};
 use axum::extract::State;
@@ -104,6 +104,8 @@ use super::SessionsMap;
 use super::trajectory_index;
 
 const TITLE_GENERATION_SUBAGENT_ID: &str = "title_generation";
+pub const TRAJECTORY_WRITER_ENV: &str = "REFACT_TRAJECTORY_WRITER";
+const TRAJECTORY_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const TITLE_GENERATION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 #[cfg(not(test))]
@@ -111,6 +113,17 @@ const TITLE_GENERATION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::f
 const TRAJECTORY_META_TITLE_MAX_CHARS: usize = 120;
 
 pub use refact_chat_history::trajectory_event::TrajectoryEvent;
+
+pub fn trajectory_writer_rollout_enabled() -> bool {
+    trajectory_writer_rollout_enabled_for(std::env::var(TRAJECTORY_WRITER_ENV).ok().as_deref())
+}
+
+pub(crate) fn trajectory_writer_rollout_enabled_for(value: Option<&str>) -> bool {
+    !matches!(
+        value.map(str::trim),
+        Some("0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF")
+    )
+}
 
 pub async fn get_session_state_for_chat(
     sessions: &SessionsMap,
@@ -2688,7 +2701,7 @@ pub async fn save_trajectory_as_with_intent(
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
     };
-    if let Err(e) = schedule_detached_trajectory_writer(gcx, snapshot, intent).await {
+    if let Err(e) = persist_trajectory_snapshot_with_intent(gcx, snapshot, intent).await {
         warn!("Failed to save trajectory: {}", e);
     }
 }
@@ -2705,7 +2718,8 @@ pub async fn save_trajectory_snapshot(
         None,
     );
     let result =
-        schedule_detached_trajectory_writer(gcx, snapshot, TrajectoryCommitIntent::Required).await;
+        persist_trajectory_snapshot_with_intent(gcx, snapshot, TrajectoryCommitIntent::Required)
+            .await;
     span.finish(
         if result.is_ok() {
             PerfOutcome::Success
@@ -2751,22 +2765,18 @@ impl Default for DetachedTrajectoryWriterState {
     }
 }
 
-fn detached_trajectory_writers(
-) -> &'static StdMutex<std::collections::HashMap<String, Arc<AMutex<DetachedTrajectoryWriterState>>>>
-{
-    static WRITERS: OnceLock<
-        StdMutex<std::collections::HashMap<String, Arc<AMutex<DetachedTrajectoryWriterState>>>>,
-    > = OnceLock::new();
+type DetachedTrajectoryWriterRegistry =
+    std::collections::HashMap<String, Weak<AMutex<DetachedTrajectoryWriterState>>>;
+
+fn detached_trajectory_writers() -> &'static StdMutex<DetachedTrajectoryWriterRegistry> {
+    static WRITERS: OnceLock<StdMutex<DetachedTrajectoryWriterRegistry>> = OnceLock::new();
     WRITERS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
 }
 
-fn detached_trajectory_writer(
+fn detached_trajectory_writer_key(
     gcx: &Arc<GlobalContext>,
-    chat_id: &str,
-) -> Arc<AMutex<DetachedTrajectoryWriterState>> {
-    let mut writers = detached_trajectory_writers()
-        .lock()
-        .expect("detached trajectory writer registry poisoned");
+    snapshot: &TrajectorySnapshot,
+) -> String {
     let workspace_key = gcx
         .documents_state
         .workspace_folders
@@ -2779,11 +2789,83 @@ fn detached_trajectory_writer(
                 .join("|")
         })
         .unwrap_or_else(|_| gcx.cache_dir.to_string_lossy().into_owned());
-    let key = format!("{workspace_key}:{chat_id}");
-    writers
-        .entry(key)
-        .or_insert_with(|| Arc::new(AMutex::new(Default::default())))
-        .clone()
+    let source = if let Some(task_meta) = snapshot.task_meta.as_ref() {
+        TrajectorySourceIdentity::from_task_meta(task_meta)
+    } else if snapshot.buddy_meta.is_some() {
+        TrajectorySourceIdentity::Buddy
+    } else {
+        TrajectorySourceIdentity::Normal
+    };
+    format!("{workspace_key}:{source:?}:{}", snapshot.chat_id)
+}
+
+fn detached_trajectory_writer(
+    gcx: &Arc<GlobalContext>,
+    snapshot: &TrajectorySnapshot,
+) -> Arc<AMutex<DetachedTrajectoryWriterState>> {
+    let mut writers = detached_trajectory_writers()
+        .lock()
+        .expect("detached trajectory writer registry poisoned");
+    writers.retain(|_, writer| writer.strong_count() > 0);
+    let key = detached_trajectory_writer_key(gcx, snapshot);
+    if let Some(writer) = writers.get(&key).and_then(Weak::upgrade) {
+        return writer;
+    }
+    let writer = Arc::new(AMutex::new(Default::default()));
+    writers.insert(key, Arc::downgrade(&writer));
+    writer
+}
+
+fn prune_detached_trajectory_writers() {
+    detached_trajectory_writers()
+        .lock()
+        .expect("detached trajectory writer registry poisoned")
+        .retain(|_, writer| writer.strong_count() > 0);
+}
+
+async fn flush_detached_trajectory_writers() -> Result<(), Vec<String>> {
+    let errors = {
+        let writers = {
+            let mut writers = detached_trajectory_writers()
+                .lock()
+                .expect("detached trajectory writer registry poisoned");
+            writers.retain(|_, writer| writer.strong_count() > 0);
+            writers
+                .values()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>()
+        };
+        futures::future::join_all(writers.into_iter().map(|writer| async move {
+            let target_version = writer.lock().await.requested_version;
+            if target_version == 0 {
+                Ok(())
+            } else {
+                wait_for_detached_trajectory_commit(writer, target_version).await
+            }
+        }))
+        .await
+        .into_iter()
+        .filter_map(Result::err)
+        .collect::<Vec<_>>()
+    };
+    prune_detached_trajectory_writers();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+pub(crate) async fn persist_trajectory_snapshot_with_intent(
+    gcx: Arc<GlobalContext>,
+    snapshot: TrajectorySnapshot,
+    intent: TrajectoryCommitIntent,
+) -> Result<(), String> {
+    if trajectory_writer_rollout_enabled() {
+        schedule_detached_trajectory_writer(gcx, snapshot, intent).await
+    } else {
+        save_trajectory_snapshot_inner(gcx, snapshot, None).await
+    }
 }
 
 async fn schedule_detached_trajectory_writer(
@@ -2791,7 +2873,7 @@ async fn schedule_detached_trajectory_writer(
     snapshot: TrajectorySnapshot,
     intent: TrajectoryCommitIntent,
 ) -> Result<(), String> {
-    let writer = detached_trajectory_writer(&gcx, &snapshot.chat_id);
+    let writer = detached_trajectory_writer(&gcx, &snapshot);
     let target_version = {
         let mut state = writer.lock().await;
         state.requested_version = state.requested_version.saturating_add(1);
@@ -2808,7 +2890,9 @@ async fn schedule_detached_trajectory_writer(
         target_version
     };
     if intent.requires_durability() {
-        wait_for_detached_trajectory_commit(writer, target_version).await?;
+        let result = wait_for_detached_trajectory_commit(writer.clone(), target_version).await;
+        prune_detached_trajectory_writers();
+        result?;
     }
     Ok(())
 }
@@ -3450,7 +3534,7 @@ async fn commit_trajectory_snapshot_for_session(
         }
     }
 
-    schedule_detached_trajectory_writer(gcx, snapshot, TrajectoryCommitIntent::Required)
+    persist_trajectory_snapshot_with_intent(gcx, snapshot, TrajectoryCommitIntent::Required)
         .await
         .map_err(|error| format!("Failed to save trajectory for {}: {}", chat_id, error))?;
 
@@ -3567,17 +3651,37 @@ pub async fn flush_trajectory_for_session(
 }
 
 pub async fn flush_all_trajectories(app: AppState) -> Result<(), Vec<String>> {
+    flush_all_trajectories_with_timeout(app, TRAJECTORY_FLUSH_TIMEOUT).await
+}
+
+async fn flush_all_trajectories_with_timeout(
+    app: AppState,
+    timeout: Duration,
+) -> Result<(), Vec<String>> {
     let sessions: Vec<Arc<AMutex<ChatSession>>> = {
         let sessions = app.chat.sessions.read().await;
         sessions.values().cloned().collect()
     };
-    let results = futures::future::join_all(
-        sessions
-            .into_iter()
-            .map(|session_arc| flush_trajectory_for_session(app.clone(), session_arc)),
-    )
-    .await;
-    let errors: Vec<String> = results.into_iter().filter_map(Result::err).collect();
+    let flushes = async move {
+        let results = futures::future::join_all(
+            sessions
+                .into_iter()
+                .map(|session_arc| flush_trajectory_for_session(app.clone(), session_arc)),
+        )
+        .await;
+        let mut errors: Vec<String> = results.into_iter().filter_map(Result::err).collect();
+        if let Err(mut detached_errors) = flush_detached_trajectory_writers().await {
+            errors.append(&mut detached_errors);
+        }
+        errors
+    };
+    let errors = match tokio::time::timeout(timeout, flushes).await {
+        Ok(errors) => errors,
+        Err(_) => vec![format!(
+            "trajectory flush timed out after {} ms",
+            timeout.as_millis()
+        )],
+    };
     if errors.is_empty() {
         Ok(())
     } else {
@@ -7012,6 +7116,168 @@ mod tests {
         );
     }
 
+    #[test]
+    fn trajectory_writer_rollout_switch_defaults_on_and_accepts_explicit_legacy_values() {
+        assert!(trajectory_writer_rollout_enabled_for(None));
+        assert!(trajectory_writer_rollout_enabled_for(Some("1")));
+        assert!(!trajectory_writer_rollout_enabled_for(Some("0")));
+        assert!(!trajectory_writer_rollout_enabled_for(Some(" false ")));
+        assert!(!trajectory_writer_rollout_enabled_for(Some("OFF")));
+    }
+
+    #[test]
+    fn trajectory_writer_ten_thousand_stale_interleavings_preserve_newer_dirty_state() {
+        let mut session = ChatSession::new("trajectory-ten-thousand-stale".to_string());
+        for _ in 0..10_000 {
+            session.increment_version();
+            let stale_version = session.trajectory_version;
+            session.increment_version();
+            let current_version = session.trajectory_version;
+            assert!(session.complete_trajectory_commit(current_version));
+            session.increment_version();
+            assert!(!session.complete_trajectory_commit(stale_version));
+            assert_eq!(session.trajectory_committed_version, current_version);
+            assert!(session.trajectory_dirty);
+            assert!(session.complete_trajectory_commit(session.trajectory_version));
+            assert!(!session.trajectory_dirty);
+        }
+        assert_eq!(session.trajectory_committed_version, 30_000);
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_writer_failed_checkpoint_retries_before_a_required_commit() {
+        let _lock = serial_test_guard();
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "checkpoint-retry-required";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        let failing_message = ChatMessage {
+            message_id: "checkpoint-failure".to_string(),
+            role: "user".to_string(),
+            content: ChatContent::SimpleText("first".to_string()),
+            ..Default::default()
+        };
+        {
+            let mut session = session_arc.lock().await;
+            session.add_message(failing_message.clone());
+        }
+        set_test_message_serialization_failure(Some(failing_message.message_id));
+        try_save_trajectory_with_intent(
+            app.clone(),
+            session_arc.clone(),
+            TrajectoryCommitIntent::Checkpoint,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if session_arc.lock().await.trajectory_save_error.is_some() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("checkpoint failure should reach the session");
+        set_test_message_serialization_failure(None);
+
+        {
+            let mut session = session_arc.lock().await;
+            session.add_message(ChatMessage::new("user".to_string(), "required".to_string()));
+        }
+        try_save_trajectory_with_intent(app, session_arc.clone(), TrajectoryCommitIntent::Required)
+            .await
+            .unwrap();
+
+        let session = session_arc.lock().await;
+        assert!(!session.trajectory_dirty);
+        assert_eq!(
+            session.trajectory_committed_version,
+            session.trajectory_version
+        );
+        drop(session);
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_writer_registry_cleans_completed_and_source_isolated_entries() {
+        let _lock = serial_test_guard();
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "detached-writer-source-isolation";
+        let normal = test_snapshot(
+            chat_id,
+            "Normal",
+            vec![ChatMessage::new("user".to_string(), "normal".to_string())],
+        );
+        let mut buddy = test_snapshot(
+            chat_id,
+            "Buddy",
+            vec![ChatMessage::new("user".to_string(), "buddy".to_string())],
+        );
+        buddy.mode = "buddy".to_string();
+        buddy.buddy_meta = Some(buddy_thread_meta());
+        let normal_key = detached_trajectory_writer_key(&gcx, &normal);
+        let buddy_key = detached_trajectory_writer_key(&gcx, &buddy);
+
+        let (normal_result, buddy_result) = tokio::join!(
+            save_trajectory_snapshot(gcx.clone(), normal),
+            save_trajectory_snapshot(gcx.clone(), buddy),
+        );
+        normal_result.unwrap();
+        buddy_result.unwrap();
+        assert_ne!(normal_key, buddy_key);
+        prune_detached_trajectory_writers();
+        let writers = detached_trajectory_writers()
+            .lock()
+            .expect("detached trajectory writer registry poisoned");
+        assert!(!writers.contains_key(&normal_key));
+        assert!(!writers.contains_key(&buddy_key));
+        drop(writers);
+
+        let normal = load_trajectory_for_chat(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        assert_eq!(normal.thread.title, "Normal");
+        let buddy_path = workspace
+            .path()
+            .join(".refact")
+            .join("buddy")
+            .join("chats")
+            .join("conversations")
+            .join(format!("{chat_id}.json"));
+        let buddy: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(buddy_path).await.unwrap()).unwrap();
+        assert_eq!(buddy["title"], "Buddy");
+    }
+
+    #[tokio::test]
+    async fn trajectory_writer_shutdown_flush_is_bounded_and_reports_blocked_session() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(workspace.path()).await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new("flush-timeout".to_string())));
+        session_arc
+            .lock()
+            .await
+            .add_message(ChatMessage::new("user".to_string(), "pending".to_string()));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("flush-timeout".to_string(), session_arc.clone());
+
+        let guard = session_arc.lock().await;
+        let errors = flush_all_trajectories_with_timeout(app, Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("timed out"));
+        drop(guard);
+    }
+
     fn assert_same_path(left: &Path, right: &Path) {
         assert_eq!(normalized_test_path(left), normalized_test_path(right));
     }
@@ -8785,6 +9051,19 @@ mod tests {
         };
 
         save_trajectory_as(gcx.clone(), &thread, &[]).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if load_trajectory_for_chat(gcx.clone(), chat_id)
+                    .await
+                    .is_some()
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("checkpoint should persist the empty capped chat");
         assert_eq!(
             load_trajectory_for_chat(gcx.clone(), chat_id)
                 .await
@@ -8796,6 +9075,19 @@ mod tests {
 
         thread.auto_compression_cap = None;
         save_trajectory_as(gcx.clone(), &thread, &[]).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if load_trajectory_for_chat(gcx.clone(), chat_id)
+                    .await
+                    .is_some_and(|loaded| loaded.thread.auto_compression_cap.is_none())
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("checkpoint should clear the persisted cap");
         assert_eq!(
             load_trajectory_for_chat(gcx, chat_id)
                 .await
@@ -18444,6 +18736,23 @@ mod tests {
             })
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    #[tokio::test]
+    async fn orphaned_temp_file_does_not_replace_last_atomic_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("chat.json");
+        let committed = r#"{"id":"chat","messages":[]}"#;
+        tokio::fs::write(&file_path, committed).await.unwrap();
+        let tmp_path = unique_trajectory_tmp_path(&file_path);
+        tokio::fs::write(&tmp_path, r#"{"id":"chat","messages":["partial"]"#)
+            .await
+            .unwrap();
+
+        let restored = tokio::fs::read_to_string(&file_path).await.unwrap();
+        assert_eq!(restored, committed);
+        assert!(tmp_path.exists());
+        tokio::fs::remove_file(tmp_path).await.unwrap();
     }
 
     #[tokio::test]
