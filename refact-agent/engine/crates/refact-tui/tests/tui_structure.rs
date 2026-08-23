@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-const APP_RS_LINE_CAP: usize = 13_100;
-const RATCHET_SCHEDULE: &str = "13,100 → 9,800 → 7,000 → 5,000 → 2,000";
+const APP_RS_LINE_CAP: usize = 11_530;
+const RATCHET_SCHEDULE: &str = "11,530 → 9,800 → 7,000 → 5,000 → 2,000";
 
 #[test]
 fn app_rs_stays_within_the_current_ratchet_cap() {
