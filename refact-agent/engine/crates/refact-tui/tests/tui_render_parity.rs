@@ -404,9 +404,9 @@ fn ask_form_bottom_pane_golden_snapshot() {
 
 
   Question 1/2
-  Which file should get the parity snapshot?
+  Which file should get the parity snapshot? (answer required)
 
-  › ◉ tests/tui_render_parity.rs
+  › ○ tests/tui_render_parity.rs
     ○ src/ui/mod.rs
 
   Press Enter to confirm or Esc to go back

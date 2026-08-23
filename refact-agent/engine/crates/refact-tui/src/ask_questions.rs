@@ -42,6 +42,7 @@ impl AskQuestion {
 pub struct AskQuestionsRequest {
     pub tool_call_id: String,
     pub questions: Vec<AskQuestion>,
+    malformed_question_positions: Vec<usize>,
 }
 
 impl AskQuestionsRequest {
@@ -57,14 +58,23 @@ impl AskQuestionsRequest {
             .filter(|value| !value.trim().is_empty())?
             .to_string();
         let raw_questions = raw.get("questions").and_then(Value::as_array)?;
-        let questions = raw_questions
-            .iter()
-            .map(parse_question)
-            .collect::<Option<Vec<_>>>()?;
+        let mut questions = Vec::new();
+        let mut malformed_question_positions = Vec::new();
+        for (index, raw_question) in raw_questions.iter().enumerate() {
+            match parse_question(raw_question) {
+                Some(question) => questions.push(question),
+                None => malformed_question_positions.push(index + 1),
+            }
+        }
         (!questions.is_empty()).then_some(Self {
             tool_call_id,
             questions,
+            malformed_question_positions,
         })
+    }
+
+    pub fn malformed_question_positions(&self) -> &[usize] {
+        &self.malformed_question_positions
     }
 
     pub fn format_manual_reply(&self, answer: &str) -> String {
@@ -125,14 +135,25 @@ fn parse_question(raw: &Value) -> Option<AskQuestion> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AskAnswerState {
-    Choice { selected: usize },
-    Multi { cursor: usize, selected: Vec<bool> },
-    Text(String),
+    Choice {
+        selected: usize,
+        answered: bool,
+    },
+    Multi {
+        cursor: usize,
+        selected: Vec<bool>,
+        answered: bool,
+    },
+    Text {
+        value: String,
+        answered: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AskQuestionsOutcome {
     None,
+    Incomplete,
     Submitted(String),
     Canceled,
 }
@@ -142,6 +163,7 @@ pub struct AskQuestionsForm {
     request: AskQuestionsRequest,
     current: usize,
     answers: Vec<AskAnswerState>,
+    submission_attempted: bool,
 }
 
 impl AskQuestionsForm {
@@ -150,20 +172,26 @@ impl AskQuestionsForm {
             .questions
             .iter()
             .map(|question| match question.question_type {
-                AskQuestionType::YesNo | AskQuestionType::SingleSelect => {
-                    AskAnswerState::Choice { selected: 0 }
-                }
+                AskQuestionType::YesNo | AskQuestionType::SingleSelect => AskAnswerState::Choice {
+                    selected: 0,
+                    answered: false,
+                },
                 AskQuestionType::MultiSelect => AskAnswerState::Multi {
                     cursor: 0,
                     selected: vec![false; question.options.len()],
+                    answered: false,
                 },
-                AskQuestionType::FreeText => AskAnswerState::Text(String::new()),
+                AskQuestionType::FreeText => AskAnswerState::Text {
+                    value: String::new(),
+                    answered: false,
+                },
             })
             .collect();
         Self {
             request,
             current: 0,
             answers,
+            submission_attempted: false,
         }
     }
 
@@ -187,6 +215,10 @@ impl AskQuestionsForm {
         self.request.questions.len()
     }
 
+    pub fn malformed_question_positions(&self) -> &[usize] {
+        self.request.malformed_question_positions()
+    }
+
     pub fn current_question(&self) -> &AskQuestion {
         &self.request.questions[self.current]
     }
@@ -197,22 +229,24 @@ impl AskQuestionsForm {
 
     pub fn current_choice_index(&self) -> Option<usize> {
         match self.answers.get(self.current)? {
-            AskAnswerState::Choice { selected } => Some(*selected),
+            AskAnswerState::Choice { selected, .. } => Some(*selected),
             AskAnswerState::Multi { cursor, .. } => Some(*cursor),
-            AskAnswerState::Text(_) => None,
+            AskAnswerState::Text { .. } => None,
         }
     }
 
     pub fn current_text(&self) -> Option<&str> {
         match self.answers.get(self.current)? {
-            AskAnswerState::Text(text) => Some(text.as_str()),
+            AskAnswerState::Text { value, .. } => Some(value.as_str()),
             _ => None,
         }
     }
 
     pub fn option_selected(&self, option_index: usize) -> bool {
         match self.answers.get(self.current) {
-            Some(AskAnswerState::Choice { selected }) => *selected == option_index,
+            Some(AskAnswerState::Choice { selected, answered }) => {
+                *answered && *selected == option_index
+            }
             Some(AskAnswerState::Multi { selected, .. }) => {
                 selected.get(option_index).copied().unwrap_or(false)
             }
@@ -226,11 +260,12 @@ impl AskQuestionsForm {
             return;
         }
         match self.answers.get_mut(self.current) {
-            Some(AskAnswerState::Choice { selected }) => {
-                *selected = (*selected + 1).min(option_count - 1)
+            Some(AskAnswerState::Choice { selected, answered }) => {
+                *selected = (*selected + 1).min(option_count - 1);
+                *answered = true;
             }
             Some(AskAnswerState::Multi { cursor, .. }) => {
-                *cursor = (*cursor + 1).min(option_count - 1)
+                *cursor = (*cursor + 1).min(option_count - 1);
             }
             _ => {}
         }
@@ -238,8 +273,9 @@ impl AskQuestionsForm {
 
     pub fn previous_option(&mut self) {
         match self.answers.get_mut(self.current) {
-            Some(AskAnswerState::Choice { selected }) => {
+            Some(AskAnswerState::Choice { selected, answered }) => {
                 *selected = selected.saturating_sub(1);
+                *answered = true;
             }
             Some(AskAnswerState::Multi { cursor, .. }) => {
                 *cursor = cursor.saturating_sub(1);
@@ -252,35 +288,45 @@ impl AskQuestionsForm {
         if self.current_question().question_type != AskQuestionType::YesNo {
             return;
         }
-        if let Some(AskAnswerState::Choice { selected }) = self.answers.get_mut(self.current) {
+        if let Some(AskAnswerState::Choice { selected, answered }) =
+            self.answers.get_mut(self.current)
+        {
             *selected = if yes { 0 } else { 1 };
+            *answered = true;
         }
     }
 
     pub fn toggle_current_multi(&mut self) {
-        if let Some(AskAnswerState::Multi { cursor, selected }) = self.answers.get_mut(self.current)
+        if let Some(AskAnswerState::Multi {
+            cursor,
+            selected,
+            answered,
+        }) = self.answers.get_mut(self.current)
         {
             if let Some(value) = selected.get_mut(*cursor) {
                 *value = !*value;
+                *answered = true;
             }
         }
     }
 
     pub fn insert_char(&mut self, ch: char) {
-        if let Some(AskAnswerState::Text(text)) = self.answers.get_mut(self.current) {
-            text.push(ch);
+        if let Some(AskAnswerState::Text { value, answered }) = self.answers.get_mut(self.current) {
+            value.push(ch);
+            *answered = true;
         }
     }
 
     pub fn insert_newline(&mut self) {
-        if let Some(AskAnswerState::Text(text)) = self.answers.get_mut(self.current) {
-            text.push('\n');
+        if let Some(AskAnswerState::Text { value, answered }) = self.answers.get_mut(self.current) {
+            value.push('\n');
+            *answered = true;
         }
     }
 
     pub fn backspace(&mut self) {
-        if let Some(AskAnswerState::Text(text)) = self.answers.get_mut(self.current) {
-            text.pop();
+        if let Some(AskAnswerState::Text { value, .. }) = self.answers.get_mut(self.current) {
+            value.pop();
         }
     }
 
@@ -296,6 +342,10 @@ impl AskQuestionsForm {
         if self.current + 1 < self.request.questions.len() {
             self.current += 1;
             AskQuestionsOutcome::None
+        } else if let Some(index) = self.unanswered_question_indices().into_iter().next() {
+            self.current = index;
+            self.submission_attempted = true;
+            AskQuestionsOutcome::Incomplete
         } else {
             AskQuestionsOutcome::Submitted(self.format_answers())
         }
@@ -317,15 +367,62 @@ impl AskQuestionsForm {
         lines.join("\n").trim().to_string()
     }
 
+    pub fn current_question_answered(&self) -> bool {
+        self.answer_is_explicit(self.current)
+    }
+
+    pub fn submission_error(&self) -> Option<String> {
+        let outstanding = self.unanswered_question_indices();
+        if !self.submission_attempted || outstanding.is_empty() {
+            return None;
+        }
+        let numbers = outstanding
+            .iter()
+            .map(|index| (index + 1).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "Answer outstanding question{plural}: {numbers}",
+            plural = if outstanding.len() == 1 { "" } else { "s" }
+        ))
+    }
+
+    fn unanswered_question_indices(&self) -> Vec<usize> {
+        self.answers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, _)| (!self.answer_is_explicit(index)).then_some(index))
+            .collect()
+    }
+
+    fn answer_is_explicit(&self, index: usize) -> bool {
+        match self.answers.get(index) {
+            Some(AskAnswerState::Choice { answered, .. })
+            | Some(AskAnswerState::Multi { answered, .. })
+            | Some(AskAnswerState::Text { answered, .. }) => *answered,
+            None => false,
+        }
+    }
+
     fn answer_text(&self, index: usize) -> String {
         let question = &self.request.questions[index];
         match &self.answers[index] {
-            AskAnswerState::Choice { selected } => question
-                .choice_options()
-                .get(*selected)
-                .cloned()
-                .unwrap_or_else(|| "(no answer)".to_string()),
-            AskAnswerState::Multi { selected, .. } => {
+            AskAnswerState::Choice { selected, answered } => {
+                if !answered {
+                    return "(no answer)".to_string();
+                }
+                question
+                    .choice_options()
+                    .get(*selected)
+                    .cloned()
+                    .unwrap_or_else(|| "(no answer)".to_string())
+            }
+            AskAnswerState::Multi {
+                selected, answered, ..
+            } => {
+                if !answered {
+                    return "(no answer)".to_string();
+                }
                 let options = question.choice_options();
                 let values = selected
                     .iter()
@@ -340,11 +437,11 @@ impl AskQuestionsForm {
                     values.join(", ")
                 }
             }
-            AskAnswerState::Text(text) => {
-                if text.trim().is_empty() {
+            AskAnswerState::Text { value, answered } => {
+                if !answered || value.trim().is_empty() {
                     "(no answer)".to_string()
                 } else {
-                    text.trim().to_string()
+                    value.trim().to_string()
                 }
             }
         }
@@ -414,6 +511,43 @@ mod tests {
     }
 
     #[test]
+    fn keeps_valid_questions_when_a_payload_question_is_malformed() {
+        let request = request_with_questions(json!([
+            {"id":"confirm","type":"yes_no","text":"Proceed?"},
+            {"id":"broken","type":"single_select","text":"Choose?"},
+            {"id":"notes","type":"free_text","text":"Notes?"}
+        ]));
+
+        assert_eq!(request.questions.len(), 2);
+        assert_eq!(request.malformed_question_positions(), &[2]);
+        assert_eq!(request.questions[0].id, "confirm");
+        assert_eq!(request.questions[1].id, "notes");
+    }
+
+    #[test]
+    fn valid_questions_stay_answerable_when_a_payload_question_is_malformed() {
+        let request = request_with_questions(json!([
+            {"id":"confirm","type":"yes_no","text":"Proceed?"},
+            {"id":"broken","type":"single_select","text":"Choose?"},
+            {"id":"notes","type":"free_text","text":"Notes?"}
+        ]));
+        let mut form = AskQuestionsForm::new(request);
+
+        form.choose_yes_no(true);
+        assert_eq!(form.accept(), AskQuestionsOutcome::None);
+        for ch in "Ready".chars() {
+            form.insert_char(ch);
+        }
+
+        assert_eq!(
+            form.accept(),
+            AskQuestionsOutcome::Submitted(
+                "[QA:call-ask]\n> [confirm] Proceed?\nYes\n\n> [notes] Notes?\nReady".to_string()
+            )
+        );
+    }
+
+    #[test]
     fn state_machine_collects_answers_into_canonical_user_message() {
         let request = request_with_questions(json!([
             {"id":"confirm","type":"yes_no","text":"Proceed?"},
@@ -439,6 +573,53 @@ mod tests {
             form.accept(),
             AskQuestionsOutcome::Submitted(
                 "[QA:call-ask]\n> [confirm] Proceed?\nNo\n\n> [path] Path?\nB\n\n> [areas] Areas?\nTests, Docs\n\n> [notes] Notes?\nShip it".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn incomplete_submission_never_formats_unseen_yes_no_defaults() {
+        let request = request_with_questions(json!([
+            {"id":"first","type":"yes_no","text":"First?"},
+            {"id":"second","type":"yes_no","text":"Second?"},
+            {"id":"third","type":"yes_no","text":"Third?"}
+        ]));
+        let mut form = AskQuestionsForm::new(request);
+
+        form.next_question();
+        form.next_question();
+
+        assert_eq!(form.accept(), AskQuestionsOutcome::Incomplete);
+        assert_eq!(form.current_index(), 0);
+        assert_eq!(
+            form.submission_error().as_deref(),
+            Some("Answer outstanding questions: 1, 2, 3")
+        );
+        assert_eq!(
+            form.format_answers(),
+            "[QA:call-ask]\n> [first] First?\n(no answer)\n\n> [second] Second?\n(no answer)\n\n> [third] Third?\n(no answer)"
+        );
+    }
+
+    #[test]
+    fn submits_all_explicit_yes_no_answers() {
+        let request = request_with_questions(json!([
+            {"id":"first","type":"yes_no","text":"First?"},
+            {"id":"second","type":"yes_no","text":"Second?"},
+            {"id":"third","type":"yes_no","text":"Third?"}
+        ]));
+        let mut form = AskQuestionsForm::new(request);
+
+        form.choose_yes_no(true);
+        form.next_question();
+        form.choose_yes_no(false);
+        form.next_question();
+        form.choose_yes_no(true);
+
+        assert_eq!(
+            form.accept(),
+            AskQuestionsOutcome::Submitted(
+                "[QA:call-ask]\n> [first] First?\nYes\n\n> [second] Second?\nNo\n\n> [third] Third?\nYes".to_string()
             )
         );
     }
@@ -491,6 +672,6 @@ mod tests {
         let form = AskQuestionsForm::new(request);
 
         assert_eq!(form.cancel(), AskQuestionsOutcome::Canceled);
-        assert_eq!(form.current_answer_text(), "Yes");
+        assert_eq!(form.current_answer_text(), "(no answer)");
     }
 }

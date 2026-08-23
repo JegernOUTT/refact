@@ -5184,7 +5184,9 @@ impl App {
                         self.ask_questions_form = None;
                         self.submit_ask_questions_reply(prompt)
                     }
-                    AskQuestionsOutcome::None | AskQuestionsOutcome::Canceled => AppAction::None,
+                    AskQuestionsOutcome::None
+                    | AskQuestionsOutcome::Incomplete
+                    | AskQuestionsOutcome::Canceled => AppAction::None,
                 }
             }
             Some(KeyAction::MoveUp) => {
@@ -8460,6 +8462,35 @@ new-chat = "ctrl-x"
         ));
         app.handle_chat_event(waiting_user_input_event(&app));
         assert!(app.ask_questions_form().is_none());
+    }
+
+    #[test]
+    fn ask_questions_does_not_submit_unseen_yes_no_defaults() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ask_questions_tool_event(
+            &app,
+            "call-ask",
+            json!([
+                {"id":"first","type":"yes_no","text":"First?"},
+                {"id":"second","type":"yes_no","text":"Second?"},
+                {"id":"third","type":"yes_no","text":"Third?"}
+            ]),
+        ));
+        app.handle_chat_event(waiting_user_input_event(&app));
+
+        assert_eq!(app.handle_key(key(KeyCode::Right)), AppAction::None);
+        assert_eq!(app.handle_key(key(KeyCode::Right)), AppAction::None);
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+
+        let form = app
+            .ask_questions_form()
+            .expect("incomplete form remains open");
+        assert_eq!(form.current_index(), 0);
+        assert_eq!(
+            form.submission_error().as_deref(),
+            Some("Answer outstanding questions: 1, 2, 3")
+        );
+        assert!(!form.format_answers().contains("\nYes"));
     }
 
     #[test]

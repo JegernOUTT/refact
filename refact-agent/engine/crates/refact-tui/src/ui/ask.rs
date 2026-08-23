@@ -27,6 +27,7 @@ pub(crate) fn render_ask_form(frame: &mut Frame<'_>, form: &AskQuestionsForm, ar
 }
 
 fn form_height(form: &AskQuestionsForm) -> u16 {
+    let notice_rows = notice_lines(form).len().min(u16::MAX as usize) as u16;
     let answer_rows = match form.current_question().question_type {
         AskQuestionType::FreeText => textarea_height(form),
         AskQuestionType::YesNo | AskQuestionType::SingleSelect | AskQuestionType::MultiSelect => {
@@ -35,6 +36,7 @@ fn form_height(form: &AskQuestionsForm) -> u16 {
     };
     let content_height = 1u16
         .saturating_add(1)
+        .saturating_add(notice_rows)
         .saturating_add(1)
         .saturating_add(answer_rows)
         .saturating_add(1)
@@ -51,10 +53,17 @@ fn render_ask_content(frame: &mut Frame<'_>, form: &AskQuestionsForm, area: Rect
 
     render_line(frame, progress_line(form), row(area, y));
     y = y.saturating_add(1);
+    for notice in notice_lines(form) {
+        if y >= bottom {
+            return;
+        }
+        render_line(frame, Line::from(notice).red(), row(area, y));
+        y = y.saturating_add(1);
+    }
+
     if y >= bottom {
         return;
     }
-
     render_line(
         frame,
         question_line(form, area.width as usize),
@@ -196,26 +205,33 @@ fn progress_line(form: &AskQuestionsForm) -> Line<'static> {
     .dim()
 }
 
+fn notice_lines(form: &AskQuestionsForm) -> Vec<String> {
+    let mut notices = form
+        .malformed_question_positions()
+        .iter()
+        .map(|position| format!("Question {position} could not be displayed"))
+        .collect::<Vec<_>>();
+    if let Some(error) = form.submission_error() {
+        notices.push(error);
+    }
+    notices
+}
+
 fn question_line(form: &AskQuestionsForm, width: usize) -> Line<'static> {
-    let line = Line::from(form.current_question().text.clone());
-    let line = if current_question_answered(form) {
+    let line = if form.current_question_answered() {
+        Line::from(form.current_question().text.clone())
+    } else {
+        Line::from(format!(
+            "{} (answer required)",
+            form.current_question().text
+        ))
+    };
+    let line = if form.current_question_answered() {
         line
     } else {
         line.cyan()
     };
     truncate_line_with_ellipsis_if_overflow(line, width)
-}
-
-fn current_question_answered(form: &AskQuestionsForm) -> bool {
-    match form.current_question().question_type {
-        AskQuestionType::YesNo | AskQuestionType::SingleSelect => false,
-        AskQuestionType::MultiSelect => {
-            (0..form.current_question().choice_options().len()).any(|idx| form.option_selected(idx))
-        }
-        AskQuestionType::FreeText => form
-            .current_text()
-            .is_some_and(|text| !text.trim().is_empty()),
-    }
 }
 
 fn render_line(frame: &mut Frame<'_>, line: Line<'static>, area: Rect) {
@@ -416,7 +432,8 @@ mod tests {
         let (text, buffer) = rendered_form(&form);
 
         assert!(text.contains("Question 1/1"));
-        assert!(text.contains("› ◉ Yes"));
+        assert!(text.contains("Proceed? (answer required)"));
+        assert!(text.contains("› ○ Yes"));
         assert!(text.contains("○ No"));
         assert!(text.contains("Press Enter to confirm or Esc to go back"));
         assert!(text.contains("Y/N choose"));
@@ -464,5 +481,38 @@ mod tests {
         assert!(text.contains("First"));
         assert!(text.contains("Second"));
         assert!(!text.contains("Type your answer…"));
+    }
+
+    #[test]
+    fn malformed_question_renders_an_error_row_alongside_valid_questions() {
+        let form = form_with_questions(json!([
+            {"id":"confirm","type":"yes_no","text":"Proceed?"},
+            {"id":"broken","type":"single_select","text":"Choose?"},
+            {"id":"notes","type":"free_text","text":"Notes?"}
+        ]));
+
+        let (text, _buffer) = rendered_form(&form);
+
+        assert!(text.contains("Proceed? (answer required)"));
+        assert!(text.contains("Question 2 could not be displayed"));
+    }
+
+    #[test]
+    fn incomplete_submission_renders_outstanding_question_notice() {
+        let mut form = form_with_questions(json!([
+            {"id":"first","type":"yes_no","text":"First?"},
+            {"id":"second","type":"yes_no","text":"Second?"}
+        ]));
+
+        form.next_question();
+        assert_eq!(
+            form.accept(),
+            crate::ask_questions::AskQuestionsOutcome::Incomplete
+        );
+
+        let (text, _buffer) = rendered_form(&form);
+
+        assert!(text.contains("Answer outstanding questions: 1, 2"));
+        assert!(text.contains("First? (answer required)"));
     }
 }
