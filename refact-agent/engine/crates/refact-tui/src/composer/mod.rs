@@ -1,11 +1,10 @@
+mod grapheme;
 pub mod queue;
 
 use std::fs;
 use std::ops::Range;
 use std::path::Path;
 use std::time::{Duration, Instant};
-
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const HISTORY_LIMIT: usize = 200;
 pub(crate) const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
@@ -667,10 +666,10 @@ impl TextEditor {
 
     fn restore(&mut self, snapshot: EditorSnapshot) {
         self.text = snapshot.text;
-        self.cursor = clamp_boundary(&self.text, snapshot.cursor);
+        self.cursor = grapheme::clamp_boundary(&self.text, snapshot.cursor);
         self.selection_anchor = snapshot
             .selection_anchor
-            .map(|anchor| clamp_boundary(&self.text, anchor));
+            .map(|anchor| grapheme::clamp_boundary(&self.text, anchor));
     }
 
     pub fn clear(&mut self) {
@@ -693,7 +692,7 @@ impl TextEditor {
         if self.delete_selection() {
             return;
         }
-        let Some(prev) = previous_boundary(&self.text, self.cursor) else {
+        let Some(prev) = grapheme::previous_boundary(&self.text, self.cursor) else {
             return;
         };
         self.text.replace_range(prev..self.cursor, "");
@@ -704,19 +703,19 @@ impl TextEditor {
         if self.delete_selection() {
             return;
         }
-        let Some(next) = next_boundary(&self.text, self.cursor) else {
+        let Some(next) = grapheme::next_boundary(&self.text, self.cursor) else {
             return;
         };
         self.text.replace_range(self.cursor..next, "");
     }
 
     pub fn move_left(&mut self, select: bool) {
-        let target = previous_boundary(&self.text, self.cursor).unwrap_or(0);
+        let target = grapheme::previous_boundary(&self.text, self.cursor).unwrap_or(0);
         self.set_cursor(target, select);
     }
 
     pub fn move_right(&mut self, select: bool) {
-        let target = next_boundary(&self.text, self.cursor).unwrap_or(self.text.len());
+        let target = grapheme::next_boundary(&self.text, self.cursor).unwrap_or(self.text.len());
         self.set_cursor(target, select);
     }
 
@@ -802,8 +801,8 @@ impl TextEditor {
     }
 
     fn remove_kill_range(&mut self, range: Range<usize>) -> Option<String> {
-        let start = clamp_boundary(&self.text, range.start);
-        let end = clamp_boundary(&self.text, range.end);
+        let start = grapheme::clamp_boundary(&self.text, range.start);
+        let end = grapheme::clamp_boundary(&self.text, range.end);
         if start >= end {
             return None;
         }
@@ -815,29 +814,35 @@ impl TextEditor {
     }
 
     pub fn can_move_up(&self) -> bool {
-        self.line_col().0 > 0
+        grapheme::line_and_column(&self.text, self.cursor).0 > 0
     }
 
     pub fn can_move_down(&self) -> bool {
-        self.line_col().0 + 1 < self.line_count()
+        grapheme::line_and_column(&self.text, self.cursor).0 + 1 < grapheme::line_count(&self.text)
     }
 
     pub fn move_up(&mut self, select: bool) {
-        let (line, col) = self.line_col();
+        let (line, column) = grapheme::line_and_column(&self.text, self.cursor);
         if line == 0 {
             self.set_cursor(0, select);
             return;
         }
-        self.set_cursor(self.offset_for_line_col(line - 1, col), select);
+        self.set_cursor(
+            grapheme::offset_for_line_column(&self.text, line - 1, column),
+            select,
+        );
     }
 
     pub fn move_down(&mut self, select: bool) {
-        let (line, col) = self.line_col();
-        if line + 1 >= self.line_count() {
+        let (line, column) = grapheme::line_and_column(&self.text, self.cursor);
+        if line + 1 >= grapheme::line_count(&self.text) {
             self.set_cursor(self.text.len(), select);
             return;
         }
-        self.set_cursor(self.offset_for_line_col(line + 1, col), select);
+        self.set_cursor(
+            grapheme::offset_for_line_column(&self.text, line + 1, column),
+            select,
+        );
     }
 
     pub fn selection_range(&self) -> Option<Range<usize>> {
@@ -852,7 +857,7 @@ impl TextEditor {
     }
 
     fn set_cursor(&mut self, target: usize, select: bool) {
-        let target = clamp_boundary(&self.text, target);
+        let target = grapheme::clamp_boundary(&self.text, target);
         if select {
             if self.selection_anchor.is_none() {
                 self.selection_anchor = Some(self.cursor);
@@ -874,51 +879,13 @@ impl TextEditor {
     }
 
     fn remove_range(&mut self, range: Range<usize>) {
-        let start = clamp_boundary(&self.text, range.start);
-        let end = clamp_boundary(&self.text, range.end);
+        let start = grapheme::clamp_boundary(&self.text, range.start);
+        let end = grapheme::clamp_boundary(&self.text, range.end);
         if start <= end {
             self.text.replace_range(start..end, "");
             self.cursor = start;
             self.selection_anchor = None;
         }
-    }
-
-    fn line_col(&self) -> (usize, usize) {
-        let mut line = 0;
-        let mut col = 0;
-        for ch in self.text[..self.cursor].chars() {
-            if ch == '\n' {
-                line += 1;
-                col = 0;
-            } else {
-                col += 1;
-            }
-        }
-        (line, col)
-    }
-
-    fn line_count(&self) -> usize {
-        self.text.chars().filter(|ch| *ch == '\n').count() + 1
-    }
-
-    fn offset_for_line_col(&self, target_line: usize, target_col: usize) -> usize {
-        let mut line = 0;
-        let mut col = 0;
-        for (idx, ch) in self.text.char_indices() {
-            if line == target_line && col == target_col {
-                return idx;
-            }
-            if ch == '\n' {
-                if line == target_line {
-                    return idx;
-                }
-                line += 1;
-                col = 0;
-            } else if line == target_line {
-                col += 1;
-            }
-        }
-        self.text.len()
     }
 
     fn view(&self, width: usize, max_rows: usize) -> ComposerView {
@@ -1042,24 +1009,6 @@ pub fn save_history(path: &Path, entries: &[String]) -> std::io::Result<()> {
     fs::rename(tmp, path)
 }
 
-fn previous_boundary(text: &str, cursor: usize) -> Option<usize> {
-    if cursor == 0 {
-        return None;
-    }
-    text[..cursor].char_indices().last().map(|(idx, _)| idx)
-}
-
-fn next_boundary(text: &str, cursor: usize) -> Option<usize> {
-    if cursor >= text.len() {
-        return None;
-    }
-    text[cursor..]
-        .char_indices()
-        .nth(1)
-        .map(|(idx, _)| cursor + idx)
-        .or(Some(text.len()))
-}
-
 fn next_word_start(text: &str, cursor: usize) -> Option<usize> {
     let mut seen_word = false;
     for (offset, ch) in text[cursor..].char_indices() {
@@ -1091,54 +1040,40 @@ fn previous_word_start(text: &str, cursor: usize) -> Option<usize> {
     start
 }
 
-fn clamp_boundary(text: &str, target: usize) -> usize {
-    if target >= text.len() {
-        return text.len();
-    }
-    let mut cursor = target;
-    while cursor > 0 && !text.is_char_boundary(cursor) {
-        cursor -= 1;
-    }
-    cursor
-}
-
 fn wrap_rows(text: &str, cursor: usize, width: usize) -> (Vec<String>, usize, usize) {
     let mut rows = Vec::new();
     let mut row = String::new();
     let mut row_width = 0;
     let mut cursor_row = 0;
     let mut cursor_col = 0;
-    let mut byte_idx = 0;
     let mut cursor_seen = false;
 
     if cursor == 0 {
         cursor_seen = true;
     }
 
-    for ch in text.chars() {
+    for (byte_idx, grapheme) in grapheme::indices(text) {
         if !cursor_seen && byte_idx == cursor {
             cursor_seen = true;
             cursor_row = rows.len();
             cursor_col = row_width;
         }
 
-        if ch == '\n' {
+        if grapheme == "\n" {
             rows.push(row);
             row = String::new();
             row_width = 0;
-            byte_idx += ch.len_utf8();
             continue;
         }
 
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if row_width > 0 && row_width + ch_width > width {
+        let grapheme_width = grapheme::grapheme_width(grapheme);
+        if row_width > 0 && row_width + grapheme_width > width {
             rows.push(row);
             row = String::new();
             row_width = 0;
         }
-        row.push(ch);
-        row_width += ch_width;
-        byte_idx += ch.len_utf8();
+        row.push_str(grapheme);
+        row_width += grapheme_width;
     }
 
     if !cursor_seen {
@@ -1151,7 +1086,7 @@ fn wrap_rows(text: &str, cursor: usize, width: usize) -> (Vec<String>, usize, us
         cursor_col = 0;
     } else if cursor_seen && cursor == text.len() {
         cursor_row = rows.len() - 1;
-        cursor_col = UnicodeWidthStr::width(rows.last().map(String::as_str).unwrap_or_default());
+        cursor_col = grapheme::display_width(rows.last().map(String::as_str).unwrap_or_default());
     }
     (rows, cursor_row, cursor_col)
 }
@@ -1191,6 +1126,66 @@ mod tests {
         editor.insert_str("XY");
         assert_eq!(editor.text(), "abXY");
         assert_eq!(editor.cursor(), 4);
+    }
+
+    #[test]
+    fn backspace_and_delete_remove_a_whole_zwj_emoji() {
+        let family = "👨‍👩‍👧‍👦";
+        let mut backspace = TextEditor::new();
+        backspace.insert_str(&format!("a{family}b"));
+        backspace.move_left(false);
+        backspace.backspace();
+        assert_eq!(backspace.text(), "ab");
+
+        let mut delete = TextEditor::new();
+        delete.insert_str(&format!("a{family}b"));
+        delete.move_line_start(false);
+        delete.move_right(false);
+        delete.delete();
+        assert_eq!(delete.text(), "ab");
+    }
+
+    #[test]
+    fn backspace_removes_a_whole_combining_cluster() {
+        let mut editor = TextEditor::new();
+        editor.insert_str("xe\u{301}y");
+        editor.move_left(false);
+        editor.backspace();
+        assert_eq!(editor.text(), "xy");
+    }
+
+    #[test]
+    fn vertical_motion_preserves_visual_column_across_cjk() {
+        let mut editor = TextEditor::new();
+        editor.insert_str("abcx\n你x");
+        editor.move_up(false);
+
+        let mut at_top = editor.clone();
+        at_top.insert_char('!');
+        assert_eq!(at_top.text(), "abc!x\n你x");
+
+        editor.move_down(false);
+        editor.insert_char('!');
+        assert_eq!(editor.text(), "abcx\n你x!");
+    }
+
+    #[test]
+    fn vertical_motion_lands_on_zwj_grapheme_boundaries() {
+        let family = "👨‍👩‍👧‍👦";
+        let mut up = TextEditor::new();
+        up.insert_str(&format!("a{family}z\nabc"));
+        up.move_up(false);
+        up.insert_char('!');
+        assert_eq!(up.text(), format!("a!{family}z\nabc"));
+
+        let mut down = TextEditor::new();
+        down.insert_str(&format!("abc\na{family}z"));
+        down.move_line_start(false);
+        down.move_up(false);
+        down.move_line_end(false);
+        down.move_down(false);
+        down.insert_char('!');
+        assert_eq!(down.text(), format!("abc\na!{family}z"));
     }
 
     #[test]
