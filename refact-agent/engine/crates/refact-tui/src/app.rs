@@ -5790,11 +5790,6 @@ impl App {
     }
 
     #[cfg(test)]
-    pub fn test_history_render_count(&self) -> usize {
-        self.history.render_count()
-    }
-
-    #[cfg(test)]
     pub fn test_apply_tui_config_content(&mut self, content: &str) {
         self.apply_tui_config_content(content);
     }
