@@ -774,11 +774,18 @@ async fn prune_buddy_conversations_throttled(gcx: Arc<GlobalContext>) {
     {
         return;
     }
+    let app = AppState::from_gcx(gcx.clone()).await;
     let dir = match get_buddy_conversations_dir(gcx).await {
         Ok(dir) => dir,
         Err(_) => return,
     };
-    match prune_buddy_conversations_in_dir(&dir, BUDDY_CONVERSATIONS_KEEP).await {
+    match prune_buddy_conversations_in_dir_with_coordinator(
+        &dir,
+        BUDDY_CONVERSATIONS_KEEP,
+        Some(&app.chat.trajectory_index_coordinator),
+    )
+    .await
+    {
         Ok(0) => {}
         Ok(removed) => info!("pruned {} old buddy conversations from {:?}", removed, dir),
         Err(e) => {
@@ -793,9 +800,18 @@ async fn prune_buddy_conversations_throttled(gcx: Arc<GlobalContext>) {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn prune_buddy_conversations_in_dir(
     dir: &Path,
     keep: usize,
+) -> Result<usize, String> {
+    prune_buddy_conversations_in_dir_with_coordinator(dir, keep, None).await
+}
+
+async fn prune_buddy_conversations_in_dir_with_coordinator(
+    dir: &Path,
+    keep: usize,
+    coordinator: Option<&trajectory_index::TrajectoryIndexCoordinator>,
 ) -> Result<usize, String> {
     let mut entries = match fs::read_dir(dir).await {
         Ok(entries) => entries,
@@ -876,7 +892,16 @@ pub(crate) async fn prune_buddy_conversations_in_dir(
     }
     let removed = removed_ids.len();
     if removed > 0 {
-        trajectory_index::remove_trajectory_index_entries(dir, &removed_ids).await?;
+        if let Some(coordinator) = coordinator {
+            trajectory_index::remove_trajectory_index_entries_with_rollout(
+                coordinator,
+                dir,
+                &removed_ids,
+            )
+            .await?;
+        } else {
+            trajectory_index::remove_trajectory_index_entries(dir, &removed_ids).await?;
+        }
     }
     Ok(removed)
 }
@@ -1139,12 +1164,22 @@ fn extend_unique_paths(
     }
 }
 
-async fn indexed_candidate_paths_in_dirs(dirs: &[PathBuf], chat_id: &str) -> Vec<PathBuf> {
+async fn indexed_candidate_paths_in_dirs(
+    gcx: &Arc<GlobalContext>,
+    dirs: &[PathBuf],
+    chat_id: &str,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    let app = AppState::from_gcx(gcx.clone()).await;
     for dir in dirs {
-        let entries = match trajectory_index::read_trajectory_index(dir).await {
-            Ok(Some(index)) => index.entries,
-            Ok(None) => continue,
+        let entries = match trajectory_index::list_trajectory_entries_with_rollout(
+            &app.chat.trajectory_index_coordinator,
+            dir,
+            None,
+        )
+        .await
+        {
+            Ok(entries) => entries,
             Err(e) => {
                 warn!("Failed to read trajectory index {:?}: {}", dir, e);
                 continue;
@@ -1166,7 +1201,7 @@ async fn indexed_candidate_paths_in_dirs(dirs: &[PathBuf], chat_id: &str) -> Vec
 async fn normal_trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let normal_dirs = get_all_trajectories_dirs(gcx).await;
+    let normal_dirs = get_all_trajectories_dirs(gcx.clone()).await;
     for dir in &normal_dirs {
         if let Some(path) = safe_trajectory_file_in_dir(dir, chat_id).await {
             if seen.insert(path.clone()) {
@@ -1182,7 +1217,7 @@ async fn normal_trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &st
             }
         }
     }
-    let indexed = indexed_candidate_paths_in_dirs(&normal_dirs, chat_id).await;
+    let indexed = indexed_candidate_paths_in_dirs(&gcx, &normal_dirs, chat_id).await;
     extend_unique_paths(&mut paths, &mut seen, indexed);
     paths
 }
@@ -1298,7 +1333,8 @@ async fn find_trajectory_file(
     validate_trajectory_id(chat_id).ok()?;
     let mut candidates = normal_trajectory_candidate_paths(gcx.clone(), chat_id).await;
     let mut seen: std::collections::HashSet<PathBuf> = candidates.iter().cloned().collect();
-    let indexed = indexed_candidate_paths_in_dirs(&list_trajectory_dirs(&gcx).await, chat_id).await;
+    let indexed =
+        indexed_candidate_paths_in_dirs(&gcx, &list_trajectory_dirs(&gcx).await, chat_id).await;
     extend_unique_paths(&mut candidates, &mut seen, indexed);
     let task_scoped = trajectory_candidate_paths(gcx.clone(), chat_id).await;
     extend_unique_paths(&mut candidates, &mut seen, task_scoped);
@@ -3346,7 +3382,8 @@ async fn save_trajectory_snapshot_inner(
             } else {
                 Some(TrajectorySourceIdentity::Normal)
             };
-            trajectory_index::upsert_trajectory_index_entry_from_owned_value(
+            trajectory_index::upsert_trajectory_index_entry_from_owned_value_with_rollout(
+                &app.chat.trajectory_index_coordinator,
                 &dir,
                 &file_path,
                 trajectory,
@@ -3838,12 +3875,16 @@ pub(crate) async fn persist_loaded_trajectory_repair_raw(
         Some("Failed to write trajectory"),
     )
     .await?;
-    if let Some(dir) = index_dir_for_trajectory_file(gcx, file_path).await {
+    if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), file_path).await {
         let source_hint = Some(trajectory_index::source_from_hint_or_value(
             &trajectory,
             None,
         ));
-        trajectory_index::upsert_trajectory_index_entry_from_owned_value(
+        trajectory_index::upsert_trajectory_index_entry_from_owned_value_with_rollout(
+            &AppState::from_gcx(gcx)
+                .await
+                .chat
+                .trajectory_index_coordinator,
             &dir,
             file_path,
             trajectory,
@@ -4409,6 +4450,7 @@ async fn refresh_trajectory_index_entry_for_path(
     path: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<(), String> {
+    let app = AppState::from_gcx(gcx.clone()).await;
     let dir = index_dir_for_trajectory_file(gcx, path)
         .await
         .ok_or_else(|| format!("Trajectory path has no parent: {}", path.display()))?;
@@ -4428,22 +4470,34 @@ async fn refresh_trajectory_index_entry_for_path(
     })
     .await
     .map_err(|e| format!("Trajectory index refresh parse task failed: {}", e))??;
-    trajectory_index::upsert_trajectory_index_entry_from_owned_value(dir, path, value, source_hint)
-        .await
+    trajectory_index::upsert_trajectory_index_entry_from_owned_value_with_rollout(
+        &app.chat.trajectory_index_coordinator,
+        dir,
+        path,
+        value,
+        source_hint,
+    )
+    .await
 }
 
 async fn remove_stale_trajectory_index_entries(gcx: Arc<GlobalContext>, chat_id: &str) {
+    let app = AppState::from_gcx(gcx.clone()).await;
     for dir in list_trajectory_dirs(&gcx).await {
-        let index = match trajectory_index::read_trajectory_index(&dir).await {
-            Ok(Some(index)) => index,
-            Ok(None) => continue,
+        let entries = match trajectory_index::list_trajectory_entries_with_rollout(
+            &app.chat.trajectory_index_coordinator,
+            &dir,
+            None,
+        )
+        .await
+        {
+            Ok(entries) => entries,
             Err(e) => {
                 warn!("Failed to read trajectory index {:?}: {}", dir, e);
                 continue;
             }
         };
         let mut should_remove = false;
-        for entry in &index.entries {
+        for entry in &entries {
             if entry.id == chat_id
                 && !trajectory_index::trajectory_index_entry_is_fresh(&dir, entry).await
             {
@@ -4452,7 +4506,13 @@ async fn remove_stale_trajectory_index_entries(gcx: Arc<GlobalContext>, chat_id:
             }
         }
         if should_remove {
-            if let Err(e) = trajectory_index::remove_trajectory_index_entry(&dir, chat_id).await {
+            if let Err(e) = trajectory_index::remove_trajectory_index_entry_with_rollout(
+                &app.chat.trajectory_index_coordinator,
+                &dir,
+                chat_id,
+            )
+            .await
+            {
                 warn!(
                     "Failed to remove stale trajectory {} from index {:?}: {}",
                     chat_id, dir, e
@@ -5343,6 +5403,33 @@ fn spawn_title_generation_task(
             warn!("Failed to write trajectory with generated title: {}", e);
             return;
         }
+        if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), &file_path).await {
+            let value = match serde_json::to_value(&data) {
+                Ok(value) => value,
+                Err(e) => {
+                    warn!(
+                        "Failed to serialize trajectory title update for index: {}",
+                        e
+                    );
+                    return;
+                }
+            };
+            if let Err(e) =
+                trajectory_index::upsert_trajectory_index_entry_from_owned_value_with_rollout(
+                    &app.chat.trajectory_index_coordinator,
+                    &dir,
+                    &file_path,
+                    value,
+                    Some(source.clone()),
+                )
+                .await
+            {
+                warn!(
+                    "Failed to update trajectory index for generated title: {}",
+                    e
+                );
+            }
+        }
         info!("Updated trajectory {} with generated title: {}", id, title);
         if !source.emits_generic_event() {
             return;
@@ -6101,12 +6188,14 @@ async fn collect_trajectory_list_candidates(
 ) -> Vec<TrajectoryListCandidate> {
     let mut candidates = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
+    let app = AppState::from_gcx(gcx.clone()).await;
 
     for trajectories_dir in list_trajectory_dirs(gcx).await {
         if !is_real_dir(&trajectories_dir).await {
             continue;
         }
-        let entries = match trajectory_index::list_trajectory_entries_from_index_or_rebuild(
+        let entries = match trajectory_index::list_trajectory_entries_with_rollout(
+            &app.chat.trajectory_index_coordinator,
             &trajectories_dir,
             None,
         )
@@ -6413,7 +6502,8 @@ pub async fn list_all_trajectories_meta(app: AppState) -> Result<Vec<TrajectoryM
         if !is_real_dir(&trajectories_dir).await {
             continue;
         }
-        let entries = match trajectory_index::list_trajectory_entries_from_index_or_rebuild(
+        let entries = match trajectory_index::list_trajectory_entries_with_rollout(
+            &app.chat.trajectory_index_coordinator,
             &trajectories_dir,
             None,
         )
@@ -6596,6 +6686,32 @@ pub async fn handle_v1_trajectories_save(
     atomic_write_json(&file_path, &data)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if !is_internal_trace_link_type(data.extra.get("link_type").and_then(|value| value.as_str())) {
+        let source_hint = Some(
+            TrajectorySourceIdentity::from_extra(&data.extra).map_err(|e| {
+                ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Invalid trajectory source for index update: {}", e),
+                )
+            })?,
+        );
+        if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), &file_path).await {
+            trajectory_index::upsert_trajectory_index_entry_from_owned_value_with_rollout(
+                &app.chat.trajectory_index_coordinator,
+                &dir,
+                &file_path,
+                serde_json::to_value(&data).map_err(|e| {
+                    ScratchError::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to serialize trajectory for index update: {}", e),
+                    )
+                })?,
+                source_hint,
+            )
+            .await
+            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        }
+    }
     let parent_id = data
         .extra
         .get("parent_id")
@@ -6708,7 +6824,13 @@ pub async fn handle_v1_trajectories_delete(
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let Some(dir) = index_dir_for_trajectory_file(gcx.clone(), &file_path).await {
-        if let Err(e) = trajectory_index::remove_trajectory_index_entry(&dir, &id).await {
+        if let Err(e) = trajectory_index::remove_trajectory_index_entry_with_rollout(
+            &app.chat.trajectory_index_coordinator,
+            &dir,
+            &id,
+        )
+        .await
+        {
             warn!(
                 "Failed to remove trajectory {} from index {:?}: {}",
                 id, dir, e

@@ -26,9 +26,15 @@ pub const TRAJECTORY_INDEX_LOCK_ORDER: &str =
     "release_global_and_session_locks_before_trajectory_index_io";
 
 pub fn trajectory_index_coordinator_rollout_enabled() -> bool {
-    std::env::var(TRAJECTORY_INDEX_COORDINATOR_ENV)
-        .ok()
-        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+    trajectory_index_coordinator_rollout_enabled_for(
+        std::env::var(TRAJECTORY_INDEX_COORDINATOR_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+pub(crate) fn trajectory_index_coordinator_rollout_enabled_for(value: Option<&str>) -> bool {
+    value.is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -194,6 +200,7 @@ async fn get_trajectory_index_lock(dir: &Path) -> Arc<AMutex<()>> {
 const INDEX_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const INDEX_LOCK_RETRY: Duration = Duration::from_millis(25);
 const COORDINATOR_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
+const COORDINATOR_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 enum TrajectoryIndexMutation {
@@ -212,6 +219,7 @@ struct PendingTrajectoryIndexMutation {
 struct TrajectoryIndexDirectoryState {
     index: Option<TrajectoryIndex>,
     loaded: bool,
+    last_reconciled_at: Option<Instant>,
     next_sequence: u64,
     pending: Vec<PendingTrajectoryIndexMutation>,
 }
@@ -248,7 +256,7 @@ impl TrajectoryIndexCoordinator {
     }
 
     async fn directory_state(&self, dir: &Path) -> Arc<AMutex<TrajectoryIndexDirectoryState>> {
-        let key = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let key = dir.to_path_buf();
         let mut directories = self.directories.lock().await;
         directories
             .entry(key)
@@ -275,7 +283,13 @@ impl TrajectoryIndexCoordinator {
 
         let mut state_guard = state.lock().await;
         if !state_guard.loaded {
-            state_guard.index = Some(loaded.index);
+            let mut index = loaded.index;
+            for pending in &state_guard.pending {
+                if !matches!(pending.mutation, TrajectoryIndexMutation::Reconcile(_)) {
+                    apply_mutation_to_index(&mut index, &pending.mutation)?;
+                }
+            }
+            state_guard.index = Some(index);
             state_guard.loaded = true;
             if loaded.needs_flush {
                 push_pending_mutation(
@@ -304,13 +318,12 @@ impl TrajectoryIndexCoordinator {
     }
 
     pub async fn upsert(&self, dir: &Path, entry: TrajectoryIndexEntry) -> Result<(), String> {
-        let state = self.ensure_loaded(dir, None).await?;
+        validate_trajectory_index_entry(&entry)?;
+        let state = self.directory_state(dir).await;
         let mut state_guard = state.lock().await;
-        let index = state_guard
-            .index
-            .as_mut()
-            .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string())?;
-        apply_mutation_to_index(index, &TrajectoryIndexMutation::Upsert(entry.clone()))?;
+        if let Some(index) = state_guard.index.as_mut() {
+            apply_mutation_to_index(index, &TrajectoryIndexMutation::Upsert(entry.clone()))?;
+        }
         push_pending_mutation(&mut state_guard, TrajectoryIndexMutation::Upsert(entry));
         Ok(())
     }
@@ -319,13 +332,11 @@ impl TrajectoryIndexCoordinator {
         if chat_ids.is_empty() {
             return Ok(());
         }
-        let state = self.ensure_loaded(dir, None).await?;
+        let state = self.directory_state(dir).await;
         let mut state_guard = state.lock().await;
-        let index = state_guard
-            .index
-            .as_mut()
-            .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string())?;
-        apply_mutation_to_index(index, &TrajectoryIndexMutation::Remove(chat_ids.clone()))?;
+        if let Some(index) = state_guard.index.as_mut() {
+            apply_mutation_to_index(index, &TrajectoryIndexMutation::Remove(chat_ids.clone()))?;
+        }
         push_pending_mutation(&mut state_guard, TrajectoryIndexMutation::Remove(chat_ids));
         Ok(())
     }
@@ -360,6 +371,7 @@ impl TrajectoryIndexCoordinator {
             }
         }
         state_guard.index = Some(index.clone());
+        state_guard.last_reconciled_at = Some(Instant::now());
         if reconciled.1 {
             push_pending_mutation(
                 &mut state_guard,
@@ -374,7 +386,25 @@ impl TrajectoryIndexCoordinator {
         dir: &Path,
         source_hint: Option<TrajectorySourceIdentity>,
     ) -> Result<Vec<TrajectoryIndexEntry>, String> {
-        Ok(self.reconcile(dir, source_hint).await?.entries)
+        let state = self.ensure_loaded(dir, source_hint.clone()).await?;
+        let reconcile_due = {
+            let state_guard = state.lock().await;
+            state_guard
+                .last_reconciled_at
+                .is_none_or(|last| last.elapsed() >= COORDINATOR_RECONCILE_INTERVAL)
+        };
+        if reconcile_due {
+            return Ok(self.reconcile(dir, source_hint).await?.entries);
+        }
+        let entries = state
+            .lock()
+            .await
+            .index
+            .as_ref()
+            .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string())?
+            .entries
+            .clone();
+        Ok(entries)
     }
 
     pub async fn flush_directory(&self, dir: &Path) -> Result<(), String> {
@@ -517,17 +547,7 @@ fn apply_mutation_to_index(
 ) -> Result<(), String> {
     match mutation {
         TrajectoryIndexMutation::Upsert(entry) => {
-            if !index_entry_file_name_is_valid(&entry.file_name)
-                || Path::new(&entry.file_name)
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    != Some(entry.id.as_str())
-            {
-                return Err(format!(
-                    "Invalid trajectory index entry path: {}",
-                    entry.file_name
-                ));
-            }
+            validate_trajectory_index_entry(entry)?;
             index.entries.retain(|existing| existing.id != entry.id);
             index
                 .skipped_files
@@ -541,6 +561,21 @@ fn apply_mutation_to_index(
     }
     index.schema_version = TRAJECTORY_INDEX_SCHEMA_VERSION;
     index.updated_at = Utc::now().to_rfc3339();
+    Ok(())
+}
+
+fn validate_trajectory_index_entry(entry: &TrajectoryIndexEntry) -> Result<(), String> {
+    if !index_entry_file_name_is_valid(&entry.file_name)
+        || Path::new(&entry.file_name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            != Some(entry.id.as_str())
+    {
+        return Err(format!(
+            "Invalid trajectory index entry path: {}",
+            entry.file_name
+        ));
+    }
     Ok(())
 }
 
@@ -1103,6 +1138,23 @@ pub async fn upsert_trajectory_index_entry_with_rollout(
     }
 }
 
+pub async fn upsert_trajectory_index_entry_from_owned_value_with_rollout(
+    coordinator: &TrajectoryIndexCoordinator,
+    dir: &Path,
+    path: &Path,
+    value: serde_json::Value,
+    source_hint: Option<TrajectorySourceIdentity>,
+) -> Result<(), String> {
+    let dir_owned = dir.to_path_buf();
+    let path_owned = path.to_path_buf();
+    let entry = tokio::task::spawn_blocking(move || {
+        entry_from_trajectory_value(&dir_owned, &path_owned, &value, source_hint)
+    })
+    .await
+    .map_err(|e| format!("Trajectory index entry task failed for {:?}: {e}", path))??;
+    upsert_trajectory_index_entry_with_rollout(coordinator, dir, entry).await
+}
+
 pub async fn upsert_trajectory_index_entry_from_value(
     dir: &Path,
     path: &Path,
@@ -1200,6 +1252,31 @@ pub async fn remove_trajectory_index_entries_with_rollout(
         coordinator.remove(dir, chat_ids.clone()).await
     } else {
         remove_trajectory_index_entries(dir, chat_ids).await
+    }
+}
+
+pub async fn remove_trajectory_index_entry_with_rollout(
+    coordinator: &TrajectoryIndexCoordinator,
+    dir: &Path,
+    chat_id: &str,
+) -> Result<(), String> {
+    remove_trajectory_index_entries_with_rollout(
+        coordinator,
+        dir,
+        &HashSet::from([chat_id.to_string()]),
+    )
+    .await
+}
+
+pub async fn list_trajectory_entries_with_rollout(
+    coordinator: &TrajectoryIndexCoordinator,
+    dir: &Path,
+    source_hint: Option<TrajectorySourceIdentity>,
+) -> Result<Vec<TrajectoryIndexEntry>, String> {
+    if trajectory_index_coordinator_rollout_enabled() {
+        coordinator.list_entries(dir, source_hint).await
+    } else {
+        list_trajectory_entries_from_index_or_rebuild(dir, source_hint).await
     }
 }
 
@@ -2252,6 +2329,70 @@ mod tests {
         let index = read_trajectory_index(&dir).await.unwrap().unwrap();
         assert_eq!(index.entries.len(), 1);
         assert_eq!(index.entries[0].title, "Renamed");
+    }
+
+    #[tokio::test]
+    async fn coordinator_enqueues_before_loading_or_writing_the_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+
+        assert!(!trajectory_index_path(&dir).exists());
+        assert_eq!(coordinator.directories.lock().await.len(), 1);
+        coordinator.flush_all().await.unwrap();
+        assert_eq!(
+            read_trajectory_index(&dir)
+                .await
+                .unwrap()
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinator_recovers_an_unflushed_committed_trajectory_on_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+        drop(coordinator);
+
+        let restarted = TrajectoryIndexCoordinator::new();
+        let entries = restarted.list_entries(&dir, None).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "chat-1");
+        restarted.flush_all().await.unwrap();
+        assert_eq!(
+            read_trajectory_index(&dir)
+                .await
+                .unwrap()
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn coordinator_rollout_switch_retains_legacy_fallback() {
+        for disabled in [None, Some("0"), Some("false"), Some("off")] {
+            assert!(!trajectory_index_coordinator_rollout_enabled_for(disabled));
+        }
+        for enabled in [Some("1"), Some("true"), Some("YES")] {
+            assert!(trajectory_index_coordinator_rollout_enabled_for(enabled));
+        }
     }
 
     #[tokio::test]

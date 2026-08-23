@@ -9,6 +9,7 @@ use uuid::Uuid;
 use chrono::Utc;
 
 use refact_buddy_core::user_action::UserAction;
+use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
 use crate::files_correction::get_project_dirs;
 use super::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus, TrajectoryInfo};
@@ -522,8 +523,14 @@ pub async fn list_task_trajectories(
         return Ok(vec![]);
     }
 
-    let entries = crate::chat::trajectory_index::list_trajectory_entries_from_index_or_rebuild(
-        &traj_dir, None,
+    let coordinator = AppState::from_gcx(gcx.clone())
+        .await
+        .chat
+        .trajectory_index_coordinator;
+    let entries = crate::chat::trajectory_index::list_trajectory_entries_with_rollout(
+        &coordinator,
+        &traj_dir,
+        None,
     )
     .await?;
     let mut trajectories: Vec<TrajectoryInfo> = entries

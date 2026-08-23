@@ -1096,8 +1096,12 @@ pub async fn handle_delete_planner_chat(
         .await
         .map_err(|e| delete_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if let Some(dir) = file_path.parent() {
-        if let Err(e) =
-            crate::chat::trajectory_index::remove_trajectory_index_entry(dir, &chat_id).await
+        if let Err(e) = crate::chat::trajectory_index::remove_trajectory_index_entry_with_rollout(
+            &app.chat.trajectory_index_coordinator,
+            dir,
+            &chat_id,
+        )
+        .await
         {
             tracing::warn!(
                 "Failed to remove planner trajectory {} from index {:?}: {}",
