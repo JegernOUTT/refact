@@ -85,61 +85,6 @@ export function formatPricing(cost: CapCost, compact = true): string {
 }
 
 /**
- * Try to find the pricing key in caps.metadata.pricing that corresponds to a given model.
- * Backend inserts pricing under both fully-qualified keys (provider/model) and bare model names.
- */
-function pickPricingKey(args: {
-  caps: CapsResponse;
-  modelName: string;
-  providerName?: string;
-}): string | null {
-  const { caps, modelName, providerName } = args;
-  const pricing = caps.metadata?.pricing;
-  if (!pricing) return null;
-
-  const hasKey = (key: string) =>
-    Object.prototype.hasOwnProperty.call(pricing, key);
-
-  if (providerName && !modelName.includes("/")) {
-    const qualifiedKey = `${providerName}/${modelName}`;
-    if (hasKey(qualifiedKey)) {
-      return qualifiedKey;
-    }
-  }
-
-  if (hasKey(modelName)) {
-    return modelName;
-  }
-
-  if (providerName && modelName.includes("/")) {
-    const bareModel = modelName.split("/").pop();
-    if (bareModel) {
-      const qualifiedKey = `${providerName}/${bareModel}`;
-      if (hasKey(qualifiedKey)) {
-        return qualifiedKey;
-      }
-    }
-  }
-
-  if (modelName.includes("/")) {
-    const bareModel = modelName.split("/").pop();
-    if (bareModel && hasKey(bareModel)) {
-      return bareModel;
-    }
-  }
-
-  const segments = modelName.split("/");
-  if (segments.length > 2) {
-    const lastTwoSegments = segments.slice(-2).join("/");
-    if (hasKey(lastTwoSegments)) {
-      return lastTwoSegments;
-    }
-  }
-
-  return null;
-}
-
-/**
  * Extract capabilities from chat model
  */
 function extractCapabilities(
@@ -201,7 +146,7 @@ function modelMatchesDefault(
 
 /**
  * Attach pricing, context window & capability flags to each simplified model.
- * Works even if caps/metadata/pricing is missing.
+ * Works even if caps or model pricing is missing.
  */
 export function attachPricingAndCapabilities(
   models: SimplifiedModel[],
@@ -223,14 +168,9 @@ export function attachPricingAndCapabilities(
     const capsModelKey = resolveCapsModelKey(capsModels, m.name, providerName);
     const capsModel = capsModelKey ? capsModels[capsModelKey] : undefined;
 
-    const pricingKey = pickPricingKey({
-      caps,
-      modelName: capsModelKey ?? m.name,
-      providerName,
-    });
     const pricing =
-      pricingKey && caps.metadata?.pricing
-        ? caps.metadata.pricing[pricingKey]
+      modelType === "chat"
+        ? (capsModel as CodeChatModel | undefined)?.pricing
         : undefined;
 
     const nCtx = capsModel?.n_ctx;

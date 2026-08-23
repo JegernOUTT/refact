@@ -9,6 +9,7 @@ import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { hasProperty } from "../../utils";
 import { isDetailMessage } from "./commands";
 import { buildApiUrlFromState } from "./apiUrl";
+import type { ModelPricing } from "./providers";
 
 export const modelsApi = createApi({
   reducerPath: "models",
@@ -284,6 +285,7 @@ export type CodeChatModel = {
   default_frequency_penalty?: number | null;
   default_max_tokens?: number | null;
   max_output_tokens?: number | null;
+  pricing?: ModelPricing;
 
   enabled: boolean;
 

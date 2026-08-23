@@ -30,14 +30,16 @@ function capsWithModelRoles(): CapsResponse {
     chat_thinking_model: "openai/o1",
     chat_light_model: "openai/o1-mini",
     chat_buddy_model: "openai/claude-3-5-haiku",
-    metadata: {
-      pricing: {
-        "openai/gpt-4o": { prompt: 2.5, generated: 10, cache_read: 1.25 },
-        "openai/o3-mini": { prompt: 1.1, generated: 4.4 },
-      },
-    },
     chat_models: {
       ...structuredClone(STUB_CAPS_RESPONSE.chat_models),
+      "openai/gpt-4o": {
+        ...STUB_CAPS_RESPONSE.chat_models["openai/gpt-4o"],
+        pricing: { prompt: 2.5, generated: 10, cache_read: 1.25 },
+      },
+      "openai/o3-mini": {
+        ...STUB_CAPS_RESPONSE.chat_models["openai/o3-mini"],
+        pricing: { prompt: 1.1, generated: 4.4 },
+      },
       "refact/legacy-model": {
         n_ctx: 8192,
         name: "legacy-model",

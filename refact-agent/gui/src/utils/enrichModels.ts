@@ -39,19 +39,6 @@ const PROVIDER_PRIORITY: Record<string, number> = {
   mistral: 6,
 };
 
-export function pricingForModel(
-  pricing: Record<string, CapCost | undefined> | undefined,
-  modelKey: string,
-  displayName: string,
-): CapCost | undefined {
-  if (!pricing) return undefined;
-  return (
-    pricing[modelKey] ??
-    pricing[displayName] ??
-    pricing[modelKey.replace(/^refact\//, "")]
-  );
-}
-
 function extractCapabilities(
   capsModel: CapsResponse["chat_models"][string] | undefined,
 ): ModelCapabilities | undefined {
@@ -67,14 +54,6 @@ function extractCapabilities(
     supportsThinkingBudget: capsModel.supports_thinking_budget,
     supportsAdaptiveThinkingBudget: capsModel.supports_adaptive_thinking_budget,
   };
-}
-
-function getPricing(
-  modelKey: string,
-  displayName: string,
-  caps: CapsResponse,
-): CapCost | undefined {
-  return pricingForModel(caps.metadata?.pricing, modelKey, displayName);
 }
 
 function getContextWindow(
@@ -108,7 +87,7 @@ export function enrichModels(
       value: modelKey,
       displayName,
       disabled: model.disabled,
-      pricing: getPricing(modelKey, displayName, caps),
+      pricing: capsModel.pricing,
       nCtx: getContextWindow(capsModel),
       capabilities: extractCapabilities(capsModel),
       isDefault: caps.chat_default_model === modelKey,

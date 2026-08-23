@@ -6,7 +6,11 @@ import type {
 } from "../../../../../services/refact";
 import { attachPricingAndCapabilities } from "./groupModelsWithPricing";
 
-function chatModel(id: string, name: string): CodeChatModel {
+function chatModel(
+  id: string,
+  name: string,
+  pricing?: CodeChatModel["pricing"],
+): CodeChatModel {
   return {
     id,
     name,
@@ -19,6 +23,7 @@ function chatModel(id: string, name: string): CodeChatModel {
     default_temperature: null,
     enabled: true,
     type: "chat",
+    pricing,
   };
 }
 
@@ -32,7 +37,12 @@ function capsWithOpenAiModel(): CapsResponse {
     chat_light_model: "",
     chat_buddy_model: "",
     chat_models: {
-      "openai/gpt-4.1": chatModel("openai/gpt-4.1", "gpt-4.1"),
+      "openai/gpt-4.1": chatModel("openai/gpt-4.1", "gpt-4.1", {
+        prompt: 2,
+        generated: 8,
+        cache_read: 1,
+        cache_creation: 3,
+      }),
     },
     code_chat_default_system_prompt: "",
     completion_models: {},
@@ -44,14 +54,7 @@ function capsWithOpenAiModel(): CapsResponse {
     running_models: [],
     tokenizer_path_template: "",
     tokenizer_rewrite_path: {},
-    metadata: {
-      pricing: {
-        "gpt-4.1": {
-          prompt: 2,
-          generated: 8,
-        },
-      },
-    },
+    metadata: {},
     customization: "",
   };
 }
@@ -75,7 +78,13 @@ describe("attachPricingAndCapabilities", () => {
 
     expect(model.nCtx).toBe(128000);
     expect(model.capabilities?.supportsTools).toBe(true);
-    expect(model.pricing?.prompt).toBe(2);
+    expect(model.pricing).toEqual({
+      prompt: 2,
+      generated: 8,
+      cache_read: 1,
+      cache_creation: 3,
+    });
+    expect(model.pricingLabel).toBe("$2.00/$8.00");
     expect(model.isDefault).toBe(true);
     expect(model.isTaskPlannerAgent).toBe(true);
   });
@@ -85,15 +94,12 @@ describe("attachPricingAndCapabilities", () => {
     caps.chat_default_model = "openai_2/gpt-4.1";
     caps.task_planner_agent_model = "";
     caps.chat_models["openai_2/gpt-4.1"] = {
-      ...chatModel("openai_2/gpt-4.1", "gpt-4.1"),
+      ...chatModel("openai_2/gpt-4.1", "gpt-4.1", {
+        prompt: 1,
+        generated: 4,
+      }),
       n_ctx: 64000,
       supports_tools: false,
-    };
-    caps.metadata = {
-      pricing: {
-        "openai/gpt-4.1": { prompt: 2, generated: 8 },
-        "openai_2/gpt-4.1": { prompt: 1, generated: 4 },
-      },
     };
 
     const [model] = attachPricingAndCapabilities(
@@ -117,5 +123,32 @@ describe("attachPricingAndCapabilities", () => {
     expect(model.pricing?.prompt).toBe(1);
     expect(model.isDefault).toBe(true);
     expect(model.isTaskPlannerAgent).toBe(false);
+  });
+
+  it("leaves unpriced models without a pricing label", () => {
+    const caps = capsWithOpenAiModel();
+    caps.chat_models["openai/unpriced"] = chatModel(
+      "openai/unpriced",
+      "unpriced",
+    );
+
+    const [model] = attachPricingAndCapabilities(
+      [
+        {
+          name: "unpriced",
+          enabled: true,
+          removable: false,
+          user_configured: false,
+        },
+      ],
+      {
+        caps,
+        modelType: "chat",
+        providerName: "openai",
+      },
+    );
+
+    expect(model.pricing).toBeUndefined();
+    expect(model.pricingLabel).toBeUndefined();
   });
 });

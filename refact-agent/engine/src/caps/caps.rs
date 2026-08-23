@@ -13,9 +13,7 @@ use crate::caps::providers::{
 use refact_core::provider_types::{
     CredentialSpec, ImageTokenMode, ModelTypeDefaults, ProviderDefaults, is_legacy_refact_model,
 };
-use crate::caps::model_caps::{
-    get_model_caps, model_caps_pricing_metadata, resolve_model_caps, ModelCapabilities,
-};
+use crate::caps::model_caps::{get_model_caps, resolve_model_caps, ModelCapabilities};
 use refact_core::provider_types::AvailableModel;
 
 const PROVIDER_MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -41,7 +39,7 @@ pub use refact_core::llm_types::{
 pub use refact_caps_core::model_records::{
     CapsMetadata, ChatModelRecord, CompletionModelFamily, CompletionModelRecord, DefaultModels,
     default_chat_scratchpad, default_completion_scratchpad, default_completion_scratchpad_patch,
-    default_hf_tokenizer_template, default_pricing, normalize_string,
+    default_hf_tokenizer_template, normalize_string,
 };
 
 pub use refact_caps_core::code_assistant_caps::CodeAssistantCaps;
@@ -416,7 +414,6 @@ fn build_chat_model_record(
     }
 }
 
-#[allow(deprecated)]
 pub async fn populate_chat_models_from_providers(
     caps: &mut CodeAssistantCaps,
     gcx: Arc<GlobalContext>,
@@ -429,8 +426,6 @@ pub async fn populate_chat_models_from_providers(
             registry.iter().map(|(_, p)| p.clone_box()).collect();
         (gcx.http_client.clone(), snapshot)
     };
-
-    let mut pricing_map = caps.metadata.pricing.as_object_mut();
 
     for provider in &providers_snapshot {
         let runtime = match provider.build_runtime() {
@@ -495,17 +490,6 @@ pub async fn populate_chat_models_from_providers(
             );
 
             let model_id = chat_record.base.id.clone();
-
-            if let Some(ref pricing) = model.pricing {
-                if let Some(map) = pricing_map.as_mut() {
-                    if let Ok(pricing_value) = serde_json::to_value(pricing) {
-                        map.insert(model_id.clone(), pricing_value.clone());
-                        if !map.contains_key(&model.id) {
-                            map.insert(model.id.clone(), pricing_value);
-                        }
-                    }
-                }
-            }
 
             let map = caps
                 .provider_base_names
@@ -842,10 +826,6 @@ pub async fn load_caps(
     let model_caps_map = get_model_caps(gcx.clone(), force_models_dev_refresh).await.map_err(|e| {
         format!("Failed to load models.dev capabilities. Check the bundled snapshot or runtime cache: {e}")
     })?;
-    caps.metadata.pricing = model_caps_pricing_metadata(&model_caps_map);
-    caps.metadata
-        .features
-        .push("models_dev_base_text_pricing".to_string());
     caps.model_caps = Arc::new(model_caps_map);
 
     // Clear chat models from legacy CapsProviders that have a new ProviderTrait implementation.
@@ -1071,6 +1051,10 @@ fn apply_model_caps_to_all_chat_models(caps: &mut CodeAssistantCaps) {
 }
 
 fn apply_registry_caps_to_chat_model(record: &mut ChatModelRecord, caps: &ModelCapabilities) {
+    if record.pricing.is_none() {
+        record.pricing = caps.pricing.clone();
+    }
+
     if !record.live_fields.is_empty() {
         let live = &record.live_fields;
         if live.n_ctx.is_none() && caps.n_ctx > 0 {
@@ -1246,6 +1230,13 @@ mod tests {
         let catalog = ModelCapabilities {
             n_ctx: 128_000,
             max_output_tokens: 16_384,
+            pricing: Some(ModelPricing {
+                prompt: 2.0,
+                generated: 8.0,
+                cache_read: Some(1.0),
+                cache_creation: Some(3.0),
+                context_over_200k: None,
+            }),
             supports_tools: true,
             supports_parallel_tools: true,
             supports_strict_tools: true,
@@ -1292,6 +1283,11 @@ mod tests {
         assert!(record.supports_clicks);
         assert_eq!(record.base.n_ctx, 128_000);
         assert_eq!(record.max_output_tokens, Some(16_384));
+        let pricing = record.pricing.as_ref().unwrap();
+        assert_eq!(pricing.prompt, 2.0);
+        assert_eq!(pricing.generated, 8.0);
+        assert_eq!(pricing.cache_read, Some(1.0));
+        assert_eq!(pricing.cache_creation, Some(3.0));
     }
 
     #[test]
@@ -1301,8 +1297,8 @@ mod tests {
             pricing: Some(ModelPricing {
                 prompt: 2.0,
                 generated: 8.0,
-                cache_read: None,
-                cache_creation: None,
+                cache_read: Some(1.0),
+                cache_creation: Some(3.0),
                 context_over_200k: None,
             }),
             ..Default::default()
@@ -1347,9 +1343,18 @@ mod tests {
             payload["chat_models"]["provider/priced"]["pricing"]["generated"],
             serde_json::json!(8.0)
         );
+        assert_eq!(
+            payload["chat_models"]["provider/priced"]["pricing"]["cache_read"],
+            serde_json::json!(1.0)
+        );
+        assert_eq!(
+            payload["chat_models"]["provider/priced"]["pricing"]["cache_creation"],
+            serde_json::json!(3.0)
+        );
         assert!(payload["chat_models"]["provider/unpriced"]
             .get("pricing")
             .is_none());
+        assert!(payload["metadata"].get("pricing").is_none());
     }
 
     #[test]
@@ -1357,6 +1362,13 @@ mod tests {
         let catalog = ModelCapabilities {
             n_ctx: 128_000,
             max_output_tokens: 16_384,
+            pricing: Some(ModelPricing {
+                prompt: 2.0,
+                generated: 8.0,
+                cache_read: Some(1.0),
+                cache_creation: Some(3.0),
+                context_over_200k: None,
+            }),
             supports_tools: true,
             supports_parallel_tools: true,
             supports_strict_tools: true,
@@ -1429,6 +1441,11 @@ mod tests {
         assert!(!record.supports_adaptive_thinking_budget);
         assert!(!record.base.supports_cache_control);
         assert_eq!(record.base.tokenizer, "fake");
+        let pricing = record.pricing.as_ref().unwrap();
+        assert_eq!(pricing.prompt, 2.0);
+        assert_eq!(pricing.generated, 8.0);
+        assert_eq!(pricing.cache_read, Some(1.0));
+        assert_eq!(pricing.cache_creation, Some(3.0));
     }
 
     #[test]

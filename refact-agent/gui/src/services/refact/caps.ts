@@ -3,6 +3,7 @@ import { CAPS_URL } from "./consts";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { CodeChatModel, CodeCompletionModel, EmbeddingModel } from "./models";
 import { buildApiUrlFromState } from "./apiUrl";
+import type { ModelPricing } from "./providers";
 
 export const capsApi = createApi({
   reducerPath: "caps",
@@ -52,33 +53,15 @@ export const capsEndpoints = capsApi.endpoints;
 // Export the generated RTK Query hook
 export const { useGetCapsQuery } = capsApi;
 
-export type CapCost = {
-  prompt: number;
-  generated: number;
-  cache_read?: number;
-  cache_creation?: number;
-};
+export type CapCost = ModelPricing;
 
-function isCapCost(json: unknown): json is CapCost {
-  if (!json) return false;
-  if (typeof json !== "object") return false;
-  if (!("prompt" in json)) return false;
-  if (typeof json.prompt !== "number") return false;
-  if (!("generated" in json)) return false;
-  if (typeof json.generated !== "number") return false;
-  return true;
-}
 type CapsMetadata = {
-  pricing?: Record<string, CapCost>;
   features?: string[];
 };
 
 function isCapsMetadata(json: unknown): json is CapsMetadata {
   if (json === null) return true;
   if (typeof json !== "object") return false;
-  if ("pricing" in json && json.pricing) {
-    return Object.values(json.pricing).every(isCapCost);
-  }
   return true;
 }
 

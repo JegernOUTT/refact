@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use tracing::warn;
 
 use crate::models_dev::{models_dev_catalog_to_model_caps, ModelsDevCatalog};
@@ -222,33 +222,6 @@ pub fn model_caps_from_models_dev_catalog(
     let mut models = models_dev_catalog_to_model_caps(catalog)?;
     validate_model_caps(&mut models);
     Ok(models)
-}
-
-pub fn model_caps_pricing_metadata(caps: &HashMap<String, ModelCapabilities>) -> Value {
-    let mut map = Map::new();
-    for (model_id, model_caps) in caps {
-        let Some(pricing) = model_caps.pricing.as_ref() else {
-            continue;
-        };
-        let Ok(mut value) = serde_json::to_value(pricing) else {
-            continue;
-        };
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert(
-                "source".to_string(),
-                Value::String("models.dev".to_string()),
-            );
-            obj.insert(
-                "tier".to_string(),
-                Value::String("base_text_tokens".to_string()),
-            );
-            if let Some(raw_cost) = model_caps.raw_cost.as_ref() {
-                obj.insert("raw_cost".to_string(), raw_cost.clone());
-            }
-        }
-        map.insert(model_id.clone(), value);
-    }
-    Value::Object(map)
 }
 
 pub fn is_model_supported(caps: &HashMap<String, ModelCapabilities>, model_name: &str) -> bool {
@@ -679,56 +652,5 @@ mod tests {
         validate_model_caps(&mut caps);
 
         assert!(caps.get("explicit-cache").unwrap().supports_cache_control);
-    }
-
-    #[test]
-    fn model_caps_pricing_metadata_converts_pricing_and_raw_cost() {
-        let mut caps = HashMap::new();
-        caps.insert(
-            "priced-model".to_string(),
-            ModelCapabilities {
-                pricing: Some(ModelPricing {
-                    prompt: 1.25,
-                    generated: 2.5,
-                    cache_read: Some(0.25),
-                    cache_creation: Some(0.75),
-                    context_over_200k: Some(ModelPricingTier {
-                        prompt: Some(3.0),
-                        generated: Some(4.0),
-                        cache_read: None,
-                        cache_creation: Some(1.0),
-                    }),
-                }),
-                raw_cost: Some(json!({ "input": 1.25, "output": 2.5 })),
-                ..Default::default()
-            },
-        );
-        caps.insert("unpriced-model".to_string(), ModelCapabilities::default());
-
-        let metadata = model_caps_pricing_metadata(&caps);
-
-        assert_eq!(metadata["priced-model"]["prompt"], json!(1.25));
-        assert_eq!(metadata["priced-model"]["generated"], json!(2.5));
-        assert_eq!(metadata["priced-model"]["cache_read"], json!(0.25));
-        assert_eq!(metadata["priced-model"]["cache_creation"], json!(0.75));
-        assert_eq!(
-            metadata["priced-model"]["context_over_200k"]["prompt"],
-            json!(3.0)
-        );
-        assert_eq!(
-            metadata["priced-model"]["context_over_200k"]["generated"],
-            json!(4.0)
-        );
-        assert_eq!(
-            metadata["priced-model"]["context_over_200k"]["cache_creation"],
-            json!(1.0)
-        );
-        assert_eq!(metadata["priced-model"]["source"], json!("models.dev"));
-        assert_eq!(metadata["priced-model"]["tier"], json!("base_text_tokens"));
-        assert_eq!(
-            metadata["priced-model"]["raw_cost"],
-            json!({ "input": 1.25, "output": 2.5 })
-        );
-        assert!(metadata.get("unpriced-model").is_none());
     }
 }

@@ -188,27 +188,10 @@ impl HasBaseModelRecord for CompletionModelRecord {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CapsMetadata {
-    #[deprecated(note = "Compatibility field; use chat_models.*.pricing instead")]
-    #[serde(default = "default_pricing")]
-    pub pricing: serde_json::Value,
     #[serde(default)]
     pub features: Vec<String>,
-}
-
-pub fn default_pricing() -> serde_json::Value {
-    serde_json::json!({})
-}
-
-#[allow(deprecated)]
-impl Default for CapsMetadata {
-    fn default() -> Self {
-        Self {
-            pricing: default_pricing(),
-            features: Vec::new(),
-        }
-    }
 }
 
 pub fn default_hf_tokenizer_template() -> String {
@@ -467,15 +450,15 @@ mod tests {
     }
 
     #[test]
-    fn default_pricing_shape_is_empty_object() {
-        assert_eq!(default_pricing(), serde_json::json!({}));
-
+    fn default_metadata_has_no_pricing_map() {
         let metadata = CapsMetadata::default();
-        assert_eq!(metadata.pricing, serde_json::json!({}));
         assert!(metadata.features.is_empty());
+        assert!(serde_json::to_value(metadata)
+            .unwrap()
+            .get("pricing")
+            .is_none());
 
         let decoded: CapsMetadata = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(decoded.pricing, serde_json::json!({}));
         assert!(decoded.features.is_empty());
     }
 

@@ -43,6 +43,14 @@ function capsWithUnavailableModel(): CapsResponse {
     chat_buddy_model: "openai/claude-3-5-haiku",
     chat_models: {
       ...caps.chat_models,
+      "openai/gpt-4o": {
+        ...caps.chat_models["openai/gpt-4o"],
+        pricing: { prompt: 2.5, generated: 10, cache_read: 1.25 },
+      },
+      "openai/gpt-4o-mini": {
+        ...caps.chat_models["openai/gpt-4o-mini"],
+        pricing: { prompt: 0.15, generated: 0.6 },
+      },
       "disabled/model": {
         n_ctx: 32000,
         name: "disabled/model",
@@ -57,12 +65,6 @@ function capsWithUnavailableModel(): CapsResponse {
         reasoning_effort_options: null,
         supports_thinking_budget: false,
         default_temperature: null,
-      },
-    },
-    metadata: {
-      pricing: {
-        "openai/gpt-4o": { prompt: 2.5, generated: 10, cache_read: 1.25 },
-        "openai/gpt-4o-mini": { prompt: 0.15, generated: 0.6 },
       },
     },
   };

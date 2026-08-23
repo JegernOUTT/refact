@@ -244,11 +244,10 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
           reasoning_effort_options?: string[] | null;
           supports_thinking_budget?: boolean;
           supports_adaptive_thinking_budget?: boolean;
+          pricing?: CapCost;
         }
       | undefined;
     if (!modelData) return null;
-    const pricing =
-      data.metadata?.pricing?.[caps.currentModel.replace(/^refact\//, "")];
     return {
       nCtx: modelData.n_ctx,
       defaultMaxTokens: modelData.default_max_tokens,
@@ -257,7 +256,9 @@ export const ChatSettingsDropdown: React.FC<ChatSettingsDropdownProps> = ({
       supportsThinkingBudget: modelData.supports_thinking_budget,
       supportsAdaptiveThinkingBudget:
         modelData.supports_adaptive_thinking_budget,
-      pricing: pricing ? formatPricingDetailed(pricing) : null,
+      pricing: modelData.pricing
+        ? formatPricingDetailed(modelData.pricing)
+        : null,
     };
   }, [caps.currentModel, capsQuery.data]);
 

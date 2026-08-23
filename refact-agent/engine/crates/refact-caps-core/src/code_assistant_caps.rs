@@ -70,7 +70,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(deprecated)]
     fn default_caps_preserves_empty_runtime_fields() {
         let caps = CodeAssistantCaps::default();
 
@@ -81,7 +80,7 @@ mod tests {
         assert_eq!(caps.caps_version, 0);
         assert_eq!(caps.customization, "");
         assert_eq!(caps.hf_tokenizer_template, default_hf_tokenizer_template());
-        assert_eq!(caps.metadata.pricing, serde_json::json!({}));
+        assert!(caps.metadata.features.is_empty());
         assert!(caps.model_caps.is_empty());
         assert!(caps.provider_base_names.is_empty());
     }
@@ -120,5 +119,6 @@ mod tests {
         assert!(value.get("model_caps").is_none());
         assert!(value.get("provider_base_names").is_none());
         assert!(value.get("user_defaults").is_none());
+        assert!(value["metadata"].get("pricing").is_none());
     }
 }
