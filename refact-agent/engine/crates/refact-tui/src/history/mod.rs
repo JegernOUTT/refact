@@ -422,7 +422,7 @@ impl HistoryBuffer {
         let visible_start = lines.len().saturating_sub(max_rows);
         let cell_ids = displayed_cells
             .into_iter()
-            .filter_map(|(id, start, end)| (start == end || start >= visible_start).then_some(id))
+            .filter_map(|(id, start, end)| (start == end || end > visible_start).then_some(id))
             .collect::<Vec<_>>();
         lines = lines.split_off(visible_start);
         self.emitted_history_lines = !lines.is_empty();
@@ -963,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_reflow_keeps_trimmed_cells_pending_for_later_frames() {
+    fn resize_reflow_drains_partially_visible_cells_and_keeps_trimmed_cells_pending() {
         let mut history = HistoryBuffer::new();
         let first_id = history.enqueue_cell(Box::new(MultiLineCell::new(&["cell0a", "cell0b"])));
         let second_id = history.enqueue_cell(Box::new(MultiLineCell::new(&["cell1a", "cell1b"])));
@@ -971,21 +971,74 @@ mod tests {
 
         let reflow = history.reflow_insertions(40, 4);
         assert_eq!(reflow.len(), 1);
-        assert_eq!(reflow[0].cell_ids, vec![third_id]);
+        assert_eq!(reflow[0].cell_ids, vec![second_id, third_id]);
+        let reflow_lines = reflow[0]
+            .lines
+            .iter()
+            .map(|line| line_to_plain(&line.line))
+            .collect::<Vec<_>>();
+        assert_eq!(reflow_lines, vec!["  cell1b", "", "  cell2a", "  cell2b"]);
         assert_eq!(
             history
                 .pending
                 .iter()
                 .map(|entry| entry.id)
                 .collect::<Vec<_>>(),
-            vec![first_id, second_id]
+            vec![first_id]
         );
 
         let later = history.drain_pending(40);
         assert_eq!(later.len(), 1);
-        assert_eq!(later[0].cell_ids, vec![first_id, second_id]);
+        assert_eq!(later[0].cell_ids, vec![first_id]);
+        let later_lines = later[0]
+            .lines
+            .iter()
+            .map(|line| line_to_plain(&line.line))
+            .collect::<Vec<_>>();
+        assert_eq!(later_lines, vec!["", "  cell0a", "  cell0b"]);
         assert_eq!(history.pending_cell_count(), 0);
         assert_eq!(history.inserted_cell_count(), 3);
+    }
+
+    #[test]
+    fn resize_reflow_drains_a_partially_visible_ten_line_cell_once() {
+        let mut history = HistoryBuffer::new();
+        let id = history.enqueue_cell(Box::new(MultiLineCell::new(&[
+            "line0", "line1", "line2", "line3", "line4", "line5", "line6", "line7", "line8",
+            "line9",
+        ])));
+
+        let reflow = history.reflow_insertions(40, 4);
+        assert_eq!(reflow.len(), 1);
+        assert_eq!(reflow[0].cell_ids, vec![id]);
+        let reflow_lines = reflow[0]
+            .lines
+            .iter()
+            .map(|line| line_to_plain(&line.line))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reflow_lines,
+            vec!["  line6", "  line7", "  line8", "  line9"]
+        );
+        assert_eq!(history.pending_cell_count(), 0);
+
+        assert!(history.drain_pending(40).is_empty());
+        assert_eq!(history.inserted_cell_count(), 1);
+    }
+
+    #[test]
+    fn resize_reflow_drains_zero_line_cells_once() {
+        let mut history = HistoryBuffer::new();
+        let id = history.enqueue_cell(Box::new(EmptyCell));
+
+        let reflow = history.reflow_insertions(40, 4);
+        assert_eq!(reflow.len(), 1);
+        assert_eq!(reflow[0].cell_ids, vec![id]);
+        assert!(reflow[0].lines.is_empty());
+        assert_eq!(history.pending_cell_count(), 0);
+
+        assert!(history.drain_pending(40).is_empty());
+        assert_eq!(history.inserted_cell_count(), 1);
     }
 
     #[test]
