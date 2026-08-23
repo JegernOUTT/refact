@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
@@ -13,9 +13,10 @@ use refact_buddy_core::user_action::UserAction;
 use crate::files_correction::get_project_dirs;
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};
-use crate::chat::internal_roles::{self, mode_switch_event, EventSubkind};
+use crate::chat::internal_roles::{self, mode_switch_event_with_diff, EventSubkind};
 use crate::chat::plan_role;
 use crate::yaml_configs::customization_registry::get_mode_config;
+use crate::yaml_configs::customization_types::ModeConfig;
 
 use super::types::*;
 use super::browser_context;
@@ -624,6 +625,82 @@ pub fn apply_setparams_patch(
     (changed, sanitized_patch)
 }
 
+const MODE_SWITCH_TOOL_NAMES_LIMIT: usize = 20;
+
+fn mode_switch_bool_delta(from: bool, to: bool) -> serde_json::Value {
+    serde_json::json!({
+        "from": from,
+        "to": to,
+        "changed": from != to,
+    })
+}
+
+fn mode_switch_tool_delta(from: &BTreeSet<String>, to: &BTreeSet<String>) -> serde_json::Value {
+    let names: Vec<_> = to
+        .difference(from)
+        .take(MODE_SWITCH_TOOL_NAMES_LIMIT)
+        .cloned()
+        .collect();
+    let count = to.difference(from).count();
+    serde_json::json!({
+        "count": count,
+        "names": names,
+        "truncated": count > MODE_SWITCH_TOOL_NAMES_LIMIT,
+    })
+}
+
+fn tool_confirm_changed(from: &ModeConfig, to: &ModeConfig) -> bool {
+    from.tool_confirm.rules.len() != to.tool_confirm.rules.len()
+        || from
+            .tool_confirm
+            .rules
+            .iter()
+            .zip(&to.tool_confirm.rules)
+            .any(|(from, to)| from.match_pattern != to.match_pattern || from.action != to.action)
+}
+
+fn mode_switch_diff(from: &ModeConfig, to: &ModeConfig) -> serde_json::Value {
+    let from_tools: BTreeSet<_> = from.tools.iter().cloned().collect();
+    let to_tools: BTreeSet<_> = to.tools.iter().cloned().collect();
+    let tool_confirm_changed = tool_confirm_changed(from, to);
+    serde_json::json!({
+        "resolved": true,
+        "tools": {
+            "added": mode_switch_tool_delta(&from_tools, &to_tools),
+            "removed": mode_switch_tool_delta(&to_tools, &from_tools),
+        },
+        "system_prompt": {
+            "changed": from.prompt != to.prompt,
+        },
+        "permissions": {
+            "allow_integrations": mode_switch_bool_delta(
+                from.allow_integrations,
+                to.allow_integrations,
+            ),
+            "allow_mcp": mode_switch_bool_delta(from.allow_mcp, to.allow_mcp),
+            "allow_subagents": mode_switch_bool_delta(
+                from.allow_subagents,
+                to.allow_subagents,
+            ),
+        },
+        "tool_confirm": {
+            "changed": tool_confirm_changed,
+            "from_rules_count": from.tool_confirm.rules.len(),
+            "to_rules_count": to.tool_confirm.rules.len(),
+        },
+        "thread_defaults": {
+            "auto_approve_editing_tools": mode_switch_bool_delta(
+                from.thread_defaults.auto_approve_editing_tools.unwrap_or(false),
+                to.thread_defaults.auto_approve_editing_tools.unwrap_or(false),
+            ),
+            "auto_approve_dangerous_commands": mode_switch_bool_delta(
+                from.thread_defaults.auto_approve_dangerous_commands.unwrap_or(false),
+                to.thread_defaults.auto_approve_dangerous_commands.unwrap_or(false),
+            ),
+        },
+    })
+}
+
 pub(crate) async fn add_mode_switch_event_and_plan_if_changed(
     app: AppState,
     session: &mut ChatSession,
@@ -635,15 +712,24 @@ pub(crate) async fn add_mode_switch_event_and_plan_if_changed(
     if new_mode == old_mode {
         return false;
     }
-    session.add_message(mode_switch_event(source, old_mode, &new_mode, reason));
 
     let model_id = if session.thread.model.is_empty() {
         None
     } else {
         Some(session.thread.model.as_str())
     };
+    let from_config = get_mode_config(app.gcx.clone(), old_mode, model_id).await;
+    let to_config = get_mode_config(app.gcx.clone(), &new_mode, model_id).await;
+    let diff = match (&from_config, &to_config) {
+        (Some(from), Some(to)) => mode_switch_diff(from, to),
+        _ => serde_json::json!({"resolved": false}),
+    };
+    session.add_message(mode_switch_event_with_diff(
+        source, old_mode, &new_mode, reason, diff,
+    ));
+
     if plan_role::current_base_plan(session).is_none() {
-        if let Some(mode_config) = get_mode_config(app.gcx.clone(), &new_mode, model_id).await {
+        if let Some(mode_config) = to_config {
             let plan_template = mode_config.plan_template.trim();
             if !plan_template.is_empty() {
                 let rendered = super::prompts::render_mode_plan_template(
@@ -2787,9 +2873,34 @@ mod tests {
     use super::*;
     use crate::exec::types::DEFAULT_EXEC_OUTPUT_LIMIT_BYTES;
     use crate::exec::{ExecMode, ExecOwnerMeta, ExecProcessId, ExecProcessMeta};
+    use crate::yaml_configs::customization_types::{ModeOverride, ModeThreadDefaults, ProjectRegistry};
     use serde_json::json;
+    use std::collections::HashMap;
     use std::path::Path;
     use std::process::Command;
+
+    fn test_mode_config(id: &str) -> ModeConfig {
+        ModeConfig {
+            schema_version: 1,
+            id: id.to_string(),
+            title: id.to_string(),
+            description: String::new(),
+            specific: false,
+            prompt: String::new(),
+            plan_template: String::new(),
+            tools: Vec::new(),
+            allow_integrations: false,
+            allow_mcp: false,
+            allow_subagents: false,
+            model_defaults: Default::default(),
+            tool_confirm: Default::default(),
+            thread_defaults: Default::default(),
+            ui: Default::default(),
+            base: None,
+            match_models: None,
+            override_config: None,
+        }
+    }
 
     fn make_request(cmd: ChatCommand) -> CommandRequest {
         CommandRequest {
@@ -2835,6 +2946,99 @@ mod tests {
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[0].client_request_id, "user-1");
         assert_eq!(queue[1].client_request_id, "regen-3");
+    }
+
+    #[test]
+    fn mode_switch_diff_bounds_large_tool_delta() {
+        let from = test_mode_config("from");
+        let mut to = test_mode_config("to");
+        to.tools = (0..100).map(|index| format!("tool-{index}")).collect();
+
+        let diff = mode_switch_diff(&from, &to);
+        let added = &diff["tools"]["added"];
+
+        assert_eq!(added["count"], json!(100));
+        assert_eq!(
+            added["names"].as_array().unwrap().len(),
+            MODE_SWITCH_TOOL_NAMES_LIMIT
+        );
+        assert_eq!(added["truncated"], json!(true));
+        assert!(added["names"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("tool-0")));
+    }
+
+    #[tokio::test]
+    async fn mode_switch_diff_uses_resolved_overlay_defaults() {
+        let workspace = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+
+        let mut explore = test_mode_config("explore");
+        explore.prompt = "explore prompt".to_string();
+        explore.thread_defaults = ModeThreadDefaults {
+            auto_approve_editing_tools: Some(false),
+            auto_approve_dangerous_commands: Some(false),
+            ..Default::default()
+        };
+        let mut agent = test_mode_config("agent");
+        agent.prompt = "agent prompt".to_string();
+        agent.thread_defaults = ModeThreadDefaults {
+            auto_approve_editing_tools: Some(true),
+            auto_approve_dangerous_commands: Some(true),
+            ..Default::default()
+        };
+        let mut overlay = test_mode_config("agent-for-test-model");
+        overlay.base = Some("agent".to_string());
+        overlay.match_models = Some(vec!["test/*".to_string()]);
+        overlay.override_config = Some(ModeOverride {
+            prompt: Some("overlay prompt".to_string()),
+            ..Default::default()
+        });
+
+        gcx.project_registry_cache.write().unwrap().insert(
+            workspace.path().to_path_buf(),
+            ProjectRegistry {
+                modes: HashMap::from([
+                    ("explore".to_string(), explore),
+                    ("agent".to_string(), agent),
+                ]),
+                mode_overrides: vec![overlay],
+                ..Default::default()
+            },
+        );
+
+        let app = AppState::from_gcx(gcx).await;
+        let mut session = ChatSession::new("mode-switch-overlay".to_string());
+        session.thread.mode = "explore".to_string();
+        session.thread.model = "test/model".to_string();
+        let old_mode = session.thread.mode.clone();
+        session.thread.mode = "agent".to_string();
+
+        assert!(
+            add_mode_switch_event_and_plan_if_changed(
+                app,
+                &mut session,
+                &old_mode,
+                None,
+                "chat.session",
+            )
+            .await
+        );
+
+        let payload = &session.messages.last().unwrap().extra["event"]["payload"];
+        assert_eq!(payload["diff"]["resolved"], json!(true));
+        assert_eq!(
+            payload["diff"]["thread_defaults"]["auto_approve_editing_tools"]["to"],
+            json!(true)
+        );
+        assert_eq!(
+            payload["diff"]["thread_defaults"]["auto_approve_dangerous_commands"]["to"],
+            json!(true)
+        );
+        assert_eq!(payload["diff"]["system_prompt"]["changed"], json!(true));
     }
 
     fn sample_worktree(id: &str) -> WorktreeMeta {

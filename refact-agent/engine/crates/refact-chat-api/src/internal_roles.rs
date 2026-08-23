@@ -190,6 +190,23 @@ pub fn mode_switch_event(
     )
 }
 
+pub fn mode_switch_event_with_diff(
+    source: impl Into<String>,
+    from: impl AsRef<str>,
+    to: impl AsRef<str>,
+    reason: Option<&str>,
+    diff: serde_json::Value,
+) -> ChatMessage {
+    let from = from.as_ref();
+    let to = to.as_ref();
+    event(
+        EventSubkind::ModeSwitch,
+        source,
+        json!({ "from": from, "to": to, "reason": reason, "diff": diff }),
+        format!("Mode switched: {} → {}", from, to),
+    )
+}
+
 pub fn plan(
     mode: impl Into<String>,
     version: u32,
@@ -359,6 +376,44 @@ mod tests {
         assert_eq!(event_meta["subkind"], json!("tool_decision"));
         assert_eq!(event_meta["source"], json!("tool.process_start"));
         assert_eq!(event_meta["payload"], json!({"tool": "shell"}));
+    }
+
+    #[test]
+    fn mode_switch_event_with_diff_is_additive() {
+        let msg = mode_switch_event_with_diff(
+            "chat.session",
+            "agent",
+            "task_planner",
+            Some("handoff"),
+            json!({"thread_defaults": {"auto_approve_dangerous_commands": {"from": false, "to": true}}}),
+        );
+        let payload = &msg.extra["event"]["payload"];
+
+        assert_eq!(payload["from"], json!("agent"));
+        assert_eq!(payload["to"], json!("task_planner"));
+        assert_eq!(payload["reason"], json!("handoff"));
+        assert_eq!(
+            payload["diff"]["thread_defaults"]["auto_approve_dangerous_commands"]["to"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn legacy_mode_switch_payload_still_deserializes() {
+        let legacy = json!({
+            "message_id": "legacy-mode-switch",
+            "role": "event",
+            "content": "Mode switched: agent → task_planner",
+            "event": {
+                "subkind": "mode_switch",
+                "source": "chat.session",
+                "payload": {"from": "agent", "to": "task_planner", "reason": null}
+            }
+        });
+
+        let message: ChatMessage = serde_json::from_value(legacy).unwrap();
+        assert_eq!(message.extra["event"]["payload"]["from"], json!("agent"));
+        assert!(message.extra["event"]["payload"].get("diff").is_none());
     }
 
     #[test]

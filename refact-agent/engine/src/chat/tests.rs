@@ -1714,7 +1714,7 @@ mod tests {
         let user_count_before = session.messages.iter().filter(|m| m.role == "user").count();
         let old_mode = session.thread.mode.clone();
 
-        let patch = json!({"mode": "TASK_AGENT"});
+        let patch = json!({"mode": "TASK_PLANNER"});
         let (changed, _) = crate::chat::queue::apply_setparams_patch(&mut session.thread, &patch);
         assert!(changed);
         crate::chat::queue::add_mode_switch_event_and_plan_if_changed(
@@ -1746,13 +1746,16 @@ mod tests {
 
         let event = event_messages[0].extra.get("event").unwrap();
         assert_eq!(event["source"], json!("chat.session"));
+        assert_eq!(event["payload"]["from"], json!("agent"));
+        assert_eq!(event["payload"]["to"], json!("task_planner"));
+        assert!(event["payload"]["reason"].is_null());
         assert_eq!(
-            event["payload"],
-            json!({"from": "agent", "to": "task_agent", "reason": null})
+            event["payload"]["diff"]["thread_defaults"]["auto_approve_dangerous_commands"],
+            json!({"from": false, "to": true, "changed": true})
         );
         assert_eq!(
             event_messages[0].content.content_text_only(),
-            "Mode switched: agent → task_agent"
+            "Mode switched: agent → task_planner"
         );
     }
 
