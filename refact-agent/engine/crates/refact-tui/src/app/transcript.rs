@@ -77,24 +77,6 @@ impl App {
             == target_ordinal
     }
 
-    pub(super) fn open_transcript_overlay(&mut self) -> AppAction {
-        self.transcript_overlay = Some(PagerOverlay::new(
-            "Transcript",
-            self.transcript_rendered_text_lines(100),
-            self.transcript_raw_text_lines(),
-        ));
-        AppAction::None
-    }
-
-    pub(super) fn open_raw_transcript_overlay(&mut self) -> AppAction {
-        self.transcript_overlay = Some(PagerOverlay::raw(
-            "Transcript raw",
-            self.transcript_rendered_text_lines(100),
-            self.transcript_raw_text_lines(),
-        ));
-        AppAction::None
-    }
-
     pub(super) fn copy_last_assistant_message(&mut self) -> AppAction {
         self.composer.clear();
         let Some(text) = self.last_assistant_rendered_plain_text(100) else {
@@ -104,21 +86,6 @@ impl App {
         AppAction::CopyToClipboard {
             text,
             source: ClipboardCopySource::LastAssistant,
-        }
-    }
-
-    pub(super) fn copy_visible_overlay_text(&mut self, height: usize) -> AppAction {
-        let Some(overlay) = self.transcript_overlay.as_ref() else {
-            return AppAction::None;
-        };
-        let text = overlay.visible_raw_text(height);
-        if text.is_empty() {
-            self.add_notice("No overlay text to copy");
-            return AppAction::None;
-        }
-        AppAction::CopyToClipboard {
-            text,
-            source: ClipboardCopySource::OverlayVisible,
         }
     }
 
@@ -166,106 +133,6 @@ impl App {
             }
             Err(error) => self.add_notice(format!("Clipboard copy failed: {error}")),
         }
-    }
-
-    pub(super) fn transcript_rendered_text_lines(&self, width: usize) -> Vec<String> {
-        let mut lines = Vec::new();
-        for item in self.overlay_transcript_items() {
-            lines.extend(
-                crate::history::render_transcript_item_lines(&item, width, false)
-                    .iter()
-                    .map(line_to_plain_string),
-            );
-        }
-        lines
-    }
-
-    pub(super) fn transcript_raw_text_lines(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        for message in self.transcript_state.messages() {
-            let id = message
-                .message_id
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .map(|value| format!(" {value}"))
-                .unwrap_or_default();
-            lines.push(format!("## {}{id}", message.role.as_str()));
-            if !message.reasoning.is_empty() {
-                lines.push("[reasoning]".to_string());
-                lines.extend(message.reasoning.lines().map(str::to_string));
-            }
-            if !message.content.is_empty() {
-                lines.extend(message.content.lines().map(str::to_string));
-            }
-            for tool in &message.tool_calls {
-                lines.push(format!("[tool_call] {}", value_to_compact_string(tool)));
-            }
-            for citation in &message.citations {
-                lines.push(format!("[citation] {}", value_to_compact_string(citation)));
-            }
-            for block in &message.server_content_blocks {
-                lines.push(format!("[server] {}", value_to_compact_string(block)));
-            }
-            lines.push(String::new());
-        }
-        lines
-    }
-
-    pub(super) fn overlay_transcript_items(&self) -> Vec<TranscriptItem> {
-        let mut items = Vec::new();
-        if self.show_session_header || self.session_title.is_some() {
-            items.push(self.session_header_item());
-        }
-        for message in self.transcript_state.messages() {
-            match &message.role {
-                TranscriptRole::User => {
-                    if !message.content.is_empty() {
-                        items.push(TranscriptItem::User(message.content.clone()));
-                    }
-                }
-                TranscriptRole::Assistant => {
-                    if !message.reasoning.is_empty() {
-                        items.push(TranscriptItem::Reasoning(message.reasoning.clone(), false));
-                    }
-                    if !message.content.is_empty() || message.tool_calls.is_empty() {
-                        items.push(TranscriptItem::Assistant(message.content.clone()));
-                    }
-                    for tool in &message.tool_calls {
-                        items.push(TranscriptItem::Tool(ToolCard::from_tool_call(tool)));
-                    }
-                    for citation in &message.citations {
-                        items.push(TranscriptItem::Citation(value_to_compact_string(citation)));
-                    }
-                    for block in &message.server_content_blocks {
-                        items.push(TranscriptItem::ServerContentBlock(value_to_compact_string(
-                            block,
-                        )));
-                    }
-                }
-                TranscriptRole::Tool => items.push(TranscriptItem::Tool(
-                    ToolCard::from_tool_call(&json!({
-                        "id": message.tool_call_id.clone().unwrap_or_default(),
-                        "name": "tool"
-                    }))
-                    .with_result(
-                        message.content.clone(),
-                        if message.tool_failed {
-                            ToolStatus::Error
-                        } else {
-                            ToolStatus::Success
-                        },
-                    ),
-                )),
-                TranscriptRole::Notice => {
-                    items.push(TranscriptItem::Notice(message.content.clone()))
-                }
-                TranscriptRole::Plan
-                | TranscriptRole::Goal
-                | TranscriptRole::Event
-                | TranscriptRole::Other(_) => {}
-            }
-        }
-        items
     }
 }
 

@@ -16,10 +16,7 @@ use crate::client::{
     ProviderListResponse, ProviderOAuthLogoutResponse, SlashCommandsListResponse, ToolDecision,
     WorkerInfo,
 };
-use crate::commands::{
-    command_by_name, command_picker_items, misc, session, workflow, CommandAction, CommandContext,
-    CommandPicker, InfoTopic, LocalToggle,
-};
+use crate::commands::{command_by_name, misc, session, workflow, CommandAction, InfoTopic, LocalToggle};
 use crate::composer::queue::{InputQueue, QueuedInput, INPUT_QUEUE_CAPACITY};
 use crate::composer::{load_history, save_history, ComposerState, EnterDecision, HistorySearchView};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
@@ -33,19 +30,12 @@ use crate::keymap::{
 };
 use crate::notifications::{NotificationConfig, NotificationKind, NotificationManager};
 use crate::overlay::{PagerAction, PagerOverlay};
-use crate::pickers::{
-    file_mention_items_from_completions, model_items_from_caps, mode_items_from_response,
-    PickerAccept, PickerItem, PickerKind, PickerState,
-};
+use crate::pickers::{file_mention_items_from_completions, PickerItem, PickerKind, PickerState};
 use crate::protocol::{DeltaOp, SseEvent, TranscriptMessage, TranscriptRole, TranscriptState};
-use crate::read_only_views::{
-    hooks_overlay, import_run_notice, import_run_overlay, import_sources_overlay, mcp_overlay,
-    memories_overlay, skills_overlay, ReadOnlyView, ViewOverlay,
-};
+use crate::read_only_views::ReadOnlyView;
 use crate::render::highlight;
 use crate::sessions::{
-    last_branch_message_id, session_items_from_trajectories, session_tab_from_picker_item,
-    SessionTab, TrajectoryMeta,
+    last_branch_message_id, session_tab_from_picker_item, SessionTab, TrajectoryMeta,
 };
 use crate::streaming::{
     run_commit_tick, AdaptiveChunkingPolicy, CommitTickScope, PlanStreamController,
@@ -62,9 +52,11 @@ use crate::tools::{
 mod chat_events;
 mod input;
 mod runtime;
+mod surfaces;
 mod transcript;
 mod workers;
 
+pub use surfaces::ProjectPickerState;
 pub use transcript::TranscriptItem;
 use chat_events::SubagentSummary;
 #[cfg(test)]
@@ -131,12 +123,6 @@ pub struct TuiOptions {
 struct HistorySaveRequest {
     path: PathBuf,
     entries: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-struct ThemePickerSnapshot {
-    theme: TuiTheme,
-    syntax_theme: syntect::highlighting::Theme,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,55 +316,6 @@ impl BacktrackTarget {
 }
 
 #[derive(Debug, Clone)]
-pub struct ProjectPickerState {
-    projects: Vec<ProjectEntry>,
-    pub filter: String,
-    pub selected: usize,
-}
-
-impl ProjectPickerState {
-    fn new(projects: Vec<ProjectEntry>) -> Self {
-        Self {
-            projects,
-            filter: String::new(),
-            selected: 0,
-        }
-    }
-
-    pub fn filtered_projects(&self) -> Vec<ProjectEntry> {
-        if self.filter.trim().is_empty() {
-            return self.projects.clone();
-        }
-        let needle = self.filter.to_ascii_lowercase();
-        self.projects
-            .iter()
-            .filter(|project| {
-                project.slug.to_ascii_lowercase().contains(&needle)
-                    || project
-                        .root
-                        .to_string_lossy()
-                        .to_ascii_lowercase()
-                        .contains(&needle)
-            })
-            .cloned()
-            .collect()
-    }
-
-    fn selected_project(&self) -> Option<ProjectEntry> {
-        self.filtered_projects().get(self.selected).cloned()
-    }
-
-    fn clamp_selection(&mut self) {
-        let len = self.filtered_projects().len();
-        if len == 0 {
-            self.selected = 0;
-        } else if self.selected >= len {
-            self.selected = len - 1;
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct App {
     transcript: Vec<TranscriptItem>,
     transcript_state: TranscriptState,
@@ -395,9 +332,9 @@ pub struct App {
     history_failure_notified: bool,
     tui_config_path: Option<PathBuf>,
     composer_mode: ComposerMode,
-    picker: ProjectPickerState,
+    picker: surfaces::ProjectPickerState,
     modal_picker: Option<PickerState>,
-    theme_picker_snapshot: Option<ThemePickerSnapshot>,
+    theme_picker_snapshot: Option<surfaces::ThemePickerSnapshot>,
     approval_queue: ApprovalQueue,
     ask_questions_form: Option<AskQuestionsForm>,
     pending_manual_ask_questions: Option<AskQuestionsRequest>,
@@ -499,7 +436,7 @@ impl App {
             history_failure_notified: false,
             tui_config_path,
             composer_mode: ComposerMode::Chat,
-            picker: ProjectPickerState::new(Vec::new()),
+            picker: surfaces::ProjectPickerState::new(Vec::new()),
             modal_picker: None,
             theme_picker_snapshot: None,
             approval_queue: ApprovalQueue::new(),
@@ -586,7 +523,7 @@ impl App {
             history_failure_notified: false,
             tui_config_path,
             composer_mode: ComposerMode::Chat,
-            picker: ProjectPickerState::new(Vec::new()),
+            picker: surfaces::ProjectPickerState::new(Vec::new()),
             modal_picker: None,
             theme_picker_snapshot: None,
             approval_queue: ApprovalQueue::new(),
@@ -1098,10 +1035,6 @@ impl App {
         &self.picker
     }
 
-    pub fn modal_picker(&self) -> Option<&PickerState> {
-        self.modal_picker.as_ref()
-    }
-
     pub fn approval_modal(&self) -> Option<&ApprovalModalState> {
         self.approval_queue.front()
     }
@@ -1137,14 +1070,6 @@ impl App {
         self.selected_backtrack_index
     }
 
-    pub fn transcript_overlay(&self) -> Option<&PagerOverlay> {
-        self.transcript_overlay.as_ref()
-    }
-
-    pub fn set_transcript_overlay_visible_height(&mut self, height: usize) {
-        self.transcript_overlay_visible_height = Some(height);
-    }
-
     pub fn should_quit(&self) -> bool {
         self.should_quit
     }
@@ -1161,33 +1086,6 @@ impl App {
             0
         } else {
             1
-        }
-    }
-
-    fn open_project_picker(&mut self, projects: Vec<ProjectEntry>) {
-        self.picker = ProjectPickerState::new(projects);
-        self.composer_mode = ComposerMode::ProjectPicker;
-        self.modal_picker = None;
-    }
-
-    fn open_model_picker(&mut self, caps: Value) {
-        self.apply_caps(&caps);
-        let items = model_items_from_caps(&caps);
-        if items.is_empty() {
-            self.add_notice("No models returned by caps");
-        } else {
-            let mut picker = PickerState::new(PickerKind::Model, items);
-            if let Some(model) = self
-                .model
-                .as_deref()
-                .filter(|model| !model.trim().is_empty())
-            {
-                let selected =
-                    resolve_chat_model_id(&caps, model).unwrap_or_else(|| model.to_string());
-                picker.select_item_id(&selected);
-            }
-            self.modal_picker = Some(picker);
-            self.composer_mode = ComposerMode::Chat;
         }
     }
 
@@ -1212,71 +1110,6 @@ impl App {
         if changed {
             self.refresh_session_header_item();
         }
-    }
-
-    fn open_mode_picker(&mut self, modes: Value) {
-        let items = mode_items_from_response(&modes);
-        if items.is_empty() {
-            self.add_notice("No modes returned by worker");
-        } else {
-            let mut picker = PickerState::new(PickerKind::Mode, items);
-            let current = self
-                .mode
-                .as_deref()
-                .filter(|mode| !mode.trim().is_empty())
-                .unwrap_or("agent");
-            picker.select_item_id(current);
-            self.modal_picker = Some(picker);
-            self.composer_mode = ComposerMode::Chat;
-        }
-    }
-
-    fn open_slash_command_picker(&mut self) {
-        let items = command_picker_items(CommandContext {
-            active_turn: self.is_chat_active(),
-        });
-        self.modal_picker = Some(PickerState::new(PickerKind::SlashCommand, items));
-        self.composer_mode = ComposerMode::Chat;
-    }
-
-    fn open_file_mention_picker(&mut self, items: Vec<PickerItem>) {
-        if items.is_empty() {
-            self.modal_picker = Some(PickerState::new(
-                PickerKind::FileMention,
-                vec![PickerItem {
-                    id: String::new(),
-                    title: "No file completions loaded".to_string(),
-                    description:
-                        "Type after @ or use /mention again when backend search returns files"
-                            .to_string(),
-                }],
-            ));
-        } else {
-            self.modal_picker = Some(PickerState::new(PickerKind::FileMention, items));
-        }
-        self.composer_mode = ComposerMode::Chat;
-    }
-
-    fn open_session_picker(&mut self, items: Vec<PickerItem>) {
-        self.set_recent_sessions(items.clone());
-        if items.is_empty() {
-            self.add_notice("No recent chats for this project yet. Continue this new chat or press Ctrl-N for another fresh one.");
-            self.modal_picker = None;
-            self.composer_mode = ComposerMode::Chat;
-        } else {
-            self.modal_picker = Some(PickerState::new(PickerKind::Session, items));
-            self.composer_mode = ComposerMode::Chat;
-        }
-    }
-
-    fn open_session_picker_from_trajectories(&mut self, trajectories: Vec<TrajectoryMeta>) {
-        let items = session_items_from_trajectories(trajectories, chrono::Utc::now());
-        self.open_session_picker(items);
-    }
-
-    fn refresh_recent_sessions_from_trajectories(&mut self, trajectories: Vec<TrajectoryMeta>) {
-        let items = session_items_from_trajectories(trajectories, chrono::Utc::now());
-        self.set_recent_sessions(items);
     }
 
     fn set_recent_sessions(&mut self, mut items: Vec<PickerItem>) {
@@ -1339,147 +1172,6 @@ impl App {
         self.resume_chat(item.id, item.title, Some(item.description))
     }
 
-    fn open_permissions_picker(&mut self) {
-        self.modal_picker = Some(PickerState::multi_with_selected(
-            PickerKind::Permissions,
-            session::permission_picker_items(),
-            session::selected_permission_ids(self.permission_policy),
-        ));
-        self.composer_mode = ComposerMode::Chat;
-    }
-
-    fn open_reasoning_picker(&mut self) {
-        let levels = self.supported_reasoning_levels();
-        if levels.is_empty() {
-            self.add_reasoning_unsupported_notice();
-            return;
-        }
-        self.modal_picker = Some(PickerState::new(
-            PickerKind::Reasoning,
-            session::reasoning_picker_items(&levels),
-        ));
-        self.composer_mode = ComposerMode::Chat;
-    }
-
-    fn open_theme_picker(&mut self) {
-        self.theme_picker_snapshot = Some(ThemePickerSnapshot {
-            theme: self.theme.clone(),
-            syntax_theme: highlight::current_syntax_theme(),
-        });
-        let theme_home = self.tui_theme_home();
-        let mut picker = PickerState::new(
-            PickerKind::Theme,
-            misc::theme_picker_items(theme_home.as_deref()),
-        );
-        if let Some(index) = picker
-            .filtered_items()
-            .iter()
-            .position(|item| item.id == self.theme.name())
-        {
-            picker.selected = index;
-        }
-        self.modal_picker = Some(picker);
-        self.composer_mode = ComposerMode::Chat;
-    }
-
-    fn set_theme(&mut self, theme: TuiTheme) {
-        let syntax_name = theme.syntax_theme_name().to_string();
-        let warning = highlight::set_theme_override(Some(syntax_name), self.tui_theme_home());
-        self.theme = theme;
-        if let Some(warning) = warning {
-            self.add_notice(warning);
-        }
-    }
-
-    fn preview_theme_name(&mut self, name: &str) {
-        if let Some(theme) = TuiTheme::named_or_syntax(name, self.tui_theme_home().as_deref()) {
-            self.set_theme(theme);
-        }
-    }
-
-    fn tui_theme_home(&self) -> Option<PathBuf> {
-        self.tui_config_path
-            .as_ref()
-            .and_then(|path| path.parent())
-            .map(Path::to_path_buf)
-    }
-
-    fn preview_current_theme_picker_selection(&mut self) {
-        let Some(picker) = self.modal_picker.as_ref() else {
-            return;
-        };
-        if picker.kind != PickerKind::Theme {
-            return;
-        }
-        let Some(item) = picker.selected_item() else {
-            return;
-        };
-        self.preview_theme_name(&item.id);
-    }
-
-    fn cancel_modal_picker(&mut self) {
-        if self
-            .modal_picker
-            .as_ref()
-            .is_some_and(|picker| picker.kind == PickerKind::Theme)
-        {
-            self.restore_theme_picker_snapshot();
-        }
-        self.modal_picker = None;
-    }
-
-    fn restore_theme_picker_snapshot(&mut self) {
-        if let Some(snapshot) = self.theme_picker_snapshot.take() {
-            let syntax_name = snapshot.theme.syntax_theme_name().to_string();
-            self.theme = snapshot.theme;
-            let _ = highlight::set_theme_override(Some(syntax_name), self.tui_theme_home());
-            highlight::set_syntax_theme(snapshot.syntax_theme);
-        }
-    }
-
-    fn update_slash_picker_filter(&mut self) {
-        let Some(picker) = self.modal_picker.as_mut() else {
-            return;
-        };
-        if picker.kind != PickerKind::SlashCommand {
-            return;
-        }
-        let filter = self
-            .composer
-            .text()
-            .strip_prefix('/')
-            .unwrap_or_default()
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_string();
-        picker.set_filter(filter);
-    }
-    fn start_file_mention_lookup(&mut self) -> AppAction {
-        self.open_file_mention_picker(vec![PickerItem {
-            id: String::new(),
-            title: "Loading file mentions…".to_string(),
-            description: "via /v1/at-command-completion".to_string(),
-        }]);
-        AppAction::LoadFileMentions {
-            query: self.composer.text().to_string(),
-            cursor: self.composer.cursor_char_offset(),
-        }
-    }
-
-    fn start_session_lookup(&mut self) -> AppAction {
-        self.modal_picker = Some(PickerState::new(
-            PickerKind::Session,
-            vec![PickerItem {
-                id: String::new(),
-                title: "Loading recent chats…".to_string(),
-                description: "via /v1/trajectories".to_string(),
-            }],
-        ));
-        self.composer_mode = ComposerMode::Chat;
-        AppAction::LoadSessions
-    }
-
     fn submit_structured_prompt(&mut self, prompt: &str) -> AppAction {
         self.composer.set_text(prompt);
         self.submit_composer().unwrap_or(AppAction::None)
@@ -1510,88 +1202,6 @@ impl App {
         self.add_notice("Switching to Agent mode");
         AppAction::SetParams {
             patch: workflow::agent_mode_patch(),
-        }
-    }
-
-    fn accept_modal_picker(&mut self, kind: PickerKind, accept: PickerAccept) -> AppAction {
-        match (kind, accept) {
-            (PickerKind::Model, PickerAccept::Single(Some(item))) => {
-                self.pending_model = Some(item.id.clone());
-                self.model = Some(item.id.clone());
-                self.add_notice(format!("Model selected for next message: {}", item.title));
-                AppAction::None
-            }
-            (PickerKind::Mode, PickerAccept::Single(Some(item))) => {
-                self.pending_mode = Some(item.id.clone());
-                self.mode = Some(item.id.clone());
-                self.add_notice(format!("Mode selected for next message: {}", item.title));
-                AppAction::None
-            }
-            (PickerKind::SlashCommand, PickerAccept::Single(Some(item))) => {
-                let typed = self.composer.text().trim();
-                let command = if typed.contains(char::is_whitespace) {
-                    typed.to_string()
-                } else {
-                    item.id
-                };
-                self.execute_command_name(&command)
-            }
-            (PickerKind::FileMention, PickerAccept::Single(Some(item))) => {
-                if item.id.is_empty() {
-                    self.add_notice("File mention search did not return a selectable file");
-                } else {
-                    self.composer
-                        .replace_current_token('@', &format!("@{} ", item.id));
-                }
-                AppAction::None
-            }
-            (PickerKind::Session, PickerAccept::Single(Some(item))) => {
-                if item.id.is_empty() {
-                    self.add_notice("No session selected");
-                    AppAction::None
-                } else {
-                    self.resume_chat(item.id, item.title, Some(item.description))
-                }
-            }
-            (PickerKind::Permissions, PickerAccept::Multi(items)) => {
-                let policy = session::permission_policy_from_items(&items);
-                self.permission_policy = policy;
-                self.add_notice(session::permission_policy_notice(policy));
-                AppAction::SetParams {
-                    patch: session::permission_policy_patch(policy),
-                }
-            }
-            (PickerKind::Reasoning, PickerAccept::Single(Some(item))) => {
-                match session::parse_reasoning_level(&item.id) {
-                    Ok(Some(level)) => self.set_reasoning_level(level),
-                    Ok(None) => AppAction::None,
-                    Err(error) => {
-                        self.add_notice(format!("/reasoning {error}"));
-                        AppAction::None
-                    }
-                }
-            }
-            (PickerKind::Theme, PickerAccept::Single(Some(item))) => {
-                self.theme_picker_snapshot = None;
-                self.apply_theme_name(&item.id, true);
-                AppAction::None
-            }
-            (PickerKind::ProviderLogout, PickerAccept::Single(Some(item))) => {
-                self.composer.clear();
-                self.modal_picker = None;
-                self.add_notice(format!("Logging out provider {}", item.title));
-                AppAction::ProviderOAuthLogout { provider: item.id }
-            }
-            (PickerKind::CompetitorImport, PickerAccept::Single(Some(item))) => {
-                self.composer.clear();
-                self.modal_picker = None;
-                if item.id == "__list__" {
-                    self.open_read_only_view(ReadOnlyView::Import)
-                } else {
-                    self.run_competitor_import(&item.id, "project")
-                }
-            }
-            _ => AppAction::None,
         }
     }
 
@@ -1865,276 +1475,6 @@ impl App {
         }
     }
 
-    fn start_provider_logout(&mut self, args: &str) -> AppAction {
-        self.composer.clear();
-        let provider = args.trim();
-        if provider.is_empty() {
-            self.add_notice("Loading providers for /logout…");
-            AppAction::LoadProviderLogoutChoices
-        } else {
-            self.add_notice(format!("Logging out provider {provider}"));
-            AppAction::ProviderOAuthLogout {
-                provider: provider.to_string(),
-            }
-        }
-    }
-
-    fn start_competitor_import(&mut self, args: &str) -> AppAction {
-        self.composer.clear();
-        let mut parts = args.split_whitespace();
-        let source = parts.next();
-        let scope = parts.next().unwrap_or("project");
-        if parts.next().is_some() {
-            self.add_notice("/import usage: /import [source|all] [project|global]");
-            return AppAction::None;
-        }
-        match source {
-            None => {
-                self.open_view_overlay(ReadOnlyView::Import.loading_overlay());
-                AppAction::LoadCompetitorImportSources
-            }
-            Some("list") | Some("sources") => self.open_read_only_view(ReadOnlyView::Import),
-            Some(source) => self.run_competitor_import(source, scope),
-        }
-    }
-
-    fn run_competitor_import(&mut self, source: &str, scope: &str) -> AppAction {
-        let source = source.trim();
-        let scope = scope.trim();
-        if !matches!(scope, "project" | "global") {
-            self.add_notice("/import scope must be project or global");
-            return AppAction::None;
-        }
-        let source = if source.eq_ignore_ascii_case("all") {
-            None
-        } else {
-            Some(source.to_string())
-        };
-        self.add_notice(format!(
-            "Running /import {} {scope}…",
-            source.as_deref().unwrap_or("all")
-        ));
-        AppAction::RunCompetitorImport {
-            source,
-            scope: scope.to_string(),
-        }
-    }
-
-    fn open_read_only_view(&mut self, view: ReadOnlyView) -> AppAction {
-        self.composer.clear();
-        self.open_view_overlay(view.loading_overlay());
-        AppAction::LoadReadOnlyView { view }
-    }
-
-    fn open_view_overlay(&mut self, overlay: ViewOverlay) {
-        let raw_lines = if overlay.raw_lines.is_empty() {
-            overlay.rendered_lines.clone()
-        } else {
-            overlay.raw_lines
-        };
-        self.transcript_overlay = Some(
-            PagerOverlay::new(overlay.title, overlay.rendered_lines, raw_lines)
-                .with_surface(overlay.surface),
-        );
-    }
-
-    fn handle_mcp_view_loaded(&mut self, result: Result<McpViewData, String>) {
-        match result {
-            Ok(data) => self.open_view_overlay(mcp_overlay(&data)),
-            Err(error) => self.open_failed_view(ReadOnlyView::Mcp, error),
-        }
-    }
-
-    fn handle_skills_view_loaded(&mut self, result: Result<SlashCommandsListResponse, String>) {
-        match result {
-            Ok(data) => self.open_view_overlay(skills_overlay(&data)),
-            Err(error) => self.open_failed_view(ReadOnlyView::Skills, error),
-        }
-    }
-
-    fn handle_memories_view_loaded(&mut self, result: Result<KnowledgeGraphResponse, String>) {
-        match result {
-            Ok(data) => self.open_view_overlay(memories_overlay(&data)),
-            Err(error) => self.open_failed_view(ReadOnlyView::Memories, error),
-        }
-    }
-
-    fn handle_hooks_view_loaded(&mut self, result: Result<HooksResponse, String>) {
-        match result {
-            Ok(data) => self.open_view_overlay(hooks_overlay(&data)),
-            Err(error) => self.open_failed_view(ReadOnlyView::Hooks, error),
-        }
-    }
-
-    fn handle_provider_logout_choices_loaded(
-        &mut self,
-        result: Result<ProviderListResponse, String>,
-    ) {
-        match result {
-            Ok(data) => self.open_provider_logout_picker(data),
-            Err(error) => {
-                self.retry_hint = retry_hint_from_message(&error);
-                self.add_notice(format!("Failed to load providers for /logout: {error}"));
-            }
-        }
-    }
-
-    fn open_provider_logout_picker(&mut self, data: ProviderListResponse) {
-        let mut items = data
-            .providers
-            .into_iter()
-            .filter(|provider| {
-                matches!(
-                    provider.base_provider.as_str(),
-                    "claude_code" | "openai_codex" | "github_copilot"
-                ) && provider.has_credentials
-            })
-            .map(|provider| PickerItem {
-                id: provider.name,
-                title: provider.display_name,
-                description: format!("{} · {}", provider.base_provider, provider.status),
-            })
-            .collect::<Vec<_>>();
-        items.sort_by(|left, right| {
-            left.title
-                .cmp(&right.title)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        if items.is_empty() {
-            self.add_notice("No OAuth provider credentials available to log out");
-            self.modal_picker = None;
-        } else {
-            self.modal_picker = Some(PickerState::new(PickerKind::ProviderLogout, items));
-            self.composer_mode = ComposerMode::Chat;
-        }
-    }
-
-    fn handle_provider_logout_finished(
-        &mut self,
-        provider: String,
-        result: Result<ProviderOAuthLogoutResponse, String>,
-    ) {
-        match result {
-            Ok(response) if response.success => {
-                let status = if response.auth_status.trim().is_empty() {
-                    "logged out".to_string()
-                } else {
-                    response.auth_status
-                };
-                self.add_notice(format!("Logged out {provider}: {status}"));
-            }
-            Ok(response) => {
-                let status = if response.auth_status.trim().is_empty() {
-                    "backend returned success=false".to_string()
-                } else {
-                    response.auth_status
-                };
-                self.add_notice(format!("Failed to log out {provider}: {status}"));
-            }
-            Err(error) => {
-                self.retry_hint = retry_hint_from_message(&error);
-                self.add_notice(format!("Failed to log out {provider}: {error}"));
-            }
-        }
-    }
-
-    fn handle_competitor_import_view_loaded(
-        &mut self,
-        result: Result<CompetitorImportInfoResponse, String>,
-    ) {
-        match result {
-            Ok(data) => self.open_view_overlay(import_sources_overlay(&data)),
-            Err(error) => self.open_failed_view(ReadOnlyView::Import, error),
-        }
-    }
-
-    fn handle_competitor_import_sources_loaded(
-        &mut self,
-        result: Result<CompetitorImportInfoResponse, String>,
-    ) {
-        match result {
-            Ok(data) => self.open_competitor_import_picker(data),
-            Err(error) => self.open_failed_view(ReadOnlyView::Import, error),
-        }
-    }
-
-    fn open_competitor_import_picker(&mut self, data: CompetitorImportInfoResponse) {
-        let overlay = import_sources_overlay(&data);
-        let mut items = data
-            .sources
-            .iter()
-            .map(|source| PickerItem {
-                id: source.id.clone(),
-                title: if source.label.trim().is_empty() {
-                    source.id.clone()
-                } else {
-                    source.label.clone()
-                },
-                description: format!("roots: {}", source.roots.join(", ")),
-            })
-            .collect::<Vec<_>>();
-        items.sort_by(|left, right| {
-            left.title
-                .cmp(&right.title)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        self.open_view_overlay(overlay);
-        if items.is_empty() {
-            self.add_notice("No competitor import sources are available");
-        } else {
-            items.insert(
-                0,
-                PickerItem {
-                    id: "__list__".to_string(),
-                    title: "Show source list only".to_string(),
-                    description: "do not run an import".to_string(),
-                },
-            );
-            self.modal_picker = Some(PickerState::new(PickerKind::CompetitorImport, items));
-            self.composer_mode = ComposerMode::Chat;
-        }
-    }
-
-    fn handle_competitor_import_finished(
-        &mut self,
-        result: Result<CompetitorImportRunResponse, String>,
-    ) {
-        match result {
-            Ok(data) => {
-                self.add_notice(import_run_notice(&data));
-                self.open_view_overlay(import_run_overlay(&data));
-            }
-            Err(error) => self.open_failed_view(ReadOnlyView::Import, error),
-        }
-    }
-
-    fn open_failed_view(&mut self, view: ReadOnlyView, error: String) {
-        self.retry_hint = retry_hint_from_message(&error);
-        self.add_notice(format!("Failed to load /{}: {error}", view.command_name()));
-        let lines = vec![
-            view.title().to_string(),
-            format!("Failed to load /{} backend data.", view.command_name()),
-            error,
-        ];
-        self.open_view_overlay(ViewOverlay {
-            title: view.title().to_string(),
-            rendered_lines: lines.clone(),
-            raw_lines: lines,
-            surface: None,
-        });
-    }
-
-    fn execute_picker_command(&mut self, picker: CommandPicker) -> AppAction {
-        self.composer.clear();
-        match picker {
-            CommandPicker::FileMention => self.start_file_mention_lookup(),
-            CommandPicker::Theme => {
-                self.open_theme_picker();
-                AppAction::None
-            }
-        }
-    }
-
     fn execute_local_toggle(&mut self, toggle: LocalToggle, _args: &str) -> AppAction {
         match toggle {
             LocalToggle::ClearTranscript => {
@@ -2159,39 +1499,6 @@ impl App {
                 self.show_status_card();
             }
         }
-    }
-
-    fn apply_theme_name(&mut self, name: &str, persist: bool) {
-        match TuiTheme::named_or_syntax(name, self.tui_theme_home().as_deref()) {
-            Some(theme) => {
-                let theme_name = theme.name().to_string();
-                self.set_theme(theme);
-                self.add_notice(format!("Theme set to {theme_name}"));
-                if persist {
-                    match self.persist_theme_name(&theme_name) {
-                        Ok(path) => self.add_notice(format!("Theme saved to {}", path.display())),
-                        Err(error) => self.add_notice(error),
-                    }
-                }
-            }
-            None => self.add_notice(format!(
-                "Unknown theme `{}`; available: {}",
-                name,
-                TuiTheme::list_available(self.tui_theme_home().as_deref())
-                    .into_iter()
-                    .map(|entry| entry.name)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
-        }
-    }
-
-    fn persist_theme_name(&mut self, name: &str) -> Result<PathBuf, String> {
-        let Some(path) = self.tui_config_path.clone() else {
-            return Err("Cannot persist TUI theme; config path is unavailable".to_string());
-        };
-        persist_theme_name_to_path(&path, name)?;
-        Ok(path)
     }
 
     fn show_debug_config_card(&mut self) {
@@ -3219,94 +2526,6 @@ fn initialize_syntax_theme(theme: &TuiTheme, config_path: Option<&Path>) {
         .and_then(|path| path.parent())
         .map(Path::to_path_buf);
     let _ = highlight::set_theme_override(Some(theme.syntax_theme_name().to_string()), theme_home);
-}
-
-fn persist_theme_name_to_path(path: &Path, name: &str) -> Result<(), String> {
-    let content = match fs::read_to_string(path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => {
-            return Err(format!(
-                "Failed to read TUI config from {}: {error}",
-                path.display()
-            ));
-        }
-    };
-    let content = apply_theme_name_to_config(&content, name);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "Failed to create TUI config directory {}: {error}",
-                parent.display()
-            )
-        })?;
-    }
-    fs::write(path, content)
-        .map_err(|error| format!("Failed to save TUI theme to {}: {error}", path.display()))
-}
-
-fn apply_theme_name_to_config(content: &str, name: &str) -> String {
-    let name_line = format!("name = {}", toml_string(name));
-    if content.trim().is_empty() {
-        return format!("[theme]\n{name_line}\n");
-    }
-
-    let mut out = Vec::new();
-    let mut in_theme = false;
-    let mut found_theme = false;
-    let mut wrote_name = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        let section = toml_section_name(trimmed);
-        if section.is_some() && in_theme && !wrote_name {
-            out.push(name_line.clone());
-            wrote_name = true;
-        }
-        if let Some(section) = section {
-            in_theme = section == "theme";
-            found_theme |= in_theme;
-            out.push(line.to_string());
-            continue;
-        }
-        if in_theme && toml_key_name(trimmed) == Some("name") {
-            let indent = line
-                .chars()
-                .take_while(|ch| ch.is_whitespace())
-                .collect::<String>();
-            out.push(format!("{indent}{name_line}"));
-            wrote_name = true;
-        } else {
-            out.push(line.to_string());
-        }
-    }
-
-    if found_theme {
-        if in_theme && !wrote_name {
-            out.push(name_line);
-        }
-    } else {
-        out.push(String::new());
-        out.push("[theme]".to_string());
-        out.push(name_line);
-    }
-
-    let mut content = out.join("\n");
-    content.push('\n');
-    content
-}
-
-fn toml_section_name(line: &str) -> Option<&str> {
-    Some(line.strip_prefix('[')?.strip_suffix(']')?.trim())
-}
-
-fn toml_key_name(line: &str) -> Option<&str> {
-    let (key, _) = line.split_once('=')?;
-    Some(key.trim())
-}
-
-fn toml_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn stable_path_hash(path: &std::path::Path) -> String {
@@ -5790,15 +5009,18 @@ new-chat = "ctrl-x"
     #[test]
     fn theme_config_helpers_update_or_create_theme_section() {
         assert_eq!(
-            apply_theme_name_to_config("", "light"),
+            surfaces::apply_theme_name_to_config("", "light"),
             "[theme]\nname = \"light\"\n"
         );
         assert_eq!(
-            apply_theme_name_to_config("vim = true\n\n[theme]\naccent = \"cyan\"\n", "plain"),
+            surfaces::apply_theme_name_to_config(
+                "vim = true\n\n[theme]\naccent = \"cyan\"\n",
+                "plain"
+            ),
             "vim = true\n\n[theme]\naccent = \"cyan\"\nname = \"plain\"\n"
         );
         assert_eq!(
-            apply_theme_name_to_config(
+            surfaces::apply_theme_name_to_config(
                 "[theme]\nname = \"dark\"\n\n[bindings]\nsend = \"ctrl-s\"\n",
                 "light"
             ),
@@ -7553,7 +6775,7 @@ new-chat = "ctrl-x"
 
     #[test]
     fn project_picker_filters_and_selects() {
-        let mut picker = ProjectPickerState::new(vec![
+        let mut picker = surfaces::ProjectPickerState::new(vec![
             ProjectEntry {
                 id: "a".to_string(),
                 slug: "alpha".to_string(),
