@@ -1119,6 +1119,365 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn send_set_goal(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        content: &str,
+        budget: Option<GoalBudget>,
+    ) -> Result<(), ClientError> {
+        self.send_set_goal_with_id(
+            project_id,
+            chat_id,
+            &request_id("set-goal"),
+            content,
+            budget,
+        )
+        .await
+    }
+
+    pub async fn send_set_goal_with_id(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+        content: &str,
+        budget: Option<GoalBudget>,
+    ) -> Result<(), ClientError> {
+        let body = match budget {
+            Some(budget) => json!({
+                "client_request_id": client_request_id,
+                "type": "set_goal",
+                "content": content,
+                "budget": budget,
+            }),
+            None => json!({
+                "client_request_id": client_request_id,
+                "type": "set_goal",
+                "content": content,
+            }),
+        };
+        self.send_command(project_id, chat_id, body).await
+    }
+
+    pub async fn send_set_goal_budget(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        budget: GoalBudget,
+    ) -> Result<(), ClientError> {
+        self.send_set_goal_budget_with_id(
+            project_id,
+            chat_id,
+            &request_id("set-goal-budget"),
+            budget,
+        )
+        .await
+    }
+
+    pub async fn send_set_goal_budget_with_id(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+        budget: GoalBudget,
+    ) -> Result<(), ClientError> {
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "client_request_id": client_request_id,
+                "type": "set_goal_budget",
+                "budget": budget,
+            }),
+        )
+        .await
+    }
+
+    pub async fn send_update_goal(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        note: &str,
+    ) -> Result<(), ClientError> {
+        self.send_update_goal_with_id(project_id, chat_id, &request_id("update-goal"), note)
+            .await
+    }
+
+    pub async fn send_update_goal_with_id(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+        note: &str,
+    ) -> Result<(), ClientError> {
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "client_request_id": client_request_id,
+                "type": "update_goal",
+                "note": note,
+            }),
+        )
+        .await
+    }
+
+    pub async fn send_goal_control(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        action: &str,
+    ) -> Result<(), ClientError> {
+        self.send_goal_control_with_id(project_id, chat_id, &request_id("goal-control"), action)
+            .await
+    }
+
+    pub async fn send_goal_control_with_id(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+        action: &str,
+    ) -> Result<(), ClientError> {
+        let action = GoalControlAction::try_from(action)
+            .map_err(|error| ClientError::Json(error.to_string()))?;
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "client_request_id": client_request_id,
+                "type": "goal_control",
+                "action": action,
+            }),
+        )
+        .await
+    }
+
+    pub async fn send_regenerate(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+    ) -> Result<(), ClientError> {
+        self.send_regenerate_with_id(project_id, chat_id, &request_id("regenerate"))
+            .await
+    }
+
+    pub async fn send_regenerate_with_id(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+    ) -> Result<(), ClientError> {
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "client_request_id": client_request_id,
+                "type": "regenerate",
+            }),
+        )
+        .await
+    }
+
+    pub async fn send_update_message(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        message_id: &str,
+        content: Value,
+        attachments: Vec<Value>,
+        regenerate: bool,
+    ) -> Result<(), ClientError> {
+        self.send_update_message_with_id(
+            project_id,
+            chat_id,
+            &request_id("update-message"),
+            message_id,
+            content,
+            attachments,
+            regenerate,
+        )
+        .await
+    }
+
+    pub async fn send_update_message_with_id(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+        message_id: &str,
+        content: Value,
+        attachments: Vec<Value>,
+        regenerate: bool,
+    ) -> Result<(), ClientError> {
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "client_request_id": client_request_id,
+                "type": "update_message",
+                "message_id": message_id,
+                "content": content,
+                "attachments": attachments,
+                "regenerate": regenerate,
+            }),
+        )
+        .await
+    }
+
+    pub async fn send_remove_message(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        message_id: &str,
+        regenerate: bool,
+    ) -> Result<(), ClientError> {
+        self.send_remove_message_with_id(
+            project_id,
+            chat_id,
+            &request_id("remove-message"),
+            message_id,
+            regenerate,
+        )
+        .await
+    }
+
+    pub async fn send_remove_message_with_id(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+        message_id: &str,
+        regenerate: bool,
+    ) -> Result<(), ClientError> {
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "client_request_id": client_request_id,
+                "type": "remove_message",
+                "message_id": message_id,
+                "regenerate": regenerate,
+            }),
+        )
+        .await
+    }
+
+    pub async fn send_restore_messages(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        messages: Vec<Value>,
+    ) -> Result<(), ClientError> {
+        self.send_restore_messages_with_id(
+            project_id,
+            chat_id,
+            &request_id("restore-messages"),
+            messages,
+        )
+        .await
+    }
+
+    pub async fn send_restore_messages_with_id(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+        messages: Vec<Value>,
+    ) -> Result<(), ClientError> {
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "client_request_id": client_request_id,
+                "type": "restore_messages",
+                "messages": messages,
+            }),
+        )
+        .await
+    }
+
+    pub async fn send_ide_tool_result(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        tool_call_id: &str,
+        content: &str,
+        tool_failed: bool,
+    ) -> Result<(), ClientError> {
+        self.send_ide_tool_result_with_id(
+            project_id,
+            chat_id,
+            &request_id("ide-tool-result"),
+            tool_call_id,
+            content,
+            tool_failed,
+        )
+        .await
+    }
+
+    pub async fn send_ide_tool_result_with_id(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+        tool_call_id: &str,
+        content: &str,
+        tool_failed: bool,
+    ) -> Result<(), ClientError> {
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "client_request_id": client_request_id,
+                "type": "ide_tool_result",
+                "tool_call_id": tool_call_id,
+                "content": content,
+                "tool_failed": tool_failed,
+            }),
+        )
+        .await
+    }
+
+    pub async fn send_tool_decision(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        tool_call_id: &str,
+        accepted: bool,
+    ) -> Result<(), ClientError> {
+        self.send_tool_decision_with_id(
+            project_id,
+            chat_id,
+            &request_id("tool-decision"),
+            tool_call_id,
+            accepted,
+        )
+        .await
+    }
+
+    pub async fn send_tool_decision_with_id(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+        tool_call_id: &str,
+        accepted: bool,
+    ) -> Result<(), ClientError> {
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "client_request_id": client_request_id,
+                "type": "tool_decision",
+                "tool_call_id": tool_call_id,
+                "accepted": accepted,
+            }),
+        )
+        .await
+    }
+
     pub async fn send_tool_decisions(
         &self,
         project_id: &str,
@@ -1135,6 +1494,82 @@ impl DaemonClient {
             }),
         )
         .await
+    }
+
+    pub async fn send_clean_background_processes(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        include_services: bool,
+    ) -> Result<(), ClientError> {
+        self.send_clean_background_processes_with_id(
+            project_id,
+            chat_id,
+            &request_id("clean-background-processes"),
+            include_services,
+        )
+        .await
+    }
+
+    pub async fn send_clean_background_processes_with_id(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+        include_services: bool,
+    ) -> Result<(), ClientError> {
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "client_request_id": client_request_id,
+                "type": "clean_background_processes",
+                "include_services": include_services,
+            }),
+        )
+        .await
+    }
+
+    pub async fn send_browser_context_decision(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        decision: BrowserContextDecision,
+    ) -> Result<(), ClientError> {
+        self.send_browser_context_decision_with_id(
+            project_id,
+            chat_id,
+            &request_id("browser-context-decision"),
+            decision,
+        )
+        .await
+    }
+
+    pub async fn send_browser_context_decision_with_id(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+        decision: BrowserContextDecision,
+    ) -> Result<(), ClientError> {
+        let body = serde_json::to_value(decision).map_err(|error| {
+            ClientError::Json(format!("failed to serialize browser decision: {error}"))
+        })?;
+        let Value::Object(mut body) = body else {
+            return Err(ClientError::Json(
+                "browser context decision did not serialize to an object".to_string(),
+            ));
+        };
+        body.insert(
+            "client_request_id".to_string(),
+            Value::String(client_request_id.to_string()),
+        );
+        body.insert(
+            "type".to_string(),
+            Value::String("browser_context_decision".to_string()),
+        );
+        self.send_command(project_id, chat_id, Value::Object(body))
+            .await
     }
 
     async fn send_command(
@@ -1735,9 +2170,65 @@ pub struct ToolDecision {
     pub accepted: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalControlAction {
+    Pause,
+    Resume,
+    Stop,
+}
+
+impl TryFrom<&str> for GoalControlAction {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "pause" => Ok(Self::Pause),
+            "resume" => Ok(Self::Resume),
+            "stop" => Ok(Self::Stop),
+            _ => Err("goal control action must be pause, resume, or stop"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GoalBudget {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_minutes: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cost_cents: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_progress_token_threshold: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_progress_turns: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserContextDecision {
+    pub pending_message_id: String,
+    pub include_actions: bool,
+    pub include_console: bool,
+    pub include_network: bool,
+    pub include_mutations: bool,
+    pub include_screenshot: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_n_actions: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_n_console: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_n_network: Option<usize>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
@@ -1948,6 +2439,360 @@ mod tests {
         }
         let _ = stream.set_read_timeout(None);
         request[header_end..header_end + content_length].to_vec()
+    }
+
+    async fn capture_command<F, Fut>(send: F) -> Value
+    where
+        F: FnOnce(DaemonClient) -> Fut,
+        Fut: Future<Output = Result<(), ClientError>>,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (sent, received) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            sent.send(read_request_body(&mut stream)).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+        let client = DaemonClient::new(format!("http://{addr}"), None).unwrap();
+
+        send(client).await.unwrap();
+        let body = serde_json::from_slice(&received.recv().unwrap()).unwrap();
+        handle.join().unwrap();
+        body
+    }
+
+    fn assert_command(body: &Value, expected: Value) {
+        assert_eq!(body, &expected);
+        assert!(body["client_request_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn set_goal_serializes_unlimited_and_explicit_budget() {
+        let unlimited = capture_command(|client| async move {
+            client
+                .send_set_goal_with_id("project", "chat", "set-goal-unlimited", "ship", None)
+                .await
+        })
+        .await;
+        assert_command(
+            &unlimited,
+            json!({
+                "client_request_id": "set-goal-unlimited",
+                "type": "set_goal",
+                "content": "ship",
+            }),
+        );
+        for key in [
+            "max_turns",
+            "max_minutes",
+            "max_tokens",
+            "max_cost_cents",
+            "no_progress_turns",
+        ] {
+            assert!(unlimited.get(key).is_none());
+        }
+
+        let budgeted = capture_command(|client| async move {
+            client
+                .send_set_goal_with_id(
+                    "project",
+                    "chat",
+                    "set-goal-budgeted",
+                    "ship",
+                    Some(GoalBudget {
+                        max_turns: Some(3),
+                        ..GoalBudget::default()
+                    }),
+                )
+                .await
+        })
+        .await;
+        assert_command(
+            &budgeted,
+            json!({
+                "client_request_id": "set-goal-budgeted",
+                "type": "set_goal",
+                "content": "ship",
+                "budget": {"max_turns": 3},
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn set_goal_budget_serializes_exact_wire_shape() {
+        let body = capture_command(|client| async move {
+            client
+                .send_set_goal_budget_with_id(
+                    "project",
+                    "chat",
+                    "set-goal-budget",
+                    GoalBudget {
+                        max_tokens: Some(42),
+                        no_progress_turns: Some(2),
+                        ..GoalBudget::default()
+                    },
+                )
+                .await
+        })
+        .await;
+        assert_command(
+            &body,
+            json!({
+                "client_request_id": "set-goal-budget",
+                "type": "set_goal_budget",
+                "budget": {"max_tokens": 42, "no_progress_turns": 2},
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn update_goal_serializes_exact_wire_shape() {
+        let body = capture_command(|client| async move {
+            client
+                .send_update_goal_with_id("project", "chat", "update-goal", "tiny victory")
+                .await
+        })
+        .await;
+        assert_command(
+            &body,
+            json!({
+                "client_request_id": "update-goal",
+                "type": "update_goal",
+                "note": "tiny victory",
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_control_accepts_only_wire_actions() {
+        for action in ["pause", "resume", "stop"] {
+            let body = capture_command(|client| async move {
+                client
+                    .send_goal_control_with_id("project", "chat", "goal-control", action)
+                    .await
+            })
+            .await;
+            assert_command(
+                &body,
+                json!({
+                    "client_request_id": "goal-control",
+                    "type": "goal_control",
+                    "action": action,
+                }),
+            );
+        }
+        assert_eq!(
+            GoalControlAction::try_from("snooze").unwrap_err(),
+            "goal control action must be pause, resume, or stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn regenerate_serializes_exact_wire_shape() {
+        let body = capture_command(|client| async move {
+            client
+                .send_regenerate_with_id("project", "chat", "regenerate")
+                .await
+        })
+        .await;
+        assert_command(
+            &body,
+            json!({
+                "client_request_id": "regenerate",
+                "type": "regenerate",
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn update_message_serializes_exact_wire_shape() {
+        let body = capture_command(|client| async move {
+            client
+                .send_update_message_with_id(
+                    "project",
+                    "chat",
+                    "update-message",
+                    "message-1",
+                    json!("rewritten"),
+                    vec![json!({"path": "snack.txt"})],
+                    true,
+                )
+                .await
+        })
+        .await;
+        assert_command(
+            &body,
+            json!({
+                "client_request_id": "update-message",
+                "type": "update_message",
+                "message_id": "message-1",
+                "content": "rewritten",
+                "attachments": [{"path": "snack.txt"}],
+                "regenerate": true,
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_message_serializes_exact_wire_shape() {
+        let body = capture_command(|client| async move {
+            client
+                .send_remove_message_with_id(
+                    "project",
+                    "chat",
+                    "remove-message",
+                    "message-1",
+                    false,
+                )
+                .await
+        })
+        .await;
+        assert_command(
+            &body,
+            json!({
+                "client_request_id": "remove-message",
+                "type": "remove_message",
+                "message_id": "message-1",
+                "regenerate": false,
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_messages_serializes_exact_wire_shape() {
+        let body = capture_command(|client| async move {
+            client
+                .send_restore_messages_with_id(
+                    "project",
+                    "chat",
+                    "restore-messages",
+                    vec![json!({"role": "user", "content": "restore me"})],
+                )
+                .await
+        })
+        .await;
+        assert_command(
+            &body,
+            json!({
+                "client_request_id": "restore-messages",
+                "type": "restore_messages",
+                "messages": [{"role": "user", "content": "restore me"}],
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn ide_tool_result_serializes_exact_wire_shape() {
+        let body = capture_command(|client| async move {
+            client
+                .send_ide_tool_result_with_id(
+                    "project",
+                    "chat",
+                    "ide-tool-result",
+                    "tool-1",
+                    "result",
+                    true,
+                )
+                .await
+        })
+        .await;
+        assert_command(
+            &body,
+            json!({
+                "client_request_id": "ide-tool-result",
+                "type": "ide_tool_result",
+                "tool_call_id": "tool-1",
+                "content": "result",
+                "tool_failed": true,
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_decision_serializes_exact_wire_shape() {
+        let body = capture_command(|client| async move {
+            client
+                .send_tool_decision_with_id("project", "chat", "tool-decision", "tool-1", true)
+                .await
+        })
+        .await;
+        assert_command(
+            &body,
+            json!({
+                "client_request_id": "tool-decision",
+                "type": "tool_decision",
+                "tool_call_id": "tool-1",
+                "accepted": true,
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_background_processes_serializes_exact_wire_shape() {
+        let body = capture_command(|client| async move {
+            client
+                .send_clean_background_processes_with_id(
+                    "project",
+                    "chat",
+                    "clean-background-processes",
+                    true,
+                )
+                .await
+        })
+        .await;
+        assert_command(
+            &body,
+            json!({
+                "client_request_id": "clean-background-processes",
+                "type": "clean_background_processes",
+                "include_services": true,
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_context_decision_serializes_exact_wire_shape() {
+        let body = capture_command(|client| async move {
+            client
+                .send_browser_context_decision_with_id(
+                    "project",
+                    "chat",
+                    "browser-context-decision",
+                    BrowserContextDecision {
+                        pending_message_id: "pending-1".to_string(),
+                        include_actions: true,
+                        include_console: false,
+                        include_network: true,
+                        include_mutations: false,
+                        include_screenshot: true,
+                        last_n_actions: Some(5),
+                        last_n_console: None,
+                        last_n_network: Some(7),
+                    },
+                )
+                .await
+        })
+        .await;
+        assert_command(
+            &body,
+            json!({
+                "client_request_id": "browser-context-decision",
+                "type": "browser_context_decision",
+                "pending_message_id": "pending-1",
+                "include_actions": true,
+                "include_console": false,
+                "include_network": true,
+                "include_mutations": false,
+                "include_screenshot": true,
+                "last_n_actions": 5,
+                "last_n_network": 7,
+            }),
+        );
+        assert!(body.get("last_n_console").is_none());
     }
 
     #[test]
