@@ -222,12 +222,11 @@ help = "f1"
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("show generated keymap help"));
-        assert!(
-            app.keymap_help_rows()
-                .iter()
-                .any(|row| row.action == crate::keymap::KeyAction::NewChat
-                    && row.bindings == "Ctrl-X")
-        );
+        assert!(app
+            .keymap_help_rows()
+            .iter()
+            .any(|row| row.action == Some(crate::keymap::KeyAction::NewChat)
+                && row.bindings == "Ctrl-X"));
     }
 
     #[test]
@@ -247,6 +246,16 @@ help = "f1"
 
         for context in crate::keymap::KeyContext::ALL {
             assert!(text.contains(context.label()), "{}", context.label());
+        }
+        for context in [
+            crate::keymap::KeyContext::History,
+            crate::keymap::KeyContext::Activity,
+            crate::keymap::KeyContext::Board,
+            crate::keymap::KeyContext::Goal,
+            crate::keymap::KeyContext::Worktree,
+            crate::keymap::KeyContext::Settings,
+        ] {
+            assert!(text.contains("not yet bound"), "{}", context.label());
         }
     }
 

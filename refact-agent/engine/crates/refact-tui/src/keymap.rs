@@ -475,7 +475,7 @@ pub struct KeymapEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelpRow {
     pub context: KeyContext,
-    pub action: KeyAction,
+    pub action: Option<KeyAction>,
     pub bindings: String,
     pub description: &'static str,
 }
@@ -641,7 +641,7 @@ impl KeymapRegistry {
             .filter(|entry| !entry.bindings.is_empty())
             .map(|entry| HelpRow {
                 context: entry.context,
-                action: entry.action,
+                action: Some(entry.action),
                 bindings: entry
                     .bindings
                     .iter()
@@ -651,7 +651,22 @@ impl KeymapRegistry {
                 description: entry.description,
             })
             .collect::<Vec<_>>();
-        rows.sort_by_key(|row| (row.context.order(), row.action.name()));
+        for context in KeyContext::ALL {
+            if !rows.iter().any(|row| row.context == context) {
+                rows.push(HelpRow {
+                    context,
+                    action: None,
+                    bindings: "—".to_string(),
+                    description: "not yet bound",
+                });
+            }
+        }
+        rows.sort_by_key(|row| {
+            (
+                row.context.order(),
+                row.action.map(KeyAction::name).unwrap_or_default(),
+            )
+        });
         rows
     }
 
@@ -1033,16 +1048,6 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(KeyContext::VimNormal, KeyAction::VimLineEnd, &["$"]),
         entry(KeyContext::VimInsert, KeyAction::VimNormalMode, &["esc"]),
     ];
-    for context in [
-        KeyContext::History,
-        KeyContext::Activity,
-        KeyContext::Board,
-        KeyContext::Goal,
-        KeyContext::Worktree,
-        KeyContext::Settings,
-    ] {
-        entries.extend(surface_navigation_entries(context));
-    }
     entries.extend(ask_form_entries());
     entries.push(entry(
         KeyContext::TranscriptCell,
@@ -1050,19 +1055,6 @@ fn default_entries() -> Vec<KeymapEntry> {
         &["t"],
     ));
     entries
-}
-
-fn surface_navigation_entries(context: KeyContext) -> Vec<KeymapEntry> {
-    vec![
-        entry(context, KeyAction::Cancel, &["esc"]),
-        entry(context, KeyAction::Accept, &["enter"]),
-        entry(context, KeyAction::MoveUp, &["up"]),
-        entry(context, KeyAction::MoveDown, &["down"]),
-        entry(context, KeyAction::MoveHome, &["home"]),
-        entry(context, KeyAction::MoveEnd, &["end"]),
-        entry(context, KeyAction::ScrollPageUp, &["pageup"]),
-        entry(context, KeyAction::ScrollPageDown, &["pagedown"]),
-    ]
 }
 
 fn ask_form_entries() -> Vec<KeymapEntry> {
@@ -1362,25 +1354,80 @@ newline = "enter"
         let rows = registry.help_rows();
         assert!(rows
             .iter()
-            .any(|row| row.action == KeyAction::HistorySearch && row.bindings.contains("Ctrl-R")));
+            .any(|row| row.action == Some(KeyAction::HistorySearch)
+                && row.bindings.contains("Ctrl-R")));
         assert!(rows
             .iter()
-            .any(|row| row.action == KeyAction::KillToLineEnd && row.bindings.contains("Alt-K")));
+            .any(|row| row.action == Some(KeyAction::KillToLineEnd)
+                && row.bindings.contains("Alt-K")));
         assert!(rows.iter().any(|row| {
-            row.action == KeyAction::OpenCommandPalette && row.bindings.contains("Ctrl-K")
+            row.action == Some(KeyAction::OpenCommandPalette) && row.bindings.contains("Ctrl-K")
         }));
+        assert!(rows.iter().any(
+            |row| row.action == Some(KeyAction::Redo) && row.bindings.contains("Ctrl-Shift-Z")
+        ));
+        assert!(
+            rows.iter()
+                .any(|row| row.action == Some(KeyAction::OpenModels)
+                    && row.bindings.contains("Alt-M"))
+        );
+        assert!(rows.iter().any(
+            |row| row.action == Some(KeyAction::PreviousSession) && row.bindings.contains("F6")
+        ));
         assert!(rows
             .iter()
-            .any(|row| row.action == KeyAction::Redo && row.bindings.contains("Ctrl-Shift-Z")));
-        assert!(rows
-            .iter()
-            .any(|row| row.action == KeyAction::OpenModels && row.bindings.contains("Alt-M")));
-        assert!(rows
-            .iter()
-            .any(|row| row.action == KeyAction::PreviousSession && row.bindings.contains("F6")));
-        assert!(rows
-            .iter()
-            .any(|row| row.action == KeyAction::NextSession && row.bindings.contains("F7")));
+            .any(|row| row.action == Some(KeyAction::NextSession) && row.bindings.contains("F7")));
+    }
+
+    #[test]
+    fn future_contexts_are_unbound_but_remain_in_help() {
+        let registry = KeymapRegistry::default();
+
+        for context in [
+            KeyContext::History,
+            KeyContext::Activity,
+            KeyContext::Board,
+            KeyContext::Goal,
+            KeyContext::Worktree,
+            KeyContext::Settings,
+        ] {
+            assert!(!registry
+                .entries
+                .iter()
+                .any(|entry| entry.context == context));
+            for code in [
+                KeyCode::Esc,
+                KeyCode::Enter,
+                KeyCode::Up,
+                KeyCode::Down,
+                KeyCode::Home,
+                KeyCode::End,
+                KeyCode::PageUp,
+                KeyCode::PageDown,
+            ] {
+                assert_eq!(
+                    registry.action_for(context, key(code, KeyModifiers::empty())),
+                    None
+                );
+            }
+        }
+
+        let rows = registry.help_rows();
+        for context in [
+            KeyContext::History,
+            KeyContext::Activity,
+            KeyContext::Board,
+            KeyContext::Goal,
+            KeyContext::Worktree,
+            KeyContext::Settings,
+        ] {
+            assert!(rows.iter().any(|row| {
+                row.context == context
+                    && row.action.is_none()
+                    && row.bindings == "—"
+                    && row.description == "not yet bound"
+            }));
+        }
     }
 
     #[test]
@@ -1409,6 +1456,10 @@ newline = "enter"
         let toggle = key(KeyCode::Char('t'), KeyModifiers::empty());
 
         assert_eq!(
+            registry.action_for(KeyContext::TranscriptCell, toggle),
+            Some(KeyAction::ToggleSelectedTool)
+        );
+        assert_eq!(
             registry.dispatch_main(false, toggle),
             KeyDispatch::text('t')
         );
@@ -1418,6 +1469,26 @@ newline = "enter"
                 action: Some(KeyAction::ToggleSelectedTool),
                 text: Some('t'),
             },
+        );
+    }
+
+    #[test]
+    fn ask_form_bindings_dispatch() {
+        let registry = KeymapRegistry::default();
+
+        assert_eq!(
+            registry.action_for(
+                KeyContext::AskForm,
+                key(KeyCode::Esc, KeyModifiers::empty())
+            ),
+            Some(KeyAction::Cancel)
+        );
+        assert_eq!(
+            registry.action_for(
+                KeyContext::AskForm,
+                key(KeyCode::Enter, KeyModifiers::empty())
+            ),
+            Some(KeyAction::Accept)
         );
     }
 

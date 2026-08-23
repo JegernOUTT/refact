@@ -171,12 +171,12 @@ fn keymap_help_golden_snapshot() {
     │overlay search Backspace             delete left or remove queued item                    │
     │  vim normal a                     append after cursor and insert                         │
     │  vim insert Esc                   return to vim normal mode                              │
-    │     history Esc                   cancel, close, or abort active work                    │
-    │    activity Esc                   cancel, close, or abort active work                    │
-    │       board Esc                   cancel, close, or abort active work                    │
-    │        goal Esc                   cancel, close, or abort active work                    │
-    │   worktrees Esc                   cancel, close, or abort active work                    │
-    │    settings Esc                   cancel, close, or abort active work                    │
+    │     history —                   not yet bound                                            │
+    │    activity —                   not yet bound                                            │
+    │       board —                   not yet bound                                            │
+    │        goal —                   not yet bound                                            │
+    │   worktrees —                   not yet bound                                            │
+    │    settings —                   not yet bound                                            │
     │    ask form Backspace             delete left or remove queued item                      │
     │transcript cell t                     expand selected tool card                           │
     └──────────────────────────────────────────────────────────────────────────────────────────┘

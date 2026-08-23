@@ -5812,7 +5812,9 @@ new-chat = "ctrl-x"
         assert_eq!(app.execute_command_name("help"), AppAction::None);
         assert!(app.help_open());
         let rows = app.keymap_help_rows();
-        assert!(rows.iter().any(|row| row.action == KeyAction::ShowHelp));
+        assert!(rows
+            .iter()
+            .any(|row| row.action == Some(KeyAction::ShowHelp)));
         assert!(rows
             .iter()
             .any(|row| row.description.contains("keymap help")));

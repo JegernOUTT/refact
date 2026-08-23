@@ -54,11 +54,11 @@ fn help_rows_for_display(rows: Vec<HelpRow>) -> Vec<HelpRow> {
     KeyContext::ALL
         .into_iter()
         .filter_map(|context| {
-            let action =
-                (context == KeyContext::Main).then_some(crate::keymap::KeyAction::ShowHelp);
             rows.iter()
                 .find(|row| {
-                    row.context == context && action.is_none_or(|action| row.action == action)
+                    row.context == context
+                        && (context != KeyContext::Main
+                            || row.action == Some(crate::keymap::KeyAction::ShowHelp))
                 })
                 .cloned()
         })
@@ -71,15 +71,24 @@ pub(crate) fn help_row_line(row: HelpRow, app: &App) -> Line<'static> {
         app.theme().style(ThemeRole::Muted),
     )];
 
-    let mut key_width = 0usize;
-    for (index, binding) in row.bindings.split(',').map(str::trim).enumerate() {
-        if index > 0 {
-            spans.push(Span::styled(", ", app.theme().style(ThemeRole::Muted)));
-            key_width += 2;
+    let key_width = if row.action.is_none() {
+        spans.push(Span::styled(
+            row.bindings.clone(),
+            app.theme().style(ThemeRole::Muted),
+        ));
+        row.bindings.len()
+    } else {
+        let mut key_width = 0usize;
+        for (index, binding) in row.bindings.split(',').map(str::trim).enumerate() {
+            if index > 0 {
+                spans.push(Span::styled(", ", app.theme().style(ThemeRole::Muted)));
+                key_width += 2;
+            }
+            spans.push(key_hint::key_with_theme(app.theme(), binding.to_string()));
+            key_width += binding.len();
         }
-        spans.push(key_hint::key_with_theme(app.theme(), binding.to_string()));
-        key_width += binding.len();
-    }
+        key_width
+    };
 
     let gap = 22usize.saturating_sub(key_width).max(2);
     spans.push(Span::raw(" ".repeat(gap)));
