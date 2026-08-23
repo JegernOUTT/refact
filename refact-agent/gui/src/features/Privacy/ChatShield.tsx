@@ -34,7 +34,19 @@ export const ChatShield: React.FC<ChatShieldProps> = ({ threadId }) => {
     { chat_id: threadId, destination, records: files },
     { skip: !model },
   );
-  const blocked = blockedPrivacyFilesFromInspection(files, inspection.data);
+  const inspectionMatchesDestination =
+    inspection.currentData?.destination.kind === destination.kind &&
+    inspection.currentData.destination.id === destination.id;
+  const currentInspection = inspectionMatchesDestination
+    ? inspection.currentData
+    : undefined;
+  const checking =
+    inspection.isLoading ||
+    (inspection.isFetching && !currentInspection) ||
+    (!currentInspection && !inspection.isError);
+  const blocked = currentInspection
+    ? blockedPrivacyFilesFromInspection(files, currentInspection)
+    : [];
   const destinations = React.useMemo(() => {
     const candidates = policy.data?.destinations ?? [];
     return candidates.some(
@@ -49,12 +61,12 @@ export const ChatShield: React.FC<ChatShieldProps> = ({ threadId }) => {
 
   const withheld = blocked.length;
   const noun = withheld === 1 ? "item" : "items";
-  const note = inspection.isLoading
+  const note = checking
     ? "checking…"
     : withheld > 0
       ? `${withheld} ${noun} withheld`
       : null;
-  const summary = inspection.isLoading
+  const summary = checking
     ? `Checking what ${model} may receive`
     : withheld > 0
       ? `${withheld} ${noun} here can't go to ${model}`

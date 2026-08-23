@@ -154,10 +154,21 @@ fn record_is_allowed(
     destination: &Destination,
     policy: &CompiledPolicy,
 ) -> bool {
-    record.zone != "blocked"
-        && policy
-            .zone_named(&record.zone)
-            .is_some_and(|zone| destination.matches_send_to(&zone.send_to))
+    if record.zone == "blocked" {
+        return false;
+    }
+    if let Some(zone) = policy.zone_named(&record.zone) {
+        return destination.matches_send_to(&zone.send_to);
+    }
+    if let Some(zone_names) = record.zone.strip_prefix("effective:") {
+        return !zone_names.is_empty()
+            && zone_names.split('+').all(|zone_name| {
+                policy
+                    .zone_named(zone_name)
+                    .is_some_and(|zone| destination.matches_send_to(&zone.send_to))
+            });
+    }
+    false
 }
 
 #[cfg(test)]
@@ -272,6 +283,64 @@ mod tests {
 
         assert_eq!(classified.name, "normal");
         assert!(clear(audited, &destination("untrusted"), &policy).is_ok());
+    }
+
+    #[test]
+    fn synthetic_effective_zone_keeps_the_intersected_destination_set() {
+        let policy = compiled(&PrivacyPolicy {
+            blocked: Vec::new(),
+            zones: vec![
+                Zone {
+                    name: "a".to_string(),
+                    patterns: vec!["a.txt".to_string()],
+                    send_to: vec!["trusted".to_string(), "a-only".to_string()],
+                    on_shell_read: ShellBehavior::Withhold,
+                },
+                Zone {
+                    name: "b".to_string(),
+                    patterns: vec!["b.txt".to_string()],
+                    send_to: vec!["trusted".to_string(), "b-only".to_string()],
+                    on_shell_read: ShellBehavior::Withhold,
+                },
+            ],
+            subagents: SubagentPolicy::default(),
+            ..Default::default()
+        });
+        let effective = policy.strictest_zone_for_paths([
+            std::path::Path::new("a.txt"),
+            std::path::Path::new("b.txt"),
+        ]);
+        let effective_record = record("a.txt", &effective.name);
+
+        assert_eq!(effective.name, "effective:a+b");
+        assert_eq!(effective.send_to, ["trusted"]);
+        assert!(clear(
+            AuditedRecords {
+                value: "payload".to_string(),
+                records: vec![effective_record.clone()],
+            },
+            &destination("trusted"),
+            &policy,
+        )
+        .is_ok());
+        assert!(clear(
+            AuditedRecords {
+                value: "payload".to_string(),
+                records: vec![effective_record.clone()],
+            },
+            &destination("a-only"),
+            &policy,
+        )
+        .is_err());
+        assert!(clear(
+            AuditedRecords {
+                value: "payload".to_string(),
+                records: vec![effective_record],
+            },
+            &destination("untrusted"),
+            &policy,
+        )
+        .is_err());
     }
 
     #[test]

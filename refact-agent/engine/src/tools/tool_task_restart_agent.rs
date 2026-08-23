@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -24,6 +24,26 @@ use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeMeta;
 use refact_chat_api::ChatCommand;
 use refact_runtime_api::CreateSessionRequest;
+
+fn context_file_message(
+    gcx: &Arc<GlobalContext>,
+    context_files: Vec<ContextFile>,
+) -> Result<ChatMessage, String> {
+    let records = crate::privacy::records::declared_file_records(
+        gcx,
+        context_files
+            .iter()
+            .map(|file| PathBuf::from(&file.file_name)),
+    )?;
+    let mut message = ChatMessage {
+        role: "context_file".to_string(),
+        content: ChatContent::ContextFiles(context_files),
+        tool_call_id: "initial_files".to_string(),
+        ..Default::default()
+    };
+    crate::privacy::records::merge_records(&mut message, records);
+    Ok(message)
+}
 
 async fn cleanup_old_worktree(
     gcx: Arc<GlobalContext>,
@@ -702,7 +722,7 @@ impl ToolTaskRestartAgent {
                     );
                     continue;
                 }
-                if crate::files_in_workspace::check_file_privacy_for_send(
+                if crate::files_in_workspace::check_file_privacy_for_model_context(
                     gcx.clone(),
                     &canonical_resolved,
                 )
@@ -736,12 +756,7 @@ impl ToolTaskRestartAgent {
                 }
             }
             if !context_files.is_empty() {
-                messages.push(ChatMessage {
-                    role: "context_file".to_string(),
-                    content: ChatContent::ContextFiles(context_files),
-                    tool_call_id: "initial_files".to_string(),
-                    ..Default::default()
-                });
+                messages.push(context_file_message(&gcx, context_files)?);
             }
         }
 
@@ -767,6 +782,34 @@ impl ToolTaskRestartAgent {
 mod tests {
     use super::*;
     use crate::tasks::types::{BoardCard, TaskBoard};
+
+    #[tokio::test]
+    async fn restart_agent_context_file_message_has_declared_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("safe.txt");
+        std::fs::write(&path, "safe\n").unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let message = context_file_message(
+            &gcx,
+            vec![ContextFile {
+                file_name: path.to_string_lossy().into_owned(),
+                file_content: "safe\n".to_string(),
+                line1: 1,
+                line2: 1,
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        let privacy: refact_privacy::PrivacyRecord =
+            serde_json::from_value(message.extra["privacy"].clone()).unwrap();
+
+        assert_eq!(privacy.files.len(), 1);
+        assert!(privacy.files[0].path.ends_with("safe.txt"));
+        assert_eq!(
+            privacy.files[0].attribution,
+            refact_privacy::Attribution::Declared
+        );
+    }
 
     fn failed_card(id: &str, worktree: Option<String>, branch: Option<String>) -> BoardCard {
         BoardCard {

@@ -8,14 +8,16 @@ use crate::at_commands::at_commands::{
     AtCommand, AtCommandsContext, AtParam, vec_context_file_to_context_tools,
 };
 use crate::at_commands::execute_at::{AtCommandMember, correct_at_arg};
-use crate::files_in_workspace::get_file_text_from_memory_or_disk;
+use crate::files_in_workspace::get_file_text_from_memory_or_disk_for_model_context;
 use crate::call_validation::{ChatMessage, ContextFile, ContextEnum};
 use crate::files_correction::{
     canonicalize_normalized_path, correct_to_nearest_filename, correct_to_nearest_dir_path,
     get_unscoped_project_dirs, project_dirs_for_unscoped_paths, shortify_paths,
 };
 use crate::global_context::GlobalContext;
-use crate::tools::scope_utils::{format_scope_notices, resolve_existing_path_with_execution_scope};
+use crate::tools::scope_utils::{
+    format_scope_notices, resolve_existing_path_with_execution_scope_for_model_context,
+};
 use crate::worktrees::scope::ExecutionScope;
 
 pub async fn resolve_file_path_directly(
@@ -62,8 +64,12 @@ pub async fn resolve_file_path_directly_with_scope(
 ) -> Result<Option<(String, Vec<String>)>, String> {
     let mut path_str = path_with_colon.to_string();
     let colon_range = colon_lines_range_from_arg(&mut path_str);
-    if let Some(resolved) =
-        resolve_existing_path_with_execution_scope(gcx.clone(), execution_scope, &path_str).await?
+    if let Some(resolved) = resolve_existing_path_with_execution_scope_for_model_context(
+        gcx.clone(),
+        execution_scope,
+        &path_str,
+    )
+    .await?
     {
         if !resolved.path.is_file() {
             return Err(format!("Path '{}' is not a file", resolved.path.display()));
@@ -414,8 +420,11 @@ pub async fn context_file_from_file_path(
     let colon_kind_mb = colon_lines_range_from_arg(&mut file_path_no_colon);
     let gradient_type = gradient_type_from_range_kind(&colon_kind_mb);
 
-    let file_content =
-        get_file_text_from_memory_or_disk(gcx.clone(), &PathBuf::from(&file_path_no_colon)).await?;
+    let file_content = get_file_text_from_memory_or_disk_for_model_context(
+        gcx.clone(),
+        &PathBuf::from(&file_path_no_colon),
+    )
+    .await?;
     let file_line_count = file_content.lines().count().max(1);
 
     if let Some(colon) = &colon_kind_mb {

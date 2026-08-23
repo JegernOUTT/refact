@@ -22,7 +22,10 @@ use crate::git::operations::git_ls_files;
 use crate::global_context::{get_app_searchable_id, GlobalContext};
 use crate::integrations::running_integrations::load_integrations;
 use crate::file_filter::{is_valid_file, SOURCE_FILE_EXTENSIONS};
-use crate::privacy::{check_file_privacy, load_privacy_if_needed, PrivacySettings, FilePrivacyLevel};
+use crate::privacy::{
+    check_file_privacy, check_file_privacy_for_read_preparation, load_privacy_if_needed,
+    FilePrivacyLevel, PrivacySettings,
+};
 use crate::files_blocklist::{IndexingEverywhere, is_blocklisted, reload_indexing_everywhere_if_needed};
 use crate::files_in_jsonl::enqueue_all_docs_from_jsonl_but_read_first;
 
@@ -144,6 +147,20 @@ pub async fn get_file_text_from_memory_or_disk(
         .await
 }
 
+pub async fn get_file_text_from_memory_or_disk_for_model_context(
+    global_context: Arc<GlobalContext>,
+    file_path: &PathBuf,
+) -> Result<String, String> {
+    let read_context = prepare_file_read_context(global_context.clone()).await;
+    get_file_text_from_memory_or_disk_for_model_context_with_context(
+        global_context,
+        file_path,
+        &read_context,
+        None,
+    )
+    .await
+}
+
 pub(crate) struct FileReadContext {
     privacy_settings: Arc<PrivacySettings>,
     worktree_mappings: Vec<crate::files_correction::RegisteredWorktreePathMapping>,
@@ -201,6 +218,16 @@ pub(crate) fn check_file_privacy_with_context(
     Ok(())
 }
 
+pub(crate) fn check_file_privacy_for_read_preparation_with_context(
+    read_context: &FileReadContext,
+    path: &Path,
+) -> Result<(), String> {
+    for alias in registered_alias_paths(path, &read_context.worktree_mappings) {
+        check_file_privacy_for_read_preparation(read_context.privacy_settings.clone(), &alias)?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn prepare_file_read_context(
     global_context: Arc<GlobalContext>,
 ) -> FileReadContext {
@@ -218,13 +245,50 @@ pub(crate) async fn get_file_text_from_memory_or_disk_with_context(
     read_context: &FileReadContext,
     max_bytes: Option<usize>,
 ) -> Result<String, String> {
+    get_file_text_from_memory_or_disk_with_context_impl(
+        global_context,
+        file_path,
+        read_context,
+        max_bytes,
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn get_file_text_from_memory_or_disk_for_model_context_with_context(
+    global_context: Arc<GlobalContext>,
+    file_path: &PathBuf,
+    read_context: &FileReadContext,
+    max_bytes: Option<usize>,
+) -> Result<String, String> {
+    get_file_text_from_memory_or_disk_with_context_impl(
+        global_context,
+        file_path,
+        read_context,
+        max_bytes,
+        true,
+    )
+    .await
+}
+
+async fn get_file_text_from_memory_or_disk_with_context_impl(
+    global_context: Arc<GlobalContext>,
+    file_path: &PathBuf,
+    read_context: &FileReadContext,
+    max_bytes: Option<usize>,
+    for_model_context: bool,
+) -> Result<String, String> {
     let requested_path = crate::files_correction::canonical_path(file_path.to_string_lossy());
     let mapped_path = crate::files_correction::normalize_path_for_unscoped_root_selection(
         &requested_path,
         &read_context.worktree_mappings,
     )
     .unwrap_or_else(|| requested_path.clone());
-    check_file_privacy_with_context(read_context, &requested_path)?;
+    if for_model_context {
+        check_file_privacy_for_read_preparation_with_context(read_context, &requested_path)?;
+    } else {
+        check_file_privacy_with_context(read_context, &requested_path)?;
+    }
 
     let doc = {
         let doc_map = global_context
@@ -269,6 +333,14 @@ pub async fn check_file_privacy_for_send(
     check_file_privacy_with_context(&read_context, file_path)
 }
 
+pub async fn check_file_privacy_for_model_context(
+    global_context: Arc<GlobalContext>,
+    file_path: &PathBuf,
+) -> Result<(), String> {
+    let read_context = prepare_file_read_context(global_context).await;
+    check_file_privacy_for_read_preparation_with_context(&read_context, file_path)
+}
+
 pub async fn filter_privacy_allowed_files(
     global_context: Arc<GlobalContext>,
     files: Vec<PathBuf>,
@@ -277,6 +349,19 @@ pub async fn filter_privacy_allowed_files(
     files
         .into_iter()
         .filter(|path| check_file_privacy_with_context(&read_context, path).is_ok())
+        .collect()
+}
+
+pub async fn filter_privacy_allowed_files_for_model_context(
+    global_context: Arc<GlobalContext>,
+    files: Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    let read_context = prepare_file_read_context(global_context).await;
+    files
+        .into_iter()
+        .filter(|path| {
+            check_file_privacy_for_read_preparation_with_context(&read_context, path).is_ok()
+        })
         .collect()
 }
 
@@ -2946,6 +3031,53 @@ mod tests {
             .unwrap_err();
 
         assert!(error.contains("privacy"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn read_context_allows_controlled_path_but_rejects_blocked_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = normalized(&temp.path().join("source"));
+        let worktree = normalized(&temp.path().join("worktree"));
+        let source_file = source.join("src").join("lib.rs");
+        let worktree_file = worktree.join("src").join("lib.rs");
+        let mappings = vec![crate::files_correction::RegisteredWorktreePathMapping {
+            root: worktree,
+            source_root: source,
+        }];
+        let controlled_settings = Arc::new(PrivacySettings {
+            privacy_rules: crate::privacy::FilePrivacySettings {
+                only_send_to_servers_I_control: vec![source_file.to_string_lossy().to_string()],
+                blocked: Vec::new(),
+            },
+            loaded_ts: 0,
+        });
+        let controlled_context = FileReadContext {
+            privacy_settings: controlled_settings,
+            worktree_mappings: mappings.clone(),
+        };
+
+        assert!(check_file_privacy_for_read_preparation_with_context(
+            &controlled_context,
+            &source_file
+        )
+        .is_ok());
+        assert!(check_file_privacy_with_context(&controlled_context, &source_file).is_err());
+
+        let blocked_alias_context = FileReadContext {
+            privacy_settings: Arc::new(PrivacySettings {
+                privacy_rules: crate::privacy::FilePrivacySettings {
+                    only_send_to_servers_I_control: vec![source_file.to_string_lossy().to_string()],
+                    blocked: vec![worktree_file.to_string_lossy().to_string()],
+                },
+                loaded_ts: 0,
+            }),
+            worktree_mappings: mappings,
+        };
+        assert!(check_file_privacy_for_read_preparation_with_context(
+            &blocked_alias_context,
+            &source_file,
+        )
+        .is_err());
     }
 
     #[test]

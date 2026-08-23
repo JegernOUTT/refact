@@ -36,15 +36,23 @@ export const DestinationInspector: React.FC<DestinationInspectorProps> = ({
   onOpenChange,
 }) => {
   const [destination, setDestination] = React.useState(initialDestination);
+  const initialDestinationKey = destinationKey(initialDestination);
+  const previousInitialDestinationKey = React.useRef(initialDestinationKey);
+  const initialDestinationChanged =
+    previousInitialDestinationKey.current !== initialDestinationKey;
+  const displayedDestination = initialDestinationChanged
+    ? initialDestination
+    : destination;
   const inspection = useInspectPrivacyQuery(
-    { chat_id: chatId, destination, records: localFiles },
+    { chat_id: chatId, destination: displayedDestination, records: localFiles },
     { skip: !open },
   );
 
   React.useEffect(() => {
-    if (!open) return;
+    if (!initialDestinationChanged) return;
+    previousInitialDestinationKey.current = initialDestinationKey;
     setDestination(initialDestination);
-  }, [initialDestination, open]);
+  }, [initialDestination, initialDestinationChanged, initialDestinationKey]);
 
   const handleDestinationChange = React.useCallback(
     (value: string) => {
@@ -56,11 +64,21 @@ export const DestinationInspector: React.FC<DestinationInspectorProps> = ({
     [destinations],
   );
 
-  const records = inspection.data?.records ?? localFiles;
-  const blocked = inspection.data
-    ? blockedPaths(inspection.data)
+  const inspectionMatchesDestination =
+    inspection.currentData?.destination.kind === displayedDestination.kind &&
+    inspection.currentData.destination.id === displayedDestination.id;
+  const currentInspection = inspectionMatchesDestination
+    ? inspection.currentData
+    : undefined;
+  const checking =
+    inspection.isLoading ||
+    (inspection.isFetching && !currentInspection) ||
+    (!currentInspection && !inspection.isError);
+  const records = currentInspection?.records ?? localFiles;
+  const blocked = currentInspection
+    ? blockedPaths(currentInspection)
     : new Set<string>();
-  const sendable = inspection.data?.sendable;
+  const sendable = currentInspection?.sendable;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -72,11 +90,11 @@ export const DestinationInspector: React.FC<DestinationInspectorProps> = ({
         <div className={styles.inspector}>
           <div className={styles.inspectorHeader}>
             <Select
-              value={destinationKey(destination)}
+              value={destinationKey(displayedDestination)}
               onValueChange={handleDestinationChange}
             >
               <Select.Trigger aria-label="Inspect destination">
-                {destination.display_name}
+                {displayedDestination.display_name}
               </Select.Trigger>
               <Select.Content maxHeight="280px">
                 {destinations.map((candidate) => (
@@ -92,7 +110,7 @@ export const DestinationInspector: React.FC<DestinationInspectorProps> = ({
             <div className={styles.inspectorStatus} role="status">
               <StatusDot
                 status={
-                  inspection.isLoading
+                  checking
                     ? "running"
                     : sendable === false
                       ? "warning"
@@ -102,7 +120,7 @@ export const DestinationInspector: React.FC<DestinationInspectorProps> = ({
                 }
               />
               <Text size="2">
-                {inspection.isLoading
+                {checking
                   ? "Checking this model…"
                   : sendable === false
                     ? `${blocked.size} records cannot go to this model`
@@ -138,7 +156,7 @@ export const DestinationInspector: React.FC<DestinationInspectorProps> = ({
             ))}
           </ul>
 
-          {records.length === 0 && !inspection.isLoading && (
+          {records.length === 0 && !checking && (
             <Text color="gray">No file records are attached to this chat.</Text>
           )}
         </div>

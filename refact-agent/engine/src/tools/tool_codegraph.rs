@@ -21,7 +21,7 @@ use crate::files_correction::{
     registered_worktree_path_mappings, resolve_codegraph_queue_path,
 };
 use crate::postprocessing::pp_command_output::OutputFilter;
-use crate::tools::scope_utils::resolve_existing_path_with_execution_scope;
+use crate::tools::scope_utils::resolve_existing_path_with_execution_scope_for_model_context;
 use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
@@ -405,8 +405,12 @@ async fn resolve_codegraph_file(
         (ccx.app.gcx.clone(), ccx.top_n, ccx.execution_scope.clone())
     };
     let read_path = if let Some(resolved) =
-        resolve_existing_path_with_execution_scope(gcx.clone(), execution_scope.as_ref(), raw_path)
-            .await?
+        resolve_existing_path_with_execution_scope_for_model_context(
+            gcx.clone(),
+            execution_scope.as_ref(),
+            raw_path,
+        )
+        .await?
     {
         if resolved.outside_absolute_path {
             return Err(format!(
@@ -437,7 +441,8 @@ async fn resolve_codegraph_file(
     if !read_path.is_file() {
         return Err(format!("Path '{}' is not a file", read_path.display()));
     }
-    crate::files_in_workspace::check_file_privacy_for_send(gcx.clone(), &read_path).await?;
+    crate::files_in_workspace::check_file_privacy_for_model_context(gcx.clone(), &read_path)
+        .await?;
     let indexed_path =
         if let Some(scope) = execution_scope.as_ref().filter(|scope| scope.is_enforced()) {
             scoped_indexed_path(scope, &read_path)?
@@ -474,7 +479,8 @@ async fn resolve_codegraph_filter_path(
                 resolved.path.display()
             ));
         }
-        crate::files_in_workspace::check_file_privacy_for_send(gcx, &resolved.path).await?;
+        crate::files_in_workspace::check_file_privacy_for_model_context(gcx, &resolved.path)
+            .await?;
         return Ok(scoped_indexed_path(scope, &resolved.path)?
             .to_string_lossy()
             .to_string());
@@ -495,7 +501,7 @@ async fn resolve_codegraph_filter_path(
                 project_dirs
             ));
         }
-        crate::files_in_workspace::check_file_privacy_for_send(gcx, &normalized).await?;
+        crate::files_in_workspace::check_file_privacy_for_model_context(gcx, &normalized).await?;
         return Ok(normalized.to_string_lossy().to_string());
     }
     Ok(preprocess_path_for_normalization(normalized_raw))

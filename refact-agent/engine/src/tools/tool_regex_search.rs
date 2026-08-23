@@ -16,12 +16,14 @@ use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile}
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::files_correction::shortify_paths;
 use crate::files_in_workspace::{
-    check_file_privacy_with_context, get_file_text_from_memory_or_disk_with_context,
-    prepare_file_read_context, FileReadContext,
+    check_file_privacy_for_read_preparation_with_context,
+    get_file_text_from_memory_or_disk_for_model_context_with_context, prepare_file_read_context,
+    FileReadContext,
 };
 use crate::global_context::GlobalContext;
 use crate::tools::scope_utils::{
-    format_scope_notices, resolve_scope_with_execution_scope_limited, validate_scope_files,
+    format_scope_notices, resolve_scope_with_execution_scope_limited_for_model_context,
+    validate_scope_files,
 };
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
@@ -93,7 +95,7 @@ async fn search_single_file(
         return Vec::new();
     }
     let file_path_buf = PathBuf::from(&file_path);
-    let file_content = match get_file_text_from_memory_or_disk_with_context(
+    let file_content = match get_file_text_from_memory_or_disk_for_model_context_with_context(
         gcx.clone(),
         &file_path_buf,
         read_context,
@@ -407,7 +409,7 @@ impl Tool for ToolRegexSearch {
             )
         };
 
-        let scoped_files = resolve_scope_with_execution_scope_limited(
+        let scoped_files = resolve_scope_with_execution_scope_limited_for_model_context(
             gcx.clone(),
             execution_scope.as_ref(),
             &scope,
@@ -419,7 +421,11 @@ impl Tool for ToolRegexSearch {
         let files_in_scope = validate_scope_files(scoped_files.files, &scope)?
             .into_iter()
             .filter(|path| {
-                check_file_privacy_with_context(&read_context, &PathBuf::from(path)).is_ok()
+                check_file_privacy_for_read_preparation_with_context(
+                    &read_context,
+                    &PathBuf::from(path),
+                )
+                .is_ok()
             })
             .collect::<Vec<_>>();
 
@@ -541,10 +547,7 @@ impl Tool for ToolRegexSearch {
             format_related_memories_section(&cards, None)
         };
 
-        let matched_paths = all_search_results
-            .iter()
-            .map(|file| PathBuf::from(&file.file_name))
-            .collect::<Vec<_>>();
+        let scanned_paths = files_in_scope.iter().map(PathBuf::from).collect::<Vec<_>>();
         let mut results = vec_context_file_to_context_tools(all_search_results);
         let mut tool_message = ChatMessage {
             role: "tool".to_string(),
@@ -555,7 +558,7 @@ impl Tool for ToolRegexSearch {
             ..Default::default()
         };
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
-        let records = crate::privacy::records::declared_file_records(&gcx, matched_paths)?;
+        let records = crate::privacy::records::declared_file_records(&gcx, scanned_paths)?;
         crate::privacy::records::merge_records(&mut tool_message, records);
         results.push(ContextEnum::ChatMessage(tool_message));
 

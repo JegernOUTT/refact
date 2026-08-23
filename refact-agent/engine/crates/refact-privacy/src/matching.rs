@@ -12,6 +12,7 @@ use crate::policy::{PrivacyPolicy, ShellBehavior, Zone};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyError {
     InvalidGlob { pattern: String, message: String },
+    InvalidZoneName { name: String },
 }
 
 impl fmt::Display for PolicyError {
@@ -19,6 +20,9 @@ impl fmt::Display for PolicyError {
         match self {
             Self::InvalidGlob { pattern, message } => {
                 write!(formatter, "invalid glob pattern {pattern:?}: {message}")
+            }
+            Self::InvalidZoneName { name } => {
+                write!(formatter, "invalid privacy zone name {name:?}")
             }
         }
     }
@@ -108,6 +112,11 @@ impl PrivacyPolicy {
         }
 
         for zone in &self.zones {
+            if zone.name.starts_with("effective:") || zone.name.contains('+') {
+                return Err(PolicyError::InvalidZoneName {
+                    name: zone.name.clone(),
+                });
+            }
             zones.push(CompiledZone {
                 zone: zone.clone(),
                 patterns: compile_patterns(&zone.patterns)?,
@@ -526,6 +535,17 @@ mod tests {
             compiled.zone_for_path(Path::new("README.md")).name,
             "normal"
         );
+    }
+
+    #[test]
+    fn reserved_effective_zone_name_syntax_is_rejected() {
+        for name in ["effective:custom", "internal+shared"] {
+            let policy = policy(vec![zone(name, &["guarded.txt"], &["trusted"])]);
+            assert!(matches!(
+                policy.compile(),
+                Err(PolicyError::InvalidZoneName { .. })
+            ));
+        }
     }
 
     #[test]

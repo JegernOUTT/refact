@@ -595,14 +595,17 @@ async fn context_files_from_files_to_open(
                 canonical_resolved.display()
             ));
         }
-        crate::files_in_workspace::check_file_privacy_for_send(gcx.clone(), &canonical_resolved)
-            .await
-            .map_err(|e| {
-                format!(
-                    "files_to_open '{}' is blocked by privacy settings: {}",
-                    path_str, e
-                )
-            })?;
+        crate::files_in_workspace::check_file_privacy_for_model_context(
+            gcx.clone(),
+            &canonical_resolved,
+        )
+        .await
+        .map_err(|e| {
+            format!(
+                "files_to_open '{}' is blocked by privacy settings: {}",
+                path_str, e
+            )
+        })?;
         if total_bytes >= FILES_TO_OPEN_TOTAL_LIMIT {
             context_files.push(ContextFile {
                 file_name: canonical_resolved.to_string_lossy().to_string(),
@@ -636,6 +639,26 @@ async fn context_files_from_files_to_open(
         });
     }
     Ok(context_files)
+}
+
+fn context_file_message(
+    gcx: &Arc<GlobalContext>,
+    context_files: Vec<ContextFile>,
+) -> Result<ChatMessage, String> {
+    let records = crate::privacy::records::declared_file_records(
+        gcx,
+        context_files
+            .iter()
+            .map(|file| PathBuf::from(&file.file_name)),
+    )?;
+    let mut message = ChatMessage {
+        role: "context_file".to_string(),
+        content: ChatContent::ContextFiles(context_files),
+        tool_call_id: "initial_files".to_string(),
+        ..Default::default()
+    };
+    crate::privacy::records::merge_records(&mut message, records);
+    Ok(message)
 }
 
 #[async_trait]
@@ -824,6 +847,17 @@ impl Tool for ToolTaskSpawnAgent {
                 }
             }
         };
+        let initial_context_message = if initial_context_files.is_empty() {
+            None
+        } else {
+            match context_file_message(&gcx, initial_context_files) {
+                Ok(message) => Some(message),
+                Err(e) => {
+                    prepared_worktree.cleanup_unlinked(gcx.clone()).await;
+                    return Err(e);
+                }
+            }
+        };
 
         let card_id_owned = card_id.to_string();
         let agent_id_clone = agent_id.clone();
@@ -980,13 +1014,8 @@ impl Tool for ToolTaskSpawnAgent {
         );
         let mut messages = vec![user_msg];
 
-        if !initial_context_files.is_empty() {
-            messages.push(ChatMessage {
-                role: "context_file".to_string(),
-                content: ChatContent::ContextFiles(initial_context_files),
-                tool_call_id: "initial_files".to_string(),
-                ..Default::default()
-            });
+        if let Some(context_message) = initial_context_message {
+            messages.push(context_message);
         }
 
         let session_result = async {
@@ -1812,6 +1841,36 @@ mod tests {
         assert_eq!(files[0].line1, 1);
         assert_eq!(files[0].line2, 2);
         assert!(files[0].file_name.ends_with("safe.txt"));
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_context_file_message_has_declared_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("worktree");
+        let source = temp.path().join("source");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(worktree.join("safe.txt"), "safe\n").unwrap();
+        let gcx = test_gcx_with_privacy(vec![]).await;
+        let files = context_files_from_files_to_open(
+            gcx.clone(),
+            &worktree,
+            &source,
+            &["safe.txt".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let message = context_file_message(&gcx, files).unwrap();
+        let privacy: refact_privacy::PrivacyRecord =
+            serde_json::from_value(message.extra["privacy"].clone()).unwrap();
+
+        assert_eq!(privacy.files.len(), 1);
+        assert!(privacy.files[0].path.ends_with("safe.txt"));
+        assert_eq!(
+            privacy.files[0].attribution,
+            refact_privacy::Attribution::Declared
+        );
     }
 
     #[tokio::test]

@@ -11,11 +11,14 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::files_correction::shortify_paths;
-use crate::files_in_workspace::{check_file_privacy_with_context, prepare_file_read_context};
+use crate::files_in_workspace::{
+    check_file_privacy_for_read_preparation_with_context, prepare_file_read_context,
+};
 use crate::postprocessing::pp_command_output::OutputFilter;
-use crate::privacy::{check_file_privacy, load_privacy_if_needed, FilePrivacyLevel};
+use crate::privacy::{check_file_privacy_for_read_preparation, load_privacy_if_needed};
 use crate::tools::scope_utils::{
-    format_scope_notices, resolve_scope_with_execution_scope_limited, validate_scope_files,
+    format_scope_notices, resolve_scope_with_execution_scope_limited_for_model_context,
+    validate_scope_files,
 };
 use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
@@ -92,12 +95,8 @@ fn run_glob(
         if !path_matches_glob(pattern, path, &opts) {
             continue;
         }
-        if check_file_privacy(
-            privacy_settings.clone(),
-            Path::new(path),
-            &FilePrivacyLevel::AllowToSendAnywhere,
-        )
-        .is_err()
+        if check_file_privacy_for_read_preparation(privacy_settings.clone(), Path::new(path))
+            .is_err()
         {
             continue;
         }
@@ -200,7 +199,7 @@ impl Tool for ToolGlob {
             return Err(ABORTED_ERROR.to_string());
         }
 
-        let scoped_files = resolve_scope_with_execution_scope_limited(
+        let scoped_files = resolve_scope_with_execution_scope_limited_for_model_context(
             gcx.clone(),
             execution_scope.as_ref(),
             &scope,
@@ -211,7 +210,10 @@ impl Tool for ToolGlob {
         let read_context = prepare_file_read_context(gcx.clone()).await;
         let files_in_scope = validate_scope_files(scoped_files.files, &scope)?
             .into_iter()
-            .filter(|path| check_file_privacy_with_context(&read_context, Path::new(path)).is_ok())
+            .filter(|path| {
+                check_file_privacy_for_read_preparation_with_context(&read_context, Path::new(path))
+                    .is_ok()
+            })
             .collect::<Vec<_>>();
         let privacy_settings = load_privacy_if_needed(gcx.clone()).await;
 

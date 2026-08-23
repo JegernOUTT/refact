@@ -18,14 +18,15 @@ use crate::files_correction::{
     preprocess_path_for_normalization,
 };
 use crate::files_in_workspace::{
-    check_file_privacy_for_send, get_file_text_from_memory_or_disk_with_context, ls_files_limited,
+    check_file_privacy_for_model_context,
+    get_file_text_from_memory_or_disk_for_model_context_with_context, ls_files_limited,
     prepare_file_read_context,
 };
 use crate::scratchpads::multimodality::MultimodalElement;
 use crate::knowledge_index::format_related_memories_section;
 use crate::tools::scope_utils::{
-    format_scope_notices, list_scoped_files_under_dir_limited,
-    resolve_existing_path_with_execution_scope,
+    format_scope_notices, list_scoped_files_under_dir_limited_for_model_context,
+    resolve_existing_path_with_execution_scope_for_model_context,
 };
 
 use refact_core::image_policy::{resize_to_policy, ImagePolicy};
@@ -549,7 +550,7 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
             .map(|scope| scope.is_enforced())
             .unwrap_or(false)
         {
-            match resolve_existing_path_with_execution_scope(
+            match resolve_existing_path_with_execution_scope_for_model_context(
                 gcx.clone(),
                 execution_scope.as_ref(),
                 &p,
@@ -560,11 +561,10 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
                     scope_notices.extend(resolved.notices);
                     if resolved.path.is_dir() {
                         let remaining = CAT_MAX_EXPANDED_FILES.saturating_sub(expanded_files_count);
-                        match list_scoped_files_under_dir_limited(
+                        match list_scoped_files_under_dir_limited_for_model_context(
                             gcx.clone(),
                             &resolved.path,
                             false,
-                            true,
                             remaining.saturating_add(1),
                             Some(&abort_flag),
                         )
@@ -705,7 +705,7 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
         let mut allowed_paths: Vec<CatResolvedPath> = Vec::with_capacity(resolved_paths.len());
         for request in resolved_paths.into_iter() {
             let path_buf = PathBuf::from(&request.path);
-            if check_file_privacy_for_send(gcx.clone(), &path_buf)
+            if check_file_privacy_for_model_context(gcx.clone(), &path_buf)
                 .await
                 .is_err()
             {
@@ -815,7 +815,7 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
         let line_range = request.line_range;
 
         let path_buf = PathBuf::from(p);
-        if let Err(e) = check_file_privacy_for_send(gcx.clone(), &path_buf).await {
+        if let Err(e) = check_file_privacy_for_model_context(gcx.clone(), &path_buf).await {
             not_found_messages.push(format!("{}: {}", p, e));
             continue;
         }
@@ -841,7 +841,7 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
                 }
             }
         } else {
-            match get_file_text_from_memory_or_disk_with_context(
+            match get_file_text_from_memory_or_disk_for_model_context_with_context(
                 gcx.clone(),
                 &path_buf,
                 &read_context,

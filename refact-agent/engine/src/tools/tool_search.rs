@@ -12,12 +12,14 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::{vec_context_file_to_context_tools, AtCommandsContext};
 use crate::at_commands::at_search::execute_at_search;
 use crate::files_in_workspace::{
-    get_file_text_from_memory_or_disk_with_context, prepare_file_read_context, FileReadContext,
+    get_file_text_from_memory_or_disk_for_model_context,
+    get_file_text_from_memory_or_disk_for_model_context_with_context, prepare_file_read_context,
+    FileReadContext,
 };
 use crate::global_context::GlobalContext;
 use crate::tools::scope_utils::{
-    create_scope_filter_with_execution_scope, format_scope_notices,
-    remap_context_files_for_execution_scope, resolve_worktree_only_scope_limited,
+    create_scope_filter_with_execution_scope_for_model_context, format_scope_notices,
+    remap_context_files_for_execution_scope_for_model_context, resolve_worktree_only_scope_limited,
 };
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
@@ -221,7 +223,7 @@ async fn direct_worktree_fallback_search(
             break;
         }
         let file_path = PathBuf::from(file);
-        let file_content = match get_file_text_from_memory_or_disk_with_context(
+        let file_content = match get_file_text_from_memory_or_disk_for_model_context_with_context(
             gcx.clone(),
             &file_path,
             read_context,
@@ -272,18 +274,22 @@ async fn execute_att_search(
         )
     };
 
-    let scoped_filter =
-        create_scope_filter_with_execution_scope(gcx.clone(), execution_scope.as_ref(), scope)
-            .await?;
+    let scoped_filter = create_scope_filter_with_execution_scope_for_model_context(
+        gcx.clone(),
+        execution_scope.as_ref(),
+        scope,
+    )
+    .await?;
 
     info!("att-search: filter: {:?}", scoped_filter.filter);
     let context_files = execute_at_search(ccx.clone(), &query, scoped_filter.filter).await?;
-    let (mut context_files, remap_notices) = remap_context_files_for_execution_scope(
-        gcx.clone(),
-        execution_scope.as_ref(),
-        context_files,
-    )
-    .await?;
+    let (mut context_files, remap_notices) =
+        remap_context_files_for_execution_scope_for_model_context(
+            gcx.clone(),
+            execution_scope.as_ref(),
+            context_files,
+        )
+        .await?;
     let mut notices = scoped_filter.notices;
     notices.extend(remap_notices);
 
@@ -432,16 +438,15 @@ impl Tool for ToolSearch {
                     if let Some(recs) = file_results_to_reqs.get(file) {
                         let mut recs_sorted = recs.clone();
                         recs_sorted.sort_by(|a, b| a.line1.cmp(&b.line1));
-                        let text =
-                            match crate::files_in_workspace::get_file_text_from_memory_or_disk(
-                                gcx.clone(),
-                                &std::path::PathBuf::from(file),
-                            )
-                            .await
-                            {
-                                Ok(t) => t,
-                                Err(_) => continue,
-                            };
+                        let text = match get_file_text_from_memory_or_disk_for_model_context(
+                            gcx.clone(),
+                            &std::path::PathBuf::from(file),
+                        )
+                        .await
+                        {
+                            Ok(t) => t,
+                            Err(_) => continue,
+                        };
                         let lines: Vec<&str> = text.lines().collect();
                         if lines.is_empty() {
                             continue;

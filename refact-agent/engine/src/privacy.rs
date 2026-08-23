@@ -300,6 +300,17 @@ pub fn check_file_privacy(
     Ok(())
 }
 
+pub(crate) fn check_file_privacy_for_read_preparation(
+    privacy_settings: Arc<PrivacySettings>,
+    path: &Path,
+) -> Result<(), String> {
+    let file_privacy_level = get_file_privacy_level(privacy_settings, path);
+    if file_privacy_level == FilePrivacyLevel::Blocked {
+        return Err(format!("privacy level {:?}", file_privacy_level));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +457,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn read_preparation_allows_controlled_but_legacy_check_stays_all_or_nothing() {
+        let privacy_settings = Arc::new(PrivacySettings {
+            privacy_rules: FilePrivacySettings {
+                only_send_to_servers_I_control: vec!["*.controlled".to_string()],
+                blocked: vec!["*.blocked".to_string()],
+            },
+            loaded_ts: 0,
+        });
+        let controlled = PathBuf::from("context.controlled");
+        let blocked = PathBuf::from("context.blocked");
+
+        assert!(
+            check_file_privacy_for_read_preparation(privacy_settings.clone(), &controlled,).is_ok()
+        );
+        assert!(
+            check_file_privacy_for_read_preparation(privacy_settings.clone(), &blocked,).is_err()
+        );
+
+        assert!(check_file_privacy(
+            privacy_settings.clone(),
+            &controlled,
+            &FilePrivacyLevel::AllowToSendAnywhere,
+        )
+        .is_err());
+        assert!(check_file_privacy(
+            privacy_settings,
+            &controlled,
+            &FilePrivacyLevel::OnlySendToServersIControl,
+        )
+        .is_ok());
     }
 }

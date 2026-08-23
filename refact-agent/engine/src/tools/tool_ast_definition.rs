@@ -7,7 +7,9 @@ use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
-use crate::tools::scope_utils::{format_scope_notices, remap_context_file_for_execution_scope};
+use crate::tools::scope_utils::{
+    format_scope_notices, remap_context_file_for_execution_scope_for_model_context,
+};
 use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
 };
@@ -165,8 +167,12 @@ async fn symbol_def_via_codegraph(
                 skip_pp: false,
             };
             if let Some((context_file, notices)) =
-                remap_context_file_for_execution_scope(gcx.clone(), execution_scope, context_file)
-                    .await?
+                remap_context_file_for_execution_scope_for_model_context(
+                    gcx.clone(),
+                    execution_scope,
+                    context_file,
+                )
+                .await?
             {
                 context_files.push(context_file);
                 all_notices.extend(notices);

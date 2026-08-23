@@ -11,8 +11,9 @@ use crate::at_commands::at_file::{file_repair_candidates, return_one_candidate_o
 use crate::call_validation::ContextFile;
 use crate::files_correction::{canonical_path, correct_to_nearest_dir_path, get_unscoped_project_dirs};
 use crate::files_in_workspace::{
-    check_file_privacy_for_send, filter_privacy_allowed_files, ls_files, ls_files_limited,
-    LsFilesLimited,
+    check_file_privacy_for_model_context, check_file_privacy_for_send,
+    filter_privacy_allowed_files, filter_privacy_allowed_files_for_model_context, ls_files,
+    ls_files_limited, LsFilesLimited,
 };
 use crate::global_context::GlobalContext;
 use crate::worktrees::scope::ExecutionScope;
@@ -57,6 +58,23 @@ pub async fn resolve_existing_path_with_execution_scope(
     execution_scope: Option<&ExecutionScope>,
     raw: &str,
 ) -> Result<Option<ScopedResolvedPath>, String> {
+    resolve_existing_path_with_execution_scope_impl(gcx, execution_scope, raw, false).await
+}
+
+pub async fn resolve_existing_path_with_execution_scope_for_model_context(
+    gcx: Arc<GlobalContext>,
+    execution_scope: Option<&ExecutionScope>,
+    raw: &str,
+) -> Result<Option<ScopedResolvedPath>, String> {
+    resolve_existing_path_with_execution_scope_impl(gcx, execution_scope, raw, true).await
+}
+
+async fn resolve_existing_path_with_execution_scope_impl(
+    gcx: Arc<GlobalContext>,
+    execution_scope: Option<&ExecutionScope>,
+    raw: &str,
+    for_model_context: bool,
+) -> Result<Option<ScopedResolvedPath>, String> {
     let Some(scope) = execution_scope else {
         return Ok(None);
     };
@@ -65,7 +83,11 @@ pub async fn resolve_existing_path_with_execution_scope(
     }
     let scoped = scope.resolve_existing_path(&PathBuf::from(raw))?;
     if scoped.path.is_file() {
-        check_file_privacy_for_send(gcx, &scoped.path).await?;
+        if for_model_context {
+            check_file_privacy_for_model_context(gcx, &scoped.path).await?;
+        } else {
+            check_file_privacy_for_send(gcx, &scoped.path).await?;
+        }
     }
     Ok(Some(ScopedResolvedPath {
         path: scoped.path.clone(),
@@ -136,6 +158,7 @@ async fn list_files_under_dir_limited(
     dir: &PathBuf,
     recursive: bool,
     privacy_filter: bool,
+    for_model_context: bool,
     max_entries: usize,
     abort: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<ScopedListingLimited, String> {
@@ -152,12 +175,24 @@ async fn list_files_under_dir_limited(
             dir.display()
         ));
     }
-    let files = if privacy_filter {
+    let files = if for_model_context {
+        filter_privacy_allowed_files_for_model_context(gcx, files).await
+    } else if privacy_filter {
         filter_privacy_allowed_files(gcx, files).await
     } else {
         files
     };
     Ok(ScopedListingLimited { files, truncated })
+}
+
+async fn list_files_under_dir_limited_for_model_context(
+    gcx: Arc<GlobalContext>,
+    dir: &PathBuf,
+    recursive: bool,
+    max_entries: usize,
+    abort: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<ScopedListingLimited, String> {
+    list_files_under_dir_limited(gcx, dir, recursive, true, true, max_entries, abort).await
 }
 
 pub async fn list_scoped_files_under_dir_limited(
@@ -168,7 +203,26 @@ pub async fn list_scoped_files_under_dir_limited(
     max_entries: usize,
     abort: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<ScopedListingLimited, String> {
-    list_files_under_dir_limited(gcx, dir, recursive, privacy_filter, max_entries, abort).await
+    list_files_under_dir_limited(
+        gcx,
+        dir,
+        recursive,
+        privacy_filter,
+        false,
+        max_entries,
+        abort,
+    )
+    .await
+}
+
+pub async fn list_scoped_files_under_dir_limited_for_model_context(
+    gcx: Arc<GlobalContext>,
+    dir: &PathBuf,
+    recursive: bool,
+    max_entries: usize,
+    abort: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<ScopedListingLimited, String> {
+    list_files_under_dir_limited_for_model_context(gcx, dir, recursive, max_entries, abort).await
 }
 
 pub async fn list_execution_scope_root_limited(
@@ -184,6 +238,7 @@ pub async fn list_execution_scope_root_limited(
         &execution_scope.effective_root().to_path_buf(),
         recursive,
         true,
+        false,
         max_entries,
         abort,
     )
@@ -347,17 +402,91 @@ pub async fn resolve_scope_with_execution_scope_limited(
     max_entries: usize,
     abort: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<ScopedFiles, String> {
+    resolve_scope_with_execution_scope_limited_impl(
+        gcx,
+        execution_scope,
+        scope,
+        max_entries,
+        abort,
+        false,
+    )
+    .await
+}
+
+pub async fn resolve_scope_with_execution_scope_limited_for_model_context(
+    gcx: Arc<GlobalContext>,
+    execution_scope: Option<&ExecutionScope>,
+    scope: &str,
+    max_entries: usize,
+    abort: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<ScopedFiles, String> {
+    resolve_scope_with_execution_scope_limited_impl(
+        gcx,
+        execution_scope,
+        scope,
+        max_entries,
+        abort,
+        true,
+    )
+    .await
+}
+
+async fn resolve_scope_with_execution_scope_limited_impl(
+    gcx: Arc<GlobalContext>,
+    execution_scope: Option<&ExecutionScope>,
+    scope: &str,
+    max_entries: usize,
+    abort: Option<&std::sync::atomic::AtomicBool>,
+    for_model_context: bool,
+) -> Result<ScopedFiles, String> {
     let Some(execution_scope) = execution_scope else {
+        if for_model_context {
+            let scoped =
+                resolve_scope_legacy_limited(gcx.clone(), scope, max_entries, abort).await?;
+            let files = filter_privacy_allowed_files_for_model_context(
+                gcx,
+                scoped.files.into_iter().map(PathBuf::from).collect(),
+            )
+            .await
+            .into_iter()
+            .map(|path| path_to_string(&path))
+            .collect();
+            return Ok(ScopedFiles {
+                files,
+                notices: scoped.notices,
+            });
+        }
         return resolve_scope_legacy_limited(gcx, scope, max_entries, abort).await;
     };
     if !execution_scope.is_enforced() {
+        if for_model_context {
+            let scoped =
+                resolve_scope_legacy_limited(gcx.clone(), scope, max_entries, abort).await?;
+            let files = filter_privacy_allowed_files_for_model_context(
+                gcx,
+                scoped.files.into_iter().map(PathBuf::from).collect(),
+            )
+            .await
+            .into_iter()
+            .map(|path| path_to_string(&path))
+            .collect();
+            return Ok(ScopedFiles {
+                files,
+                notices: scoped.notices,
+            });
+        }
         return resolve_scope_legacy_limited(gcx, scope, max_entries, abort).await;
     }
 
     if is_worktree_root_alias(scope) {
-        let listing =
-            list_execution_scope_root_limited(gcx, execution_scope, true, max_entries, abort)
-                .await?;
+        execution_scope.ensure_active_root()?;
+        let root = execution_scope.effective_root().to_path_buf();
+        let listing = if for_model_context {
+            list_files_under_dir_limited_for_model_context(gcx, &root, true, max_entries, abort)
+                .await?
+        } else {
+            list_files_under_dir_limited(gcx, &root, true, true, false, max_entries, abort).await?
+        };
         let mut notices = vec![];
         if listing.truncated {
             notices.push(truncation_notice(max_entries));
@@ -381,7 +510,11 @@ pub async fn resolve_scope_with_execution_scope_limited(
                 scope
             ));
         }
-        check_file_privacy_for_send(gcx, &scoped.path).await?;
+        if for_model_context {
+            check_file_privacy_for_model_context(gcx, &scoped.path).await?;
+        } else {
+            check_file_privacy_for_send(gcx, &scoped.path).await?;
+        }
         return Ok(ScopedFiles {
             files: vec![path_to_string(&scoped.path)],
             notices: scoped_path_notices(&scoped),
@@ -394,9 +527,13 @@ pub async fn resolve_scope_with_execution_scope_limited(
         ));
     }
 
-    let listing =
-        list_scoped_files_under_dir_limited(gcx, &scoped.path, true, true, max_entries, abort)
-            .await?;
+    let listing = if for_model_context {
+        list_files_under_dir_limited_for_model_context(gcx, &scoped.path, true, max_entries, abort)
+            .await?
+    } else {
+        list_files_under_dir_limited(gcx, &scoped.path, true, true, false, max_entries, abort)
+            .await?
+    };
     let mut notices = scoped_path_notices(&scoped);
     if listing.truncated {
         notices.push(truncation_notice(max_entries));
@@ -578,6 +715,23 @@ pub async fn create_scope_filter_with_execution_scope(
     execution_scope: Option<&ExecutionScope>,
     scope: &str,
 ) -> Result<ScopedScopeFilter, String> {
+    create_scope_filter_with_execution_scope_impl(gcx, execution_scope, scope, false).await
+}
+
+pub async fn create_scope_filter_with_execution_scope_for_model_context(
+    gcx: Arc<GlobalContext>,
+    execution_scope: Option<&ExecutionScope>,
+    scope: &str,
+) -> Result<ScopedScopeFilter, String> {
+    create_scope_filter_with_execution_scope_impl(gcx, execution_scope, scope, true).await
+}
+
+async fn create_scope_filter_with_execution_scope_impl(
+    gcx: Arc<GlobalContext>,
+    execution_scope: Option<&ExecutionScope>,
+    scope: &str,
+    for_model_context: bool,
+) -> Result<ScopedScopeFilter, String> {
     let Some(execution_scope) = execution_scope else {
         return Ok(ScopedScopeFilter {
             filter: create_scope_filter_legacy(gcx, scope).await?,
@@ -607,7 +761,11 @@ pub async fn create_scope_filter_with_execution_scope(
     let scope_is_dir = scope.ends_with('/') || scope.ends_with('\\');
     let scoped = execution_scope.resolve_existing_path(&PathBuf::from(scope))?;
     if scoped.path.is_file() {
-        check_file_privacy_for_send(gcx, &scoped.path).await?;
+        if for_model_context {
+            check_file_privacy_for_model_context(gcx, &scoped.path).await?;
+        } else {
+            check_file_privacy_for_send(gcx, &scoped.path).await?;
+        }
     }
     let indexed_path = indexed_path_for_scoped_path(execution_scope, &scoped.path);
     let filter = if scoped.path.is_dir() || scope_is_dir {
@@ -630,12 +788,37 @@ pub async fn create_scope_filter_with_execution_scope(
 pub async fn remap_context_file_for_execution_scope(
     gcx: Arc<GlobalContext>,
     execution_scope: Option<&ExecutionScope>,
+    context_file: ContextFile,
+) -> Result<Option<(ContextFile, Vec<String>)>, String> {
+    remap_context_file_for_execution_scope_impl(gcx, execution_scope, context_file, false).await
+}
+
+pub async fn remap_context_file_for_execution_scope_for_model_context(
+    gcx: Arc<GlobalContext>,
+    execution_scope: Option<&ExecutionScope>,
+    context_file: ContextFile,
+) -> Result<Option<(ContextFile, Vec<String>)>, String> {
+    remap_context_file_for_execution_scope_impl(gcx, execution_scope, context_file, true).await
+}
+
+async fn remap_context_file_for_execution_scope_impl(
+    gcx: Arc<GlobalContext>,
+    execution_scope: Option<&ExecutionScope>,
     mut context_file: ContextFile,
+    for_model_context: bool,
 ) -> Result<Option<(ContextFile, Vec<String>)>, String> {
     let Some(execution_scope) = execution_scope else {
+        if for_model_context {
+            check_file_privacy_for_model_context(gcx, &PathBuf::from(&context_file.file_name))
+                .await?;
+        }
         return Ok(Some((context_file, vec![])));
     };
     if !execution_scope.is_enforced() {
+        if for_model_context {
+            check_file_privacy_for_model_context(gcx, &PathBuf::from(&context_file.file_name))
+                .await?;
+        }
         return Ok(Some((context_file, vec![])));
     }
 
@@ -648,7 +831,11 @@ pub async fn remap_context_file_for_execution_scope(
         dunce::simplified(&canonical_path(context_file.file_name.clone())).to_path_buf();
 
     if normalized_path.starts_with(execution_scope.effective_root()) {
-        check_file_privacy_for_send(gcx.clone(), &normalized_path).await?;
+        if for_model_context {
+            check_file_privacy_for_model_context(gcx.clone(), &normalized_path).await?;
+        } else {
+            check_file_privacy_for_send(gcx.clone(), &normalized_path).await?;
+        }
         context_file.file_name = path_to_string(&normalized_path);
         return Ok(Some((context_file, vec![])));
     }
@@ -665,7 +852,11 @@ pub async fn remap_context_file_for_execution_scope(
                         worktree_path.to_string_lossy().to_string(),
                     ))
                     .to_path_buf();
-                    check_file_privacy_for_send(gcx.clone(), &worktree_path).await?;
+                    if for_model_context {
+                        check_file_privacy_for_model_context(gcx.clone(), &worktree_path).await?;
+                    } else {
+                        check_file_privacy_for_send(gcx.clone(), &worktree_path).await?;
+                    }
                     let notice = format!(
                         "⚠️ AST/VecDB result was mapped from source checkout to active worktree: {} -> {}",
                         normalized_path.display(),
@@ -679,7 +870,11 @@ pub async fn remap_context_file_for_execution_scope(
         }
     }
 
-    check_file_privacy_for_send(gcx, &normalized_path).await?;
+    if for_model_context {
+        check_file_privacy_for_model_context(gcx, &normalized_path).await?;
+    } else {
+        check_file_privacy_for_send(gcx, &normalized_path).await?;
+    }
     context_file.file_name = path_to_string(&normalized_path);
     Ok(Some((
         context_file,
@@ -695,14 +890,35 @@ pub async fn remap_context_files_for_execution_scope(
     execution_scope: Option<&ExecutionScope>,
     context_files: Vec<ContextFile>,
 ) -> Result<(Vec<ContextFile>, Vec<String>), String> {
+    remap_context_files_for_execution_scope_impl(gcx, execution_scope, context_files, false).await
+}
+
+pub async fn remap_context_files_for_execution_scope_for_model_context(
+    gcx: Arc<GlobalContext>,
+    execution_scope: Option<&ExecutionScope>,
+    context_files: Vec<ContextFile>,
+) -> Result<(Vec<ContextFile>, Vec<String>), String> {
+    remap_context_files_for_execution_scope_impl(gcx, execution_scope, context_files, true).await
+}
+
+async fn remap_context_files_for_execution_scope_impl(
+    gcx: Arc<GlobalContext>,
+    execution_scope: Option<&ExecutionScope>,
+    context_files: Vec<ContextFile>,
+    for_model_context: bool,
+) -> Result<(Vec<ContextFile>, Vec<String>), String> {
     let mut remapped = Vec::new();
     let mut notices = Vec::new();
     let mut seen = HashSet::new();
 
     for context_file in context_files {
-        if let Some((context_file, mut file_notices)) =
-            remap_context_file_for_execution_scope(gcx.clone(), execution_scope, context_file)
-                .await?
+        if let Some((context_file, mut file_notices)) = remap_context_file_for_execution_scope_impl(
+            gcx.clone(),
+            execution_scope,
+            context_file,
+            for_model_context,
+        )
+        .await?
         {
             let key = format!(
                 "{}:{}:{}:{:?}",
@@ -926,7 +1142,11 @@ mod worktree_scope_read_tools {
         }
     }
 
-    async fn make_gcx(fixture: &Fixture, blocked: Vec<String>) -> Arc<GlobalContext> {
+    async fn make_gcx_with_privacy(
+        fixture: &Fixture,
+        controlled: Vec<String>,
+        blocked: Vec<String>,
+    ) -> Arc<GlobalContext> {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let workspace_files = vec![
             fixture.source.join("src").join("lib.rs"),
@@ -942,7 +1162,7 @@ mod worktree_scope_read_tools {
             drop(locked);
             *privacy_settings.write().unwrap() = Arc::new(PrivacySettings {
                 privacy_rules: FilePrivacySettings {
-                    only_send_to_servers_I_control: vec![],
+                    only_send_to_servers_I_control: controlled,
                     blocked,
                 },
                 loaded_ts: u64::MAX / 2,
@@ -951,6 +1171,10 @@ mod worktree_scope_read_tools {
             *workspace_files_lock.lock().unwrap() = workspace_files;
         }
         gcx
+    }
+
+    async fn make_gcx(fixture: &Fixture, blocked: Vec<String>) -> Arc<GlobalContext> {
+        make_gcx_with_privacy(fixture, vec![], blocked).await
     }
 
     async fn install_mock_vecdb(gcx: Arc<GlobalContext>, records: Vec<(&PathBuf, &str)>) {
@@ -1354,6 +1578,94 @@ mod worktree_scope_read_tools {
     }
 
     #[tokio::test]
+    async fn model_context_existing_path_allows_controlled_but_not_blocked() {
+        let fixture = make_fixture();
+        let controlled = fixture.root.join("src/context.controlled");
+        let blocked = fixture.root.join("src/context.blocked");
+        fs::write(&controlled, "controlled\n").unwrap();
+        fs::write(&blocked, "blocked\n").unwrap();
+        let gcx = make_gcx_with_privacy(
+            &fixture,
+            vec!["*.controlled".to_string()],
+            vec!["*.blocked".to_string()],
+        )
+        .await;
+        let scope = ExecutionScope::from_worktree(&fixture.worktree);
+
+        assert!(resolve_existing_path_with_execution_scope(
+            gcx.clone(),
+            Some(&scope),
+            "src/context.controlled",
+        )
+        .await
+        .is_err());
+        let resolved = resolve_existing_path_with_execution_scope_for_model_context(
+            gcx.clone(),
+            Some(&scope),
+            "src/context.controlled",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(resolved.path, controlled);
+        assert!(
+            resolve_existing_path_with_execution_scope_for_model_context(
+                gcx,
+                Some(&scope),
+                "src/context.blocked",
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn model_context_limited_scope_includes_controlled_but_omits_blocked() {
+        let fixture = make_fixture();
+        fs::write(fixture.root.join("src/context.controlled"), "controlled\n").unwrap();
+        fs::write(fixture.root.join("src/context.blocked"), "blocked\n").unwrap();
+        let gcx = make_gcx_with_privacy(
+            &fixture,
+            vec!["*.controlled".to_string()],
+            vec!["*.blocked".to_string()],
+        )
+        .await;
+        let scope = ExecutionScope::from_worktree(&fixture.worktree);
+
+        let strict = resolve_scope_with_execution_scope_limited(
+            gcx.clone(),
+            Some(&scope),
+            "src/",
+            100,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!strict
+            .files
+            .iter()
+            .any(|path| path.ends_with("context.controlled")));
+
+        let model_context = resolve_scope_with_execution_scope_limited_for_model_context(
+            gcx,
+            Some(&scope),
+            "src/",
+            100,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(model_context
+            .files
+            .iter()
+            .any(|path| path.ends_with("context.controlled")));
+        assert!(!model_context
+            .files
+            .iter()
+            .any(|path| path.ends_with("context.blocked")));
+    }
+
+    #[tokio::test]
     async fn legacy_scope_limited_resolution_reports_truncation_notice() {
         let fixture = make_fixture();
         let gcx = make_gcx(&fixture, vec![]).await;
@@ -1682,6 +1994,61 @@ mod worktree_scope_read_tools {
             .1
             .join("\n")
             .contains("mapped from source checkout"));
+    }
+
+    #[tokio::test]
+    async fn model_context_remap_allows_controlled_but_rejects_blocked() {
+        let fixture = make_fixture();
+        let controlled_source = fixture.source.join("src/context.controlled");
+        let controlled_worktree = fixture.root.join("src/context.controlled");
+        let blocked_source = fixture.source.join("src/context.blocked");
+        let blocked_worktree = fixture.root.join("src/context.blocked");
+        fs::write(&controlled_source, "controlled\n").unwrap();
+        fs::write(&controlled_worktree, "controlled worktree\n").unwrap();
+        fs::write(&blocked_source, "blocked\n").unwrap();
+        fs::write(&blocked_worktree, "blocked worktree\n").unwrap();
+        let gcx = make_gcx_with_privacy(
+            &fixture,
+            vec!["*.controlled".to_string()],
+            vec!["*.blocked".to_string()],
+        )
+        .await;
+        let scope = ExecutionScope::from_worktree(&fixture.worktree);
+        let context_file = |path: &Path| ContextFile {
+            file_name: path.to_string_lossy().to_string(),
+            file_content: String::new(),
+            line1: 1,
+            line2: 1,
+            file_rev: None,
+            symbols: vec![],
+            gradient_type: 5,
+            usefulness: 100.0,
+            skip_pp: false,
+        };
+
+        assert!(remap_context_file_for_execution_scope(
+            gcx.clone(),
+            Some(&scope),
+            context_file(&controlled_source),
+        )
+        .await
+        .is_err());
+        let (remapped, notices) = remap_context_files_for_execution_scope_for_model_context(
+            gcx.clone(),
+            Some(&scope),
+            vec![context_file(&controlled_source)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(remapped[0].file_name, norm(controlled_worktree));
+        assert!(notices.join("\n").contains("mapped from source checkout"));
+        assert!(remap_context_files_for_execution_scope_for_model_context(
+            gcx,
+            Some(&scope),
+            vec![context_file(&blocked_source)],
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]

@@ -156,9 +156,16 @@ impl Tool for ToolDesignSystem {
         let scope = resolve_scope(&workspace_root, args.scope.as_deref())?;
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
         let paths = collect_scan_paths(&scope);
-        let paths =
-            crate::files_in_workspace::filter_privacy_allowed_files(gcx.clone(), paths).await;
+        let paths = crate::files_in_workspace::filter_privacy_allowed_files_for_model_context(
+            gcx.clone(),
+            paths,
+        )
+        .await;
         let (files, scanned_bytes, scan_truncated) = load_source_files(&workspace_root, paths);
+        let record_paths = files
+            .iter()
+            .map(|file| file.absolute.clone())
+            .collect::<Vec<_>>();
         let codegraph = gcx.codegraph.lock().await.clone();
         let graph = load_graph_facts(codegraph.as_ref()).await;
         let report = analyze_design_system(
@@ -183,7 +190,6 @@ impl Tool for ToolDesignSystem {
                 report.token_count, report.component_count, report.drift_count
             )
         };
-        let record_paths = report_paths(&workspace_root, &report);
         let text = ToolJson::new("design_system", summary, report).to_text();
         let mut messages = vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
@@ -1432,19 +1438,6 @@ fn nearest_number(
         .min_by(|left, right| left.2.total_cmp(&right.2))
         .map(|(token, value, _)| (Some(token.name.clone()), Some(value.clone())))
         .unwrap_or((None, None))
-}
-
-fn report_paths(workspace_root: &Path, report: &DesignSystemResponse) -> Vec<PathBuf> {
-    report
-        .token_sources
-        .iter()
-        .chain(report.components.iter().map(|component| &component.path))
-        .chain(report.drift.iter().map(|finding| &finding.path))
-        .map(|path| workspace_root.join(path))
-        .filter(|path| path.exists())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 fn relative_path(root: &Path, path: &Path) -> String {

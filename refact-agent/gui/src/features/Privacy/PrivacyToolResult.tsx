@@ -51,10 +51,15 @@ export const PrivacyToolResult: React.FC<PrivacyToolResultProps> = ({
     { chat_id: threadId, destination, records: files },
     { skip: shell !== null || !refusal || !model },
   );
-  const blockedFiles = blockedPrivacyFilesFromInspection(
-    files,
-    inspection.data,
-  );
+  const inspectionMatchesDestination =
+    inspection.currentData?.destination.kind === destination.kind &&
+    inspection.currentData.destination.id === destination.id;
+  const currentInspection = inspectionMatchesDestination
+    ? inspection.currentData
+    : undefined;
+  const blockedFiles = currentInspection
+    ? blockedPrivacyFilesFromInspection(files, currentInspection)
+    : [];
 
   const handleSwitchModel = React.useCallback(() => {
     dispatch(push({ name: "default models" }));
@@ -108,8 +113,8 @@ export const PrivacyToolResult: React.FC<PrivacyToolResultProps> = ({
     );
   }
 
-  const awaitingInspection = !inspection.data && !inspection.isError;
-  const inspectionAllowsSend = inspection.data?.sendable === true;
+  const awaitingInspection = !currentInspection && !inspection.isError;
+  const inspectionAllowsSend = currentInspection?.sendable === true;
   if (
     !refusal ||
     awaitingInspection ||

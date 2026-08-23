@@ -22,6 +22,7 @@ import { ChatShield } from "./ChatShield";
 import { BlockCard } from "./BlockCard";
 import { WithheldOutputCard } from "./WithheldOutputCard";
 import { ToolContent } from "../../components/ChatContent/ToolsContent";
+import { setChatModel } from "../Chat/Thread";
 
 const destination: PrivacyDestination = {
   id: "untrusted",
@@ -138,6 +139,66 @@ describe("Privacy shield", () => {
       await screen.findByText("1 records cannot go to this model"),
     ).toBeVisible();
     expect(screen.getByText("derived.txt")).toBeVisible();
+  });
+
+  it("does not show a blocked provider response after switching models", async () => {
+    installPolicyHandler();
+    let releaseTrustedInspection: (() => void) | undefined;
+    const trustedInspectionPending = new Promise<void>((resolve) => {
+      releaseTrustedInspection = () => resolve();
+    });
+    server.use(
+      http.post("*/v1/privacy/inspect", async ({ request }) => {
+        const body = (await request.json()) as {
+          destination: PrivacyDestination;
+        };
+        const isTrusted = body.destination.id === "trusted";
+        if (isTrusted) await trustedInspectionPending;
+        return HttpResponse.json({
+          chat_id: "chat",
+          destination: body.destination,
+          sendable: isTrusted,
+          would_send: [],
+          records: [effectiveFile],
+          blocked: isTrusted
+            ? []
+            : [{ record_index: 0, record: effectiveFile }],
+          refusal: isTrusted ? null : "destination untrusted cannot receive",
+        });
+      }),
+    );
+    const chat = chatWithMessages([
+      {
+        role: "tool",
+        tool_call_id: "call-shell",
+        content: "withheld",
+        extra: { privacy: { files: [effectiveFile] } },
+      },
+    ] as ChatMessages);
+
+    const { store } = render(
+      <ChatShield threadId={chat.current_thread_id} />,
+      { preloadedState: { chat } },
+    );
+    expect(await screen.findByText("1 item withheld")).toBeVisible();
+
+    store.dispatch(
+      setChatModel({
+        chatId: chat.current_thread_id,
+        model: "trusted/model",
+      }),
+    );
+
+    expect(await screen.findByText("checking…")).toBeVisible();
+    expect(screen.queryByText("1 item withheld")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("1 item here can't go to trusted/model"),
+    ).not.toBeInTheDocument();
+
+    releaseTrustedInspection?.();
+    expect(
+      await screen.findByText("Everything here can go to trusted/model"),
+    ).toBeInTheDocument();
   });
 });
 
