@@ -87,9 +87,9 @@ use crate::http::routers::v1::code_edit::handle_v1_code_edit;
 use crate::http::routers::v1::workspace::handle_v1_get_app_searchable_id;
 use crate::chat::{
     handle_v1_chat_subscribe, handle_v1_chat_command, handle_v1_chat_cancel_queued,
-    handle_v1_trajectories_list, handle_v1_trajectories_all, handle_v1_trajectories_get,
-    handle_v1_trajectory_path, handle_v1_trajectories_save, handle_v1_trajectories_delete,
-    handle_v1_trajectories_subscribe,
+    handle_v1_chat_reprioritize_queued, handle_v1_trajectories_list, handle_v1_trajectories_all,
+    handle_v1_trajectories_get, handle_v1_trajectory_path, handle_v1_trajectories_save,
+    handle_v1_trajectories_delete, handle_v1_trajectories_subscribe,
 };
 use crate::http::routers::v1::voice::{
     handle_v1_voice_transcribe, handle_v1_voice_download, handle_v1_voice_status,
@@ -545,7 +545,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         )
         .route(
             "/chats/:chat_id/queue/:client_request_id",
-            delete(handle_v1_chat_cancel_queued),
+            delete(handle_v1_chat_cancel_queued).patch(handle_v1_chat_reprioritize_queued),
         )
         .route("/voice/transcribe", post(handle_v1_voice_transcribe))
         .route("/voice/download", post(handle_v1_voice_download))

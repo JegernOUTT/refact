@@ -2044,6 +2044,47 @@ impl ChatSession {
         });
     }
 
+    pub fn reprioritize_queued_command(&mut self, client_request_id: &str, priority: bool) -> bool {
+        let Some(index) = self
+            .command_queue
+            .iter()
+            .position(|request| request.client_request_id == client_request_id)
+        else {
+            return false;
+        };
+        if self.command_queue[index].priority == priority {
+            return true;
+        }
+        let interrupts_active_loop =
+            priority && Self::command_interrupts_active_loop(&self.command_queue[index].command);
+        let active = matches!(
+            self.runtime.state,
+            SessionState::Generating | SessionState::ExecutingTools
+        );
+        if interrupts_active_loop && active {
+            self.abort_stream();
+            self.clear_pending_tool_calls_for_interruption();
+        }
+        let Some(mut request) = self.command_queue.remove(index) else {
+            return false;
+        };
+        request.priority = priority;
+        if priority {
+            let insert_pos = self
+                .command_queue
+                .iter()
+                .position(|queued| !queued.priority)
+                .unwrap_or(self.command_queue.len());
+            self.command_queue.insert(insert_pos, request);
+        } else {
+            self.command_queue.push_back(request);
+        }
+        self.touch();
+        self.emit_queue_update();
+        self.queue_notify.notify_one();
+        true
+    }
+
     /// Try to insert a priority command before non-priority queued work.
     ///
     /// Accepted interrupting commands abort any active generation/tool loop before
@@ -2727,6 +2768,105 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].component, "command.queue_wait");
         assert_eq!(events[0].elapsed_us, 42);
+    }
+
+    #[test]
+    fn reprioritize_queued_command_is_idempotent_without_side_effects() {
+        let mut session = make_session();
+        session.command_queue.extend([
+            CommandRequest {
+                client_request_id: "first".to_string(),
+                priority: true,
+                command: ChatCommand::Regenerate {},
+            },
+            CommandRequest {
+                client_request_id: "target".to_string(),
+                priority: true,
+                command: ChatCommand::Regenerate {},
+            },
+            CommandRequest {
+                client_request_id: "last".to_string(),
+                priority: false,
+                command: ChatCommand::Regenerate {},
+            },
+        ]);
+        let last_activity = session.last_activity;
+        let event_seq = session.event_seq;
+        let mut events = session.subscribe();
+
+        assert!(session.reprioritize_queued_command("target", true));
+
+        assert_eq!(
+            session
+                .command_queue
+                .iter()
+                .map(|request| request.client_request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "target", "last"]
+        );
+        assert_eq!(session.last_activity, last_activity);
+        assert_eq!(session.event_seq, event_seq);
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn promoting_user_message_interrupts_active_tools_and_preserves_request() {
+        let mut session = make_session();
+        session.runtime.state = SessionState::ExecutingTools;
+        session.messages.push(ChatMessage {
+            message_id: "assistant-with-tool".to_string(),
+            role: "assistant".to_string(),
+            tool_calls: Some(vec![ChatToolCall {
+                id: "pending-tool".to_string(),
+                index: Some(0),
+                tool_type: "function".to_string(),
+                function: ChatToolFunction {
+                    name: "shell".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                extra_content: None,
+            }]),
+            ..Default::default()
+        });
+        let content = json!([
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,payload"}}
+        ]);
+        let attachments = vec![json!({"name": "image.png", "mime": "image/png"})];
+        let context_files = vec![json!({"file_name": "context.md", "file_content": "details"})];
+        session.command_queue.push_back(CommandRequest {
+            client_request_id: "promoted-request".to_string(),
+            priority: false,
+            command: ChatCommand::UserMessage {
+                content: content.clone(),
+                attachments: attachments.clone(),
+                context_files: context_files.clone(),
+                suppress_auto_enrichment: true,
+            },
+        });
+
+        assert!(session.reprioritize_queued_command("promoted-request", true));
+
+        assert_eq!(session.runtime.state, SessionState::Idle);
+        assert!(session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(session.messages[0].tool_calls.is_none());
+        let request = session.command_queue.front().unwrap();
+        assert_eq!(request.client_request_id, "promoted-request");
+        assert!(request.priority);
+        match &request.command {
+            ChatCommand::UserMessage {
+                content: actual_content,
+                attachments: actual_attachments,
+                context_files: actual_context_files,
+                suppress_auto_enrichment,
+            } => {
+                assert_eq!(actual_content, &content);
+                assert_eq!(actual_attachments, &attachments);
+                assert_eq!(actual_context_files, &context_files);
+                assert!(*suppress_auto_enrichment);
+            }
+            command => panic!("expected user message, got {command:?}"),
+        }
     }
 
     #[test]

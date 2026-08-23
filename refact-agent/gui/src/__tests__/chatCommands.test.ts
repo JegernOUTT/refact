@@ -1,4 +1,13 @@
+import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { QueuedMessage } from "../components/ChatContent/QueuedMessage";
+import { ChatThreadProvider } from "../features/Chat/Thread";
+import {
+  createDefaultChatState,
+  render,
+  screen,
+  waitFor,
+} from "../utils/test-utils";
 import {
   sendChatCommand,
   sendUserMessage,
@@ -9,6 +18,7 @@ import {
   updateMessage,
   removeMessage,
   cancelQueuedItem,
+  updateQueuedItemPriority,
   normalizeConnection,
   resetChatParamsSyncState,
   invalidateChatParamsSyncState,
@@ -16,7 +26,11 @@ import {
 } from "../services/refact/chatCommands";
 import type { EngineApiConfig } from "../services/refact/apiUrl";
 
-type MockRequestInit = { body?: string; headers?: Record<string, string> };
+type MockRequestInit = {
+  method?: string;
+  body?: string;
+  headers?: Record<string, string>;
+};
 type MockCall = [string, MockRequestInit];
 
 const mockFetch =
@@ -188,6 +202,103 @@ describe("chatCommands", () => {
       expect(getRequestUrl()).toBe(
         "https://remote.example.com/base/v1/chats/chat/queue/request",
       );
+    });
+  });
+
+  describe("updateQueuedItemPriority", () => {
+    it("PATCHes the existing encoded queue item with priority and auth", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true } as Response);
+
+      const result = await updateQueuedItemPriority(
+        "chat/id",
+        "request/id with spaces",
+        true,
+        { host: "web", dev: true },
+        "test-key",
+      );
+
+      expect(result).toBe(true);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockFetch).toHaveBeenCalledWith(
+        "/v1/chats/chat%2Fid/queue/request%2Fid%20with%20spaces",
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer test-key",
+          },
+          body: JSON.stringify({ priority: true }),
+        },
+      );
+      expect(getRequestBody(mockFetch.mock.calls[0] as MockCall)).toEqual({
+        priority: true,
+      });
+    });
+
+    it("reprioritizes an image-only queued message in place", async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true } as Response);
+      const chat = createDefaultChatState();
+      const chatId = chat.current_thread_id;
+      const ThreadProvider = ChatThreadProvider as React.ComponentType<{
+        chatId: string;
+        children?: React.ReactNode;
+      }>;
+
+      const { user } = render(
+        React.createElement(
+          ThreadProvider,
+          { chatId },
+          React.createElement(QueuedMessage, {
+            position: 1,
+            queuedItem: {
+              client_request_id: "image/request",
+              priority: false,
+              command_type: "user_message",
+              preview: "Queued image",
+            },
+          }),
+        ),
+        {
+          preloadedState: {
+            chat,
+            config: {
+              host: "web",
+              dev: true,
+              lspPort: 8001,
+              apiKey: "image-key",
+              themeProps: {},
+            },
+          },
+        },
+      );
+
+      await user.click(
+        screen.getByRole("button", { name: "Change to send next" }),
+      );
+
+      await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+      expect(mockFetch).toHaveBeenCalledWith(
+        `/v1/chats/${encodeURIComponent(chatId)}/queue/image%2Frequest`,
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer image-key",
+          },
+          body: JSON.stringify({ priority: true }),
+        },
+      );
+      expect(
+        mockFetch.mock.calls.some(([, init]) => init.method === "DELETE"),
+      ).toBe(false);
+      expect(
+        mockFetch.mock.calls.some(
+          ([url, init]) =>
+            init.method === "POST" &&
+            url.endsWith("/commands") &&
+            getRequestBody([url, init]).type === "user_message",
+        ),
+      ).toBe(false);
     });
   });
 

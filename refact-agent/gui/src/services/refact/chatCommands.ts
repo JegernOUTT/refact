@@ -567,3 +567,27 @@ export async function cancelQueuedItem(
   );
   return response.ok;
 }
+
+export async function updateQueuedItemPriority(
+  chatId: string,
+  clientRequestId: string,
+  priority: boolean,
+  connection: PortOrConnection,
+  apiKey?: string,
+): Promise<boolean> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+  const response = await fetch(
+    queueItemUrl(connection, chatId, clientRequestId),
+    {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ priority }),
+    },
+  );
+  return response.ok;
+}

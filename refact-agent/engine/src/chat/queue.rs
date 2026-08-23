@@ -166,7 +166,7 @@ pub async fn inject_priority_messages_if_any(
             content,
             attachments,
             context_files,
-            suppress_auto_enrichment: _,
+            suppress_auto_enrichment,
         } = request.command
         {
             let (session_id, project_dir) = {
@@ -225,6 +225,9 @@ pub async fn inject_priority_messages_if_any(
                 let mut session = session_arc.lock().await;
                 if !context_files.is_empty() {
                     apply_manual_context_files(&mut session, &context_files);
+                }
+                if suppress_auto_enrichment && context_files.is_empty() {
+                    session.suppress_auto_enrichment_for_next_turn = true;
                 }
                 let parsed_content = parse_content_with_attachments(&content, &attachments);
                 let accepted = AcceptedUserMessage {
@@ -3712,6 +3715,85 @@ mod tests {
                     .content_text_only()
                     .contains("resume pursuit")
         }));
+    }
+
+    #[tokio::test]
+    async fn priority_user_message_suppresses_auto_enrichment_without_context_files() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(
+            "priority-suppress-enrichment".to_string(),
+        )));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.checkpoints_enabled = false;
+            session.command_queue.push_back(CommandRequest {
+                client_request_id: "priority-user".to_string(),
+                priority: true,
+                command: ChatCommand::UserMessage {
+                    content: json!("skip enrichment"),
+                    attachments: vec![],
+                    context_files: vec![],
+                    suppress_auto_enrichment: true,
+                },
+            });
+        }
+
+        assert!(inject_priority_messages_if_any(app, session_arc.clone()).await);
+
+        let session = session_arc.lock().await;
+        assert!(session.suppress_auto_enrichment_for_next_turn);
+        assert!(session.messages.iter().any(|message| {
+            message.role == "user"
+                && message
+                    .content
+                    .content_text_only()
+                    .contains("skip enrichment")
+        }));
+    }
+
+    #[tokio::test]
+    async fn promoted_multimodal_message_reaches_priority_injection_unchanged() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(
+            "priority-multimodal".to_string(),
+        )));
+        let image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIW2Nk+M/wHwAF/gL+3MxZ5wAAAABJRU5ErkJggg==";
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.checkpoints_enabled = false;
+            session.command_queue.push_back(CommandRequest {
+                client_request_id: "multimodal-user".to_string(),
+                priority: false,
+                command: ChatCommand::UserMessage {
+                    content: json!([
+                        {"type": "text", "text": "describe this"},
+                        {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{image_data}")}}
+                    ]),
+                    attachments: vec![],
+                    context_files: vec![],
+                    suppress_auto_enrichment: false,
+                },
+            });
+            assert!(session.reprioritize_queued_command("multimodal-user", true));
+        }
+
+        assert!(inject_priority_messages_if_any(app, session_arc.clone()).await);
+
+        let session = session_arc.lock().await;
+        let user_message = session
+            .messages
+            .iter()
+            .find(|message| message.role == "user")
+            .expect("promoted user message");
+        let ChatContent::Multimodal(elements) = &user_message.content else {
+            panic!("expected multimodal user message");
+        };
+        assert_eq!(elements[0].m_type, "text");
+        assert_eq!(elements[0].m_content, "describe this");
+        assert_eq!(elements[1].m_type, "image/png");
+        assert_eq!(elements[1].m_content, image_data);
     }
 
     #[test]

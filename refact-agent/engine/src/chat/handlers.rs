@@ -23,6 +23,11 @@ use super::trajectory_ops::sanitize_messages_for_model_switch;
 use super::trajectories::validate_trajectory_id;
 use crate::yaml_configs::customization_registry::{get_mode_config, map_legacy_mode_to_id};
 
+#[derive(serde::Deserialize)]
+pub struct QueuePriorityPatch {
+    priority: bool,
+}
+
 fn command_error_response(status: StatusCode, code: &str, error: String) -> Response<Body> {
     let body = serde_json::to_string(&serde_json::json!({
         "code": code,
@@ -627,6 +632,39 @@ pub async fn handle_v1_chat_cancel_queued(
     }
 }
 
+pub async fn handle_v1_chat_reprioritize_queued(
+    State(app): State<AppState>,
+    Path((chat_id, client_request_id)): Path<(String, String)>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    validate_trajectory_id(&chat_id)?;
+    let patch: QueuePriorityPatch = serde_json::from_slice(&body_bytes)
+        .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
+
+    let Some(session_arc) = app.chat.sessions.read().await.get(&chat_id).cloned() else {
+        return Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"status":"not_found"}"#))
+            .unwrap());
+    };
+    let mut session = session_arc.lock().await;
+
+    if session.reprioritize_queued_command(&client_request_id, patch.priority) {
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"status":"updated"}"#))
+            .unwrap())
+    } else {
+        Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"status":"not_found"}"#))
+            .unwrap())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,5 +864,169 @@ mod tests {
         let session = session_arc.lock().await;
         assert!(session.command_queue.is_empty());
         assert!(session.command_enqueued_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reprioritize_queued_multimodal_command_preserves_payload_and_timestamp() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+        let chat_id = "reprioritize-queued";
+        let session_arc = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
+            chat_id.to_string(),
+        )));
+        let enqueued_at = Instant::now();
+        {
+            let mut session = session_arc.lock().await;
+            session.command_queue.push_back(CommandRequest {
+                client_request_id: "priority-first".to_string(),
+                priority: true,
+                command: ChatCommand::Regenerate {},
+            });
+            session.command_queue.push_back(CommandRequest {
+                client_request_id: "normal-last".to_string(),
+                priority: false,
+                command: ChatCommand::Regenerate {},
+            });
+            session.command_queue.push_back(CommandRequest {
+                client_request_id: "multimodal".to_string(),
+                priority: false,
+                command: ChatCommand::UserMessage {
+                    content: json!([
+                        {"type": "text", "text": "describe this"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,image"}}
+                    ]),
+                    attachments: vec![json!({"name": "diagram.png", "mime": "image/png"})],
+                    context_files: vec![
+                        json!({"file_name": "notes.md", "file_content": "context"}),
+                    ],
+                    suppress_auto_enrichment: true,
+                },
+            });
+            session
+                .command_enqueued_at
+                .insert("multimodal".to_string(), enqueued_at);
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        let response = handle_v1_chat_reprioritize_queued(
+            State(app.clone()),
+            Path((chat_id.to_string(), "multimodal".to_string())),
+            hyper::body::Bytes::from(r#"{"priority":true}"#),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let session = session_arc.lock().await;
+        assert_eq!(
+            session
+                .command_queue
+                .iter()
+                .map(|request| request.client_request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["priority-first", "multimodal", "normal-last"]
+        );
+        let request = &session.command_queue[1];
+        assert!(request.priority);
+        match &request.command {
+            ChatCommand::UserMessage {
+                content,
+                attachments,
+                context_files,
+                suppress_auto_enrichment,
+            } => {
+                assert_eq!(content[0], json!({"type": "text", "text": "describe this"}));
+                assert_eq!(content[1]["type"], "image_url");
+                assert_eq!(
+                    content[1]["image_url"]["url"],
+                    "data:image/png;base64,image"
+                );
+                assert_eq!(
+                    attachments,
+                    &vec![json!({"name": "diagram.png", "mime": "image/png"})]
+                );
+                assert_eq!(
+                    context_files,
+                    &vec![json!({"file_name": "notes.md", "file_content": "context"})]
+                );
+                assert!(*suppress_auto_enrichment);
+            }
+            command => panic!("expected user message, got {command:?}"),
+        }
+        assert_eq!(
+            session.command_enqueued_at.get("multimodal"),
+            Some(&enqueued_at)
+        );
+        drop(session);
+
+        let response = handle_v1_chat_reprioritize_queued(
+            State(app.clone()),
+            Path((chat_id.to_string(), "multimodal".to_string())),
+            hyper::body::Bytes::from(r#"{"priority":false}"#),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let session = session_arc.lock().await;
+        assert_eq!(
+            session
+                .command_queue
+                .iter()
+                .map(|request| request.client_request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["priority-first", "normal-last", "multimodal"]
+        );
+        assert!(!session.command_queue[2].priority);
+        assert_eq!(
+            session.command_enqueued_at.get("multimodal"),
+            Some(&enqueued_at)
+        );
+        drop(session);
+
+        let response = handle_v1_chat_reprioritize_queued(
+            State(app.clone()),
+            Path((chat_id.to_string(), "missing".to_string())),
+            hyper::body::Bytes::from(r#"{"priority":false}"#),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let unknown_chat_id = "missing-chat".to_string();
+        let response = handle_v1_chat_reprioritize_queued(
+            State(app.clone()),
+            Path((unknown_chat_id.clone(), "missing".to_string())),
+            hyper::body::Bytes::from(r#"{"priority":false}"#),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(!app
+            .chat
+            .sessions
+            .read()
+            .await
+            .contains_key(&unknown_chat_id));
+    }
+
+    #[tokio::test]
+    async fn reprioritize_queued_command_rejects_invalid_json() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+
+        let error = handle_v1_chat_reprioritize_queued(
+            State(app),
+            Path(("reprioritize-queued".to_string(), "request".to_string())),
+            hyper::body::Bytes::from(r#"{"priority":"now"}"#),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
+        assert!(error.message.starts_with("Invalid JSON:"));
     }
 }

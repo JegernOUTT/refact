@@ -6,7 +6,7 @@ import { useChatActions } from "../../hooks/useChatActions";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import { selectConfig, selectApiKey } from "../../features/Config/configSlice";
 import { useThreadId } from "../../features/Chat/Thread";
-import { sendUserMessage } from "../../services/refact/chatCommands";
+import { updateQueuedItemPriority } from "../../services/refact/chatCommands";
 import { setInputValue } from "../ChatForm/actions";
 import { Badge, Icon, IconButton, Tooltip } from "../ui";
 import styles from "./ChatContent.module.css";
@@ -87,22 +87,19 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
   );
 
   const handleTogglePriority = useCallback(async () => {
-    if (isWorking || !isEditable || !chatId) return;
+    if (isWorking || queuedItem.command_type !== "user_message" || !chatId) {
+      return;
+    }
     setIsWorking(true);
     try {
-      const ok = await cancelQueued(queuedItem.client_request_id);
+      const ok = await updateQueuedItemPriority(
+        chatId,
+        queuedItem.client_request_id,
+        !queuedItem.priority,
+        config,
+        apiKey ?? undefined,
+      );
       if (!ok) return;
-      try {
-        await sendUserMessage(
-          chatId,
-          content,
-          config,
-          apiKey ?? undefined,
-          !queuedItem.priority,
-        );
-      } catch {
-        postInputValue(chatId, content, queuedItem.priority);
-      }
     } catch {
       return;
     } finally {
@@ -110,14 +107,12 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
     }
   }, [
     isWorking,
-    isEditable,
     chatId,
     config,
     apiKey,
-    cancelQueued,
+    queuedItem.command_type,
     queuedItem.client_request_id,
     queuedItem.priority,
-    content,
   ]);
 
   const tooltipContent = content || queuedItem.preview;
@@ -155,7 +150,7 @@ export const QueuedMessage: React.FC<QueuedMessageProps> = ({
               </Text>
             </Flex>
             <Flex gap="1" align="center" flexShrink="0">
-              {isEditable && (
+              {queuedItem.command_type === "user_message" && (
                 <IconButton
                   aria-label={
                     queuedItem.priority
