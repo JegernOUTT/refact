@@ -11,7 +11,10 @@ use tokio::sync::Mutex as AMutex;
 
 use crate::app_state::{AppState, AppToolRegistry, FixtureToolFactory};
 use crate::at_commands::at_commands::AtCommandsContext;
-use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
+use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ChatToolFunction, ContextEnum};
+use crate::chat::tools::{
+    process_tool_calls_once, resolve_tool_call_aliases_with_catalog, ToolStepOutcome,
+};
 use crate::chat::perf_diagnostics::{
     self, MemoryPerfSink, PerfClock, PerfComponent, PerfEvent, PerfRecorder,
 };
@@ -304,6 +307,99 @@ pub struct VariantBenchmarkReport {
     pub machine: MachineMetrics,
 }
 
+pub const TOOL_POOL_CHAT_COUNT: u8 = 8;
+pub const TOOL_POOL_DESCRIPTOR_COUNT: u16 = 50;
+const TOOL_POOL_SAME_NAME_PARALLEL_CALLS: usize = 8;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ToolPoolWorkload {
+    pub id: String,
+    pub seed: u64,
+    pub chat_count: u8,
+    pub tool_descriptors: u16,
+    pub tool_calls_per_chat: u16,
+    pub same_name_parallel_calls: u8,
+}
+
+impl ToolPoolWorkload {
+    pub fn fixed() -> Self {
+        Self {
+            id: "turn-tool-pool-8-chats-50-tools".to_string(),
+            seed: 0x7100_0000,
+            chat_count: TOOL_POOL_CHAT_COUNT,
+            tool_descriptors: TOOL_POOL_DESCRIPTOR_COUNT,
+            tool_calls_per_chat: TOOL_POOL_DESCRIPTOR_COUNT,
+            same_name_parallel_calls: TOOL_POOL_SAME_NAME_PARALLEL_CALLS as u8,
+        }
+    }
+
+    pub fn fixture_signature(&self) -> String {
+        format!(
+            "{:016x}",
+            stable_hash(&[
+                self.seed,
+                u64::from(self.chat_count),
+                u64::from(self.tool_descriptors),
+                u64::from(self.tool_calls_per_chat),
+                u64::from(self.same_name_parallel_calls),
+            ])
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct ToolPoolCounters {
+    pub immutable_catalog_builds: u64,
+    pub mutable_vector_builds: u64,
+    pub parallel_vector_expansions: u64,
+    pub confirmation_preflight_starts: u64,
+    pub confirmation_preflight_tool_checks: u64,
+    pub execution_lookups: u64,
+    pub tool_calls: u64,
+    pub tool_runtime_calls: u64,
+    pub errors: u64,
+}
+
+impl ToolPoolCounters {
+    pub fn catalog_preflight_operations(&self) -> u64 {
+        self.immutable_catalog_builds
+            .saturating_add(self.mutable_vector_builds)
+            .saturating_add(self.parallel_vector_expansions)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ToolPoolVariantBenchmarkReport {
+    pub variant: String,
+    pub workload_signature: String,
+    pub counters: ToolPoolCounters,
+    pub catalog_acquisition_latency: LatencySummary,
+    pub schema_alias_preparation_latency: LatencySummary,
+    pub warm_schema_alias_preparation_latency: Option<LatencySummary>,
+    pub confirmation_preflight_latency: LatencySummary,
+    pub execution_lookup_latency: LatencySummary,
+    pub tool_start_overhead_latency: LatencySummary,
+    pub tool_runtime_latency: LatencySummary,
+    pub machine: MachineMetrics,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ToolPoolComparison {
+    pub legacy_catalog_preflight_operations: u64,
+    pub pooled_catalog_preflight_operations: u64,
+    pub catalog_preflight_operation_reduction_percent: f64,
+    pub tool_start_p95_us: u64,
+    pub warm_schema_alias_p95_us: u64,
+    pub remaining_stage: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ToolPoolWorkloadBenchmarkReport {
+    pub workload: ToolPoolWorkload,
+    pub variants: Vec<ToolPoolVariantBenchmarkReport>,
+    pub comparison: ToolPoolComparison,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct WorkloadBenchmarkReport {
     pub workload: ConcurrentChatWorkload,
@@ -317,6 +413,7 @@ pub struct ConcurrentChatBenchmarkReport {
     pub warmup_samples: usize,
     pub measured_samples: usize,
     pub workloads: Vec<WorkloadBenchmarkReport>,
+    pub tool_pool_workload: ToolPoolWorkloadBenchmarkReport,
 }
 
 struct Sample {
@@ -332,6 +429,16 @@ struct Sample {
     checkpoint_return_elapsed_us: u64,
     background_flush_elapsed_us: u64,
     total_elapsed_us: u64,
+}
+
+struct ToolPoolSample {
+    counters: ToolPoolCounters,
+    catalog_acquisition_elapsed_us: Vec<u64>,
+    schema_alias_preparation_elapsed_us: Vec<u64>,
+    warm_schema_alias_preparation_elapsed_us: Vec<u64>,
+    confirmation_preflight_elapsed_us: Vec<u64>,
+    execution_lookup_elapsed_us: Vec<u64>,
+    tool_runtime_elapsed_us: Vec<u64>,
 }
 
 #[derive(Clone)]
@@ -397,12 +504,14 @@ async fn run_benchmark_async(
     for workload in workloads {
         reports.push(run_workload(&workload, &options).await?);
     }
+    let tool_pool_workload = run_tool_pool_workload(&ToolPoolWorkload::fixed(), &options).await?;
     Ok(ConcurrentChatBenchmarkReport {
         schema: CONCURRENT_CHAT_BENCHMARK_SCHEMA,
         mode: options.mode.as_str().to_string(),
         warmup_samples: options.warmup_samples,
         measured_samples: options.measured_samples,
         workloads: reports,
+        tool_pool_workload,
     })
 }
 
@@ -413,6 +522,21 @@ pub fn run_ci_fixture() -> Result<WorkloadBenchmarkReport, String> {
         .map_err(|error| format!("failed to start benchmark Tokio runtime: {error}"))?
         .block_on(run_workload(
             &ConcurrentChatWorkload::ci_fixture(),
+            &BenchmarkOptions {
+                mode: HarnessMode::Quick,
+                warmup_samples: 0,
+                measured_samples: 1,
+            },
+        ))
+}
+
+pub fn run_tool_pool_ci_fixture() -> Result<ToolPoolWorkloadBenchmarkReport, String> {
+    Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("failed to start benchmark Tokio runtime: {error}"))?
+        .block_on(run_tool_pool_workload(
+            &ToolPoolWorkload::fixed(),
             &BenchmarkOptions {
                 mode: HarnessMode::Quick,
                 warmup_samples: 0,
@@ -437,7 +561,13 @@ pub fn validate_report_json(json: &str) -> Result<(), String> {
     {
         return Err("benchmark JSON schema is missing or unsupported".to_string());
     }
-    for key in ["mode", "warmup_samples", "measured_samples", "workloads"] {
+    for key in [
+        "mode",
+        "warmup_samples",
+        "measured_samples",
+        "workloads",
+        "tool_pool_workload",
+    ] {
         if !object.contains_key(key) {
             return Err(format!("benchmark JSON is missing {key}"));
         }
@@ -491,6 +621,48 @@ pub fn validate_report_json(json: &str) -> Result<(), String> {
             if variants.iter().any(|variant| variant.get(key).is_none()) {
                 return Err(format!("benchmark variant is missing {key}"));
             }
+        }
+    }
+    let tool_pool_workload = object
+        .get("tool_pool_workload")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "benchmark JSON tool_pool_workload must be an object".to_string())?;
+    let variants = tool_pool_workload
+        .get("variants")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "benchmark JSON tool pool variants must be an array".to_string())?;
+    if variants.len() != 2
+        || variants[0]
+            .get("variant")
+            .and_then(serde_json::Value::as_str)
+            != Some("legacy")
+        || variants[1]
+            .get("variant")
+            .and_then(serde_json::Value::as_str)
+            != Some("pooled")
+    {
+        return Err(
+            "benchmark tool pool workload must include legacy and pooled variants".to_string(),
+        );
+    }
+    for key in ["workload", "comparison"] {
+        if !tool_pool_workload.contains_key(key) {
+            return Err(format!("benchmark tool pool workload is missing {key}"));
+        }
+    }
+    for key in [
+        "counters",
+        "catalog_acquisition_latency",
+        "schema_alias_preparation_latency",
+        "warm_schema_alias_preparation_latency",
+        "confirmation_preflight_latency",
+        "execution_lookup_latency",
+        "tool_start_overhead_latency",
+        "tool_runtime_latency",
+        "machine",
+    ] {
+        if variants.iter().any(|variant| variant.get(key).is_none()) {
+            return Err(format!("benchmark tool pool variant is missing {key}"));
         }
     }
     Ok(())
@@ -655,6 +827,432 @@ async fn run_variant_workload(
         machine: sample_machine_metrics(),
     };
     Ok(variant)
+}
+
+async fn run_tool_pool_workload(
+    workload: &ToolPoolWorkload,
+    options: &BenchmarkOptions,
+) -> Result<ToolPoolWorkloadBenchmarkReport, String> {
+    let mut variants = Vec::with_capacity(2);
+    for (variant, snapshots_enabled) in [("legacy", false), ("pooled", true)] {
+        variants.push(run_tool_pool_variant(workload, options, variant, snapshots_enabled).await?);
+    }
+    let legacy = variants
+        .iter()
+        .find(|variant| variant.variant == "legacy")
+        .ok_or_else(|| "tool pool benchmark omitted legacy variant".to_string())?;
+    let pooled = variants
+        .iter()
+        .find(|variant| variant.variant == "pooled")
+        .ok_or_else(|| "tool pool benchmark omitted pooled variant".to_string())?;
+    let legacy_operations = legacy.counters.catalog_preflight_operations();
+    let pooled_operations = pooled.counters.catalog_preflight_operations();
+    let reduction_percent = if legacy_operations == 0 {
+        0.0
+    } else {
+        (1.0 - pooled_operations as f64 / legacy_operations as f64) * 100.0
+    };
+    let tool_start_p95_us = pooled.tool_start_overhead_latency.p95_us;
+    let warm_schema_alias_p95_us = pooled
+        .warm_schema_alias_preparation_latency
+        .as_ref()
+        .map(|latency| latency.p95_us)
+        .unwrap_or(u64::MAX);
+    let remaining_stage = if reduction_percent < 80.0 {
+        Some("catalog_preflight_operations".to_string())
+    } else if tool_start_p95_us >= 100_000 {
+        Some("tool_start_overhead".to_string())
+    } else if warm_schema_alias_p95_us >= 1_000 {
+        Some("warm_schema_alias_preparation".to_string())
+    } else {
+        None
+    };
+    Ok(ToolPoolWorkloadBenchmarkReport {
+        workload: workload.clone(),
+        variants,
+        comparison: ToolPoolComparison {
+            legacy_catalog_preflight_operations: legacy_operations,
+            pooled_catalog_preflight_operations: pooled_operations,
+            catalog_preflight_operation_reduction_percent: reduction_percent,
+            tool_start_p95_us,
+            warm_schema_alias_p95_us,
+            remaining_stage,
+        },
+    })
+}
+
+async fn run_tool_pool_variant(
+    workload: &ToolPoolWorkload,
+    options: &BenchmarkOptions,
+    variant: &str,
+    snapshots_enabled: bool,
+) -> Result<ToolPoolVariantBenchmarkReport, String> {
+    for _ in 0..options.warmup_samples {
+        let sample = run_tool_pool_sample(workload, snapshots_enabled).await?;
+        assert_tool_pool_invariants(&sample.counters, workload)?;
+    }
+    let mut samples = Vec::with_capacity(options.measured_samples);
+    for _ in 0..options.measured_samples {
+        let sample = run_tool_pool_sample(workload, snapshots_enabled).await?;
+        assert_tool_pool_invariants(&sample.counters, workload)?;
+        samples.push(sample);
+    }
+    let counters = aggregate_tool_pool_counters(&samples);
+    let catalog_acquisition_elapsed_us =
+        tool_pool_elapsed(&samples, |sample| &sample.catalog_acquisition_elapsed_us);
+    let schema_alias_preparation_elapsed_us = tool_pool_elapsed(&samples, |sample| {
+        &sample.schema_alias_preparation_elapsed_us
+    });
+    let warm_schema_alias_preparation_elapsed_us = tool_pool_elapsed(&samples, |sample| {
+        &sample.warm_schema_alias_preparation_elapsed_us
+    });
+    let confirmation_preflight_elapsed_us =
+        tool_pool_elapsed(&samples, |sample| &sample.confirmation_preflight_elapsed_us);
+    let execution_lookup_elapsed_us =
+        tool_pool_elapsed(&samples, |sample| &sample.execution_lookup_elapsed_us);
+    let tool_runtime_elapsed_us =
+        tool_pool_elapsed(&samples, |sample| &sample.tool_runtime_elapsed_us);
+    Ok(ToolPoolVariantBenchmarkReport {
+        variant: variant.to_string(),
+        workload_signature: workload.fixture_signature(),
+        counters,
+        catalog_acquisition_latency: LatencySummary::from_samples(&catalog_acquisition_elapsed_us)?,
+        schema_alias_preparation_latency: LatencySummary::from_samples(
+            &schema_alias_preparation_elapsed_us,
+        )?,
+        warm_schema_alias_preparation_latency: snapshots_enabled
+            .then(|| LatencySummary::from_samples(&warm_schema_alias_preparation_elapsed_us))
+            .transpose()?,
+        confirmation_preflight_latency: LatencySummary::from_samples(
+            &confirmation_preflight_elapsed_us,
+        )?,
+        execution_lookup_latency: LatencySummary::from_samples(&execution_lookup_elapsed_us)?,
+        tool_start_overhead_latency: LatencySummary::from_samples(&execution_lookup_elapsed_us)?,
+        tool_runtime_latency: LatencySummary::from_samples(&tool_runtime_elapsed_us)?,
+        machine: sample_machine_metrics(),
+    })
+}
+
+async fn run_tool_pool_sample(
+    workload: &ToolPoolWorkload,
+    snapshots_enabled: bool,
+) -> Result<ToolPoolSample, String> {
+    let fixture = BenchmarkFixture::new(workload.tool_descriptors as usize).await?;
+    let _diagnostic_lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK
+        .lock()
+        .map_err(|_| "performance recorder test lock poisoned".to_string())?;
+    let _snapshot_env_guard = ToolCatalogSnapshotEnvGuard::set(snapshots_enabled);
+    let sink = Arc::new(MemoryPerfSink::new());
+    let recorder = Arc::new(PerfRecorder::with_salt(
+        Arc::new(BenchmarkClock::default()),
+        sink.clone(),
+        [17; 32],
+    ));
+    let _recorder_guard = perf_diagnostics::install_test_recorder(recorder);
+    let mut catalog_acquisition_elapsed_us = Vec::with_capacity(workload.chat_count as usize);
+    let mut schema_alias_preparation_elapsed_us = Vec::with_capacity(workload.chat_count as usize);
+    let mut warm_schema_alias_preparation_elapsed_us =
+        Vec::with_capacity(workload.chat_count as usize);
+    let mut sessions = Vec::with_capacity(workload.chat_count as usize);
+
+    for chat_index in 0..workload.chat_count {
+        let tool_calls = deterministic_tool_calls(workload, chat_index);
+        let catalog_started = Instant::now();
+        let catalog = fixture
+            .app
+            .tool_registry
+            .acquire_tool_catalog("agent", Some("benchmark-local"), None)
+            .await;
+        catalog_acquisition_elapsed_us.push(elapsed_us(catalog_started));
+
+        let schema_alias_started = Instant::now();
+        let canonical =
+            build_canonical_openai_tools(fixture.gcx.clone(), &catalog.index.tools, false, true)
+                .await;
+        let resolved = resolve_tool_call_aliases_with_catalog(tool_calls.clone(), &catalog);
+        schema_alias_preparation_elapsed_us.push(elapsed_us(schema_alias_started));
+        if canonical.tools.len() != workload.tool_descriptors as usize
+            || resolved.len() != workload.tool_calls_per_chat as usize
+        {
+            return Err(
+                "tool pool fixture did not prepare the expected schema and aliases".to_string(),
+            );
+        }
+
+        if snapshots_enabled {
+            let warm_schema_alias_started = Instant::now();
+            let warm_canonical = build_canonical_openai_tools(
+                fixture.gcx.clone(),
+                &catalog.index.tools,
+                false,
+                true,
+            )
+            .await;
+            let warm_resolved =
+                resolve_tool_call_aliases_with_catalog(tool_calls.clone(), &catalog);
+            warm_schema_alias_preparation_elapsed_us.push(elapsed_us(warm_schema_alias_started));
+            if warm_canonical.tools.len() != canonical.tools.len()
+                || warm_resolved.len() != resolved.len()
+            {
+                return Err("warm tool pool schema and aliases changed within a turn".to_string());
+            }
+        }
+
+        let chat_id = format!("tool-pool-{}-{chat_index}", workload.fixture_signature());
+        let session = Arc::new(AMutex::new(crate::chat::types::ChatSession::new(
+            chat_id.clone(),
+        )));
+        {
+            let mut session_locked = session.lock().await;
+            session_locked.thread.model = "benchmark-local".to_string();
+            session_locked.thread.mode = "agent".to_string();
+            session_locked.thread.include_project_info = false;
+            session_locked.tool_catalog = Some(catalog);
+            let mut assistant = ChatMessage::new("assistant".to_string(), String::new());
+            assistant.tool_calls = Some(tool_calls);
+            session_locked.add_message(assistant);
+        }
+        fixture
+            .app
+            .chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id, session.clone());
+        sessions.push(session);
+    }
+
+    let outcomes = futures::future::join_all(sessions.iter().cloned().map(|session| {
+        process_tool_calls_once(
+            fixture.app.clone(),
+            session,
+            "agent",
+            Some("benchmark-local"),
+        )
+    }))
+    .await;
+    for (chat_index, (outcome, session)) in outcomes.into_iter().zip(sessions.iter()).enumerate() {
+        if !matches!(outcome, ToolStepOutcome::Continue) {
+            return Err(format!(
+                "tool pool fixture chat {chat_index} did not continue"
+            ));
+        }
+        assert_tool_result_order(session, workload, chat_index as u8).await?;
+    }
+
+    let events = sink.events();
+    let counters = ToolPoolCounters {
+        immutable_catalog_builds: event_count(&events, PerfComponent::ToolCatalogBuild),
+        mutable_vector_builds: event_count(&events, PerfComponent::ToolMutableVectorBuild),
+        parallel_vector_expansions: event_count(&events, PerfComponent::ToolPoolParallelExpansion),
+        confirmation_preflight_starts: event_count(
+            &events,
+            PerfComponent::ToolConfirmationPreflight,
+        ),
+        confirmation_preflight_tool_checks: event_item_count(
+            &events,
+            PerfComponent::ToolConfirmationPreflight,
+        ),
+        execution_lookups: event_count(&events, PerfComponent::ToolExecutionLookup),
+        tool_calls: u64::from(workload.chat_count) * u64::from(workload.tool_calls_per_chat),
+        tool_runtime_calls: event_count(&events, PerfComponent::ToolRuntime),
+        errors: tool_pool_errors(&events),
+    };
+    Ok(ToolPoolSample {
+        counters,
+        catalog_acquisition_elapsed_us,
+        schema_alias_preparation_elapsed_us,
+        warm_schema_alias_preparation_elapsed_us,
+        confirmation_preflight_elapsed_us: event_elapsed(
+            &events,
+            PerfComponent::ToolConfirmationPreflight,
+        ),
+        execution_lookup_elapsed_us: event_elapsed(&events, PerfComponent::ToolExecutionLookup),
+        tool_runtime_elapsed_us: event_elapsed(&events, PerfComponent::ToolRuntime),
+    })
+}
+
+fn deterministic_tool_calls(workload: &ToolPoolWorkload, chat_index: u8) -> Vec<ChatToolCall> {
+    let mut names = std::iter::repeat("benchmark_tool_0".to_string())
+        .take(usize::from(workload.same_name_parallel_calls))
+        .collect::<Vec<_>>();
+    names.extend(
+        (1..=workload.tool_calls_per_chat - workload.same_name_parallel_calls as u16)
+            .map(|index| format!("benchmark_tool_{index}")),
+    );
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(call_index, name)| ChatToolCall {
+            id: format!(
+                "pool-{}-{chat_index}-{call_index}",
+                workload.fixture_signature()
+            ),
+            index: Some(call_index),
+            function: ChatToolFunction {
+                name,
+                arguments: "{}".to_string(),
+            },
+            tool_type: "function".to_string(),
+            extra_content: None,
+        })
+        .collect()
+}
+
+async fn assert_tool_result_order(
+    session: &Arc<AMutex<crate::chat::types::ChatSession>>,
+    workload: &ToolPoolWorkload,
+    chat_index: u8,
+) -> Result<(), String> {
+    let session = session.lock().await;
+    let results = session
+        .messages
+        .iter()
+        .filter(|message| message.role == "tool")
+        .collect::<Vec<_>>();
+    if results.len() != workload.tool_calls_per_chat as usize {
+        return Err(format!(
+            "tool pool fixture chat {chat_index} returned {} results instead of {}",
+            results.len(),
+            workload.tool_calls_per_chat
+        ));
+    }
+    for (call_index, result) in results.iter().enumerate() {
+        let expected = format!(
+            "pool-{}-{chat_index}-{call_index}",
+            workload.fixture_signature()
+        );
+        if result.tool_call_id != expected || result.tool_failed == Some(true) {
+            return Err(format!(
+                "tool pool fixture chat {chat_index} lost result ordering"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn assert_tool_pool_invariants(
+    counters: &ToolPoolCounters,
+    workload: &ToolPoolWorkload,
+) -> Result<(), String> {
+    let expected_calls = u64::from(workload.chat_count) * u64::from(workload.tool_calls_per_chat);
+    if counters.tool_calls != expected_calls
+        || counters.tool_runtime_calls != expected_calls
+        || counters.execution_lookups != expected_calls
+        || counters.confirmation_preflight_starts != u64::from(workload.chat_count)
+        || counters.confirmation_preflight_tool_checks != expected_calls
+    {
+        return Err(
+            "tool pool fixture did not exercise every real preflight and execution path"
+                .to_string(),
+        );
+    }
+    if counters.immutable_catalog_builds == 0 || counters.mutable_vector_builds == 0 {
+        return Err(
+            "tool pool fixture did not acquire real catalog and mutable vectors".to_string(),
+        );
+    }
+    if counters.errors != 0 {
+        return Err(format!(
+            "tool pool fixture recorded {} errors",
+            counters.errors
+        ));
+    }
+    Ok(())
+}
+
+fn aggregate_tool_pool_counters(samples: &[ToolPoolSample]) -> ToolPoolCounters {
+    samples
+        .iter()
+        .fold(ToolPoolCounters::default(), |mut total, sample| {
+            total.immutable_catalog_builds += sample.counters.immutable_catalog_builds;
+            total.mutable_vector_builds += sample.counters.mutable_vector_builds;
+            total.parallel_vector_expansions += sample.counters.parallel_vector_expansions;
+            total.confirmation_preflight_starts += sample.counters.confirmation_preflight_starts;
+            total.confirmation_preflight_tool_checks +=
+                sample.counters.confirmation_preflight_tool_checks;
+            total.execution_lookups += sample.counters.execution_lookups;
+            total.tool_calls += sample.counters.tool_calls;
+            total.tool_runtime_calls += sample.counters.tool_runtime_calls;
+            total.errors += sample.counters.errors;
+            total
+        })
+}
+
+fn tool_pool_elapsed(
+    samples: &[ToolPoolSample],
+    elapsed: impl Fn(&ToolPoolSample) -> &Vec<u64>,
+) -> Vec<u64> {
+    samples
+        .iter()
+        .flat_map(|sample| elapsed(sample).iter().copied())
+        .collect()
+}
+
+fn event_count(events: &[PerfEvent], component: PerfComponent) -> u64 {
+    events
+        .iter()
+        .filter(|event| event.component == component.as_str())
+        .count() as u64
+}
+
+fn event_item_count(events: &[PerfEvent], component: PerfComponent) -> u64 {
+    events
+        .iter()
+        .filter(|event| event.component == component.as_str())
+        .filter_map(|event| event.item_count)
+        .sum()
+}
+
+fn event_elapsed(events: &[PerfEvent], component: PerfComponent) -> Vec<u64> {
+    events
+        .iter()
+        .filter(|event| event.component == component.as_str())
+        .map(|event| event.elapsed_us)
+        .collect()
+}
+
+fn tool_pool_errors(events: &[PerfEvent]) -> u64 {
+    events
+        .iter()
+        .filter(|event| event.outcome == "failure")
+        .filter(|event| {
+            matches!(
+                event.component,
+                "tool.catalog_build"
+                    | "tool.mutable_vector_build"
+                    | "tool.pool_parallel_expansion"
+                    | "tool.confirmation_preflight"
+                    | "tool.execution_lookup"
+                    | "tool.runtime"
+            )
+        })
+        .count() as u64
+}
+
+struct ToolCatalogSnapshotEnvGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl ToolCatalogSnapshotEnvGuard {
+    fn set(enabled: bool) -> Self {
+        let previous = std::env::var_os("REFACT_TOOL_CATALOG_SNAPSHOTS");
+        std::env::set_var(
+            "REFACT_TOOL_CATALOG_SNAPSHOTS",
+            if enabled { "1" } else { "0" },
+        );
+        Self { previous }
+    }
+}
+
+impl Drop for ToolCatalogSnapshotEnvGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            std::env::set_var("REFACT_TOOL_CATALOG_SNAPSHOTS", previous);
+        } else {
+            std::env::remove_var("REFACT_TOOL_CATALOG_SNAPSHOTS");
+        }
+    }
 }
 
 async fn run_sample(
@@ -1159,6 +1757,68 @@ mod tests {
     }
 
     #[test]
+    fn fixed_tool_pool_workload_has_the_required_concurrency_and_catalog_size() {
+        let workload = ToolPoolWorkload::fixed();
+
+        assert_eq!(workload.chat_count, TOOL_POOL_CHAT_COUNT);
+        assert_eq!(workload.tool_descriptors, TOOL_POOL_DESCRIPTOR_COUNT);
+        assert_eq!(workload.tool_calls_per_chat, TOOL_POOL_DESCRIPTOR_COUNT);
+        assert_eq!(
+            workload.same_name_parallel_calls as usize,
+            TOOL_POOL_SAME_NAME_PARALLEL_CALLS
+        );
+        assert_eq!(
+            deterministic_tool_calls(&workload, 0).len(),
+            TOOL_POOL_DESCRIPTOR_COUNT as usize
+        );
+    }
+
+    #[test]
+    fn tool_pool_fixture_compares_real_legacy_and_pooled_operations() {
+        let report = run_tool_pool_ci_fixture().expect("tool pool fixture should run");
+        let legacy = &report.variants[0];
+        let pooled = &report.variants[1];
+        let expected_calls =
+            u64::from(report.workload.chat_count) * u64::from(report.workload.tool_calls_per_chat);
+        let maximum_expansions = u64::from(report.workload.chat_count)
+            * (u64::from(report.workload.same_name_parallel_calls) - 1);
+
+        assert_eq!(legacy.variant, "legacy");
+        assert_eq!(pooled.variant, "pooled");
+        assert_eq!(legacy.counters.tool_calls, expected_calls);
+        assert_eq!(pooled.counters.tool_calls, expected_calls);
+        assert_eq!(
+            legacy.counters.confirmation_preflight_tool_checks,
+            expected_calls
+        );
+        assert_eq!(
+            pooled.counters.confirmation_preflight_tool_checks,
+            expected_calls
+        );
+        assert_eq!(
+            pooled.counters.mutable_vector_builds,
+            u64::from(report.workload.chat_count)
+        );
+        assert!(pooled.counters.parallel_vector_expansions <= maximum_expansions);
+        assert!(
+            report
+                .comparison
+                .catalog_preflight_operation_reduction_percent
+                >= 80.0,
+            "{:#?}",
+            report.comparison
+        );
+        assert!(pooled.tool_start_overhead_latency.p95_us < 100_000);
+        match report.comparison.remaining_stage.as_deref() {
+            None => assert!(report.comparison.warm_schema_alias_p95_us < 1_000),
+            Some("warm_schema_alias_preparation") => {
+                assert!(report.comparison.warm_schema_alias_p95_us >= 1_000)
+            }
+            Some(stage) => panic!("unexpected remaining stage: {stage}"),
+        }
+    }
+
+    #[test]
     fn fixed_fixture_repeats_structural_counters_without_requiring_identical_wall_clock() {
         let first = run_ci_fixture().expect("first fixture run succeeds");
         let second = run_ci_fixture().expect("second fixture run succeeds");
@@ -1228,16 +1888,19 @@ mod tests {
 
     #[test]
     fn report_compares_legacy_and_coalesced_writer_variants() {
+        let tool_pool_workload = run_tool_pool_ci_fixture().expect("tool pool fixture should run");
         let report = ConcurrentChatBenchmarkReport {
             schema: CONCURRENT_CHAT_BENCHMARK_SCHEMA,
             mode: HarnessMode::Quick.as_str().to_string(),
             warmup_samples: 0,
             measured_samples: 1,
             workloads: vec![run_ci_fixture().expect("CI fixture should run")],
+            tool_pool_workload,
         };
         let json = render_json(&report).expect("report serializes");
         validate_report_json(&json).expect("report schema validates");
         assert!(json.contains("\"legacy\""));
         assert!(json.contains("\"coalesced\""));
+        assert!(json.contains("\"pooled\""));
     }
 }

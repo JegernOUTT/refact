@@ -554,14 +554,15 @@ impl AppToolRegistry {
             .map(|scope| scope.effective_root().to_string_lossy().to_string())
     }
 
-    async fn fresh_tools_for_catalog(
+    async fn fresh_mutable_tools(
         &self,
         gcx: SharedGlobalContext,
         mode: &str,
         model_id: Option<&str>,
         catalog: &ToolCatalogSnapshot,
+        component: PerfComponent,
     ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
-        let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
+        let span = perf_diagnostics::span(component, None, None);
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
             self.tools_for_mode(gcx, mode, model_id).await,
         )
@@ -583,7 +584,13 @@ impl AppToolRegistry {
         catalog: &ToolCatalogSnapshot,
     ) -> TurnToolPool {
         let tools = self
-            .fresh_tools_for_catalog(gcx, mode, model_id, catalog)
+            .fresh_mutable_tools(
+                gcx,
+                mode,
+                model_id,
+                catalog,
+                PerfComponent::ToolMutableVectorBuild,
+            )
             .await;
         let pool = TurnToolPool::new(AppTurnToolPool::from_tools(tools));
         pool.record_initial_vector_build();
@@ -604,7 +611,13 @@ impl AppToolRegistry {
         catalog: &ToolCatalogSnapshot,
     ) -> Result<(), String> {
         let tools = self
-            .fresh_tools_for_catalog(gcx, mode, model_id, catalog)
+            .fresh_mutable_tools(
+                gcx,
+                mode,
+                model_id,
+                catalog,
+                PerfComponent::ToolPoolParallelExpansion,
+            )
             .await;
         Self::app_turn_tool_pool(pool)?
             .add_missing_tools(tools)
@@ -858,7 +871,13 @@ impl ToolRegistry for AppToolRegistry {
             }
         };
         let tools = self
-            .fresh_tools_for_catalog(self.gcx.clone(), mode, model_id, catalog)
+            .fresh_mutable_tools(
+                self.gcx.clone(),
+                mode,
+                model_id,
+                catalog,
+                PerfComponent::ToolMutableVectorBuild,
+            )
             .await;
         let catalog_desc = Self::find_catalog_descriptor(catalog, tool_name)?;
         let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
@@ -994,12 +1013,19 @@ impl ToolRegistry for AppToolRegistry {
             .downcast_ref::<Arc<AMutex<crate::at_commands::at_commands::AtCommandsContext>>>()
             .ok_or_else(|| "invalid AtCommandsContext passed to ToolRegistry".to_string())?
             .clone();
+        let lookup_span = perf_diagnostics::span(PerfComponent::ToolExecutionLookup, None, None);
         let gcx = {
             let cgcx = ccx.lock().await;
             cgcx.app.gcx.clone()
         };
         let tools = self
-            .fresh_tools_for_catalog(gcx.clone(), mode, model_id, catalog)
+            .fresh_mutable_tools(
+                gcx.clone(),
+                mode,
+                model_id,
+                catalog,
+                PerfComponent::ToolMutableVectorBuild,
+            )
             .await;
         let catalog_desc = match Self::find_catalog_descriptor(catalog, tool_name) {
             Some(desc) => desc,
@@ -1027,6 +1053,7 @@ impl ToolRegistry for AppToolRegistry {
                     cgcx.app = AppState::from_gcx(gcx.clone()).await;
                 }
                 let tool_call_id = tool_call_id.to_string();
+                lookup_span.finish_tool(PerfOutcome::Success, 1, 1, None);
                 let runtime_span = perf_diagnostics::span(PerfComponent::ToolRuntime, None, None);
                 let result = tool.tool_execute(ccx, &tool_call_id, &coerced_args).await;
                 let result = match result {
@@ -1058,6 +1085,7 @@ impl ToolRegistry for AppToolRegistry {
                 }));
             }
         }
+        lookup_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
         Ok(None)
     }
 
@@ -1089,6 +1117,7 @@ impl ToolRegistry for AppToolRegistry {
             .downcast_ref::<Arc<AMutex<crate::at_commands::at_commands::AtCommandsContext>>>()
             .ok_or_else(|| "invalid AtCommandsContext passed to ToolRegistry".to_string())?
             .clone();
+        let lookup_span = perf_diagnostics::span(PerfComponent::ToolExecutionLookup, None, None);
         let catalog_desc = match Self::find_catalog_descriptor(catalog, tool_name) {
             Some(desc) => desc,
             None => return Ok(None),
@@ -1119,6 +1148,7 @@ impl ToolRegistry for AppToolRegistry {
             let mut cgcx = ccx.lock().await;
             cgcx.app = AppState::from_gcx(gcx).await;
         }
+        lookup_span.finish_tool(PerfOutcome::Success, 1, 1, None);
         let runtime_span = perf_diagnostics::span(PerfComponent::ToolRuntime, None, None);
         let result = tool
             .tool_execute(ccx, &tool_call_id.to_string(), &coerced_args)

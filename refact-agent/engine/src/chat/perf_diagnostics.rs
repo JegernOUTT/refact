@@ -29,9 +29,13 @@ pub enum PerfComponent {
     SseLagged,
     ToolConfirmationWait,
     ToolCatalogBuild,
+    ToolMutableVectorBuild,
+    ToolPoolParallelExpansion,
     ToolAliasResolution,
     ToolConfirmationPreflight,
     ToolPolicyLookup,
+    ToolExecutionLookup,
+    ToolSemaphoreWait,
     ToolRuntime,
     ToolPreHook,
     ToolPostHook,
@@ -40,7 +44,7 @@ pub enum PerfComponent {
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 27] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -56,9 +60,13 @@ impl PerfComponent {
         Self::SseLagged,
         Self::ToolConfirmationWait,
         Self::ToolCatalogBuild,
+        Self::ToolMutableVectorBuild,
+        Self::ToolPoolParallelExpansion,
         Self::ToolAliasResolution,
         Self::ToolConfirmationPreflight,
         Self::ToolPolicyLookup,
+        Self::ToolExecutionLookup,
+        Self::ToolSemaphoreWait,
         Self::ToolRuntime,
         Self::ToolPreHook,
         Self::ToolPostHook,
@@ -83,9 +91,13 @@ impl PerfComponent {
             Self::SseLagged => "sse.lagged",
             Self::ToolConfirmationWait => "tool.confirmation_wait",
             Self::ToolCatalogBuild => "tool.catalog_build",
+            Self::ToolMutableVectorBuild => "tool.mutable_vector_build",
+            Self::ToolPoolParallelExpansion => "tool.pool_parallel_expansion",
             Self::ToolAliasResolution => "tool.alias_resolution",
             Self::ToolConfirmationPreflight => "tool.confirmation_preflight",
             Self::ToolPolicyLookup => "tool.policy_lookup",
+            Self::ToolExecutionLookup => "tool.execution_lookup",
+            Self::ToolSemaphoreWait => "tool.semaphore_wait",
             Self::ToolRuntime => "tool.runtime",
             Self::ToolPreHook => "tool.pre_hook",
             Self::ToolPostHook => "tool.post_hook",
@@ -652,7 +664,7 @@ mod tests {
             .iter()
             .map(|component| component.as_str())
             .collect();
-        assert_eq!(labels.len(), 24);
+        assert_eq!(labels.len(), 27);
         assert!(labels.iter().all(|label| label.len() <= 32));
         assert!(labels.contains(&"command.queue_wait"));
         assert!(labels.contains(&"stream.first_delta"));
@@ -660,6 +672,9 @@ mod tests {
         assert!(labels.contains(&"sse.broadcast"));
         assert!(labels.contains(&"sse.lagged"));
         assert!(labels.contains(&"tool.confirmation_wait"));
+        assert!(labels.contains(&"tool.mutable_vector_build"));
+        assert!(labels.contains(&"tool.pool_parallel_expansion"));
+        assert!(labels.contains(&"tool.execution_lookup"));
         assert_eq!(PerfOutcome::Success.as_str(), "success");
         assert_eq!(PerfOutcome::Failure.as_str(), "failure");
     }
