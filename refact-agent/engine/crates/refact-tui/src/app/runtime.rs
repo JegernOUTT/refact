@@ -1492,6 +1492,7 @@ fn spawn_subscription_task(
                                     return;
                                 }
                             }
+                            ChatSeqDecision::Suppress => {}
                             ChatSeqDecision::Resubscribe(message) => {
                                 let _ = tx
                                     .send(RuntimeEvent::ChatResubscribe {

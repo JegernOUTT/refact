@@ -513,6 +513,7 @@ impl ChatEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatSeqDecision {
     Apply,
+    Suppress,
     Resubscribe(String),
 }
 
@@ -538,18 +539,28 @@ impl ChatSeqTracker {
             ));
         };
         if event.kind == "snapshot" {
+            if self.last_seq.is_some_and(|last_seq| seq < last_seq) {
+                return ChatSeqDecision::Suppress;
+            }
             self.last_seq = Some(seq);
             return ChatSeqDecision::Apply;
         }
-        match self.last_seq.and_then(|last| last.checked_add(1)) {
-            Some(expected) if seq == expected => {
-                self.last_seq = Some(seq);
-                ChatSeqDecision::Apply
-            }
-            Some(expected) => ChatSeqDecision::Resubscribe(format!(
-                "SSE seq mismatch: expected {expected}, got {seq} for {} event",
-                event.kind
-            )),
+        match self.last_seq {
+            Some(last_seq) if seq <= last_seq => ChatSeqDecision::Suppress,
+            Some(last_seq) => match last_seq.checked_add(1) {
+                Some(expected) if seq == expected => {
+                    self.last_seq = Some(seq);
+                    ChatSeqDecision::Apply
+                }
+                Some(expected) => ChatSeqDecision::Resubscribe(format!(
+                    "SSE seq mismatch: expected {expected}, got {seq} for {} event",
+                    event.kind
+                )),
+                None => ChatSeqDecision::Resubscribe(format!(
+                    "SSE seq overflow after {last_seq} for {} event",
+                    event.kind
+                )),
+            },
             None => ChatSeqDecision::Resubscribe(format!(
                 "SSE stream started with {} event before snapshot",
                 event.kind
@@ -951,11 +962,22 @@ impl DaemonClient {
         chat_id: &str,
         content: &str,
     ) -> Result<(), ClientError> {
+        self.send_user_message_with_id(project_id, chat_id, &request_id("user-message"), content)
+            .await
+    }
+
+    pub async fn send_user_message_with_id(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+        content: &str,
+    ) -> Result<(), ClientError> {
         self.send_command(
             project_id,
             chat_id,
             json!({
-                "client_request_id": request_id("user-message"),
+                "client_request_id": client_request_id,
                 "type": "user_message",
                 "content": content,
             }),
@@ -1169,14 +1191,6 @@ fn sse_data_stream(response: reqwest::Response) -> BoxStream<'static, Result<Str
                     }
                     None => {
                         done = true;
-                        if !pending_utf8.is_empty() {
-                            return Some((
-                                Err(ClientError::Sse(
-                                    "incomplete UTF-8 sequence at SSE EOF".to_string(),
-                                )),
-                                (byte_stream, parser, pending_utf8, pending_events, done),
-                            ));
-                        }
                         pending_events.extend(
                             parser
                                 .finish()
@@ -1184,9 +1198,16 @@ fn sse_data_stream(response: reqwest::Response) -> BoxStream<'static, Result<Str
                                 .filter(|data| !data.trim().is_empty())
                                 .map(Ok),
                         );
-                        pending_events.push_back(Err(ClientError::SseDisconnect(
-                            "stream ended before the subscription was closed cleanly".to_string(),
-                        )));
+                        if !pending_utf8.is_empty() {
+                            pending_events.push_back(Err(ClientError::Sse(
+                                "incomplete UTF-8 sequence at SSE EOF".to_string(),
+                            )));
+                        } else {
+                            pending_events.push_back(Err(ClientError::SseDisconnect(
+                                "stream ended before the subscription was closed cleanly"
+                                    .to_string(),
+                            )));
+                        }
                     }
                 }
             }
@@ -1561,7 +1582,7 @@ fn url_encode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
-fn request_id(prefix: &str) -> String {
+pub(crate) fn request_id(prefix: &str) -> String {
     format!("tui-{prefix}-{}", uuid::Uuid::new_v4())
 }
 
@@ -1729,6 +1750,37 @@ mod tests {
         let _ = stream.set_read_timeout(None);
     }
 
+    fn read_request_body(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+        let mut request = Vec::new();
+        let mut buffer = [0; 256];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).unwrap();
+            request.extend_from_slice(&buffer[..read]);
+        }
+        let header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then_some(value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or_default();
+        while request.len() < header_end + content_length {
+            let read = stream.read(&mut buffer).unwrap();
+            request.extend_from_slice(&buffer[..read]);
+        }
+        let _ = stream.set_read_timeout(None);
+        request[header_end..header_end + content_length].to_vec()
+    }
+
     #[test]
     fn sse_parser_handles_partial_frames() {
         let mut parser = SseLineParser::default();
@@ -1747,6 +1799,50 @@ mod tests {
         assert_eq!(event.chat_id.as_deref(), Some("c"));
         assert_eq!(event.seq, Some(7));
         assert_eq!(event.kind, "stream_started");
+    }
+
+    #[test]
+    fn stale_snapshot_does_not_rewind_sequence_cursor() {
+        let mut tracker = ChatSeqTracker::new();
+        let snapshot = ChatEvent {
+            chat_id: Some("chat".to_string()),
+            seq: Some(100),
+            kind: "snapshot".to_string(),
+            raw: json!({}),
+        };
+        let stale_snapshot = ChatEvent {
+            seq: Some(40),
+            ..snapshot.clone()
+        };
+        let next_event = ChatEvent {
+            seq: Some(101),
+            kind: "runtime_updated".to_string(),
+            ..snapshot.clone()
+        };
+
+        assert_eq!(tracker.observe(&snapshot), ChatSeqDecision::Apply);
+        assert_eq!(tracker.observe(&stale_snapshot), ChatSeqDecision::Suppress);
+        assert_eq!(tracker.observe(&next_event), ChatSeqDecision::Apply);
+    }
+
+    #[test]
+    fn duplicate_event_is_suppressed_without_resubscription() {
+        let mut tracker = ChatSeqTracker::new();
+        let snapshot = ChatEvent {
+            chat_id: Some("chat".to_string()),
+            seq: Some(1),
+            kind: "snapshot".to_string(),
+            raw: json!({}),
+        };
+        let event = ChatEvent {
+            seq: Some(2),
+            kind: "runtime_updated".to_string(),
+            ..snapshot.clone()
+        };
+
+        assert_eq!(tracker.observe(&snapshot), ChatSeqDecision::Apply);
+        assert_eq!(tracker.observe(&event), ChatSeqDecision::Apply);
+        assert_eq!(tracker.observe(&event), ChatSeqDecision::Suppress);
     }
 
     #[test]
@@ -1864,6 +1960,60 @@ mod tests {
         assert_eq!(event.seq, Some(0));
         assert!(matches!(error, ClientError::SseDisconnect(_)));
         assert!(error.is_unreachable());
+    }
+
+    #[tokio::test]
+    async fn sse_utf8_eof_flushes_buffered_event_before_error() {
+        let server = spawn_chat_sse_bytes_server(
+            b"data: {\"chat_id\":\"chat\",\"seq\":0,\"type\":\"snapshot\"}\n\xE2",
+        );
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+        let mut stream = client.subscribe_chat("project", "chat").await.unwrap();
+
+        let event = stream.next().await.unwrap().unwrap();
+        let error = stream.next().await.unwrap().unwrap_err();
+        server.stop();
+
+        assert_eq!(event.kind, "snapshot");
+        assert_eq!(event.seq, Some(0));
+        assert!(matches!(error, ClientError::Sse(message) if message.contains("incomplete UTF-8")));
+    }
+
+    #[tokio::test]
+    async fn repeated_user_message_delivery_reuses_request_id() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (requests, received) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let body = read_request_body(&mut stream);
+                requests.send(body).unwrap();
+                stream
+                    .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                    .unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        let client = DaemonClient::new(format!("http://{addr}"), None).unwrap();
+
+        client
+            .send_user_message_with_id("project", "chat", "request-1", "hello")
+            .await
+            .unwrap();
+        client
+            .send_user_message_with_id("project", "chat", "request-1", "hello")
+            .await
+            .unwrap();
+
+        let first: Value = serde_json::from_slice(&received.recv().unwrap()).unwrap();
+        let second: Value = serde_json::from_slice(&received.recv().unwrap()).unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(first["client_request_id"], "request-1");
+        assert_eq!(second["client_request_id"], "request-1");
+        assert_eq!(first["content"], "hello");
+        assert_eq!(second["content"], "hello");
     }
 
     #[tokio::test]

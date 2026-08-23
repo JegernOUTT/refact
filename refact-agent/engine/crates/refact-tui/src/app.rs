@@ -4138,7 +4138,7 @@ impl App {
                 attached_files,
                 depth,
             } => self.handle_subchat_update(&tool_call_id, &subchat_id, &attached_files, depth),
-            SseEvent::Unknown { .. } => {}
+            SseEvent::Ack { .. } | SseEvent::Unknown { .. } => {}
         }
         AppAction::None
     }
@@ -10829,7 +10829,7 @@ new-chat = "ctrl-x"
         );
         let duplicate = chat_event(&app, 2, "stream_delta", delta);
         let decision = apply_tracked(&mut app, &mut tracker, duplicate);
-        assert!(matches!(decision, ChatSeqDecision::Resubscribe(_)));
+        assert_eq!(decision, ChatSeqDecision::Suppress);
         assert_eq!(assistant_text(&app), "once\n");
     }
 

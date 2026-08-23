@@ -23,6 +23,11 @@ pub enum SseEvent {
         finish_reason: Option<Value>,
     },
     RuntimeUpdated,
+    Ack {
+        client_request_id: String,
+        accepted: bool,
+        result: Option<Value>,
+    },
     QueueUpdated {
         queue_size: usize,
         queued_items: Vec<Value>,
@@ -93,6 +98,18 @@ impl SseEvent {
                 finish_reason: raw.get("finish_reason").cloned(),
             },
             "runtime_updated" => Self::RuntimeUpdated,
+            "ack" => Self::Ack {
+                client_request_id: raw
+                    .get("client_request_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                accepted: raw
+                    .get("accepted")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                result: raw.get("result").cloned(),
+            },
             "queue_updated" => Self::QueueUpdated {
                 queue_size: raw
                     .get("queue_size")
@@ -1039,6 +1056,29 @@ mod tests {
                 assert_eq!(subchat_id, "1/2: search({})");
                 assert_eq!(attached_files, vec!["src/lib.rs", "src/app.rs"]);
                 assert_eq!(depth, 7);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ack_parses_delivery_correlation_fields() {
+        let event = SseEvent::from_raw(&json!({
+            "type": "ack",
+            "client_request_id": "request-1",
+            "accepted": true,
+            "result": {"queued": true}
+        }));
+
+        match event {
+            SseEvent::Ack {
+                client_request_id,
+                accepted,
+                result,
+            } => {
+                assert_eq!(client_request_id, "request-1");
+                assert!(accepted);
+                assert_eq!(result, Some(json!({"queued": true})));
             }
             other => panic!("unexpected event: {other:?}"),
         }

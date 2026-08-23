@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use refact_tui::app::{App, SessionState, TranscriptItem};
 use refact_tui::client::{
     discover_daemon_endpoint, discover_daemon_endpoint_from, resolve_daemon_endpoint, ChatEvent,
-    ChatSeqDecision, ChatSeqTracker, DaemonClient, OpenProjectResponse, ToolDecision,
+    ChatSeqDecision, ChatSeqTracker, ClientError, DaemonClient, OpenProjectResponse, ToolDecision,
 };
 use refact_tui::protocol::{DeltaOp, TranscriptState};
 use ratatui::backend::TestBackend;
@@ -162,6 +162,7 @@ fn run_fixture(name: &str) -> FixtureRun {
             ChatSeqDecision::Apply => {
                 app.apply_chat_event(event);
             }
+            ChatSeqDecision::Suppress => {}
             ChatSeqDecision::Resubscribe(message) => {
                 return FixtureRun {
                     app,
@@ -188,6 +189,7 @@ fn run_fixture_with_recovery_snapshots(name: &str, native_scrollback: bool) -> F
             ChatSeqDecision::Apply => {
                 app.apply_chat_event(event);
             }
+            ChatSeqDecision::Suppress => {}
             ChatSeqDecision::Resubscribe(message) => {
                 recovery.get_or_insert(message);
                 tracker.reset();
@@ -754,7 +756,11 @@ async fn fake_stream_seq_gap_triggers_recovery_without_applying_gap_delta() {
     let mut recovery = None;
 
     while let Some(event) = futures::StreamExt::next(&mut stream).await {
-        let event = event.unwrap();
+        let event = match event {
+            Ok(event) => event,
+            Err(ClientError::SseDisconnect(_)) => break,
+            Err(error) => panic!("unexpected stream error: {error}"),
+        };
         match tracker.observe(&event) {
             ChatSeqDecision::Apply => {
                 if event.kind == "stream_delta" {
@@ -765,6 +771,7 @@ async fn fake_stream_seq_gap_triggers_recovery_without_applying_gap_delta() {
                     }
                 }
             }
+            ChatSeqDecision::Suppress => {}
             ChatSeqDecision::Resubscribe(message) => {
                 recovery = Some(message);
                 break;
@@ -777,7 +784,7 @@ async fn fake_stream_seq_gap_triggers_recovery_without_applying_gap_delta() {
 }
 
 #[tokio::test]
-async fn duplicate_seq_triggers_recovery_without_duplicate_content() {
+async fn duplicate_seq_is_suppressed_without_duplicate_content() {
     let state = State::with_chat_script(vec![
         json!({"chat_id": "chat-1", "seq": "0", "type": "snapshot", "thread": {"id": "chat-1", "model": "", "mode": "agent"}, "runtime": {"state": "idle"}, "messages": []}),
         json!({"chat_id": "chat-1", "seq": "1", "type": "stream_started"}),
@@ -792,7 +799,11 @@ async fn duplicate_seq_triggers_recovery_without_duplicate_content() {
     let mut recovery = None;
 
     while let Some(event) = futures::StreamExt::next(&mut stream).await {
-        let event = event.unwrap();
+        let event = match event {
+            Ok(event) => event,
+            Err(ClientError::SseDisconnect(_)) => break,
+            Err(error) => panic!("unexpected stream error: {error}"),
+        };
         match tracker.observe(&event) {
             ChatSeqDecision::Apply => {
                 if event.kind == "stream_delta" {
@@ -803,6 +814,7 @@ async fn duplicate_seq_triggers_recovery_without_duplicate_content() {
                     }
                 }
             }
+            ChatSeqDecision::Suppress => {}
             ChatSeqDecision::Resubscribe(message) => {
                 recovery = Some(message);
                 break;
@@ -811,7 +823,7 @@ async fn duplicate_seq_triggers_recovery_without_duplicate_content() {
     }
 
     assert_eq!(content, "once");
-    assert!(recovery.unwrap().contains("expected 3, got 2"));
+    assert_eq!(recovery, None);
 }
 
 async fn spawn_server(state: State) -> String {
