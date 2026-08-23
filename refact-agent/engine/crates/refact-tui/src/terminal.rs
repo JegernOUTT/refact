@@ -564,17 +564,36 @@ fn install_unix_signal_handlers() -> io::Result<()> {
 
 #[cfg(unix)]
 extern "C" fn terminal_signal_handler(signal: libc::c_int) {
-    let fd = SIGNAL_RESTORE_WRITE_FD.load(Ordering::Relaxed);
-    if fd >= 0 {
-        let signal = signal as u8;
-        unsafe {
-            libc::write(fd, std::ptr::addr_of!(signal).cast(), 1);
-        }
+    let _ = write_terminal_signal(SIGNAL_RESTORE_WRITE_FD.load(Ordering::Relaxed), signal);
+}
+
+#[cfg(unix)]
+fn write_terminal_signal(fd: libc::c_int, signal: libc::c_int) -> Option<libc::ssize_t> {
+    if fd < 0 {
+        return None;
     }
+
+    let signal = signal as u8;
+    unsafe { Some(libc::write(fd, std::ptr::addr_of!(signal).cast(), 1)) }
 }
 
 #[cfg(unix)]
 fn wait_for_terminal_signal(read_fd: libc::c_int) {
+    let mut ops = CrosstermTerminalOps::new(io::stdout());
+    let Some(signal) = wait_for_terminal_signal_with_ops(read_fd, &mut ops) else {
+        return;
+    };
+
+    unsafe {
+        libc::_exit(128 + i32::from(signal));
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_terminal_signal_with_ops<O: TerminalOps>(
+    read_fd: libc::c_int,
+    ops: &mut O,
+) -> Option<u8> {
     let mut signal = 0u8;
     loop {
         let bytes_read = unsafe { libc::read(read_fd, std::ptr::addr_of_mut!(signal).cast(), 1) };
@@ -587,16 +606,14 @@ fn wait_for_terminal_signal(read_fd: libc::c_int) {
         unsafe {
             libc::close(read_fd);
         }
-        return;
+        return None;
     }
     unsafe {
         libc::close(read_fd);
     }
 
-    let _ = restore_terminal(&mut io::stdout());
-    unsafe {
-        libc::_exit(128 + i32::from(signal));
-    }
+    let _ = restore_terminal_ops(ops);
+    Some(signal)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -912,6 +929,104 @@ mod tests {
 
         fn set_title(&mut self, _title: &str) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn unix_pipe() -> [libc::c_int; 2] {
+        let mut fds = [-1; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        fds
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_handler_write_emits_one_signal_byte() {
+        let [read_fd, write_fd] = unix_pipe();
+
+        assert_eq!(write_terminal_signal(write_fd, libc::SIGTERM), Some(1));
+
+        let mut signal = 0u8;
+        assert_eq!(
+            unsafe { libc::read(read_fd, std::ptr::addr_of_mut!(signal).cast(), 1) },
+            1
+        );
+        assert_eq!(signal, libc::SIGTERM as u8);
+
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_handler_write_skips_negative_fd() {
+        assert_eq!(write_terminal_signal(-1, libc::SIGINT), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_handler_write_drops_signal_when_pipe_is_full() {
+        let [read_fd, write_fd] = unix_pipe();
+        set_nonblocking(write_fd).unwrap();
+        let fill = [0u8; 4096];
+
+        loop {
+            if unsafe { libc::write(write_fd, fill.as_ptr().cast(), fill.len()) } == -1 {
+                assert_eq!(
+                    io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EAGAIN)
+                );
+                break;
+            }
+        }
+
+        assert_eq!(write_terminal_signal(write_fd, libc::SIGINT), Some(-1));
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::EAGAIN)
+        );
+
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_waiter_restores_terminal_with_mock_ops() {
+        let [read_fd, write_fd] = unix_pipe();
+        assert_eq!(write_terminal_signal(write_fd, libc::SIGINT), Some(1));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let waiter_calls = calls.clone();
+
+        let signal = std::thread::spawn(move || {
+            let mut ops = FakeTerminalOps {
+                calls: waiter_calls,
+                fail_on: None,
+            };
+            wait_for_terminal_signal_with_ops(read_fd, &mut ops)
+        })
+        .join()
+        .unwrap();
+
+        assert_eq!(signal, Some(libc::SIGINT as u8));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                TerminalStep::ShowCursor,
+                TerminalStep::DisableBracketedPaste,
+                TerminalStep::DisableFocusChange,
+                TerminalStep::DisableMouseCapture,
+                TerminalStep::LeaveAlternateScreen,
+                TerminalStep::DisableRawMode,
+            ]
+        );
+
+        unsafe {
+            libc::close(write_fd);
         }
     }
 
