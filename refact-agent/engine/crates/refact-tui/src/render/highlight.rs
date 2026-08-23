@@ -9,7 +9,7 @@ use syntect::highlighting::{
 };
 use syntect::parsing::{Scope, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
-use two_face::theme::EmbeddedThemeName;
+use two_face::theme::{EmbeddedThemeName, LazyThemeSet};
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME: OnceLock<RwLock<Theme>> = OnceLock::new();
@@ -36,10 +36,12 @@ pub fn set_theme_override(name: Option<String>, theme_home: Option<PathBuf>) -> 
     let warning = validate_theme_name(name.as_deref(), theme_home.as_deref());
     write_lock(theme_override_lock(), name.clone());
     write_lock(theme_home_lock(), theme_home.clone());
-    if let Some(theme) = resolve_theme_with_override(name.as_deref(), theme_home.as_deref()) {
-        set_syntax_theme(theme);
-    }
-    warning
+    let (theme, fallback_warning) = theme_or_builtin_fallback(resolve_theme_with_override(
+        name.as_deref(),
+        theme_home.as_deref(),
+    ));
+    set_syntax_theme(theme);
+    warning.or(fallback_warning)
 }
 
 pub fn set_syntax_theme(theme: Theme) {
@@ -59,9 +61,7 @@ pub fn current_syntax_theme() -> Theme {
 
 pub fn validate_theme_name(name: Option<&str>, theme_home: Option<&Path>) -> Option<String> {
     let name = name?;
-    if parse_theme_name(name).is_some()
-        || custom_theme_path(name, theme_home).is_some_and(|path| path.is_file())
-    {
+    if resolve_theme_by_name(name, theme_home).is_some() {
         return None;
     }
     Some(format!(
@@ -70,9 +70,8 @@ pub fn validate_theme_name(name: Option<&str>, theme_home: Option<&Path>) -> Opt
 }
 
 pub fn resolve_theme_by_name(name: &str, theme_home: Option<&Path>) -> Option<Theme> {
-    let theme_set = two_face::theme::extra();
     if let Some(embedded) = parse_theme_name(name) {
-        return Some(theme_set.get(embedded).clone());
+        return embedded_theme(embedded);
     }
     custom_theme_path(name, theme_home).and_then(|path| ThemeSet::get_theme(path).ok())
 }
@@ -160,13 +159,14 @@ pub fn highlight_code_to_styled_spans(code: &str, lang: &str) -> Option<Vec<Vec<
 
 fn theme_lock() -> &'static RwLock<Theme> {
     THEME.get_or_init(|| {
-        RwLock::new(
-            resolve_theme_with_override(
-                theme_override_name().as_deref(),
-                configured_theme_home().as_deref(),
-            )
-            .unwrap(),
-        )
+        let (theme, warning) = theme_or_builtin_fallback(resolve_theme_with_override(
+            theme_override_name().as_deref(),
+            configured_theme_home().as_deref(),
+        ));
+        if let Some(warning) = warning {
+            tracing::warn!("{warning}");
+        }
+        RwLock::new(theme)
     })
 }
 
@@ -208,6 +208,25 @@ fn resolve_theme_with_override(name: Option<&str>, theme_home: Option<&Path>) ->
         }
     }
     resolve_theme_by_name(adaptive_default_theme_name(), None)
+}
+
+fn embedded_theme(name: EmbeddedThemeName) -> Option<Theme> {
+    let theme_set = LazyThemeSet::from(two_face::theme::extra());
+    embedded_theme_from_set(&theme_set, name)
+}
+
+fn embedded_theme_from_set(theme_set: &LazyThemeSet, name: EmbeddedThemeName) -> Option<Theme> {
+    theme_set.get(name.as_name()).cloned()
+}
+
+fn theme_or_builtin_fallback(theme: Option<Theme>) -> (Theme, Option<String>) {
+    match theme {
+        Some(theme) => (theme, None),
+        None => (
+            embedded_theme(EmbeddedThemeName::Ansi).unwrap_or_default(),
+            Some("Syntax theme unavailable. Using the ANSI fallback theme.".to_string()),
+        ),
+    }
 }
 
 fn custom_theme_path(name: &str, theme_home: Option<&Path>) -> Option<PathBuf> {
@@ -631,5 +650,19 @@ mod tests {
         ] {
             assert!(find_syntax(lang).is_some(), "missing syntax for {lang}");
         }
+    }
+
+    #[test]
+    fn missing_embedded_theme_uses_builtin_fallback() {
+        let missing_themes = LazyThemeSet::from(&ThemeSet::default());
+        let missing_theme =
+            embedded_theme_from_set(&missing_themes, EmbeddedThemeName::CatppuccinMocha);
+        let (theme, warning) = theme_or_builtin_fallback(missing_theme);
+
+        assert_eq!(
+            warning.as_deref(),
+            Some("Syntax theme unavailable. Using the ANSI fallback theme.")
+        );
+        assert!(highlight_to_line_spans_with_theme("fn main() {}", "rust", &theme).is_some());
     }
 }

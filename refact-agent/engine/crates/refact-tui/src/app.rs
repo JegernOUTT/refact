@@ -9673,6 +9673,22 @@ bell = false
     }
 
     #[test]
+    fn app_config_reports_invalid_multibyte_theme_color() {
+        let mut app = App::new(project());
+        app.test_apply_tui_config_content(
+            r##"
+[theme]
+accent = "#ééé"
+"##,
+        );
+
+        assert_eq!(app.theme().name(), "dark");
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("invalid theme accent color"))
+        }));
+    }
+
+    #[test]
     fn app_notification_gate_disables_pending_notifications() {
         let mut app = App::new(project());
         app.test_set_notifications_config(NotificationConfig::new(false, true, Duration::ZERO));

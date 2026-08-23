@@ -172,7 +172,7 @@ impl TuiTheme {
 
     pub fn from_toml_str(content: &str) -> Result<Self, String> {
         let config: ThemeFileConfig = toml::from_str(content).map_err(|error| error.to_string())?;
-        Ok(Self::from_config(config, None))
+        Self::from_config(config, None)
     }
 
     pub fn from_toml_str_with_custom_dir(
@@ -180,7 +180,7 @@ impl TuiTheme {
         custom_dir: Option<&Path>,
     ) -> Result<Self, String> {
         let config: ThemeFileConfig = toml::from_str(content).map_err(|error| error.to_string())?;
-        Ok(Self::from_config(config, custom_dir))
+        Self::from_config(config, custom_dir)
     }
 
     pub fn from_config_file_content(content: Option<&str>) -> Result<Self, String> {
@@ -225,7 +225,7 @@ impl TuiTheme {
         }
     }
 
-    fn from_config(config: ThemeFileConfig, custom_dir: Option<&Path>) -> Self {
+    fn from_config(config: ThemeFileConfig, custom_dir: Option<&Path>) -> Result<Self, String> {
         let mut theme = config
             .theme
             .as_ref()
@@ -233,39 +233,24 @@ impl TuiTheme {
             .and_then(|name| Self::named_or_syntax(name, custom_dir))
             .unwrap_or_default();
         if let Some(section) = config.theme {
-            theme.apply_overrides(section);
+            theme.apply_overrides(section)?;
         }
-        theme
+        Ok(theme)
     }
 
-    fn apply_overrides(&mut self, section: ThemeSection) {
+    fn apply_overrides(&mut self, section: ThemeSection) -> Result<(), String> {
         if let Some(value) = section.name {
             self.name = value;
         }
-        if let Some(value) = section.accent.and_then(parse_style) {
-            self.accent = value;
-        }
-        if let Some(value) = section.muted.and_then(parse_style) {
-            self.muted = value;
-        }
-        if let Some(value) = section.text.and_then(parse_style) {
-            self.text = value;
-        }
-        if let Some(value) = section.warning.and_then(parse_style) {
-            self.warning = value;
-        }
-        if let Some(value) = section.error.and_then(parse_style) {
-            self.error = value;
-        }
-        if let Some(value) = section.success.and_then(parse_style) {
-            self.success = value;
-        }
-        if let Some(value) = section.highlight.and_then(parse_style) {
-            self.highlight = value;
-        }
-        if let Some(value) = section.border.and_then(parse_style) {
-            self.border = value;
-        }
+        apply_color_override(&mut self.accent, ThemeRole::Accent, section.accent)?;
+        apply_color_override(&mut self.muted, ThemeRole::Muted, section.muted)?;
+        apply_color_override(&mut self.text, ThemeRole::Text, section.text)?;
+        apply_color_override(&mut self.warning, ThemeRole::Warning, section.warning)?;
+        apply_color_override(&mut self.error, ThemeRole::Error, section.error)?;
+        apply_color_override(&mut self.success, ThemeRole::Success, section.success)?;
+        apply_color_override(&mut self.highlight, ThemeRole::Highlight, section.highlight)?;
+        apply_color_override(&mut self.border, ThemeRole::Border, section.border)?;
+        Ok(())
     }
 }
 
@@ -297,8 +282,18 @@ struct ThemeSection {
     border: Option<String>,
 }
 
-fn parse_style(value: String) -> Option<Style> {
-    parse_color(&value).map(|color| Style::default().fg(color))
+fn apply_color_override(
+    target: &mut Style,
+    role: ThemeRole,
+    value: Option<String>,
+) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    *target = parse_color(&value)
+        .map(|color| Style::default().fg(color))
+        .ok_or_else(|| format!("invalid theme {} color: {value}", role.name()))?;
+    Ok(())
 }
 
 fn parse_color(value: &str) -> Option<Color> {
@@ -315,7 +310,7 @@ fn parse_color(value: &str) -> Option<Color> {
         "darkgray" | "dark-gray" | "darkgrey" | "dark-grey" => Some(Color::DarkGray),
         "white" => Some(Color::White),
         "reset" | "plain" | "default" => Some(Color::Reset),
-        value if value.starts_with('#') && value.len() == 7 => {
+        value if value.len() == 7 && value.is_ascii() && value.starts_with('#') => {
             let red = u8::from_str_radix(&value[1..3], 16).ok()?;
             let green = u8::from_str_radix(&value[3..5], 16).ok()?;
             let blue = u8::from_str_radix(&value[5..7], 16).ok()?;
@@ -371,5 +366,18 @@ muted = "dark-gray"
         assert_eq!(theme.style(ThemeRole::Text).fg, Some(Color::Black));
         assert_eq!(TuiTheme::dark().syntax_theme_name(), "catppuccin-mocha");
         assert_eq!(TuiTheme::light().syntax_theme_name(), "catppuccin-latte");
+    }
+
+    #[test]
+    fn rejects_multibyte_color_values_without_slicing_them() {
+        let error = TuiTheme::from_toml_str(
+            r##"
+[theme]
+accent = "#ééé"
+"##,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("invalid theme accent color"));
     }
 }

@@ -95,9 +95,17 @@ fn skip_escape(bytes: &[u8], index: usize) -> usize {
     match bytes[index] {
         b'[' => skip_csi(bytes, index + 1),
         b']' | b'P' | b'^' | b'_' | b'X' => skip_control_string(bytes, index + 1),
-        0x20..=0x2f => (index + 2).min(bytes.len()),
+        0x20..=0x2f => skip_char(bytes, index + 1),
         _ => (index + 1).min(bytes.len()),
     }
+}
+
+fn skip_char(bytes: &[u8], index: usize) -> usize {
+    let mut next = (index + 1).min(bytes.len());
+    while next < bytes.len() && bytes[next] & 0b1100_0000 == 0b1000_0000 {
+        next += 1;
+    }
+    next
 }
 
 fn skip_csi(bytes: &[u8], mut index: usize) -> usize {
@@ -153,5 +161,10 @@ mod tests {
         assert_eq!(value.get("command").unwrap(), "echo");
         assert_eq!(value["command"], "echo");
         assert_eq!(value["items"][0], "a b");
+    }
+
+    #[test]
+    fn skips_escape_intermediates_without_splitting_utf8() {
+        assert_eq!(sanitize_tool_text("\x1b \u{00e9}"), "");
     }
 }
