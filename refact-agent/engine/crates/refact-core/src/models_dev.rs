@@ -1080,6 +1080,36 @@ mod tests {
     }
 
     #[test]
+    fn model_caps_expose_typed_pricing_only_for_complete_published_costs() {
+        let priced = models_dev_model_to_model_caps(
+            "anthropic",
+            &test_provider(),
+            &test_model(Some(ModelsDevCost {
+                input: Some(3.0),
+                output: Some(15.0),
+                cache_read: Some(0.3),
+                cache_write: Some(3.75),
+                ..Default::default()
+            })),
+        );
+        let unpriced = models_dev_model_to_model_caps(
+            "anthropic",
+            &test_provider(),
+            &test_model(Some(ModelsDevCost {
+                input: Some(3.0),
+                ..Default::default()
+            })),
+        );
+
+        let pricing = priced.pricing.expect("published price is typed");
+        assert_eq!(pricing.prompt, 3.0);
+        assert_eq!(pricing.generated, 15.0);
+        assert_eq!(pricing.cache_read, Some(0.3));
+        assert_eq!(pricing.cache_creation, Some(3.75));
+        assert!(unpriced.pricing.is_none());
+    }
+
+    #[test]
     fn model_caps_do_not_enable_cache_control_when_long_context_cache_pricing_exists() {
         let model = test_model(Some(ModelsDevCost {
             input: Some(3.0),

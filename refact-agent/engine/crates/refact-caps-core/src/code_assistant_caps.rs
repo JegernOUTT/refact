@@ -70,6 +70,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)]
     fn default_caps_preserves_empty_runtime_fields() {
         let caps = CodeAssistantCaps::default();
 

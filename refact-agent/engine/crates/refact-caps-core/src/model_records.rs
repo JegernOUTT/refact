@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use refact_core::llm_types::{BaseModelRecord, HasBaseModelRecord, default_true};
-use refact_core::provider_types::LiveModelFields;
+use refact_core::provider_types::{LiveModelFields, ModelPricing};
 
 #[derive(Debug, Serialize, Clone, Deserialize)]
 pub struct ChatModelRecord {
@@ -45,6 +45,8 @@ pub struct ChatModelRecord {
     pub supports_strict_tools: bool,
     #[serde(default = "default_true")]
     pub supports_temperature: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<ModelPricing>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub available_providers: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,6 +76,7 @@ impl Default for ChatModelRecord {
             supports_parallel_tools: false,
             supports_strict_tools: false,
             supports_temperature: default_true(),
+            pricing: None,
             available_providers: Vec::new(),
             selected_provider: None,
             live_fields: LiveModelFields::default(),
@@ -187,6 +190,7 @@ impl HasBaseModelRecord for CompletionModelRecord {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CapsMetadata {
+    #[deprecated(note = "Compatibility field; use chat_models.*.pricing instead")]
     #[serde(default = "default_pricing")]
     pub pricing: serde_json::Value,
     #[serde(default)]
@@ -197,6 +201,7 @@ pub fn default_pricing() -> serde_json::Value {
     serde_json::json!({})
 }
 
+#[allow(deprecated)]
 impl Default for CapsMetadata {
     fn default() -> Self {
         Self {

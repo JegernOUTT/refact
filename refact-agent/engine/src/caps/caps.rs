@@ -409,12 +409,14 @@ fn build_chat_model_record(
         } else {
             model.supports_temperature
         },
+        pricing: model.pricing.clone(),
         available_providers: model.available_providers.clone(),
         selected_provider: model.selected_provider.clone(),
         live_fields: model.live_fields.clone(),
     }
 }
 
+#[allow(deprecated)]
 pub async fn populate_chat_models_from_providers(
     caps: &mut CodeAssistantCaps,
     gcx: Arc<GlobalContext>,
@@ -799,6 +801,7 @@ async fn take_models_dev_startup_refresh_flag(gcx: Arc<GlobalContext>) -> bool {
     }
 }
 
+#[allow(deprecated)]
 pub async fn load_caps(
     _cmdline: crate::global_context::CommandLine,
     gcx: Arc<GlobalContext>,
@@ -1214,7 +1217,7 @@ mod tests {
     use indexmap::IndexMap;
     use refact_core::provider_types::{
         CustomModelConfig, LiveModelFields, available_model_from_catalog_and_live,
-        merge_custom_models,
+        merge_custom_models, ModelPricing,
     };
     use std::collections::HashSet;
 
@@ -1289,6 +1292,64 @@ mod tests {
         assert!(record.supports_clicks);
         assert_eq!(record.base.n_ctx, 128_000);
         assert_eq!(record.max_output_tokens, Some(16_384));
+    }
+
+    #[test]
+    fn caps_payload_serializes_typed_model_pricing_and_omits_unknown_pricing() {
+        let priced_caps = ModelCapabilities {
+            n_ctx: 128_000,
+            pricing: Some(ModelPricing {
+                prompt: 2.0,
+                generated: 8.0,
+                cache_read: None,
+                cache_creation: None,
+                context_over_200k: None,
+            }),
+            ..Default::default()
+        };
+        let priced_model = AvailableModel::from_caps("priced", &priced_caps, true, None);
+        let unpriced_model = AvailableModel::from_caps(
+            "unpriced",
+            &ModelCapabilities {
+                n_ctx: 128_000,
+                ..Default::default()
+            },
+            true,
+            None,
+        );
+        let mut caps = CodeAssistantCaps::default();
+        for model in [&priced_model, &unpriced_model] {
+            let record = build_chat_model_record(
+                "provider",
+                &[],
+                model,
+                &HashMap::new(),
+                WireFormat::OpenaiChatCompletions,
+                "https://example.com/v1/chat/completions",
+                "",
+                "",
+                "",
+                &HashMap::new(),
+                None,
+                true,
+            );
+            caps.chat_models
+                .insert(record.base.id.clone(), Arc::new(record));
+        }
+
+        let payload = serde_json::to_value(caps).unwrap();
+
+        assert_eq!(
+            payload["chat_models"]["provider/priced"]["pricing"]["prompt"],
+            serde_json::json!(2.0)
+        );
+        assert_eq!(
+            payload["chat_models"]["provider/priced"]["pricing"]["generated"],
+            serde_json::json!(8.0)
+        );
+        assert!(payload["chat_models"]["provider/unpriced"]
+            .get("pricing")
+            .is_none());
     }
 
     #[test]
