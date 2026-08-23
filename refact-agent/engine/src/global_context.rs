@@ -354,7 +354,7 @@ pub struct GlobalContext {
     pub privacy_settings: Arc<StdRwLock<Arc<PrivacySettings>>>,
     pub privacy_policy_load: Arc<StdRwLock<refact_privacy::PolicyLoad>>,
     pub privacy_observation_runtime: Arc<StdRwLock<PrivacyObservationRuntimeState>>,
-    pub indexing_everywhere: Arc<crate::files_blocklist::IndexingEverywhere>,
+    pub indexing_everywhere: Arc<StdRwLock<Arc<crate::files_blocklist::IndexingEverywhere>>>,
     pub integration_sessions:
         Arc<AMutex<HashMap<String, Arc<AMutex<Box<dyn IntegrationSession>>>>>>,
     pub browser_runtimes: Arc<AMutex<HashMap<String, Arc<AMutex<BrowserRuntime>>>>>,
@@ -855,7 +855,9 @@ pub async fn create_global_context(
         privacy_observation_runtime: Arc::new(StdRwLock::new(
             PrivacyObservationRuntimeState::default(),
         )),
-        indexing_everywhere: Arc::new(crate::files_blocklist::IndexingEverywhere::default()),
+        indexing_everywhere: Arc::new(StdRwLock::new(Arc::new(
+            crate::files_blocklist::IndexingEverywhere::default(),
+        ))),
         integration_sessions: Arc::new(AMutex::new(HashMap::new())),
         browser_runtimes: Arc::new(AMutex::new(HashMap::new())),
         init_shadow_repos_background_task_holder: BackgroundTasksHolder::new(vec![]),
@@ -1142,7 +1144,9 @@ pub mod tests {
             privacy_observation_runtime: Arc::new(StdRwLock::new(
                 PrivacyObservationRuntimeState::default(),
             )),
-            indexing_everywhere: Arc::new(crate::files_blocklist::IndexingEverywhere::default()),
+            indexing_everywhere: Arc::new(StdRwLock::new(Arc::new(
+                crate::files_blocklist::IndexingEverywhere::default(),
+            ))),
             integration_sessions: Arc::new(AMutex::new(HashMap::new())),
             browser_runtimes: Arc::new(AMutex::new(HashMap::new())),
             init_shadow_repos_background_task_holder: BackgroundTasksHolder::new(vec![]),

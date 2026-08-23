@@ -170,6 +170,7 @@ mod privacy;
 mod project_configs;
 pub mod project_information;
 pub mod scheduler;
+mod settings_config;
 mod setup_status;
 mod shell_policy;
 pub mod sidebar;
@@ -313,6 +314,16 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/config-path", get(handle_v1_config_path))
         .route("/customization", get(handle_v1_customization))
         .route("/project-configs", get(handle_v1_project_configs_get))
+        .route(
+            "/indexing-settings",
+            get(settings_config::handle_v1_indexing_settings_get)
+                .post(settings_config::handle_v1_indexing_settings_post),
+        )
+        .route(
+            "/skills/settings",
+            get(settings_config::handle_v1_skills_settings_get)
+                .post(settings_config::handle_v1_skills_settings_post),
+        )
         .route(
             "/privacy/policy",
             get(privacy::handle_v1_privacy_policy_get).post(privacy::handle_v1_privacy_policy_post),

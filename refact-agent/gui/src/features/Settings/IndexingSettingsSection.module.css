@@ -1,0 +1,75 @@
+.statusGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--rf-space-2);
+}
+
+.statusCard {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  padding: var(--rf-space-3);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-card);
+  background: var(--rf-surface-1);
+}
+
+.statusHeading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--rf-space-2);
+}
+
+.muted,
+.notice,
+.note,
+.error,
+.warning,
+.success,
+.errorList {
+  margin: 0;
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
+}
+
+.muted,
+.note {
+  color: var(--rf-color-muted);
+}
+
+.notice,
+.warning {
+  color: var(--rf-color-warning);
+}
+
+.notice,
+.note,
+.error,
+.success {
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-radius: var(--rf-radius-ctl);
+  background: var(--rf-surface-1);
+}
+
+.error,
+.errorList {
+  color: var(--rf-color-danger);
+}
+
+.success {
+  color: var(--rf-color-success);
+}
+
+.errorList {
+  display: grid;
+  gap: var(--rf-space-2xs);
+  padding-left: var(--rf-space-4);
+}
+
+@media (width <= 640px) {
+  .statusGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

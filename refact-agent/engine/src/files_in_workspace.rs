@@ -1394,7 +1394,6 @@ pub async fn enqueue_all_files_from_workspace_folders(
             *roots = workspace_vcs_roots;
         }
         update_git_branch_heads_for_roots(&gcx, &vcs_folders);
-        // indexing_everywhere is immutable in shared GlobalContext; callers will reload as needed.
         gcx.documents_state.cache_dirty.clone()
     };
 
@@ -1403,18 +1402,19 @@ pub async fn enqueue_all_files_from_workspace_folders(
         .unwrap()
         .as_secs_f64();
 
-    let mut updated_or_removed: IndexSet<String> = IndexSet::new();
-    updated_or_removed.extend(
+    let current_paths = all_files.iter().cloned().collect::<HashSet<_>>();
+    let removed_paths = old_workspace_files
+        .iter()
+        .filter(|path| !current_paths.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut updated_paths: IndexSet<String> = IndexSet::new();
+    updated_paths.extend(
         all_files
             .iter()
             .map(|file| file.to_string_lossy().to_string()),
     );
-    updated_or_removed.extend(
-        old_workspace_files
-            .iter()
-            .map(|p| p.to_string_lossy().to_string()),
-    );
-    let paths_nodups: Vec<String> = updated_or_removed.into_iter().collect();
+    let paths_nodups: Vec<String> = updated_paths.into_iter().collect();
 
     crate::indexing_routing::route_index_enqueue(
         gcx.clone(),
@@ -1423,6 +1423,11 @@ pub async fn enqueue_all_files_from_workspace_folders(
         vecdb_only,
     )
     .await;
+    if !vecdb_only {
+        for path in removed_paths {
+            on_did_delete(gcx.clone(), &path).await;
+        }
+    }
 
     all_files.len() as i32
 }

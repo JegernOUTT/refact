@@ -109,6 +109,10 @@ export interface ShellSettingsPage {
   name: "shell settings";
 }
 
+export interface IndexingSettingsPage {
+  name: "indexing settings";
+}
+
 export interface BuddyPage {
   name: "buddy";
   draftId?: string;
@@ -149,7 +153,8 @@ export type Page =
   | BuddyPage
   | GeneralSettingsPage
   | PrivacySettingsPage
-  | ShellSettingsPage;
+  | ShellSettingsPage
+  | IndexingSettingsPage;
 
 export function isIntegrationSetupPage(
   page: Page,

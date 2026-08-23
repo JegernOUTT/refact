@@ -34,3 +34,5 @@ export * from "./mcpMarketplace";
 export * from "./extensionsMarketplace";
 export * from "./files";
 export * from "./shellPolicy";
+export * from "./indexingSettings";
+export * from "./skillsSettings";

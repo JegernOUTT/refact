@@ -75,7 +75,7 @@ pub struct ModelServices {
 pub struct WorkspaceServices {
     pub documents_state: DocumentsState,
     pub privacy_settings: Arc<PrivacySettings>,
-    pub indexing_everywhere: Arc<IndexingEverywhere>,
+    pub indexing_everywhere: Arc<StdRwLock<Arc<IndexingEverywhere>>>,
     pub completions_cache: Arc<StdRwLock<CompletionCache>>,
     pub vec_db: Arc<AMutex<Option<Arc<dyn VecdbSearch>>>>,
     pub vec_db_error: Arc<StdMutex<String>>,

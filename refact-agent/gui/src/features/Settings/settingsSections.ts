@@ -4,6 +4,7 @@ import {
   Cable,
   Paintbrush,
   Plug,
+  ScanSearch,
   Settings,
   ShieldCheck,
   Sparkles,
@@ -16,6 +17,7 @@ export type SettingsSectionId =
   | "general"
   | "privacy"
   | "shell"
+  | "indexing"
   | "providers"
   | "models"
   | "customization"
@@ -34,6 +36,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   { id: "general", label: "General", icon: Settings },
   { id: "privacy", label: "Privacy & Access", icon: ShieldCheck },
   { id: "shell", label: "Shell", icon: Terminal },
+  { id: "indexing", label: "Indexing", icon: ScanSearch },
   { id: "providers", label: "Providers", icon: Plug },
   { id: "models", label: "Models", icon: Bot },
   { id: "customization", label: "Customization", icon: Paintbrush },
