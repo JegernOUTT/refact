@@ -121,7 +121,7 @@ impl<'a> Renderable for Paragraph<'a> {
         self.render_ref(area, buf);
     }
     fn desired_height(&self, width: u16) -> u16 {
-        self.line_count(width) as u16
+        self.line_count(width).min(usize::from(u16::MAX)) as u16
     }
 }
 
@@ -181,7 +181,7 @@ impl Renderable for ColumnRenderable<'_> {
             if !child_area.is_empty() {
                 child.render(child_area, buf);
             }
-            y += child_area.height;
+            y = y.saturating_add(child_area.height);
         }
     }
 
@@ -189,7 +189,7 @@ impl Renderable for ColumnRenderable<'_> {
         self.children
             .iter()
             .map(|child| child.desired_height(width))
-            .sum()
+            .fold(0, u16::saturating_add)
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
@@ -202,7 +202,7 @@ impl Renderable for ColumnRenderable<'_> {
                     return Some((px, py));
                 }
             }
-            y += child_area.height;
+            y = y.saturating_add(child_area.height);
         }
         None
     }
@@ -215,7 +215,7 @@ impl Renderable for ColumnRenderable<'_> {
             if !child_area.is_empty() && child.cursor_pos(child_area).is_some() {
                 return child.cursor_style(child_area);
             }
-            y += child_area.height;
+            y = y.saturating_add(child_area.height);
         }
         SetCursorStyle::DefaultUserShape
     }
@@ -277,22 +277,24 @@ impl<'a> FlexRenderable<'a> {
         let max_size = area.height;
         for (i, FlexChild { flex, child }) in self.children.iter().enumerate() {
             if *flex > 0 {
-                flex_children.push((i, *flex as u16, child.desired_height(area.width)));
+                flex_children.push((i, *flex as u32, child.desired_height(area.width)));
             } else {
                 child_sizes[i] = child
                     .desired_height(area.width)
                     .min(max_size.saturating_sub(allocated_size));
-                allocated_size += child_sizes[i];
+                allocated_size = allocated_size.saturating_add(child_sizes[i]);
             }
         }
         let free_space = max_size.saturating_sub(allocated_size);
         let mut remaining_space = free_space;
         while !flex_children.is_empty() {
-            let total_flex = flex_children.iter().map(|(_, flex, _)| *flex).sum::<u16>();
+            let total_flex = flex_children.iter().fold(0u64, |total, (_, flex, _)| {
+                total.saturating_add(u64::from(*flex))
+            });
             let mut satisfied_any = false;
             flex_children.retain(|(i, flex, desired_height)| {
                 let proportional_share =
-                    (u32::from(remaining_space) * u32::from(*flex) / u32::from(total_flex)) as u16;
+                    (u64::from(remaining_space) * u64::from(*flex) / total_flex.max(1)) as u16;
                 if *desired_height <= proportional_share {
                     child_sizes[*i] = *desired_height;
                     remaining_space = remaining_space.saturating_sub(*desired_height);
@@ -306,25 +308,27 @@ impl<'a> FlexRenderable<'a> {
                 break;
             }
         }
-        let total_flex = flex_children.iter().map(|(_, flex, _)| *flex).sum::<u16>();
+        let total_flex = flex_children.iter().fold(0u64, |total, (_, flex, _)| {
+            total.saturating_add(u64::from(*flex))
+        });
         let mut allocated_flex_space = 0;
         let last_flex_child_idx = flex_children.last().map(|(i, _, _)| *i);
         for (i, flex, desired_height) in flex_children {
             let max_child_extent = if Some(i) == last_flex_child_idx {
                 remaining_space.saturating_sub(allocated_flex_space)
             } else {
-                (u32::from(remaining_space) * u32::from(flex) / u32::from(total_flex)) as u16
+                (u64::from(remaining_space) * u64::from(flex) / total_flex.max(1)) as u16
             };
             let child_size = desired_height.min(max_child_extent);
             child_sizes[i] = child_size;
-            allocated_flex_space += child_size;
+            allocated_flex_space = allocated_flex_space.saturating_add(child_size);
         }
 
         let mut y = area.y;
         for size in child_sizes {
             let child_area = Rect::new(area.x, y, area.width, size);
             allocated_rects.push(child_area);
-            y += child_area.height;
+            y = y.saturating_add(child_area.height);
         }
         allocated_rects
     }
@@ -467,9 +471,11 @@ impl<'a> Renderable for InsetRenderable<'a> {
 
     fn desired_height(&self, width: u16) -> u16 {
         self.child
-            .desired_height(width.saturating_sub(self.insets.left + self.insets.right))
-            + self.insets.top
-            + self.insets.bottom
+            .desired_height(
+                width.saturating_sub(self.insets.left.saturating_add(self.insets.right)),
+            )
+            .saturating_add(self.insets.top)
+            .saturating_add(self.insets.bottom)
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
@@ -566,6 +572,51 @@ mod tests {
             vec!["aaa".to_string(), "bbb".to_string()]
         );
         assert_eq!(column.desired_height(3), 2);
+    }
+
+    #[test]
+    fn column_height_saturates_at_u16_max() {
+        let mut column = ColumnRenderable::new();
+        column.push(HeightRenderable::with_height(u16::MAX));
+        column.push(HeightRenderable::with_height(1));
+
+        assert_eq!(column.desired_height(80), u16::MAX);
+    }
+
+    #[test]
+    fn flex_accepts_weight_larger_than_u16() {
+        let mut flex = FlexRenderable::new();
+        flex.push(
+            65_536,
+            RenderableItem::Owned(Box::new(HeightRenderable::with_height(10))),
+        );
+
+        let allocated = flex.allocate(Rect::new(0, 0, 80, 10));
+
+        assert_eq!(allocated[0].height, 10);
+    }
+
+    #[test]
+    fn flex_total_weight_larger_than_u16_does_not_divide_by_zero() {
+        let mut flex = FlexRenderable::new();
+        flex.push(
+            65_535,
+            RenderableItem::Owned(Box::new(HeightRenderable::with_height(10))),
+        );
+        flex.push(
+            1,
+            RenderableItem::Owned(Box::new(HeightRenderable::with_height(10))),
+        );
+
+        let allocated = flex.allocate(Rect::new(0, 0, 80, 10));
+
+        assert_eq!(
+            allocated
+                .into_iter()
+                .map(|area| area.height)
+                .collect::<Vec<_>>(),
+            vec![9, 1],
+        );
     }
 
     #[test]
