@@ -313,6 +313,7 @@ pub struct AppToolRegistry {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ToolCatalogKey {
     workspace_scope: String,
+    execution_scope: Option<String>,
     mode: String,
     model: Option<String>,
     customization_generation: u64,
@@ -360,9 +361,18 @@ impl ToolCatalogCache {
         snapshots.insert(key, snapshot);
     }
 
+    async fn release_build_lock(&self, key: &ToolCatalogKey) {
+        self.build_locks.lock().await.remove(key);
+    }
+
     #[cfg(test)]
     async fn snapshot_count(&self) -> usize {
         self.snapshots.read().await.len()
+    }
+
+    #[cfg(test)]
+    async fn build_lock_count(&self) -> usize {
+        self.build_locks.lock().await.len()
     }
 }
 
@@ -416,11 +426,12 @@ impl AppToolRegistry {
         !matches!(value, Some("0") | Some("false") | Some("no") | Some("off"))
     }
 
-    async fn catalog_key(
+    async fn catalog_key_with_scope(
         &self,
         gcx: SharedGlobalContext,
         mode: &str,
         model_id: Option<&str>,
+        execution_scope: Option<String>,
     ) -> ToolCatalogKey {
         let workspace_scope = crate::files_correction::get_active_project_path(gcx.clone())
             .await
@@ -430,6 +441,7 @@ impl AppToolRegistry {
         let generations = &gcx.tool_catalog_generations;
         ToolCatalogKey {
             workspace_scope,
+            execution_scope,
             mode: mode.to_string(),
             model: model_id.map(str::to_string),
             customization_generation: generations.customization.load(Ordering::Acquire),
@@ -472,6 +484,51 @@ impl AppToolRegistry {
         mode: &str,
         model_id: Option<&str>,
     ) -> Arc<ToolCatalogSnapshot> {
+        self.snapshot_for_mode_with_scope(gcx, mode, model_id, None)
+            .await
+    }
+
+    async fn execution_scope_from_ccx(
+        ccx: &Arc<AMutex<crate::at_commands::at_commands::AtCommandsContext>>,
+    ) -> Option<String> {
+        ccx.lock()
+            .await
+            .execution_scope
+            .as_ref()
+            .map(|scope| scope.effective_root().to_string_lossy().to_string())
+    }
+
+    async fn fresh_tools_for_scope(
+        &self,
+        gcx: SharedGlobalContext,
+        mode: &str,
+        model_id: Option<&str>,
+        execution_scope: Option<String>,
+    ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
+        let snapshot = self
+            .snapshot_for_mode_with_scope(gcx.clone(), mode, model_id, execution_scope)
+            .await;
+        let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
+        let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
+            self.tools_for_mode(gcx, mode, model_id).await,
+        )
+        .tools;
+        span.finish_tool(
+            PerfOutcome::Success,
+            1,
+            snapshot.index.tools.len() as u64,
+            None,
+        );
+        tools
+    }
+
+    async fn snapshot_for_mode_with_scope(
+        &self,
+        gcx: SharedGlobalContext,
+        mode: &str,
+        model_id: Option<&str>,
+        execution_scope: Option<String>,
+    ) -> Arc<ToolCatalogSnapshot> {
         if !Self::snapshot_cache_enabled() {
             let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
             let snapshot = Arc::new(self.build_snapshot(gcx, mode, model_id).await);
@@ -483,7 +540,9 @@ impl AppToolRegistry {
             );
             return snapshot;
         }
-        let key = self.catalog_key(gcx.clone(), mode, model_id).await;
+        let key = self
+            .catalog_key_with_scope(gcx.clone(), mode, model_id, execution_scope)
+            .await;
         if let Some(snapshot) = gcx.tool_catalog_cache.get(&key).await {
             return snapshot;
         }
@@ -500,7 +559,10 @@ impl AppToolRegistry {
             snapshot.index.tools.len() as u64,
             None,
         );
-        gcx.tool_catalog_cache.insert(key, snapshot.clone()).await;
+        gcx.tool_catalog_cache
+            .insert(key.clone(), snapshot.clone())
+            .await;
+        gcx.tool_catalog_cache.release_build_lock(&key).await;
         snapshot
     }
 
@@ -512,6 +574,18 @@ impl AppToolRegistry {
         model_id: Option<&str>,
     ) -> Arc<ToolCatalogSnapshot> {
         self.snapshot_for_mode(self.gcx.clone(), mode, model_id)
+            .await
+    }
+
+    #[cfg(any(test, feature = "bench"))]
+    #[allow(dead_code)]
+    async fn snapshot_for_mode_with_scope_for_test(
+        &self,
+        mode: &str,
+        model_id: Option<&str>,
+        execution_scope: Option<String>,
+    ) -> Arc<ToolCatalogSnapshot> {
+        self.snapshot_for_mode_with_scope(self.gcx.clone(), mode, model_id, execution_scope)
             .await
     }
 }
@@ -545,6 +619,23 @@ impl ToolRegistry for AppToolRegistry {
         index
     }
 
+    async fn get_tools_index_for_mode_and_scope(
+        &self,
+        mode: &str,
+        model_id: Option<&str>,
+        execution_scope: Option<&str>,
+    ) -> ToolRegistryIndex {
+        self.snapshot_for_mode_with_scope(
+            self.gcx.clone(),
+            mode,
+            model_id,
+            execution_scope.map(str::to_string),
+        )
+        .await
+        .index
+        .clone()
+    }
+
     async fn check_tool_confirmation(
         &self,
         ccx: &(dyn std::any::Any + Send + Sync),
@@ -563,10 +654,10 @@ impl ToolRegistry for AppToolRegistry {
                 ))
             }
         };
-        let catalog_span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
-        let raw_tools = self.tools_for_mode(self.gcx.clone(), mode, model_id).await;
-        let tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools).tools;
-        catalog_span.finish_tool(PerfOutcome::Success, 1, tools.len() as u64, None);
+        let execution_scope = Self::execution_scope_from_ccx(&ccx).await;
+        let tools = self
+            .fresh_tools_for_scope(self.gcx.clone(), mode, model_id, execution_scope)
+            .await;
         let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
         for tool in tools {
             let desc = tool.tool_description();
@@ -619,10 +710,10 @@ impl ToolRegistry for AppToolRegistry {
             let cgcx = ccx.lock().await;
             cgcx.app.gcx.clone()
         };
-        let catalog_span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
-        let raw_tools = self.tools_for_mode(gcx.clone(), mode, model_id).await;
-        let tools = crate::tools::tools_list::apply_mcp_lazy_filter(raw_tools).tools;
-        catalog_span.finish_tool(PerfOutcome::Success, 1, tools.len() as u64, None);
+        let execution_scope = Self::execution_scope_from_ccx(&ccx).await;
+        let tools = self
+            .fresh_tools_for_scope(gcx.clone(), mode, model_id, execution_scope)
+            .await;
         let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
         for mut tool in tools {
             let desc = tool.tool_description();
@@ -1029,6 +1120,7 @@ mod tests {
             gcx.tool_catalog_cache.snapshot_count().await,
             TOOL_CATALOG_SNAPSHOT_CACHE_LIMIT
         );
+        assert_eq!(gcx.tool_catalog_cache.build_lock_count().await, 0);
     }
 
     #[tokio::test]
@@ -1060,6 +1152,30 @@ mod tests {
             mutable_a[0].tool_description().description,
             mutable_b[0].tool_description().description
         );
+    }
+
+    #[tokio::test]
+    async fn tool_catalog_key_isolates_execution_scopes() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let registry = fixture_registry(gcx, builds.clone());
+        let first = registry
+            .snapshot_for_mode_with_scope_for_test(
+                "agent",
+                Some("provider/model"),
+                Some("/workspace/one".to_string()),
+            )
+            .await;
+        let second = registry
+            .snapshot_for_mode_with_scope_for_test(
+                "agent",
+                Some("provider/model"),
+                Some("/workspace/two".to_string()),
+            )
+            .await;
+
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+        assert!(!Arc::ptr_eq(&first, &second));
     }
 
     #[test]

@@ -499,9 +499,17 @@ pub async fn run_goal_verifier(
         .await
         .map_err(|e| e.message)?;
     let model_rec = crate::caps::resolve_chat_model(caps, &thread.model)?;
+    let execution_scope = thread
+        .worktree
+        .as_ref()
+        .map(|worktree| worktree.root.to_string_lossy().into_owned());
     let tools_for_gen = app
         .tool_registry
-        .get_tools_index_for_mode(&thread.mode, Some(&model_rec.base.id))
+        .get_tools_index_for_mode_and_scope(
+            &thread.mode,
+            Some(&model_rec.base.id),
+            execution_scope.as_deref(),
+        )
         .await;
     let prepare_inputs = goal_verifier_prepare_inputs_from_parts(
         thread,

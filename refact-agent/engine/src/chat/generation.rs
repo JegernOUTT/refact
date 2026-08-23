@@ -416,9 +416,17 @@ pub async fn prepare_session_preamble_and_knowledge(
             }
         };
 
+        let execution_scope = thread
+            .worktree
+            .as_ref()
+            .map(|worktree| worktree.root.to_string_lossy().into_owned());
         let tools_for_mode = app
             .tool_registry
-            .get_tools_index_for_mode(&thread.mode, Some(&model_rec.base.id))
+            .get_tools_index_for_mode_and_scope(
+                &thread.mode,
+                Some(&model_rec.base.id),
+                execution_scope.as_deref(),
+            )
             .await;
         if tools_for_mode.mcp_lazy_mode {
             mcp_for_index = Some((
@@ -1888,9 +1896,17 @@ pub async fn run_llm_generation(
     let model_rec = crate::caps::resolve_chat_model(caps.clone(), &thread.model)?;
     check_aborted_before_stream(&abort_flag)?;
 
+    let execution_scope = thread
+        .worktree
+        .as_ref()
+        .map(|worktree| worktree.root.to_string_lossy().into_owned());
     let tools_for_gen = app
         .tool_registry
-        .get_tools_index_for_mode(&thread.mode, Some(&model_rec.base.id))
+        .get_tools_index_for_mode_and_scope(
+            &thread.mode,
+            Some(&model_rec.base.id),
+            execution_scope.as_deref(),
+        )
         .await;
     let mcp_lazy_active = tools_for_gen.mcp_lazy_mode;
     let tools = tools_for_gen.tools;

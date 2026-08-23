@@ -440,6 +440,7 @@ async fn invalidate_caps(gcx: &Arc<GlobalContext>) {
     let mut caps = gcx.caps_state.write().await;
     caps.caps = None;
     caps.last_attempted_ts = 0;
+    gcx.tool_catalog_generations.advance_capabilities();
 }
 
 async fn current_claude_code_provider(
@@ -1277,6 +1278,7 @@ async fn save_google_antigravity_refreshed_tokens(
         let mut caps_state = caps_state.write().await;
         caps_state.caps = None;
         caps_state.last_attempted_ts = 0;
+        gcx.tool_catalog_generations.advance_capabilities();
     }
 
     Ok(changed)
@@ -1372,6 +1374,7 @@ async fn save_xai_refreshed_tokens(
         let mut caps_state = caps_state.write().await;
         caps_state.caps = None;
         caps_state.last_attempted_ts = 0;
+        gcx.tool_catalog_generations.advance_capabilities();
     }
 
     Ok(changed)
@@ -1475,6 +1478,7 @@ pub(crate) async fn save_refreshed_tokens(
         let mut caps_state = caps_state.write().await;
         caps_state.caps = None;
         caps_state.last_attempted_ts = 0;
+        gcx.tool_catalog_generations.advance_capabilities();
     }
 
     Ok(changed)

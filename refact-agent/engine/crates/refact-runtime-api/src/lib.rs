@@ -91,6 +91,15 @@ pub trait ToolRegistry: Send + Sync {
         mode: &str,
         model_id: Option<&str>,
     ) -> ToolRegistryIndex;
+    async fn get_tools_index_for_mode_and_scope(
+        &self,
+        mode: &str,
+        model_id: Option<&str>,
+        execution_scope: Option<&str>,
+    ) -> ToolRegistryIndex {
+        let _ = execution_scope;
+        self.get_tools_index_for_mode(mode, model_id).await
+    }
     async fn check_tool_confirmation(
         &self,
         ccx: &(dyn std::any::Any + Send + Sync),
