@@ -2,6 +2,13 @@ use std::io::{self, IsTerminal, Write};
 use std::panic;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::sync::atomic::{AtomicI32, Ordering};
+#[cfg(unix)]
+use std::sync::OnceLock;
+#[cfg(unix)]
+use std::thread;
+
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
@@ -24,14 +31,14 @@ pub type RefactTerminal = Terminal<StdoutBackend>;
 
 pub struct StdoutBackend {
     inner: CrosstermBackend<io::Stdout>,
-    injected_cursor: Option<Position>,
+    cursor_position: Position,
 }
 
 impl StdoutBackend {
-    fn new(injected_cursor: Option<Position>) -> Self {
+    fn new(cursor_position: Position) -> Self {
         Self {
             inner: CrosstermBackend::new(io::stdout()),
-            injected_cursor,
+            cursor_position,
         }
     }
 }
@@ -63,13 +70,12 @@ impl Backend for StdoutBackend {
     }
 
     fn get_cursor_position(&mut self) -> io::Result<Position> {
-        match self.injected_cursor.take() {
-            Some(position) => Ok(position),
-            None => self.inner.get_cursor_position(),
-        }
+        Ok(self.cursor_position)
     }
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        let position = position.into();
+        self.cursor_position = position;
         self.inner.set_cursor_position(position)
     }
 
@@ -371,6 +377,7 @@ impl TerminalSession {
         mode: TerminalMode,
         title_config: TerminalTitleConfig,
     ) -> io::Result<Self> {
+        install_signal_restore_handler()?;
         let mut guard = TerminalRestoreGuard::new_with_title_config(
             CrosstermTerminalOps::new(io::stdout()),
             mode,
@@ -436,15 +443,7 @@ impl TerminalSession {
 
     pub fn clear_for_resize_reflow(&mut self) -> io::Result<()> {
         execute!(self.terminal.backend_mut(), Clear(ClearType::Purge))?;
-        self.terminal = match self.guard.mode {
-            TerminalMode::Inline => Terminal::with_options(
-                StdoutBackend::new(None),
-                TerminalOptions {
-                    viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
-                },
-            )?,
-            TerminalMode::AlternateScreen => Terminal::new(StdoutBackend::new(None))?,
-        };
+        self.terminal = build_terminal(self.guard.mode)?;
         Ok(())
     }
 }
@@ -456,12 +455,148 @@ impl Drop for TerminalSession {
 }
 
 fn install_panic_restore_hook(mode: TerminalMode, title_config: TerminalTitleConfig) {
+    if !terminal_panic_hook_installed() {
+        return;
+    }
     let previous_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
         let mut ops = CrosstermTerminalOps::new(io::stdout());
         restore_terminal_state(&mut ops, RestoreState::started(mode, title_config.active()));
         previous_hook(panic_info);
     }));
+}
+
+fn terminal_panic_hook_installed() -> bool {
+    static PANIC_RESTORE_HOOK_INSTALLED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    !PANIC_RESTORE_HOOK_INSTALLED.swap(true, std::sync::atomic::Ordering::AcqRel)
+}
+
+#[cfg(unix)]
+static SIGNAL_RESTORE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+
+#[cfg(unix)]
+struct SignalRestoreHandler {
+    _thread: thread::JoinHandle<()>,
+}
+
+#[cfg(unix)]
+fn install_signal_restore_handler() -> io::Result<()> {
+    static SIGNAL_RESTORE_HANDLER: OnceLock<Result<SignalRestoreHandler, String>> = OnceLock::new();
+
+    match SIGNAL_RESTORE_HANDLER.get_or_init(install_unix_signal_restore_handler) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(io::Error::other(error.clone())),
+    }
+}
+
+#[cfg(not(unix))]
+fn install_signal_restore_handler() -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn install_unix_signal_restore_handler() -> Result<SignalRestoreHandler, String> {
+    let mut pipe_fds = [-1; 2];
+    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error().to_string());
+    }
+    let read_fd = pipe_fds[0];
+    let write_fd = pipe_fds[1];
+
+    if let Err(error) = set_nonblocking(write_fd) {
+        unsafe {
+            libc::close(read_fd);
+            libc::close(write_fd);
+        }
+        return Err(error.to_string());
+    }
+
+    let thread = match thread::Builder::new()
+        .name("refact-tui-signal-restore".to_string())
+        .spawn(move || wait_for_terminal_signal(read_fd))
+    {
+        Ok(thread) => thread,
+        Err(error) => {
+            unsafe {
+                libc::close(read_fd);
+                libc::close(write_fd);
+            }
+            return Err(error.to_string());
+        }
+    };
+
+    if let Err(error) = install_unix_signal_handlers() {
+        unsafe {
+            libc::close(write_fd);
+        }
+        return Err(error.to_string());
+    }
+
+    SIGNAL_RESTORE_WRITE_FD.store(write_fd, Ordering::Release);
+    Ok(SignalRestoreHandler { _thread: thread })
+}
+
+#[cfg(unix)]
+fn set_nonblocking(fd: libc::c_int) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn install_unix_signal_handlers() -> io::Result<()> {
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        if unsafe {
+            libc::signal(
+                signal,
+                terminal_signal_handler as *const () as libc::sighandler_t,
+            )
+        } == libc::SIG_ERR
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+extern "C" fn terminal_signal_handler(signal: libc::c_int) {
+    let fd = SIGNAL_RESTORE_WRITE_FD.load(Ordering::Relaxed);
+    if fd >= 0 {
+        let signal = signal as u8;
+        unsafe {
+            libc::write(fd, std::ptr::addr_of!(signal).cast(), 1);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_terminal_signal(read_fd: libc::c_int) {
+    let mut signal = 0u8;
+    loop {
+        let bytes_read = unsafe { libc::read(read_fd, std::ptr::addr_of_mut!(signal).cast(), 1) };
+        if bytes_read == 1 {
+            break;
+        }
+        if bytes_read == -1 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        unsafe {
+            libc::close(read_fd);
+        }
+        return;
+    }
+    unsafe {
+        libc::close(read_fd);
+    }
+
+    let _ = restore_terminal(&mut io::stdout());
+    unsafe {
+        libc::_exit(128 + i32::from(signal));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -678,25 +813,51 @@ fn restore_terminal_state<O: TerminalOps>(ops: &mut O, state: RestoreState) {
 }
 
 pub fn restore_terminal<W: Write>(writer: &mut W) -> io::Result<()> {
-    execute!(
-        writer,
-        Show,
-        DisableBracketedPaste,
-        DisableFocusChange,
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    )
+    restore_terminal_ops(&mut CrosstermTerminalOps::new(writer))
+}
+
+fn restore_terminal_ops<O: TerminalOps>(ops: &mut O) -> io::Result<()> {
+    let mut first_error = None;
+    for step in [
+        TerminalStep::ShowCursor,
+        TerminalStep::DisableBracketedPaste,
+        TerminalStep::DisableFocusChange,
+        TerminalStep::DisableMouseCapture,
+        TerminalStep::LeaveAlternateScreen,
+        TerminalStep::DisableRawMode,
+    ] {
+        if let Err(error) = ops.apply(step) {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 fn build_terminal(mode: TerminalMode) -> io::Result<RefactTerminal> {
+    let cursor_position = match mode {
+        TerminalMode::Inline => probe_startup_cursor_position(),
+        TerminalMode::AlternateScreen => Position { x: 0, y: 0 },
+    };
+    build_terminal_with_cursor(mode, cursor_position)
+}
+
+fn build_terminal_with_cursor(
+    mode: TerminalMode,
+    cursor_position: Position,
+) -> io::Result<RefactTerminal> {
     match mode {
         TerminalMode::Inline => Terminal::with_options(
-            StdoutBackend::new(Some(probe_startup_cursor_position())),
+            StdoutBackend::new(cursor_position),
             TerminalOptions {
                 viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
             },
         ),
-        TerminalMode::AlternateScreen => Terminal::new(StdoutBackend::new(None)),
+        TerminalMode::AlternateScreen => Terminal::new(StdoutBackend::new(cursor_position)),
     }
 }
 
@@ -729,7 +890,7 @@ mod tests {
 
     impl Drop for TestGuard<'_> {
         fn drop(&mut self) {
-            restore_terminal(self.output).unwrap();
+            let _ = restore_terminal(self.output);
         }
     }
 
@@ -875,13 +1036,69 @@ mod tests {
     }
 
     #[test]
-    fn stdout_backend_returns_injected_cursor_once() {
-        let mut backend = StdoutBackend::new(Some(Position { x: 4, y: 9 }));
+    fn stdout_backend_uses_bounded_cursor_position() {
+        let mut backend = StdoutBackend::new(Position { x: 4, y: 9 });
         assert_eq!(
             Backend::get_cursor_position(&mut backend).unwrap(),
             Position { x: 4, y: 9 }
         );
-        assert!(backend.injected_cursor.is_none());
+        assert_eq!(
+            Backend::get_cursor_position(&mut backend).unwrap(),
+            Position { x: 4, y: 9 }
+        );
+    }
+
+    #[test]
+    fn resize_rebuild_uses_the_bounded_cursor_position() {
+        let cursor_position = Position { x: 4, y: 9 };
+        let mut terminal =
+            build_terminal_with_cursor(TerminalMode::Inline, cursor_position).unwrap();
+
+        assert_eq!(
+            Backend::get_cursor_position(terminal.backend_mut()).unwrap(),
+            cursor_position
+        );
+    }
+
+    #[test]
+    fn restore_terminal_disables_raw_mode() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut ops = FakeTerminalOps {
+            calls: calls.clone(),
+            fail_on: None,
+        };
+
+        restore_terminal_ops(&mut ops).unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![
+                TerminalStep::ShowCursor,
+                TerminalStep::DisableBracketedPaste,
+                TerminalStep::DisableFocusChange,
+                TerminalStep::DisableMouseCapture,
+                TerminalStep::LeaveAlternateScreen,
+                TerminalStep::DisableRawMode,
+            ]
+        );
+    }
+
+    #[test]
+    fn restore_terminal_is_idempotent() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut ops = FakeTerminalOps {
+            calls: calls.clone(),
+            fail_on: None,
+        };
+
+        restore_terminal_ops(&mut ops).unwrap();
+        restore_terminal_ops(&mut ops).unwrap();
+
+        assert_eq!(calls.lock().unwrap().len(), 12);
+        assert_eq!(
+            calls.lock().unwrap().last(),
+            Some(&TerminalStep::DisableRawMode)
+        );
     }
 
     #[test]
