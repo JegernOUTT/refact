@@ -374,16 +374,61 @@ pub fn permission_policy_notice(policy: PermissionPolicy) -> String {
 
 pub fn status_card_text(snapshot: &StatusSnapshot) -> String {
     format!(
-        "Status\nDaemon: {}\nWorker: {}\nProject: {}\nModel: {} · mode {} · reason:{}\nSession: {}\nUsage: {}",
+        "Status\nDaemon: {}\nWorker: {}\nProject: {}\nModel: {} · mode {} · reason:{}\nTerminal background: {}\nSession: {}\nUsage: {}",
         daemon_line(snapshot),
         snapshot.worker,
         project_line(snapshot),
         snapshot.model,
         snapshot.mode,
         snapshot.reasoning,
+        terminal_background_status(),
         short_session_id(&snapshot.session_id),
         usage_line(snapshot.usage.as_ref())
     )
+}
+
+pub fn terminal_background_status() -> String {
+    match crate::terminal_palette::default_colors_status() {
+        crate::terminal_palette::DefaultColorsStatus::Detected => {
+            "detected via OSC 10/11".to_string()
+        }
+        crate::terminal_palette::DefaultColorsStatus::Unavailable => {
+            "unavailable (OSC 10/11 probe timed out or is unsupported)".to_string()
+        }
+    }
+}
+
+pub fn status_snapshot(
+    daemon_online: bool,
+    daemon_status: Option<&crate::client::DaemonStatus>,
+    daemon_base_url: Option<String>,
+    worker: String,
+    project: String,
+    project_root: Option<String>,
+    model: String,
+    mode: String,
+    reasoning: String,
+    permission_policy: PermissionPolicy,
+    session_id: String,
+    usage: Option<StatusUsage>,
+    retry_hint: Option<String>,
+) -> StatusSnapshot {
+    StatusSnapshot {
+        daemon_online,
+        daemon_version: daemon_status.map(|status| status.version.clone()),
+        daemon_port: daemon_status.map(|status| status.port),
+        daemon_base_url,
+        worker,
+        project,
+        project_root,
+        model,
+        mode,
+        reasoning,
+        permission_policy,
+        session_id,
+        usage,
+        retry_hint,
+    }
 }
 
 fn daemon_line(snapshot: &StatusSnapshot) -> String {
@@ -530,7 +575,7 @@ mod tests {
         });
         assert_eq!(
             text,
-            "Status\nDaemon: v1.2.3 on port 8488\nWorker: ready pid 42 http 9000 lsp 9001\nProject: demo (/tmp/demo)\nModel: gpt-demo · mode agent · reason:high\nSession: abcdef12\nUsage: 100 prompt + 50 completion = 150 total tokens; 85% context left"
+            "Status\nDaemon: v1.2.3 on port 8488\nWorker: ready pid 42 http 9000 lsp 9001\nProject: demo (/tmp/demo)\nModel: gpt-demo · mode agent · reason:high\nTerminal background: unavailable (OSC 10/11 probe timed out or is unsupported)\nSession: abcdef12\nUsage: 100 prompt + 50 completion = 150 total tokens; 85% context left"
         );
     }
 }

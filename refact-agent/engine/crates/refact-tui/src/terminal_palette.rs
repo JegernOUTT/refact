@@ -9,6 +9,12 @@ pub enum StdoutColorLevel {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DefaultColorsStatus {
+    Detected,
+    Unavailable,
+}
+
 pub fn stdout_color_level() -> StdoutColorLevel {
     match supports_color::on_cached(supports_color::Stream::Stdout) {
         Some(level) if level.has_16m => StdoutColorLevel::TrueColor,
@@ -113,7 +119,8 @@ fn best_color_for_color_level(target: (u8, u8, u8), color_level: StdoutColorLeve
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map_or_else(Color::default, |(i, _)| indexed_color(i as u8)),
-        StdoutColorLevel::Ansi16 | StdoutColorLevel::Unknown => Color::default(),
+        StdoutColorLevel::Ansi16 => nearest_ansi16_color(target),
+        StdoutColorLevel::Unknown => Color::default(),
     }
 }
 
@@ -129,6 +136,23 @@ pub struct DefaultColors {
 
 pub fn default_colors() -> Option<DefaultColors> {
     imp::default_colors()
+}
+
+pub fn default_colors_status() -> DefaultColorsStatus {
+    #[cfg(test)]
+    if let Some(bg) = default_bg_override_for_test() {
+        return if bg.is_some() {
+            DefaultColorsStatus::Detected
+        } else {
+            DefaultColorsStatus::Unavailable
+        };
+    }
+
+    if default_colors().is_some() {
+        DefaultColorsStatus::Detected
+    } else {
+        DefaultColorsStatus::Unavailable
+    }
 }
 
 pub fn default_fg() -> Option<(u8, u8, u8)> {
@@ -220,8 +244,26 @@ mod imp {
     }
 
     fn query_default_colors() -> Option<DefaultColors> {
-        None
+        crate::terminal_probe::default_colors(crate::terminal_probe::DEFAULT_TIMEOUT)
+            .ok()
+            .flatten()
+            .map(|colors| DefaultColors {
+                fg: colors.fg,
+                bg: colors.bg,
+            })
     }
+}
+
+fn nearest_ansi16_color(target: (u8, u8, u8)) -> Color {
+    XTERM_COLORS[..16]
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            perceptual_distance(**a, target)
+                .partial_cmp(&perceptual_distance(**b, target))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map_or_else(Color::default, |(index, _)| Color::Indexed(index as u8))
 }
 
 fn xterm_fixed_colors() -> impl Iterator<Item = (usize, (u8, u8, u8))> {
@@ -324,9 +366,21 @@ mod tests {
     }
 
     #[test]
-    fn best_color_resets_for_ansi16() {
+    fn best_color_quantizes_to_ansi16_index() {
         assert_eq!(
-            best_color_for_level((12, 34, 56), StdoutColorLevel::Ansi16),
+            best_color_for_level((255, 0, 0), StdoutColorLevel::Ansi16),
+            Color::Indexed(9)
+        );
+        assert_eq!(
+            best_color_for_level((0, 0, 0), StdoutColorLevel::Ansi16),
+            Color::Indexed(0)
+        );
+    }
+
+    #[test]
+    fn best_color_resets_for_unknown_output() {
+        assert_eq!(
+            best_color_for_level((12, 34, 56), StdoutColorLevel::Unknown),
             Color::Reset
         );
     }
@@ -386,5 +440,6 @@ mod tests {
         requery_default_colors();
         assert_eq!(default_fg(), None);
         assert_eq!(default_bg(), None);
+        assert_eq!(default_colors_status(), DefaultColorsStatus::Unavailable);
     }
 }

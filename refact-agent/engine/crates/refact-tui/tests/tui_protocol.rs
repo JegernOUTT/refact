@@ -602,8 +602,8 @@ fn render_snapshot_for_assistant_streaming_fixture() {
 
 
 
-› Ask Refact…
-  Enter send   Ctrl-J newline
+│› Ask Refact…
+│  Enter send   Ctrl-J newline
  30 used · fixture · gpt-demo · agent · reason:off · ● idle · daemon on…"#;
     assert_eq!(snapshot, expected);
 }

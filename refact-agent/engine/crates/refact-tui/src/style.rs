@@ -5,16 +5,13 @@ use ratatui::style::{Color, Modifier, Style};
 use crate::terminal_palette;
 
 const LIGHT_BG_ACCENT_RGB: (u8, u8, u8) = (0, 95, 135);
-const ASSUMED_DARK_TERMINAL_BG: (u8, u8, u8) = (0, 0, 0);
 const TABLE_SEPARATOR_FG_ALPHA: f32 = 0.20;
 
 pub fn user_message_style() -> Style {
     if !terminal_background_color_enabled() {
         return Style::default();
     }
-    user_message_style_for(Some(
-        terminal_palette::default_bg().unwrap_or(ASSUMED_DARK_TERMINAL_BG),
-    ))
+    user_message_style_for(terminal_palette::default_bg())
 }
 
 pub fn proposed_plan_style() -> Style {
@@ -22,7 +19,11 @@ pub fn proposed_plan_style() -> Style {
 }
 
 pub(crate) fn table_separator_style() -> Style {
-    table_separator_style_for(terminal_palette::default_fg(), default_terminal_bg())
+    table_separator_style_for(
+        terminal_palette::default_fg(),
+        default_terminal_bg(),
+        terminal_palette::stdout_color_level(),
+    )
 }
 
 pub(crate) fn accent_style() -> Style {
@@ -120,7 +121,14 @@ pub(crate) fn override_color_enabled_for_test(enabled: bool) -> ColorEnabledOver
 fn table_separator_style_for(
     terminal_fg: Option<(u8, u8, u8)>,
     terminal_bg: Option<(u8, u8, u8)>,
+    color_level: terminal_palette::StdoutColorLevel,
 ) -> Style {
+    if matches!(
+        color_level,
+        terminal_palette::StdoutColorLevel::Ansi16 | terminal_palette::StdoutColorLevel::Unknown
+    ) {
+        return Style::default().add_modifier(Modifier::DIM);
+    }
     let (Some(fg), Some(bg)) = (terminal_fg, terminal_bg) else {
         return Style::default().add_modifier(Modifier::DIM);
     };
@@ -166,13 +174,13 @@ mod tests {
     }
 
     #[test]
-    fn default_terminal_bg_falls_back_when_probe_unavailable() {
+    fn default_terminal_bg_stays_unknown_when_probe_unavailable() {
         let _color = override_color_enabled_for_test(true);
         let _bg = terminal_palette::override_default_bg_for_test(None);
 
         assert_eq!(default_terminal_bg(), None);
         assert_eq!(accent_style().fg, Some(Color::Cyan));
-        assert_eq!(user_message_style().bg, Some(Color::Rgb(30, 30, 30)));
+        assert_eq!(user_message_style(), Style::default());
     }
 
     #[test]
@@ -208,7 +216,7 @@ mod tests {
         let _bg = terminal_palette::override_default_bg_for_test(None);
         let style = user_message_style();
 
-        assert_eq!(style.bg, Some(Color::Rgb(30, 30, 30)));
+        assert_eq!(style, Style::default());
     }
 
     #[test]
@@ -227,8 +235,24 @@ mod tests {
 
     #[test]
     fn table_separator_style_dims_without_terminal_colors() {
-        let style = table_separator_style_for(None, Some((0, 0, 0)));
+        let style = table_separator_style_for(
+            None,
+            Some((0, 0, 0)),
+            terminal_palette::StdoutColorLevel::TrueColor,
+        );
 
         assert!(style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn table_separator_style_dims_for_ansi16_and_unknown_output() {
+        for color_level in [
+            terminal_palette::StdoutColorLevel::Ansi16,
+            terminal_palette::StdoutColorLevel::Unknown,
+        ] {
+            let style =
+                table_separator_style_for(Some((255, 255, 255)), Some((0, 0, 0)), color_level);
+            assert!(style.add_modifier.contains(Modifier::DIM));
+        }
     }
 }

@@ -13,8 +13,6 @@ use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
 
 const MIN_OVERLAY_WIDTH: u16 = 24;
 const MIN_OVERLAY_HEIGHT: u16 = 8;
-const SURFACE_INSET_V: u16 = 1;
-const SURFACE_INSET_H: u16 = 2;
 
 struct OverlayLayout {
     header: Option<Rect>,
@@ -84,14 +82,10 @@ fn transcript_popup_area(area: Rect) -> Rect {
 }
 
 fn menu_surface_inner_area(area: Rect) -> Rect {
-    Rect {
-        x: area.x.saturating_add(SURFACE_INSET_H),
-        y: area.y.saturating_add(SURFACE_INSET_V),
-        width: area.width.saturating_sub(SURFACE_INSET_H.saturating_mul(2)),
-        height: area
-            .height
-            .saturating_sub(SURFACE_INSET_V.saturating_mul(2)),
-    }
+    area.inner(ratatui::layout::Margin {
+        vertical: 1,
+        horizontal: 1,
+    })
 }
 
 fn content_layout(area: Rect) -> OverlayLayout {
@@ -328,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_overlay_renders_deboxed_surface_and_hint_bar() {
+    fn transcript_overlay_renders_framed_surface_and_hint_bar() {
         let overlay = PagerOverlay::new(
             "Transcript",
             vec!["alpha".to_string(), "beta".to_string()],
@@ -347,11 +341,11 @@ mod tests {
         assert!(text.contains("Rendered /"));
         assert!(text.contains("↑/↓ scroll"));
         assert!(text.contains("Esc/q close"));
-        assert!(!text.contains("┌"));
-        assert!(!text.contains("┐"));
-        assert!(!text.contains("└"));
-        assert!(!text.contains("┘"));
-        assert!(!text.contains("│"));
+        assert!(text.contains("┌"));
+        assert!(text.contains("┐"));
+        assert!(text.contains("└"));
+        assert!(text.contains("┘"));
+        assert!(text.contains("│"));
     }
 
     #[test]
@@ -382,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn read_only_views_surface_overlay_is_deboxed_and_accents_rows() {
+    fn read_only_views_surface_overlay_is_framed_and_accents_rows() {
         let overlay = PagerOverlay::new("Skills", vec!["Skills".to_string()], Vec::new())
             .with_surface(Some(ViewOverlaySurface {
                 summary_lines: vec!["Available skills".to_string()],
@@ -421,7 +415,7 @@ mod tests {
         assert!(text.contains("/explain"));
         assert!(text.contains("Explain code"));
         assert!(text.contains("rendered"));
-        assert!(!text.contains("┌"));
+        assert!(text.contains("┌"));
         let cursor = buffer
             .content()
             .iter()

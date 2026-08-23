@@ -1,8 +1,15 @@
+use std::io::IsTerminal;
 use std::time::Duration;
 
 use ratatui::layout::Position;
 
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DefaultColors {
+    pub(crate) fg: (u8, u8, u8),
+    pub(crate) bg: (u8, u8, u8),
+}
 
 #[cfg(unix)]
 pub(crate) fn cursor_position(timeout: Duration) -> std::io::Result<Option<Position>> {
@@ -14,6 +21,23 @@ pub(crate) fn cursor_position(_timeout: Duration) -> std::io::Result<Option<Posi
     use ratatui::backend::Backend as _;
     let mut backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     Ok(Some(backend.get_cursor_position()?))
+}
+
+#[cfg(unix)]
+pub(crate) fn default_colors(timeout: Duration) -> std::io::Result<Option<DefaultColors>> {
+    if !should_probe_default_colors(std::io::stdout().is_terminal()) {
+        return Ok(None);
+    }
+    imp::default_colors(timeout)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn default_colors(_timeout: Duration) -> std::io::Result<Option<DefaultColors>> {
+    Ok(None)
+}
+
+fn should_probe_default_colors(stdout_is_tty: bool) -> bool {
+    stdout_is_tty
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -37,6 +61,66 @@ fn parse_cursor_position(buffer: &[u8]) -> Option<Position> {
         search_start = start + 2;
     }
     None
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn parse_default_colors(buffer: &[u8]) -> Option<DefaultColors> {
+    let mut foreground = None;
+    let mut background = None;
+    let mut search_start = 0;
+    while let Some(rel) = find_subslice(&buffer[search_start..], b"\x1b]") {
+        let start = search_start + rel;
+        let payload_start = start + 2;
+        let rest = &buffer[payload_start..];
+        let bel_end = rest.iter().position(|byte| *byte == b'\x07');
+        let st_end = find_subslice(rest, b"\x1b\\");
+        let Some((end, terminator_len)) = (match (bel_end, st_end) {
+            (Some(bel), Some(st)) if bel <= st => Some((bel, 1)),
+            (_, Some(st)) => Some((st, 2)),
+            (Some(bel), None) => Some((bel, 1)),
+            (None, None) => None,
+        }) else {
+            break;
+        };
+        if let Some((code, color)) = parse_osc_color(&rest[..end]) {
+            match code {
+                10 => foreground = Some(color),
+                11 => background = Some(color),
+                _ => {}
+            }
+        }
+        if let (Some(fg), Some(bg)) = (foreground, background) {
+            return Some(DefaultColors { fg, bg });
+        }
+        search_start = payload_start + end + terminator_len;
+    }
+    None
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn parse_osc_color(payload: &[u8]) -> Option<(u8, (u8, u8, u8))> {
+    let payload = std::str::from_utf8(payload).ok()?;
+    let (code, value) = payload.split_once(';')?;
+    let code = code.parse::<u8>().ok()?;
+    let value = value.strip_prefix("rgb:")?;
+    let mut components = value.split('/').map(parse_osc_component);
+    let color = (
+        components.next()??,
+        components.next()??,
+        components.next()??,
+    );
+    components.next().is_none().then_some((code, color))
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn parse_osc_component(component: &str) -> Option<u8> {
+    let digits = component.len();
+    if !(1..=4).contains(&digits) {
+        return None;
+    }
+    let value = u32::from_str_radix(component, 16).ok()?;
+    let maximum = (1u32 << (digits * 4)) - 1;
+    Some(((value * 255 + maximum / 2) / maximum) as u8)
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]
@@ -72,7 +156,14 @@ mod imp {
             let stdio_reader = dup_file(libc::STDIN_FILENO);
             let stdio_writer = dup_file(libc::STDOUT_FILENO);
             match (stdio_reader, stdio_writer) {
-                (Ok(reader), Ok(writer)) => Self::new(reader, writer),
+                (Ok(reader), Ok(writer))
+                    if unsafe {
+                        libc::isatty(reader.as_raw_fd()) == 1
+                            && libc::isatty(writer.as_raw_fd()) == 1
+                    } =>
+                {
+                    Self::new(reader, writer)
+                }
                 _ => {
                     let reader = OpenOptions::new().read(true).open("/dev/tty")?;
                     let writer = OpenOptions::new().write(true).open("/dev/tty")?;
@@ -182,6 +273,12 @@ mod imp {
         read_until(&mut tty, timeout, super::parse_cursor_position)
     }
 
+    pub(super) fn default_colors(timeout: Duration) -> io::Result<Option<super::DefaultColors>> {
+        let mut tty = Tty::open()?;
+        tty.write_all(b"\x1b]10;?\x07\x1b]11;?\x07")?;
+        read_until(&mut tty, timeout, super::parse_default_colors)
+    }
+
     fn read_until<T>(
         tty: &mut Tty,
         timeout: Duration,
@@ -238,5 +335,33 @@ mod tests {
             parse_cursor_position(b"\x1b[bad\x1b[2;5R"),
             Some(Position { x: 4, y: 1 })
         );
+    }
+
+    #[test]
+    fn parses_osc_foreground_and_background_reports() {
+        assert_eq!(
+            parse_default_colors(
+                b"noise\x1b]10;rgb:ffff/0000/8080\x1b\\\x1b]11;rgb:00/80/ff\x07more"
+            ),
+            Some(DefaultColors {
+                fg: (255, 0, 128),
+                bg: (0, 128, 255),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_or_malformed_osc_reports() {
+        assert_eq!(parse_default_colors(b"\x1b]10;rgb:ff/00/00\x07"), None);
+        assert_eq!(
+            parse_default_colors(b"\x1b]10;rgb:ffff/0000/0000\x07\x1b]11;rgb:bad\x07"),
+            None
+        );
+    }
+
+    #[test]
+    fn skips_osc_queries_when_stdout_is_not_a_terminal() {
+        assert!(should_probe_default_colors(true));
+        assert!(!should_probe_default_colors(false));
     }
 }

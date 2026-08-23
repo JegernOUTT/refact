@@ -1171,7 +1171,7 @@ impl App {
 
     pub fn composer_height(&self, width: u16) -> u16 {
         let text_width = width
-            .saturating_sub(crate::ui_consts::LIVE_PREFIX_COLS + 1)
+            .saturating_sub(crate::ui_consts::LIVE_PREFIX_COLS + 2)
             .max(1);
         self.composer.height(text_width, 8) + 1 + self.queue_preview_height()
     }
@@ -2242,7 +2242,29 @@ impl App {
 
     fn show_status_card(&mut self) {
         self.push_history_item(TranscriptItem::Status(
-            self.status_snapshot(),
+            session::status_snapshot(
+                self.daemon_online,
+                self.daemon_status.as_ref(),
+                self.daemon_base_url.clone(),
+                worker_status_line(self.current_worker()),
+                self.current_project()
+                    .map(|project| project.slug.clone())
+                    .unwrap_or_else(|| "-".to_string()),
+                self.current_project()
+                    .map(|project| project.root.display().to_string()),
+                self.model().unwrap_or("default").to_string(),
+                self.mode().unwrap_or("agent").to_string(),
+                self.reasoning_effort_label().to_string(),
+                self.permission_policy,
+                self.chat_id.clone(),
+                self.usage().map(|usage| session::StatusUsage {
+                    prompt_tokens: usage.prompt_tokens,
+                    completion_tokens: usage.completion_tokens,
+                    total_tokens: usage.tokens_used(),
+                    context_window_tokens: self.context_window_tokens(),
+                }),
+                self.retry_hint.clone(),
+            ),
             self.theme.clone(),
         ));
     }
@@ -2323,38 +2345,6 @@ impl App {
             });
         }
         summaries
-    }
-
-    fn status_snapshot(&self) -> session::StatusSnapshot {
-        session::StatusSnapshot {
-            daemon_online: self.daemon_online,
-            daemon_version: self
-                .daemon_status
-                .as_ref()
-                .map(|status| status.version.clone()),
-            daemon_port: self.daemon_status.as_ref().map(|status| status.port),
-            daemon_base_url: self.daemon_base_url.clone(),
-            worker: worker_status_line(self.current_worker()),
-            project: self
-                .current_project()
-                .map(|project| project.slug.clone())
-                .unwrap_or_else(|| "-".to_string()),
-            project_root: self
-                .current_project()
-                .map(|project| project.root.display().to_string()),
-            model: self.model().unwrap_or("default").to_string(),
-            mode: self.mode().unwrap_or("agent").to_string(),
-            reasoning: self.reasoning_effort_label().to_string(),
-            permission_policy: self.permission_policy,
-            session_id: self.chat_id.clone(),
-            usage: self.usage().map(|usage| session::StatusUsage {
-                prompt_tokens: usage.prompt_tokens,
-                completion_tokens: usage.completion_tokens,
-                total_tokens: usage.tokens_used(),
-                context_window_tokens: self.context_window_tokens(),
-            }),
-            retry_hint: self.retry_hint.clone(),
-        }
     }
 
     fn apply_daemon_status(&mut self, status: DaemonStatus, base_url: String) {

@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_modal_renders_deboxed_surface_footer_and_accent_row() {
+    fn approval_modal_renders_framed_surface_footer_and_accent_row() {
         let modal = ApprovalModalState::new(vec![reason("call-1")]);
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -229,11 +229,11 @@ mod tests {
         assert!(text.contains("y approve"));
         assert!(text.contains("a approve for chat"));
         assert!(text.contains("v details"));
-        assert!(!text.contains("┌"));
-        assert!(!text.contains("┐"));
-        assert!(!text.contains("└"));
-        assert!(!text.contains("┘"));
-        assert!(!text.contains("│"));
+        assert!(text.contains("┌"));
+        assert!(text.contains("┐"));
+        assert!(text.contains("└"));
+        assert!(text.contains("┘"));
+        assert!(text.contains("│"));
         let cursor = buffer
             .content()
             .iter()
@@ -269,7 +269,7 @@ mod tests {
         assert!(text.contains("-old"));
         assert!(text.contains("+new"));
         assert!(text.contains("v summary"));
-        assert!(!text.contains("┌"));
+        assert!(text.contains("┌"));
     }
 
     #[test]

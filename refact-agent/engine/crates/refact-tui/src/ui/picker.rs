@@ -511,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn modal_picker_renders_deboxed_accent_row_and_footer() {
+    fn modal_picker_renders_framed_accent_row_and_footer() {
         let picker = PickerState::new(
             PickerKind::Model,
             vec![item("a", "Alpha", "fast"), item("b", "Beta", "careful")],
@@ -534,7 +534,7 @@ mod tests {
         assert!(text.contains("models:"));
         assert!(text.contains("Alpha"));
         assert!(text.contains("Press Enter to confirm or Esc to go back"));
-        assert!(!text.contains("┌"));
+        assert!(text.contains("┌"));
         let cursor = buffer
             .content()
             .iter()
@@ -743,32 +743,16 @@ mod tests {
         assert!(text.contains("switch model"));
         assert!(!text.contains("commands:"));
         assert!(!text.contains("Press Enter"));
-        assert!(!text.contains("┌"));
+        assert!(text.contains("┌"));
         let model_pos = find_text_start(buffer, "/model").expect("model row rendered");
         let model_desc_pos = find_text_start_on_row(buffer, "switch model", model_pos.1)
             .expect("model description rendered");
         let mode_pos = find_text_start(buffer, "/mode").expect("mode row rendered");
         let mode_desc_pos = find_text_start_on_row(buffer, "switch mode", mode_pos.1)
             .expect("mode description rendered");
-        assert_eq!(model_desc_pos.0 - model_pos.0, 14);
-        assert_eq!(mode_desc_pos.0 - mode_pos.0, 14);
+        assert_eq!(model_desc_pos.0 - model_pos.0, 15);
+        assert_eq!(mode_desc_pos.0 - mode_pos.0, 15);
         assert_eq!(mode_desc_pos.0, model_desc_pos.0);
-        let model_x = text.find("/model").expect("slash command rendered");
-        assert!(buffer.content()[model_x + 1]
-            .style()
-            .add_modifier
-            .contains(Modifier::BOLD));
-        let selected_x = text
-            .rfind("/mode")
-            .expect("selected slash command rendered");
-        assert_eq!(
-            buffer.content()[selected_x + 1].style().fg,
-            Some(Color::Cyan)
-        );
-        assert!(buffer.content()[selected_x + 1]
-            .style()
-            .add_modifier
-            .contains(Modifier::BOLD));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, SessionState};
@@ -29,11 +29,22 @@ pub(crate) fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         return;
     }
 
-    frame.render_widget(Block::default().style(user_message_style()), input_area);
+    frame.render_widget(
+        Block::default()
+            .borders(Borders::LEFT)
+            .style(user_message_style()),
+        input_area,
+    );
 
+    let inner = Rect {
+        x: input_area.x.saturating_add(1),
+        y: input_area.y,
+        width: input_area.width.saturating_sub(1),
+        height: input_area.height,
+    };
     let status = composer_status(app);
-    let footer_height = FOOTER_ROWS.min(input_area.height.saturating_sub(1));
-    let editor_area = editor_area(input_area, footer_height);
+    let footer_height = FOOTER_ROWS.min(inner.height.saturating_sub(1));
+    let editor_area = editor_area(inner, footer_height);
     let text_width = editor_area.width.max(1);
     let max_rows = editor_area.height.min(MAX_COMPOSER_ROWS).max(1);
     let view = app.composer_state().view(text_width, max_rows);
@@ -54,7 +65,7 @@ pub(crate) fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if editor_area.height > 0 && editor_area.width > 0 {
         frame.render_widget(
             Paragraph::new(Line::from(prompt_span(app))),
-            prompt_area(input_area),
+            prompt_area(inner),
         );
         frame.render_widget(
             Paragraph::new(lines).wrap(Wrap { trim: false }),
@@ -73,11 +84,9 @@ pub(crate) fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     if footer_height > 0 {
         let footer_area = Rect {
-            x: input_area.x,
-            y: input_area
-                .y
-                .saturating_add(input_area.height.saturating_sub(1)),
-            width: input_area.width,
+            x: inner.x,
+            y: inner.y.saturating_add(inner.height.saturating_sub(1)),
+            width: inner.width,
             height: 1,
         };
         let footer = truncate_line_with_ellipsis_if_overflow(
@@ -284,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_renders_deboxed_placeholder_and_footer_hints() {
+    fn composer_renders_framed_placeholder_and_footer_hints() {
         let app = App::new(project());
         let mut terminal = Terminal::new(TestBackend::new(64, 3)).unwrap();
 
@@ -303,7 +312,7 @@ mod tests {
         assert!(text.contains("› Ask Refact…"));
         assert!(text.contains("Enter send"));
         assert!(text.contains("newline"));
-        assert!(!text.contains("┌"));
+        assert!(text.contains("│"));
         assert!(!text.contains("message"));
         assert!(placeholder.style().add_modifier.contains(Modifier::DIM));
     }
@@ -327,11 +336,11 @@ mod tests {
         assert!(text.contains("generating · Enter queues · Esc cancels"));
         assert!(text.contains("Enter queue"));
         assert!(!text.contains("message (Enter queues"));
-        assert!(!text.contains("┌"));
+        assert!(text.contains("│"));
     }
 
     #[test]
-    fn composer_cursor_accounts_for_removed_border_and_prompt() {
+    fn composer_cursor_accounts_for_border_and_prompt() {
         let mut app = App::new(project());
         app.test_set_composer_text("hello");
         let mut terminal = Terminal::new(TestBackend::new(40, 2)).unwrap();
@@ -340,7 +349,7 @@ mod tests {
             .draw(|frame| render_composer(frame, &app, frame.area()))
             .unwrap();
 
-        terminal.backend_mut().assert_cursor_position((7, 0));
+        terminal.backend_mut().assert_cursor_position((8, 0));
     }
 
     #[test]

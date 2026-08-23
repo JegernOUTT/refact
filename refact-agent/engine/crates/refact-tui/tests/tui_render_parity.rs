@@ -226,8 +226,8 @@ fn transcript_cells_golden_snapshot() {
 
 
 
-› Ask Refact…
-  Enter send   Ctrl-J newline
+│› Ask Refact…
+│  Enter send   Ctrl-J newline
  98% context left (1.54K used) · fixture · gpt-demo · agent · reason:off · ● idle · daemon online ·…"#,
     );
 }
@@ -326,25 +326,25 @@ fn approval_overlay_golden_snapshot() {
   • Opened project fixture at /tmp/fixture
 
 
+   ┌──────────────────────────────────────────────────────────────────────────────────┐
+   │Approval required · approval 1 of 1                                               │
+   │› apply_patch  apply patch                                                        │
+   │  rule: ask                                                                       │
+   │                                                                                  │
+   │                                                                                  │
+   │                                                                                  │
+   │                                                                                  │
+   │                                                                                  │
+   │                                                                                  │
+   │                                                                                  │
+   │                                                                                  │
+   │                                                                                  │
+   │                                                                                  │
+   │y approve · a approve for chat · n reject · v details · Esc                       │
+   └──────────────────────────────────────────────────────────────────────────────────┘
 
-     Approval required · approval 1 of 1
-     › apply_patch  apply patch
-       rule: ask
-
-
-
-
-
-
-
-
-
-
-     y approve · a approve for chat · n reject · v details · Esc
-
-
-› Ask Refact…
-  approval pending   Enter send   Ctrl-J newline
+│› Ask Refact…
+│  approval pending   Enter send   Ctrl-J newline
  fixture · default · agent · reason:off · ◆ generating · Esc to interrupt · daemon online…"#,
     );
 }
@@ -402,16 +402,16 @@ fn ask_form_bottom_pane_golden_snapshot() {
 
 
 
-
-  Question 1/2
-  Which file should get the parity snapshot? (answer required)
-
-  › ○ tests/tui_render_parity.rs
-    ○ src/ui/mod.rs
-
-  Press Enter to confirm or Esc to go back
-  ↑/↓ choose · ←/→ question
-
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│Question 1/2                                                                            │
+│Which file should get the parity snapshot? (answer required)                            │
+│                                                                                        │
+│› ○ tests/tui_render_parity.rs                                                          │
+│  ○ src/ui/mod.rs                                                                       │
+│                                                                                        │
+│Press Enter to confirm or Esc to go back                                                │
+│↑/↓ choose · ←/→ question                                                               │
+└────────────────────────────────────────────────────────────────────────────────────────┘
  fixture · gpt-demo · agent · reason:off · ● idle · daemon online · worker ready"#,
     );
 }
@@ -501,16 +501,17 @@ fn status_command_card_golden_snapshot() {
         r#"╭──────────────────────────────────────────────────────────────────────────────────────╮
 │  refact (v<version>)                                                                     │
 │                                                                                      │
-│  Daemon:           v1.2.3 on port 32000                                              │
-│  Worker:           ready · pid 42 · http 32000 · lsp 32001                           │
-│  Model:            gpt-demo                                                          │
-│  Mode:             agent                                                             │
-│  Reasoning:        high                                                              │
-│  Directory:        /tmp/fixture                                                      │
-│  Permissions:      auto_approve_editing_tools=true · auto_approve_dangerous_commands │
-│  Token usage:      1.54K total (1.2K input + 340 output)                             │
-│  Context window:   98% left (1.54K/100K)                                             │
-│  Retry hint:       retry available                                                   │
+│  Daemon:                v1.2.3 on port 32000                                         │
+│  Worker:                ready · pid 42 · http 32000 · lsp 32001                      │
+│  Model:                 gpt-demo                                                     │
+│  Mode:                  agent                                                        │
+│  Reasoning:             high                                                         │
+│  Terminal background:   unavailable (OSC 10/11 probe timed out or is unsupported)    │
+│  Directory:             /tmp/fixture                                                 │
+│  Permissions:           auto_approve_editing_tools=true · auto_approve_dangerous_com │
+│  Token usage:           1.54K total (1.2K input + 340 output)                        │
+│  Context window:        98% left (1.54K/100K)                                        │
+│  Retry hint:            retry available                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────╯"#,
     );
 }
@@ -550,11 +551,12 @@ fn picker_golden_snapshots() {
 
 
 
-
-      models:
-      › GPT Demo     default · tools
-        Claude Demo  reasoning · long context
-      Press Enter to confirm or Esc to go back"#,
+    ┌──────────────────────────────────────────────────────────────────────────────┐
+    │models:                                                                       │
+    │› GPT Demo     default · tools                                                │
+    │  Claude Demo  reasoning · long context                                       │
+    │Press Enter to confirm or Esc to go back                                      │
+    └──────────────────────────────────────────────────────────────────────────────┘"#,
     );
 
     let mut slash_picker = PickerState::new(
@@ -593,9 +595,10 @@ fn picker_golden_snapshots() {
 
 
 
-
-      /status               show daemon status
-      /theme                choose TUI theme"#,
+    ┌──────────────────────────────────────────────────────────────────────────────┐
+    │/status                show daemon status                                     │
+    │/theme                 choose TUI theme                                       │
+    └──────────────────────────────────────────────────────────────────────────────┘"#,
     );
 }
 
@@ -621,11 +624,17 @@ fn events_pane_golden_snapshot() {
     });
     assert_snapshot(
         actual,
-        r#"
-  daemon events                                    workers
-  p1 chat.process_completed                        No workers
-  {"source":"exec.registry","content":"Process
-  cargo test exited with code
-  0","payload":{"process_…"#,
+        r#"┌──────────────────────────────────────────────────────────────────────────────────────┐
+│daemon events                                     workers                             │
+│p1 chat.process_completed                         No workers                          │
+│{"source":"exec.registry","content":"Process cargo                                    │
+│test exited with code 0","payload":{"process_…                                        │
+│                                                                                      │
+│                                                                                      │
+│                                                                                      │
+│                                                                                      │
+│                                                                                      │
+│                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────┘"#,
     );
 }

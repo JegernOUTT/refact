@@ -96,7 +96,7 @@ mod tests {
     }
 
     #[test]
-    fn events_pane_renders_deboxed_headers() {
+    fn events_pane_renders_framed_headers() {
         let app = App::new(project());
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
 
@@ -107,9 +107,9 @@ mod tests {
 
         assert!(text.contains("daemon events"));
         assert!(text.contains("workers"));
-        assert!(!text.contains("┌"));
-        assert!(!text.contains("│"));
-        assert!(!text.contains("└"));
+        assert!(text.contains("┌"));
+        assert!(text.contains("│"));
+        assert!(text.contains("└"));
     }
 
     #[test]
@@ -121,17 +121,28 @@ mod tests {
             .draw(|frame| render_events_pane(frame, &app, frame.area()))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let text = text_from_terminal(&terminal);
-        let no_events = text.find("No daemon events yet").expect("empty event text") as u16;
-        let no_workers = text.find("No workers").expect("empty worker text") as u16;
+        let no_events = find_text_start(buffer, "No daemon events yet").expect("empty event text");
+        let no_workers = find_text_start(buffer, "No workers").expect("empty worker text");
 
-        assert!(buffer[(no_events % 60, no_events / 60)]
+        assert!(buffer[no_events]
             .style()
             .add_modifier
             .contains(Modifier::ITALIC));
-        assert!(buffer[(no_workers % 60, no_workers / 60)]
+        assert!(buffer[no_workers]
             .style()
             .add_modifier
             .contains(Modifier::ITALIC));
+    }
+
+    fn find_text_start(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<(u16, u16)> {
+        for y in buffer.area.top()..buffer.area.bottom() {
+            let row = (buffer.area.left()..buffer.area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>();
+            if let Some(x) = row.find(needle) {
+                return Some((buffer.area.x + x as u16, y));
+            }
+        }
+        None
     }
 }

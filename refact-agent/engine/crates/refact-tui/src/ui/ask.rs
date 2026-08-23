@@ -424,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn ask_form_renders_deboxed_options_and_footer() {
+    fn ask_form_renders_framed_options_and_footer() {
         let form = form_with_questions(json!([
             {"id":"confirm","type":"yes_no","text":"Proceed?"}
         ]));
@@ -437,7 +437,7 @@ mod tests {
         assert!(text.contains("○ No"));
         assert!(text.contains("Press Enter to confirm or Esc to go back"));
         assert!(text.contains("Y/N choose"));
-        assert!(!text.contains("┌"));
+        assert!(text.contains("┌"));
         let cursor = buffer
             .content()
             .iter()
@@ -458,7 +458,7 @@ mod tests {
         assert!(text.contains("Question 1/1"));
         assert!(text.contains("Type your answer…"));
         assert!(text.contains("Type answer · Ctrl-J newline"));
-        assert!(!text.contains("┌"));
+        assert!(text.contains("┌"));
         let (x, y) = find_text_start(&buffer, "Notes?").expect("question rendered");
         assert_eq!(buffer[(x, y)].style().fg, Some(Color::Cyan));
     }

@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -40,7 +40,11 @@ pub(crate) fn render_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().style(user_message_style()))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .style(user_message_style()),
+            )
             .wrap(Wrap { trim: false }),
         popup,
     );

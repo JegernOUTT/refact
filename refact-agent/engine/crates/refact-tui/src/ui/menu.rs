@@ -6,7 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Widget};
+use ratatui::widgets::{Block, Borders, Widget};
 
 use crate::key_hint;
 use crate::render::{Insets, RectExt};
@@ -16,8 +16,6 @@ use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
 
 pub(crate) const MAX_POPUP_ROWS: usize = 8;
 
-const MENU_SURFACE_INSET_V: u16 = 1;
-const MENU_SURFACE_INSET_H: u16 = 2;
 const FIXED_LEFT_COLUMN_NUMERATOR: usize = 3;
 const FIXED_LEFT_COLUMN_DENOMINATOR: usize = 10;
 
@@ -105,9 +103,10 @@ pub(crate) fn render_menu_surface(area: Rect, buf: &mut Buffer) -> Rect {
         return area;
     }
     Block::default()
+        .borders(Borders::ALL)
         .style(user_message_style())
         .render(area, buf);
-    area.inset(Insets::vh(MENU_SURFACE_INSET_V, MENU_SURFACE_INSET_H))
+    area.inset(Insets::vh(1, 1))
 }
 
 pub(crate) fn standard_popup_hint_line() -> Line<'static> {
@@ -654,13 +653,20 @@ mod tests {
     use ratatui::style::Color;
 
     #[test]
-    fn menu_surface_returns_codex_inset() {
+    fn menu_surface_returns_framed_inset() {
         let area = Rect::new(2, 3, 20, 10);
         let mut buffer = Buffer::empty(area);
 
         let inner = render_menu_surface(area, &mut buffer);
 
-        assert_eq!(inner, Rect::new(4, 4, 16, 8));
+        assert_eq!(inner, Rect::new(3, 4, 18, 8));
+        let text = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("┌"));
+        assert!(text.contains("┘"));
     }
 
     #[test]

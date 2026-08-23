@@ -90,6 +90,10 @@ pub(crate) fn render_lines(
     lines.push(formatter.line("Model", value(snapshot.model.clone())));
     lines.push(formatter.line("Mode", value(snapshot.mode.clone())));
     lines.push(formatter.line("Reasoning", value(snapshot.reasoning.clone())));
+    lines.push(formatter.line(
+        "Terminal background",
+        value(crate::commands::session::terminal_background_status()),
+    ));
     lines.push(formatter.line("Directory", value(directory_label(snapshot, value_width))));
     lines.push(formatter.line(
         "Permissions",
@@ -130,6 +134,7 @@ fn labels(snapshot: &StatusSnapshot) -> Vec<String> {
         "Model",
         "Mode",
         "Reasoning",
+        "Terminal background",
         "Directory",
         "Permissions",
         "Token usage",
