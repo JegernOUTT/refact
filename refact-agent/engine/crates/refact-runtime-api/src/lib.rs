@@ -1,4 +1,7 @@
+use std::any::Any;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use refact_buddy_core::snapshot::BuddySnapshot;
@@ -71,6 +74,49 @@ pub struct ToolCatalogSnapshot {
 }
 
 #[derive(Clone)]
+pub struct TurnToolPool {
+    inner: Arc<dyn Any + Send + Sync>,
+    initial_vector_builds: Arc<AtomicU64>,
+    fallback_vector_builds: Arc<AtomicU64>,
+}
+
+impl TurnToolPool {
+    pub fn new<T>(inner: T) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        Self {
+            inner: Arc::new(inner),
+            initial_vector_builds: Arc::new(AtomicU64::new(0)),
+            fallback_vector_builds: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn downcast_ref<T>(&self) -> Option<&T>
+    where
+        T: Any,
+    {
+        self.inner.downcast_ref()
+    }
+
+    pub fn record_initial_vector_build(&self) {
+        self.initial_vector_builds.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_fallback_vector_build(&self) {
+        self.fallback_vector_builds.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn initial_vector_builds(&self) -> u64 {
+        self.initial_vector_builds.load(Ordering::Relaxed)
+    }
+
+    pub fn fallback_vector_builds(&self) -> u64 {
+        self.fallback_vector_builds.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Clone)]
 pub struct ToolConfirmationCheck {
     pub tool_name: String,
     pub result: refact_tool_api::MatchConfirmDeny,
@@ -128,6 +174,27 @@ pub trait ToolRegistry: Send + Sync {
             aliases: build_registry_from_names(&names),
         })
     }
+    async fn acquire_turn_tool_pool(
+        &self,
+        mode: &str,
+        model_id: Option<&str>,
+        execution_scope: Option<&str>,
+        catalog: &ToolCatalogSnapshot,
+    ) -> Option<TurnToolPool> {
+        let _ = (mode, model_id, execution_scope, catalog);
+        None
+    }
+    async fn prepare_turn_tool_pool(
+        &self,
+        pool: &TurnToolPool,
+        catalog: &ToolCatalogSnapshot,
+        mode: &str,
+        model_id: Option<&str>,
+        tool_slots: &[(String, usize)],
+    ) -> Result<(), String> {
+        let _ = (pool, catalog, mode, model_id, tool_slots);
+        Ok(())
+    }
     async fn check_tool_confirmation(
         &self,
         ccx: &(dyn std::any::Any + Send + Sync),
@@ -147,6 +214,20 @@ pub trait ToolRegistry: Send + Sync {
     ) -> Option<Result<ToolConfirmationCheck, String>> {
         let _ = catalog;
         self.check_tool_confirmation(ccx, mode, model_id, tool_name, args)
+            .await
+    }
+    async fn check_tool_confirmation_with_catalog_and_pool(
+        &self,
+        ccx: &(dyn std::any::Any + Send + Sync),
+        catalog: &ToolCatalogSnapshot,
+        pool: Option<&TurnToolPool>,
+        mode: &str,
+        model_id: Option<&str>,
+        tool_name: &str,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Option<Result<ToolConfirmationCheck, String>> {
+        let _ = pool;
+        self.check_tool_confirmation_with_catalog(ccx, catalog, mode, model_id, tool_name, args)
             .await
     }
     async fn get_tool_policy_info(&self, mode: &str, model_id: Option<&str>)
@@ -172,6 +253,21 @@ pub trait ToolRegistry: Send + Sync {
     ) -> Result<Option<ToolExecutionResult>, String> {
         let _ = catalog;
         self.execute_tool(ccx, mode, model_id, tool_call_id, tool_name, args)
+            .await
+    }
+    async fn execute_tool_with_catalog_and_pool(
+        &self,
+        ccx: &(dyn std::any::Any + Send + Sync),
+        catalog: &ToolCatalogSnapshot,
+        pool: Option<&TurnToolPool>,
+        mode: &str,
+        model_id: Option<&str>,
+        tool_call_id: &str,
+        tool_name: &str,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Option<ToolExecutionResult>, String> {
+        let _ = pool;
+        self.execute_tool_with_catalog(ccx, catalog, mode, model_id, tool_call_id, tool_name, args)
             .await
     }
     async fn load_task_memories(&self, task_id: &str) -> Result<Vec<(PathBuf, String)>, String>;

@@ -24,7 +24,10 @@ use super::generation::{start_generation, prepare_session_preamble_and_knowledge
 use super::goal_verifier::{
     should_verify_goal_on_done, verify_goal_before_completion, GoalCompletionGateOutcome,
 };
-use super::tools::{execute_tools_with_session, resolve_tool_call_aliases_with_catalog};
+use super::tools::{
+    acquire_session_turn_tool_pool, execute_tools_with_session,
+    resolve_tool_call_aliases_with_catalog,
+};
 use super::trajectories::{
     maybe_save_trajectory_with_intent, maybe_save_trajectory_background_with_intent,
 };
@@ -2527,6 +2530,15 @@ async fn handle_tool_decisions(
         };
         let tool_calls_to_execute =
             resolve_tool_call_aliases_with_catalog(tool_calls_to_execute, &catalog);
+        let turn_tool_pool = acquire_session_turn_tool_pool(
+            &app,
+            &session_arc,
+            &thread,
+            &thread.mode,
+            Some(&thread.model),
+            &catalog,
+        )
+        .await;
 
         {
             let mut session = session_arc.lock().await;
@@ -2543,6 +2555,7 @@ async fn handle_tool_decisions(
             Some(thread.model.as_str()),
             super::tools::ExecuteToolsOptions {
                 catalog: Some(catalog),
+                turn_tool_pool,
                 ..Default::default()
             },
         )

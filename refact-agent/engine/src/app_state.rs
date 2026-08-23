@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -12,7 +12,7 @@ use refact_buddy_core::user_action::UserAction;
 use refact_chat_api::ChatMessage;
 use refact_runtime_api::{
     ActivitySink, BuddyEventSink, ToolConfirmationCheck, ToolExecutionResult, ToolPolicyInfo,
-    ToolCatalogSnapshot, ToolRegistry, ToolRegistryIndex,
+    ToolCatalogSnapshot, ToolRegistry, ToolRegistryIndex, TurnToolPool,
 };
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 
@@ -310,6 +310,57 @@ pub struct AppToolRegistry {
     fixture_tool_factory: Option<FixtureToolFactory>,
 }
 
+type MutableTool = Box<dyn crate::tools::tools_description::Tool + Send>;
+
+struct AppTurnToolPool {
+    tools: AMutex<HashMap<String, VecDeque<MutableTool>>>,
+}
+
+impl AppTurnToolPool {
+    fn canonical_tool_name(tool_name: &str) -> String {
+        crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name)
+    }
+
+    fn from_tools(tools: Vec<MutableTool>) -> Self {
+        let mut grouped: HashMap<String, VecDeque<MutableTool>> = HashMap::new();
+        for tool in tools {
+            grouped
+                .entry(Self::canonical_tool_name(&tool.tool_description().name))
+                .or_default()
+                .push_back(tool);
+        }
+        Self {
+            tools: AMutex::new(grouped),
+        }
+    }
+
+    async fn take(&self, tool_name: &str) -> Option<MutableTool> {
+        self.tools
+            .lock()
+            .await
+            .get_mut(&Self::canonical_tool_name(tool_name))
+            .and_then(VecDeque::pop_front)
+    }
+
+    async fn return_tool(&self, tool: MutableTool) {
+        let name = Self::canonical_tool_name(&tool.tool_description().name);
+        self.tools
+            .lock()
+            .await
+            .entry(name)
+            .or_default()
+            .push_back(tool);
+    }
+
+    async fn add_missing_tools(&self, tools: Vec<MutableTool>) {
+        let mut grouped = self.tools.lock().await;
+        for tool in tools {
+            let name = Self::canonical_tool_name(&tool.tool_description().name);
+            grouped.entry(name).or_default().push_back(tool);
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ToolCatalogKey {
     workspace_scope: String,
@@ -519,6 +570,62 @@ impl AppToolRegistry {
         tools
     }
 
+    async fn build_turn_tool_pool(
+        &self,
+        gcx: SharedGlobalContext,
+        mode: &str,
+        model_id: Option<&str>,
+        catalog: &ToolCatalogSnapshot,
+    ) -> TurnToolPool {
+        let tools = self
+            .fresh_tools_for_catalog(gcx, mode, model_id, catalog)
+            .await;
+        let pool = TurnToolPool::new(AppTurnToolPool::from_tools(tools));
+        pool.record_initial_vector_build();
+        pool
+    }
+
+    fn app_turn_tool_pool<'a>(pool: &'a TurnToolPool) -> Result<&'a AppTurnToolPool, String> {
+        pool.downcast_ref::<AppTurnToolPool>()
+            .ok_or_else(|| "invalid TurnToolPool passed to AppToolRegistry".to_string())
+    }
+
+    async fn add_turn_tool_pool_fallback(
+        &self,
+        pool: &TurnToolPool,
+        gcx: SharedGlobalContext,
+        mode: &str,
+        model_id: Option<&str>,
+        catalog: &ToolCatalogSnapshot,
+    ) -> Result<(), String> {
+        let tools = self
+            .fresh_tools_for_catalog(gcx, mode, model_id, catalog)
+            .await;
+        Self::app_turn_tool_pool(pool)?
+            .add_missing_tools(tools)
+            .await;
+        pool.record_fallback_vector_build();
+        Ok(())
+    }
+
+    async fn take_turn_tool(
+        &self,
+        pool: &TurnToolPool,
+        gcx: SharedGlobalContext,
+        mode: &str,
+        model_id: Option<&str>,
+        catalog: &ToolCatalogSnapshot,
+        tool_name: &str,
+    ) -> Result<Option<MutableTool>, String> {
+        let pool_impl = Self::app_turn_tool_pool(pool)?;
+        if let Some(tool) = pool_impl.take(tool_name).await {
+            return Ok(Some(tool));
+        }
+        self.add_turn_tool_pool_fallback(pool, gcx, mode, model_id, catalog)
+            .await?;
+        Ok(pool_impl.take(tool_name).await)
+    }
+
     fn find_catalog_descriptor<'a>(
         catalog: &'a ToolCatalogSnapshot,
         tool_name: &str,
@@ -660,6 +767,47 @@ impl ToolRegistry for AppToolRegistry {
         .await
     }
 
+    async fn acquire_turn_tool_pool(
+        &self,
+        mode: &str,
+        model_id: Option<&str>,
+        _execution_scope: Option<&str>,
+        catalog: &ToolCatalogSnapshot,
+    ) -> Option<TurnToolPool> {
+        if !Self::snapshot_cache_enabled() {
+            return None;
+        }
+        Some(
+            self.build_turn_tool_pool(self.gcx.clone(), mode, model_id, catalog)
+                .await,
+        )
+    }
+
+    async fn prepare_turn_tool_pool(
+        &self,
+        pool: &TurnToolPool,
+        catalog: &ToolCatalogSnapshot,
+        mode: &str,
+        model_id: Option<&str>,
+        tool_slots: &[(String, usize)],
+    ) -> Result<(), String> {
+        let gcx = self.gcx.clone();
+        for (tool_name, required_slots) in tool_slots {
+            let pool_impl = Self::app_turn_tool_pool(pool)?;
+            let existing = {
+                let tools = pool_impl.tools.lock().await;
+                tools
+                    .get(&AppTurnToolPool::canonical_tool_name(tool_name))
+                    .map_or(0, VecDeque::len)
+            };
+            for _ in existing..*required_slots {
+                self.add_turn_tool_pool_fallback(pool, gcx.clone(), mode, model_id, catalog)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn check_tool_confirmation(
         &self,
         ccx: &(dyn std::any::Any + Send + Sync),
@@ -728,6 +876,64 @@ impl ToolRegistry for AppToolRegistry {
             }
         }
         None
+    }
+
+    async fn check_tool_confirmation_with_catalog_and_pool(
+        &self,
+        ccx: &(dyn std::any::Any + Send + Sync),
+        catalog: &ToolCatalogSnapshot,
+        pool: Option<&TurnToolPool>,
+        mode: &str,
+        model_id: Option<&str>,
+        tool_name: &str,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Option<Result<ToolConfirmationCheck, String>> {
+        let Some(pool) = pool else {
+            return self
+                .check_tool_confirmation_with_catalog(ccx, catalog, mode, model_id, tool_name, args)
+                .await;
+        };
+        let ccx = match ccx
+            .downcast_ref::<Arc<AMutex<crate::at_commands::at_commands::AtCommandsContext>>>()
+        {
+            Some(ccx) => ccx.clone(),
+            None => {
+                return Some(Err(
+                    "invalid AtCommandsContext passed to ToolRegistry".to_string()
+                ))
+            }
+        };
+        let catalog_desc = Self::find_catalog_descriptor(catalog, tool_name)?;
+        let gcx = {
+            let cgcx = ccx.lock().await;
+            cgcx.app.gcx.clone()
+        };
+        let Some(tool) = (match self
+            .take_turn_tool(pool, gcx, mode, model_id, catalog, tool_name)
+            .await
+        {
+            Ok(tool) => tool,
+            Err(error) => return Some(Err(error)),
+        }) else {
+            return None;
+        };
+        let mut coerced_args: HashMap<String, serde_json::Value> = args.into_iter().collect();
+        refact_tool_api::coerce_hashmap_to_schema(&mut coerced_args, &catalog_desc.input_schema);
+        let integr_config_path = (!catalog_desc.source.config_path.is_empty())
+            .then(|| catalog_desc.source.config_path.clone());
+        let result = tool
+            .match_against_confirm_deny(ccx, &coerced_args)
+            .await
+            .map(|result| ToolConfirmationCheck {
+                tool_name: catalog_desc.name.clone(),
+                result,
+                integr_config_path,
+            });
+        Self::app_turn_tool_pool(pool)
+            .expect("pool was validated before tool lease")
+            .return_tool(tool)
+            .await;
+        Some(result)
     }
 
     async fn get_tool_policy_info(
@@ -844,6 +1050,101 @@ impl ToolRegistry for AppToolRegistry {
             }
         }
         Ok(None)
+    }
+
+    async fn execute_tool_with_catalog_and_pool(
+        &self,
+        ccx: &(dyn std::any::Any + Send + Sync),
+        catalog: &ToolCatalogSnapshot,
+        pool: Option<&TurnToolPool>,
+        mode: &str,
+        model_id: Option<&str>,
+        tool_call_id: &str,
+        tool_name: &str,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Option<ToolExecutionResult>, String> {
+        let Some(pool) = pool else {
+            return self
+                .execute_tool_with_catalog(
+                    ccx,
+                    catalog,
+                    mode,
+                    model_id,
+                    tool_call_id,
+                    tool_name,
+                    args,
+                )
+                .await;
+        };
+        let ccx = ccx
+            .downcast_ref::<Arc<AMutex<crate::at_commands::at_commands::AtCommandsContext>>>()
+            .ok_or_else(|| "invalid AtCommandsContext passed to ToolRegistry".to_string())?
+            .clone();
+        let catalog_desc = match Self::find_catalog_descriptor(catalog, tool_name) {
+            Some(desc) => desc,
+            None => return Ok(None),
+        };
+        let gcx = {
+            let cgcx = ccx.lock().await;
+            cgcx.app.gcx.clone()
+        };
+        let Some(mut tool) = self
+            .take_turn_tool(pool, gcx.clone(), mode, model_id, catalog, tool_name)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let mut coerced_args: HashMap<String, serde_json::Value> = args.into_iter().collect();
+        let coercion_notes = refact_tool_api::coerce_hashmap_to_schema(
+            &mut coerced_args,
+            &catalog_desc.input_schema,
+        );
+        if !coercion_notes.is_empty() {
+            tracing::info!(
+                "Coerced arguments for tool {}: {:?}",
+                tool.tool_description().name,
+                coercion_notes
+            );
+        }
+        {
+            let mut cgcx = ccx.lock().await;
+            cgcx.app = AppState::from_gcx(gcx).await;
+        }
+        let runtime_span = perf_diagnostics::span(PerfComponent::ToolRuntime, None, None);
+        let result = tool
+            .tool_execute(ccx, &tool_call_id.to_string(), &coerced_args)
+            .await;
+        let result = match result {
+            Ok(result) => {
+                runtime_span.finish_tool(PerfOutcome::Success, 1, 1, None);
+                result
+            }
+            Err(error) => {
+                runtime_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
+                Self::app_turn_tool_pool(pool)
+                    .expect("pool was validated before tool lease")
+                    .return_tool(tool)
+                    .await;
+                return Err(error);
+            }
+        };
+        Self::app_turn_tool_pool(pool)
+            .expect("pool was validated before tool lease")
+            .return_tool(tool)
+            .await;
+        let mut messages = Vec::new();
+        let mut context_files = Vec::new();
+        for item in result.1 {
+            match item {
+                crate::call_validation::ContextEnum::ChatMessage(message) => messages.push(message),
+                crate::call_validation::ContextEnum::ContextFile(file) => context_files.push(file),
+            }
+        }
+        Ok(Some(ToolExecutionResult {
+            had_corrections: result.0,
+            messages,
+            context_files,
+        }))
     }
 
     async fn load_task_memories(&self, task_id: &str) -> Result<Vec<(PathBuf, String)>, String> {
@@ -1062,6 +1363,7 @@ mod tests {
 
     struct FixtureTool {
         _build_number: usize,
+        name: String,
     }
 
     #[async_trait]
@@ -1077,14 +1379,14 @@ mod tests {
 
         fn tool_description(&self) -> ToolDesc {
             ToolDesc {
-                name: "fixture".to_string(),
+                name: self.name.clone(),
                 experimental: false,
                 allow_parallel: true,
                 description: format!("fixture {}", self._build_number),
                 input_schema: serde_json::json!({"type":"object"}),
                 output_schema: None,
                 annotations: None,
-                display_name: "fixture".to_string(),
+                display_name: self.name.clone(),
                 source: ToolSource {
                     source_type: ToolSourceType::Builtin,
                     config_path: String::new(),
@@ -1094,13 +1396,28 @@ mod tests {
     }
 
     fn fixture_registry(gcx: SharedGlobalContext, builds: Arc<AtomicUsize>) -> AppToolRegistry {
+        fixture_registry_with_names(gcx, builds, vec!["fixture".to_string()])
+    }
+
+    fn fixture_registry_with_names(
+        gcx: SharedGlobalContext,
+        builds: Arc<AtomicUsize>,
+        names: Vec<String>,
+    ) -> AppToolRegistry {
         AppToolRegistry::with_fixture_tool_factory(
             gcx,
             Arc::new(move || {
                 let build_number = builds.fetch_add(1, Ordering::SeqCst);
-                vec![Box::new(FixtureTool {
-                    _build_number: build_number,
-                })]
+                names
+                    .iter()
+                    .map(|name| {
+                        Box::new(FixtureTool {
+                            _build_number: build_number,
+                            name: name.clone(),
+                        })
+                            as Box<dyn crate::tools::tools_description::Tool + Send>
+                    })
+                    .collect()
             }),
         )
     }
@@ -1252,6 +1569,122 @@ mod tests {
 
         assert_eq!(builds.load(Ordering::SeqCst), 2);
         assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[tokio::test]
+    async fn turn_tool_pool_unique_batch_uses_one_mutable_vector() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let names = (0..200).map(|index| format!("tool-{index}")).collect();
+        let registry = fixture_registry_with_names(gcx.clone(), builds.clone(), names);
+        let catalog = registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model"))
+            .await;
+        let pool = registry
+            .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
+            .await;
+        let builds_after_pool = builds.load(Ordering::SeqCst);
+        let slots = (0..200)
+            .map(|index| (format!("tool-{index}"), 1))
+            .collect::<Vec<_>>();
+
+        registry
+            .prepare_turn_tool_pool(&pool, &catalog, "agent", Some("provider/model"), &slots)
+            .await
+            .unwrap();
+
+        assert_eq!(pool.initial_vector_builds(), 1);
+        assert_eq!(pool.fallback_vector_builds(), 0);
+        assert_eq!(builds.load(Ordering::SeqCst), builds_after_pool);
+    }
+
+    #[tokio::test]
+    async fn turn_tool_pool_reuses_one_instance_for_sequential_calls() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let registry = fixture_registry(gcx.clone(), builds.clone());
+        let catalog = registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model"))
+            .await;
+        let pool = registry
+            .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
+            .await;
+        let builds_after_pool = builds.load(Ordering::SeqCst);
+
+        for _ in 0..50 {
+            let tool = registry
+                .take_turn_tool(
+                    &pool,
+                    registry.gcx.clone(),
+                    "agent",
+                    Some("provider/model"),
+                    &catalog,
+                    "fixture",
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            AppToolRegistry::app_turn_tool_pool(&pool)
+                .unwrap()
+                .return_tool(tool)
+                .await;
+        }
+
+        assert_eq!(pool.initial_vector_builds(), 1);
+        assert_eq!(pool.fallback_vector_builds(), 0);
+        assert_eq!(builds.load(Ordering::SeqCst), builds_after_pool);
+    }
+
+    #[tokio::test]
+    async fn turn_tool_pool_same_name_parallelism_is_bounded_by_multiplicity() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let registry = fixture_registry(gcx.clone(), builds);
+        let catalog = registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model"))
+            .await;
+        let pool = registry
+            .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
+            .await;
+        let parallelism = 8;
+
+        registry
+            .prepare_turn_tool_pool(
+                &pool,
+                &catalog,
+                "agent",
+                Some("provider/model"),
+                &[("fixture".to_string(), parallelism)],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(pool.initial_vector_builds(), 1);
+        assert_eq!(pool.fallback_vector_builds(), parallelism as u64 - 1);
+        assert_eq!(
+            pool.initial_vector_builds() + pool.fallback_vector_builds(),
+            parallelism as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_tool_pools_are_isolated_between_turns() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let registry = fixture_registry(gcx.clone(), builds.clone());
+        let catalog = registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model"))
+            .await;
+        let first = registry
+            .build_turn_tool_pool(gcx.clone(), "agent", Some("provider/model"), &catalog)
+            .await;
+        let second = registry
+            .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
+            .await;
+
+        assert_eq!(first.initial_vector_builds(), 1);
+        assert_eq!(second.initial_vector_builds(), 1);
+        assert_eq!(builds.load(Ordering::SeqCst), 3);
     }
 
     #[test]

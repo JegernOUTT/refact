@@ -454,6 +454,7 @@ impl ChatSession {
             external_reload_pending: None,
             last_prompt_messages: Vec::new(),
             tool_catalog: None,
+            turn_tool_pool: None,
             tier1_compact_attempts: 0,
             tier1_compaction_disabled: false,
             compression_insufficient_hashes: HashSet::new(),
@@ -559,6 +560,7 @@ impl ChatSession {
             closed_flag: Arc::new(AtomicBool::new(false)),
             last_prompt_messages: Vec::new(),
             tool_catalog: None,
+            turn_tool_pool: None,
             tier1_compact_attempts: 0,
             tier1_compaction_disabled: false,
             compression_insufficient_hashes: HashSet::new(),
@@ -1020,6 +1022,7 @@ impl ChatSession {
 
     pub fn replace_messages(&mut self, messages: Vec<ChatMessage>) {
         self.messages = messages;
+        self.turn_tool_pool = None;
         self.compression_retry_after_ms.clear();
         self.rebuild_goal_projection_from_messages();
         self.reset_compaction_runtime_state();
@@ -1900,6 +1903,9 @@ impl ChatSession {
             self.last_tool_started_at = None;
             self.last_tool_progress_at = None;
         }
+        if !matches!(state, SessionState::ExecutingTools | SessionState::Paused) {
+            self.turn_tool_pool = None;
+        }
         if state == SessionState::Generating && old_state != SessionState::Generating {
             self.last_stream_delta_at = None;
         }
@@ -2130,6 +2136,7 @@ impl ChatSession {
         }
         self.abort_flag.store(false, Ordering::SeqCst);
         self.user_interrupt_flag.store(false, Ordering::SeqCst);
+        self.turn_tool_pool = None;
         let message_id = Uuid::new_v4().to_string();
         self.draft_message = Some(ChatMessage {
             message_id: message_id.clone(),
@@ -5126,6 +5133,23 @@ mod tests {
         assert!(session.thread.previous_response_id.is_none());
         assert!(session.cache_guard_force_next);
         assert!(session.trajectory_dirty);
+    }
+
+    #[test]
+    fn turn_tool_pool_clears_when_a_turn_is_replaced_or_terminated() {
+        let mut session = make_session();
+        let pool = refact_runtime_api::TurnToolPool::new(());
+        session.turn_tool_pool = Some(pool.clone());
+
+        session.set_runtime_state(SessionState::ExecutingTools, None);
+        assert!(session.turn_tool_pool.is_some());
+
+        session.set_runtime_state(SessionState::Idle, None);
+        assert!(session.turn_tool_pool.is_none());
+
+        session.turn_tool_pool = Some(pool);
+        session.replace_messages(Vec::new());
+        assert!(session.turn_tool_pool.is_none());
     }
 
     #[test]

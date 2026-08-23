@@ -22,7 +22,7 @@ use crate::yaml_configs::customization_registry::{
 };
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};
-use refact_runtime_api::ToolCatalogSnapshot;
+use refact_runtime_api::{ToolCatalogSnapshot, TurnToolPool};
 use refact_tool_api::MatchConfirmDenyResult;
 use crate::exec::command_policy::escalation_from_args;
 
@@ -65,6 +65,7 @@ pub struct ExecuteToolsOptions {
     pub postprocess_settings: Option<PostprocessSettings>,
     pub allowed_tools: Vec<String>,
     pub catalog: Option<Arc<ToolCatalogSnapshot>>,
+    pub turn_tool_pool: Option<TurnToolPool>,
 }
 
 fn tool_execution_messages(
@@ -165,6 +166,40 @@ async fn build_tool_execution_context(
         )
         .await,
     ))
+}
+
+fn execution_scope_for_thread(thread: &ThreadParams) -> Option<String> {
+    thread
+        .worktree
+        .as_ref()
+        .map(|worktree| worktree.root.to_string_lossy().into_owned())
+}
+
+pub(crate) async fn acquire_session_turn_tool_pool(
+    app: &AppState,
+    session_arc: &Arc<AMutex<ChatSession>>,
+    thread: &ThreadParams,
+    mode_id: &str,
+    model_id: Option<&str>,
+    catalog: &ToolCatalogSnapshot,
+) -> Option<TurnToolPool> {
+    let existing = { session_arc.lock().await.turn_tool_pool.clone() };
+    if existing.is_some() {
+        return existing;
+    }
+    let pool = app
+        .tool_registry
+        .acquire_turn_tool_pool(
+            mode_id,
+            model_id,
+            execution_scope_for_thread(thread).as_deref(),
+            catalog,
+        )
+        .await;
+    if let Some(pool) = &pool {
+        session_arc.lock().await.turn_tool_pool = Some(pool.clone());
+    }
+    pool
 }
 
 fn is_server_executed_tool(tool_call_id: &str) -> bool {
@@ -762,11 +797,11 @@ mod tests {
             .iter()
             .position(|event| event.component == PerfComponent::ToolRuntime.as_str())
             .expect("runtime event");
-        assert!(runtime_index > 0);
-        assert_eq!(
-            events[runtime_index - 1].component,
-            PerfComponent::ToolCatalogBuild.as_str()
-        );
+        let catalog_index = events
+            .iter()
+            .position(|event| event.component == PerfComponent::ToolCatalogBuild.as_str())
+            .expect("catalog build event");
+        assert!(catalog_index < runtime_index);
         assert_eq!(
             events
                 .iter()
@@ -1813,13 +1848,16 @@ pub async fn process_tool_calls_once(
         }
     };
     let tool_calls = resolve_tool_call_aliases_with_catalog(tool_calls, &catalog);
+    let turn_tool_pool =
+        acquire_session_turn_tool_pool(&app, &session_arc, &thread, mode_id, model_id, &catalog)
+            .await;
 
     info!(
         "process_tool_calls_once: {} tool calls to process",
         tool_calls.len()
     );
 
-    let (confirmations, denials) = check_tools_confirmation(
+    let (confirmations, denials) = check_tools_confirmation_with_pool(
         app.clone(),
         &tool_calls,
         &messages,
@@ -1829,6 +1867,7 @@ pub async fn process_tool_calls_once(
         model_id,
         &allowed_tools,
         &source_command,
+        turn_tool_pool.as_ref(),
     )
     .await;
 
@@ -2018,6 +2057,7 @@ pub async fn process_tool_calls_once(
         ExecuteToolsOptions {
             allowed_tools: allowed_tools.clone(),
             catalog: Some(catalog),
+            turn_tool_pool,
             ..Default::default()
         },
     );
@@ -2235,6 +2275,33 @@ pub async fn check_tools_confirmation(
     allowed_tools: &[String],
     _source_command: &str,
 ) -> (Vec<PauseReason>, Vec<PauseReason>) {
+    check_tools_confirmation_with_pool(
+        app,
+        tool_calls,
+        messages,
+        thread,
+        catalog,
+        mode_id,
+        model_id,
+        allowed_tools,
+        _source_command,
+        None,
+    )
+    .await
+}
+
+async fn check_tools_confirmation_with_pool(
+    app: AppState,
+    tool_calls: &[crate::call_validation::ChatToolCall],
+    messages: &[ChatMessage],
+    thread: &ThreadParams,
+    catalog: Option<&ToolCatalogSnapshot>,
+    mode_id: &str,
+    model_id: Option<&str>,
+    allowed_tools: &[String],
+    _source_command: &str,
+    turn_tool_pool: Option<&TurnToolPool>,
+) -> (Vec<PauseReason>, Vec<PauseReason>) {
     let preflight_span =
         perf_diagnostics::span(PerfComponent::ToolConfirmationPreflight, None, None);
     let item_count = tool_calls.len() as u64;
@@ -2327,9 +2394,10 @@ pub async fn check_tools_confirmation(
         let Some(tool_result) = (match catalog {
             Some(catalog) => {
                 app.tool_registry
-                    .check_tool_confirmation_with_catalog(
+                    .check_tool_confirmation_with_catalog_and_pool(
                         &ccx,
                         catalog,
+                        turn_tool_pool,
                         mode_id,
                         model_id,
                         &tool_call.function.name,
@@ -2445,7 +2513,13 @@ pub async fn execute_tools_with_session(
         return (vec![], false);
     }
 
-    let (prompt_messages, session_abort_flag, session_allowed_tools, session_catalog) = {
+    let (
+        prompt_messages,
+        session_abort_flag,
+        session_allowed_tools,
+        session_catalog,
+        session_turn_tool_pool,
+    ) = {
         let session = session_arc.lock().await;
         let msgs = tool_execution_messages(messages, &session.last_prompt_messages);
         (
@@ -2453,6 +2527,7 @@ pub async fn execute_tools_with_session(
             session.abort_flag.clone(),
             session.active_command.allowed_tools.clone(),
             session.tool_catalog.clone(),
+            session.turn_tool_pool.clone(),
         )
     };
     if options.allowed_tools.is_empty() {
@@ -2474,6 +2549,14 @@ pub async fn execute_tools_with_session(
                 .await
         }
     };
+    if options.turn_tool_pool.is_none() {
+        options.turn_tool_pool = session_turn_tool_pool;
+    }
+    if options.turn_tool_pool.is_none() {
+        options.turn_tool_pool =
+            acquire_session_turn_tool_pool(&app, &session_arc, thread, mode_id, model_id, &catalog)
+                .await;
+    }
 
     let n_ctx = get_effective_n_ctx(app.clone(), thread).await;
     let budget = match ToolBudget::try_from_n_ctx(n_ctx) {
@@ -2513,6 +2596,7 @@ pub async fn execute_tools_with_session(
 
     let cancel_flag = spawn_subchat_bridge(ccx.clone(), session_arc.clone());
 
+    let turn_tool_pool = options.turn_tool_pool.clone();
     let result = execute_tools_inner(
         app.clone(),
         ccx,
@@ -2523,6 +2607,7 @@ pub async fn execute_tools_with_session(
         options,
         &prompt_messages,
         catalog,
+        turn_tool_pool,
     )
     .await;
 
@@ -2567,6 +2652,7 @@ async fn execute_single_tool(
     idx: usize,
     tool_call: ChatToolCall,
     catalog: Arc<ToolCatalogSnapshot>,
+    turn_tool_pool: Option<TurnToolPool>,
     serial_registry: Arc<SerialToolRegistry>,
     allow_parallel: bool,
     batch_size: usize,
@@ -2644,9 +2730,10 @@ async fn execute_single_tool(
 
     let (idx, had_corrections, mut msgs, files) = match app
         .tool_registry
-        .execute_tool_with_catalog(
+        .execute_tool_with_catalog_and_pool(
             &ccx,
             &catalog,
+            turn_tool_pool.as_ref(),
             mode_id,
             model_id,
             &tool_call.id,
@@ -2778,6 +2865,7 @@ async fn execute_tools_inner(
     options: ExecuteToolsOptions,
     messages: &[ChatMessage],
     catalog: Arc<ToolCatalogSnapshot>,
+    turn_tool_pool: Option<TurnToolPool>,
 ) -> (Vec<ChatMessage>, bool) {
     let max_parallel = limits().max_parallel_tools.max(1);
 
@@ -2804,6 +2892,8 @@ async fn execute_tools_inner(
 
     let mut all_results: Vec<(usize, bool, Vec<ChatMessage>, Vec<ContextFile>)> = Vec::new();
     let mut current_parallel_batch: Vec<(usize, ChatToolCall)> = Vec::new();
+    let mut prepared_parallel_slots: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
 
     for (idx, tool_call) in tool_calls.iter().enumerate() {
         let is_aborted = {
@@ -2862,6 +2952,8 @@ async fn execute_tools_inner(
                     ccx.clone(),
                     &current_parallel_batch,
                     catalog.clone(),
+                    turn_tool_pool.clone(),
+                    &mut prepared_parallel_slots,
                     serial_registry.clone(),
                     max_parallel,
                     mode_id,
@@ -2878,6 +2970,7 @@ async fn execute_tools_inner(
                 idx,
                 tool_call.clone(),
                 catalog.clone(),
+                turn_tool_pool.clone(),
                 serial_registry.clone(),
                 false,
                 1,
@@ -2895,6 +2988,8 @@ async fn execute_tools_inner(
             ccx.clone(),
             &current_parallel_batch,
             catalog,
+            turn_tool_pool,
+            &mut prepared_parallel_slots,
             serial_registry.clone(),
             max_parallel,
             mode_id,
@@ -2958,11 +3053,63 @@ async fn execute_parallel_batch(
     ccx: Arc<AMutex<AtCommandsContext>>,
     batch: &[(usize, ChatToolCall)],
     catalog: Arc<ToolCatalogSnapshot>,
+    turn_tool_pool: Option<TurnToolPool>,
+    prepared_parallel_slots: &mut std::collections::HashMap<String, usize>,
     serial_registry: Arc<SerialToolRegistry>,
     max_parallel: usize,
     mode_id: &str,
     model_id: Option<&str>,
 ) -> Vec<(usize, bool, Vec<ChatMessage>, Vec<ContextFile>)> {
+    if let Some(pool) = turn_tool_pool.as_ref() {
+        let mut required_slots: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (_, tool_call) in batch {
+            let name = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(
+                &tool_call.function.name,
+            );
+            *required_slots.entry(name).or_default() += 1;
+        }
+        let slots = required_slots
+            .into_iter()
+            .filter_map(|(name, count)| {
+                let required = count.min(max_parallel);
+                let prepared = prepared_parallel_slots
+                    .get(&name)
+                    .copied()
+                    .unwrap_or_default();
+                (required > prepared).then(|| (name, required))
+            })
+            .collect::<Vec<_>>();
+        if let Err(error) = app
+            .tool_registry
+            .prepare_turn_tool_pool(pool, &catalog, mode_id, model_id, &slots)
+            .await
+        {
+            return batch
+                .iter()
+                .map(|(idx, tool_call)| {
+                    (
+                        *idx,
+                        true,
+                        vec![ChatMessage {
+                            message_id: Uuid::new_v4().to_string(),
+                            role: "tool".to_string(),
+                            content: ChatContent::SimpleText(format!(
+                                "Error preparing tool pool: {error}"
+                            )),
+                            tool_call_id: tool_call.id.clone(),
+                            tool_failed: Some(true),
+                            ..Default::default()
+                        }],
+                        Vec::new(),
+                    )
+                })
+                .collect();
+        }
+        for (name, count) in slots {
+            prepared_parallel_slots.insert(name, count);
+        }
+    }
     let semaphore = Arc::new(Semaphore::new(max_parallel));
     let batch_size = batch.len();
 
@@ -2974,6 +3121,7 @@ async fn execute_parallel_batch(
             let semaphore = semaphore.clone();
             let serial_registry = serial_registry.clone();
             let catalog = catalog.clone();
+            let turn_tool_pool = turn_tool_pool.clone();
             let tool_call = tool_call.clone();
             let idx = *idx;
             let batch_size = batch_size;
@@ -2996,6 +3144,7 @@ async fn execute_parallel_batch(
                     idx,
                     tool_call,
                     catalog,
+                    turn_tool_pool,
                     serial_registry,
                     true,
                     batch_size,
@@ -3089,6 +3238,15 @@ pub async fn execute_tools(
                 .await
         }
     };
+    let turn_tool_pool = app
+        .tool_registry
+        .acquire_turn_tool_pool(
+            mode_id,
+            model_id,
+            execution_scope_for_thread(thread).as_deref(),
+            &catalog,
+        )
+        .await;
 
     let n_ctx = get_effective_n_ctx(app.clone(), thread).await;
     let budget = match ToolBudget::try_from_n_ctx(n_ctx) {
@@ -3144,7 +3302,16 @@ pub async fn execute_tools(
     }
 
     let (result_msgs, had_corrections) = execute_tools_inner(
-        app, ccx, tool_calls, mode_id, model_id, budget, options, messages, catalog,
+        app,
+        ccx,
+        tool_calls,
+        mode_id,
+        model_id,
+        budget,
+        options,
+        messages,
+        catalog,
+        turn_tool_pool,
     )
     .await;
 
