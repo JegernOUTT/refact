@@ -133,6 +133,7 @@ pub struct ToolPostResponse {
 }
 
 pub async fn handle_v1_post_tools(
+    State(app): State<AppState>,
     body_bytes: hyper::body::Bytes,
 ) -> Result<Json<ToolPostResponse>, ScratchError> {
     let tools = serde_json::from_slice::<ToolPostReq>(&body_bytes)
@@ -161,6 +162,7 @@ pub async fn handle_v1_post_tools(
             )
         })?;
     }
+    app.gcx.tool_catalog_generations.advance_integrations();
 
     Ok(Json(ToolPostResponse { success: true }))
 }

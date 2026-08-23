@@ -329,6 +329,8 @@ pub struct ToolCatalogSnapshot {
     pub policy: Vec<ToolPolicyInfo>,
 }
 
+const TOOL_CATALOG_SNAPSHOT_CACHE_LIMIT: usize = 128;
+
 #[derive(Default)]
 pub struct ToolCatalogCache {
     snapshots: ARwLock<HashMap<ToolCatalogKey, Arc<ToolCatalogSnapshot>>>,
@@ -349,7 +351,13 @@ impl ToolCatalogCache {
     }
 
     async fn insert(&self, key: ToolCatalogKey, snapshot: Arc<ToolCatalogSnapshot>) {
-        self.snapshots.write().await.insert(key, snapshot);
+        let mut snapshots = self.snapshots.write().await;
+        if snapshots.len() >= TOOL_CATALOG_SNAPSHOT_CACHE_LIMIT && !snapshots.contains_key(&key) {
+            if let Some(evicted) = snapshots.keys().next().cloned() {
+                snapshots.remove(&evicted);
+            }
+        }
+        snapshots.insert(key, snapshot);
     }
 
     #[cfg(test)]
@@ -396,12 +404,16 @@ impl AppToolRegistry {
     }
 
     fn snapshot_cache_enabled() -> bool {
-        !matches!(
+        Self::snapshot_cache_enabled_for(
             env::var("REFACT_TOOL_CATALOG_SNAPSHOTS")
+                .ok()
                 .as_deref()
                 .map(str::trim),
-            Ok("0") | Ok("false") | Ok("no") | Ok("off")
         )
+    }
+
+    fn snapshot_cache_enabled_for(value: Option<&str>) -> bool {
+        !matches!(value, Some("0") | Some("false") | Some("no") | Some("off"))
     }
 
     async fn catalog_key(
@@ -954,6 +966,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_catalog_snapshot_warm_acquisition_stays_below_two_milliseconds() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let registry = fixture_registry(gcx, builds.clone());
+        registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model"))
+            .await;
+        let mut samples = Vec::new();
+        for _ in 0..16 {
+            let started = std::time::Instant::now();
+            registry
+                .snapshot_for_mode_for_test("agent", Some("provider/model"))
+                .await;
+            samples.push(started.elapsed());
+        }
+        samples.sort_unstable();
+
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert!(samples[15] < std::time::Duration::from_millis(2));
+    }
+
+    #[tokio::test]
     async fn tool_catalog_generations_create_next_turn_snapshot_without_mutating_old_one() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let builds = Arc::new(AtomicUsize::new(0));
@@ -965,11 +999,36 @@ mod tests {
         let second = registry
             .snapshot_for_mode_for_test("agent", Some("provider/model"))
             .await;
+        gcx.ext_cache_generation.fetch_add(1, Ordering::SeqCst);
+        let third = registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model"))
+            .await;
 
-        assert_eq!(builds.load(Ordering::SeqCst), 2);
+        assert_eq!(builds.load(Ordering::SeqCst), 3);
         assert!(!Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&second, &third));
         assert_eq!(first.index.tools[0].name, "fixture");
         assert_eq!(second.index.tools[0].name, "fixture");
+        assert_eq!(third.index.tools[0].name, "fixture");
+    }
+
+    #[tokio::test]
+    async fn tool_catalog_snapshot_cache_is_bounded_across_generations() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let registry = fixture_registry(gcx.clone(), builds);
+
+        for _ in 0..=TOOL_CATALOG_SNAPSHOT_CACHE_LIMIT {
+            registry
+                .snapshot_for_mode_for_test("agent", Some("provider/model"))
+                .await;
+            gcx.tool_catalog_generations.advance_integrations();
+        }
+
+        assert_eq!(
+            gcx.tool_catalog_cache.snapshot_count().await,
+            TOOL_CATALOG_SNAPSHOT_CACHE_LIMIT
+        );
     }
 
     #[tokio::test]
@@ -1001,5 +1060,32 @@ mod tests {
             mutable_a[0].tool_description().description,
             mutable_b[0].tool_description().description
         );
+    }
+
+    #[test]
+    fn tool_catalog_snapshot_rollout_switch_keeps_the_cold_fallback_available() {
+        for disabled in ["0", "false", "no", "off"] {
+            assert!(!AppToolRegistry::snapshot_cache_enabled_for(Some(disabled)));
+        }
+        for enabled in [None, Some("1"), Some("true"), Some("yes")] {
+            assert!(AppToolRegistry::snapshot_cache_enabled_for(enabled));
+        }
+    }
+
+    #[test]
+    fn tool_catalog_generations_are_independent_for_every_invalidation_source() {
+        let generations = crate::global_context::ToolCatalogGenerations::default();
+
+        generations.advance_customization();
+        generations.advance_integrations();
+        generations.advance_mcp();
+        generations.advance_privacy();
+        generations.advance_capabilities();
+
+        assert_eq!(generations.customization.load(Ordering::Acquire), 1);
+        assert_eq!(generations.integrations.load(Ordering::Acquire), 1);
+        assert_eq!(generations.mcp.load(Ordering::Acquire), 1);
+        assert_eq!(generations.privacy.load(Ordering::Acquire), 1);
+        assert_eq!(generations.capabilities.load(Ordering::Acquire), 1);
     }
 }
