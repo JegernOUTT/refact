@@ -3067,22 +3067,54 @@ async fn execute_parallel_batch(
             let name = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(
                 &tool_call.function.name,
             );
-            *required_slots.entry(name).or_default() += 1;
+            let Some(desc) = catalog.index.tools.iter().find(|desc| desc.name == name) else {
+                continue;
+            };
+            let key = format!(
+                "{}\u{1f}{:?}\u{1f}{}",
+                desc.name, desc.source.source_type, desc.source.config_path
+            );
+            *required_slots.entry(key).or_default() += 1;
         }
         let slots = required_slots
             .into_iter()
-            .filter_map(|(name, count)| {
+            .filter_map(|(key, count)| {
                 let required = count.min(max_parallel);
                 let prepared = prepared_parallel_slots
-                    .get(&name)
+                    .get(&key)
                     .copied()
                     .unwrap_or_default();
-                (required > prepared).then(|| (name, required))
+                (required > prepared).then(|| (key, required))
+            })
+            .collect::<Vec<_>>();
+        let requested_slots = slots
+            .iter()
+            .map(|(key, count)| {
+                let mut parts = key.split('\u{1f}');
+                let name = parts.next().expect("tool pool key must include a name");
+                let source_type = parts
+                    .next()
+                    .expect("tool pool key must include source type");
+                let source_path = parts
+                    .next()
+                    .expect("tool pool key must include source path");
+                let desc = catalog
+                    .index
+                    .tools
+                    .iter()
+                    .find(|desc| {
+                        desc.name == name
+                            && format!("{:?}", desc.source.source_type) == source_type
+                            && desc.source.config_path == source_path
+                    })
+                    .expect("tool pool key must reference a catalog descriptor")
+                    .clone();
+                (desc, *count)
             })
             .collect::<Vec<_>>();
         if let Err(error) = app
             .tool_registry
-            .prepare_turn_tool_pool(pool, &catalog, mode_id, model_id, &slots)
+            .prepare_turn_tool_pool(pool, &catalog, mode_id, model_id, &requested_slots)
             .await
         {
             return batch
@@ -3106,8 +3138,8 @@ async fn execute_parallel_batch(
                 })
                 .collect();
         }
-        for (name, count) in slots {
-            prepared_parallel_slots.insert(name, count);
+        for (key, count) in slots {
+            prepared_parallel_slots.insert(key, count);
         }
     }
     let semaphore = Arc::new(Semaphore::new(max_parallel));

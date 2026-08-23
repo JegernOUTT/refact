@@ -317,15 +317,20 @@ struct AppTurnToolPool {
 }
 
 impl AppTurnToolPool {
-    fn canonical_tool_name(tool_name: &str) -> String {
-        crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name)
+    fn tool_key(desc: &refact_tool_api::ToolDesc) -> String {
+        format!(
+            "{}\u{1f}{:?}\u{1f}{}",
+            crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&desc.name),
+            desc.source.source_type,
+            desc.source.config_path
+        )
     }
 
     fn from_tools(tools: Vec<MutableTool>) -> Self {
         let mut grouped: HashMap<String, VecDeque<MutableTool>> = HashMap::new();
         for tool in tools {
             grouped
-                .entry(Self::canonical_tool_name(&tool.tool_description().name))
+                .entry(Self::tool_key(&tool.tool_description()))
                 .or_default()
                 .push_back(tool);
         }
@@ -334,16 +339,16 @@ impl AppTurnToolPool {
         }
     }
 
-    async fn take(&self, tool_name: &str) -> Option<MutableTool> {
+    async fn take(&self, desc: &refact_tool_api::ToolDesc) -> Option<MutableTool> {
         self.tools
             .lock()
             .await
-            .get_mut(&Self::canonical_tool_name(tool_name))
+            .get_mut(&Self::tool_key(desc))
             .and_then(VecDeque::pop_front)
     }
 
     async fn return_tool(&self, tool: MutableTool) {
-        let name = Self::canonical_tool_name(&tool.tool_description().name);
+        let name = Self::tool_key(&tool.tool_description());
         self.tools
             .lock()
             .await
@@ -355,7 +360,7 @@ impl AppTurnToolPool {
     async fn add_missing_tools(&self, tools: Vec<MutableTool>) {
         let mut grouped = self.tools.lock().await;
         for tool in tools {
-            let name = Self::canonical_tool_name(&tool.tool_description().name);
+            let name = Self::tool_key(&tool.tool_description());
             grouped.entry(name).or_default().push_back(tool);
         }
     }
@@ -617,13 +622,17 @@ impl AppToolRegistry {
         catalog: &ToolCatalogSnapshot,
         tool_name: &str,
     ) -> Result<Option<MutableTool>, String> {
+        let catalog_desc = match Self::find_catalog_descriptor(catalog, tool_name) {
+            Some(desc) => desc,
+            None => return Ok(None),
+        };
         let pool_impl = Self::app_turn_tool_pool(pool)?;
-        if let Some(tool) = pool_impl.take(tool_name).await {
+        if let Some(tool) = pool_impl.take(catalog_desc).await {
             return Ok(Some(tool));
         }
         self.add_turn_tool_pool_fallback(pool, gcx, mode, model_id, catalog)
             .await?;
-        Ok(pool_impl.take(tool_name).await)
+        Ok(pool_impl.take(catalog_desc).await)
     }
 
     fn find_catalog_descriptor<'a>(
@@ -789,15 +798,15 @@ impl ToolRegistry for AppToolRegistry {
         catalog: &ToolCatalogSnapshot,
         mode: &str,
         model_id: Option<&str>,
-        tool_slots: &[(String, usize)],
+        tool_slots: &[(refact_tool_api::ToolDesc, usize)],
     ) -> Result<(), String> {
         let gcx = self.gcx.clone();
-        for (tool_name, required_slots) in tool_slots {
+        for (tool_desc, required_slots) in tool_slots {
             let pool_impl = Self::app_turn_tool_pool(pool)?;
             let existing = {
                 let tools = pool_impl.tools.lock().await;
                 tools
-                    .get(&AppTurnToolPool::canonical_tool_name(tool_name))
+                    .get(&AppTurnToolPool::tool_key(tool_desc))
                     .map_or(0, VecDeque::len)
             };
             for _ in existing..*required_slots {
@@ -1584,8 +1593,12 @@ mod tests {
             .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
             .await;
         let builds_after_pool = builds.load(Ordering::SeqCst);
-        let slots = (0..200)
-            .map(|index| (format!("tool-{index}"), 1))
+        let slots = catalog
+            .index
+            .tools
+            .iter()
+            .cloned()
+            .map(|tool| (tool, 1))
             .collect::<Vec<_>>();
 
         registry
@@ -1654,7 +1667,7 @@ mod tests {
                 &catalog,
                 "agent",
                 Some("provider/model"),
-                &[("fixture".to_string(), parallelism)],
+                &[(catalog.index.tools[0].clone(), parallelism)],
             )
             .await
             .unwrap();

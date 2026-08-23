@@ -190,7 +190,7 @@ pub trait ToolRegistry: Send + Sync {
         catalog: &ToolCatalogSnapshot,
         mode: &str,
         model_id: Option<&str>,
-        tool_slots: &[(String, usize)],
+        tool_slots: &[(ToolDesc, usize)],
     ) -> Result<(), String> {
         let _ = (pool, catalog, mode, model_id, tool_slots);
         Ok(())
