@@ -6,17 +6,17 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::key_hint;
-use crate::keymap::HelpRow;
+use crate::keymap::{HelpRow, KeyContext};
 use crate::style::user_message_style;
 use crate::theme::ThemeRole;
 
 pub(crate) fn render_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let rows = app.keymap_help_rows();
+    let rows = help_rows_for_display(app.keymap_help_rows());
     let row_count = rows.len().min(24) as u16;
     let popup = super::centered(
         area,
         area.width.saturating_sub(8).min(92),
-        row_count.saturating_add(4).min(area.height),
+        row_count.saturating_add(5).min(area.height),
     );
     frame.render_widget(Clear, popup);
     let mut lines = Vec::new();
@@ -35,7 +35,7 @@ pub(crate) fn render_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }),
     ]));
     lines.push(Line::from(""));
-    for row in rows.into_iter().take(24) {
+    for row in rows {
         lines.push(help_row_line(row, app));
     }
     frame.render_widget(
@@ -48,6 +48,21 @@ pub(crate) fn render_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+fn help_rows_for_display(rows: Vec<HelpRow>) -> Vec<HelpRow> {
+    KeyContext::ALL
+        .into_iter()
+        .filter_map(|context| {
+            let action =
+                (context == KeyContext::Main).then_some(crate::keymap::KeyAction::ShowHelp);
+            rows.iter()
+                .find(|row| {
+                    row.context == context && action.is_none_or(|action| row.action == action)
+                })
+                .cloned()
+        })
+        .collect()
 }
 
 pub(crate) fn help_row_line(row: HelpRow, app: &App) -> Line<'static> {

@@ -15,9 +15,36 @@ pub enum KeyContext {
     OverlaySearch,
     VimNormal,
     VimInsert,
+    History,
+    Activity,
+    Board,
+    Goal,
+    Worktree,
+    Settings,
+    AskForm,
+    TranscriptCell,
 }
 
 impl KeyContext {
+    pub const ALL: [Self; 16] = [
+        Self::Main,
+        Self::ProjectPicker,
+        Self::ModalPicker,
+        Self::Approval,
+        Self::Overlay,
+        Self::OverlaySearch,
+        Self::VimNormal,
+        Self::VimInsert,
+        Self::History,
+        Self::Activity,
+        Self::Board,
+        Self::Goal,
+        Self::Worktree,
+        Self::Settings,
+        Self::AskForm,
+        Self::TranscriptCell,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Main => "main",
@@ -28,6 +55,14 @@ impl KeyContext {
             Self::OverlaySearch => "overlay search",
             Self::VimNormal => "vim normal",
             Self::VimInsert => "vim insert",
+            Self::History => "history",
+            Self::Activity => "activity",
+            Self::Board => "board",
+            Self::Goal => "goal",
+            Self::Worktree => "worktrees",
+            Self::Settings => "settings",
+            Self::AskForm => "ask form",
+            Self::TranscriptCell => "transcript cell",
         }
     }
 
@@ -41,6 +76,14 @@ impl KeyContext {
             Self::OverlaySearch => 5,
             Self::VimNormal => 6,
             Self::VimInsert => 7,
+            Self::History => 8,
+            Self::Activity => 9,
+            Self::Board => 10,
+            Self::Goal => 11,
+            Self::Worktree => 12,
+            Self::Settings => 13,
+            Self::AskForm => 14,
+            Self::TranscriptCell => 15,
         }
     }
 }
@@ -69,6 +112,7 @@ pub enum KeyAction {
     Cancel,
     CycleToolSelection,
     ToggleSelectedTool,
+    OpenCommandPalette,
     OpenSlashCommands,
     OpenFileMention,
     InsertNewline,
@@ -133,6 +177,7 @@ impl KeyAction {
             Self::Cancel => "cancel",
             Self::CycleToolSelection => "cycle-tool-selection",
             Self::ToggleSelectedTool => "toggle-selected-tool",
+            Self::OpenCommandPalette => "command-palette",
             Self::OpenSlashCommands => "slash-commands",
             Self::OpenFileMention => "file-mention",
             Self::InsertNewline => "newline",
@@ -197,6 +242,7 @@ impl KeyAction {
             Self::Cancel => "cancel, close, or abort active work",
             Self::CycleToolSelection => "select next tool card",
             Self::ToggleSelectedTool => "expand selected tool card",
+            Self::OpenCommandPalette => "open command palette",
             Self::OpenSlashCommands => "open slash command picker",
             Self::OpenFileMention => "open file mention picker",
             Self::InsertNewline => "insert composer newline",
@@ -269,6 +315,7 @@ const ALL_ACTIONS: &[KeyAction] = &[
     KeyAction::Cancel,
     KeyAction::CycleToolSelection,
     KeyAction::ToggleSelectedTool,
+    KeyAction::OpenCommandPalette,
     KeyAction::OpenSlashCommands,
     KeyAction::OpenFileMention,
     KeyAction::InsertNewline,
@@ -549,6 +596,16 @@ impl KeymapRegistry {
             .unwrap_or_else(KeyDispatch::unhandled)
     }
 
+    pub fn dispatch_main(&self, transcript_cell_active: bool, key: KeyEvent) -> KeyDispatch {
+        if transcript_cell_active {
+            let dispatch = self.dispatch(KeyContext::TranscriptCell, key);
+            if !dispatch.is_unhandled() {
+                return dispatch;
+            }
+        }
+        self.dispatch(KeyContext::Main, key)
+    }
+
     pub fn action_for(&self, context: KeyContext, key: KeyEvent) -> Option<KeyAction> {
         self.dispatch(context, key).action
     }
@@ -825,7 +882,7 @@ impl BindingConfig {
 }
 
 fn default_entries() -> Vec<KeymapEntry> {
-    vec![
+    let mut entries = vec![
         entry(KeyContext::Main, KeyAction::ShowHelp, &["?"]),
         entry(KeyContext::Main, KeyAction::ToggleEvents, &["f2"]),
         entry(KeyContext::Main, KeyAction::Quit, &["ctrl-q"]),
@@ -843,7 +900,7 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(KeyContext::Main, KeyAction::OpenExternalEditor, &["ctrl-g"]),
         entry(KeyContext::Main, KeyAction::ToggleReasoning, &["alt-r"]),
         entry(KeyContext::Main, KeyAction::HistorySearch, &["ctrl-r"]),
-        entry(KeyContext::Main, KeyAction::KillToLineEnd, &["ctrl-k"]),
+        entry(KeyContext::Main, KeyAction::KillToLineEnd, &["alt-k"]),
         entry(KeyContext::Main, KeyAction::KillToLineStart, &["ctrl-u"]),
         entry(KeyContext::Main, KeyAction::Yank, &["ctrl-y"]),
         entry(KeyContext::Main, KeyAction::Undo, &["ctrl-z"]),
@@ -851,6 +908,7 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(KeyContext::Main, KeyAction::CtrlC, &["ctrl-c"]),
         entry(KeyContext::Main, KeyAction::Cancel, &["esc"]),
         entry(KeyContext::Main, KeyAction::CycleToolSelection, &["tab"]),
+        entry(KeyContext::Main, KeyAction::OpenCommandPalette, &["ctrl-k"]),
         entry(KeyContext::Main, KeyAction::OpenSlashCommands, &["/"]),
         entry(KeyContext::Main, KeyAction::OpenFileMention, &["@"]),
         entry(
@@ -896,6 +954,18 @@ fn default_entries() -> Vec<KeymapEntry> {
             KeyContext::ModalPicker,
             KeyAction::Backspace,
             &["backspace"],
+        ),
+        entry(KeyContext::ModalPicker, KeyAction::MoveHome, &["home"]),
+        entry(KeyContext::ModalPicker, KeyAction::MoveEnd, &["end"]),
+        entry(
+            KeyContext::ModalPicker,
+            KeyAction::ScrollPageUp,
+            &["pageup"],
+        ),
+        entry(
+            KeyContext::ModalPicker,
+            KeyAction::ScrollPageDown,
+            &["pagedown"],
         ),
         entry(KeyContext::Approval, KeyAction::ApprovalApproveOnce, &["y"]),
         entry(
@@ -962,6 +1032,60 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(KeyContext::VimNormal, KeyAction::VimLineStart, &["0"]),
         entry(KeyContext::VimNormal, KeyAction::VimLineEnd, &["$"]),
         entry(KeyContext::VimInsert, KeyAction::VimNormalMode, &["esc"]),
+    ];
+    for context in [
+        KeyContext::History,
+        KeyContext::Activity,
+        KeyContext::Board,
+        KeyContext::Goal,
+        KeyContext::Worktree,
+        KeyContext::Settings,
+    ] {
+        entries.extend(surface_navigation_entries(context));
+    }
+    entries.extend(ask_form_entries());
+    entries.push(entry(
+        KeyContext::TranscriptCell,
+        KeyAction::ToggleSelectedTool,
+        &["t"],
+    ));
+    entries
+}
+
+fn surface_navigation_entries(context: KeyContext) -> Vec<KeymapEntry> {
+    vec![
+        entry(context, KeyAction::Cancel, &["esc"]),
+        entry(context, KeyAction::Accept, &["enter"]),
+        entry(context, KeyAction::MoveUp, &["up"]),
+        entry(context, KeyAction::MoveDown, &["down"]),
+        entry(context, KeyAction::MoveHome, &["home"]),
+        entry(context, KeyAction::MoveEnd, &["end"]),
+        entry(context, KeyAction::ScrollPageUp, &["pageup"]),
+        entry(context, KeyAction::ScrollPageDown, &["pagedown"]),
+    ]
+}
+
+fn ask_form_entries() -> Vec<KeymapEntry> {
+    vec![
+        entry(KeyContext::AskForm, KeyAction::Cancel, &["esc"]),
+        entry(KeyContext::AskForm, KeyAction::Accept, &["enter"]),
+        entry(KeyContext::AskForm, KeyAction::Backspace, &["backspace"]),
+        entry(KeyContext::AskForm, KeyAction::MoveLeft, &["left"]),
+        entry(KeyContext::AskForm, KeyAction::MoveRight, &["right"]),
+        entry(KeyContext::AskForm, KeyAction::MoveHome, &["home"]),
+        entry(KeyContext::AskForm, KeyAction::MoveEnd, &["end"]),
+        entry(KeyContext::AskForm, KeyAction::MoveUp, &["up"]),
+        entry(KeyContext::AskForm, KeyAction::MoveDown, &["down"]),
+        entry(
+            KeyContext::AskForm,
+            KeyAction::ToggleSelectedTool,
+            &["space"],
+        ),
+        entry(
+            KeyContext::AskForm,
+            KeyAction::InsertNewline,
+            &["ctrl-j", "shift-enter", "alt-enter"],
+        ),
     ]
 }
 
@@ -1188,6 +1312,31 @@ newline = "enter"
             Some(KeyAction::HistorySearch)
         );
         assert_eq!(
+            registry.action_for(
+                KeyContext::Main,
+                key(KeyCode::Char('g'), KeyModifiers::CONTROL)
+            ),
+            Some(KeyAction::OpenExternalEditor)
+        );
+        assert_eq!(
+            registry.action_for(
+                KeyContext::Main,
+                key(KeyCode::Char('t'), KeyModifiers::CONTROL)
+            ),
+            Some(KeyAction::OpenTranscriptOverlay)
+        );
+        assert_eq!(
+            registry.action_for(
+                KeyContext::Main,
+                key(KeyCode::Char('k'), KeyModifiers::CONTROL)
+            ),
+            Some(KeyAction::OpenCommandPalette)
+        );
+        assert_eq!(
+            registry.action_for(KeyContext::Main, key(KeyCode::Char('k'), KeyModifiers::ALT)),
+            Some(KeyAction::KillToLineEnd)
+        );
+        assert_eq!(
             registry.action_for(KeyContext::Main, key(KeyCode::Char('r'), KeyModifiers::ALT)),
             Some(KeyAction::ToggleReasoning)
         );
@@ -1216,7 +1365,10 @@ newline = "enter"
             .any(|row| row.action == KeyAction::HistorySearch && row.bindings.contains("Ctrl-R")));
         assert!(rows
             .iter()
-            .any(|row| row.action == KeyAction::KillToLineEnd && row.bindings.contains("Ctrl-K")));
+            .any(|row| row.action == KeyAction::KillToLineEnd && row.bindings.contains("Alt-K")));
+        assert!(rows.iter().any(|row| {
+            row.action == KeyAction::OpenCommandPalette && row.bindings.contains("Ctrl-K")
+        }));
         assert!(rows
             .iter()
             .any(|row| row.action == KeyAction::Redo && row.bindings.contains("Ctrl-Shift-Z")));
@@ -1229,6 +1381,61 @@ newline = "enter"
         assert!(rows
             .iter()
             .any(|row| row.action == KeyAction::NextSession && row.bindings.contains("F7")));
+    }
+
+    #[test]
+    fn all_contexts_are_labeled_ordered_and_collision_free() {
+        let registry = KeymapRegistry::default();
+        let mut contexts = KeyContext::ALL;
+        contexts.sort_by_key(|context| context.order());
+
+        assert_eq!(contexts, KeyContext::ALL);
+        assert!(contexts.iter().all(|context| !context.label().is_empty()));
+        assert!(registry.warnings().is_empty());
+
+        let rows = registry.help_rows();
+        for context in KeyContext::ALL {
+            assert!(
+                rows.iter().any(|row| row.context == context),
+                "{} is missing from generated help",
+                context.label()
+            );
+        }
+    }
+
+    #[test]
+    fn main_defers_to_active_transcript_cell() {
+        let registry = KeymapRegistry::default();
+        let toggle = key(KeyCode::Char('t'), KeyModifiers::empty());
+
+        assert_eq!(
+            registry.dispatch_main(false, toggle),
+            KeyDispatch::text('t')
+        );
+        assert_eq!(
+            registry.dispatch_main(true, toggle),
+            KeyDispatch {
+                action: Some(KeyAction::ToggleSelectedTool),
+                text: Some('t'),
+            },
+        );
+    }
+
+    #[test]
+    fn modal_picker_navigation_keys_dispatch() {
+        let registry = KeymapRegistry::default();
+
+        for (code, action) in [
+            (KeyCode::Home, KeyAction::MoveHome),
+            (KeyCode::End, KeyAction::MoveEnd),
+            (KeyCode::PageUp, KeyAction::ScrollPageUp),
+            (KeyCode::PageDown, KeyAction::ScrollPageDown),
+        ] {
+            assert_eq!(
+                registry.action_for(KeyContext::ModalPicker, key(code, KeyModifiers::empty())),
+                Some(action),
+            );
+        }
     }
 
     #[test]

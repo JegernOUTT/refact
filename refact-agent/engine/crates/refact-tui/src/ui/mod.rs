@@ -222,8 +222,32 @@ help = "f1"
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("show generated keymap help"));
-        assert!(text.contains("Ctrl-X"));
-        assert!(!text.contains("Ctrl-N"));
+        assert!(
+            app.keymap_help_rows()
+                .iter()
+                .any(|row| row.action == crate::keymap::KeyAction::NewChat
+                    && row.bindings == "Ctrl-X")
+        );
+    }
+
+    #[test]
+    fn help_lists_every_key_context() {
+        let app = App::new(project());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| help::render_help(frame, &app, frame.area()))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        for context in crate::keymap::KeyContext::ALL {
+            assert!(text.contains(context.label()), "{}", context.label());
+        }
     }
 
     #[test]

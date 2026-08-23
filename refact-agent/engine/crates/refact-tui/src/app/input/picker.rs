@@ -66,6 +66,34 @@ impl App {
                 self.preview_current_theme_picker_selection();
                 AppAction::None
             }
+            Some(KeyAction::MoveHome) => {
+                if let Some(picker) = self.modal_picker.as_mut() {
+                    picker.select_first();
+                }
+                self.preview_current_theme_picker_selection();
+                AppAction::None
+            }
+            Some(KeyAction::MoveEnd) => {
+                if let Some(picker) = self.modal_picker.as_mut() {
+                    picker.select_last();
+                }
+                self.preview_current_theme_picker_selection();
+                AppAction::None
+            }
+            Some(KeyAction::ScrollPageUp) => {
+                if let Some(picker) = self.modal_picker.as_mut() {
+                    picker.select_page_up();
+                }
+                self.preview_current_theme_picker_selection();
+                AppAction::None
+            }
+            Some(KeyAction::ScrollPageDown) => {
+                if let Some(picker) = self.modal_picker.as_mut() {
+                    picker.select_page_down();
+                }
+                self.preview_current_theme_picker_selection();
+                AppAction::None
+            }
             Some(KeyAction::ToggleSelectedTool) => {
                 if let Some(picker) = self.modal_picker.as_mut() {
                     if picker.is_multi() {
@@ -119,5 +147,29 @@ mod tests {
     #[test]
     fn composer_modes_are_distinct() {
         assert_ne!(ComposerMode::Chat, ComposerMode::ProjectPicker);
+    }
+
+    #[test]
+    fn modal_picker_home_end_and_paging_change_selection() {
+        let mut app = App::notice_only("test");
+        app.modal_picker = Some(PickerState::new(
+            PickerKind::Model,
+            (0..25)
+                .map(|index| PickerItem {
+                    id: index.to_string(),
+                    title: index.to_string(),
+                    description: String::new(),
+                })
+                .collect(),
+        ));
+
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::empty()));
+        assert_eq!(app.modal_picker().unwrap().selected, 24);
+        app.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty()));
+        assert_eq!(app.modal_picker().unwrap().selected, 14);
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::empty()));
+        assert_eq!(app.modal_picker().unwrap().selected, 0);
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::empty()));
+        assert_eq!(app.modal_picker().unwrap().selected, 10);
     }
 }

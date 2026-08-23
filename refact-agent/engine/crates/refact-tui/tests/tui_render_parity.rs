@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::widgets::{Paragraph, Widget};
@@ -144,6 +145,47 @@ fn fixture_snapshot_messages() -> Vec<Value> {
             "content": "Daemon event captured separately."
         }),
     ]
+}
+
+#[test]
+fn keymap_help_golden_snapshot() {
+    let mut app = App::new(project());
+    app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::empty()));
+
+    let actual = render_app_snapshot(&mut app, 100, 30);
+    assert_snapshot(
+        actual,
+        r#"refact fixture | Ctrl-N new · Ctrl-P projects · Alt-M model · Ctrl-O mode · ? help
+  • Opened project fixture at /tmp/fixture
+
+
+    ┌──────────────────────────────────────────────────────────────────────────────────────────┐
+    │Help                                                                                      │
+    │Theme dark · vim off                                                                      │
+    │                                                                                          │
+    │        main ?                     show generated keymap help                             │
+    │    projects Backspace             delete left or remove queued item                      │
+    │     pickers Backspace             delete left or remove queued item                      │
+    │   approvals a                     approve matching tools for chat                        │
+    │     overlay Esc, q                cancel, close, or abort active work                    │
+    │overlay search Backspace             delete left or remove queued item                    │
+    │  vim normal a                     append after cursor and insert                         │
+    │  vim insert Esc                   return to vim normal mode                              │
+    │     history Esc                   cancel, close, or abort active work                    │
+    │    activity Esc                   cancel, close, or abort active work                    │
+    │       board Esc                   cancel, close, or abort active work                    │
+    │        goal Esc                   cancel, close, or abort active work                    │
+    │   worktrees Esc                   cancel, close, or abort active work                    │
+    │    settings Esc                   cancel, close, or abort active work                    │
+    │    ask form Backspace             delete left or remove queued item                      │
+    │transcript cell t                     expand selected tool card                           │
+    └──────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+│› Ask Refact…
+│  Enter send   Ctrl-J newline
+ fixture · default · agent · reason:off · ● idle · daemon online · worker ready"#,
+    );
 }
 
 #[test]

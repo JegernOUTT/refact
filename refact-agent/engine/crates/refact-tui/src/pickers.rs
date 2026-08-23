@@ -43,6 +43,8 @@ pub struct PickerState {
     selected_ids: Vec<String>,
 }
 
+const PAGE_STEP: usize = 10;
+
 impl PickerState {
     pub fn new(kind: PickerKind, items: Vec<PickerItem>) -> Self {
         Self::with_selection_mode(kind, items, PickerSelectionMode::Single)
@@ -184,6 +186,23 @@ impl PickerState {
 
     pub fn select_prev(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn select_first(&mut self) {
+        self.selected = 0;
+    }
+
+    pub fn select_last(&mut self) {
+        self.selected = self.filtered_items().len().saturating_sub(1);
+    }
+
+    pub fn select_page_up(&mut self) {
+        self.selected = self.selected.saturating_sub(PAGE_STEP);
+    }
+
+    pub fn select_page_down(&mut self) {
+        self.selected = self.selected.saturating_add(PAGE_STEP);
+        self.clamp_selection();
     }
 
     pub fn toggle_selected(&mut self) {
@@ -404,6 +423,27 @@ mod tests {
         picker.push_filter('n');
         assert_eq!(picker.selected, 0);
         assert_eq!(picker.selected_item().unwrap().id, "new");
+    }
+
+    #[test]
+    fn picker_navigation_supports_home_end_and_paging() {
+        let items = (0..25)
+            .map(|index| PickerItem {
+                id: index.to_string(),
+                title: index.to_string(),
+                description: String::new(),
+            })
+            .collect();
+        let mut picker = PickerState::new(PickerKind::Model, items);
+
+        picker.select_last();
+        assert_eq!(picker.selected, 24);
+        picker.select_page_up();
+        assert_eq!(picker.selected, 14);
+        picker.select_page_down();
+        assert_eq!(picker.selected, 24);
+        picker.select_first();
+        assert_eq!(picker.selected, 0);
     }
 
     #[test]

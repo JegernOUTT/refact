@@ -96,6 +96,11 @@ impl App {
                     self.insert_dispatch_text(dispatch)
                 }
             }
+            Some(KeyAction::OpenCommandPalette) => {
+                self.input_queue.clear_selection();
+                self.open_slash_command_picker();
+                AppAction::None
+            }
             Some(KeyAction::OpenSlashCommands) => {
                 if self.composer.is_empty() {
                     self.input_queue.clear_selection();

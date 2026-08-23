@@ -22,7 +22,7 @@ impl App {
                 }
             }
         }
-        let dispatch = self.keymap.dispatch(KeyContext::Main, key);
+        let dispatch = self.keymap.dispatch(KeyContext::AskForm, key);
         match dispatch.action {
             Some(KeyAction::Cancel) => {
                 let request = form.request().clone();

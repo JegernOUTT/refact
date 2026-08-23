@@ -8390,7 +8390,7 @@ new-chat = "ctrl-x"
         app.composer.set_text("alpha beta");
         app.composer.move_word_backward(false);
         app.composer.move_word_backward(false);
-        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT));
         assert_eq!(app.composer(), "");
         app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
         assert_eq!(app.composer(), "alpha beta");
