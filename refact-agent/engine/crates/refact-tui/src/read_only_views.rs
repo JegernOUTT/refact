@@ -161,10 +161,10 @@ pub fn skills_overlay(data: &SlashCommandsListResponse) -> ViewOverlay {
         rows.push(surface_note_row(empty));
     } else {
         for skill in skills {
-            let invocable = if skill.user_invocable {
-                "user-invocable"
-            } else {
-                "model-only"
+            let invocable = match skill.user_invocable {
+                Some(true) => "user-invocable",
+                Some(false) => "model-only",
+                None => "invocation unknown",
             };
             lines.push(format!(
                 "• /{} — {} · {}",
@@ -224,22 +224,28 @@ pub fn skills_overlay(data: &SlashCommandsListResponse) -> ViewOverlay {
 
 pub fn memories_overlay(data: &KnowledgeGraphResponse) -> ViewOverlay {
     let stats = &data.stats;
+    let count = |value: Option<usize>| {
+        value.map_or_else(|| "unknown".to_string(), |count| count.to_string())
+    };
     let mut summary_lines = vec![
         "Knowledge graph summary from /v1/knowledge-graph.".to_string(),
         format!(
             "Docs: {} active / {} total · Tags: {} · Files: {} · Entities: {} · Edges: {}",
-            stats.active_docs,
-            stats.doc_count,
-            stats.tag_count,
-            stats.file_count,
-            stats.entity_count,
-            stats.edge_count
+            count(stats.active_docs),
+            count(stats.doc_count),
+            count(stats.tag_count),
+            count(stats.file_count),
+            count(stats.entity_count),
+            count(stats.edge_count)
         ),
     ];
-    if stats.deprecated_docs > 0 || stats.trajectory_count > 0 {
+    if stats.deprecated_docs.is_some_and(|count| count > 0)
+        || stats.trajectory_count.is_some_and(|count| count > 0)
+    {
         summary_lines.push(format!(
             "Deprecated docs: {} · Trajectory docs: {}",
-            stats.deprecated_docs, stats.trajectory_count
+            count(stats.deprecated_docs),
+            count(stats.trajectory_count)
         ));
     }
     let mut lines = overlay_lines("Memories", &summary_lines);
@@ -367,23 +373,29 @@ pub fn import_sources_overlay(data: &CompetitorImportInfoResponse) -> ViewOverla
 pub fn import_run_overlay(data: &CompetitorImportRunResponse) -> ViewOverlay {
     let report = &data.report;
     let source = data.source.as_deref().unwrap_or("all");
+    let count = |status| {
+        import_status_count(report, status)
+            .map_or_else(|| "unknown".to_string(), |count| count.to_string())
+    };
     let mut lines = vec![
         "Import".to_string(),
         format!("Imported {source} customizations in {} scope.", data.scope),
         format!(
             "Discovered: {} · created {} · updated {} · unchanged {} · stale {}",
-            report.discovered_candidates,
-            import_status_count(report, ImportStatus::Created),
-            import_status_count(report, ImportStatus::Updated),
-            import_status_count(report, ImportStatus::Unchanged),
-            import_status_count(report, ImportStatus::Stale),
+            report
+                .discovered_candidates
+                .map_or_else(|| "unknown".to_string(), |count| count.to_string()),
+            count(ImportStatus::Created),
+            count(ImportStatus::Updated),
+            count(ImportStatus::Unchanged),
+            count(ImportStatus::Stale),
         ),
         format!(
             "Conflicts: {} · user-modified {} · unsupported {} · errors {}",
-            import_status_count(report, ImportStatus::Conflict),
-            import_status_count(report, ImportStatus::UserModified),
-            import_status_count(report, ImportStatus::Unsupported),
-            import_status_count(report, ImportStatus::Error),
+            count(ImportStatus::Conflict),
+            count(ImportStatus::UserModified),
+            count(ImportStatus::Unsupported),
+            count(ImportStatus::Error),
         ),
     ];
     if let Some(completed_at) = report.completed_at.as_deref() {
@@ -401,7 +413,9 @@ pub fn import_run_overlay(data: &CompetitorImportRunResponse) -> ViewOverlay {
             let path = issue.path.as_deref().unwrap_or("no path");
             lines.push(format!(
                 "• {:?} · {competitor} {kind} · {path}",
-                issue.status
+                issue
+                    .status
+                    .map_or("unknown".to_string(), |status| format!("{status:?}"))
             ));
             if !issue.message.trim().is_empty() {
                 lines.push(format!("  {}", compact_text(&issue.message)));
@@ -626,18 +640,28 @@ fn push_hook_lines(lines: &mut Vec<String>, hook: &HookInfo) {
     lines.push(format!("  {}", compact_text(&hook.command)));
 }
 
-fn import_status_count(data: &crate::client::ImportReport, status: ImportStatus) -> usize {
-    data.status_counts.get(&status).copied().unwrap_or_default()
+fn import_status_count(data: &crate::client::ImportReport, status: ImportStatus) -> Option<usize> {
+    data.status_counts.get(&status).copied()
 }
 
 pub fn import_run_notice(data: &CompetitorImportRunResponse) -> String {
     let source = data.source.as_deref().unwrap_or("all");
-    let created = import_status_count(&data.report, ImportStatus::Created);
-    let updated = import_status_count(&data.report, ImportStatus::Updated);
-    let errors = import_status_count(&data.report, ImportStatus::Error);
+    let count = |status| {
+        import_status_count(&data.report, status)
+            .map_or_else(|| "unknown".to_string(), |count| count.to_string())
+    };
+    let created = count(ImportStatus::Created);
+    let updated = count(ImportStatus::Updated);
+    let errors = count(ImportStatus::Error);
     format!(
         "/import {source} {} complete: discovered {}, created {}, updated {}, errors {}",
-        data.scope, data.report.discovered_candidates, created, updated, errors
+        data.scope,
+        data.report
+            .discovered_candidates
+            .map_or_else(|| "unknown".to_string(), |count| count.to_string()),
+        created,
+        updated,
+        errors
     )
 }
 
@@ -750,7 +774,7 @@ mod tests {
             skills: vec![SkillInfo {
                 name: "explain".to_string(),
                 description: "Explain code".to_string(),
-                user_invocable: true,
+                user_invocable: Some(true),
                 source: "project_refact".to_string(),
             }],
             commands: Vec::new(),
@@ -764,9 +788,9 @@ mod tests {
     fn memories_overlay_lists_knowledge_docs() {
         let overlay = memories_overlay(&KnowledgeGraphResponse {
             stats: KnowledgeStats {
-                doc_count: 1,
-                tag_count: 1,
-                active_docs: 1,
+                doc_count: Some(1),
+                tag_count: Some(1),
+                active_docs: Some(1),
                 ..Default::default()
             },
             nodes: vec![KnowledgeNode {
@@ -842,7 +866,7 @@ mod tests {
             report: ImportReport {
                 completed_at: None,
                 reported_sources: Vec::new(),
-                discovered_candidates: 3,
+                discovered_candidates: Some(3),
                 status_counts,
                 competitor_counts: BTreeMap::new(),
                 kind_counts: BTreeMap::new(),

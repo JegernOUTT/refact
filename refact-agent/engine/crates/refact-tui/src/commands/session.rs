@@ -415,8 +415,8 @@ pub fn status_snapshot(
 ) -> StatusSnapshot {
     StatusSnapshot {
         daemon_online,
-        daemon_version: daemon_status.map(|status| status.version.clone()),
-        daemon_port: daemon_status.map(|status| status.port),
+        daemon_version: daemon_status.and_then(|status| status.version.clone()),
+        daemon_port: daemon_status.and_then(|status| status.port),
         daemon_base_url,
         worker,
         project,

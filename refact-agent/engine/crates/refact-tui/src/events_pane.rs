@@ -1,6 +1,6 @@
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::client::{worker_state_label, WorkerInfo};
@@ -11,11 +11,22 @@ const EVENTS_RETENTION_NOTICE_KIND: &str = "retention_notice";
 const EVENTS_RETENTION_NOTICE_MESSAGE: &str =
     "Older daemon events dropped after reaching 10000 events";
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+fn deserialize_default_on_null<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DaemonEventRecord {
-    pub ts_ms: u64,
+    pub ts_ms: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub kind: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub project_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub payload: Value,
 }
 
@@ -57,11 +68,7 @@ impl EventsPaneState {
                 .iter()
                 .any(|event| event.kind == EVENTS_RETENTION_NOTICE_KIND)
             {
-                let ts_ms = self
-                    .events
-                    .last()
-                    .map(|event| event.ts_ms)
-                    .unwrap_or_default();
+                let ts_ms = self.events.last().and_then(|event| event.ts_ms);
                 self.events.push(DaemonEventRecord {
                     ts_ms,
                     kind: EVENTS_RETENTION_NOTICE_KIND.to_string(),
@@ -195,7 +202,7 @@ mod tests {
     #[test]
     fn events_formatting_includes_project_kind_and_payload() {
         let event = DaemonEventRecord {
-            ts_ms: 1,
+            ts_ms: Some(1),
             kind: "worker_ready".to_string(),
             project_id: Some("abc".to_string()),
             payload: serde_json::json!({"pid": 42}),
@@ -207,7 +214,7 @@ mod tests {
     fn events_rendering_keeps_event_and_worker_data() {
         let theme = TuiTheme::dark();
         let event = DaemonEventRecord {
-            ts_ms: 1,
+            ts_ms: Some(1),
             kind: "worker_ready".to_string(),
             project_id: Some("abc".to_string()),
             payload: serde_json::json!({"pid": 42}),
@@ -237,7 +244,7 @@ mod tests {
         let mut state = EventsPaneState::new();
         for idx in 0..10_005 {
             state.push_event(DaemonEventRecord {
-                ts_ms: idx,
+                ts_ms: Some(idx),
                 kind: "tick".to_string(),
                 project_id: None,
                 payload: Value::Null,
@@ -248,6 +255,6 @@ mod tests {
             .events()
             .iter()
             .any(|event| event.kind == EVENTS_RETENTION_NOTICE_KIND));
-        assert!(state.events()[0].ts_ms > 0);
+        assert!(state.events()[0].ts_ms.is_some_and(|ts_ms| ts_ms > 0));
     }
 }

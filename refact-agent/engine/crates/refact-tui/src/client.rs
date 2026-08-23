@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures::stream::{self, BoxStream};
 use futures::StreamExt;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use url::Url;
 
@@ -35,6 +35,14 @@ const OPEN_PROJECT_STARTING_INITIAL_BACKOFF: Duration = Duration::from_millis(1)
 const OPEN_PROJECT_STARTING_MAX_BACKOFF: Duration = Duration::from_secs(2);
 const OPEN_PROJECT_STARTING_MAX_ATTEMPTS: u32 = 8;
 const TRAJECTORIES_PAGE_SIZE: usize = 200;
+
+fn deserialize_default_on_null<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -102,14 +110,13 @@ pub struct DaemonEndpoint {
     pub auth_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonInfoFile {
-    pub pid: u32,
-    pub port: u16,
-    #[serde(default)]
-    pub bind: String,
-    pub version: String,
-    #[serde(default)]
+    pub pid: Option<u32>,
+    pub port: Option<u16>,
+    pub bind: Option<String>,
+    pub version: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub auth_token: Option<String>,
 }
 
@@ -121,52 +128,58 @@ pub struct DaemonClient {
     sse_client: reqwest::Client,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonStatus {
-    pub pid: u32,
-    pub version: String,
-    pub port: u16,
-    pub started_at_ms: u64,
-    pub uptime_secs: u64,
-    pub workers: u64,
-    #[serde(default)]
-    pub cron_pending: HashMap<String, u64>,
+    pub pid: Option<u32>,
+    pub version: Option<String>,
+    pub port: Option<u16>,
+    pub started_at_ms: Option<u64>,
+    pub uptime_secs: Option<u64>,
+    pub workers: Option<u64>,
+    pub cron_pending: Option<HashMap<String, u64>>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectEntry {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub id: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub slug: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub root: PathBuf,
-    pub pinned: bool,
-    pub last_active_ms: u64,
-    #[serde(default)]
+    pub pinned: Option<bool>,
+    pub last_active_ms: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub settings: Value,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct OpenProjectResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub project_id: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub slug: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub root: PathBuf,
-    pub pinned: bool,
+    pub pinned: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub worker: Option<WorkerInfo>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub cron_pending: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkerInfo {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub project_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub slug: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub root: PathBuf,
-    #[serde(default = "default_root_exists")]
-    pub root_exists: bool,
-    #[serde(default)]
-    pub pinned: bool,
-    #[serde(default)]
-    pub last_active_ms: u64,
+    pub root_exists: Option<bool>,
+    pub pinned: Option<bool>,
+    pub last_active_ms: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub state: Value,
     pub pid: Option<u32>,
     pub rss_bytes: Option<u64>,
@@ -174,19 +187,15 @@ pub struct WorkerInfo {
     pub uptime_secs: Option<u64>,
     pub http_port: Option<u16>,
     pub lsp_port: Option<u16>,
-    #[serde(default)]
-    pub lsp_clients: usize,
-    #[serde(default)]
-    pub busy_chats: usize,
-    #[serde(default)]
-    pub exec_running: usize,
-    #[serde(default)]
-    pub live_proxy_streams: u64,
+    pub lsp_clients: Option<usize>,
+    pub busy_chats: Option<usize>,
+    pub exec_running: Option<usize>,
+    pub live_proxy_streams: Option<u64>,
     pub cron_next_fire_ms: Option<u64>,
     pub idle_deadline_ms: Option<u64>,
     pub last_status_report_ms: Option<u64>,
     pub last_error: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub log_path: String,
 }
 
@@ -196,9 +205,9 @@ impl Default for WorkerInfo {
             project_id: String::new(),
             slug: String::new(),
             root: PathBuf::new(),
-            root_exists: true,
-            pinned: false,
-            last_active_ms: 0,
+            root_exists: None,
+            pinned: None,
+            last_active_ms: None,
             state: Value::Null,
             pid: None,
             rss_bytes: None,
@@ -206,10 +215,10 @@ impl Default for WorkerInfo {
             uptime_secs: None,
             http_port: None,
             lsp_port: None,
-            lsp_clients: 0,
-            busy_chats: 0,
-            exec_running: 0,
-            live_proxy_streams: 0,
+            lsp_clients: None,
+            busy_chats: None,
+            exec_running: None,
+            live_proxy_streams: None,
             cron_next_fire_ms: None,
             idle_deadline_ms: None,
             last_status_report_ms: None,
@@ -219,208 +228,216 @@ impl Default for WorkerInfo {
     }
 }
 
-fn default_root_exists() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct AtCommandCompletionResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     completions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct IntegrationListResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub integrations: Vec<IntegrationRecord>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub error_log: Vec<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct IntegrationRecord {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub project_path: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub integr_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub integr_config_path: String,
-    #[serde(default)]
-    pub integr_config_exists: bool,
-    #[serde(default)]
+    pub integr_config_exists: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub config_unparsed: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct McpViewData {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub servers: Vec<McpServerSummary>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub error_log: Vec<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct McpServerSummary {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub name: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub transport: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub project_path: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub config_path: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub info: Option<McpServerInfoResponse>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct McpServerInfoResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub config_path: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub status: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub auth_status: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub server_name: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub server_version: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub protocol_version: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub tools: Vec<McpToolInfo>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub resources: Vec<McpResourceInfo>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub prompts: Vec<McpPromptInfo>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub capabilities: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub logs_tail: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub metrics: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct McpToolInfo {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub description: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub input_schema: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub annotations: Option<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub internal_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct McpResourceInfo {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub uri: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub description: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub mime_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct McpPromptInfo {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SlashCommandsListResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub commands: Vec<SlashCommandInfo>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub skills: Vec<SkillInfo>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SlashCommandInfo {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub description: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub argument_hint: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub source: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SkillInfo {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub description: String,
-    #[serde(default)]
-    pub user_invocable: bool,
-    #[serde(default)]
+    pub user_invocable: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub source: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProviderListResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub providers: Vec<ProviderListItem>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderListItem {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub base_provider: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub display_name: String,
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub readonly: bool,
-    #[serde(default)]
-    pub has_credentials: bool,
-    #[serde(default)]
+    pub enabled: Option<bool>,
+    pub readonly: Option<bool>,
+    pub has_credentials: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub status: String,
-    #[serde(default)]
-    pub model_count: usize,
+    pub model_count: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderOAuthLogoutResponse {
-    #[serde(default)]
-    pub success: bool,
-    #[serde(default)]
+    pub success: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub auth_status: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HooksResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub hooks: Vec<HookInfo>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub raw_content: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub file_path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HookInfo {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub event: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub matcher: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub command: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub timeout: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompetitorImportInfoResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub sources: Vec<CompetitorImportSourceInfo>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompetitorImportSourceInfo {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub label: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub roots: Vec<String>,
 }
 
@@ -437,123 +454,111 @@ pub enum ImportStatus {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportReportCounts {
-    #[serde(default)]
-    pub discovered: usize,
-    #[serde(default)]
-    pub created: usize,
-    #[serde(default)]
-    pub updated: usize,
-    #[serde(default)]
-    pub unchanged: usize,
-    #[serde(default)]
-    pub stale: usize,
-    #[serde(default)]
-    pub conflicts: usize,
-    #[serde(default)]
-    pub user_modified: usize,
-    #[serde(default)]
-    pub unsupported: usize,
-    #[serde(default)]
-    pub errors: usize,
+    pub discovered: Option<usize>,
+    pub created: Option<usize>,
+    pub updated: Option<usize>,
+    pub unchanged: Option<usize>,
+    pub stale: Option<usize>,
+    pub conflicts: Option<usize>,
+    pub user_modified: Option<usize>,
+    pub unsupported: Option<usize>,
+    pub errors: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ImportReportIssue {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub competitor: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub kind: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub path: Option<String>,
-    pub status: ImportStatus,
-    #[serde(default)]
+    pub status: Option<ImportStatus>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ImportReport {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub completed_at: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub reported_sources: Vec<Value>,
-    #[serde(default)]
-    pub discovered_candidates: usize,
-    #[serde(default)]
+    pub discovered_candidates: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub status_counts: std::collections::BTreeMap<ImportStatus, usize>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub competitor_counts: std::collections::BTreeMap<String, ImportReportCounts>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub kind_counts: std::collections::BTreeMap<String, ImportReportCounts>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub top_issues: Vec<ImportReportIssue>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct CompetitorImportRunResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub scope: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub source: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub report: ImportReport,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct KnowledgeGraphResponse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub nodes: Vec<KnowledgeNode>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub edges: Vec<KnowledgeEdge>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub stats: KnowledgeStats,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct KnowledgeNode {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub node_type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub label: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub content: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub tags: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub created: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub file_path: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub kind: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KnowledgeEdge {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub source: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub target: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub edge_type: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KnowledgeStats {
-    #[serde(default)]
-    pub doc_count: usize,
-    #[serde(default)]
-    pub tag_count: usize,
-    #[serde(default)]
-    pub file_count: usize,
-    #[serde(default)]
-    pub entity_count: usize,
-    #[serde(default)]
-    pub edge_count: usize,
-    #[serde(default)]
-    pub active_docs: usize,
-    #[serde(default)]
-    pub deprecated_docs: usize,
-    #[serde(default)]
-    pub trajectory_count: usize,
+    pub doc_count: Option<usize>,
+    pub tag_count: Option<usize>,
+    pub file_count: Option<usize>,
+    pub entity_count: Option<usize>,
+    pub edge_count: Option<usize>,
+    pub active_docs: Option<usize>,
+    pub deprecated_docs: Option<usize>,
+    pub trajectory_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -646,11 +651,12 @@ impl DaemonEndpoint {
         }
     }
 
-    fn from_info(info: DaemonInfoFile) -> Self {
-        Self {
-            base_url: daemon_base_url_from_bind(&info.bind, info.port),
+    fn from_info(info: DaemonInfoFile) -> Option<Self> {
+        let port = info.port.filter(|port| *port > 0)?;
+        Some(Self {
+            base_url: daemon_base_url_from_bind(info.bind.as_deref().unwrap_or_default(), port),
             auth_token: info.auth_token.filter(|token| !token.is_empty()),
-        }
+        })
     }
 }
 
@@ -701,7 +707,7 @@ pub fn discover_daemon_endpoint_from(
 ) -> Result<Option<DaemonEndpoint>, DaemonDiscoveryWarning> {
     match std::fs::read_to_string(path) {
         Ok(content) => match serde_json::from_str::<DaemonInfoFile>(&content) {
-            Ok(info) => Ok(Some(DaemonEndpoint::from_info(info))),
+            Ok(info) => Ok(DaemonEndpoint::from_info(info)),
             Err(error) => Err(invalid_info_warning(path, error.to_string())),
         },
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
@@ -944,7 +950,7 @@ impl DaemonClient {
                 .list_trajectories(project_id, TRAJECTORIES_PAGE_SIZE, cursor.as_deref())
                 .await?;
             items.extend(page.items);
-            if !page.has_more {
+            if page.has_more != Some(true) {
                 return Ok(items);
             }
             let next_cursor = page.next_cursor.ok_or_else(|| {
@@ -2103,7 +2109,8 @@ fn encode_path_segment(value: &str) -> String {
 }
 
 fn is_configured_mcp_integration(integration: &IntegrationRecord) -> bool {
-    integration.integr_config_exists && mcp_transport(&integration.integr_name).is_some()
+    integration.integr_config_exists == Some(true)
+        && mcp_transport(&integration.integr_name).is_some()
 }
 
 fn mcp_transport(name: &str) -> Option<&'static str> {
@@ -2164,8 +2171,8 @@ pub fn worker_state_label(worker: Option<&WorkerInfo>) -> String {
                 .keys()
                 .next()
                 .cloned()
-                .unwrap_or_else(|| "worker".to_string()),
-            _ => "worker".to_string(),
+                .unwrap_or_else(|| "unknown".to_string()),
+            _ => "unknown".to_string(),
         },
         None => "unknown".to_string(),
     }
@@ -3183,18 +3190,18 @@ mod tests {
         let ready = &workers[1];
         assert_eq!(ready.slug, "ready-project");
         assert_eq!(ready.root, PathBuf::from("/tmp/ready"));
-        assert!(ready.root_exists);
-        assert!(!ready.pinned);
-        assert_eq!(ready.last_active_ms, 2);
+        assert_eq!(ready.root_exists, Some(true));
+        assert_eq!(ready.pinned, Some(false));
+        assert_eq!(ready.last_active_ms, Some(2));
         assert_eq!(ready.rss_bytes, Some(100));
         assert_eq!(ready.cpu_percent, Some(12.5));
         assert_eq!(ready.uptime_secs, Some(3));
         assert_eq!(ready.http_port, Some(31000));
         assert_eq!(ready.lsp_port, Some(31001));
-        assert_eq!(ready.lsp_clients, 4);
-        assert_eq!(ready.busy_chats, 5);
-        assert_eq!(ready.exec_running, 6);
-        assert_eq!(ready.live_proxy_streams, 7);
+        assert_eq!(ready.lsp_clients, Some(4));
+        assert_eq!(ready.busy_chats, Some(5));
+        assert_eq!(ready.exec_running, Some(6));
+        assert_eq!(ready.live_proxy_streams, Some(7));
         assert_eq!(ready.cron_next_fire_ms, Some(8));
         assert_eq!(ready.idle_deadline_ms, Some(9));
         assert_eq!(ready.last_status_report_ms, Some(10));
@@ -3243,6 +3250,242 @@ mod tests {
             .collect()
     }
 
+    fn assert_tolerant_response<T>(empty: Value, populated: Value)
+    where
+        T: for<'de> Deserialize<'de> + Serialize + Default,
+    {
+        assert!(serde_json::from_value::<T>(empty).is_ok());
+        let mut nulls = serde_json::to_value(T::default()).unwrap();
+        if let Value::Object(values) = &mut nulls {
+            values.values_mut().for_each(|value| *value = Value::Null);
+        }
+        assert!(serde_json::from_value::<T>(nulls).is_ok());
+        let mut populated = populated;
+        populated["future_field"] = json!(true);
+        assert!(serde_json::from_value::<T>(populated).is_ok());
+    }
+
+    #[test]
+    fn every_response_struct_accepts_nulls_and_unknown_fields() {
+        macro_rules! response_cases {
+            ($case:ident $(, $rest:ident)*) => {
+                response_cases!($($rest),*);
+                $case!(assert_tolerant_response);
+            };
+            () => {};
+        }
+
+        macro_rules! daemon_info_file {
+            ($assert:ident) => {
+                $assert::<DaemonInfoFile>(json!({}), json!({"pid": 1, "port": 8488}));
+            };
+        }
+        macro_rules! daemon_status {
+            ($assert:ident) => {
+                $assert::<DaemonStatus>(json!({}), json!({"pid": 1, "workers": 2}));
+            };
+        }
+        macro_rules! project_entry {
+            ($assert:ident) => {
+                $assert::<ProjectEntry>(json!({}), json!({"id": "project", "root": "/tmp/project"}));
+            };
+        }
+        macro_rules! open_project_response {
+            ($assert:ident) => {
+                $assert::<OpenProjectResponse>(json!({}), json!({"project_id": "project"}));
+            };
+        }
+        macro_rules! worker_info {
+            ($assert:ident) => {
+                $assert::<WorkerInfo>(json!({}), json!({"project_id": "project", "state": "ready"}));
+            };
+        }
+        macro_rules! at_command_completion_response {
+            ($assert:ident) => {
+                $assert::<AtCommandCompletionResponse>(json!({}), json!({"completions": ["README.md"]}));
+            };
+        }
+        macro_rules! integration_list_response {
+            ($assert:ident) => {
+                $assert::<IntegrationListResponse>(json!({}), json!({"integrations": [{}]}));
+            };
+        }
+        macro_rules! integration_record {
+            ($assert:ident) => {
+                $assert::<IntegrationRecord>(json!({}), json!({"integr_name": "mcp_stdio_demo"}));
+            };
+        }
+        macro_rules! mcp_view_data {
+            ($assert:ident) => {
+                $assert::<McpViewData>(json!({}), json!({"servers": [{}]}));
+            };
+        }
+        macro_rules! mcp_server_summary {
+            ($assert:ident) => {
+                $assert::<McpServerSummary>(json!({}), json!({"name": "demo"}));
+            };
+        }
+        macro_rules! mcp_server_info_response {
+            ($assert:ident) => {
+                $assert::<McpServerInfoResponse>(json!({}), json!({"tools": [{}]}));
+            };
+        }
+        macro_rules! mcp_tool_info {
+            ($assert:ident) => {
+                $assert::<McpToolInfo>(json!({}), json!({"name": "lookup"}));
+            };
+        }
+        macro_rules! mcp_resource_info {
+            ($assert:ident) => {
+                $assert::<McpResourceInfo>(json!({}), json!({"uri": "file:///tmp/readme"}));
+            };
+        }
+        macro_rules! mcp_prompt_info {
+            ($assert:ident) => {
+                $assert::<McpPromptInfo>(json!({}), json!({"name": "review"}));
+            };
+        }
+        macro_rules! slash_commands_list_response {
+            ($assert:ident) => {
+                $assert::<SlashCommandsListResponse>(json!({}), json!({"commands": [{}], "skills": [{}]}));
+            };
+        }
+        macro_rules! slash_command_info {
+            ($assert:ident) => {
+                $assert::<SlashCommandInfo>(json!({}), json!({"name": "review"}));
+            };
+        }
+        macro_rules! skill_info {
+            ($assert:ident) => {
+                $assert::<SkillInfo>(json!({}), json!({"name": "explain"}));
+            };
+        }
+        macro_rules! provider_list_response {
+            ($assert:ident) => {
+                $assert::<ProviderListResponse>(json!({}), json!({"providers": [{}]}));
+            };
+        }
+        macro_rules! provider_list_item {
+            ($assert:ident) => {
+                $assert::<ProviderListItem>(json!({}), json!({"name": "openai_codex"}));
+            };
+        }
+        macro_rules! provider_oauth_logout_response {
+            ($assert:ident) => {
+                $assert::<ProviderOAuthLogoutResponse>(json!({}), json!({"success": true}));
+            };
+        }
+        macro_rules! hooks_response {
+            ($assert:ident) => {
+                $assert::<HooksResponse>(json!({}), json!({"hooks": [{}]}));
+            };
+        }
+        macro_rules! hook_info {
+            ($assert:ident) => {
+                $assert::<HookInfo>(json!({}), json!({"event": "PreToolUse"}));
+            };
+        }
+        macro_rules! competitor_import_info_response {
+            ($assert:ident) => {
+                $assert::<CompetitorImportInfoResponse>(json!({}), json!({"sources": [{}]}));
+            };
+        }
+        macro_rules! competitor_import_source_info {
+            ($assert:ident) => {
+                $assert::<CompetitorImportSourceInfo>(json!({}), json!({"id": "claude_code"}));
+            };
+        }
+        macro_rules! import_report_counts {
+            ($assert:ident) => {
+                $assert::<ImportReportCounts>(json!({}), json!({"created": 1}));
+            };
+        }
+        macro_rules! import_report_issue {
+            ($assert:ident) => {
+                $assert::<ImportReportIssue>(json!({}), json!({"status": "created"}));
+            };
+        }
+        macro_rules! import_report {
+            ($assert:ident) => {
+                $assert::<ImportReport>(json!({}), json!({"discovered_candidates": 1}));
+            };
+        }
+        macro_rules! competitor_import_run_response {
+            ($assert:ident) => {
+                $assert::<CompetitorImportRunResponse>(json!({}), json!({"scope": "project", "report": {}}));
+            };
+        }
+        macro_rules! knowledge_graph_response {
+            ($assert:ident) => {
+                $assert::<KnowledgeGraphResponse>(json!({}), json!({"nodes": [{}], "edges": [{}]}));
+            };
+        }
+        macro_rules! knowledge_node {
+            ($assert:ident) => {
+                $assert::<KnowledgeNode>(json!({}), json!({"id": "doc-1"}));
+            };
+        }
+        macro_rules! knowledge_edge {
+            ($assert:ident) => {
+                $assert::<KnowledgeEdge>(json!({}), json!({"source": "doc-1", "target": "tag:ui"}));
+            };
+        }
+        macro_rules! knowledge_stats {
+            ($assert:ident) => {
+                $assert::<KnowledgeStats>(json!({}), json!({"doc_count": 1}));
+            };
+        }
+        macro_rules! daemon_event_record {
+            ($assert:ident) => {
+                $assert::<DaemonEventRecord>(json!({}), json!({"kind": "worker_ready"}));
+            };
+        }
+
+        response_cases!(
+            daemon_info_file,
+            daemon_status,
+            project_entry,
+            open_project_response,
+            worker_info,
+            at_command_completion_response,
+            integration_list_response,
+            integration_record,
+            mcp_view_data,
+            mcp_server_summary,
+            mcp_server_info_response,
+            mcp_tool_info,
+            mcp_resource_info,
+            mcp_prompt_info,
+            slash_commands_list_response,
+            slash_command_info,
+            skill_info,
+            provider_list_response,
+            provider_list_item,
+            provider_oauth_logout_response,
+            hooks_response,
+            hook_info,
+            competitor_import_info_response,
+            competitor_import_source_info,
+            import_report_counts,
+            import_report_issue,
+            import_report,
+            competitor_import_run_response,
+            knowledge_graph_response,
+            knowledge_node,
+            knowledge_edge,
+            knowledge_stats,
+            daemon_event_record
+        );
+    }
+
+    #[test]
+    fn missing_response_values_remain_unknown_in_surfaces() {
+        assert_eq!(worker_state_label(Some(&WorkerInfo::default())), "unknown");
+        assert_eq!(DaemonEndpoint::from_info(DaemonInfoFile::default()), None);
+        assert_eq!(ProviderOAuthLogoutResponse::default().success, None);
+        assert_eq!(ProviderListItem::default().has_credentials, None);
+    }
+
     #[tokio::test]
     async fn trajectories_client_preserves_envelope_and_fetches_cursor_page() {
         let (server, requests) = spawn_json_response_server_with_requests(vec![
@@ -3255,9 +3498,9 @@ mod tests {
             .list_trajectories("project/id", 1, None)
             .await
             .unwrap();
-        assert!(first_page.has_more);
+        assert_eq!(first_page.has_more, Some(true));
         assert_eq!(first_page.next_cursor.as_deref(), Some("cursor/for page 2"));
-        assert_eq!(first_page.total_count, 2);
+        assert_eq!(first_page.total_count, Some(2));
         assert_eq!(first_page.items[0].id, "chat-0");
 
         let second_page = client
@@ -3274,7 +3517,7 @@ mod tests {
             "cursor={}",
             encode_query_value("cursor/for page 2")
         )));
-        assert!(!second_page.has_more);
+        assert_eq!(second_page.has_more, Some(false));
         assert_eq!(second_page.items[0].id, "chat-1");
     }
 
@@ -3399,7 +3642,7 @@ mod tests {
             Some("[path]")
         );
         assert_eq!(response.skills[0].name, "explain");
-        assert!(response.skills[0].user_invocable);
+        assert_eq!(response.skills[0].user_invocable, Some(true));
     }
 
     #[test]
@@ -3412,7 +3655,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert_eq!(response.stats.doc_count, 1);
+        assert_eq!(response.stats.doc_count, Some(1));
         assert_eq!(response.nodes[0].kind.as_deref(), Some("decision"));
         assert_eq!(response.edges[0].edge_type, "tagged_with");
     }

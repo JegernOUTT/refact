@@ -1,106 +1,98 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::pickers::PickerItem;
 use crate::protocol::TranscriptMessage;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+fn deserialize_default_on_null<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct PaginatedTrajectories {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub items: Vec<TrajectoryMeta>,
-    #[serde(default)]
     pub next_cursor: Option<String>,
-    #[serde(default)]
-    pub has_more: bool,
-    #[serde(default)]
-    pub total_count: usize,
+    pub has_more: Option<bool>,
+    pub total_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorktreeMeta {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub kind: String,
-    #[serde(default)]
-    pub root: PathBuf,
-    #[serde(default)]
-    pub source_workspace_root: PathBuf,
-    #[serde(default)]
-    pub repo_root: PathBuf,
-    #[serde(default)]
+    pub id: Option<String>,
+    pub kind: Option<String>,
+    pub root: Option<PathBuf>,
+    pub source_workspace_root: Option<PathBuf>,
+    pub repo_root: Option<PathBuf>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub branch: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub base_branch: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub base_commit: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub task_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub card_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub agent_id: Option<String>,
-    #[serde(default)]
-    pub enforce: bool,
+    pub enforce: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct TrajectoryMeta {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub title: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub created_at: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub updated_at: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub model: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub mode: String,
-    #[serde(default)]
-    pub message_count: usize,
-    #[serde(default)]
+    pub message_count: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub parent_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub link_type: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub task_id: Option<String>,
-    #[serde(default, alias = "role")]
+    #[serde(
+        default,
+        alias = "role",
+        deserialize_with = "deserialize_default_on_null"
+    )]
     pub task_role: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub agent_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub card_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub session_state: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub root_chat_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub worktree: Option<WorktreeMeta>,
-    #[serde(default)]
-    pub total_lines_added: i64,
-    #[serde(default)]
-    pub total_lines_removed: i64,
-    #[serde(default)]
-    pub tasks_total: i32,
-    #[serde(default)]
-    pub tasks_done: i32,
-    #[serde(default)]
-    pub tasks_failed: i32,
-    #[serde(default)]
-    pub total_prompt_tokens: u64,
-    #[serde(default)]
-    pub total_completion_tokens: u64,
-    #[serde(default)]
-    pub total_tokens: u64,
-    #[serde(default)]
-    pub total_cache_read_tokens: u64,
-    #[serde(default)]
-    pub total_cache_creation_tokens: u64,
-    #[serde(default)]
+    pub total_lines_added: Option<i64>,
+    pub total_lines_removed: Option<i64>,
+    pub tasks_total: Option<i32>,
+    pub tasks_done: Option<i32>,
+    pub tasks_failed: Option<i32>,
+    pub total_prompt_tokens: Option<u64>,
+    pub total_completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub total_cache_read_tokens: Option<u64>,
+    pub total_cache_creation_tokens: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
     pub total_cost_usd: Option<f64>,
 }
 
@@ -137,7 +129,12 @@ pub fn session_picker_item(trajectory: &TrajectoryMeta, now: DateTime<Utc>) -> P
     if !trajectory.mode.trim().is_empty() {
         parts.push(trajectory.mode.clone());
     }
-    parts.push(message_count_label(trajectory.message_count));
+    parts.push(
+        trajectory
+            .message_count
+            .map(message_count_label)
+            .unwrap_or_else(|| "unknown messages".to_string()),
+    );
     parts.push(short_chat_id(&trajectory.id));
     if let Some(state) = trajectory
         .session_state
@@ -245,6 +242,65 @@ mod tests {
             .with_timezone(&Utc)
     }
 
+    fn assert_tolerant_response<T>(empty: serde_json::Value, populated: serde_json::Value)
+    where
+        T: for<'de> Deserialize<'de> + Serialize + Default,
+    {
+        assert!(serde_json::from_value::<T>(empty).is_ok());
+        let mut nulls = serde_json::to_value(T::default()).unwrap();
+        if let serde_json::Value::Object(values) = &mut nulls {
+            values
+                .values_mut()
+                .for_each(|value| *value = serde_json::Value::Null);
+        }
+        assert!(serde_json::from_value::<T>(nulls).is_ok());
+        let mut populated = populated;
+        populated["future_field"] = json!(true);
+        assert!(serde_json::from_value::<T>(populated).is_ok());
+    }
+
+    #[test]
+    fn every_trajectory_response_struct_accepts_nulls_and_unknown_fields() {
+        macro_rules! response_cases {
+            ($case:ident $(, $rest:ident)*) => {
+                response_cases!($($rest),*);
+                $case!(assert_tolerant_response);
+            };
+            () => {};
+        }
+
+        macro_rules! paginated_trajectories {
+            ($assert:ident) => {
+                $assert::<PaginatedTrajectories>(json!({}), json!({"items": [{}]}));
+            };
+        }
+        macro_rules! worktree_meta {
+            ($assert:ident) => {
+                $assert::<WorktreeMeta>(json!({}), json!({"id": "worktree-1"}));
+            };
+        }
+        macro_rules! trajectory_meta {
+            ($assert:ident) => {
+                $assert::<TrajectoryMeta>(json!({}), json!({"id": "chat-1", "total_tokens": 42}));
+            };
+        }
+
+        response_cases!(paginated_trajectories, worktree_meta, trajectory_meta);
+    }
+
+    #[test]
+    fn missing_trajectory_metrics_render_as_unknown() {
+        let item = session_picker_item(
+            &TrajectoryMeta {
+                id: "chat-123".to_string(),
+                ..Default::default()
+            },
+            now(),
+        );
+
+        assert!(item.description.contains("unknown messages"));
+    }
+
     #[test]
     fn session_picker_items_sort_by_recency_and_format_age() {
         let items = session_items_from_trajectories(
@@ -256,7 +312,7 @@ mod tests {
                     updated_at: "2026-06-10T12:00:00Z".to_string(),
                     model: "gpt-old".to_string(),
                     mode: "agent".to_string(),
-                    message_count: 1,
+                    message_count: Some(1),
                     parent_id: None,
                     link_type: None,
                     session_state: None,
@@ -270,7 +326,7 @@ mod tests {
                     updated_at: "2026-06-12T11:00:00Z".to_string(),
                     model: "gpt-new".to_string(),
                     mode: "explore".to_string(),
-                    message_count: 3,
+                    message_count: Some(3),
                     parent_id: None,
                     link_type: None,
                     session_state: Some("idle".to_string()),
@@ -302,7 +358,7 @@ mod tests {
                 updated_at: "2026-06-12T11:55:00Z".to_string(),
                 model: "claude-demo".to_string(),
                 mode: "agent".to_string(),
-                message_count: 2,
+                message_count: Some(2),
                 parent_id: None,
                 link_type: None,
                 session_state: None,
@@ -396,12 +452,12 @@ mod tests {
 
         assert_eq!(trajectory.id, "chat-123");
         assert!(trajectory.title.is_empty());
-        assert_eq!(trajectory.message_count, 0);
+        assert_eq!(trajectory.message_count, None);
         assert_eq!(trajectory.task_id, None);
         assert_eq!(trajectory.worktree, None);
         assert_eq!(trajectory.total_cost_usd, None);
         assert_eq!(response.next_cursor, None);
-        assert!(!response.has_more);
-        assert_eq!(response.total_count, 0);
+        assert_eq!(response.has_more, None);
+        assert_eq!(response.total_count, None);
     }
 }

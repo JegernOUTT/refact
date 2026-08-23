@@ -20,7 +20,7 @@ fn project() -> OpenProjectResponse {
         project_id: "p1".to_string(),
         slug: "fixture".to_string(),
         root: PathBuf::from("/tmp/fixture"),
-        pinned: false,
+        pinned: Some(false),
         worker: Some(WorkerInfo {
             project_id: "p1".to_string(),
             pid: Some(42),

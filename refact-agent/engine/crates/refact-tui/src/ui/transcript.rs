@@ -300,7 +300,7 @@ mod tests {
             project_id: "p1".to_string(),
             slug: "demo".to_string(),
             root: PathBuf::from("/tmp/demo"),
-            pinned: false,
+            pinned: Some(false),
             worker: None,
             cron_pending: None,
         }

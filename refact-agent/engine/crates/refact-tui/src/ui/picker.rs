@@ -51,7 +51,7 @@ fn clamped_selected_idx(len: usize, selected: usize) -> usize {
 
 fn project_row(idx: usize, selected: usize, project: &ProjectEntry) -> GenericDisplayRow {
     let mut prefix = vec![Span::raw(cursor_prefix(idx, selected))];
-    if project.pinned {
+    if project.pinned == Some(true) {
         prefix.push(Span::styled("★ ", accent_style()));
     }
     GenericDisplayRow {
@@ -388,8 +388,8 @@ mod tests {
             id: slug.to_string(),
             slug: slug.to_string(),
             root: root.into(),
-            pinned,
-            last_active_ms: 0,
+            pinned: Some(pinned),
+            last_active_ms: Some(0),
             settings: serde_json::Value::Null,
         }
     }

@@ -805,7 +805,7 @@ impl App {
         }
         let (subkind, source, payload) = event_metadata(message);
         self.events_pane.push_event(DaemonEventRecord {
-            ts_ms: now_ms(),
+            ts_ms: Some(now_ms()),
             kind: format!("chat.{subkind}"),
             project_id: self.current_project_id().map(str::to_string),
             payload: json!({

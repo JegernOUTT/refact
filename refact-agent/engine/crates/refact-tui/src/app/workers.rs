@@ -28,18 +28,12 @@ pub(super) fn update_current_worker_from_event(
             .as_ref()
             .map(|worker| worker.root.clone())
             .unwrap_or_else(|| project.root.clone()),
-        root_exists: previous
-            .as_ref()
-            .map(|worker| worker.root_exists)
-            .unwrap_or(true),
+        root_exists: previous.as_ref().and_then(|worker| worker.root_exists),
         pinned: previous
             .as_ref()
-            .map(|worker| worker.pinned)
-            .unwrap_or(project.pinned),
-        last_active_ms: previous
-            .as_ref()
-            .map(|worker| worker.last_active_ms)
-            .unwrap_or_default(),
+            .and_then(|worker| worker.pinned)
+            .or(project.pinned),
+        last_active_ms: previous.as_ref().and_then(|worker| worker.last_active_ms),
         state: Value::String(state.to_string()),
         pid: event
             .payload
@@ -62,22 +56,12 @@ pub(super) fn update_current_worker_from_event(
             .and_then(Value::as_u64)
             .map(|port| port as u16)
             .or_else(|| previous.as_ref().and_then(|worker| worker.lsp_port)),
-        lsp_clients: previous
-            .as_ref()
-            .map(|worker| worker.lsp_clients)
-            .unwrap_or_default(),
-        busy_chats: previous
-            .as_ref()
-            .map(|worker| worker.busy_chats)
-            .unwrap_or_default(),
-        exec_running: previous
-            .as_ref()
-            .map(|worker| worker.exec_running)
-            .unwrap_or_default(),
+        lsp_clients: previous.as_ref().and_then(|worker| worker.lsp_clients),
+        busy_chats: previous.as_ref().and_then(|worker| worker.busy_chats),
+        exec_running: previous.as_ref().and_then(|worker| worker.exec_running),
         live_proxy_streams: previous
             .as_ref()
-            .map(|worker| worker.live_proxy_streams)
-            .unwrap_or_default(),
+            .and_then(|worker| worker.live_proxy_streams),
         cron_next_fire_ms: previous
             .as_ref()
             .and_then(|worker| worker.cron_next_fire_ms),

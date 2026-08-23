@@ -29,7 +29,7 @@ impl State {
             project_id: "p1".to_string(),
             slug: "fixture".to_string(),
             root: std::path::PathBuf::from("/tmp/fixture"),
-            pinned: false,
+            pinned: Some(false),
             worker: None,
             cron_pending: None,
         }

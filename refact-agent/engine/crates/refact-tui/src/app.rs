@@ -3032,7 +3032,7 @@ mod tests {
             project_id: "p1".to_string(),
             slug: "demo".to_string(),
             root: PathBuf::from("/tmp/demo"),
-            pinned: false,
+            pinned: Some(false),
             worker: None,
             cron_pending: None,
         }
@@ -5125,7 +5125,7 @@ new-chat = "ctrl-x"
             skills: vec![crate::client::SkillInfo {
                 name: "explain".to_string(),
                 description: "Explain code".to_string(),
-                user_invocable: true,
+                user_invocable: Some(true),
                 source: "project_refact".to_string(),
             }],
         }));
@@ -5180,21 +5180,21 @@ new-chat = "ctrl-x"
                     name: "openai_codex".to_string(),
                     base_provider: "openai_codex".to_string(),
                     display_name: "OpenAI Codex".to_string(),
-                    enabled: true,
-                    readonly: false,
-                    has_credentials: true,
+                    enabled: Some(true),
+                    readonly: Some(false),
+                    has_credentials: Some(true),
                     status: "configured".to_string(),
-                    model_count: 1,
+                    model_count: Some(1),
                 },
                 crate::client::ProviderListItem {
                     name: "openrouter".to_string(),
                     base_provider: "openrouter".to_string(),
                     display_name: "OpenRouter".to_string(),
-                    enabled: true,
-                    readonly: false,
-                    has_credentials: true,
+                    enabled: Some(true),
+                    readonly: Some(false),
+                    has_credentials: Some(true),
                     status: "configured".to_string(),
-                    model_count: 1,
+                    model_count: Some(1),
                 },
             ],
         }));
@@ -5211,7 +5211,7 @@ new-chat = "ctrl-x"
         app.handle_provider_logout_finished(
             "openai_codex".to_string(),
             Ok(ProviderOAuthLogoutResponse {
-                success: true,
+                success: Some(true),
                 auth_status: "No credentials found".to_string(),
             }),
         );
@@ -5281,7 +5281,7 @@ new-chat = "ctrl-x"
             report: crate::client::ImportReport {
                 completed_at: None,
                 reported_sources: Vec::new(),
-                discovered_candidates: 1,
+                discovered_candidates: Some(1),
                 status_counts,
                 competitor_counts: std::collections::BTreeMap::new(),
                 kind_counts: std::collections::BTreeMap::new(),
@@ -5523,13 +5523,13 @@ new-chat = "ctrl-x"
         let mut app = App::new(project());
         app.test_set_daemon_status(
             DaemonStatus {
-                pid: 7,
-                version: "1.2.3".to_string(),
-                port: 8488,
-                started_at_ms: 10,
-                uptime_secs: 20,
-                workers: 1,
-                cron_pending: HashMap::new(),
+                pid: Some(7),
+                version: Some("1.2.3".to_string()),
+                port: Some(8488),
+                started_at_ms: Some(10),
+                uptime_secs: Some(20),
+                workers: Some(1),
+                cron_pending: Some(HashMap::new()),
             },
             "http://127.0.0.1:8488",
         );
@@ -5956,13 +5956,13 @@ new-chat = "ctrl-x"
         let mut daemon_events = DaemonEventSubscription::new();
         daemon_events.generation = 2;
         let stale = DaemonEventRecord {
-            ts_ms: 1,
+            ts_ms: Some(1),
             kind: "worker_ready".to_string(),
             project_id: Some("old".to_string()),
             payload: Value::Null,
         };
         let fresh = DaemonEventRecord {
-            ts_ms: 2,
+            ts_ms: Some(2),
             kind: "worker_ready".to_string(),
             project_id: Some("p1".to_string()),
             payload: Value::Null,
@@ -6141,7 +6141,7 @@ new-chat = "ctrl-x"
             project_id: "p2".to_string(),
             slug: "demo2".to_string(),
             root: PathBuf::from("/tmp/demo2"),
-            pinned: false,
+            pinned: Some(false),
             worker: None,
             cron_pending: None,
         });
@@ -6780,16 +6780,16 @@ new-chat = "ctrl-x"
                 id: "a".to_string(),
                 slug: "alpha".to_string(),
                 root: PathBuf::from("/tmp/alpha"),
-                pinned: false,
-                last_active_ms: 0,
+                pinned: Some(false),
+                last_active_ms: Some(0),
                 settings: Value::Null,
             },
             ProjectEntry {
                 id: "b".to_string(),
                 slug: "beta".to_string(),
                 root: PathBuf::from("/tmp/beta"),
-                pinned: false,
-                last_active_ms: 0,
+                pinned: Some(false),
+                last_active_ms: Some(0),
                 settings: Value::Null,
             },
         ]);

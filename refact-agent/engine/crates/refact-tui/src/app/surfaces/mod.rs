@@ -546,7 +546,7 @@ impl App {
                 matches!(
                     provider.base_provider.as_str(),
                     "claude_code" | "openai_codex" | "github_copilot"
-                ) && provider.has_credentials
+                ) && provider.has_credentials == Some(true)
             })
             .map(|provider| PickerItem {
                 id: provider.name,
@@ -574,7 +574,7 @@ impl App {
         result: Result<ProviderOAuthLogoutResponse, String>,
     ) {
         match result {
-            Ok(response) if response.success => {
+            Ok(response) if response.success == Some(true) => {
                 let status = if response.auth_status.trim().is_empty() {
                     "logged out".to_string()
                 } else {
