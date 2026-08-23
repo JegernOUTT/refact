@@ -1449,7 +1449,7 @@ fn load_recent_sessions(
 ) {
     tokio::spawn(async move {
         let result = client
-            .list_trajectories(&project_id, 50)
+            .list_all_trajectories(&project_id)
             .await
             .map_err(|error| error.to_string());
         let _ = tx

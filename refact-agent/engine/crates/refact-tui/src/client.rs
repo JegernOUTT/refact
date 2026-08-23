@@ -34,6 +34,7 @@ const OPEN_PROJECT_STARTING_INITIAL_BACKOFF: Duration = Duration::from_millis(25
 const OPEN_PROJECT_STARTING_INITIAL_BACKOFF: Duration = Duration::from_millis(1);
 const OPEN_PROJECT_STARTING_MAX_BACKOFF: Duration = Duration::from_secs(2);
 const OPEN_PROJECT_STARTING_MAX_ATTEMPTS: u32 = 8;
+const TRAJECTORIES_PAGE_SIZE: usize = 200;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -916,14 +917,39 @@ impl DaemonClient {
         &self,
         project_id: &str,
         limit: usize,
-    ) -> Result<Vec<TrajectoryMeta>, ClientError> {
-        let path = format!(
+        cursor: Option<&str>,
+    ) -> Result<PaginatedTrajectories, ClientError> {
+        let mut path = format!(
             "/p/{}/v1/trajectories?displayable_only=true&limit={}",
             encode_path_segment(project_id),
             limit.clamp(1, 200)
         );
-        let response: PaginatedTrajectories = self.get_json(&path).await?;
-        Ok(response.items)
+        if let Some(cursor) = cursor {
+            path.push_str("&cursor=");
+            path.push_str(&encode_query_value(cursor));
+        }
+        self.get_json(&path).await
+    }
+
+    pub async fn list_all_trajectories(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<TrajectoryMeta>, ClientError> {
+        let mut items = Vec::new();
+        let mut cursor = None;
+
+        loop {
+            let page = self
+                .list_trajectories(project_id, TRAJECTORIES_PAGE_SIZE, cursor.as_deref())
+                .await?;
+            items.extend(page.items);
+            if !page.has_more {
+                return Ok(items);
+            }
+            cursor = Some(page.next_cursor.ok_or_else(|| {
+                ClientError::Json("trajectory page has_more without next_cursor".to_string())
+            })?);
+        }
     }
 
     pub async fn send_branch_from_chat(
@@ -1815,10 +1841,17 @@ mod tests {
     }
 
     fn spawn_json_response_server(responses: Vec<Value>) -> TestServer {
+        spawn_json_response_server_with_requests(responses).0
+    }
+
+    fn spawn_json_response_server_with_requests(
+        responses: Vec<Value>,
+    ) -> (TestServer, mpsc::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
         let (stop, stopped) = mpsc::channel();
+        let (requests, received) = mpsc::channel();
         let handle = thread::spawn(move || {
             for response in responses {
                 let mut stream = loop {
@@ -1832,7 +1865,7 @@ mod tests {
                         Err(_) => return,
                     }
                 };
-                read_request_headers(&mut stream);
+                let _ = requests.send(read_request_headers(&mut stream));
                 let body = response.to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -1843,11 +1876,14 @@ mod tests {
             }
             let _ = stopped.recv_timeout(Duration::from_millis(10));
         });
-        TestServer {
-            base_url: format!("http://{addr}"),
-            stop,
-            handle,
-        }
+        (
+            TestServer {
+                base_url: format!("http://{addr}"),
+                stop,
+                handle,
+            },
+            received,
+        )
     }
 
     fn open_project_response(state: &str, http_port: Option<u16>, lsp_port: Option<u16>) -> Value {
@@ -1868,7 +1904,7 @@ mod tests {
         })
     }
 
-    fn read_request_headers(stream: &mut std::net::TcpStream) {
+    fn read_request_headers(stream: &mut std::net::TcpStream) -> String {
         let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
         let mut request = Vec::new();
         let mut buffer = [0; 256];
@@ -1880,6 +1916,7 @@ mod tests {
             }
         }
         let _ = stream.set_read_timeout(None);
+        String::from_utf8_lossy(&request).to_string()
     }
 
     fn read_request_body(stream: &mut std::net::TcpStream) -> Vec<u8> {
@@ -2332,6 +2369,77 @@ mod tests {
             serde_json::from_value::<WorkerInfo>(round_trip).unwrap(),
             *ready
         );
+    }
+
+    fn trajectory_response(
+        items: Vec<Value>,
+        next_cursor: Option<&str>,
+        has_more: bool,
+        total_count: usize,
+    ) -> Value {
+        json!({
+            "items": items,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+            "total_count": total_count,
+        })
+    }
+
+    fn trajectory_items(start: usize, end: usize) -> Vec<Value> {
+        (start..end)
+            .map(|index| json!({"id": format!("chat-{index}")}))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn trajectories_client_preserves_envelope_and_fetches_cursor_page() {
+        let (server, requests) = spawn_json_response_server_with_requests(vec![
+            trajectory_response(trajectory_items(0, 1), Some("cursor/for page 2"), true, 2),
+            trajectory_response(trajectory_items(1, 2), None, false, 2),
+        ]);
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+
+        let first_page = client
+            .list_trajectories("project/id", 1, None)
+            .await
+            .unwrap();
+        assert!(first_page.has_more);
+        assert_eq!(first_page.next_cursor.as_deref(), Some("cursor/for page 2"));
+        assert_eq!(first_page.total_count, 2);
+        assert_eq!(first_page.items[0].id, "chat-0");
+
+        let second_page = client
+            .list_trajectories("project/id", 1, first_page.next_cursor.as_deref())
+            .await
+            .unwrap();
+        server.stop();
+
+        let first_request = requests.recv().unwrap();
+        let second_request = requests.recv().unwrap();
+        assert!(first_request
+            .contains("GET /p/project%2Fid/v1/trajectories?displayable_only=true&limit=1"));
+        assert!(second_request.contains(&format!(
+            "cursor={}",
+            encode_query_value("cursor/for page 2")
+        )));
+        assert!(!second_page.has_more);
+        assert_eq!(second_page.items[0].id, "chat-1");
+    }
+
+    #[tokio::test]
+    async fn trajectories_client_reaches_every_chat_beyond_fifty() {
+        let server = spawn_json_response_server(vec![
+            trajectory_response(trajectory_items(0, 200), Some("page-2"), true, 201),
+            trajectory_response(trajectory_items(200, 201), None, false, 201),
+        ]);
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+
+        let trajectories = client.list_all_trajectories("project").await.unwrap();
+        server.stop();
+
+        assert_eq!(trajectories.len(), 201);
+        assert_eq!(trajectories.first().unwrap().id, "chat-0");
+        assert_eq!(trajectories.last().unwrap().id, "chat-200");
     }
 
     #[test]
