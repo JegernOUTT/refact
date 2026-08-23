@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -937,6 +937,7 @@ impl DaemonClient {
     ) -> Result<Vec<TrajectoryMeta>, ClientError> {
         let mut items = Vec::new();
         let mut cursor = None;
+        let mut seen_cursors = HashSet::new();
 
         loop {
             let page = self
@@ -946,9 +947,15 @@ impl DaemonClient {
             if !page.has_more {
                 return Ok(items);
             }
-            cursor = Some(page.next_cursor.ok_or_else(|| {
+            let next_cursor = page.next_cursor.ok_or_else(|| {
                 ClientError::Json("trajectory page has_more without next_cursor".to_string())
-            })?);
+            })?;
+            if !seen_cursors.insert(next_cursor.clone()) {
+                return Err(ClientError::Json(format!(
+                    "trajectory page repeated next_cursor: {next_cursor}"
+                )));
+            }
+            cursor = Some(next_cursor);
         }
     }
 
@@ -3285,6 +3292,50 @@ mod tests {
         assert_eq!(trajectories.len(), 201);
         assert_eq!(trajectories.first().unwrap().id, "chat-0");
         assert_eq!(trajectories.last().unwrap().id, "chat-200");
+    }
+
+    #[tokio::test]
+    async fn trajectories_client_rejects_repeated_cursor_without_a_third_request() {
+        let (server, requests) = spawn_json_response_server_with_requests(vec![
+            trajectory_response(trajectory_items(0, 1), Some("page-a"), true, 3),
+            trajectory_response(trajectory_items(1, 2), Some("page-a"), true, 3),
+            trajectory_response(trajectory_items(2, 3), None, false, 3),
+        ]);
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+
+        let error = client.list_all_trajectories("project").await.unwrap_err();
+        server.stop();
+
+        assert!(
+            matches!(error, ClientError::Json(message) if message.contains("repeated next_cursor: page-a"))
+        );
+        assert!(requests.recv().unwrap().contains("limit=200"));
+        assert!(requests.recv().unwrap().contains("cursor=page-a"));
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn trajectories_client_follows_distinct_cursors_until_terminal_page() {
+        let (server, requests) = spawn_json_response_server_with_requests(vec![
+            trajectory_response(trajectory_items(0, 1), Some("page-a"), true, 3),
+            trajectory_response(trajectory_items(1, 2), Some("page-b"), true, 3),
+            trajectory_response(trajectory_items(2, 3), None, false, 3),
+        ]);
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+
+        let trajectories = client.list_all_trajectories("project").await.unwrap();
+        server.stop();
+
+        assert_eq!(
+            trajectories
+                .iter()
+                .map(|trajectory| trajectory.id.as_str())
+                .collect::<Vec<_>>(),
+            ["chat-0", "chat-1", "chat-2"]
+        );
+        assert!(requests.recv().unwrap().contains("limit=200"));
+        assert!(requests.recv().unwrap().contains("cursor=page-a"));
+        assert!(requests.recv().unwrap().contains("cursor=page-b"));
     }
 
     #[test]
