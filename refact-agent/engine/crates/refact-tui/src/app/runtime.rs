@@ -850,7 +850,11 @@ pub(super) async fn run_action(
                 daemon_events.restart(client.clone(), tx.clone());
             }
         }
-        AppAction::SendMessage { prompt, params } => {
+        AppAction::SendMessage {
+            prompt,
+            params,
+            client_request_id,
+        } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
                 let generation = subscriptions.command_generation();
@@ -859,6 +863,7 @@ pub(super) async fn run_action(
                 let context = CommandContextTag::SendMessage {
                     prompt: prompt.clone(),
                     params: params.clone(),
+                    client_request_id: client_request_id.clone(),
                 };
                 tokio::spawn(async move {
                     let result = async {
@@ -868,7 +873,12 @@ pub(super) async fn run_action(
                                 .await?;
                         }
                         client
-                            .send_user_message(&project_id, &chat_id, &prompt)
+                            .send_user_message_with_id(
+                                &project_id,
+                                &chat_id,
+                                &client_request_id,
+                                &prompt,
+                            )
                             .await
                     }
                     .await
@@ -1089,6 +1099,102 @@ pub(super) async fn run_action(
 }
 
 impl App {
+    pub(super) fn handle_send_message_failure(
+        &mut self,
+        prompt: String,
+        params: Value,
+        client_request_id: String,
+        error: String,
+    ) -> AppAction {
+        let Some(in_flight) = self.in_flight_send.as_ref() else {
+            return AppAction::None;
+        };
+        if in_flight.client_request_id != client_request_id {
+            return AppAction::None;
+        }
+        let accepted = in_flight.accepted;
+        self.in_flight_send = None;
+        if accepted {
+            return AppAction::None;
+        }
+        self.retry_hint = retry_hint_from_message(&error);
+        self.rollback_failed_send_message(prompt, params, client_request_id, &error)
+    }
+
+    fn rollback_failed_send_message(
+        &mut self,
+        prompt: String,
+        params: Value,
+        client_request_id: String,
+        error: &str,
+    ) -> AppAction {
+        self.set_session_state(SessionState::Idle);
+        self.clear_stream_controllers();
+        self.rollback_failed_send_transcript(&prompt);
+        self.restore_failed_prompt(prompt, params, client_request_id);
+        self.add_notice(format!("Command failed: {error}"));
+        AppAction::None
+    }
+
+    fn rollback_failed_send_transcript(&mut self, prompt: &str) {
+        let messages = self.transcript_state.messages();
+        let truncate_from = if messages.len() >= 2
+            && messages[messages.len() - 2].role == TranscriptRole::User
+            && messages[messages.len() - 2].content == prompt
+            && is_empty_live_assistant(&messages[messages.len() - 1])
+        {
+            Some(messages.len() - 2)
+        } else if messages.last().is_some_and(is_empty_live_assistant) {
+            Some(messages.len() - 1)
+        } else {
+            None
+        };
+        if let Some(index) = truncate_from {
+            self.transcript_state.truncate_messages(index);
+            self.rebuild_render_transcript_from_state();
+        }
+    }
+
+    fn restore_failed_prompt(&mut self, prompt: String, params: Value, client_request_id: String) {
+        let draft = self.composer.text().to_string();
+        if !draft.trim().is_empty() && draft != prompt {
+            let draft_params = self.take_pending_params();
+            self.enqueue_input(draft, draft_params);
+        }
+        self.pending_send_retry = Some(PendingSendRetry {
+            prompt: prompt.clone(),
+            params,
+            client_request_id,
+        });
+        self.composer.set_text(prompt);
+    }
+
+    pub(super) fn handle_send_ack(&mut self, client_request_id: &str, accepted: bool) {
+        if !accepted {
+            return;
+        }
+        if let Some(in_flight) = self
+            .in_flight_send
+            .as_mut()
+            .filter(|in_flight| in_flight.client_request_id == client_request_id)
+        {
+            in_flight.accepted = true;
+        }
+    }
+
+    pub(super) fn clear_in_flight_send(&mut self, client_request_id: &str) -> bool {
+        if self
+            .in_flight_send
+            .as_ref()
+            .is_some_and(|in_flight| in_flight.client_request_id == client_request_id)
+        {
+            self.in_flight_send = None;
+            true
+        } else {
+            false
+        }
+    }
+
     fn handle_quit_abort_success(&mut self) {
         self.abort_in_flight = false;
         self.set_session_state(SessionState::Idle);

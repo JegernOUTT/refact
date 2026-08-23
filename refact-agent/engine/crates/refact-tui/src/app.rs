@@ -12,7 +12,7 @@ use crate::ask_questions::{
     AskQuestionType, AskQuestionsForm, AskQuestionsOutcome, AskQuestionsRequest,
 };
 use crate::client::{
-    worker_state_label, ChatEvent, DaemonStatus, CompetitorImportInfoResponse,
+    request_id, worker_state_label, ChatEvent, DaemonStatus, CompetitorImportInfoResponse,
     CompetitorImportRunResponse, HooksResponse, KnowledgeGraphResponse, McpViewData,
     OpenProjectResponse, ProjectEntry, ProviderListResponse, ProviderOAuthLogoutResponse,
     SlashCommandsListResponse, ToolDecision, WorkerInfo,
@@ -299,6 +299,13 @@ struct BacktrackTarget {
 struct PendingSendRetry {
     prompt: String,
     params: Value,
+    client_request_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InFlightSend {
+    client_request_id: String,
+    accepted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,6 +331,7 @@ enum CommandContextTag {
     SendMessage {
         prompt: String,
         params: Value,
+        client_request_id: String,
     },
     Reasoning {
         previous: ReasoningStateSnapshot,
@@ -439,6 +447,7 @@ pub struct App {
     pending_reasoning_rollback: Option<PendingReasoningRollback>,
     pending_model: Option<String>,
     pending_mode: Option<String>,
+    in_flight_send: Option<InFlightSend>,
     pending_send_retry: Option<PendingSendRetry>,
     session_state: SessionState,
     subscription_status: SubscriptionStatus,
@@ -542,6 +551,7 @@ impl App {
             pending_reasoning_rollback: None,
             pending_model: None,
             pending_mode: None,
+            in_flight_send: None,
             pending_send_retry: None,
             session_state: SessionState::Idle,
             subscription_status: SubscriptionStatus::Online,
@@ -628,6 +638,7 @@ impl App {
             pending_reasoning_rollback: None,
             pending_model: None,
             pending_mode: None,
+            in_flight_send: None,
             pending_send_retry: None,
             session_state: SessionState::Error,
             subscription_status: SubscriptionStatus::Offline,
@@ -2560,12 +2571,12 @@ impl App {
         if self.backtrack_pending.is_some() {
             return Some(self.start_backtrack_turn(prompt));
         }
-        let params = self.take_submit_params(&prompt);
+        let (params, client_request_id) = self.take_submit_params(&prompt);
         if self.is_chat_active() && self.session_state != SessionState::WaitingUserInput {
             self.enqueue_input(prompt, params);
             Some(AppAction::None)
         } else {
-            Some(self.start_prompt_turn(prompt, params))
+            Some(self.start_prompt_turn(prompt, params, client_request_id))
         }
     }
 
@@ -2573,6 +2584,7 @@ impl App {
         let Some(target) = self.backtrack_pending.take() else {
             return AppAction::None;
         };
+        self.in_flight_send = None;
         self.pending_send_retry = None;
         if !self
             .transcript_state
@@ -2598,7 +2610,17 @@ impl App {
         }
     }
 
-    fn start_prompt_turn(&mut self, prompt: String, params: Value) -> AppAction {
+    fn start_prompt_turn(
+        &mut self,
+        prompt: String,
+        params: Value,
+        client_request_id: Option<String>,
+    ) -> AppAction {
+        let client_request_id = client_request_id.unwrap_or_else(|| request_id("user-message"));
+        self.in_flight_send = Some(InFlightSend {
+            client_request_id: client_request_id.clone(),
+            accepted: false,
+        });
         self.cancel_backtrack();
         self.clear_active_ask_questions();
         self.transcript_state.push_user_message(prompt.clone());
@@ -2608,10 +2630,14 @@ impl App {
         self.clear_stream_controllers();
         self.usage = None;
         self.retry_hint = None;
-        AppAction::SendMessage { prompt, params }
+        AppAction::SendMessage {
+            prompt,
+            params,
+            client_request_id,
+        }
     }
 
-    fn take_submit_params(&mut self, prompt: &str) -> Value {
+    fn take_submit_params(&mut self, prompt: &str) -> (Value, Option<String>) {
         if self
             .pending_send_retry
             .as_ref()
@@ -2620,18 +2646,18 @@ impl App {
             return self
                 .pending_send_retry
                 .take()
-                .map(|retry| retry.params)
-                .unwrap_or_else(|| Value::Object(Map::new()));
+                .map(|retry| (retry.params, Some(retry.client_request_id)))
+                .unwrap_or_else(|| (Value::Object(Map::new()), None));
         }
         self.pending_send_retry = None;
-        self.take_pending_params()
+        (self.take_pending_params(), None)
     }
 
     fn dispatch_next_queued_input(&mut self) -> AppAction {
         let Some(QueuedInput { text, params, .. }) = self.input_queue.pop_next_ready() else {
             return AppAction::None;
         };
-        self.start_prompt_turn(text, params)
+        self.start_prompt_turn(text, params, None)
     }
 
     fn enqueue_input(&mut self, prompt: String, params: Value) {
@@ -2645,8 +2671,8 @@ impl App {
     }
 
     fn submit_ask_questions_reply(&mut self, prompt: String) -> AppAction {
-        let params = self.take_submit_params(&prompt);
-        self.start_prompt_turn(prompt, params)
+        let (params, client_request_id) = self.take_submit_params(&prompt);
+        self.start_prompt_turn(prompt, params, client_request_id)
     }
 
     fn set_params_context(&mut self, patch: &Value) -> CommandContextTag {
@@ -2675,6 +2701,12 @@ impl App {
 
     fn handle_command_success(&mut self, context: CommandContextTag) -> AppAction {
         match context {
+            CommandContextTag::SendMessage {
+                client_request_id, ..
+            } => {
+                self.clear_in_flight_send(&client_request_id);
+                AppAction::None
+            }
             CommandContextTag::Abort => {
                 if !self.abort_in_flight {
                     return AppAction::None;
@@ -2700,84 +2732,45 @@ impl App {
     }
 
     fn handle_command_failure(&mut self, context: CommandContextTag, error: String) -> AppAction {
-        self.retry_hint = retry_hint_from_message(&error);
         match context {
-            CommandContextTag::SendMessage { prompt, params } => {
-                self.rollback_failed_send_message(prompt, params, &error)
-            }
+            CommandContextTag::SendMessage {
+                prompt,
+                params,
+                client_request_id,
+            } => self.handle_send_message_failure(prompt, params, client_request_id, error),
             CommandContextTag::Abort => {
+                self.retry_hint = retry_hint_from_message(&error);
                 self.abort_in_flight = false;
                 self.add_notice(format!("Abort failed: {error}"));
                 AppAction::None
             }
             CommandContextTag::Rename { .. } => {
+                self.retry_hint = retry_hint_from_message(&error);
                 self.add_notice(format!("Rename failed: {error}"));
                 AppAction::None
             }
             CommandContextTag::Fork { .. } => {
+                self.retry_hint = retry_hint_from_message(&error);
                 self.add_notice(format!("Fork failed: {error}"));
                 AppAction::None
             }
             CommandContextTag::Archive { .. } => {
+                self.retry_hint = retry_hint_from_message(&error);
                 self.add_notice(format!("Archive failed: {error}"));
                 AppAction::None
             }
             CommandContextTag::Reasoning { previous } => {
+                self.retry_hint = retry_hint_from_message(&error);
                 self.restore_reasoning_snapshot(previous);
                 self.add_notice(format!("/reasoning failed: {error}"));
                 AppAction::None
             }
             _ => {
+                self.retry_hint = retry_hint_from_message(&error);
                 self.add_notice(format!("Command failed: {error}"));
                 AppAction::None
             }
         }
-    }
-
-    fn rollback_failed_send_message(
-        &mut self,
-        prompt: String,
-        params: Value,
-        error: &str,
-    ) -> AppAction {
-        self.set_session_state(SessionState::Idle);
-        self.clear_stream_controllers();
-        self.rollback_failed_send_transcript(&prompt);
-        self.restore_failed_prompt(prompt, params);
-        self.add_notice(format!("Command failed: {error}"));
-        AppAction::None
-    }
-
-    fn rollback_failed_send_transcript(&mut self, prompt: &str) {
-        let messages = self.transcript_state.messages();
-        let truncate_from = if messages.len() >= 2
-            && messages[messages.len() - 2].role == TranscriptRole::User
-            && messages[messages.len() - 2].content == prompt
-            && is_empty_live_assistant(&messages[messages.len() - 1])
-        {
-            Some(messages.len() - 2)
-        } else if messages.last().is_some_and(is_empty_live_assistant) {
-            Some(messages.len() - 1)
-        } else {
-            None
-        };
-        if let Some(index) = truncate_from {
-            self.transcript_state.truncate_messages(index);
-            self.rebuild_render_transcript_from_state();
-        }
-    }
-
-    fn restore_failed_prompt(&mut self, prompt: String, params: Value) {
-        let draft = self.composer.text().to_string();
-        if !draft.trim().is_empty() && draft != prompt {
-            let draft_params = self.take_pending_params();
-            self.enqueue_input(draft, draft_params);
-        }
-        self.pending_send_retry = Some(PendingSendRetry {
-            prompt: prompt.clone(),
-            params,
-        });
-        self.composer.set_text(prompt);
     }
 
     fn begin_queue_edit(&mut self) -> AppAction {
@@ -3160,6 +3153,7 @@ impl App {
     fn clear_pending_target_params(&mut self) {
         self.pending_model = None;
         self.pending_mode = None;
+        self.in_flight_send = None;
         self.pending_send_retry = None;
         self.pending_reasoning_rollback = None;
     }
@@ -4128,7 +4122,12 @@ impl App {
                 attached_files,
                 depth,
             } => self.handle_subchat_update(&tool_call_id, &subchat_id, &attached_files, depth),
-            SseEvent::Ack { .. } | SseEvent::Unknown { .. } => {}
+            SseEvent::Ack {
+                client_request_id,
+                accepted,
+                ..
+            } => self.handle_send_ack(&client_request_id, accepted),
+            SseEvent::Unknown { .. } => {}
         }
         AppAction::None
     }
@@ -5201,6 +5200,7 @@ pub enum AppAction {
     SendMessage {
         prompt: String,
         params: Value,
+        client_request_id: String,
     },
     RetryFromIndex {
         index: usize,
@@ -7881,12 +7881,16 @@ new-chat = "ctrl-x"
     }
 
     #[test]
-    fn send_message_failure_rolls_back_and_restores_prompt() {
+    fn unacknowledged_send_timeout_rolls_back_and_restores_prompt() {
         let mut app = App::new(project());
         app.composer.set_text("hello");
         let action = app.handle_key(key(KeyCode::Enter));
-        let (prompt, params) = match action {
-            AppAction::SendMessage { prompt, params } => (prompt, params),
+        let (prompt, params, client_request_id) = match action {
+            AppAction::SendMessage {
+                prompt,
+                params,
+                client_request_id,
+            } => (prompt, params, client_request_id),
             other => panic!("unexpected action: {other:?}"),
         };
         app.composer.set_text("draft");
@@ -7895,8 +7899,9 @@ new-chat = "ctrl-x"
             CommandContextTag::SendMessage {
                 prompt: prompt.clone(),
                 params: params.clone(),
+                client_request_id: client_request_id.clone(),
             },
-            Err("fake client error".to_string()),
+            Err("request timed out".to_string()),
         );
 
         assert_eq!(result, AppAction::None);
@@ -7914,7 +7919,7 @@ new-chat = "ctrl-x"
             .iter()
             .any(|item| matches!(item, TranscriptItem::Assistant(_))));
         assert!(app.visible_transcript().iter().any(|item| {
-            matches!(item, TranscriptItem::Notice(text) if text.contains("fake client error"))
+            matches!(item, TranscriptItem::Notice(text) if text.contains("request timed out"))
         }));
 
         let retry = app.handle_key(key(KeyCode::Enter));
@@ -7922,14 +7927,127 @@ new-chat = "ctrl-x"
             AppAction::SendMessage {
                 prompt: retry_prompt,
                 params: retry_params,
+                client_request_id: retry_client_request_id,
             } => {
                 assert_eq!(retry_prompt, prompt);
                 assert_eq!(retry_params, params);
+                assert_eq!(retry_client_request_id, client_request_id);
             }
             other => panic!("unexpected retry action: {other:?}"),
         }
         assert_eq!(app.input_queue().len(), 1);
         assert_eq!(app.input_queue().items()[0].text, "draft");
+    }
+
+    #[test]
+    fn accepted_send_timeout_keeps_one_optimistic_turn() {
+        let mut app = App::new(project());
+        app.composer.set_text("hello");
+        let (prompt, params, client_request_id) = match app.handle_key(key(KeyCode::Enter)) {
+            AppAction::SendMessage {
+                prompt,
+                params,
+                client_request_id,
+            } => (prompt, params, client_request_id),
+            other => panic!("unexpected action: {other:?}"),
+        };
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "ack".to_string(),
+            raw: json!({
+                "client_request_id": client_request_id,
+                "accepted": true,
+            }),
+        });
+        assert_eq!(
+            app.handle_command_finished(
+                CommandContextTag::SendMessage {
+                    prompt,
+                    params,
+                    client_request_id,
+                },
+                Err("request timed out".to_string()),
+            ),
+            AppAction::None
+        );
+
+        assert_eq!(app.session_state(), SessionState::Generating);
+        assert_eq!(app.composer(), "");
+        assert!(app.pending_send_retry.is_none());
+        assert!(app.in_flight_send.is_none());
+        assert_eq!(
+            app.transcript_state()
+                .messages()
+                .iter()
+                .filter(|message| message.role == TranscriptRole::User)
+                .count(),
+            1
+        );
+        assert!(!app.visible_transcript().iter().any(
+            |item| matches!(item, TranscriptItem::Notice(text) if text.contains("timed out"))
+        ));
+    }
+
+    #[test]
+    fn unrelated_ack_does_not_complete_current_send() {
+        let mut app = App::new(project());
+        app.composer.set_text("hello");
+        let (prompt, params, client_request_id) = match app.handle_key(key(KeyCode::Enter)) {
+            AppAction::SendMessage {
+                prompt,
+                params,
+                client_request_id,
+            } => (prompt, params, client_request_id),
+            other => panic!("unexpected action: {other:?}"),
+        };
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "ack".to_string(),
+            raw: json!({"client_request_id": "stale-request", "accepted": true}),
+        });
+        app.handle_command_finished(
+            CommandContextTag::SendMessage {
+                prompt,
+                params,
+                client_request_id,
+            },
+            Err("request timed out".to_string()),
+        );
+
+        assert_eq!(app.session_state(), SessionState::Idle);
+        assert_eq!(app.composer(), "hello");
+        assert!(app.pending_send_retry.is_some());
+    }
+
+    #[test]
+    fn new_logical_send_gets_a_new_request_id() {
+        let mut app = App::new(project());
+        app.composer.set_text("first");
+        let first = match app.handle_key(key(KeyCode::Enter)) {
+            AppAction::SendMessage {
+                client_request_id, ..
+            } => client_request_id,
+            other => panic!("unexpected action: {other:?}"),
+        };
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+        app.composer.set_text("second");
+        let second = match app.handle_key(key(KeyCode::Enter)) {
+            AppAction::SendMessage {
+                client_request_id, ..
+            } => client_request_id,
+            other => panic!("unexpected action: {other:?}"),
+        };
+
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -9310,6 +9428,7 @@ new-chat = "ctrl-x"
         app.pending_send_retry = Some(PendingSendRetry {
             prompt: "retry".to_string(),
             params: json!({"model": "old"}),
+            client_request_id: "old-request".to_string(),
         });
 
         app.new_chat();
@@ -9331,6 +9450,7 @@ new-chat = "ctrl-x"
         app.pending_send_retry = Some(PendingSendRetry {
             prompt: "retry".to_string(),
             params: json!({"model": "old"}),
+            client_request_id: "old-request".to_string(),
         });
         app.set_project(OpenProjectResponse {
             project_id: "p2".to_string(),
@@ -9395,6 +9515,46 @@ new-chat = "ctrl-x"
         let command = state.find_command("set_params").unwrap();
         assert_eq!(command["patch"]["mode"], "agent");
         assert_eq!(command["patch"]["tool_use"], "agent");
+    }
+
+    #[tokio::test]
+    async fn send_message_action_posts_its_client_request_id() {
+        let state = CommandState::default();
+        let base_url = spawn_command_server(state.clone());
+        let client = DaemonClient::new(base_url, None).unwrap();
+        let mut app = App::new(project());
+        app.composer.set_text("hello");
+        let action = app.handle_key(key(KeyCode::Enter));
+        let client_request_id = match &action {
+            AppAction::SendMessage {
+                client_request_id, ..
+            } => client_request_id.clone(),
+            other => panic!("unexpected action: {other:?}"),
+        };
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut subscriptions = SubscriptionManager::new();
+        let mut daemon_events = DaemonEventSubscription::new();
+
+        run_action(
+            &mut app,
+            action,
+            &client,
+            &tx,
+            &mut subscriptions,
+            &mut daemon_events,
+        )
+        .await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(RuntimeEvent::CommandFinished {
+                context: CommandContextTag::SendMessage { client_request_id: sent, .. },
+                result: Ok(()),
+                ..
+            }) if sent == client_request_id
+        ));
+        let command = state.find_command("user_message").unwrap();
+        assert_eq!(command["client_request_id"], client_request_id);
     }
 
     #[tokio::test]
