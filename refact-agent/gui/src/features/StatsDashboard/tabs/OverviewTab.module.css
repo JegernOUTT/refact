@@ -5,9 +5,23 @@
   min-width: 0;
 }
 
+.groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-5);
+  min-width: 0;
+}
+
+.quotaSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-3);
+  min-width: 0;
+}
+
 .quotaGrid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   align-items: stretch;
   gap: var(--rf-space-3);
   min-width: 0;
@@ -16,17 +30,6 @@
 .quotaGrid > * {
   min-width: 0;
   min-height: 0;
-}
-
-.groups {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-5);
-  min-width: 0;
-}
-
-.quotaGrid {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
 }
 
 .quotaCard {
@@ -40,15 +43,13 @@
 }
 
 .quotaHeader,
-.quotaLine,
 .quotaLabel {
   display: flex;
   align-items: center;
   min-width: 0;
 }
 
-.quotaHeader,
-.quotaLine {
+.quotaHeader {
   justify-content: space-between;
   gap: var(--rf-space-2);
 }
@@ -67,8 +68,7 @@
 }
 
 .quotaProvider,
-.quotaMeta,
-.quotaExtra {
+.quotaSummary {
   color: var(--rf-color-muted);
   font: var(--rf-text-1) / var(--rf-line) var(--rf-font-ui);
 }
@@ -79,20 +79,11 @@
   white-space: nowrap;
 }
 
-.usageBar {
-  width: 100%;
-  height: var(--rf-space-1);
-  overflow: hidden;
-  background: var(--rf-surface-3);
-  border-radius: var(--rf-radius-pill);
-}
-
-.usageBarFill {
-  height: 100%;
-  width: var(--usage-pct);
-  background: var(--usage-color);
-  border-radius: inherit;
-  transition: width var(--rf-dur-slow) var(--rf-ease-standard);
+.quotaSummary {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--rf-space-1) var(--rf-space-2);
 }
 
 .emptyText,
@@ -153,12 +144,6 @@
   font-family: var(--rf-font-mono);
   text-overflow: ellipsis;
   vertical-align: bottom;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .usageBarFill {
-    transition: none;
-  }
 }
 
 @media (prefers-reduced-transparency: reduce) {

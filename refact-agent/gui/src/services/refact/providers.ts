@@ -150,6 +150,49 @@ export type AvailableModelsResponse = {
   error?: string | null;
 };
 
+export type ProviderQuotaSource = string;
+
+export type ProviderQuotaWindow = {
+  id: string;
+  label: string;
+  used_percent: number | null;
+  limit?: number | null;
+  used?: number | null;
+  remaining?: number | null;
+  reset_at?: string | null;
+  reset_after_seconds?: number | null;
+  window_seconds?: number | null;
+  status?: string | null;
+};
+
+export type ProviderQuotaFact = {
+  id: string;
+  label: string;
+  value: string | number | boolean | null;
+  unit?: string | null;
+};
+
+export type ProviderQuotaSnapshot = {
+  provider_name: string;
+  base_provider: string;
+  plan?: string | null;
+  source: ProviderQuotaSource;
+  available: boolean;
+  fetched_at: string;
+  stale: boolean;
+  windows: ProviderQuotaWindow[];
+  facts: ProviderQuotaFact[];
+  error?: string | null;
+};
+
+export type ProviderQuotaResponse = {
+  quota: ProviderQuotaSnapshot;
+};
+
+export type ProviderQuotaListResponse = {
+  quotas: ProviderQuotaSnapshot[];
+};
+
 export type ClaudeCodeUsageWindow = {
   percent_used: number;
   resets_at?: string | null;
@@ -484,6 +527,12 @@ function providerScopedPath(
   return `${PROVIDERS_URL}/${encodeURIComponent(providerName)}${suffix}`;
 }
 
+function withRefreshQuery(path: string, refresh: boolean | undefined): string {
+  if (refresh === undefined) return path;
+  const query = new URLSearchParams({ refresh: String(refresh) });
+  return `${path}?${query.toString()}`;
+}
+
 export function providerIdentitySettings(
   provider: ProviderIdentitySettings,
 ): ProviderIdentitySettings {
@@ -501,6 +550,7 @@ export const providersApi = createApi({
     "PROVIDER_SCHEMA",
     "PROVIDER_MODELS",
     "AVAILABLE_MODELS",
+    "QUOTA",
     "DEFAULTS",
   ],
   baseQuery: fetchBaseQuery({
@@ -821,6 +871,97 @@ export const providersApi = createApi({
       },
     }),
 
+    getProviderQuota: builder.query<
+      ProviderQuotaResponse,
+      { providerName: string; refresh?: boolean }
+    >({
+      providesTags: (_result, _error, { providerName }) => [
+        { type: "QUOTA", id: providerName },
+      ],
+      queryFn: async (args, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const path = withRefreshQuery(
+          `${PROVIDERS_URL}/${encodeURIComponent(args.providerName)}/quota`,
+          args.refresh,
+        );
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10_000);
+        let result: Awaited<ReturnType<typeof baseQuery>>;
+        try {
+          result = await baseQuery({
+            ...extraOptions,
+            method: "GET",
+            url: buildApiUrlFromState(state, path),
+            credentials: "same-origin",
+            redirect: "follow",
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
+
+        if (result.error) return { error: result.error };
+        if (!isProviderQuotaResponse(result.data)) {
+          return {
+            meta: result.meta,
+            error: {
+              error: `Invalid response from /v1/providers/${args.providerName}/quota`,
+              data: result.data,
+              status: "CUSTOM_ERROR",
+            },
+          };
+        }
+
+        return { data: result.data };
+      },
+    }),
+
+    getProviderQuotas: builder.query<
+      ProviderQuotaListResponse,
+      { refresh?: boolean } | undefined
+    >({
+      providesTags: (result) => [
+        { type: "QUOTA", id: "LIST" },
+        ...(result?.quotas.map((quota) => ({
+          type: "QUOTA" as const,
+          id: quota.provider_name,
+        })) ?? []),
+      ],
+      queryFn: async (args, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const path = withRefreshQuery(`${PROVIDERS_URL}/quotas`, args?.refresh);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10_000);
+        let result: Awaited<ReturnType<typeof baseQuery>>;
+        try {
+          result = await baseQuery({
+            ...extraOptions,
+            method: "GET",
+            url: buildApiUrlFromState(state, path),
+            credentials: "same-origin",
+            redirect: "follow",
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+        }
+
+        if (result.error) return { error: result.error };
+        if (!isProviderQuotaListResponse(result.data)) {
+          return {
+            meta: result.meta,
+            error: {
+              error: "Invalid response from /v1/providers/quotas",
+              data: result.data,
+              status: "CUSTOM_ERROR",
+            },
+          };
+        }
+
+        return { data: result.data };
+      },
+    }),
+
     getClaudeCodeUsage: builder.query<
       ClaudeCodeUsageResponse,
       ProviderScopedQueryRequiredArg
@@ -1051,6 +1192,10 @@ export const providersApi = createApi({
       OpenAICodexResetRedeemResponse,
       ProviderScopedQueryRequiredArg & { redeemRequestId: string }
     >({
+      invalidatesTags: (_result, _error, { providerName }) => [
+        { type: "QUOTA", id: providerName },
+        { type: "QUOTA", id: "LIST" },
+      ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
         const url = buildApiUrlFromState(
@@ -1309,6 +1454,8 @@ export const providersApi = createApi({
         { type: "PROVIDER_MODELS", id: providerName },
         { type: "AVAILABLE_MODELS", id: providerName },
         { type: "PROVIDERS", id: "LIST" },
+        { type: "QUOTA", id: providerName },
+        { type: "QUOTA", id: "LIST" },
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
@@ -1349,6 +1496,10 @@ export const providersApi = createApi({
       OAuthStartResponse,
       { providerName: string; mode?: string }
     >({
+      invalidatesTags: (_result, _error, { providerName }) => [
+        { type: "QUOTA", id: providerName },
+        { type: "QUOTA", id: "LIST" },
+      ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
         const url = buildApiUrlFromState(
@@ -1391,6 +1542,8 @@ export const providersApi = createApi({
               { type: "PROVIDER", id: providerName },
               { type: "PROVIDERS", id: "LIST" },
               { type: "AVAILABLE_MODELS", id: providerName },
+              { type: "QUOTA", id: providerName },
+              { type: "QUOTA", id: "LIST" },
             ]
           : [],
       queryFn: async (args, api, extraOptions, baseQuery) => {
@@ -1436,6 +1589,8 @@ export const providersApi = createApi({
         { type: "PROVIDER", id: providerName },
         { type: "PROVIDERS", id: "LIST" },
         { type: "AVAILABLE_MODELS", id: providerName },
+        { type: "QUOTA", id: providerName },
+        { type: "QUOTA", id: "LIST" },
       ],
       queryFn: async (args, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
@@ -1464,6 +1619,8 @@ export const providersApi = createApi({
         { type: "PROVIDER", id: providerName },
         { type: "PROVIDER_MODELS", id: providerName },
         { type: "PROVIDERS", id: "LIST" },
+        { type: "QUOTA", id: providerName },
+        { type: "QUOTA", id: "LIST" },
       ],
       queryFn: async (providerName, api, extraOptions, baseQuery) => {
         const state = api.getState() as RootState;
@@ -1766,6 +1923,110 @@ function isUsageResponse(data: unknown): data is ClaudeCodeUsageResponse {
   return hasProperty(data, "data") || hasProperty(data, "error");
 }
 
+function isProviderQuotaSnapshot(data: unknown): data is ProviderQuotaSnapshot {
+  if (typeof data !== "object" || data === null) return false;
+  if (
+    !hasProperty(data, "provider_name") ||
+    typeof data.provider_name !== "string"
+  )
+    return false;
+  if (
+    !hasProperty(data, "base_provider") ||
+    typeof data.base_provider !== "string"
+  )
+    return false;
+  if (!hasProperty(data, "source") || typeof data.source !== "string")
+    return false;
+  if (!hasProperty(data, "available") || typeof data.available !== "boolean")
+    return false;
+  if (!hasProperty(data, "fetched_at") || typeof data.fetched_at !== "string")
+    return false;
+  if (!hasProperty(data, "stale") || typeof data.stale !== "boolean")
+    return false;
+  if (!isOptionalNullableString(data, "plan")) return false;
+  if (!hasProperty(data, "windows") || !Array.isArray(data.windows))
+    return false;
+  if (!hasProperty(data, "facts") || !Array.isArray(data.facts)) return false;
+  if (!data.windows.every(isProviderQuotaWindow)) return false;
+  if (!data.facts.every(isProviderQuotaFact)) return false;
+  return (
+    !hasProperty(data, "error") ||
+    data.error === null ||
+    data.error === undefined ||
+    typeof data.error === "string"
+  );
+}
+
+function isNullableFiniteNumber(data: unknown): data is number | null {
+  return data === null || (typeof data === "number" && Number.isFinite(data));
+}
+
+function isOptionalNullableFiniteNumber(data: object, key: string): boolean {
+  return (
+    !hasProperty(data, key) ||
+    data[key] === undefined ||
+    isNullableFiniteNumber(data[key])
+  );
+}
+
+function isOptionalNullableString(data: object, key: string): boolean {
+  return (
+    !hasProperty(data, key) ||
+    data[key] === undefined ||
+    data[key] === null ||
+    typeof data[key] === "string"
+  );
+}
+
+function isProviderQuotaWindow(data: unknown): data is ProviderQuotaWindow {
+  if (typeof data !== "object" || data === null) return false;
+  if (!hasProperty(data, "id") || typeof data.id !== "string") return false;
+  if (!hasProperty(data, "label") || typeof data.label !== "string")
+    return false;
+  if (
+    !hasProperty(data, "used_percent") ||
+    !isNullableFiniteNumber(data.used_percent)
+  )
+    return false;
+  if (!isOptionalNullableFiniteNumber(data, "limit")) return false;
+  if (!isOptionalNullableFiniteNumber(data, "used")) return false;
+  if (!isOptionalNullableFiniteNumber(data, "remaining")) return false;
+  if (!isOptionalNullableFiniteNumber(data, "reset_after_seconds"))
+    return false;
+  if (!isOptionalNullableFiniteNumber(data, "window_seconds")) return false;
+  if (!isOptionalNullableString(data, "reset_at")) return false;
+  return isOptionalNullableString(data, "status");
+}
+
+function isProviderQuotaFact(data: unknown): data is ProviderQuotaFact {
+  if (typeof data !== "object" || data === null) return false;
+  if (!hasProperty(data, "id") || typeof data.id !== "string") return false;
+  if (!hasProperty(data, "label") || typeof data.label !== "string")
+    return false;
+  if (!hasProperty(data, "value")) return false;
+  if (
+    data.value !== null &&
+    typeof data.value !== "string" &&
+    typeof data.value !== "number" &&
+    typeof data.value !== "boolean"
+  )
+    return false;
+  return isOptionalNullableString(data, "unit");
+}
+
+function isProviderQuotaResponse(data: unknown): data is ProviderQuotaResponse {
+  if (typeof data !== "object" || data === null) return false;
+  return hasProperty(data, "quota") && isProviderQuotaSnapshot(data.quota);
+}
+
+function isProviderQuotaListResponse(
+  data: unknown,
+): data is ProviderQuotaListResponse {
+  if (typeof data !== "object" || data === null) return false;
+  if (!hasProperty(data, "quotas") || !Array.isArray(data.quotas)) return false;
+  return data.quotas.every(isProviderQuotaSnapshot);
+}
+
 function isOAuthStartMode(data: unknown): data is OAuthStartMode {
   return data === "callback" || data === "manual_code" || data === "device";
 }
@@ -1851,6 +2112,8 @@ export const {
   useGetOpenRouterModelEndpointsQuery,
   useGetOpenRouterAccountInfoQuery,
   useGetOpenRouterHealthQuery,
+  useGetProviderQuotaQuery,
+  useGetProviderQuotasQuery,
   useGetClaudeCodeUsageQuery,
   useGetOpenAICodexUsageQuery,
   useGetOpenCodeUsageQuery,

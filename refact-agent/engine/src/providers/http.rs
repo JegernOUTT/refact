@@ -57,6 +57,11 @@ use super::google_gemini::GoogleGeminiProvider;
 use super::claude_code::ClaudeCodeProvider;
 use super::openai_codex::{OpenAICodexProvider, UsageRequestError};
 use super::opencode::OpenCodeProvider;
+use crate::providers::litellm::{LiteLLMBudgetQueryResult, LiteLLMProvider};
+use crate::providers::quota::{
+    ProviderQuotaCache, ProviderQuotaFact, ProviderQuotaFactValue, ProviderQuotaSnapshot,
+    ProviderQuotaSource, ProviderQuotaWindow,
+};
 use crate::providers::google_antigravity::{
     GoogleAntigravityProvider, GoogleAntigravityQuotaRequestError,
 };
@@ -605,6 +610,23 @@ pub struct ProviderPathParams {
     name: String,
 }
 
+#[derive(Deserialize, Default)]
+pub struct ProviderQuotaQuery {
+    #[serde(default)]
+    refresh: bool,
+}
+
+#[derive(Serialize)]
+struct ProviderQuotaResponse {
+    quota: ProviderQuotaSnapshot,
+}
+
+#[derive(Serialize)]
+struct ProviderQuotasResponse {
+    quotas: Vec<ProviderQuotaSnapshot>,
+    truncated: bool,
+}
+
 #[derive(Deserialize)]
 pub struct ProviderModelPathParams {
     name: String,
@@ -857,6 +879,7 @@ pub async fn handle_v1_provider_update(
 
     reload_provider_from_disk(gcx.clone(), &identity.instance_id, &config_dir).await?;
     refact_providers::credential::invalidate(&identity.instance_id);
+    invalidate_provider_quota(&gcx, &identity.instance_id).await;
 
     invalidate_caps(gcx).await;
 
@@ -938,6 +961,7 @@ pub async fn handle_v1_provider_delete(
         registry.remove(&params.name);
     }
     refact_providers::credential::invalidate(&params.name);
+    invalidate_provider_quota(&gcx, &params.name).await;
 
     invalidate_caps(gcx).await;
 
@@ -3304,6 +3328,488 @@ async fn xai_oauth_usage_response(
     }
 }
 
+fn quota_window_from_value(name: &str, value: &Value) -> ProviderQuotaWindow {
+    let number = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| value.get(*key).and_then(Value::as_f64))
+    };
+    let string = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| value.get(*key).and_then(Value::as_str).map(str::to_string))
+    };
+    let limit = number(&["limit"]);
+    let remaining = number(&["remaining"]);
+    let used_percent =
+        number(&["used_percent", "percent_used"]).or_else(|| match (limit, remaining) {
+            (Some(limit), Some(remaining))
+                if limit.is_finite() && limit > 0.0 && remaining.is_finite() && remaining > 0.0 =>
+            {
+                Some(100.0 * (1.0 - remaining / limit))
+            }
+            _ => None,
+        });
+    ProviderQuotaWindow {
+        id: name.to_string(),
+        label: name.replace('_', " "),
+        used_percent,
+        limit,
+        used: number(&["used"]),
+        remaining,
+        reset_at: string(&["reset_at", "resets_at", "reset"]),
+        reset_after_seconds: value.get("reset_after_seconds").and_then(Value::as_u64),
+        window_seconds: ["window_seconds", "limit_window_seconds"]
+            .iter()
+            .find_map(|key| value.get(*key).and_then(Value::as_u64)),
+        status: string(&["status"]),
+    }
+}
+
+fn quota_fact(name: &str, value: Option<&Value>) -> Option<ProviderQuotaFact> {
+    let value = match value? {
+        Value::String(value) => ProviderQuotaFactValue::String(value.clone()),
+        Value::Number(value) => ProviderQuotaFactValue::Number(value.clone()),
+        Value::Bool(value) => ProviderQuotaFactValue::Boolean(*value),
+        Value::Null => ProviderQuotaFactValue::Null,
+        Value::Array(_) | Value::Object(_) => return None,
+    };
+    Some(ProviderQuotaFact {
+        id: name.to_string(),
+        label: name.replace('_', " "),
+        value,
+    })
+}
+
+fn quota_snapshot_from_details(
+    provider: &str,
+    base_provider: &str,
+    source: ProviderQuotaSource,
+    details: Value,
+) -> ProviderQuotaSnapshot {
+    let mut windows = Vec::new();
+    let mut facts = Vec::new();
+    let available = match source {
+        ProviderQuotaSource::XaiOauth => details
+            .get("available")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        _ => true,
+    };
+    let plan = details
+        .get("plan_type")
+        .or_else(|| details.get("plan"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    match source {
+        ProviderQuotaSource::ClaudeCode => {
+            for key in [
+                "five_hour",
+                "seven_day",
+                "seven_day_sonnet",
+                "seven_day_opus",
+                "seven_day_oauth_apps",
+                "seven_day_cowork",
+                "seven_day_omelette",
+            ] {
+                if let Some(value) = details.get(key).filter(|value| value.is_object()) {
+                    windows.push(quota_window_from_value(key, value));
+                }
+            }
+            if let Some(scoped) = details.get("scoped_windows").and_then(Value::as_array) {
+                for item in scoped {
+                    if let Some(window) = item.get("window") {
+                        let name = item
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .unwrap_or("scoped");
+                        windows.push(quota_window_from_value(name, window));
+                    }
+                }
+            }
+            if let Some(extra) = details.get("extra_usage") {
+                facts.extend(
+                    [
+                        quota_fact("used_credits", extra.get("used_credits")),
+                        quota_fact("monthly_limit", extra.get("monthly_limit")),
+                        quota_fact("currency", extra.get("currency")),
+                    ]
+                    .into_iter()
+                    .flatten(),
+                );
+            }
+        }
+        ProviderQuotaSource::OpenaiCodex => {
+            for (prefix, rate_limit) in [
+                ("rate_limit", details.get("rate_limit")),
+                ("code_review", details.get("code_review_rate_limit")),
+            ] {
+                if let Some(rate_limit) = rate_limit {
+                    for (suffix, window) in [
+                        ("primary", rate_limit.get("primary_window")),
+                        ("secondary", rate_limit.get("secondary_window")),
+                    ] {
+                        if let Some(window) = window.filter(|value| value.is_object()) {
+                            windows.push(quota_window_from_value(
+                                &format!("{prefix}_{suffix}"),
+                                window,
+                            ));
+                        }
+                    }
+                }
+            }
+            if let Some(additional) = details
+                .get("additional_rate_limits")
+                .and_then(Value::as_array)
+            {
+                for (index, item) in additional.iter().enumerate() {
+                    let name = item
+                        .get("limit_name")
+                        .or_else(|| item.get("metered_feature"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("additional");
+                    if let Some(rate_limit) = item.get("rate_limit") {
+                        for (suffix, window) in [
+                            ("primary", rate_limit.get("primary_window")),
+                            ("secondary", rate_limit.get("secondary_window")),
+                        ] {
+                            if let Some(window) = window.filter(|value| value.is_object()) {
+                                windows.push(quota_window_from_value(
+                                    &format!("additional_{index}_{name}_{suffix}"),
+                                    window,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(credits) = details.get("credits") {
+                facts.extend(
+                    [
+                        quota_fact("credit_balance", credits.get("balance")),
+                        quota_fact("credits_unlimited", credits.get("unlimited")),
+                    ]
+                    .into_iter()
+                    .flatten(),
+                );
+            }
+            if let Some(reset_credits) = details.get("rate_limit_reset_credits") {
+                facts.extend(
+                    [quota_fact(
+                        "reset_credits_available",
+                        reset_credits.get("available_count"),
+                    )]
+                    .into_iter()
+                    .flatten(),
+                );
+            }
+        }
+        ProviderQuotaSource::Opencode => {
+            for key in ["rolling", "weekly", "monthly"] {
+                if let Some(value) = details.get(key).filter(|value| value.is_object()) {
+                    windows.push(quota_window_from_value(key, value));
+                }
+            }
+            facts.extend(
+                [quota_fact("balance", details.get("balance"))]
+                    .into_iter()
+                    .flatten(),
+            );
+        }
+        ProviderQuotaSource::GoogleAntigravity => {
+            if let Some(groups) = details.get("groups").and_then(Value::as_array) {
+                for group in groups {
+                    let group_name = group
+                        .get("display_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("quota");
+                    if let Some(buckets) = group.get("buckets").and_then(Value::as_array) {
+                        for bucket in buckets {
+                            let name = bucket
+                                .get("display_name")
+                                .and_then(Value::as_str)
+                                .unwrap_or(group_name);
+                            let remaining_fraction = bucket
+                                .get("remaining_fraction")
+                                .and_then(Value::as_f64)
+                                .filter(|value| value.is_finite());
+                            let mut window = quota_window_from_value(name, bucket);
+                            window.used_percent = remaining_fraction
+                                .map(|value| 100.0 * (1.0 - value.clamp(0.0, 1.0)));
+                            windows.push(window);
+                        }
+                    }
+                }
+            }
+        }
+        ProviderQuotaSource::XaiOauth => {
+            if let Some(values) = details.get("windows").and_then(Value::as_array) {
+                for (index, value) in values.iter().enumerate() {
+                    let name = value
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("window_{index}"));
+                    windows.push(quota_window_from_value(&name, value));
+                }
+            }
+        }
+        ProviderQuotaSource::Litellm => {
+            facts.extend(
+                [
+                    quota_fact("spend", details.get("spend")),
+                    quota_fact("max_budget", details.get("max_budget")),
+                    quota_fact("remaining", details.get("remaining")),
+                ]
+                .into_iter()
+                .flatten(),
+            );
+        }
+        ProviderQuotaSource::Unavailable => {}
+    }
+    ProviderQuotaSnapshot {
+        provider_name: provider.to_string(),
+        base_provider: base_provider.to_string(),
+        source,
+        available,
+        error: None,
+        plan,
+        windows,
+        facts,
+        fetched_at: ProviderQuotaCache::now_iso_timestamp(),
+        stale: false,
+    }
+}
+
+async fn fetch_provider_quota(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+    base_provider: &str,
+) -> ProviderQuotaSnapshot {
+    let result: Result<(ProviderQuotaSource, Value), String> = match base_provider {
+        "claude_code" => fetch_claude_code_usage_with_refresh(gcx, provider_name)
+            .await
+            .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
+            .map(|value| (ProviderQuotaSource::ClaudeCode, value)),
+        "openai_codex" => fetch_openai_codex_usage_with_refresh(gcx, provider_name)
+            .await
+            .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
+            .map(|value| (ProviderQuotaSource::OpenaiCodex, value)),
+        "google_antigravity" => fetch_google_antigravity_usage_with_refresh(gcx, provider_name)
+            .await
+            .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
+            .map(|value| (ProviderQuotaSource::GoogleAntigravity, value)),
+        "opencode" => {
+            let resolved = resolve_provider_for_base(&gcx, provider_name, "opencode").await;
+            match resolved {
+                Ok((provider, client)) => {
+                    match downcast_provider::<OpenCodeProvider>(provider.as_ref(), "OpenCode") {
+                        Ok(provider) if provider.usage_endpoint.trim().is_empty() => {
+                            return ProviderQuotaSnapshot::unavailable(
+                                provider_name,
+                                base_provider,
+                            );
+                        }
+                        Ok(provider) => provider
+                            .fetch_usage(&client)
+                            .await
+                            .and_then(|value| {
+                                serde_json::to_value(value).map_err(|error| error.to_string())
+                            })
+                            .map(|value| (ProviderQuotaSource::Opencode, value)),
+                        Err(error) => Err(error.message),
+                    }
+                }
+                Err(error) => Err(error.message),
+            }
+        }
+        "xai_oauth" => {
+            let provider = {
+                let registry = gcx.providers.read().await;
+                registry
+                    .get(provider_name)
+                    .map(|provider| provider.clone_box())
+            };
+            match provider.and_then(|provider| {
+                provider
+                    .as_any()
+                    .downcast_ref::<XAIOAuthProvider>()
+                    .cloned()
+            }) {
+                Some(provider) => provider
+                    .fetch_usage()
+                    .await
+                    .and_then(|value| {
+                        serde_json::to_value(value).map_err(|error| error.to_string())
+                    })
+                    .map(|value| (ProviderQuotaSource::XaiOauth, value)),
+                None => Err(format!("Provider '{provider_name}' is not available")),
+            }
+        }
+        "litellm" => {
+            let provider = {
+                let registry = gcx.providers.read().await;
+                registry
+                    .get(provider_name)
+                    .map(|provider| provider.clone_box())
+            };
+            match provider
+                .and_then(|provider| provider.as_any().downcast_ref::<LiteLLMProvider>().cloned())
+            {
+                Some(provider) => match provider.query_budget(&gcx.http_client).await {
+                    LiteLLMBudgetQueryResult::Available(value) => serde_json::to_value(value)
+                        .map(|value| (ProviderQuotaSource::Litellm, value))
+                        .map_err(|error| error.to_string()),
+                    LiteLLMBudgetQueryResult::Unavailable(_) => {
+                        return ProviderQuotaSnapshot::unavailable(provider_name, base_provider);
+                    }
+                    LiteLLMBudgetQueryResult::Error(error) => {
+                        Err(format!("LiteLLM budget query failed: {error:?}"))
+                    }
+                },
+                None => Err(format!("Provider '{provider_name}' is not available")),
+            }
+        }
+        _ => return ProviderQuotaSnapshot::unavailable(provider_name, base_provider),
+    };
+    match result {
+        Ok((source, details)) => {
+            quota_snapshot_from_details(provider_name, base_provider, source, details)
+        }
+        Err(error) => ProviderQuotaSnapshot::error(
+            provider_name,
+            base_provider,
+            match base_provider {
+                "claude_code" => ProviderQuotaSource::ClaudeCode,
+                "openai_codex" => ProviderQuotaSource::OpenaiCodex,
+                "opencode" => ProviderQuotaSource::Opencode,
+                "google_antigravity" => ProviderQuotaSource::GoogleAntigravity,
+                "xai_oauth" => ProviderQuotaSource::XaiOauth,
+                "litellm" => ProviderQuotaSource::Litellm,
+                _ => ProviderQuotaSource::Unavailable,
+            },
+            error,
+        ),
+    }
+}
+
+async fn provider_quota_cached(
+    gcx: Arc<GlobalContext>,
+    provider_name: &str,
+    base_provider: &str,
+    refresh: bool,
+) -> ProviderQuotaSnapshot {
+    let (cached, prior) = {
+        let cache = gcx.quota_cache.lock().await;
+        (
+            if refresh {
+                None
+            } else {
+                cache.get_fresh(provider_name, ProviderQuotaCache::now_timestamp())
+            },
+            cache.get_stale(provider_name),
+        )
+    };
+    if !refresh {
+        if let Some(snapshot) = cached {
+            return snapshot;
+        }
+    }
+    let snapshot = fetch_provider_quota(gcx.clone(), provider_name, base_provider).await;
+    if let Some(fallback) = stale_quota_fallback(&snapshot, prior) {
+        return fallback;
+    }
+    gcx.quota_cache
+        .lock()
+        .await
+        .insert(provider_name.to_string(), snapshot.clone());
+    snapshot
+}
+
+fn stale_quota_fallback(
+    fetched: &ProviderQuotaSnapshot,
+    prior: Option<ProviderQuotaSnapshot>,
+) -> Option<ProviderQuotaSnapshot> {
+    let error = fetched.error.as_ref()?;
+    let mut prior = prior?;
+    if !prior.available || prior.source == ProviderQuotaSource::Unavailable {
+        return None;
+    }
+    prior.error = Some(error.clone());
+    prior.stale = true;
+    Some(prior)
+}
+
+async fn invalidate_provider_quota(gcx: &Arc<GlobalContext>, provider_name: &str) {
+    gcx.quota_cache.lock().await.invalidate(provider_name);
+}
+
+pub async fn handle_v1_provider_quota(
+    State(app): State<AppState>,
+    Path(params): Path<ProviderPathParams>,
+    Query(query): Query<ProviderQuotaQuery>,
+) -> Result<Response<Body>, ScratchError> {
+    validate_instance_id_for_http(&params.name)?;
+    let identity = resolve_provider_identity(&app.gcx, &params.name).await?;
+    let snapshot = provider_quota_cached(
+        app.gcx.clone(),
+        &identity.instance_id,
+        &identity.base_provider,
+        query.refresh,
+    )
+    .await;
+    json_response(StatusCode::OK, &ProviderQuotaResponse { quota: snapshot })
+}
+
+pub async fn handle_v1_provider_quotas(
+    State(app): State<AppState>,
+    Query(query): Query<ProviderQuotaQuery>,
+) -> Result<Response<Body>, ScratchError> {
+    let providers = {
+        let registry = app.gcx.providers.read().await;
+        let mut providers = registry
+            .iter()
+            .filter(|(_, provider)| !provider.is_hidden_from_list())
+            .map(|(name, provider)| (name.to_string(), provider.base_provider_name().to_string()))
+            .collect::<Vec<_>>();
+        providers.sort_by(|a, b| a.0.cmp(&b.0));
+        providers
+    };
+    let mut snapshots = vec![None; providers.len()];
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut next = 0;
+    while next < providers.len() || !tasks.is_empty() {
+        while next < providers.len() && tasks.len() < 8 {
+            let (name, base_provider) = providers[next].clone();
+            let gcx = app.gcx.clone();
+            let refresh = query.refresh;
+            let index = next;
+            tasks.spawn(async move {
+                (
+                    index,
+                    provider_quota_cached(gcx, &name, &base_provider, refresh).await,
+                )
+            });
+            next += 1;
+        }
+        if let Some(result) = tasks.join_next().await {
+            let (index, snapshot) = result.map_err(|error| {
+                ScratchError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Quota fetch task failed: {error}"),
+                )
+            })?;
+            snapshots[index] = Some(snapshot);
+        }
+    }
+    let snapshots = snapshots.into_iter().flatten().collect();
+    json_response(
+        StatusCode::OK,
+        &ProviderQuotasResponse {
+            quotas: snapshots,
+            truncated: false,
+        },
+    )
+}
+
 async fn openai_codex_redeem_response(
     gcx: Arc<GlobalContext>,
     provider_name: &str,
@@ -3800,6 +4306,7 @@ async fn save_provider_oauth_tokens(
         crate::providers::oauth_refresh::clear_invalid_refresh_token(provider_name, &refresh_token);
     }
 
+    invalidate_provider_quota(gcx, provider_name).await;
     invalidate_caps(gcx.clone()).await;
     Ok(())
 }
@@ -3807,6 +4314,194 @@ async fn save_provider_oauth_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_quota_mapping_is_private_and_normalizes_windows() {
+        let details = json!({
+            "plan_type": "pro",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 25.0,
+                    "reset_at": "2026-01-01T00:00:00Z",
+                    "limit_window_seconds": 18000
+                }
+            },
+            "credits": {"balance": 12.5, "unlimited": false}
+        });
+        let snapshot = quota_snapshot_from_details(
+            "codex-work",
+            "openai_codex",
+            ProviderQuotaSource::OpenaiCodex,
+            details.clone(),
+        );
+        assert_eq!(snapshot.plan.as_deref(), Some("pro"));
+        assert_eq!(snapshot.windows.len(), 1);
+        assert_eq!(snapshot.windows[0].used_percent, Some(25.0));
+        assert_eq!(snapshot.facts.len(), 2);
+        let serialized = serde_json::to_value(snapshot).unwrap();
+        assert!(serialized.get("details").is_none());
+        assert!(serialized.get("account_id").is_none());
+    }
+
+    #[test]
+    fn generic_quota_window_derives_used_percent() {
+        let window = quota_window_from_value("daily", &json!({"limit": 200, "remaining": 50}));
+        assert_eq!(window.used_percent, Some(75.0));
+        assert_eq!(window.remaining, Some(50.0));
+    }
+
+    #[test]
+    fn antigravity_quota_mapping_normalizes_fraction_without_absolute_remaining() {
+        let snapshot = quota_snapshot_from_details(
+            "antigravity-work",
+            "google_antigravity",
+            ProviderQuotaSource::GoogleAntigravity,
+            json!({"groups": [{"display_name": "Gemini", "buckets": [{
+                "display_name": "Daily", "remaining_fraction": 0.8, "reset": "tomorrow"
+            }]}]}),
+        );
+        assert_eq!(snapshot.windows[0].remaining, None);
+        assert_eq!(snapshot.windows[0].used_percent, Some(20.0));
+        assert_eq!(snapshot.windows[0].reset_at.as_deref(), Some("tomorrow"));
+    }
+
+    #[test]
+    fn quota_envelopes_and_items_serialize_for_gui_contract() {
+        let snapshot = quota_snapshot_from_details(
+            "codex-work",
+            "openai_codex",
+            ProviderQuotaSource::OpenaiCodex,
+            json!({
+                "rate_limit": {"primary_window": {"limit": 100.0}},
+                "credits": {"balance": 12.5, "opaque": {"ignored": true}}
+            }),
+        );
+        let single = serde_json::to_value(ProviderQuotaResponse {
+            quota: snapshot.clone(),
+        })
+        .unwrap();
+        let multiple = serde_json::to_value(ProviderQuotasResponse {
+            quotas: vec![snapshot],
+            truncated: false,
+        })
+        .unwrap();
+
+        assert_eq!(single.as_object().unwrap().len(), 1);
+        assert!(single.get("quota").is_some());
+        assert_eq!(multiple.as_object().unwrap().len(), 2);
+        assert!(multiple.get("quotas").is_some());
+        assert_eq!(multiple["truncated"], false);
+        let quota = &single["quota"];
+        for field in [
+            "provider_name",
+            "base_provider",
+            "source",
+            "available",
+            "fetched_at",
+            "stale",
+            "windows",
+            "facts",
+        ] {
+            assert!(
+                quota.get(field).is_some(),
+                "missing required quota field {field}"
+            );
+        }
+        let window = &quota["windows"][0];
+        assert!(window.get("id").is_some());
+        assert!(window.get("label").is_some());
+        assert!(window.get("used_percent").is_some());
+        let fact = &quota["facts"][0];
+        assert!(fact.get("id").is_some());
+        assert!(fact.get("label").is_some());
+        assert!(fact["value"].is_number());
+        assert!(quota["facts"].as_array().unwrap().iter().all(|fact| {
+            let value = &fact["value"];
+            value.is_null() || value.is_boolean() || value.is_number() || value.is_string()
+        }));
+        assert!(quota_fact("opaque", Some(&json!({"ignored": true}))).is_none());
+        assert!(quota.get("details").is_none());
+        assert!(quota.get("account_id").is_none());
+    }
+
+    #[test]
+    fn claude_quota_includes_all_documented_and_scoped_windows_without_plan() {
+        let mut details = serde_json::Map::new();
+        for key in [
+            "five_hour",
+            "seven_day",
+            "seven_day_sonnet",
+            "seven_day_oauth_apps",
+            "seven_day_opus",
+            "seven_day_cowork",
+            "seven_day_omelette",
+        ] {
+            details.insert(key.to_string(), json!({"used_percent": 1}));
+        }
+        details.insert(
+            "scoped_windows".to_string(),
+            json!([{"label": "Fable", "window": {"used_percent": 2}}]),
+        );
+        details.insert("email".to_string(), json!("private@example.com"));
+        let snapshot = quota_snapshot_from_details(
+            "claude-work",
+            "claude_code",
+            ProviderQuotaSource::ClaudeCode,
+            Value::Object(details),
+        );
+
+        assert!(snapshot.plan.is_none());
+        assert_eq!(snapshot.windows.len(), 8);
+        assert!(serde_json::to_value(snapshot)
+            .unwrap()
+            .get("email")
+            .is_none());
+    }
+
+    #[test]
+    fn codex_quota_includes_additional_windows_and_reset_credit_fact() {
+        let snapshot = quota_snapshot_from_details(
+            "codex-work",
+            "openai_codex",
+            ProviderQuotaSource::OpenaiCodex,
+            json!({
+                "rate_limit": {"primary_window": {"used_percent": 10}},
+                "code_review_rate_limit": {"secondary_window": {"used_percent": 20}},
+                "additional_rate_limits": [{
+                    "limit_name": "Spark",
+                    "rate_limit": {"primary_window": {"used_percent": 30}}
+                }],
+                "rate_limit_reset_credits": {"available_count": 2}
+            }),
+        );
+
+        assert_eq!(snapshot.windows.len(), 3);
+        assert!(snapshot
+            .facts
+            .iter()
+            .any(|fact| fact.id == "reset_credits_available"));
+    }
+
+    #[test]
+    fn stale_fallback_preserves_prior_timestamp_and_skips_unavailable() {
+        let mut prior = ProviderQuotaSnapshot::unavailable("codex-work", "openai_codex");
+        prior.available = true;
+        prior.source = ProviderQuotaSource::OpenaiCodex;
+        prior.fetched_at = "old".to_string();
+        let fetched = ProviderQuotaSnapshot::error(
+            "codex-work",
+            "openai_codex",
+            ProviderQuotaSource::OpenaiCodex,
+            "upstream failed",
+        );
+        let fallback = stale_quota_fallback(&fetched, Some(prior)).unwrap();
+        assert!(fallback.stale);
+        assert_eq!(fallback.fetched_at, "old");
+        assert_eq!(fallback.error.as_deref(), Some("upstream failed"));
+
+        let unavailable = ProviderQuotaSnapshot::unavailable("other", "other");
+        assert!(stale_quota_fallback(&unavailable, Some(fallback)).is_none());
+    }
 
     async fn response_json(response: Response<Body>) -> serde_json::Value {
         let body = hyper::body::to_bytes(response.into_body()).await.unwrap();

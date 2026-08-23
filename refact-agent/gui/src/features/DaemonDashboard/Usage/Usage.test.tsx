@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import { setUpStore } from "../../../app/store";
 import type { DaemonWorker } from "../../../services/refact/daemon";
-import type { ProviderListItem } from "../../../services/refact/providers";
 import { server } from "../../../utils/mockServer";
 import { render, screen, waitFor, within } from "../../../utils/test-utils";
 import type { StatsSummary } from "../../StatsDashboard/types";
@@ -116,19 +115,6 @@ function providerRow(calls: number, provider = "anthropic") {
   };
 }
 
-function providerListItem(name: string, baseProvider = name): ProviderListItem {
-  return {
-    name,
-    base_provider: baseProvider,
-    display_name: name,
-    enabled: true,
-    readonly: false,
-    has_credentials: true,
-    status: "configured",
-    model_count: 1,
-  };
-}
-
 function dayRow(date: string, tokens: number, cost: number) {
   return {
     date,
@@ -204,11 +190,32 @@ describe("UsagePage", () => {
       http.get(`${BASE}/p/beta/v1/stats/llm/summary`, () =>
         HttpResponse.json(betaSummary),
       ),
-      http.get(`${BASE}/p/alpha/v1/providers`, () =>
-        HttpResponse.json({ providers: [providerListItem("openrouter")] }),
+      http.get(`${BASE}/p/alpha/v1/providers/quotas`, () =>
+        HttpResponse.json({
+          quotas: [
+            {
+              provider_name: "openrouter",
+              base_provider: "openrouter",
+              source: "account",
+              available: true,
+              fetched_at: "2026-07-18T10:00:00Z",
+              stale: false,
+              windows: [
+                {
+                  id: "plan",
+                  label: "Plan",
+                  used_percent: 95,
+                  limit: 100,
+                  remaining: 5,
+                },
+              ],
+              facts: [],
+            },
+          ],
+        }),
       ),
-      http.get(`${BASE}/p/alpha/v1/providers/openrouter/account-info`, () =>
-        HttpResponse.json({ data: { limit: 100, usage: 95, remaining: 5 } }),
+      http.get(`${BASE}/p/beta/v1/providers/quotas`, () =>
+        HttpResponse.json({ quotas: [] }),
       ),
     );
 
@@ -229,46 +236,70 @@ describe("UsagePage", () => {
     expect(within(modelTable).getByText("15")).toBeInTheDocument();
 
     expect(
-      await screen.findByText("openrouter: $5.00 of $100.00 plan remaining"),
+      await screen.findByText(
+        "openrouter on alpha: Plan quota is nearly exhausted (5 remaining)",
+      ),
     ).toBeInTheDocument();
+    expect(screen.getByText("alpha · openrouter · Plan")).toBeInTheDocument();
+    expect(screen.getByText("5 / 100 remaining")).toBeInTheDocument();
     expect(screen.getAllByTestId("echarts-mock").length).toBeGreaterThan(0);
   });
 
-  it("skips account-info probes for providers without advertised support", async () => {
-    let providersListRequested = false;
-    let accountInfoProbed = false;
+  it("renders normalized windows and facts for every ready project", async () => {
+    const quotaProjects: string[] = [];
     server.use(
       http.get(`${BASE}/daemon/v1/workers`, () =>
-        HttpResponse.json([worker("alpha", "ready")]),
+        HttpResponse.json([worker("alpha", "ready"), worker("beta", "ready")]),
       ),
       http.get(`${BASE}/p/alpha/v1/stats/llm/summary`, () =>
         HttpResponse.json(alphaSummary),
       ),
-      http.get(`${BASE}/p/alpha/v1/providers`, () => {
-        providersListRequested = true;
+      http.get(`${BASE}/p/beta/v1/stats/llm/summary`, () =>
+        HttpResponse.json(betaSummary),
+      ),
+      http.get(`${BASE}/p/alpha/v1/providers/quotas`, () => {
+        quotaProjects.push("alpha");
+        return HttpResponse.json({ quotas: [] });
+      }),
+      http.get(`${BASE}/p/beta/v1/providers/quotas`, () => {
+        quotaProjects.push("beta");
         return HttpResponse.json({
-          providers: [
-            providerListItem("anthropic"),
-            providerListItem("openrouter"),
+          quotas: [
+            {
+              provider_name: "codex_work",
+              base_provider: "openai_codex",
+              source: "usage",
+              available: true,
+              fetched_at: "2026-07-18T10:00:00Z",
+              stale: true,
+              windows: [
+                {
+                  id: "weekly",
+                  label: "Weekly",
+                  used_percent: 42,
+                  reset_after_seconds: 3600,
+                  window_seconds: 604800,
+                },
+              ],
+              facts: [
+                { id: "credits", label: "Credits", value: 12.5, unit: "USD" },
+              ],
+            },
           ],
         });
-      }),
-      http.get(`${BASE}/p/alpha/v1/providers/openrouter/account-info`, () =>
-        HttpResponse.json({ data: { remaining: 50, limit: 100 } }),
-      ),
-      http.get(`${BASE}/p/alpha/v1/providers/anthropic/account-info`, () => {
-        accountInfoProbed = true;
-        return new HttpResponse(null, { status: 400 });
       }),
     );
 
     renderUsage();
 
-    expect((await screen.findAllByText("1.0K")).length).toBeGreaterThan(0);
-    await waitFor(() => expect(providersListRequested).toBe(true));
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(accountInfoProbed).toBe(false);
-    expect(screen.queryByText(/token plan/)).toBeNull();
+    expect(
+      await screen.findByText("beta · codex_work · Weekly"),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("42% used").length).toBeGreaterThan(0);
+    expect(screen.getByText("beta · codex_work · Credits")).toBeInTheDocument();
+    expect(screen.getByText("12.5 USD")).toBeInTheDocument();
+    expect(screen.getAllByText("Stale").length).toBeGreaterThan(0);
+    expect(quotaProjects.sort()).toEqual(["alpha", "beta"]);
   });
 
   it("lists stopped workers as not counted and wakes them on demand", async () => {
@@ -283,8 +314,14 @@ describe("UsagePage", () => {
       http.get(`${BASE}/p/alpha/v1/stats/llm/summary`, () =>
         HttpResponse.json(projectSummary()),
       ),
+      http.get(`${BASE}/p/alpha/v1/providers/quotas`, () =>
+        HttpResponse.json({ quotas: [] }),
+      ),
       http.get(`${BASE}/p/gamma/v1/stats/llm/summary`, () =>
         HttpResponse.json(projectSummary()),
+      ),
+      http.get(`${BASE}/p/gamma/v1/providers/quotas`, () =>
+        HttpResponse.json({ quotas: [] }),
       ),
       http.post(`${BASE}/daemon/v1/projects/gamma/restart`, () => {
         restarted = true;
@@ -322,6 +359,9 @@ describe("UsagePage", () => {
       ),
       http.get(`${BASE}/p/alpha/v1/stats/llm/summary`, () =>
         HttpResponse.json(projectSummary()),
+      ),
+      http.get(`${BASE}/p/alpha/v1/providers/quotas`, () =>
+        HttpResponse.json({ quotas: [] }),
       ),
     );
 

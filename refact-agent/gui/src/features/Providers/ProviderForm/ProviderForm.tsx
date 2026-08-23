@@ -8,48 +8,27 @@ import { Spinner } from "../../../components/Spinner";
 
 import { useProviderForm } from "./useProviderForm";
 import type {
-  ClaudeCodeUsageData,
   ProviderListItem,
+  ProviderQuotaFact,
+  ProviderQuotaSnapshot,
+  ProviderQuotaWindow,
   ProviderStatus,
-  ClaudeCodeUsageWindow,
-  GoogleAntigravityUsageData,
-  OpenAICodexAdditionalRateLimit,
-  OpenAICodexRateLimit,
-  OpenAICodexUsageData,
-  OpenAICodexUsageWindow,
-  OpenCodeUsageData,
-  XAIOAuthUsageData,
 } from "../../../services/refact";
-import { Badge, Button, Surface } from "../../../components/ui";
+import { Badge, Button, ProviderQuota, Surface } from "../../../components/ui";
 
 import styles from "./ProviderForm.module.css";
 import { ProviderModelsList } from "./ProviderModelsList/ProviderModelsList";
 import {
   useGetOpenRouterHealthQuery,
-  useGetClaudeCodeUsageQuery,
-  useGetOpenAICodexUsageQuery,
-  useGetOpenCodeUsageQuery,
-  useGetGoogleAntigravityUsageQuery,
-  useGetXAIOAuthUsageQuery,
+  useGetProviderQuotaQuery,
   useRedeemOpenAICodexResetCreditMutation,
 } from "../../../services/refact";
 import {
-  clampPercent,
-  formatClaudeExtraUsage,
-  formatCodexCreditsDetails,
-  formatCodexCreditsSummary,
-  formatCodexSpendControl,
   formatLimitWindowSeconds,
-  formatNullableBool,
-  formatRemainingFractionMeta,
   formatQuotaMeta,
   formatResetAfterSeconds,
   formatResetAt,
   formatUsagePercent,
-  formatWindowLabel,
-  getClaudeUsageWindowRows,
-  remainingCountToUsedPercent,
-  remainingFractionToUsedPercent,
 } from "../../../utils/providerQuota";
 
 export type ProviderFormProps = {
@@ -71,184 +50,6 @@ const StatusBadge: React.FC<{ status: ProviderStatus }> = ({ status }) => {
   }
 };
 
-const UsageBar: React.FC<{ pct: number }> = ({ pct }) => (
-  <progress
-    className={styles.usageBar}
-    max={100}
-    value={pct}
-    aria-label={`${Math.round(pct)}% used`}
-  />
-);
-
-const ClaudeWindowRow: React.FC<{
-  label: string;
-  w: ClaudeCodeUsageWindow;
-}> = ({ label, w }) => {
-  const pct = clampPercent(w.percent_used);
-  const meta = formatQuotaMeta([
-    formatUsagePercent(pct),
-    formatResetAt(w.resets_at),
-  ]);
-  return (
-    <div className={styles.usageRow}>
-      <div className={styles.usageRowHeader}>
-        <span>{label}</span>
-        <span>{meta}</span>
-      </div>
-      <UsageBar pct={pct} />
-    </div>
-  );
-};
-
-const CodexWindowRow: React.FC<{
-  label: string;
-  w: OpenAICodexUsageWindow;
-  limitReached?: boolean;
-}> = ({ label, w, limitReached }) => {
-  const pct = clampPercent(w.used_percent);
-  const windowText = formatLimitWindowSeconds(w.limit_window_seconds);
-  const meta = formatQuotaMeta([
-    formatUsagePercent(pct),
-    windowText ? `Window ${windowText}` : null,
-    formatResetAfterSeconds(w.reset_after_seconds),
-    formatResetAt(w.reset_at),
-  ]);
-  return (
-    <div className={styles.usageRow}>
-      <div className={styles.usageRowHeader}>
-        <span className={styles.usageLabelGroup}>
-          {label}
-          {limitReached ? <Badge tone="danger">Limit reached</Badge> : null}
-        </span>
-        <span>{meta}</span>
-      </div>
-      <UsageBar pct={pct} />
-    </div>
-  );
-};
-
-const InfoRow: React.FC<{ label: string; value: string }> = ({
-  label,
-  value,
-}) => (
-  <div className={styles.usageRowHeader}>
-    <span>{label}</span>
-    <span>{value}</span>
-  </div>
-);
-
-const PassiveQuotaRow: React.FC<{
-  label: string;
-  usedPercent: number | null;
-  meta: string;
-}> = ({ label, usedPercent, meta }) => {
-  return (
-    <div className={styles.usageRow}>
-      <div className={styles.usageRowHeader}>
-        <span>{label}</span>
-        <span>{meta}</span>
-      </div>
-      {usedPercent === null ? null : <UsageBar pct={usedPercent} />}
-    </div>
-  );
-};
-
-const ClaudeUsagePanel: React.FC<{ data: ClaudeCodeUsageData }> = ({
-  data,
-}) => {
-  const windowRows = getClaudeUsageWindowRows(data);
-
-  return (
-    <Surface className={styles.usagePanel} variant="glass" animated="rise">
-      <div className={styles.usageTitle}>Usage</div>
-      <div className={styles.usageRows}>
-        {windowRows.length > 0 ? (
-          windowRows.map(({ key, label, window }) => (
-            <ClaudeWindowRow key={key} label={label} w={window} />
-          ))
-        ) : (
-          <div className={styles.usageMeta}>Quota windows not reported.</div>
-        )}
-        {data.extra_usage ? (
-          <div className={styles.usageRow}>
-            <div className={styles.usageRowHeader}>
-              <span>Extra usage</span>
-              <span>{formatClaudeExtraUsage(data.extra_usage)}</span>
-            </div>
-            {typeof data.extra_usage.utilization === "number" ? (
-              <UsageBar pct={clampPercent(data.extra_usage.utilization)} />
-            ) : null}
-          </div>
-        ) : (
-          <div className={styles.usageMeta}>Extra usage not reported.</div>
-        )}
-      </div>
-    </Surface>
-  );
-};
-
-const RateLimitSection: React.FC<{
-  title: string;
-  rl: OpenAICodexRateLimit | null | undefined;
-}> = ({ title, rl }) => {
-  if (!rl) {
-    return <div className={styles.usageMeta}>{title}: not reported.</div>;
-  }
-
-  const hasWindows = Boolean(rl.primary_window ?? rl.secondary_window);
-
-  return (
-    <div className={styles.usageRow}>
-      <div className={styles.usageRowHeader}>
-        <span className={styles.usageLabelGroup}>
-          {title}
-          {rl.limit_reached ? <Badge tone="danger">Limit reached</Badge> : null}
-        </span>
-        <span>
-          {formatQuotaMeta([
-            `allowed ${formatNullableBool(rl.allowed)}`,
-            `limit reached ${formatNullableBool(rl.limit_reached)}`,
-          ])}
-        </span>
-      </div>
-      {rl.primary_window ? (
-        <CodexWindowRow
-          label={formatWindowLabel(
-            "Primary",
-            rl.primary_window.limit_window_seconds,
-          )}
-          w={rl.primary_window}
-          limitReached={rl.limit_reached}
-        />
-      ) : null}
-      {rl.secondary_window ? (
-        <CodexWindowRow
-          label={formatWindowLabel(
-            "Secondary",
-            rl.secondary_window.limit_window_seconds,
-          )}
-          w={rl.secondary_window}
-        />
-      ) : null}
-      {!hasWindows ? (
-        <div className={styles.usageMeta}>No active windows reported.</div>
-      ) : null}
-    </div>
-  );
-};
-
-const AdditionalRateLimitRow: React.FC<{
-  limit: OpenAICodexAdditionalRateLimit;
-}> = ({ limit }) => (
-  <div className={styles.usageRow}>
-    <div className={styles.usageRowHeader}>
-      <span>{limit.limit_name ?? "Additional quota"}</span>
-      {limit.metered_feature ? <span>{limit.metered_feature}</span> : null}
-    </div>
-    <RateLimitSection title="Quota" rl={limit.rate_limit} />
-  </div>
-);
-
 const formatRedeemCode = (code: string): string => {
   switch (code) {
     case "reset":
@@ -264,17 +65,83 @@ const formatRedeemCode = (code: string): string => {
   }
 };
 
-const CodexUsagePanel: React.FC<{
-  data: OpenAICodexUsageData;
+const formatNumber = (value: number): string =>
+  value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+
+const formatFactValue = (fact: ProviderQuotaFact): string => {
+  if (fact.value === null) return "Unavailable";
+  const value =
+    typeof fact.value === "boolean"
+      ? fact.value
+        ? "Yes"
+        : "No"
+      : typeof fact.value === "number"
+        ? formatNumber(fact.value)
+        : fact.value;
+  return fact.unit ? `${value} ${fact.unit}` : String(value);
+};
+
+const formatWindowValue = (window: ProviderQuotaWindow): string => {
+  if (typeof window.used === "number" && typeof window.limit === "number") {
+    return `${formatNumber(window.used)} / ${formatNumber(window.limit)}`;
+  }
+  if (
+    typeof window.remaining === "number" &&
+    typeof window.limit === "number"
+  ) {
+    return `${formatNumber(window.remaining)} / ${formatNumber(
+      window.limit,
+    )} remaining`;
+  }
+  return typeof window.used_percent === "number"
+    ? formatUsagePercent(window.used_percent)
+    : "Usage unavailable";
+};
+
+const formatWindowMeta = (window: ProviderQuotaWindow): string | undefined => {
+  const hasCountValue =
+    (typeof window.used === "number" || typeof window.remaining === "number") &&
+    typeof window.limit === "number";
+  const duration = formatLimitWindowSeconds(window.window_seconds);
+  const meta = formatQuotaMeta([
+    hasCountValue && typeof window.used_percent === "number"
+      ? formatUsagePercent(window.used_percent)
+      : null,
+    duration ? `Window ${duration}` : null,
+    formatResetAfterSeconds(window.reset_after_seconds),
+    formatResetAt(window.reset_at),
+  ]);
+  return meta || undefined;
+};
+
+const quotaTone = (
+  window: ProviderQuotaWindow,
+): "accent" | "warning" | "danger" => {
+  const status = window.status?.toLocaleLowerCase() ?? "";
+  if (status.includes("limit") || status.includes("error")) return "danger";
+  if (status.includes("warning") || (window.used_percent ?? 0) >= 80) {
+    return "warning";
+  }
+  return "accent";
+};
+
+const findResetCredits = (facts: ProviderQuotaFact[]): number | null => {
+  const fact = facts.find((candidate) => {
+    const identity = `${candidate.id} ${candidate.label}`.toLocaleLowerCase();
+    return identity.includes("reset") && identity.includes("credit");
+  });
+  return typeof fact?.value === "number" ? fact.value : null;
+};
+
+const CodexResetCreditAction: React.FC<{
+  availableResets: number;
   providerName: string;
   onRedeemed: () => void;
-}> = ({ data, providerName, onRedeemed }) => {
+}> = ({ availableResets, providerName, onRedeemed }) => {
   const [redeem, { isLoading: isRedeeming }] =
     useRedeemOpenAICodexResetCreditMutation();
   const [redeemMessage, setRedeemMessage] = React.useState<string | null>(null);
   const redeemRequestIdRef = React.useRef<string | null>(null);
-  const availableResets = data.rate_limit_reset_credits?.available_count;
-  const showResetCredits = typeof availableResets === "number";
 
   const handleRedeem = async () => {
     if (!redeemRequestIdRef.current) {
@@ -297,294 +164,152 @@ const CodexUsagePanel: React.FC<{
       );
       return;
     }
-    // Idempotency key is reused on retry and only cleared after success.
     redeemRequestIdRef.current = null;
     setRedeemMessage(formatRedeemCode(payload.data.code));
     onRedeemed();
   };
 
   return (
+    <div className={styles.usageActions}>
+      <Button
+        size="1"
+        variant="soft"
+        loading={isRedeeming}
+        disabled={isRedeeming || availableResets <= 0}
+        onClick={() => void handleRedeem()}
+      >
+        Redeem reset
+      </Button>
+      {redeemMessage ? (
+        <div className={styles.usageMeta} role="status">
+          {redeemMessage}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+type ProviderQuotaPanelProps = {
+  action?: React.ReactNode;
+  error: boolean;
+  fetching: boolean;
+  loading: boolean;
+  snapshot?: ProviderQuotaSnapshot;
+};
+
+export const ProviderQuotaPanel: React.FC<ProviderQuotaPanelProps> = ({
+  action,
+  error,
+  fetching,
+  loading,
+  snapshot,
+}) => {
+  const fetchedAt = snapshot?.fetched_at
+    ? new Date(snapshot.fetched_at).toLocaleString()
+    : null;
+
+  return (
     <Surface className={styles.usagePanel} variant="glass" animated="rise">
       <div className={styles.usageHeader}>
         <div>
-          <div className={styles.usageTitle}>Usage</div>
-          {data.email ? (
-            <div className={styles.usageMeta}>{data.email}</div>
+          <div className={styles.usageTitle}>Quota</div>
+          {snapshot ? (
+            <div className={styles.usageMeta}>
+              {formatQuotaMeta([
+                `Source: ${snapshot.source}`,
+                fetchedAt && fetchedAt !== "Invalid Date"
+                  ? `Updated ${fetchedAt}`
+                  : null,
+              ])}
+            </div>
           ) : null}
         </div>
-        {data.plan_type ? <Badge tone="accent">{data.plan_type}</Badge> : null}
+        <div className={styles.usageBadges}>
+          {fetching && !loading ? (
+            <Badge tone="accent">Refreshing</Badge>
+          ) : null}
+          {snapshot?.stale ? <Badge tone="warning">Stale</Badge> : null}
+          {snapshot && !snapshot.available ? (
+            <Badge tone="muted">Unavailable</Badge>
+          ) : null}
+        </div>
       </div>
-      <div className={styles.usageRows}>
-        <RateLimitSection title="Main quota" rl={data.rate_limit} />
-        {data.rate_limit_reached_type ? (
-          <InfoRow label="Reached type" value={data.rate_limit_reached_type} />
-        ) : null}
-        {data.additional_rate_limits?.length ? (
-          <div className={styles.usageRow}>
-            <div className={styles.usageTitle}>Additional quotas</div>
-            {data.additional_rate_limits.map((limit, index) => (
-              <AdditionalRateLimitRow
-                key={`${limit.limit_name ?? "quota"}-${index}`}
-                limit={limit}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className={styles.usageMeta}>
-            Additional quotas not reported.
-          </div>
-        )}
-        <RateLimitSection
-          title="Code review quota"
-          rl={data.code_review_rate_limit}
-        />
-        {data.credits ? (
-          <div className={styles.usageRow}>
-            <InfoRow
-              label="Credits"
-              value={formatCodexCreditsSummary(data.credits)}
-            />
-            {formatCodexCreditsDetails(data.credits) ? (
-              <div className={styles.usageMeta}>
-                {formatCodexCreditsDetails(data.credits)}
-              </div>
-            ) : null}
-          </div>
-        ) : (
-          <div className={styles.usageMeta}>Credits not reported.</div>
-        )}
-        {showResetCredits ? (
-          <div className={styles.usageRow}>
-            <div className={styles.resetCreditsRow}>
-              <InfoRow
-                label="Reset credits"
-                value={`${availableResets} available`}
-              />
-              <Button
-                size="1"
-                variant="soft"
-                loading={isRedeeming}
-                disabled={isRedeeming || availableResets <= 0}
-                onClick={() => void handleRedeem()}
-              >
-                Redeem reset
-              </Button>
-            </div>
-            {redeemMessage ? (
-              <div className={styles.usageMeta}>{redeemMessage}</div>
-            ) : null}
-          </div>
-        ) : null}
-        {data.spend_control ? (
-          <InfoRow
-            label="Spend control"
-            value={formatCodexSpendControl(data.spend_control)}
-          />
-        ) : null}
-      </div>
-    </Surface>
-  );
-};
 
-type OpenCodeUsageWindowKey = keyof Pick<
-  OpenCodeUsageData,
-  "rolling" | "weekly" | "monthly"
->;
-
-const OPENCODE_USAGE_WINDOWS: {
-  key: OpenCodeUsageWindowKey;
-  label: string;
-}[] = [
-  { key: "rolling", label: "Rolling" },
-  { key: "weekly", label: "Weekly" },
-  { key: "monthly", label: "Monthly" },
-];
-
-const OpenCodeUsagePanel: React.FC<{ data: OpenCodeUsageData }> = ({
-  data,
-}) => {
-  const windowRows = OPENCODE_USAGE_WINDOWS.map(({ key, label }) => ({
-    key,
-    label,
-    window: data[key],
-  })).filter(
-    (
-      row,
-    ): row is {
-      key: OpenCodeUsageWindowKey;
-      label: string;
-      window: NonNullable<OpenCodeUsageData[OpenCodeUsageWindowKey]>;
-    } => Boolean(row.window),
-  );
-
-  return (
-    <Surface className={styles.usagePanel} variant="glass" animated="rise">
-      <div className={styles.usageTitle}>Usage</div>
-      <div className={styles.usageRows}>
-        {data.plan_type ? (
-          <InfoRow label="Plan" value={data.plan_type} />
-        ) : null}
-        {data.workspace_id ? (
-          <InfoRow label="Workspace" value={data.workspace_id} />
-        ) : null}
-        {typeof data.balance === "number" ? (
-          <InfoRow
-            label="Zen balance"
-            value={data.balance.toLocaleString(undefined, {
-              maximumFractionDigits: 2,
-            })}
-          />
-        ) : null}
-        {windowRows.length > 0 ? (
-          windowRows.map(({ key, label, window }) => (
-            <CodexWindowRow
-              key={key}
-              label={formatWindowLabel(label, window.limit_window_seconds)}
-              w={window}
-              limitReached={window.status === "rate-limited"}
-            />
-          ))
-        ) : (
-          <div className={styles.usageMeta}>Quota windows not reported.</div>
-        )}
-      </div>
-    </Surface>
-  );
-};
-
-const GoogleAntigravityUsagePanel: React.FC<{
-  data: GoogleAntigravityUsageData;
-}> = ({ data }) => (
-  <Surface className={styles.usagePanel} variant="glass" animated="rise">
-    <div className={styles.usageTitle}>Usage</div>
-    <div className={styles.usageRows}>
-      {data.description ? (
-        <div className={styles.usageMeta}>{data.description}</div>
+      {loading ? <div className={styles.usageMeta}>Loading quota…</div> : null}
+      {error ? (
+        <div className={styles.usageMeta} role="alert">
+          {snapshot ? "Failed to refresh quota." : "Failed to load quota."}
+        </div>
       ) : null}
-      {data.groups.length > 0 ? (
-        data.groups.map((group, groupIndex) => (
-          <div
-            className={styles.usageRow}
-            key={`${group.display_name}-${groupIndex}`}
-          >
-            <div className={styles.usageTitle}>{group.display_name}</div>
-            {group.description ? (
-              <div className={styles.usageMeta}>{group.description}</div>
-            ) : null}
-            {group.buckets.length > 0 ? (
-              group.buckets.map((bucket, bucketIndex) => (
-                <PassiveQuotaRow
-                  key={`${bucket.display_name}-${bucketIndex}`}
-                  label={bucket.display_name}
-                  usedPercent={remainingFractionToUsedPercent(
-                    bucket.remaining_fraction,
-                  )}
-                  meta={formatRemainingFractionMeta(
-                    bucket.remaining_fraction,
-                    bucket.description,
-                    bucket.reset,
-                  )}
-                />
-              ))
-            ) : (
-              <div className={styles.usageMeta}>Quotas not reported.</div>
-            )}
-          </div>
-        ))
-      ) : (
-        <div className={styles.usageMeta}>Quota groups not reported.</div>
-      )}
-    </div>
-  </Surface>
-);
+      {snapshot?.error ? (
+        <div className={styles.usageMeta} role="alert">
+          {snapshot.error}
+        </div>
+      ) : null}
+      {snapshot && !snapshot.available && !snapshot.error ? (
+        <div className={styles.usageMeta}>
+          Quota information is unavailable.
+        </div>
+      ) : null}
 
-const XAIOAuthUsagePanel: React.FC<{ data: XAIOAuthUsageData }> = ({
-  data,
-}) => {
-  const windows = data.windows;
-  return (
-    <Surface className={styles.usagePanel} variant="glass" animated="rise">
-      <div className={styles.usageTitle}>Usage</div>
-      <div className={styles.usageRows}>
-        {!data.available ? (
-          <div className={styles.usageMeta}>
-            {data.message || "Quota information is unavailable."}
-          </div>
-        ) : windows.length > 0 ? (
-          windows.map((window, index) => {
-            const usedPercent = remainingCountToUsedPercent(
-              window.remaining,
-              window.limit,
-            );
-            const countMeta =
-              typeof window.remaining === "number" &&
-              typeof window.limit === "number"
-                ? `${window.remaining} of ${window.limit} remaining`
-                : "Usage unavailable";
-            return (
-              <PassiveQuotaRow
-                key={`${window.name ?? "quota"}-${index}`}
-                label={window.name ?? "Quota"}
-                usedPercent={usedPercent}
-                meta={formatQuotaMeta([
-                  usedPercent === null
-                    ? countMeta
-                    : formatUsagePercent(usedPercent),
-                  usedPercent === null ? null : countMeta,
-                  formatResetAt(window.reset_at),
-                ])}
-              />
-            );
-          })
-        ) : (
-          <div className={styles.usageMeta}>
-            {data.message || "Quota windows not reported."}
-          </div>
-        )}
-      </div>
+      {snapshot?.available ? (
+        <div className={styles.usageRows}>
+          {snapshot.windows.map((window) => (
+            <ProviderQuota
+              key={window.id}
+              label={window.label}
+              value={formatWindowValue(window)}
+              meta={formatWindowMeta(window)}
+              usedPercent={window.used_percent ?? undefined}
+              tone={quotaTone(window)}
+              badge={
+                window.status ? (
+                  <Badge
+                    tone={quotaTone(window) === "danger" ? "danger" : "muted"}
+                  >
+                    {window.status}
+                  </Badge>
+                ) : undefined
+              }
+            />
+          ))}
+          {snapshot.facts.map((fact) => (
+            <ProviderQuota
+              key={fact.id}
+              label={fact.label}
+              value={formatFactValue(fact)}
+              tone="muted"
+            />
+          ))}
+          {snapshot.windows.length === 0 && snapshot.facts.length === 0 ? (
+            <div className={styles.usageMeta}>
+              No quota windows or account facts were reported.
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {action}
     </Surface>
   );
 };
-
 export const ProviderForm: React.FC<ProviderFormProps> = ({
   currentProvider,
 }) => {
   const baseProvider = currentProvider.base_provider;
+  const [forceQuotaRefresh, setForceQuotaRefresh] = React.useState(false);
   const { data: openRouterHealth } = useGetOpenRouterHealthQuery(
     { providerName: currentProvider.name, useInstanceRoute: true },
     { skip: baseProvider !== "openrouter" },
   );
-  const { data: claudeUsage, isError: claudeUsageError } =
-    useGetClaudeCodeUsageQuery(
-      { providerName: currentProvider.name, useInstanceRoute: true },
-      { skip: baseProvider !== "claude_code", pollingInterval: 60_000 },
-    );
   const {
-    data: codexUsage,
-    isError: codexUsageError,
-    refetch: refetchCodexUsage,
-  } = useGetOpenAICodexUsageQuery(
-    { providerName: currentProvider.name, useInstanceRoute: true },
-    { skip: baseProvider !== "openai_codex", pollingInterval: 60_000 },
+    data: quotaResponse,
+    isError: quotaError,
+    isFetching: quotaFetching,
+    isLoading: quotaLoading,
+  } = useGetProviderQuotaQuery(
+    { providerName: currentProvider.name, refresh: forceQuotaRefresh },
+    { pollingInterval: 60_000 },
   );
-  const { data: openCodeUsage, isError: openCodeUsageError } =
-    useGetOpenCodeUsageQuery(
-      { providerName: currentProvider.name, useInstanceRoute: true },
-      { skip: baseProvider !== "opencode", pollingInterval: 60_000 },
-    );
-  const { data: antigravityUsage, isError: antigravityUsageError } =
-    useGetGoogleAntigravityUsageQuery(
-      { providerName: currentProvider.name, useInstanceRoute: true },
-      {
-        skip: baseProvider !== "google_antigravity",
-        pollingInterval: 60_000,
-      },
-    );
-  const { data: xaiOAuthUsage, isError: xaiOAuthUsageError } =
-    useGetXAIOAuthUsageQuery(
-      { providerName: currentProvider.name, useInstanceRoute: true },
-      { skip: baseProvider !== "xai_oauth", pollingInterval: 60_000 },
-    );
   const {
     areShowingExtraFields,
     formValues,
@@ -624,54 +349,28 @@ export const ProviderForm: React.FC<ProviderFormProps> = ({
           ) : null}
         </div>
 
-        {claudeUsage?.data && !claudeUsage.error ? (
-          <ClaudeUsagePanel data={claudeUsage.data} />
-        ) : null}
-        {claudeUsage?.error != null || claudeUsageError ? (
-          <div className={styles.defaultDescription}>
-            Usage: {claudeUsage?.error ?? "Failed to load"}
-          </div>
-        ) : null}
-
-        {codexUsage?.data && !codexUsage.error ? (
-          <CodexUsagePanel
-            data={codexUsage.data}
-            providerName={currentProvider.name}
-            onRedeemed={() => void refetchCodexUsage()}
-          />
-        ) : null}
-        {codexUsage?.error != null || codexUsageError ? (
-          <div className={styles.defaultDescription}>
-            Usage: {codexUsage?.error ?? "Failed to load"}
-          </div>
-        ) : null}
-
-        {openCodeUsage?.data && !openCodeUsage.error ? (
-          <OpenCodeUsagePanel data={openCodeUsage.data} />
-        ) : null}
-        {openCodeUsage?.error != null || openCodeUsageError ? (
-          <div className={styles.defaultDescription}>
-            Usage: {openCodeUsage?.error ?? "Failed to load"}
-          </div>
-        ) : null}
-
-        {antigravityUsage?.data && !antigravityUsage.error ? (
-          <GoogleAntigravityUsagePanel data={antigravityUsage.data} />
-        ) : null}
-        {antigravityUsage?.error != null || antigravityUsageError ? (
-          <div className={styles.defaultDescription}>
-            Usage: {antigravityUsage?.error ?? "Failed to load"}
-          </div>
-        ) : null}
-
-        {xaiOAuthUsage?.data && !xaiOAuthUsage.error ? (
-          <XAIOAuthUsagePanel data={xaiOAuthUsage.data} />
-        ) : null}
-        {xaiOAuthUsage?.error != null || xaiOAuthUsageError ? (
-          <div className={styles.defaultDescription}>
-            Usage: {xaiOAuthUsage?.error ?? "Failed to load"}
-          </div>
-        ) : null}
+        <ProviderQuotaPanel
+          snapshot={quotaResponse?.quota}
+          loading={quotaLoading}
+          fetching={quotaFetching}
+          error={quotaError}
+          action={
+            baseProvider === "openai_codex" && quotaResponse?.quota
+              ? (() => {
+                  const availableResets = findResetCredits(
+                    quotaResponse.quota.facts,
+                  );
+                  return availableResets === null ? null : (
+                    <CodexResetCreditAction
+                      availableResets={availableResets}
+                      providerName={currentProvider.name}
+                      onRedeemed={() => setForceQuotaRefresh(true)}
+                    />
+                  );
+                })()
+              : null
+          }
+        />
 
         <div className={styles.formSection}>
           {hasOAuth ? (

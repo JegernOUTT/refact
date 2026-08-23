@@ -1,6 +1,7 @@
 pub mod http;
 pub mod oauth_refresh;
 pub mod pricing;
+pub mod quota;
 pub mod runtime_credential;
 
 pub use refact_providers::config;
@@ -25,6 +26,7 @@ pub use refact_providers::google_antigravity_oauth;
 pub use refact_providers::google_gemini;
 pub use refact_providers::groq;
 pub use refact_providers::kimi;
+pub use refact_providers::litellm;
 pub use refact_providers::lmstudio;
 pub use refact_providers::minimax;
 pub use refact_providers::ollama;

@@ -43,9 +43,6 @@
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-3);
-}
-
-.usagePanel {
   padding: var(--rf-space-3);
 }
 
@@ -64,11 +61,11 @@
   font-weight: var(--rf-weight-semibold);
 }
 
-.defaultDescription,
 .usageMeta {
   color: var(--rf-color-muted);
   font-size: var(--rf-text-2);
   line-height: var(--rf-line-2);
+  overflow-wrap: anywhere;
 }
 
 .usageRows,
@@ -77,6 +74,12 @@
   min-width: 0;
   flex-direction: column;
   gap: var(--rf-space-3);
+}
+
+.defaultDescription {
+  color: var(--rf-color-muted);
+  font-size: var(--rf-text-2);
+  line-height: var(--rf-line-2);
 }
 
 .usageRow {
@@ -113,24 +116,17 @@
   flex-wrap: wrap;
 }
 
-.usageBar {
-  width: 100%;
-  height: var(--rf-space-1);
-  overflow: hidden;
-  border-radius: var(--rf-radius-pill);
-  background: var(--rf-surface-2);
-  appearance: none;
+.usageBadges,
+.usageActions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--rf-space-2);
+  flex-wrap: wrap;
 }
 
-.usageBar::-webkit-progress-bar {
-  border-radius: var(--rf-radius-pill);
-  background: var(--rf-surface-2);
-}
-
-.usageBar::-webkit-progress-value,
-.usageBar::-moz-progress-bar {
-  border-radius: var(--rf-radius-pill);
-  background: var(--rf-color-success);
+.usageActions {
+  justify-content: space-between;
 }
 
 .customModelDialog {

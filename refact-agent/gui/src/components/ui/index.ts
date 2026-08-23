@@ -58,6 +58,7 @@ export type {
   PopoverProps,
   PopoverTriggerProps,
 } from "./Popover";
+export * from "./ProviderQuota";
 export { SegmentedControl } from "./SegmentedControl";
 export type {
   SegmentedControlOption,

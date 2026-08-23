@@ -23,6 +23,8 @@ use crate::traits::{
 const DEFAULT_ENDPOINT: &str = "http://localhost:4000";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const METADATA_ENRICHMENT_TIMEOUT: Duration = Duration::from_secs(2);
+const BUDGET_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_BUDGET_BODY_BYTES: usize = 64 * 1024;
 const MAX_DISCOVERY_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DISCOVERED_CONTEXT_TOKENS: usize = 10_000_000;
 const MAX_DISCOVERED_OUTPUT_TOKENS: usize = 1_000_000;
@@ -31,6 +33,10 @@ const MAX_DISCOVERED_OUTPUT_TOKENS: usize = 1_000_000;
 pub struct LiteLLMProvider {
     pub endpoint: String,
     pub api_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<CredentialSpec>,
     pub enabled: bool,
@@ -51,6 +57,8 @@ impl Default for LiteLLMProvider {
         Self {
             endpoint: DEFAULT_ENDPOINT.to_string(),
             api_key: String::new(),
+            admin_url: None,
+            admin_api_key: None,
             credential: None,
             enabled: false,
             enabled_models: Vec::new(),
@@ -60,6 +68,35 @@ impl Default for LiteLLMProvider {
             supports_cache_control: false,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LiteLLMBudget {
+    pub spend: f64,
+    pub max_budget: f64,
+    pub remaining: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LiteLLMBudgetUnavailable {
+    NotConfigured,
+    BudgetNotConfigured,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LiteLLMBudgetError {
+    InvalidAdminUrl,
+    RequestFailed,
+    HttpStatus(u16),
+    ResponseTooLarge,
+    InvalidResponse,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LiteLLMBudgetQueryResult {
+    Available(LiteLLMBudget),
+    Unavailable(LiteLLMBudgetUnavailable),
+    Error(LiteLLMBudgetError),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -92,6 +129,142 @@ impl LiteLLMProvider {
 
     fn bearer_from_static(&self) -> String {
         resolve_env_var(&self.api_key, "", "litellm api_key")
+    }
+
+    fn validated_admin_url(value: &str) -> Result<String, LiteLLMBudgetError> {
+        let normalized = normalize_base_url(value);
+        let url =
+            reqwest::Url::parse(&normalized).map_err(|_| LiteLLMBudgetError::InvalidAdminUrl)?;
+        if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+            return Err(LiteLLMBudgetError::InvalidAdminUrl);
+        }
+        let host = url.host_str().ok_or(LiteLLMBudgetError::InvalidAdminUrl)?;
+        let permitted_scheme = url.scheme() == "https"
+            || (url.scheme() == "http"
+                && matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]"));
+        if !permitted_scheme {
+            return Err(LiteLLMBudgetError::InvalidAdminUrl);
+        }
+        Ok(normalized)
+    }
+
+    fn admin_url_for_settings(&self) -> Option<String> {
+        let value = self.admin_url.as_deref()?;
+        let mut url = reqwest::Url::parse(value).ok()?;
+        if !url.username().is_empty() || url.password().is_some() {
+            url.set_username("").ok()?;
+            url.set_password(None).ok()?;
+        }
+        Some(normalize_base_url(url.as_str()))
+    }
+
+    fn parse_budget_response(value: &Value) -> LiteLLMBudgetQueryResult {
+        let info = value
+            .get("info")
+            .filter(|value| value.is_object())
+            .unwrap_or(value);
+        if matches!(info.get("max_budget"), None | Some(Value::Null)) {
+            return LiteLLMBudgetQueryResult::Unavailable(
+                LiteLLMBudgetUnavailable::BudgetNotConfigured,
+            );
+        }
+        let Some(spend) = Self::budget_number(info.get("spend")).filter(|value| *value >= 0.0)
+        else {
+            return LiteLLMBudgetQueryResult::Error(LiteLLMBudgetError::InvalidResponse);
+        };
+        let Some(max_budget) =
+            Self::budget_number(info.get("max_budget")).filter(|value| *value >= 0.0)
+        else {
+            return LiteLLMBudgetQueryResult::Error(LiteLLMBudgetError::InvalidResponse);
+        };
+        let remaining = Self::budget_number(info.get("remaining"));
+        LiteLLMBudgetQueryResult::Available(LiteLLMBudget {
+            spend,
+            max_budget,
+            remaining,
+        })
+    }
+
+    fn budget_number(value: Option<&Value>) -> Option<f64> {
+        value
+            .and_then(|value| {
+                value.as_f64().or_else(|| {
+                    value
+                        .as_str()
+                        .and_then(|text| text.trim().parse::<f64>().ok())
+                })
+            })
+            .filter(|number| number.is_finite())
+    }
+
+    pub async fn query_budget(&self, http_client: &reqwest::Client) -> LiteLLMBudgetQueryResult {
+        let Some(configured_url) = self
+            .admin_url
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return LiteLLMBudgetQueryResult::Unavailable(LiteLLMBudgetUnavailable::NotConfigured);
+        };
+        let admin_url = match Self::validated_admin_url(configured_url) {
+            Ok(value) => value,
+            Err(error) => return LiteLLMBudgetQueryResult::Error(error),
+        };
+        let Some(configured_key) = self
+            .admin_api_key
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return LiteLLMBudgetQueryResult::Unavailable(LiteLLMBudgetUnavailable::NotConfigured);
+        };
+        let admin_api_key = resolve_env_var(configured_key, "", "litellm admin_api_key");
+        if admin_api_key.is_empty() {
+            return LiteLLMBudgetQueryResult::Unavailable(LiteLLMBudgetUnavailable::NotConfigured);
+        }
+        let response = match http_client
+            .get(format!("{admin_url}/key/info"))
+            .bearer_auth(admin_api_key)
+            .timeout(BUDGET_QUERY_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => {
+                return LiteLLMBudgetQueryResult::Error(LiteLLMBudgetError::RequestFailed);
+            }
+        };
+        if !response.status().is_success() {
+            return LiteLLMBudgetQueryResult::Error(LiteLLMBudgetError::HttpStatus(
+                response.status().as_u16(),
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_BUDGET_BODY_BYTES as u64)
+        {
+            return LiteLLMBudgetQueryResult::Error(LiteLLMBudgetError::ResponseTooLarge);
+        }
+        let mut response = response;
+        let mut body = Vec::new();
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    if body.len().saturating_add(chunk.len()) > MAX_BUDGET_BODY_BYTES {
+                        return LiteLLMBudgetQueryResult::Error(
+                            LiteLLMBudgetError::ResponseTooLarge,
+                        );
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    return LiteLLMBudgetQueryResult::Error(LiteLLMBudgetError::RequestFailed);
+                }
+            }
+        }
+        match serde_json::from_slice(&body) {
+            Ok(value) => Self::parse_budget_response(&value),
+            Err(_) => LiteLLMBudgetQueryResult::Error(LiteLLMBudgetError::InvalidResponse),
+        }
     }
 
     async fn discovery_auth(&self, provider_id: &str) -> Result<DiscoveryAuth, String> {
@@ -1067,6 +1240,17 @@ fields:
     f_type: string_long
     f_desc: "LiteLLM Proxy API key (literal value or $ENV_VAR)"
     f_label: "API Key"
+  admin_url:
+    f_type: string_long
+    f_desc: "Optional LiteLLM Proxy admin base URL. The /key/info query reports the configured admin key's accessible budget; it may not represent an inference key unless both use the same credential. HTTPS is required except for loopback HTTP."
+    f_placeholder: "http://localhost:4000"
+    f_label: "Admin URL"
+    f_extra: true
+  admin_api_key:
+    f_type: string_long
+    f_desc: "Optional static LiteLLM admin API key (literal value or $ENV_VAR), used only for budget queries"
+    f_label: "Admin API Key"
+    f_extra: true
   credential:
     f_type: string_long
     f_object: true
@@ -1097,6 +1281,8 @@ available:
     fn provider_settings_apply(&mut self, yaml: serde_yaml::Value) -> Result<(), String> {
         let mut endpoint = self.endpoint.clone();
         let mut api_key = self.api_key.clone();
+        let mut admin_url = self.admin_url.clone();
+        let mut admin_api_key = self.admin_api_key.clone();
         let mut credential_spec = self.credential.clone();
         let mut enabled = self.enabled;
         let mut supports_cache_control = self.supports_cache_control;
@@ -1108,6 +1294,49 @@ available:
             if value != "***" {
                 api_key = value.to_string();
             }
+        }
+        let admin_key_was_deliberately_set = match yaml.get("admin_api_key") {
+            Some(value) if value.is_null() => true,
+            Some(value) => value.as_str().is_some_and(|value| value != "***"),
+            None => false,
+        };
+        if let Some(value) = yaml.get("admin_api_key") {
+            admin_api_key = if value.is_null() {
+                None
+            } else if let Some(value) = value.as_str() {
+                if value == "***" {
+                    admin_api_key
+                } else if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                }
+            } else {
+                return Err("admin_api_key must be a string".to_string());
+            };
+        }
+        if let Some(value) = yaml.get("admin_url") {
+            admin_url = if value.is_null() {
+                None
+            } else if let Some(value) = value.as_str() {
+                if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(Self::validated_admin_url(value).map_err(|_| {
+                        "admin_url must be HTTPS, except for localhost/127.0.0.1/[::1] HTTP, and must not contain userinfo or a fragment".to_string()
+                    })?)
+                }
+            } else {
+                return Err("admin_url must be a string".to_string());
+            };
+        }
+        let admin_url_changed = match (self.admin_url.as_deref(), admin_url.as_deref()) {
+            (Some(old), Some(new)) => Self::validated_admin_url(old).ok().as_deref() != Some(new),
+            (None, None) => false,
+            _ => true,
+        };
+        if admin_url_changed && !admin_key_was_deliberately_set {
+            admin_api_key = None;
         }
         if let Some(value) = yaml.get("credential") {
             credential_spec = if value.is_null() {
@@ -1154,6 +1383,8 @@ available:
 
         self.endpoint = endpoint;
         self.api_key = api_key;
+        self.admin_url = admin_url;
+        self.admin_api_key = admin_api_key;
         self.credential = credential_spec;
         self.enabled = enabled;
         self.supports_cache_control = supports_cache_control;
@@ -1170,8 +1401,10 @@ available:
             .keys()
             .map(|key| (key.clone(), "***".to_string()))
             .collect::<HashMap<_, _>>();
+        let admin_url = self.admin_url_for_settings();
         json!({
             "endpoint": self.endpoint, "api_key": if self.api_key.is_empty() { "" } else { "***" },
+            "admin_url": admin_url, "admin_api_key": if self.admin_api_key.is_some() { "***" } else { "" },
             "credential": self.credential, "enabled": self.enabled,
             "enabled_models": self.enabled_models, "disabled_models": self.disabled_models,
             "custom_models": self.custom_models,
@@ -1337,6 +1570,230 @@ mod tests {
             "http://host:4000/v1/completions"
         );
         assert_eq!(runtime.embedding_endpoint, "http://host:4000/v1/embeddings");
+    }
+
+    #[test]
+    fn legacy_config_and_masked_admin_key_are_compatible_for_same_url() {
+        let legacy: LiteLLMProvider = serde_yaml::from_str(
+            "endpoint: http://proxy:4000\napi_key: inference\nenabled: false\n",
+        )
+        .unwrap();
+        assert!(legacy.admin_url.is_none() && legacy.admin_api_key.is_none());
+
+        let mut provider = LiteLLMProvider::default();
+        provider
+            .provider_settings_apply(
+                serde_yaml::from_str(
+                    "admin_url: https://admin.example/v1/\nadmin_api_key: admin-secret\n",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(provider.admin_url.as_deref(), Some("https://admin.example"));
+        assert_eq!(provider.provider_settings_as_json()["admin_api_key"], "***");
+        provider
+            .provider_settings_apply(
+                serde_yaml::from_str("admin_url: https://admin.example/v1\nadmin_api_key: '***'\n")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(provider.admin_api_key.as_deref(), Some("admin-secret"));
+        assert_eq!(provider.admin_url.as_deref(), Some("https://admin.example"));
+        assert!(provider.provider_schema().contains("Admin API Key"));
+        assert!(provider
+            .provider_schema()
+            .contains("may not represent an inference key"));
+        assert_eq!(
+            provider.provider_schema().matches("f_extra: true").count(),
+            5
+        );
+    }
+
+    #[test]
+    fn admin_url_policy_accepts_https_and_loopback_http_only() {
+        for value in [
+            "https://admin.example",
+            "https://admin.example:8443/proxy/v1",
+            "http://localhost:4000",
+            "http://127.0.0.1:4000/v1",
+            "http://[::1]:4000/v1/",
+        ] {
+            assert!(
+                LiteLLMProvider::validated_admin_url(value).is_ok(),
+                "expected accepted URL: {value}"
+            );
+        }
+        for value in [
+            "http://admin.example",
+            "ftp://admin.example",
+            "not a url",
+            "https://",
+            "https://user@admin.example",
+            "https://user:password@admin.example",
+            "https://admin.example/#fragment",
+        ] {
+            assert_eq!(
+                LiteLLMProvider::validated_admin_url(value),
+                Err(LiteLLMBudgetError::InvalidAdminUrl),
+                "expected rejected URL: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_key_is_not_rebound_when_admin_url_changes() {
+        let mut provider = LiteLLMProvider {
+            admin_url: Some("https://old.example".into()),
+            admin_api_key: Some("admin-secret".into()),
+            ..Default::default()
+        };
+        provider
+            .provider_settings_apply(
+                serde_yaml::from_str("admin_url: https://new.example\nadmin_api_key: '***'\n")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(provider.admin_url.as_deref(), Some("https://new.example"));
+        assert!(provider.admin_api_key.is_none());
+
+        provider.admin_api_key = Some("second-secret".into());
+        provider
+            .provider_settings_apply(
+                serde_yaml::from_str("admin_url: https://third.example\n").unwrap(),
+            )
+            .unwrap();
+        assert!(provider.admin_api_key.is_none());
+
+        provider
+            .provider_settings_apply(
+                serde_yaml::from_str(
+                    "admin_url: https://fourth.example\nadmin_api_key: deliberate-secret\n",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(provider.admin_api_key.as_deref(), Some("deliberate-secret"));
+    }
+
+    #[test]
+    fn settings_never_expose_admin_url_userinfo() {
+        let provider = LiteLLMProvider {
+            admin_url: Some("https://username:password@admin.example/v1".into()),
+            ..Default::default()
+        };
+        let settings = provider.provider_settings_as_json();
+        assert_eq!(settings["admin_url"], "https://admin.example");
+        assert!(!settings.to_string().contains("username"));
+        assert!(!settings.to_string().contains("password"));
+
+        let mut provider = LiteLLMProvider::default();
+        assert!(provider
+            .provider_settings_apply(
+                serde_yaml::from_str("admin_url: https://username@admin.example\n").unwrap()
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn budget_response_normalizes_numbers_and_unavailable_cases() {
+        assert_eq!(
+            LiteLLMProvider::parse_budget_response(
+                &json!({"info":{"spend":"12.5","max_budget":100,"remaining":"87.5"}}),
+            ),
+            LiteLLMBudgetQueryResult::Available(LiteLLMBudget {
+                spend: 12.5,
+                max_budget: 100.0,
+                remaining: Some(87.5),
+            })
+        );
+        assert_eq!(
+            LiteLLMProvider::parse_budget_response(&json!({"spend":1})),
+            LiteLLMBudgetQueryResult::Unavailable(LiteLLMBudgetUnavailable::BudgetNotConfigured)
+        );
+        assert_eq!(
+            LiteLLMProvider::parse_budget_response(
+                &json!({"spend":"not-a-number","max_budget":"100"}),
+            ),
+            LiteLLMBudgetQueryResult::Error(LiteLLMBudgetError::InvalidResponse)
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_query_uses_proxy_root_and_static_admin_bearer() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 4096];
+            let size = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with("GET /key/info "));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer admin-only"));
+            assert!(!request.contains("inference-only"));
+            let body = r#"{"spend":"2.5","max_budget":"10","remaining":7.5}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let provider = LiteLLMProvider {
+            api_key: "inference-only".into(),
+            admin_url: Some(format!("http://{address}/v1")),
+            admin_api_key: Some("admin-only".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            provider.query_budget(&reqwest::Client::new()).await,
+            LiteLLMBudgetQueryResult::Available(LiteLLMBudget {
+                spend: 2.5,
+                max_budget: 10.0,
+                remaining: Some(7.5),
+            })
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn budget_query_is_unavailable_without_complete_opt_in() {
+        let client = reqwest::Client::new();
+        assert_eq!(
+            LiteLLMProvider::default().query_budget(&client).await,
+            LiteLLMBudgetQueryResult::Unavailable(LiteLLMBudgetUnavailable::NotConfigured)
+        );
+        let provider = LiteLLMProvider {
+            admin_url: Some("http://localhost:1".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            provider.query_budget(&client).await,
+            LiteLLMBudgetQueryResult::Unavailable(LiteLLMBudgetUnavailable::NotConfigured)
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_admin_url_returns_typed_error_without_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let provider = LiteLLMProvider {
+            admin_url: Some(format!("http://user@{address}")),
+            admin_api_key: Some("admin-secret".into()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            provider.query_budget(&reqwest::Client::new()).await,
+            LiteLLMBudgetQueryResult::Error(LiteLLMBudgetError::InvalidAdminUrl)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), listener.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ import {
   EmptyState,
   Icon,
   LoadingState,
+  ProviderQuota,
   SegmentedControl,
   Surface,
 } from "../../../components/ui";
@@ -26,7 +27,12 @@ import {
   type DaemonWorker,
 } from "../../../services/refact/daemon";
 import { selectConfig } from "../../Config/configSlice";
-import { providerSupportsAccountInfo } from "../../../services/refact/providers";
+import type {
+  ProviderQuotaFact,
+  ProviderQuotaListResponse,
+  ProviderQuotaSnapshot,
+  ProviderQuotaWindow,
+} from "../../../services/refact/providers";
 import { StatCard } from "../../StatsDashboard/components/StatCard";
 import type { StatsSummary } from "../../StatsDashboard/types";
 import {
@@ -40,7 +46,13 @@ import {
   formatTokenCount,
 } from "../../StatsDashboard/utils/formatters";
 import { isReadyWorker } from "../Projects/projectRagStatus";
-import { providerItems } from "../Doctor/clientChecks";
+import {
+  formatLimitWindowSeconds,
+  formatQuotaMeta,
+  formatResetAfterSeconds,
+  formatResetAt,
+  formatUsagePercent,
+} from "../../../utils/providerQuota";
 import {
   aggregateUsage,
   type AggregatedUsage,
@@ -51,7 +63,6 @@ import styles from "./Usage.module.css";
 
 const REQUEST_TIMEOUT_MS = 5_000;
 const MAX_CONCURRENT_REQUESTS = 3;
-const MAX_PROVIDER_PROBES = 3;
 const LOW_PLAN_REMAINING_RATIO = 0.1;
 
 type RangePreset = "7d" | "30d" | "90d";
@@ -73,9 +84,20 @@ type UsageFetchState =
   | { state: "ready"; inputs: ProjectUsageInput[]; unavailableSlugs: string[] };
 
 type TokenPlanWarning = {
-  provider: string;
+  key: string;
   message: string;
 };
+
+type ProjectQuotaResult = {
+  projectId: string;
+  slug: string;
+  state: "ready" | "error";
+  quotas: ProviderQuotaSnapshot[];
+};
+
+type QuotaFetchState =
+  | { state: "loading" }
+  | { state: "ready"; projects: ProjectQuotaResult[] };
 
 function isStatsSummary(data: unknown): data is StatsSummary {
   if (!data || typeof data !== "object") return false;
@@ -154,77 +176,372 @@ async function fetchProjectSummaries(
   return { inputs, unavailableSlugs };
 }
 
-function tokenPlanWarning(
-  provider: string,
-  payload: unknown,
-): TokenPlanWarning | null {
-  if (!payload || typeof payload !== "object") return null;
-  const data = (payload as { data?: unknown }).data;
-  if (!data || typeof data !== "object") return null;
-  const record = data as Record<string, unknown>;
-  const limit = typeof record.limit === "number" ? record.limit : null;
-  const remaining =
-    typeof record.remaining === "number" ? record.remaining : null;
-  if (remaining !== null && remaining <= 0) {
-    return { provider, message: `${provider}: token plan exhausted` };
+async function collectBounded<T, R>(
+  items: T[],
+  collect: (item: T) => Promise<R>,
+  concurrency = MAX_CONCURRENT_REQUESTS,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  async function run() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await collect(items[index]);
+    }
   }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, run),
+  );
+  return results;
+}
+
+function isQuotaListResponse(data: unknown): data is ProviderQuotaListResponse {
+  if (!data || typeof data !== "object") return false;
+  const quotas = (data as { quotas?: unknown }).quotas;
+  return Array.isArray(quotas) && quotas.every(isQuotaSnapshot);
+}
+
+function isNullableFiniteNumber(value: unknown): boolean {
+  return (
+    value === null || (typeof value === "number" && Number.isFinite(value))
+  );
+}
+
+function isOptionalNullableString(
+  record: Record<string, unknown>,
+  key: string,
+): boolean {
+  return (
+    !(key in record) || record[key] == null || typeof record[key] === "string"
+  );
+}
+
+function isQuotaWindow(value: unknown): value is ProviderQuotaWindow {
+  if (!value || typeof value !== "object") return false;
+  const window = value as Record<string, unknown>;
+  return (
+    typeof window.id === "string" &&
+    typeof window.label === "string" &&
+    isNullableFiniteNumber(window.used_percent) &&
+    [
+      "limit",
+      "used",
+      "remaining",
+      "reset_after_seconds",
+      "window_seconds",
+    ].every(
+      (key) =>
+        !(key in window) ||
+        window[key] === undefined ||
+        isNullableFiniteNumber(window[key]),
+    ) &&
+    isOptionalNullableString(window, "reset_at") &&
+    isOptionalNullableString(window, "status")
+  );
+}
+
+function isQuotaFact(value: unknown): value is ProviderQuotaFact {
+  if (!value || typeof value !== "object") return false;
+  const fact = value as Record<string, unknown>;
+  return (
+    typeof fact.id === "string" &&
+    typeof fact.label === "string" &&
+    "value" in fact &&
+    (fact.value === null ||
+      typeof fact.value === "string" ||
+      typeof fact.value === "boolean" ||
+      (typeof fact.value === "number" && Number.isFinite(fact.value))) &&
+    isOptionalNullableString(fact, "unit")
+  );
+}
+
+function isQuotaSnapshot(value: unknown): value is ProviderQuotaSnapshot {
+  if (!value || typeof value !== "object") return false;
+  const snapshot = value as Record<string, unknown>;
+  return (
+    typeof snapshot.provider_name === "string" &&
+    typeof snapshot.base_provider === "string" &&
+    typeof snapshot.source === "string" &&
+    typeof snapshot.available === "boolean" &&
+    typeof snapshot.fetched_at === "string" &&
+    typeof snapshot.stale === "boolean" &&
+    isOptionalNullableString(snapshot, "plan") &&
+    isOptionalNullableString(snapshot, "error") &&
+    Array.isArray(snapshot.windows) &&
+    snapshot.windows.every(isQuotaWindow) &&
+    Array.isArray(snapshot.facts) &&
+    snapshot.facts.every(isQuotaFact)
+  );
+}
+
+async function fetchProjectQuotas(
+  daemonBase: string,
+  workers: DaemonWorker[],
+): Promise<ProjectQuotaResult[]> {
+  return collectBounded(workers, async (worker) => {
+    try {
+      const data = await fetchJsonWithTimeout(
+        projectApiUrl(daemonBase, worker.project_id, "/providers/quotas"),
+      );
+      if (!isQuotaListResponse(data)) throw new Error("Invalid response");
+      return {
+        projectId: worker.project_id,
+        slug: worker.slug,
+        state: "ready" as const,
+        quotas: data.quotas,
+      };
+    } catch {
+      return {
+        projectId: worker.project_id,
+        slug: worker.slug,
+        state: "error" as const,
+        quotas: [],
+      };
+    }
+  });
+}
+
+function quotaWarning(
+  project: ProjectQuotaResult,
+  quota: ProviderQuotaSnapshot,
+  window: ProviderQuotaWindow,
+): TokenPlanWarning | null {
+  const identity = `${quota.provider_name} on ${project.slug}`;
+  const status = window.status?.toLocaleLowerCase() ?? "";
+  const exhausted =
+    window.remaining !== undefined &&
+    window.remaining !== null &&
+    window.remaining <= 0;
   if (
-    limit !== null &&
-    remaining !== null &&
-    remaining <= limit * LOW_PLAN_REMAINING_RATIO
+    exhausted ||
+    (window.used_percent !== null && window.used_percent >= 100) ||
+    status.includes("limit") ||
+    status.includes("exhaust")
   ) {
     return {
-      provider,
-      message: `${provider}: ${formatCostPrecise(
-        remaining,
-      )} of ${formatCostPrecise(limit)} plan remaining`,
+      key: `${project.projectId}:${quota.provider_name}:${window.id}`,
+      message: `${identity}: ${window.label} quota exhausted`,
+    };
+  }
+  const lowByPercent =
+    window.used_percent !== null && window.used_percent >= 90;
+  const lowByRemaining =
+    window.limit !== undefined &&
+    window.limit !== null &&
+    window.limit > 0 &&
+    window.remaining !== undefined &&
+    window.remaining !== null &&
+    window.remaining <= window.limit * LOW_PLAN_REMAINING_RATIO;
+  if (lowByPercent || lowByRemaining) {
+    const remaining =
+      window.remaining !== undefined && window.remaining !== null
+        ? ` (${formatNumber(window.remaining)} remaining)`
+        : "";
+    return {
+      key: `${project.projectId}:${quota.provider_name}:${window.id}`,
+      message: `${identity}: ${window.label} quota is nearly exhausted${remaining}`,
     };
   }
   return null;
 }
 
-async function fetchTokenPlanWarnings(
-  daemonBase: string,
-  probeProjectId: string,
-  usedProviders: string[],
-): Promise<TokenPlanWarning[]> {
-  let capableProviders: Set<string>;
-  try {
-    capableProviders = new Set(
-      providerItems(
-        await fetchJsonWithTimeout(
-          projectApiUrl(daemonBase, probeProjectId, "/providers"),
-        ),
-      )
-        .filter((item) => providerSupportsAccountInfo(item.base_provider))
-        .map((item) => item.name),
-    );
-  } catch {
-    capableProviders = new Set();
-  }
-  const providers = usedProviders
-    .filter((provider) => capableProviders.has(provider))
-    .slice(0, MAX_PROVIDER_PROBES);
-  const results = await Promise.all(
-    providers.map(async (provider) => {
-      try {
-        return tokenPlanWarning(
-          provider,
-          await fetchJsonWithTimeout(
-            projectApiUrl(
-              daemonBase,
-              probeProjectId,
-              `/providers/${encodeURIComponent(provider)}/account-info`,
-            ),
-          ),
+function quotaWarnings(projects: ProjectQuotaResult[]): TokenPlanWarning[] {
+  return projects.flatMap((project) =>
+    project.quotas.flatMap((quota) => {
+      const windowWarnings = quota.windows
+        .map((window) => quotaWarning(project, quota, window))
+        .filter((warning): warning is TokenPlanWarning => warning !== null);
+      const numericFacts = new Map(
+        quota.facts
+          .filter(
+            (fact): fact is ProviderQuotaFact & { value: number } =>
+              typeof fact.value === "number" && Number.isFinite(fact.value),
+          )
+          .map((fact) => [fact.id.toLocaleLowerCase(), fact.value]),
+      );
+      const remaining = [...numericFacts].find(([id]) =>
+        id.includes("remaining"),
+      )?.[1];
+      const limit = [...numericFacts].find(
+        ([id]) => id.includes("limit") || id.includes("max_budget"),
+      )?.[1];
+      const exhaustedFact = quota.facts.some((fact) => {
+        const id = fact.id.toLocaleLowerCase();
+        return (
+          ((id.includes("limit_reached") || id.includes("exhausted")) &&
+            fact.value === true) ||
+          (id.includes("status") &&
+            typeof fact.value === "string" &&
+            /limit|exhaust/i.test(fact.value))
         );
-      } catch {
-        return null;
+      });
+      const lowFact =
+        remaining !== undefined &&
+        limit !== undefined &&
+        limit > 0 &&
+        remaining <= limit * LOW_PLAN_REMAINING_RATIO;
+      if (exhaustedFact || (remaining !== undefined && remaining <= 0)) {
+        windowWarnings.push({
+          key: `${project.projectId}:${quota.provider_name}:facts`,
+          message: `${quota.provider_name} on ${project.slug}: quota exhausted`,
+        });
+      } else if (lowFact) {
+        windowWarnings.push({
+          key: `${project.projectId}:${quota.provider_name}:facts`,
+          message: `${quota.provider_name} on ${
+            project.slug
+          }: quota is nearly exhausted (${formatNumber(remaining)} remaining)`,
+        });
       }
+      return windowWarnings;
     }),
   );
-  return results.filter(
-    (warning): warning is TokenPlanWarning => warning !== null,
+}
+
+function quotaNumber(value: number): string {
+  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function windowValue(window: ProviderQuotaWindow): string {
+  if (window.remaining != null && window.limit != null) {
+    return `${quotaNumber(window.remaining)} / ${quotaNumber(
+      window.limit,
+    )} remaining`;
+  }
+  if (window.used != null && window.limit != null) {
+    return `${quotaNumber(window.used)} / ${quotaNumber(window.limit)}`;
+  }
+  if (window.used_percent != null)
+    return formatUsagePercent(window.used_percent);
+  if (window.remaining != null)
+    return `${quotaNumber(window.remaining)} remaining`;
+  return "Usage reported";
+}
+
+function factValue(fact: ProviderQuotaFact): string {
+  if (fact.value === null) return "Not reported";
+  const value =
+    typeof fact.value === "boolean"
+      ? fact.value
+        ? "Yes"
+        : "No"
+      : typeof fact.value === "number"
+        ? quotaNumber(fact.value)
+        : fact.value;
+  return fact.unit ? `${value} ${fact.unit}` : String(value);
+}
+
+function quotaMeta(window: ProviderQuotaWindow): string | undefined {
+  const windowDuration = formatLimitWindowSeconds(window.window_seconds);
+  return (
+    formatQuotaMeta([
+      window.used_percent === null
+        ? null
+        : formatUsagePercent(window.used_percent),
+      windowDuration ? `Window ${windowDuration}` : null,
+      formatResetAt(window.reset_at),
+      formatResetAfterSeconds(window.reset_after_seconds),
+      window.status ?? null,
+    ]) || undefined
+  );
+}
+
+function quotaTone(quota: ProviderQuotaSnapshot, usedPercent?: number) {
+  if (!quota.available || quota.error) return "danger" as const;
+  if (quota.stale) return "muted" as const;
+  if (usedPercent !== undefined && usedPercent >= 90) return "danger" as const;
+  if (usedPercent !== undefined && usedPercent >= 70) return "warning" as const;
+  return "success" as const;
+}
+
+function QuotaSection({ quotaState }: { quotaState: QuotaFetchState }) {
+  return (
+    <section
+      aria-label="Provider quotas across projects"
+      className={styles.quotaSection}
+    >
+      <h3 className={styles.sectionTitle}>
+        <Icon icon={Gauge} size="sm" tone="accent" />
+        Provider quotas across projects
+      </h3>
+      {quotaState.state === "loading" ? (
+        <LoadingState label="Loading provider quotas" />
+      ) : (
+        <div className={styles.quotaGrid}>
+          {quotaState.projects.map((project) => {
+            if (project.state === "error") {
+              return (
+                <ProviderQuota
+                  key={project.projectId}
+                  label={`${project.slug} · provider quotas`}
+                  meta="Could not load quotas from this project"
+                  tone="danger"
+                  value="Error"
+                />
+              );
+            }
+            if (project.quotas.length === 0) {
+              return (
+                <ProviderQuota
+                  key={project.projectId}
+                  label={`${project.slug} · provider quotas`}
+                  meta="No provider reported quota information"
+                  tone="muted"
+                  value="Unavailable"
+                />
+              );
+            }
+            return project.quotas.flatMap((quota) => {
+              const identity = `${project.slug} · ${quota.provider_name}`;
+              const badge = quota.stale
+                ? "Stale"
+                : quota.available
+                  ? `${quota.base_provider} · Available`
+                  : "Unavailable";
+              if (
+                !quota.available ||
+                quota.windows.length + quota.facts.length === 0
+              ) {
+                return [
+                  <ProviderQuota
+                    badge={badge}
+                    key={`${project.projectId}:${quota.provider_name}`}
+                    label={identity}
+                    meta={quota.error ?? "Quota information is unavailable"}
+                    tone={quotaTone(quota)}
+                    value={quota.error ? "Error" : "Unavailable"}
+                  />,
+                ];
+              }
+              return [
+                ...quota.windows.map((window) => (
+                  <ProviderQuota
+                    badge={badge}
+                    key={`${project.projectId}:${quota.provider_name}:window:${window.id}`}
+                    label={`${identity} · ${window.label}`}
+                    meta={quotaMeta(window)}
+                    tone={quotaTone(quota, window.used_percent ?? undefined)}
+                    usedPercent={window.used_percent ?? undefined}
+                    value={windowValue(window)}
+                  />
+                )),
+                ...quota.facts.map((fact) => (
+                  <ProviderQuota
+                    badge={badge}
+                    key={`${project.projectId}:${quota.provider_name}:fact:${fact.id}`}
+                    label={`${identity} · ${fact.label}`}
+                    meta={quota.error ?? undefined}
+                    tone={quotaTone(quota)}
+                    value={factValue(fact)}
+                  />
+                )),
+              ];
+            });
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -283,7 +600,7 @@ function UsageContent({ aggregated, warnings }: UsageContentProps) {
       {warnings.length > 0 && (
         <Surface className={styles.warnings} role="status" variant="glass">
           {warnings.map((warning) => (
-            <div className={styles.warningRow} key={warning.provider}>
+            <div className={styles.warningRow} key={warning.key}>
               <Icon icon={TriangleAlert} size="sm" tone="warning" />
               <span>{warning.message}</span>
             </div>
@@ -455,33 +772,25 @@ export function UsagePage() {
     () => (usage.state === "ready" ? aggregateUsage(usage.inputs) : null),
     [usage],
   );
-  const probeProjectId =
-    usage.state === "ready" && usage.inputs.length > 0
-      ? usage.inputs[0].projectId
-      : null;
 
-  const [warnings, setWarnings] = useState<TokenPlanWarning[]>([]);
+  const [quotaState, setQuotaState] = useState<QuotaFetchState>({
+    state: "loading",
+  });
   useEffect(() => {
-    if (
-      !aggregated ||
-      probeProjectId === null ||
-      aggregated.used_providers.length === 0
-    ) {
-      setWarnings([]);
-      return;
-    }
     let active = true;
-    void fetchTokenPlanWarnings(
-      daemonBase,
-      probeProjectId,
-      aggregated.used_providers,
-    ).then((results) => {
-      if (active) setWarnings(results);
+    setQuotaState({ state: "loading" });
+    void fetchProjectQuotas(daemonBase, readyWorkers).then((projects) => {
+      if (active) setQuotaState({ state: "ready", projects });
     });
     return () => {
       active = false;
     };
-  }, [aggregated, daemonBase, probeProjectId]);
+  }, [daemonBase, readyWorkers]);
+  const warnings = useMemo(
+    () =>
+      quotaState.state === "ready" ? quotaWarnings(quotaState.projects) : [],
+    [quotaState],
+  );
 
   const notCountedWorkers = useMemo(() => {
     if (usage.state !== "ready") return [];
@@ -540,6 +849,9 @@ export function UsagePage() {
           value={preset}
         />
       </header>
+      {!workersLoading && !workersError && readyWorkers.length > 0 && (
+        <QuotaSection quotaState={quotaState} />
+      )}
       {content}
       {notCountedWorkers.length > 0 && (
         <section aria-label="Projects not counted" className={styles.stopped}>

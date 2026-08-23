@@ -20,6 +20,7 @@ const XAI_MODELS_URL: &str = "https://cli-chat-proxy.grok.com/v1/models";
 const XAI_RESPONSES_URL: &str = "https://cli-chat-proxy.grok.com/v1/responses";
 const XAI_CLIENT_VERSION: &str = "1.0.5";
 const XAI_CLIENT_IDENTIFIER: &str = "grok-shell";
+const RATE_LIMIT_SAMPLE_MAX_AGE_MS: i64 = 60_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct XAIOAuthUsage {
@@ -57,9 +58,47 @@ pub struct XAIOAuthProvider {
     pub enabled_models: Vec<String>,
     #[serde(default)]
     pub custom_models: HashMap<String, CustomModelConfig>,
+    /// Ephemeral response metadata. This is deliberately neither serialized nor
+    /// deserialized so provider configuration cannot inject or persist headers.
+    #[serde(default, skip_serializing, skip_deserializing)]
+    cached_rate_limit_sample: Option<XAIRateLimitSample>,
+}
+
+#[derive(Debug, Clone)]
+struct XAIRateLimitSample {
+    headers: HashMap<String, String>,
+    captured_at: i64,
 }
 
 impl XAIOAuthProvider {
+    const RATE_LIMIT_HEADERS: [&'static str; 6] = [
+        "x-ratelimit-limit-requests",
+        "x-ratelimit-remaining-requests",
+        "x-ratelimit-reset-requests",
+        "x-ratelimit-limit-tokens",
+        "x-ratelimit-remaining-tokens",
+        "x-ratelimit-reset-tokens",
+    ];
+
+    /// Retains only xAI quota metadata. This is the single allowlist used by
+    /// both response handling and the provider cache boundary.
+    pub fn filter_rate_limit_headers<I, K, V>(headers: I) -> HashMap<String, String>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        headers
+            .into_iter()
+            .filter_map(|(name, value)| {
+                let normalized_name = name.as_ref().trim().to_ascii_lowercase();
+                Self::RATE_LIMIT_HEADERS
+                    .contains(&normalized_name.as_str())
+                    .then(|| (normalized_name, value.as_ref().trim().to_string()))
+            })
+            .collect()
+    }
+
     fn cli_request_headers() -> HashMap<String, String> {
         HashMap::from([
             (
@@ -190,8 +229,103 @@ impl XAIOAuthProvider {
         }
     }
 
+    /// Captures only known quota headers from a normal xAI proxy response.
+    ///
+    /// Header names are matched case-insensitively and stored in their canonical
+    /// lowercase form. In particular, authorization, cookies, and arbitrary
+    /// response headers can never enter the cache. A response without recognized
+    /// headers leaves the last captured sample intact.
+    pub fn capture_rate_limit_headers(&mut self, headers: &HashMap<String, String>) -> bool {
+        self.capture_rate_limit_headers_at(headers, chrono::Utc::now().timestamp_millis())
+    }
+
+    /// Timestamp-explicit variant, useful when the caller already records the
+    /// response time (and for deterministic consumers).
+    pub fn capture_rate_limit_headers_at(
+        &mut self,
+        headers: &HashMap<String, String>,
+        captured_at: i64,
+    ) -> bool {
+        let allowed = Self::filter_rate_limit_headers(headers);
+        if allowed.is_empty() {
+            return false;
+        }
+
+        self.cached_rate_limit_sample = Some(XAIRateLimitSample {
+            headers: allowed,
+            captured_at,
+        });
+        true
+    }
+
+    /// Returns normalized quota metadata from the most recently captured
+    /// response, or the existing passive/unavailable result before any capture.
+    pub fn captured_usage(&self) -> Option<XAIOAuthUsage> {
+        self.captured_usage_at(chrono::Utc::now().timestamp_millis())
+    }
+
+    fn captured_usage_at(&self, now: i64) -> Option<XAIOAuthUsage> {
+        let sample = self.cached_rate_limit_sample.as_ref()?;
+        if now.saturating_sub(sample.captured_at) >= RATE_LIMIT_SAMPLE_MAX_AGE_MS {
+            return None;
+        }
+        let headers = sample.headers.clone();
+        let mut windows = Vec::new();
+        if let Some(window) = Self::usage_window_from_headers(&headers, "requests") {
+            windows.push(window);
+        }
+        if let Some(window) = Self::usage_window_from_headers(&headers, "tokens") {
+            windows.push(window);
+        }
+
+        let captured = format!(" at {} ms since Unix epoch", sample.captured_at);
+        Some(XAIOAuthUsage {
+            source: "response_headers".to_string(),
+            available: !windows.is_empty(),
+            message: if windows.is_empty() {
+                format!("xAI proxy returned rate-limit headers{captured}, but no valid quota values were present.")
+            } else {
+                format!("Quota captured from xAI proxy response headers{captured}.")
+            },
+            windows,
+            headers,
+        })
+    }
+
+    pub fn captured_rate_limit_at(&self) -> Option<i64> {
+        self.cached_rate_limit_sample
+            .as_ref()
+            .map(|sample| sample.captured_at)
+    }
+
+    fn usage_window_from_headers(
+        headers: &HashMap<String, String>,
+        name: &str,
+    ) -> Option<XAIOAuthUsageWindow> {
+        let parse_u64 = |field: &str| {
+            headers
+                .get(&format!("x-ratelimit-{field}-{name}"))
+                .and_then(|value| value.parse::<u64>().ok())
+        };
+        let limit = parse_u64("limit");
+        let remaining = parse_u64("remaining");
+        let reset_at = headers
+            .get(&format!("x-ratelimit-reset-{name}"))
+            .filter(|value| !value.is_empty())
+            .cloned();
+        if limit.is_none() && remaining.is_none() && reset_at.is_none() {
+            return None;
+        }
+        Some(XAIOAuthUsageWindow {
+            name: Some(name.to_string()),
+            limit,
+            remaining,
+            reset_at,
+        })
+    }
+
     pub async fn fetch_usage(&self) -> Result<XAIOAuthUsage, String> {
-        Ok(Self::passive_usage())
+        Ok(self.captured_usage().unwrap_or_else(Self::passive_usage))
     }
 }
 
@@ -485,6 +619,136 @@ mod tests {
         assert!(usage.windows.is_empty());
         assert!(usage.headers.is_empty());
         assert!(usage.message.contains("rate-limit metadata"));
+    }
+
+    #[tokio::test]
+    async fn no_captured_headers_retains_passive_usage() {
+        let mut provider = XAIOAuthProvider::default();
+
+        assert!(provider.captured_usage().is_none());
+        assert!(!provider.capture_rate_limit_headers(&HashMap::new()));
+        assert_eq!(provider.captured_rate_limit_at(), None);
+        assert_eq!(
+            provider.fetch_usage().await.unwrap(),
+            XAIOAuthProvider::passive_usage()
+        );
+    }
+
+    #[test]
+    fn captured_request_and_token_headers_are_normalized() {
+        let mut provider = XAIOAuthProvider::default();
+        let headers = HashMap::from([
+            ("X-RateLimit-Limit-Requests".to_string(), " 60 ".to_string()),
+            (
+                "x-ratelimit-remaining-requests".to_string(),
+                "42".to_string(),
+            ),
+            ("x-ratelimit-reset-requests".to_string(), "1s".to_string()),
+            ("x-ratelimit-limit-tokens".to_string(), "100000".to_string()),
+            (
+                "x-ratelimit-remaining-tokens".to_string(),
+                "75000".to_string(),
+            ),
+            ("x-ratelimit-reset-tokens".to_string(), "6m0s".to_string()),
+            ("authorization".to_string(), "Bearer secret".to_string()),
+            ("set-cookie".to_string(), "secret-cookie".to_string()),
+        ]);
+
+        assert!(provider.capture_rate_limit_headers_at(&headers, 1_700_000_000_000));
+        let usage = provider.captured_usage_at(1_700_000_000_001).unwrap();
+
+        assert_eq!(usage.source, "response_headers");
+        assert!(usage.available);
+        assert_eq!(usage.windows.len(), 2);
+        assert_eq!(usage.windows[0].name.as_deref(), Some("requests"));
+        assert_eq!(usage.windows[0].limit, Some(60));
+        assert_eq!(usage.windows[0].remaining, Some(42));
+        assert_eq!(usage.windows[0].reset_at.as_deref(), Some("1s"));
+        assert_eq!(usage.windows[1].name.as_deref(), Some("tokens"));
+        assert_eq!(usage.windows[1].limit, Some(100_000));
+        assert_eq!(usage.windows[1].remaining, Some(75_000));
+        assert_eq!(usage.windows[1].reset_at.as_deref(), Some("6m0s"));
+        assert_eq!(usage.headers.len(), 6);
+        assert!(!usage.headers.contains_key("authorization"));
+        assert!(!usage.headers.contains_key("set-cookie"));
+        assert!(usage.message.contains("1700000000000"));
+        assert_eq!(provider.captured_rate_limit_at(), Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn malformed_headers_do_not_fabricate_numeric_quota() {
+        let mut provider = XAIOAuthProvider::default();
+        let headers = HashMap::from([
+            ("x-ratelimit-limit-requests".to_string(), "many".to_string()),
+            (
+                "x-ratelimit-remaining-requests".to_string(),
+                "-1".to_string(),
+            ),
+            ("x-ratelimit-limit-tokens".to_string(), "1.5".to_string()),
+            ("x-ratelimit-reset-tokens".to_string(), "".to_string()),
+            ("x-api-key".to_string(), "must-not-be-stored".to_string()),
+        ]);
+
+        assert!(provider.capture_rate_limit_headers_at(&headers, 123));
+        let usage = provider.captured_usage_at(124).unwrap();
+
+        assert!(!usage.available);
+        assert!(usage.windows.is_empty());
+        assert!(!usage.headers.contains_key("x-api-key"));
+        assert!(usage.message.contains("no valid quota values"));
+    }
+
+    #[test]
+    fn cached_headers_are_serde_defaulted_and_hidden() {
+        let mut provider: XAIOAuthProvider = serde_yaml::from_str("enabled: true\n").unwrap();
+        assert!(provider.captured_usage().is_none());
+        assert!(provider.capture_rate_limit_headers_at(
+            &HashMap::from([("x-ratelimit-limit-requests".to_string(), "10".to_string(),)]),
+            456,
+        ));
+
+        let serialized = serde_yaml::to_string(&provider).unwrap();
+        assert!(!serialized.contains("cached_rate_limit"));
+        assert!(!serialized.contains("x-ratelimit"));
+
+        let injected: XAIOAuthProvider = serde_yaml::from_str(
+            "enabled: false\ncached_rate_limit_sample:\n  headers:\n    authorization: Bearer-secret\n  captured_at: 789\n",
+        )
+        .unwrap();
+        assert!(injected.captured_usage().is_none());
+    }
+
+    #[test]
+    fn captured_headers_expire_after_sixty_seconds() {
+        let mut provider = XAIOAuthProvider::default();
+        assert!(provider.capture_rate_limit_headers_at(
+            &HashMap::from([(
+                "x-ratelimit-remaining-requests".to_string(),
+                "5".to_string(),
+            )]),
+            10_000,
+        ));
+
+        assert!(provider.captured_usage_at(69_999).is_some());
+        assert!(provider.captured_usage_at(70_000).is_none());
+    }
+
+    #[test]
+    fn provider_filter_rejects_non_quota_response_headers() {
+        let filtered = XAIOAuthProvider::filter_rate_limit_headers([
+            ("X-RateLimit-Remaining-Requests", " 3 "),
+            ("retry-after", "10"),
+            ("authorization", "Bearer secret"),
+            ("set-cookie", "secret=true"),
+        ]);
+
+        assert_eq!(
+            filtered,
+            HashMap::from([(
+                "x-ratelimit-remaining-requests".to_string(),
+                "3".to_string(),
+            )])
+        );
     }
 
     #[test]

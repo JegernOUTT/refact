@@ -22,6 +22,7 @@ use crate::app_state::{
 use crate::caps::CodeAssistantCaps;
 use crate::caps::providers::get_latest_provider_mtime;
 use crate::providers::{ProviderRegistry, load_providers_from_config};
+use crate::providers::quota::ProviderQuotaCache;
 use crate::completion_cache::CompletionCache;
 use crate::custom_error::ScratchError;
 use crate::exec::ExecRegistry;
@@ -375,6 +376,7 @@ pub struct GlobalContext {
     pub voice_service: SharedVoiceService,
     pub project_registry_cache: Arc<StdRwLock<RegistryCacheManager>>,
     pub providers: Arc<ARwLock<ProviderRegistry>>,
+    pub quota_cache: Arc<AMutex<ProviderQuotaCache>>,
     pub knowledge_index: Arc<AMutex<KnowledgeIndex>>,
     pub llm_stats_sender:
         Arc<StdMutex<Option<tokio::sync::mpsc::Sender<crate::stats::event::LlmCallEvent>>>>,
@@ -876,6 +878,7 @@ pub async fn create_global_context(
                 .await
                 .unwrap_or_default(),
         )),
+        quota_cache: Arc::new(AMutex::new(ProviderQuotaCache::default())),
         knowledge_index: Arc::new(AMutex::new(KnowledgeIndex::empty())),
         llm_stats_sender: Arc::new(StdMutex::new(None)),
         ext_cache_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1158,6 +1161,7 @@ pub mod tests {
             voice_service: crate::voice::VoiceService::new(),
             project_registry_cache: Arc::new(StdRwLock::new(RegistryCacheManager::new())),
             providers: Arc::new(ARwLock::new(ProviderRegistry::default())),
+            quota_cache: Arc::new(AMutex::new(ProviderQuotaCache::default())),
             knowledge_index: Arc::new(AMutex::new(KnowledgeIndex::empty())),
             llm_stats_sender: Arc::new(StdMutex::new(None)),
             ext_cache_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),

@@ -364,6 +364,58 @@ fn claude_code_instance_id(model_rec: &BaseModelRecord) -> Option<&str> {
     .then_some(provider_name)
 }
 
+fn xai_oauth_instance_id(model_rec: &BaseModelRecord) -> Option<&str> {
+    let (provider_name, _) = model_rec.id.split_once('/')?;
+    (provider_name == "xai_oauth"
+        || model_rec
+            .extra_headers
+            .get(crate::caps::caps::MODEL_BASE_PROVIDER_HEADER)
+            .is_some_and(|base_provider| base_provider == "xai_oauth"))
+    .then_some(provider_name)
+}
+
+fn xai_rate_limit_headers(headers: &reqwest::header::HeaderMap) -> HashMap<String, String> {
+    crate::providers::xai_oauth::XAIOAuthProvider::filter_rate_limit_headers(
+        headers
+            .iter()
+            .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str(), value))),
+    )
+}
+
+async fn capture_xai_oauth_rate_limit_headers(
+    app: &AppState,
+    model_rec: &BaseModelRecord,
+    headers: &reqwest::header::HeaderMap,
+) {
+    let Some(provider_instance_id) = xai_oauth_instance_id(model_rec) else {
+        return;
+    };
+    let rate_limit_headers = xai_rate_limit_headers(headers);
+    if rate_limit_headers.is_empty() {
+        return;
+    }
+
+    let captured = {
+        let mut registry = app.model.providers.write().await;
+        registry
+            .get_mut(provider_instance_id)
+            .and_then(|provider| {
+                provider
+                    .as_any_mut()
+                    .downcast_mut::<crate::providers::xai_oauth::XAIOAuthProvider>()
+            })
+            .is_some_and(|provider| provider.capture_rate_limit_headers(&rate_limit_headers))
+    };
+    if captured {
+        // Keep follow-up work after the provider registry guard is dropped.
+        // ProviderQuotaCache currently has no targeted invalidation API.
+        tracing::debug!(
+            provider = provider_instance_id,
+            "captured xAI quota response headers"
+        );
+    }
+}
+
 fn claude_code_request_expires_at(model_rec: &BaseModelRecord) -> Option<i64> {
     model_rec
         .extra_headers
@@ -2479,6 +2531,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
         .await
     }
     .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?;
+    capture_xai_oauth_rate_limit_headers(&app, &params.model_rec, response.headers()).await;
     let mut status = response.status();
     if !status.is_success()
         && matches!(
@@ -2530,6 +2583,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
                 .await
             }
             .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+            capture_xai_oauth_rate_limit_headers(&app, &params.model_rec, response.headers()).await;
             status = response.status();
         }
         if let Some(provider_instance_id) = claude_code_instance_id(&params.model_rec) {
@@ -2579,6 +2633,8 @@ pub async fn run_llm_stream<C: StreamCollector>(
                         .await
                     }
                     .map_err(|error| LlmStreamError::new(error, partial_output_emitted))?;
+                capture_xai_oauth_rate_limit_headers(&app, &params.model_rec, response.headers())
+                    .await;
                 status = response.status();
             }
         }
@@ -2636,6 +2692,8 @@ pub async fn run_llm_stream<C: StreamCollector>(
                         .await
                     }
                     .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?;
+                capture_xai_oauth_rate_limit_headers(&app, &params.model_rec, response.headers())
+                    .await;
                 status = response.status();
             }
             None => {}
@@ -3353,6 +3411,63 @@ mod tests {
             Some("claude-code-work")
         );
         assert_eq!(claude_code_instance_id(&plain_anthropic), None);
+    }
+
+    #[test]
+    fn xai_oauth_instance_id_uses_model_prefix_for_configured_instance() {
+        let singleton = BaseModelRecord {
+            id: "xai_oauth/grok-4".to_string(),
+            ..Default::default()
+        };
+        let mut named = BaseModelRecord {
+            id: "grok-work/grok-4".to_string(),
+            ..Default::default()
+        };
+        named.extra_headers.insert(
+            crate::caps::caps::MODEL_BASE_PROVIDER_HEADER.to_string(),
+            "xai_oauth".to_string(),
+        );
+        let plain_xai = BaseModelRecord {
+            id: "xai/grok-4".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(xai_oauth_instance_id(&singleton), Some("xai_oauth"));
+        assert_eq!(xai_oauth_instance_id(&named), Some("grok-work"));
+        assert_eq!(xai_oauth_instance_id(&plain_xai), None);
+    }
+
+    #[test]
+    fn xai_429_rate_limit_header_extraction_is_strictly_allowlisted() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+
+        // The response body/status do not affect extraction, so this models the
+        // headers captured before a rejected 429 response body is consumed.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ratelimit-limit-requests", HeaderValue::from_static("60"));
+        headers.insert(
+            "x-ratelimit-remaining-requests",
+            HeaderValue::from_static("42"),
+        );
+        headers.insert("x-ratelimit-reset-tokens", HeaderValue::from_static("1s"));
+        headers.insert("authorization", HeaderValue::from_static("Bearer secret"));
+        headers.insert("set-cookie", HeaderValue::from_static("credential=secret"));
+        headers.insert(
+            "x-ratelimit-limit-tokens",
+            HeaderValue::from_bytes(&[0xff]).unwrap(),
+        );
+
+        assert_eq!(
+            xai_rate_limit_headers(&headers),
+            HashMap::from([
+                ("x-ratelimit-limit-requests".to_string(), "60".to_string()),
+                (
+                    "x-ratelimit-remaining-requests".to_string(),
+                    "42".to_string(),
+                ),
+                ("x-ratelimit-reset-tokens".to_string(), "1s".to_string()),
+            ])
+        );
     }
 
     #[test]
