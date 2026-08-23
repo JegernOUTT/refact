@@ -1,6 +1,6 @@
 // Adapted from openai/codex codex-rs/tui/src/text_formatting.rs, Apache-2.0.
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 pub fn capitalize_first(input: &str) -> String {
     let mut chars = input.chars();
@@ -15,7 +15,9 @@ pub fn capitalize_first(input: &str) -> String {
 }
 
 pub fn format_and_truncate_tool_result(text: &str, max_lines: usize, line_width: usize) -> String {
-    let max_graphemes = (max_lines * line_width).saturating_sub(max_lines);
+    let max_graphemes = max_lines
+        .saturating_mul(line_width)
+        .saturating_sub(max_lines);
     let display_text = format_json_compact(text).unwrap_or_else(|| text.to_string());
     truncate_text(&display_text, max_graphemes)
 }
@@ -75,12 +77,227 @@ pub fn truncate_text(text: &str, max_graphemes: usize) -> String {
     truncated
 }
 
-pub fn center_truncate_path(path: &str, max_width: usize) -> String {
-    if max_width == 0 {
+struct PathSegment<'a> {
+    original: &'a str,
+    text: String,
+    truncatable: bool,
+    is_suffix: bool,
+}
+
+struct PathMetrics {
+    prefix_widths: Vec<usize>,
+    suffix_widths: Vec<usize>,
+    prefix_nonempty: Vec<usize>,
+    suffix_nonempty: Vec<usize>,
+    separator_width: usize,
+}
+
+impl PathMetrics {
+    fn new(segments: &[&str], max_width: usize, separator_width: usize) -> Self {
+        let segment_widths = segments
+            .iter()
+            .map(|segment| {
+                let width = UnicodeWidthStr::width(*segment);
+                if width > max_width {
+                    UnicodeWidthStr::width("…")
+                } else {
+                    width
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut prefix_widths: Vec<usize> = Vec::with_capacity(segments.len() + 1);
+        let mut prefix_nonempty: Vec<usize> = Vec::with_capacity(segments.len() + 1);
+        prefix_widths.push(0usize);
+        prefix_nonempty.push(0usize);
+        for (segment, width) in segments.iter().zip(&segment_widths) {
+            prefix_widths.push(
+                prefix_widths
+                    .last()
+                    .copied()
+                    .unwrap_or(0usize)
+                    .saturating_add(*width),
+            );
+            prefix_nonempty.push(
+                prefix_nonempty
+                    .last()
+                    .copied()
+                    .unwrap_or(0usize)
+                    .saturating_add(usize::from(!segment.is_empty())),
+            );
+        }
+
+        let mut suffix_widths = vec![0; segments.len() + 1];
+        let mut suffix_nonempty = vec![0; segments.len() + 1];
+        for index in (0..segments.len()).rev() {
+            suffix_widths[index] = segment_widths[index].saturating_add(suffix_widths[index + 1]);
+            suffix_nonempty[index] =
+                usize::from(!segments[index].is_empty()).saturating_add(suffix_nonempty[index + 1]);
+        }
+
+        Self {
+            prefix_widths,
+            suffix_widths,
+            prefix_nonempty,
+            suffix_nonempty,
+            separator_width,
+        }
+    }
+
+    fn candidate_width(
+        &self,
+        segments: &[&str],
+        has_leading_sep: bool,
+        left_count: usize,
+        right_count: usize,
+    ) -> usize {
+        let suffix_start = segments.len().saturating_sub(right_count);
+        let text_width = self.prefix_widths[left_count]
+            .saturating_add(UnicodeWidthStr::width("…"))
+            .saturating_add(self.suffix_widths[suffix_start]);
+        let nonempty_count = self.prefix_nonempty[left_count]
+            .saturating_add(1)
+            .saturating_add(self.suffix_nonempty[suffix_start]);
+        let separator_count = nonempty_count
+            .saturating_sub(1)
+            .saturating_add(usize::from(has_leading_sep));
+        text_width.saturating_add(self.separator_width.saturating_mul(separator_count))
+    }
+}
+
+fn front_truncate(original: &str, allowed_width: usize) -> String {
+    if allowed_width == 0 {
         return String::new();
     }
+    if UnicodeWidthStr::width(original) <= allowed_width {
+        return original.to_string();
+    }
+    if allowed_width <= UnicodeWidthStr::width("…") {
+        return "…".to_string();
+    }
+
+    let mut kept = Vec::new();
+    let mut used_width = UnicodeWidthStr::width("…");
+    for grapheme in original.graphemes(true).rev() {
+        let grapheme_width = UnicodeWidthStr::width(grapheme);
+        if used_width.saturating_add(grapheme_width) > allowed_width {
+            break;
+        }
+        used_width = used_width.saturating_add(grapheme_width);
+        kept.push(grapheme);
+    }
+    kept.reverse();
+
+    let mut truncated = String::from("…");
+    for grapheme in kept {
+        truncated.push_str(grapheme);
+    }
+    truncated
+}
+
+fn assemble_path(has_leading_sep: bool, sep: char, segments: &[PathSegment<'_>]) -> String {
+    let mut result = String::new();
+    if has_leading_sep {
+        result.push(sep);
+    }
+    for segment in segments {
+        if !result.is_empty() && !result.ends_with(sep) {
+            result.push(sep);
+        }
+        result.push_str(segment.text.as_str());
+    }
+    result
+}
+
+fn fit_path_segments(
+    has_leading_sep: bool,
+    sep: char,
+    segments: &mut [PathSegment<'_>],
+    max_width: usize,
+    segment_count: usize,
+    allow_front_truncate: bool,
+) -> Option<String> {
+    loop {
+        let candidate = assemble_path(has_leading_sep, sep, segments);
+        let width = UnicodeWidthStr::width(candidate.as_str());
+        if width <= max_width {
+            return Some(candidate);
+        }
+        if !allow_front_truncate {
+            return None;
+        }
+
+        let mut changed = false;
+        'segments: for is_suffix in [true, false] {
+            for index in (0..segments.len()).rev() {
+                let segment = &mut segments[index];
+                if !segment.truncatable || segment.is_suffix != is_suffix {
+                    continue;
+                }
+
+                let original_width = UnicodeWidthStr::width(segment.original);
+                if original_width <= max_width && segment_count > 2 {
+                    continue;
+                }
+
+                let segment_width = UnicodeWidthStr::width(segment.text.as_str());
+                let other_width = width.saturating_sub(segment_width);
+                let allowed_width = max_width.saturating_sub(other_width).max(1);
+                let new_text = front_truncate(segment.original, allowed_width);
+                if new_text != segment.text {
+                    segment.text = new_text;
+                    changed = true;
+                    break 'segments;
+                }
+            }
+        }
+
+        if !changed {
+            return None;
+        }
+    }
+}
+
+fn build_path_candidate<'a>(
+    segments: &[&'a str],
+    left_count: usize,
+    right_count: usize,
+) -> Vec<PathSegment<'a>> {
+    let mut candidate = segments[..left_count]
+        .iter()
+        .map(|segment| PathSegment {
+            original: segment,
+            text: (*segment).to_string(),
+            truncatable: true,
+            is_suffix: false,
+        })
+        .collect::<Vec<_>>();
+
+    candidate.push(PathSegment {
+        original: "…",
+        text: "…".to_string(),
+        truncatable: false,
+        is_suffix: false,
+    });
+    candidate.extend(
+        segments[segments.len() - right_count..]
+            .iter()
+            .map(|segment| PathSegment {
+                original: segment,
+                text: (*segment).to_string(),
+                truncatable: true,
+                is_suffix: true,
+            }),
+    );
+    candidate
+}
+
+fn center_truncate_path_with_candidate_count(path: &str, max_width: usize) -> (String, usize) {
+    if max_width == 0 {
+        return (String::new(), 0);
+    }
     if UnicodeWidthStr::width(path) <= max_width {
-        return path.to_string();
+        return (path.to_string(), 0);
     }
 
     let sep = std::path::MAIN_SEPARATOR;
@@ -101,190 +318,127 @@ pub fn center_truncate_path(path: &str, max_width: usize) -> String {
         if has_leading_sep {
             let root = sep.to_string();
             if UnicodeWidthStr::width(root.as_str()) <= max_width {
-                return root;
+                return (root, 0);
             }
         }
-        return "…".to_string();
+        return ("…".to_string(), 0);
     }
 
-    struct Segment<'a> {
-        original: &'a str,
-        text: String,
-        truncatable: bool,
-        is_suffix: bool,
-    }
-
-    let assemble = |leading: bool, segments: &[Segment<'_>]| -> String {
-        let mut result = String::new();
-        if leading {
-            result.push(sep);
-        }
-        for segment in segments {
-            if !result.is_empty() && !result.ends_with(sep) {
-                result.push(sep);
-            }
-            result.push_str(segment.text.as_str());
-        }
-        result
-    };
-
-    let front_truncate = |original: &str, allowed_width: usize| -> String {
-        if allowed_width == 0 {
-            return String::new();
-        }
-        if UnicodeWidthStr::width(original) <= allowed_width {
-            return original.to_string();
-        }
-        if allowed_width == 1 {
-            return "…".to_string();
-        }
-
-        let mut kept: Vec<char> = Vec::new();
-        let mut used_width = 1;
-        for ch in original.chars().rev() {
-            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-            if used_width + ch_width > allowed_width {
-                break;
-            }
-            used_width += ch_width;
-            kept.push(ch);
-        }
-        kept.reverse();
-        let mut truncated = String::from("…");
-        for ch in kept {
-            truncated.push(ch);
-        }
-        truncated
-    };
-
-    let mut combos: Vec<(usize, usize)> = Vec::new();
     let segment_count = raw_segments.len();
-    for left in 1..=segment_count {
-        let min_right = if left == segment_count { 0 } else { 1 };
-        for right in min_right..=(segment_count - left) {
-            combos.push((left, right));
-        }
-    }
-
-    let desired_suffix = if segment_count > 1 {
-        std::cmp::min(2, segment_count - 1)
-    } else {
-        0
-    };
-    let mut prioritized: Vec<(usize, usize)> = Vec::new();
-    let mut fallback: Vec<(usize, usize)> = Vec::new();
-    for combo in combos {
-        if combo.1 >= desired_suffix {
-            prioritized.push(combo);
-        } else {
-            fallback.push(combo);
-        }
-    }
-
-    let sort_combos = |items: &mut Vec<(usize, usize)>| {
-        items.sort_by(|(left_a, right_a), (left_b, right_b)| {
-            left_b
-                .cmp(left_a)
-                .then_with(|| right_b.cmp(right_a))
-                .then_with(|| (left_b + right_b).cmp(&(left_a + right_a)))
-        });
-    };
-    sort_combos(&mut prioritized);
-    sort_combos(&mut fallback);
-
-    let fit_segments =
-        |segments: &mut Vec<Segment<'_>>, allow_front_truncate: bool| -> Option<String> {
-            loop {
-                let candidate = assemble(has_leading_sep, segments);
-                let width = UnicodeWidthStr::width(candidate.as_str());
-                if width <= max_width {
-                    return Some(candidate);
-                }
-
-                if !allow_front_truncate {
-                    return None;
-                }
-
-                let mut indices: Vec<usize> = Vec::new();
-                for (idx, seg) in segments.iter().enumerate().rev() {
-                    if seg.truncatable && seg.is_suffix {
-                        indices.push(idx);
-                    }
-                }
-                for (idx, seg) in segments.iter().enumerate().rev() {
-                    if seg.truncatable && !seg.is_suffix {
-                        indices.push(idx);
-                    }
-                }
-
-                if indices.is_empty() {
-                    return None;
-                }
-
-                let mut changed = false;
-                for idx in indices {
-                    let original_width = UnicodeWidthStr::width(segments[idx].original);
-                    if original_width <= max_width && segment_count > 2 {
-                        continue;
-                    }
-                    let seg_width = UnicodeWidthStr::width(segments[idx].text.as_str());
-                    let other_width = width.saturating_sub(seg_width);
-                    let allowed_width = max_width.saturating_sub(other_width).max(1);
-                    let new_text = front_truncate(segments[idx].original, allowed_width);
-                    if new_text != segments[idx].text {
-                        segments[idx].text = new_text;
-                        changed = true;
-                        break;
-                    }
-                }
-
-                if !changed {
-                    return None;
-                }
-            }
-        };
-
-    for (left_count, right_count) in prioritized.into_iter().chain(fallback) {
-        let mut segments: Vec<Segment<'_>> = raw_segments[..left_count]
-            .iter()
-            .map(|seg| Segment {
-                original: seg,
-                text: (*seg).to_string(),
-                truncatable: true,
-                is_suffix: false,
-            })
-            .collect();
-
-        let need_ellipsis = left_count + right_count < segment_count;
-        if need_ellipsis {
-            segments.push(Segment {
-                original: "…",
-                text: "…".to_string(),
-                truncatable: false,
-                is_suffix: false,
-            });
-        }
-
-        if right_count > 0 {
-            segments.extend(
-                raw_segments[segment_count - right_count..]
+    if segment_count <= 2 {
+        let (left_count, right_count) = if segment_count == 1 { (1, 0) } else { (1, 1) };
+        let mut candidate =
+            if right_count == 0 {
+                raw_segments[..left_count]
                     .iter()
-                    .map(|seg| Segment {
-                        original: seg,
-                        text: (*seg).to_string(),
+                    .map(|segment| PathSegment {
+                        original: segment,
+                        text: (*segment).to_string(),
+                        truncatable: true,
+                        is_suffix: false,
+                    })
+                    .collect()
+            } else {
+                let mut candidate = raw_segments[..left_count]
+                    .iter()
+                    .map(|segment| PathSegment {
+                        original: segment,
+                        text: (*segment).to_string(),
+                        truncatable: true,
+                        is_suffix: false,
+                    })
+                    .collect::<Vec<_>>();
+                candidate.extend(raw_segments[segment_count - right_count..].iter().map(
+                    |segment| PathSegment {
+                        original: segment,
+                        text: (*segment).to_string(),
                         truncatable: true,
                         is_suffix: true,
-                    }),
-            );
+                    },
+                ));
+                candidate
+            };
+        if let Some(candidate) = fit_path_segments(
+            has_leading_sep,
+            sep,
+            &mut candidate,
+            max_width,
+            segment_count,
+            true,
+        ) {
+            return (candidate, 1);
+        }
+        return (front_truncate(path, max_width), 1);
+    }
+
+    let metrics = PathMetrics::new(
+        &raw_segments,
+        max_width,
+        UnicodeWidthStr::width(sep.to_string().as_str()),
+    );
+    let mut candidate_count = 0;
+    let desired_suffix = 2;
+    let mut right_count = desired_suffix;
+
+    for left_count in (1..segment_count.saturating_sub(1)).rev() {
+        let max_right_count = segment_count.saturating_sub(left_count + 1);
+        if max_right_count < desired_suffix {
+            continue;
         }
 
-        let allow_front_truncate = need_ellipsis || segment_count <= 2;
-        if let Some(candidate) = fit_segments(&mut segments, allow_front_truncate) {
-            return candidate;
+        candidate_count += 1;
+        if metrics.candidate_width(&raw_segments, has_leading_sep, left_count, right_count)
+            > max_width
+        {
+            continue;
+        }
+        while right_count < max_right_count {
+            candidate_count += 1;
+            if metrics.candidate_width(&raw_segments, has_leading_sep, left_count, right_count + 1)
+                > max_width
+            {
+                break;
+            }
+            right_count += 1;
+        }
+
+        let mut candidate = build_path_candidate(&raw_segments, left_count, right_count);
+        if let Some(candidate) = fit_path_segments(
+            has_leading_sep,
+            sep,
+            &mut candidate,
+            max_width,
+            segment_count,
+            true,
+        ) {
+            return (candidate, candidate_count);
         }
     }
 
-    front_truncate(path, max_width)
+    for left_count in (1..segment_count.saturating_sub(1)).rev() {
+        candidate_count += 1;
+        if metrics.candidate_width(&raw_segments, has_leading_sep, left_count, 1) > max_width {
+            continue;
+        }
+
+        let mut candidate = build_path_candidate(&raw_segments, left_count, 1);
+        if let Some(candidate) = fit_path_segments(
+            has_leading_sep,
+            sep,
+            &mut candidate,
+            max_width,
+            segment_count,
+            true,
+        ) {
+            return (candidate, candidate_count);
+        }
+    }
+
+    (front_truncate(path, max_width), candidate_count)
+}
+
+pub fn center_truncate_path(path: &str, max_width: usize) -> String {
+    center_truncate_path_with_candidate_count(path, max_width).0
 }
 
 pub fn format_tokens_compact(value: u64) -> String {
@@ -398,7 +552,15 @@ mod tests {
     }
 
     #[test]
-    fn center_truncate_path_keeps_leading_and_trailing_segments() {
+    fn format_and_truncate_tool_result_saturates_capacity_math() {
+        assert_eq!(
+            format_and_truncate_tool_result("x", usize::MAX, usize::MAX),
+            ""
+        );
+    }
+
+    #[test]
+    fn center_truncate_path_preserves_status_card_output() {
         let sep = std::path::MAIN_SEPARATOR;
         let path = format!("~{sep}hello{sep}the{sep}fox{sep}is{sep}very{sep}fast");
         let truncated = center_truncate_path(&path, 24);
@@ -414,6 +576,27 @@ mod tests {
         let path = format!("~{sep}supercalifragilisticexpialidocious");
         let truncated = center_truncate_path(&path, 18);
         assert_eq!(truncated, format!("~{sep}…cexpialidocious"));
+    }
+
+    #[test]
+    fn front_truncate_preserves_combining_and_zwj_graphemes() {
+        assert_eq!(front_truncate("prefixe\u{301}", 2), "…e\u{301}");
+        let family = "👨‍👩‍👧‍👦";
+        assert_eq!(
+            front_truncate(&format!("prefix{family}"), 3),
+            format!("…{family}")
+        );
+    }
+
+    #[test]
+    fn center_truncate_path_scans_a_linear_number_of_candidates() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let segments = (0..1_000)
+            .map(|index| format!("segment-{index}"))
+            .collect::<Vec<_>>();
+        let path = segments.join(&sep.to_string());
+        let (_, candidate_count) = center_truncate_path_with_candidate_count(&path, 10);
+        assert!(candidate_count <= segments.len().saturating_mul(3));
     }
 
     #[test]
