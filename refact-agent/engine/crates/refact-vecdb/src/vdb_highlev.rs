@@ -187,6 +187,11 @@ impl VecdbSearch for VecDb {
     }
 
     async fn remove_file(&self, file_path: &PathBuf) -> Result<(), String> {
+        self.vectorizer_service
+            .lock()
+            .await
+            .cancel_pending_path(file_path)
+            .await;
         let mut handler_locked = self.vecdb_handler.lock().await;
         let file_path_str = file_path.to_string_lossy().to_string();
         handler_locked

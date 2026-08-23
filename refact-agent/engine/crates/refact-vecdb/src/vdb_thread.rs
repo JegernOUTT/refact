@@ -41,9 +41,121 @@ fn should_log_skip(skipped_paths: &mut HashSet<PathBuf>, path: &PathBuf) -> bool
     skipped_paths.insert(path.clone())
 }
 
-enum MessageToVecdbThread {
-    RegularDocument(String),
+enum VecdbWork {
+    RegularDocument { path: String, generation: u64 },
     ImmediatelyRegularDocument(String),
+}
+
+#[derive(Clone, Copy)]
+struct PendingRegular {
+    updated_at: SystemTime,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct LatestPathQueue {
+    immediate: VecDeque<String>,
+    pending_regular: HashMap<String, PendingRegular>,
+    in_flight_regular: HashMap<String, u64>,
+    cancelled_regular: HashSet<String>,
+}
+
+impl LatestPathQueue {
+    fn enqueue_regular(&mut self, path: String, updated_at: SystemTime) {
+        self.cancelled_regular.remove(&path);
+        let generation = self
+            .pending_regular
+            .get(&path)
+            .map(|pending| pending.generation)
+            .or_else(|| self.in_flight_regular.get(&path).copied())
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.pending_regular.insert(
+            path,
+            PendingRegular {
+                updated_at,
+                generation,
+            },
+        );
+    }
+
+    fn enqueue_immediately(&mut self, path: String) {
+        self.immediate.push_back(path);
+    }
+
+    fn take_next(&mut self, now: SystemTime) -> Option<VecdbWork> {
+        if let Some(path) = self.immediate.pop_front() {
+            return Some(VecdbWork::ImmediatelyRegularDocument(path));
+        }
+        let path = self
+            .pending_regular
+            .iter()
+            .find(|(_, pending)| {
+                now.duration_since(pending.updated_at)
+                    .unwrap_or_default()
+                    .as_secs()
+                    > COOLDOWN_SECONDS
+            })
+            .map(|(path, _)| path.clone())?;
+        let pending = self.pending_regular.remove(&path)?;
+        self.in_flight_regular
+            .insert(path.clone(), pending.generation);
+        Some(VecdbWork::RegularDocument {
+            path,
+            generation: pending.generation,
+        })
+    }
+
+    fn complete_regular(&mut self, path: &str, generation: u64) {
+        if self.in_flight_regular.get(path) == Some(&generation) {
+            self.in_flight_regular.remove(path);
+            self.cancelled_regular.remove(path);
+        }
+    }
+
+    fn cancel_regular(&mut self, path: &str) {
+        self.pending_regular.remove(path);
+        self.cancelled_regular.insert(path.to_string());
+    }
+
+    fn has_newer_regular(&self, path: &str, generation: u64) -> bool {
+        self.pending_regular
+            .get(path)
+            .is_some_and(|pending| pending.generation > generation)
+    }
+
+    fn is_cancelled_regular(&self, path: &str, generation: u64) -> bool {
+        self.cancelled_regular.contains(path)
+            && self.in_flight_regular.get(path) == Some(&generation)
+    }
+
+    fn should_process_regular(&self, path: &str, generation: u64) -> bool {
+        !self.is_cancelled_regular(path, generation)
+    }
+
+    fn cancel_all_regular(&mut self) {
+        self.pending_regular.clear();
+        self.in_flight_regular.clear();
+        self.cancelled_regular.clear();
+    }
+
+    fn unprocessed_len(&self) -> usize {
+        self.immediate.len() + self.pending_regular.len() + self.in_flight_regular.len()
+    }
+
+    fn is_idle(&self) -> bool {
+        self.unprocessed_len() == 0
+    }
+
+    #[cfg(test)]
+    fn pending_regular_len(&self) -> usize {
+        self.pending_regular.len()
+    }
+
+    #[cfg(test)]
+    fn in_flight_regular_len(&self) -> usize {
+        self.in_flight_regular.len()
+    }
 }
 
 pub struct FileVectorizerService {
@@ -52,7 +164,7 @@ pub struct FileVectorizerService {
     pub vstatus_notify: Arc<ANotify>,
     constants: VecdbConstants,
     memory_plane_roots: Arc<RwLock<MemoryPlaneRoots>>,
-    vecdb_todo: Arc<AMutex<VecDeque<MessageToVecdbThread>>>,
+    vecdb_queue: Arc<AMutex<LatestPathQueue>>,
 }
 
 async fn vectorize_batch_from_q(
@@ -221,10 +333,10 @@ async fn vectorize_thread(
     let mut run_actual_model_on_these: Vec<SplitResult> = vec![];
     let mut ready_to_vecdb: Vec<VecdbRecord> = vec![];
 
-    let (vecdb_todo, constants, memory_plane_roots, vecdb_handler_arc, vstatus, vstatus_notify) = {
+    let (vecdb_queue, constants, memory_plane_roots, vecdb_handler_arc, vstatus, vstatus_notify) = {
         let vservice_locked = vservice.lock().await;
         (
-            vservice_locked.vecdb_todo.clone(),
+            vservice_locked.vecdb_queue.clone(),
             vservice_locked.constants.clone(),
             vservice_locked.memory_plane_roots.clone(),
             vservice_locked.vecdb_handler.clone(),
@@ -233,44 +345,24 @@ async fn vectorize_thread(
         )
     };
 
-    let mut last_updated: HashMap<String, SystemTime> = HashMap::new();
     let mut skipped_paths = HashSet::new();
     loop {
         if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            vecdb_queue.lock().await.cancel_all_regular();
             tracing::info!("VecDB thread: shutdown detected, stopping");
             return;
         }
-        let mut work_on_one: Option<MessageToVecdbThread> = None;
+        let work_on_one: Option<VecdbWork>;
         let current_time = SystemTime::now();
         let mut vstatus_changed = false;
         {
-            let mut vecdb_todo_locked = vecdb_todo.lock().await;
-            while let Some(msg) = vecdb_todo_locked.pop_front() {
-                match msg {
-                    MessageToVecdbThread::RegularDocument(cpath) => {
-                        last_updated.insert(cpath, current_time);
-                    }
-                    MessageToVecdbThread::ImmediatelyRegularDocument(_) => {
-                        work_on_one = Some(msg);
-                        break;
-                    }
-                }
-            }
-            if work_on_one.is_none() {
-                let doc_to_remove = last_updated
-                    .iter()
-                    .find(|(_, time)| {
-                        time.elapsed().unwrap_or_default().as_secs() > COOLDOWN_SECONDS
-                    })
-                    .map(|(doc, _)| doc.clone());
-                if let Some(doc) = doc_to_remove {
-                    work_on_one = Some(MessageToVecdbThread::RegularDocument(doc.clone()));
-                    last_updated.remove(&doc);
-                }
-            }
-            files_unprocessed = vecdb_todo_locked.len()
-                + last_updated.len()
-                + if work_on_one.is_some() { 1 } else { 0 };
+            let mut vecdb_queue_locked = vecdb_queue.lock().await;
+            work_on_one = vecdb_queue_locked.take_next(current_time);
+            files_unprocessed = vecdb_queue_locked.unprocessed_len()
+                + usize::from(matches!(
+                    work_on_one.as_ref(),
+                    Some(VecdbWork::ImmediatelyRegularDocument(_))
+                ));
             files_total = files_total.max(files_unprocessed);
             {
                 let mut vstatus_locked = vstatus.lock().await;
@@ -326,11 +418,13 @@ async fn vectorize_thread(
             info!("have {} unprocessed files", files_unprocessed);
             reported_unprocessed = files_unprocessed;
         }
-        let cpath = {
-            match work_on_one {
-                Some(MessageToVecdbThread::RegularDocument(cpath))
-                | Some(MessageToVecdbThread::ImmediatelyRegularDocument(cpath)) => cpath.clone(),
-                None if last_updated.is_empty() => {
+        let (cpath, regular_generation) = {
+            match work_on_one.as_ref() {
+                Some(VecdbWork::RegularDocument { path, generation }) => {
+                    (path.clone(), Some(*generation))
+                }
+                Some(VecdbWork::ImmediatelyRegularDocument(cpath)) => (cpath.clone(), None),
+                None if vecdb_queue.lock().await.is_idle() => {
                     assert!(run_actual_model_on_these.is_empty());
                     assert!(ready_to_vecdb.is_empty());
                     let reported_vecdb_complete = {
@@ -376,12 +470,31 @@ async fn vectorize_thread(
                     }
                     continue;
                 }
-                _ => continue,
+                None => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {},
+                        _ = vstatus_notify.notified() => {},
+                    }
+                    continue;
+                }
             }
         };
 
         let last_30_chars = refact_core::custom_error::last_n_chars(&cpath, 30);
         let doc_path: PathBuf = cpath.clone().into();
+        if let Some(generation) = regular_generation {
+            if !vecdb_queue
+                .lock()
+                .await
+                .should_process_regular(&cpath, generation)
+            {
+                vecdb_queue
+                    .lock()
+                    .await
+                    .complete_regular(&cpath, generation);
+                continue;
+            }
+        }
 
         if let Err(reason) = file_vectorization_gate(&doc_path) {
             if should_log_skip(&mut skipped_paths, &doc_path) {
@@ -390,10 +503,17 @@ async fn vectorize_thread(
             if let Err(err) = vecdb_handler_arc
                 .lock()
                 .await
-                .vecdb_records_remove(vec![cpath])
+                .vecdb_records_remove(vec![cpath.clone()])
                 .await
             {
                 info!("VECDB Error removing guarded file: {}", err);
+            }
+            if let Some(generation) = regular_generation {
+                let mut queue = vecdb_queue.lock().await;
+                if !queue.has_newer_regular(&cpath, generation) {
+                    queue.cancel_regular(&cpath);
+                }
+                queue.complete_regular(&cpath, generation);
             }
             continue;
         }
@@ -412,18 +532,46 @@ async fn vectorize_thread(
                     Ok(_) => {}
                     Err(err) => info!("VECDB Error removing: {}", err),
                 }
+                if let Some(generation) = regular_generation {
+                    let mut queue = vecdb_queue.lock().await;
+                    if !queue.has_newer_regular(&cpath, generation) {
+                        queue.cancel_regular(&cpath);
+                    }
+                    queue.complete_regular(&cpath, generation);
+                }
                 continue;
             }
         };
 
-        let file_kind = {
+        if let Some(generation) = regular_generation {
+            if !vecdb_queue
+                .lock()
+                .await
+                .should_process_regular(&cpath, generation)
+            {
+                vecdb_queue
+                    .lock()
+                    .await
+                    .complete_regular(&cpath, generation);
+                continue;
+            }
+        }
+
+        let file_kind_result = {
             let roots = memory_plane_roots.read().unwrap();
-            match memory_plane_file_kind(&doc_path, &roots) {
-                Ok(kind) => kind,
-                Err(err) => {
-                    info!("embeddings {} rejected: {}", last_30_chars, err);
-                    continue;
+            memory_plane_file_kind(&doc_path, &roots)
+        };
+        let file_kind = match file_kind_result {
+            Ok(kind) => kind,
+            Err(err) => {
+                info!("embeddings {} rejected: {}", last_30_chars, err);
+                if let Some(generation) = regular_generation {
+                    vecdb_queue
+                        .lock()
+                        .await
+                        .complete_regular(&cpath, generation);
                 }
+                continue;
             }
         };
 
@@ -433,6 +581,12 @@ async fn vectorize_thread(
         if file_kind == MemoryPlaneFileKind::KnowledgeMarkdown {
             if let Err(err) = doc.does_text_look_good() {
                 info!("embeddings {} doesn't look good: {}", last_30_chars, err);
+                if let Some(generation) = regular_generation {
+                    vecdb_queue
+                        .lock()
+                        .await
+                        .complete_regular(&cpath, generation);
+                }
                 continue;
             }
         }
@@ -492,6 +646,12 @@ async fn vectorize_thread(
             10,
         )
         .await;
+        if let Some(generation) = regular_generation {
+            vecdb_queue
+                .lock()
+                .await
+                .complete_regular(&cpath, generation);
+        }
     }
 }
 
@@ -519,8 +679,15 @@ impl FileVectorizerService {
             vstatus_notify: Arc::new(ANotify::new()),
             constants,
             memory_plane_roots: Arc::new(RwLock::new(memory_plane_roots)),
-            vecdb_todo: Default::default(),
+            vecdb_queue: Default::default(),
         }
+    }
+
+    pub(crate) async fn cancel_pending_path(&self, path: &PathBuf) {
+        self.vecdb_queue
+            .lock()
+            .await
+            .cancel_regular(&path.to_string_lossy());
     }
 }
 
@@ -573,11 +740,11 @@ pub async fn vectorizer_enqueue_files(
 ) {
     info!("adding {} files", documents.len());
     let documents = _filter_docs_to_enqueue(documents, roots);
-    let (vecdb_todo, vstatus, vstatus_notify, vecdb_max_files) = {
+    let (vecdb_queue, vstatus, vstatus_notify, vecdb_max_files) = {
         let service = vservice.lock().await;
         *service.memory_plane_roots.write().unwrap() = roots.clone();
         (
-            service.vecdb_todo.clone(),
+            service.vecdb_queue.clone(),
             service.vstatus.clone(),
             service.vstatus_notify.clone(),
             service.constants.vecdb_max_files,
@@ -594,14 +761,12 @@ pub async fn vectorizer_enqueue_files(
     }
     {
         {
-            let mut vecdb_todo_locked = vecdb_todo.lock().await;
+            let mut vecdb_queue_locked = vecdb_queue.lock().await;
             for doc in documents_my_copy.iter() {
                 if process_immediately {
-                    vecdb_todo_locked.push_back(MessageToVecdbThread::ImmediatelyRegularDocument(
-                        doc.clone(),
-                    ));
+                    vecdb_queue_locked.enqueue_immediately(doc.clone());
                 } else {
-                    vecdb_todo_locked.push_back(MessageToVecdbThread::RegularDocument(doc.clone()));
+                    vecdb_queue_locked.enqueue_regular(doc.clone(), SystemTime::now());
                 }
             }
             vstatus.lock().await.queue_additions = true;
@@ -670,6 +835,105 @@ mod tests {
             &roots
         )
         .is_ok());
+    }
+
+    #[test]
+    fn regular_queue_coalesces_repeated_pending_paths() {
+        let mut queue = LatestPathQueue::default();
+        let path = "/workspace/project/.refact/knowledge/note.md".to_string();
+        let now = SystemTime::now();
+
+        for _ in 0..100 {
+            queue.enqueue_regular(path.clone(), now);
+        }
+
+        assert_eq!(queue.pending_regular_len(), 1);
+        assert_eq!(queue.unprocessed_len(), 1);
+    }
+
+    #[test]
+    fn regular_queue_schedules_one_follow_up_after_in_flight_update() {
+        let mut queue = LatestPathQueue::default();
+        let path = "/workspace/project/.refact/knowledge/note.md".to_string();
+        let expired = SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(COOLDOWN_SECONDS + 1))
+            .unwrap();
+
+        queue.enqueue_regular(path.clone(), expired);
+        let VecdbWork::RegularDocument {
+            path: in_flight_path,
+            generation,
+        } = queue.take_next(SystemTime::now()).unwrap()
+        else {
+            panic!("regular document should be selected");
+        };
+        queue.enqueue_regular(path.clone(), SystemTime::now());
+
+        assert_eq!(queue.pending_regular_len(), 1);
+        assert_eq!(queue.in_flight_regular_len(), 1);
+        queue.complete_regular(&in_flight_path, generation);
+        assert_eq!(queue.pending_regular_len(), 1);
+        assert_eq!(queue.in_flight_regular_len(), 0);
+    }
+
+    #[test]
+    fn regular_queue_cancel_discards_pending_but_not_immediate_requests() {
+        let mut queue = LatestPathQueue::default();
+        let path = "/workspace/project/.refact/knowledge/note.md".to_string();
+        let expired = SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(COOLDOWN_SECONDS + 1))
+            .unwrap();
+
+        queue.enqueue_regular(path.clone(), expired);
+        queue.enqueue_immediately(path.clone());
+        queue.cancel_regular(&path);
+
+        assert_eq!(queue.pending_regular_len(), 0);
+        assert!(matches!(
+            queue.take_next(SystemTime::now()),
+            Some(VecdbWork::ImmediatelyRegularDocument(immediate)) if immediate == path
+        ));
+    }
+
+    #[test]
+    fn regular_queue_cancel_marks_in_flight_work_stale() {
+        let mut queue = LatestPathQueue::default();
+        let path = "/workspace/project/.refact/knowledge/note.md".to_string();
+        let expired = SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(COOLDOWN_SECONDS + 1))
+            .unwrap();
+
+        queue.enqueue_regular(path.clone(), expired);
+        let VecdbWork::RegularDocument { generation, .. } =
+            queue.take_next(SystemTime::now()).unwrap()
+        else {
+            panic!("regular document should be selected");
+        };
+        queue.cancel_regular(&path);
+
+        assert!(!queue.should_process_regular(&path, generation));
+        queue.complete_regular(&path, generation);
+        assert!(queue.is_idle());
+    }
+
+    #[test]
+    fn regular_queue_shutdown_clears_pending_and_in_flight_state() {
+        let mut queue = LatestPathQueue::default();
+        let path = "/workspace/project/.refact/knowledge/note.md".to_string();
+        let expired = SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(COOLDOWN_SECONDS + 1))
+            .unwrap();
+
+        queue.enqueue_regular(path, expired);
+        let _ = queue.take_next(SystemTime::now());
+        queue.enqueue_regular(
+            "/workspace/project/.refact/knowledge/other.md".to_string(),
+            SystemTime::now(),
+        );
+        queue.cancel_all_regular();
+
+        assert_eq!(queue.pending_regular_len(), 0);
+        assert_eq!(queue.in_flight_regular_len(), 0);
     }
 
     #[tokio::test]

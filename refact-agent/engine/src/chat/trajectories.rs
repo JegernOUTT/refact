@@ -3406,7 +3406,8 @@ async fn save_trajectory_snapshot_inner(
     if should_vectorize_trajectory(snapshot.link_type.as_deref()) {
         let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
         let vec_db = app.workspace.vec_db.clone();
-        if let Some(vecdb) = vec_db.lock().await.as_ref() {
+        let vecdb = vec_db.lock().await.clone();
+        if let Some(vecdb) = vecdb {
             vecdb
                 .vectorizer_enqueue_files(
                     &vec![file_path.to_string_lossy().to_string()],
@@ -6922,6 +6923,9 @@ mod tests {
     use crate::chat::types::{
         ActiveCommandContext, ChatEvent, CompressionPhase, CompressionReason, EventEnvelope,
     };
+    use crate::vecdb::vdb_structs::{EmbeddingModelConfig, SearchResult, VecDbStatus, VecdbRecord};
+    use async_trait::async_trait;
+    use refact_core::vecdb_types::VecdbSearch;
     use refact_chat_api::{
         BuddyThreadMeta, ClaudeCodeIdentity, FrozenRequestPrefix, GoalBudget, GoalProgress,
         GoalStatus,
@@ -6931,6 +6935,90 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::Mutex as StdMutex;
+
+    struct BlockingRecordingVecdb {
+        enqueued: Arc<StdMutex<Vec<String>>>,
+        release_enqueue: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl VecdbSearch for BlockingRecordingVecdb {
+        async fn vecdb_search(
+            &self,
+            query: String,
+            _top_n: usize,
+            _filter_mb: Option<String>,
+        ) -> Result<SearchResult, String> {
+            Ok(SearchResult {
+                query_text: query,
+                results: vec![],
+            })
+        }
+
+        async fn get_status(&self) -> Result<VecDbStatus, String> {
+            Ok(VecDbStatus {
+                files_unprocessed: 0,
+                files_total: 0,
+                requests_made_since_start: 0,
+                vectors_made_since_start: 0,
+                db_size: 0,
+                db_cache_size: 0,
+                state: "done".to_string(),
+                queue_additions: false,
+                vecdb_max_files_hit: false,
+                vecdb_errors: Default::default(),
+            })
+        }
+
+        async fn remove_file(&self, _file_path: &PathBuf) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn vectorizer_enqueue_files(
+            &self,
+            documents: &[String],
+            _process_immediately: bool,
+            _roots: refact_core::memory_plane::MemoryPlaneRoots,
+        ) {
+            self.enqueued.lock().unwrap().extend(documents.to_vec());
+            self.release_enqueue.notified().await;
+        }
+
+        fn current_constants(&self) -> (EmbeddingModelConfig, usize) {
+            (
+                EmbeddingModelConfig {
+                    model_id: String::new(),
+                    endpoint: String::new(),
+                    endpoint_style: String::new(),
+                    embedding_endpoint_style: String::new(),
+                    api_key: String::new(),
+                    model_name: String::new(),
+                    embedding_size: 0,
+                    dimensions: None,
+                    query_prefix: String::new(),
+                    document_prefix: String::new(),
+                    rejection_threshold: 0.0,
+                    embedding_batch: 1,
+                    n_ctx: 0,
+                },
+                0,
+            )
+        }
+
+        async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, String> {
+            Ok(vec![])
+        }
+
+        async fn vecdb_search_with_embedding(
+            &self,
+            _embedding: &Vec<f32>,
+            _top_n: usize,
+            _filter_mb: Option<String>,
+        ) -> Result<Vec<VecdbRecord>, String> {
+            Ok(vec![])
+        }
+    }
 
     fn normalized_test_path(path: &Path) -> PathBuf {
         crate::files_correction::canonicalize_normalized_path(path.to_path_buf())
@@ -7237,6 +7325,43 @@ mod tests {
                 .content_text_only(),
             "right"
         );
+    }
+
+    #[tokio::test]
+    async fn trajectory_commit_finishes_before_best_effort_vecdb_enqueue() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let enqueued = Arc::new(StdMutex::new(Vec::new()));
+        let release_enqueue = Arc::new(Notify::new());
+        *gcx.vec_db.lock().await = Some(Arc::new(BlockingRecordingVecdb {
+            enqueued: enqueued.clone(),
+            release_enqueue: release_enqueue.clone(),
+        }));
+
+        let save = tokio::spawn(save_trajectory_snapshot(
+            gcx.clone(),
+            test_snapshot(
+                "commit-before-enqueue",
+                "Committed",
+                vec![ChatMessage::new("user".to_string(), "durable".to_string())],
+            ),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if !enqueued.lock().unwrap().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(load_trajectory_for_chat(gcx, "commit-before-enqueue")
+            .await
+            .is_some());
+        release_enqueue.notify_one();
+        save.await.unwrap().unwrap();
     }
 
     #[test]
