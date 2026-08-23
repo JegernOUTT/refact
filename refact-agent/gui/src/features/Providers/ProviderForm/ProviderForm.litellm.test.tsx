@@ -36,7 +36,7 @@ fields:
     f_label: Cache Control
   enabled:
     f_type: boolean
-    f_label: Enabled
+    f_label: Enable Provider
   extra_headers:
     f_type: string_long
     f_label: Extra Headers
@@ -75,6 +75,7 @@ describe("LiteLLM ProviderForm contract", () => {
               args: ["litellm"],
             },
             supports_cache_control: true,
+            enabled: false,
             extra_headers: { "X-Team": "platform" },
           },
           runtime: null,
@@ -110,7 +111,9 @@ describe("LiteLLM ProviderForm contract", () => {
     fireEvent.blur(command);
 
     expect(screen.getByLabelText("Cache Control")).toBeChecked();
-    expect(screen.getByLabelText("Enabled")).toBeChecked();
+    const enabled = screen.getByLabelText("Enable Provider");
+    expect(enabled).not.toBeChecked();
+    await user.click(enabled);
 
     await user.click(
       screen.getByRole("button", { name: "Show advanced fields" }),
@@ -127,6 +130,11 @@ describe("LiteLLM ProviderForm contract", () => {
         base_provider: "litellm",
         display_name: "Team LiteLLM",
         credential: { command: "token-helper", args: ["team"] },
+      });
+      expect(updates).toContainEqual({
+        base_provider: "litellm",
+        display_name: "Team LiteLLM",
+        enabled: true,
       });
     });
 

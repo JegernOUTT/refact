@@ -1230,6 +1230,11 @@ impl ProviderTrait for LiteLLMProvider {
     fn provider_schema(&self) -> &'static str {
         r#"
 fields:
+  enabled:
+    f_type: boolean
+    f_desc: "Enable this LiteLLM provider and expose its enabled models in global model selectors"
+    f_label: "Enable Provider"
+    f_default: false
   endpoint:
     f_type: string_long
     f_desc: "LiteLLM Proxy base URL. Models and deployment metadata are discovered dynamically from the proxy."
@@ -1530,6 +1535,9 @@ mod tests {
     #[test]
     fn schema_and_config_validate_and_redact() {
         let mut provider = LiteLLMProvider::default();
+        assert!(provider
+            .provider_schema()
+            .contains("f_label: \"Enable Provider\""));
         assert!(provider.provider_schema().contains("f_confirmation: true"));
         assert!(provider
             .provider_schema()
