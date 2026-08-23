@@ -321,6 +321,8 @@ pub struct ChatSession {
     pub trajectory_save_in_flight: bool,
     pub trajectory_save_queued: bool,
     pub trajectory_save_mutex: Arc<AMutex<()>>,
+    pub trajectory_commit_notify: Arc<Notify>,
+    pub trajectory_save_error: Option<String>,
     pub created_at: String,
     pub closed: bool,
     pub closed_flag: Arc<AtomicBool>,

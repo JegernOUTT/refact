@@ -268,10 +268,15 @@ pub async fn start_server(
                 let shutdown = async move {
                     crate::global_context::block_until_signal(ask_shutdown_receiver, shutdown_flag)
                         .await;
-                    crate::chat::close_all_chat_sessions(
-                        crate::app_state::AppState::from_gcx(gcx_for_shutdown).await,
-                    )
-                    .await;
+                    let app = crate::app_state::AppState::from_gcx(gcx_for_shutdown).await;
+                    if let Err(errors) =
+                        crate::chat::trajectories::flush_all_trajectories(app.clone()).await
+                    {
+                        for error in errors {
+                            error!("graceful shutdown trajectory flush failed: {}", error);
+                        }
+                    }
+                    crate::chat::close_all_chat_sessions(app).await;
                 };
                 let server = builder
                     .serve(router.into_make_service())

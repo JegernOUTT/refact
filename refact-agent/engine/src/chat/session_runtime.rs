@@ -330,6 +330,20 @@ pub async fn close_all_chat_sessions(app: AppState) {
         let sessions_read = sessions.read().await;
         sessions_read.values().cloned().collect()
     };
+    let flushes = futures::future::join_all(session_arcs.iter().cloned().map(|session_arc| {
+        super::trajectories::flush_trajectory_for_session(app.clone(), session_arc)
+    }));
+    match tokio::time::timeout(std::time::Duration::from_secs(5), flushes).await {
+        Ok(results) => {
+            for error in results.into_iter().filter_map(Result::err) {
+                warn!(
+                    "close_all_chat_sessions: trajectory flush failed: {}",
+                    error
+                );
+            }
+        }
+        Err(_) => warn!("close_all_chat_sessions: trajectory flush timed out"),
+    }
     for session_arc in session_arcs {
         let lock_result =
             tokio::time::timeout(std::time::Duration::from_millis(500), session_arc.lock()).await;

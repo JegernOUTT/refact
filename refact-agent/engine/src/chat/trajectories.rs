@@ -1,6 +1,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+use std::sync::atomic::Ordering;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use axum::extract::Path as AxumPath;
 use axum::http::{Response, StatusCode};
@@ -8,7 +9,7 @@ use axum::extract::State;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::{Mutex as AMutex, broadcast};
+use tokio::sync::{Mutex as AMutex, Notify, broadcast};
 use tokio::fs;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::{debug, info, warn};
@@ -2687,7 +2688,7 @@ pub async fn save_trajectory_as_with_intent(
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
     };
-    if let Err(e) = save_trajectory_snapshot(gcx, snapshot).await {
+    if let Err(e) = schedule_detached_trajectory_writer(gcx, snapshot, intent).await {
         warn!("Failed to save trajectory: {}", e);
     }
 }
@@ -2703,7 +2704,8 @@ pub async fn save_trajectory_snapshot(
         Some(&snapshot.chat_id),
         None,
     );
-    let result = save_trajectory_snapshot_inner(gcx, snapshot).await;
+    let result =
+        schedule_detached_trajectory_writer(gcx, snapshot, TrajectoryCommitIntent::Required).await;
     span.finish(
         if result.is_ok() {
             PerfOutcome::Success
@@ -2716,6 +2718,150 @@ pub async fn save_trajectory_snapshot(
         None,
     );
     result
+}
+
+struct DetachedTrajectoryWriterState {
+    pending: Option<(u64, TrajectorySnapshot)>,
+    requested_version: u64,
+    committed_version: u64,
+    in_flight: bool,
+    error: Option<String>,
+    notify: Arc<Notify>,
+    write_cache: Arc<AMutex<DetachedTrajectoryWriteCache>>,
+}
+
+#[derive(Default)]
+struct DetachedTrajectoryWriteCache {
+    backing_path: Option<PathBuf>,
+    existing_metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    source: Option<TrajectorySourceIdentity>,
+}
+
+impl Default for DetachedTrajectoryWriterState {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            requested_version: 0,
+            committed_version: 0,
+            in_flight: false,
+            error: None,
+            notify: Arc::new(Notify::new()),
+            write_cache: Arc::new(AMutex::new(Default::default())),
+        }
+    }
+}
+
+fn detached_trajectory_writers(
+) -> &'static StdMutex<std::collections::HashMap<String, Arc<AMutex<DetachedTrajectoryWriterState>>>>
+{
+    static WRITERS: OnceLock<
+        StdMutex<std::collections::HashMap<String, Arc<AMutex<DetachedTrajectoryWriterState>>>>,
+    > = OnceLock::new();
+    WRITERS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+fn detached_trajectory_writer(
+    gcx: &Arc<GlobalContext>,
+    chat_id: &str,
+) -> Arc<AMutex<DetachedTrajectoryWriterState>> {
+    let mut writers = detached_trajectory_writers()
+        .lock()
+        .expect("detached trajectory writer registry poisoned");
+    let workspace_key = gcx
+        .documents_state
+        .workspace_folders
+        .lock()
+        .map(|folders| {
+            folders
+                .iter()
+                .map(|folder| folder.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("|")
+        })
+        .unwrap_or_else(|_| gcx.cache_dir.to_string_lossy().into_owned());
+    let key = format!("{workspace_key}:{chat_id}");
+    writers
+        .entry(key)
+        .or_insert_with(|| Arc::new(AMutex::new(Default::default())))
+        .clone()
+}
+
+async fn schedule_detached_trajectory_writer(
+    gcx: Arc<GlobalContext>,
+    snapshot: TrajectorySnapshot,
+    intent: TrajectoryCommitIntent,
+) -> Result<(), String> {
+    let writer = detached_trajectory_writer(&gcx, &snapshot.chat_id);
+    let target_version = {
+        let mut state = writer.lock().await;
+        state.requested_version = state.requested_version.saturating_add(1);
+        let target_version = state.requested_version;
+        state.pending = Some((target_version, snapshot));
+        state.error = None;
+        if !state.in_flight {
+            state.in_flight = true;
+            let writer = writer.clone();
+            tokio::spawn(async move {
+                run_detached_trajectory_writer(gcx, writer).await;
+            });
+        }
+        target_version
+    };
+    if intent.requires_durability() {
+        wait_for_detached_trajectory_commit(writer, target_version).await?;
+    }
+    Ok(())
+}
+
+async fn run_detached_trajectory_writer(
+    gcx: Arc<GlobalContext>,
+    writer: Arc<AMutex<DetachedTrajectoryWriterState>>,
+) {
+    loop {
+        let (version, snapshot, write_cache) = {
+            let mut state = writer.lock().await;
+            let Some((version, snapshot)) = state.pending.take() else {
+                state.in_flight = false;
+                state.notify.notify_waiters();
+                return;
+            };
+            (version, snapshot, state.write_cache.clone())
+        };
+        let result = save_trajectory_snapshot_inner(gcx.clone(), snapshot, Some(write_cache)).await;
+        let mut state = writer.lock().await;
+        match result {
+            Ok(()) => {
+                state.committed_version = state.committed_version.max(version);
+                state.error = None;
+                state.notify.notify_waiters();
+            }
+            Err(error) => {
+                state.error = Some(error);
+                state.in_flight = false;
+                state.notify.notify_waiters();
+                return;
+            }
+        }
+    }
+}
+
+async fn wait_for_detached_trajectory_commit(
+    writer: Arc<AMutex<DetachedTrajectoryWriterState>>,
+    target_version: u64,
+) -> Result<(), String> {
+    loop {
+        let notified = {
+            let state = writer.lock().await;
+            if state.committed_version >= target_version {
+                return Ok(());
+            }
+            if let Some(error) = state.error.clone() {
+                return Err(error);
+            }
+            state.notify.clone().notified_owned()
+        };
+        notified.await;
+    }
 }
 
 #[cfg(test)]
@@ -2745,6 +2891,7 @@ fn set_test_message_serialization_failure(message_id: Option<String>) {
 async fn save_trajectory_snapshot_inner(
     gcx: Arc<GlobalContext>,
     mut snapshot: TrajectorySnapshot,
+    write_cache: Option<Arc<AMutex<DetachedTrajectoryWriteCache>>>,
 ) -> Result<(), String> {
     validate_trajectory_id(&snapshot.chat_id).map_err(|e| e.message)?;
     let app = AppState::from_gcx(gcx.clone()).await;
@@ -2962,7 +3109,24 @@ async fn save_trajectory_snapshot_inner(
         trajectory["task_meta"] = serde_json::to_value(task_meta).unwrap_or_default();
     }
 
-    let file_path_result = if let Some(ref task_meta) = snapshot.task_meta {
+    let source = if let Some(task_meta) = snapshot.task_meta.as_ref() {
+        TrajectorySourceIdentity::from_task_meta(task_meta)
+    } else if snapshot.buddy_meta.is_some() {
+        TrajectorySourceIdentity::Buddy
+    } else {
+        TrajectorySourceIdentity::Normal
+    };
+    let cached_path = if let Some(write_cache) = write_cache.as_ref() {
+        let write_cache = write_cache.lock().await;
+        (write_cache.source.as_ref() == Some(&source))
+            .then(|| write_cache.backing_path.clone())
+            .flatten()
+    } else {
+        None
+    };
+    let file_path_result = if let Some(path) = cached_path {
+        Ok(path)
+    } else if let Some(ref task_meta) = snapshot.task_meta {
         safe_new_task_trajectory_file(gcx.clone(), task_meta, &snapshot.chat_id).await
     } else if snapshot.buddy_meta.is_some() {
         safe_new_buddy_trajectory_file(gcx.clone(), &snapshot.chat_id).await
@@ -2989,8 +3153,18 @@ async fn save_trajectory_snapshot_inner(
             return Err(error);
         }
     };
-    let existing_trajectory =
-        match read_existing_trajectory_object(&file_path, &snapshot.chat_id).await {
+    let cached_metadata = if let Some(write_cache) = write_cache.as_ref() {
+        let write_cache = write_cache.lock().await;
+        (write_cache.source.as_ref() == Some(&source)
+            && write_cache.backing_path.as_deref() == Some(file_path.as_path()))
+        .then(|| write_cache.existing_metadata.clone())
+        .flatten()
+    } else {
+        None
+    };
+    let existing_trajectory = match cached_metadata {
+        Some(existing_trajectory) => Some(existing_trajectory),
+        None => match read_existing_trajectory_object(&file_path, &snapshot.chat_id).await {
             Ok(existing_trajectory) => existing_trajectory,
             Err(error) => {
                 serialize_span.finish(
@@ -3002,7 +3176,14 @@ async fn save_trajectory_snapshot_inner(
                 );
                 return Err(error);
             }
-        };
+        },
+    };
+    if let Some(write_cache) = write_cache.as_ref() {
+        let mut write_cache = write_cache.lock().await;
+        write_cache.backing_path = Some(file_path.clone());
+        write_cache.existing_metadata = existing_trajectory.clone();
+        write_cache.source = Some(source);
+    }
 
     let updated_at = chrono::Utc::now().to_rfc3339();
     trajectory["updated_at"] = serde_json::Value::String(updated_at.clone());
@@ -3225,16 +3406,16 @@ pub async fn try_save_trajectory_with_intent(
     if !intent.persists() {
         return Ok(true);
     }
-    let snapshot = {
+    {
         let session = session_arc.lock().await;
         if !session.trajectory_dirty {
             return Ok(true);
         }
-        trajectory_snapshot_from_session(&session)
-    };
-
-    commit_trajectory_snapshot_for_session(app.gcx.clone(), session_arc.clone(), snapshot, intent)
-        .await?;
+    }
+    let target_version = schedule_trajectory_writer(app, session_arc.clone(), intent).await?;
+    if intent.requires_durability() {
+        wait_for_trajectory_commit(session_arc.clone(), target_version).await?;
+    }
     let session = session_arc.lock().await;
     Ok(!session.trajectory_dirty)
 }
@@ -3269,15 +3450,138 @@ async fn commit_trajectory_snapshot_for_session(
         }
     }
 
-    save_trajectory_snapshot(gcx, snapshot)
+    schedule_detached_trajectory_writer(gcx, snapshot, TrajectoryCommitIntent::Required)
         .await
         .map_err(|error| format!("Failed to save trajectory for {}: {}", chat_id, error))?;
 
     let mut session = session_arc.lock().await;
-    if session.complete_trajectory_commit(saved_version) {
+    let committed = session.complete_trajectory_commit(saved_version);
+    session.trajectory_commit_notify.notify_waiters();
+    if committed {
         Ok(SessionTrajectoryCommitOutcome::Committed)
     } else {
         Ok(SessionTrajectoryCommitOutcome::SkippedStale)
+    }
+}
+
+async fn schedule_trajectory_writer(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+    _intent: TrajectoryCommitIntent,
+) -> Result<u64, String> {
+    let should_spawn = {
+        let mut session = session_arc.lock().await;
+        let target_version = session.trajectory_version;
+        if !session.trajectory_dirty {
+            return Ok(target_version);
+        }
+        if session.trajectory_save_in_flight {
+            session.trajectory_save_queued = true;
+            return Ok(target_version);
+        }
+        session.trajectory_save_in_flight = true;
+        session.trajectory_save_queued = false;
+        session.trajectory_save_error = None;
+        target_version
+    };
+    let gcx = app.gcx.clone();
+    tokio::spawn(async move {
+        loop {
+            let snapshot = {
+                let session = session_arc.lock().await;
+                if !session.trajectory_dirty {
+                    None
+                } else {
+                    Some(trajectory_snapshot_from_session(&session))
+                }
+            };
+            let Some(snapshot) = snapshot else {
+                let mut session = session_arc.lock().await;
+                session.trajectory_save_in_flight = false;
+                session.trajectory_save_queued = false;
+                session.trajectory_commit_notify.notify_waiters();
+                return;
+            };
+
+            let result = commit_trajectory_snapshot_for_session(
+                gcx.clone(),
+                session_arc.clone(),
+                snapshot,
+                TrajectoryCommitIntent::Checkpoint,
+            )
+            .await;
+            let mut session = session_arc.lock().await;
+            match result {
+                Ok(_) => {
+                    session.trajectory_save_error = None;
+                }
+                Err(error) => {
+                    warn!("{}", error);
+                    session.trajectory_dirty = true;
+                    session.trajectory_save_in_flight = false;
+                    session.trajectory_save_queued = false;
+                    session.trajectory_save_error = Some(error);
+                    session.trajectory_commit_notify.notify_waiters();
+                    return;
+                }
+            }
+            if session.trajectory_dirty || session.trajectory_save_queued {
+                session.trajectory_save_queued = false;
+                continue;
+            }
+            session.trajectory_save_in_flight = false;
+            session.trajectory_commit_notify.notify_waiters();
+            return;
+        }
+    });
+    Ok(should_spawn)
+}
+
+async fn wait_for_trajectory_commit(
+    session_arc: Arc<AMutex<ChatSession>>,
+    target_version: u64,
+) -> Result<(), String> {
+    loop {
+        let notified = {
+            let session = session_arc.lock().await;
+            let notified = session.trajectory_commit_notify.clone().notified_owned();
+            if session.trajectory_committed_version >= target_version {
+                return Ok(());
+            }
+            if let Some(error) = session.trajectory_save_error.clone() {
+                return Err(error);
+            }
+            notified
+        };
+        notified.await;
+    }
+}
+
+pub async fn flush_trajectory_for_session(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+) -> Result<(), String> {
+    try_save_trajectory_with_intent(app, session_arc, TrajectoryCommitIntent::Required)
+        .await
+        .map(|_| ())
+}
+
+pub async fn flush_all_trajectories(app: AppState) -> Result<(), Vec<String>> {
+    let sessions: Vec<Arc<AMutex<ChatSession>>> = {
+        let sessions = app.chat.sessions.read().await;
+        sessions.values().cloned().collect()
+    };
+    let results = futures::future::join_all(
+        sessions
+            .into_iter()
+            .map(|session_arc| flush_trajectory_for_session(app.clone(), session_arc)),
+    )
+    .await;
+    let errors: Vec<String> = results.into_iter().filter_map(Result::err).collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
     }
 }
 
@@ -3292,74 +3596,16 @@ pub fn maybe_save_trajectory_background(app: AppState, session_arc: Arc<AMutex<C
 pub fn maybe_save_trajectory_background_with_intent(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
-    intent: TrajectoryCommitIntent,
+    _intent: TrajectoryCommitIntent,
 ) {
-    if !intent.persists() {
+    if app.runtime.shutdown_flag.load(Ordering::Relaxed) {
         return;
     }
-    let gcx = app.gcx.clone();
     tokio::spawn(async move {
-        loop {
-            {
-                let mut session = session_arc.lock().await;
-                if !session.trajectory_dirty {
-                    session.trajectory_save_in_flight = false;
-                    session.trajectory_save_queued = false;
-                    return;
-                }
-                if session.trajectory_save_in_flight {
-                    session.trajectory_save_queued = true;
-                    return;
-                }
-                session.trajectory_save_in_flight = true;
-                session.trajectory_save_queued = false;
-            }
-
-            let snapshot = {
-                let mut session = session_arc.lock().await;
-                if !session.trajectory_dirty {
-                    if session.trajectory_save_queued {
-                        session.trajectory_save_queued = false;
-                        session.trajectory_save_in_flight = false;
-                        drop(session);
-                        continue;
-                    } else {
-                        session.trajectory_save_in_flight = false;
-                        return;
-                    }
-                }
-                trajectory_snapshot_from_session(&session)
-            };
-
-            let result = commit_trajectory_snapshot_for_session(
-                gcx.clone(),
-                session_arc.clone(),
-                snapshot,
-                intent,
-            )
-            .await;
-
-            let mut session = session_arc.lock().await;
-            match result {
-                Ok(_) => {}
-                Err(e) => {
-                    warn!("{}", e);
-                    session.trajectory_dirty = true;
-                    session.trajectory_save_in_flight = false;
-                    session.trajectory_save_queued = false;
-                    return;
-                }
-            }
-
-            if session.trajectory_dirty || session.trajectory_save_queued {
-                session.trajectory_save_queued = false;
-                session.trajectory_save_in_flight = false;
-                drop(session);
-                continue;
-            }
-
-            session.trajectory_save_in_flight = false;
-            return;
+        if let Err(error) =
+            schedule_trajectory_writer(app, session_arc, TrajectoryCommitIntent::Checkpoint).await
+        {
+            warn!("{}", error);
         }
     });
 }
@@ -3373,14 +3619,12 @@ pub async fn maybe_save_trajectory_with_intent(
     session_arc: Arc<AMutex<ChatSession>>,
     intent: TrajectoryCommitIntent,
 ) {
+    if intent == TrajectoryCommitIntent::Checkpoint {
+        maybe_save_trajectory_background_with_intent(app, session_arc, intent);
+        return;
+    }
     if let Err(e) = try_save_trajectory_with_intent(app, session_arc.clone(), intent).await {
         warn!("{}", e);
-    } else {
-        let mut session = session_arc.lock().await;
-        if !session.trajectory_dirty {
-            session.trajectory_save_in_flight = false;
-            session.trajectory_save_queued = false;
-        }
     }
 }
 
@@ -5867,9 +6111,17 @@ async fn ensure_real_dir_tree(path: &Path) -> Result<(), String> {
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&current).await.map_err(|e| {
-                    format!("Failed to create directory {}: {}", current.display(), e)
-                })?;
+                match fs::create_dir(&current).await {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => {
+                        return Err(format!(
+                            "Failed to create directory {}: {}",
+                            current.display(),
+                            e
+                        ))
+                    }
+                }
                 let metadata = fs::symlink_metadata(&current).await.map_err(|e| {
                     format!(
                         "Failed to inspect created directory {}: {}",
@@ -6640,6 +6892,124 @@ mod tests {
             .map(|message| message.content.content_text_only())
             .collect::<Vec<_>>();
         assert_eq!(content, vec!["older", "newer"]);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_writer_coalesces_to_the_latest_session_snapshot() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "checkpoint-writer-coalesces";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+
+        {
+            let mut session = session_arc.lock().await;
+            session.add_message(ChatMessage::new("user".to_string(), "first".to_string()));
+        }
+        maybe_save_trajectory_background_with_intent(
+            app.clone(),
+            session_arc.clone(),
+            TrajectoryCommitIntent::Checkpoint,
+        );
+        {
+            let mut session = session_arc.lock().await;
+            session.add_message(ChatMessage::new("user".to_string(), "second".to_string()));
+        }
+        maybe_save_trajectory_background_with_intent(
+            app.clone(),
+            session_arc.clone(),
+            TrajectoryCommitIntent::Checkpoint,
+        );
+
+        flush_trajectory_for_session(app, session_arc)
+            .await
+            .unwrap();
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(
+            loaded
+                .messages
+                .iter()
+                .map(|message| message.content.content_text_only())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+    }
+
+    #[tokio::test]
+    async fn required_writer_waits_for_a_checkpoint_and_commits_latest_version() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "required-after-checkpoint";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+
+        {
+            let mut session = session_arc.lock().await;
+            session.add_message(ChatMessage::new(
+                "user".to_string(),
+                "checkpoint".to_string(),
+            ));
+        }
+        maybe_save_trajectory_background_with_intent(
+            app.clone(),
+            session_arc.clone(),
+            TrajectoryCommitIntent::Checkpoint,
+        );
+        {
+            let mut session = session_arc.lock().await;
+            session.add_message(ChatMessage::new("user".to_string(), "required".to_string()));
+        }
+
+        try_save_trajectory_with_intent(app, session_arc.clone(), TrajectoryCommitIntent::Required)
+            .await
+            .unwrap();
+        let session = session_arc.lock().await;
+        assert!(!session.trajectory_dirty);
+        assert_eq!(
+            session.trajectory_committed_version,
+            session.trajectory_version
+        );
+        drop(session);
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn different_session_writers_commit_independently() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        let left = Arc::new(AMutex::new(ChatSession::new("writer-left".to_string())));
+        let right = Arc::new(AMutex::new(ChatSession::new("writer-right".to_string())));
+        left.lock()
+            .await
+            .add_message(ChatMessage::new("user".to_string(), "left".to_string()));
+        right
+            .lock()
+            .await
+            .add_message(ChatMessage::new("user".to_string(), "right".to_string()));
+
+        let (left_result, right_result) = tokio::join!(
+            flush_trajectory_for_session(app.clone(), left),
+            flush_trajectory_for_session(app, right),
+        );
+        left_result.unwrap();
+        right_result.unwrap();
+        assert_eq!(
+            load_trajectory_for_chat(gcx.clone(), "writer-left")
+                .await
+                .unwrap()
+                .messages[0]
+                .content
+                .content_text_only(),
+            "left"
+        );
+        assert_eq!(
+            load_trajectory_for_chat(gcx, "writer-right")
+                .await
+                .unwrap()
+                .messages[0]
+                .content
+                .content_text_only(),
+            "right"
+        );
     }
 
     fn assert_same_path(left: &Path, right: &Path) {
@@ -14776,6 +15146,8 @@ mod tests {
             trajectory_save_in_flight: false,
             trajectory_save_queued: false,
             trajectory_save_mutex: Arc::new(AMutex::new(())),
+            trajectory_commit_notify: Arc::new(Notify::new()),
+            trajectory_save_error: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             closed: false,
             closed_flag: Arc::new(AtomicBool::new(false)),
@@ -14884,6 +15256,8 @@ mod tests {
             trajectory_save_in_flight: false,
             trajectory_save_queued: false,
             trajectory_save_mutex: Arc::new(AMutex::new(())),
+            trajectory_commit_notify: Arc::new(Notify::new()),
+            trajectory_save_error: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             closed: false,
             closed_flag: Arc::new(AtomicBool::new(false)),
