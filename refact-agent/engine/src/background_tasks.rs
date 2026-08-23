@@ -50,6 +50,50 @@ impl BackgroundTasksHolder {
     }
 }
 
+pub async fn start_full_soak_background_tasks(gcx: Arc<GlobalContext>) -> BackgroundTasksHolder {
+    let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+    let goal_monitor_app = app_state.clone();
+    let background_agent_monitor_app = app_state.clone();
+    let background_agent_monitor_shutdown = gcx.shutdown_flag.clone();
+    let trajectory_index_coordinator = gcx.trajectory_index_coordinator.clone();
+    let trajectory_index_shutdown = gcx.shutdown_flag.clone();
+    let mut bg = BackgroundTasksHolder::new(vec![
+        tokio::spawn(crate::files_in_workspace::files_in_workspace_init_task(
+            gcx.clone(),
+        )),
+        tokio::spawn(crate::codegraph::cg_highlev::codegraph_background_task(
+            gcx.clone(),
+        )),
+        tokio::spawn(
+            crate::integrations::sessions::remove_expired_sessions_background_task(gcx.clone()),
+        ),
+        tokio::spawn(crate::chat::start_agent_monitor(app_state)),
+        tokio::spawn(crate::chat::start_goal_monitor(goal_monitor_app)),
+        tokio::spawn(
+            crate::chat::trajectory_index::trajectory_index_coordinator_background_task(
+                trajectory_index_coordinator,
+                trajectory_index_shutdown,
+            ),
+        ),
+        tokio::spawn(crate::agents::monitor::run_background_agent_monitor(
+            background_agent_monitor_app,
+            background_agent_monitor_shutdown,
+        )),
+        tokio::spawn({
+            let gcx = gcx.clone();
+            async move {
+                let app = crate::app_state::AppState::from_gcx(gcx).await;
+                crate::buddy::actor::buddy_background_task(app).await
+            }
+        }),
+    ]);
+    bg.push_back(crate::scheduler::runner::spawn(
+        crate::scheduler::runner::session_cron_store(),
+        gcx,
+    ));
+    bg
+}
+
 pub async fn start_background_tasks(
     gcx: Arc<GlobalContext>,
     _config_dir: &PathBuf,

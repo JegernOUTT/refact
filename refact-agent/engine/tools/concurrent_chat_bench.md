@@ -21,3 +21,14 @@ cd refact-agent/engine && cargo run --release -p refact-lsp --bin concurrent_cha
 ```
 
 CI runs the bounded quick fixtures and structural invariant tests; soak is for deliberate local before/after measurements.
+
+Run the provider-free full-system fixture in CI-sized form through its unit test, or collect the release soak report explicitly:
+
+```bash
+cd refact-agent/engine && cargo test -p refact-lsp --lib chat::perf_harness::tests::full_soak_ci_fixture_starts_required_subsystems -- --test-threads=1
+cd refact-agent/engine && cargo run --release -p refact-lsp --bin concurrent_chat_bench -- --full-soak > /tmp/refact-full-soak.json
+```
+
+`--full-soak` uses an isolated workspace and exercises actual chat sessions, queue processors, trajectory writer/index coordinator, trajectory watcher, CodeGraph's in-memory service and background scheduler, Buddy, task/goal and background-agent monitors, scheduler, exec registry, and session-cleanup startup. It uses deterministic local generation deltas and local tools; it makes no provider or network calls. The report compares `legacy` and `optimized` rollout switches serially on the same executable and machine, and labels this accurately as a **synthetic same-version comparison**, not a historical Wave 0 baseline.
+
+The report records p95 queue wait, first delta, checkpoint return, required flush, tool start, SSE serialization/broadcast, trajectory/index write bytes, session queue counters, monitor/cleanup scans, CPU/RSS, process IO, errors, tool ordering, and trajectory restore results. The production VecDB initializer requires embedding credentials, so the no-network fixture substitutes a local recording backend and declares that limitation in every report; CodeGraph remains an actual in-memory service whose background task drains the isolated workspace queue.

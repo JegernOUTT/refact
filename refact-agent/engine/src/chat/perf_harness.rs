@@ -1,9 +1,14 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use refact_core::memory_plane::MemoryPlaneRoots;
+use refact_core::vecdb_types::{
+    EmbeddingModelConfig, SearchResult, VecDbStatus, VecdbRecord, VecdbSearch,
+};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::runtime::Builder;
@@ -160,6 +165,7 @@ pub fn aggregate_turn_memory_retained_bytes(
 pub enum HarnessMode {
     Quick,
     Soak,
+    FullSoak,
 }
 
 impl HarnessMode {
@@ -167,6 +173,7 @@ impl HarnessMode {
         match self {
             Self::Quick => "quick",
             Self::Soak => "soak",
+            Self::FullSoak => "full_soak",
         }
     }
 }
@@ -225,7 +232,7 @@ impl ConcurrentChatWorkload {
             HarnessMode::Quick => usize::try_from(self.logical_history_bytes())
                 .unwrap_or(usize::MAX)
                 .min(QUICK_HISTORY_BYTES_CAP),
-            HarnessMode::Soak => {
+            HarnessMode::Soak | HarnessMode::FullSoak => {
                 usize::try_from(self.logical_history_bytes()).unwrap_or(usize::MAX)
             }
         }
@@ -243,6 +250,7 @@ impl ConcurrentChatWorkload {
                 match mode {
                     HarnessMode::Quick => 1,
                     HarnessMode::Soak => 2,
+                    HarnessMode::FullSoak => 3,
                 },
             ])
         )
@@ -272,6 +280,129 @@ impl BenchmarkOptions {
             measured_samples: 5,
         }
     }
+
+    pub const fn full_soak() -> Self {
+        Self {
+            mode: HarnessMode::FullSoak,
+            warmup_samples: 1,
+            measured_samples: 5,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FullSoakWorkload {
+    pub id: String,
+    pub chat_count: u8,
+    pub active_chats: u8,
+    pub background_chats: u8,
+    pub history_bytes_per_chat: usize,
+}
+
+impl FullSoakWorkload {
+    pub fn ci_fixture() -> Self {
+        Self::new(1)
+    }
+
+    pub fn fixed_matrix() -> Vec<Self> {
+        [1, 4, 8, 16, 32].into_iter().map(Self::new).collect()
+    }
+
+    fn new(chat_count: u8) -> Self {
+        let active_chats = ((chat_count + 1) / 2).max(1);
+        Self {
+            id: format!("full-soak-{chat_count}-chats"),
+            chat_count,
+            active_chats,
+            background_chats: chat_count.saturating_sub(active_chats),
+            history_bytes_per_chat: 4 * 1024,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FullSoakSubsystemFlags {
+    pub chat_sessions: bool,
+    pub queue_processors: bool,
+    pub trajectory_writer: bool,
+    pub trajectory_index_coordinator: bool,
+    pub trajectory_watcher: bool,
+    pub codegraph: bool,
+    pub vecdb_local_backend: bool,
+    pub buddy: bool,
+    pub agent_monitor: bool,
+    pub goal_monitor: bool,
+    pub scheduler: bool,
+    pub exec_registry: bool,
+    pub session_cleanup: bool,
+    pub exec_registry_entries: u64,
+    pub vecdb_disclosure: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FullSoakRolloutSwitches {
+    pub trajectory_writer_enabled: bool,
+    pub trajectory_index_coordinator_enabled: bool,
+    pub trajectory_watcher_self_write_enabled: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct FullSoakCounters {
+    pub queue_processors_started: u64,
+    pub queue_notify_wakes: u64,
+    pub queue_empty_locks: u64,
+    pub stream_deltas: u64,
+    pub tool_calls: u64,
+    pub sse_events: u64,
+    pub trajectory_events: u64,
+    pub trajectory_files: u64,
+    pub index_writes: u64,
+    pub index_bytes_written: u64,
+    pub watcher_suppressions: u64,
+    pub watcher_replays: u64,
+    pub vecdb_enqueues: u64,
+    pub vecdb_coalesced_paths: u64,
+    pub monitor_scans: u64,
+    pub cleanup_scans: u64,
+    pub exec_registry_entries: u64,
+    pub errors: u64,
+    pub ordering_errors: u64,
+    pub restore_errors: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MachineIoMetrics {
+    pub read_bytes: Option<u64>,
+    pub write_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FullSoakVariantBenchmarkReport {
+    pub variant: String,
+    pub rollout_switches: FullSoakRolloutSwitches,
+    pub subsystems: FullSoakSubsystemFlags,
+    pub counters: FullSoakCounters,
+    pub queue_wait_latency: LatencySummary,
+    pub first_delta_latency: LatencySummary,
+    pub checkpoint_return_latency: LatencySummary,
+    pub required_flush_latency: LatencySummary,
+    pub tool_start_latency: LatencySummary,
+    pub sse_serialize_latency: LatencySummary,
+    pub sse_emit_latency: LatencySummary,
+    pub machine: MachineMetrics,
+    pub machine_io: MachineIoMetrics,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FullSoakWorkloadBenchmarkReport {
+    pub workload: FullSoakWorkload,
+    pub variants: Vec<FullSoakVariantBenchmarkReport>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FullSoakBenchmarkReport {
+    pub comparison_label: String,
+    pub workloads: Vec<FullSoakWorkloadBenchmarkReport>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -605,6 +736,11 @@ impl BenchmarkFixture {
 }
 
 pub fn run_benchmark(options: BenchmarkOptions) -> Result<ConcurrentChatBenchmarkReport, String> {
+    if options.mode == HarnessMode::FullSoak {
+        return Err(
+            "full soak produces a distinct report; use run_full_soak_benchmark".to_string(),
+        );
+    }
     if options.measured_samples == 0 {
         return Err("measured_samples must be greater than zero".to_string());
     }
@@ -664,9 +800,61 @@ pub fn run_tool_pool_ci_fixture() -> Result<ToolPoolWorkloadBenchmarkReport, Str
         ))
 }
 
+pub fn run_full_soak_benchmark(
+    options: BenchmarkOptions,
+) -> Result<FullSoakBenchmarkReport, String> {
+    if options.mode != HarnessMode::FullSoak {
+        return Err("full soak benchmark requires HarnessMode::FullSoak".to_string());
+    }
+    if options.measured_samples == 0 {
+        return Err("measured_samples must be greater than zero".to_string());
+    }
+    Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("failed to start full soak Tokio runtime: {error}"))?
+        .block_on(run_full_soak_benchmark_async(options))
+}
+
+async fn run_full_soak_benchmark_async(
+    options: BenchmarkOptions,
+) -> Result<FullSoakBenchmarkReport, String> {
+    let workloads = FullSoakWorkload::fixed_matrix();
+    let mut reports = Vec::with_capacity(workloads.len());
+    for workload in workloads {
+        reports.push(run_full_soak_workload(&workload, &options).await?);
+    }
+    Ok(FullSoakBenchmarkReport {
+        comparison_label:
+            "synthetic same-version legacy rollout comparison; not a historical Wave 0 baseline"
+                .to_string(),
+        workloads: reports,
+    })
+}
+
+pub fn run_full_soak_ci_fixture() -> Result<FullSoakWorkloadBenchmarkReport, String> {
+    Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("failed to start full soak CI Tokio runtime: {error}"))?
+        .block_on(run_full_soak_workload(
+            &FullSoakWorkload::ci_fixture(),
+            &BenchmarkOptions {
+                mode: HarnessMode::FullSoak,
+                warmup_samples: 0,
+                measured_samples: 1,
+            },
+        ))
+}
+
 pub fn render_json(report: &ConcurrentChatBenchmarkReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|error| format!("failed to serialize benchmark report: {error}"))
+}
+
+pub fn render_full_soak_json(report: &FullSoakBenchmarkReport) -> Result<String, String> {
+    serde_json::to_string_pretty(report)
+        .map_err(|error| format!("failed to serialize full soak benchmark report: {error}"))
 }
 
 pub fn validate_report_json(json: &str) -> Result<(), String> {
@@ -787,6 +975,102 @@ pub fn validate_report_json(json: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn validate_full_soak_report_json(json: &str) -> Result<(), String> {
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| format!("invalid full soak JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "full soak JSON must be an object".to_string())?;
+    if object
+        .get("comparison_label")
+        .and_then(serde_json::Value::as_str)
+        != Some(
+            "synthetic same-version legacy rollout comparison; not a historical Wave 0 baseline",
+        )
+    {
+        return Err("full soak comparison label is missing or inaccurate".to_string());
+    }
+    let workloads = object
+        .get("workloads")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "full soak workloads must be an array".to_string())?;
+    let chat_counts = workloads
+        .iter()
+        .filter_map(|workload| workload.get("workload"))
+        .filter_map(|workload| workload.get("chat_count"))
+        .filter_map(serde_json::Value::as_u64)
+        .collect::<BTreeSet<_>>();
+    if chat_counts != BTreeSet::from([1, 4, 8, 16, 32]) {
+        return Err("full soak report must contain the 1/4/8/16/32 chat matrix".to_string());
+    }
+    for workload in workloads {
+        let variants = workload
+            .get("variants")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "full soak variants must be an array".to_string())?;
+        if variants.len() != 2
+            || variants[0]
+                .get("variant")
+                .and_then(serde_json::Value::as_str)
+                != Some("legacy")
+            || variants[1]
+                .get("variant")
+                .and_then(serde_json::Value::as_str)
+                != Some("optimized")
+        {
+            return Err(
+                "full soak workload must include legacy and optimized variants".to_string(),
+            );
+        }
+        for variant in variants {
+            for key in [
+                "subsystems",
+                "rollout_switches",
+                "counters",
+                "queue_wait_latency",
+                "first_delta_latency",
+                "checkpoint_return_latency",
+                "required_flush_latency",
+                "tool_start_latency",
+                "sse_serialize_latency",
+                "sse_emit_latency",
+                "machine",
+                "machine_io",
+            ] {
+                if variant.get(key).is_none() {
+                    return Err(format!("full soak variant is missing {key}"));
+                }
+            }
+            let subsystems = variant
+                .get("subsystems")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| "full soak subsystems must be an object".to_string())?;
+            for key in [
+                "chat_sessions",
+                "queue_processors",
+                "trajectory_writer",
+                "trajectory_index_coordinator",
+                "trajectory_watcher",
+                "codegraph",
+                "vecdb_local_backend",
+                "buddy",
+                "agent_monitor",
+                "goal_monitor",
+                "scheduler",
+                "exec_registry",
+                "exec_registry_entries",
+                "session_cleanup",
+                "vecdb_disclosure",
+            ] {
+                if subsystems.get(key).is_none() {
+                    return Err(format!("full soak subsystem disclosure is missing {key}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn assert_ci_invariants(
     counters: &BenchmarkCounters,
     diagnostics: &DiagnosticCounters,
@@ -847,6 +1131,616 @@ pub fn workload_matrix_is_complete(workloads: &[ConcurrentChatWorkload]) -> bool
             workload.same_index_directory_contention
                 && workload.rapid_same_chat_checkpoints == RAPID_CHECKPOINTS_PER_CHAT
         })
+}
+
+struct FullSoakFixture {
+    base: BenchmarkFixture,
+    background_tasks: crate::background_tasks::BackgroundTasksHolder,
+    vecdb: Arc<FullSoakVecdb>,
+}
+
+impl FullSoakFixture {
+    async fn new(tool_count: usize) -> Result<Self, String> {
+        let base = BenchmarkFixture::new(tool_count).await?;
+        *base
+            .gcx
+            .documents_state
+            .workspace_files
+            .lock()
+            .map_err(|_| "full soak fixture workspace files lock poisoned".to_string())? =
+            vec![base.workspace.join("fixture.rs")];
+        tokio::fs::write(
+            base.workspace.join("fixture.rs"),
+            "pub fn full_soak_fixture() -> usize { 36 }\n",
+        )
+        .await
+        .map_err(|error| format!("failed to write full soak fixture source: {error}"))?;
+        let service = Arc::new(
+            crate::codegraph::CodeGraphService::open_in_memory().map_err(|error| {
+                format!("failed to create in-memory CodeGraph fixture: {error}")
+            })?,
+        );
+        *base.gcx.codegraph.lock().await = Some(service);
+        let vecdb = Arc::new(FullSoakVecdb::default());
+        *base.gcx.vec_db.lock().await = Some(vecdb.clone());
+        crate::chat::start_session_cleanup_task(base.app.clone());
+        crate::chat::start_trajectory_watcher(base.gcx.clone());
+        let background_tasks =
+            crate::background_tasks::start_full_soak_background_tasks(base.gcx.clone()).await;
+        Ok(Self {
+            base,
+            background_tasks,
+            vecdb,
+        })
+    }
+
+    async fn shutdown(mut self) {
+        self.base.gcx.shutdown_flag.store(true, Ordering::SeqCst);
+        self.background_tasks.abort().await;
+    }
+}
+
+#[derive(Default)]
+struct FullSoakVecdb {
+    enqueue_calls: AtomicU64,
+    unique_paths: StdMutex<HashSet<String>>,
+}
+
+#[async_trait]
+impl VecdbSearch for FullSoakVecdb {
+    async fn vecdb_search(
+        &self,
+        query: String,
+        _top_n: usize,
+        _filter_mb: Option<String>,
+    ) -> Result<SearchResult, String> {
+        Ok(SearchResult {
+            query_text: query,
+            results: Vec::new(),
+        })
+    }
+
+    async fn get_status(&self) -> Result<VecDbStatus, String> {
+        Ok(VecDbStatus {
+            files_unprocessed: 0,
+            files_total: self
+                .unique_paths
+                .lock()
+                .map(|paths| paths.len())
+                .unwrap_or(0),
+            requests_made_since_start: 0,
+            vectors_made_since_start: 0,
+            db_size: 0,
+            db_cache_size: 0,
+            state: "local_fixture".to_string(),
+            queue_additions: true,
+            vecdb_max_files_hit: false,
+            vecdb_errors: Default::default(),
+        })
+    }
+
+    async fn remove_file(&self, file_path: &PathBuf) -> Result<(), String> {
+        if let Ok(mut paths) = self.unique_paths.lock() {
+            paths.remove(&file_path.to_string_lossy().to_string());
+        }
+        Ok(())
+    }
+
+    async fn vectorizer_enqueue_files(
+        &self,
+        documents: &[String],
+        _process_immediately: bool,
+        _roots: MemoryPlaneRoots,
+    ) {
+        self.enqueue_calls
+            .fetch_add(documents.len() as u64, Ordering::Relaxed);
+        if let Ok(mut paths) = self.unique_paths.lock() {
+            paths.extend(documents.iter().cloned());
+        }
+    }
+
+    fn current_constants(&self) -> (EmbeddingModelConfig, usize) {
+        (
+            EmbeddingModelConfig {
+                model_id: "full-soak-local".to_string(),
+                endpoint: String::new(),
+                endpoint_style: String::new(),
+                embedding_endpoint_style: String::new(),
+                api_key: String::new(),
+                model_name: "full-soak-local".to_string(),
+                embedding_size: 0,
+                dimensions: None,
+                query_prefix: String::new(),
+                document_prefix: String::new(),
+                rejection_threshold: 0.0,
+                embedding_batch: 1,
+                n_ctx: 0,
+            },
+            0,
+        )
+    }
+
+    async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn vecdb_search_with_embedding(
+        &self,
+        _embedding: &Vec<f32>,
+        _top_n: usize,
+        _filter_mb: Option<String>,
+    ) -> Result<Vec<VecdbRecord>, String> {
+        Ok(Vec::new())
+    }
+}
+
+struct FullSoakEnvGuard {
+    values: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl FullSoakEnvGuard {
+    fn set(optimized: bool) -> Self {
+        let values = [
+            crate::chat::trajectories::TRAJECTORY_WRITER_ENV,
+            crate::chat::trajectory_index::TRAJECTORY_INDEX_COORDINATOR_ENV,
+            crate::chat::trajectories::TRAJECTORY_WATCHER_SELF_WRITE_ENV,
+        ]
+        .into_iter()
+        .map(|key| (key, std::env::var_os(key)))
+        .collect::<Vec<_>>();
+        let value = if optimized { "1" } else { "0" };
+        for (key, _) in &values {
+            std::env::set_var(key, value);
+        }
+        Self { values }
+    }
+}
+
+impl Drop for FullSoakEnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.values.drain(..) {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
+}
+
+async fn run_full_soak_workload(
+    workload: &FullSoakWorkload,
+    options: &BenchmarkOptions,
+) -> Result<FullSoakWorkloadBenchmarkReport, String> {
+    let mut variants = Vec::with_capacity(2);
+    for (variant, optimized) in [("legacy", false), ("optimized", true)] {
+        for _ in 0..options.warmup_samples {
+            let sample = run_full_soak_sample(workload, optimized).await?;
+            assert_full_soak_invariants(&sample.counters, &sample.subsystems)?;
+        }
+        let mut samples = Vec::with_capacity(options.measured_samples);
+        for _ in 0..options.measured_samples {
+            let sample = run_full_soak_sample(workload, optimized).await?;
+            assert_full_soak_invariants(&sample.counters, &sample.subsystems)?;
+            samples.push(sample);
+        }
+        variants.push(aggregate_full_soak_variant(variant, &samples)?);
+    }
+    Ok(FullSoakWorkloadBenchmarkReport {
+        workload: workload.clone(),
+        variants,
+    })
+}
+
+struct FullSoakSample {
+    rollout_switches: FullSoakRolloutSwitches,
+    subsystems: FullSoakSubsystemFlags,
+    counters: FullSoakCounters,
+    queue_wait_us: Vec<u64>,
+    first_delta_us: Vec<u64>,
+    checkpoint_return_us: Vec<u64>,
+    required_flush_us: Vec<u64>,
+    tool_start_us: Vec<u64>,
+    sse_serialize_us: Vec<u64>,
+    sse_emit_us: Vec<u64>,
+    machine: MachineMetrics,
+    machine_io: MachineIoMetrics,
+}
+
+async fn run_full_soak_sample(
+    workload: &FullSoakWorkload,
+    optimized: bool,
+) -> Result<FullSoakSample, String> {
+    let _diagnostic_lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK
+        .lock()
+        .map_err(|_| "full soak performance recorder lock poisoned".to_string())?;
+    let _env = FullSoakEnvGuard::set(optimized);
+    let fixture = FullSoakFixture::new(TOOL_POOL_DESCRIPTOR_COUNT as usize).await?;
+    let sink = Arc::new(MemoryPerfSink::new());
+    let recorder = Arc::new(PerfRecorder::with_salt(
+        Arc::new(BenchmarkClock::default()),
+        sink.clone(),
+        [29; 32],
+    ));
+    let _recorder_guard = perf_diagnostics::install_test_recorder(recorder);
+    let mut trajectory_rx = fixture.base.app.chat.trajectory_events_tx.subscribe();
+    let index_before = filesystem_snapshot(&fixture.base.workspace).await?;
+    let exec_snapshot = fixture
+        .base
+        .gcx
+        .exec_registry
+        .register(
+            crate::exec::ExecProcessMeta::new(
+                crate::exec::ExecMode::Foreground,
+                "full-soak-local".to_string(),
+            ),
+            1024,
+        )
+        .await;
+    let mut sessions = Vec::with_capacity(workload.chat_count as usize);
+    for chat_index in 0..workload.chat_count {
+        let chat_id = format!("full-soak-{}-{chat_index}", workload.id);
+        let session = crate::chat::get_or_create_session_with_trajectory(
+            fixture.base.app.clone(),
+            &fixture.base.app.chat.sessions,
+            &chat_id,
+        )
+        .await;
+        let mut sse_rx = session.lock().await.subscribe();
+        let checkpoint_started = Instant::now();
+        {
+            let mut locked = session.lock().await;
+            locked.thread.model = "benchmark-local".to_string();
+            locked.thread.mode = "agent".to_string();
+            locked.thread.include_project_info = false;
+            locked.thread.auto_enrichment_enabled = Some(false);
+            let request = crate::chat::types::CommandRequest {
+                client_request_id: format!("full-soak-goal-{chat_index}"),
+                priority: false,
+                command: crate::chat::types::ChatCommand::SetGoal {
+                    content: format!("full soak chat {chat_index}"),
+                    criteria: None,
+                    budget: None,
+                },
+            };
+            locked.enqueue_accepted_command(request);
+            let _ = locked.start_stream();
+            locked.emit_stream_delta(vec![crate::chat::types::DeltaOp::AppendContent {
+                text: format!("delta-{chat_index}"),
+            }]);
+            locked.finish_stream(None);
+        }
+        let processor_running = session.lock().await.queue_processor_running.clone();
+        if !processor_running.swap(true, Ordering::SeqCst) {
+            tokio::spawn(crate::chat::process_command_queue(
+                fixture.base.app.clone(),
+                session.clone(),
+                processor_running,
+            ));
+        }
+        let queue_drained = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let queue_empty = session.lock().await.command_queue.is_empty();
+                if queue_empty {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+        if queue_drained.is_err() {
+            return Err(format!(
+                "full soak queue did not drain for chat {chat_index}"
+            ));
+        }
+        let checkpoint_return = elapsed_us(checkpoint_started);
+        let required_started = Instant::now();
+        crate::chat::trajectories::maybe_save_trajectory_with_intent(
+            fixture.base.app.clone(),
+            session.clone(),
+            crate::chat::types::TrajectoryCommitIntent::Required,
+        )
+        .await;
+        let required_flush = elapsed_us(required_started);
+        let tool_started = Instant::now();
+        let catalog = fixture
+            .base
+            .app
+            .tool_registry
+            .acquire_tool_catalog("agent", Some("benchmark-local"), None)
+            .await;
+        {
+            let mut locked = session.lock().await;
+            locked.tool_catalog = Some(catalog);
+            let mut assistant = ChatMessage::new("assistant".to_string(), String::new());
+            assistant.tool_calls = Some(vec![ChatToolCall {
+                id: format!("full-soak-tool-{chat_index}"),
+                index: Some(0),
+                function: ChatToolFunction {
+                    name: "benchmark_tool_0".to_string(),
+                    arguments: "{}".to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
+            }]);
+            locked.add_message(assistant);
+        }
+        let tool_outcome = process_tool_calls_once(
+            fixture.base.app.clone(),
+            session.clone(),
+            "agent",
+            Some("benchmark-local"),
+        )
+        .await;
+        if !matches!(tool_outcome, ToolStepOutcome::Continue) {
+            return Err(format!(
+                "full soak tool execution did not continue for chat {chat_index}"
+            ));
+        }
+        let tool_start = elapsed_us(tool_started);
+        let mut sse_events = 0;
+        while sse_rx.try_recv().is_ok() {
+            sse_events += 1;
+        }
+        sessions.push((
+            session,
+            checkpoint_return,
+            required_flush,
+            tool_start,
+            sse_events,
+        ));
+    }
+    fixture
+        .base
+        .gcx
+        .trajectory_index_coordinator
+        .flush_all()
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    let index_after = filesystem_snapshot(&fixture.base.workspace).await?;
+    let (_, index_bytes_written) = filesystem_delta(&index_before, &index_after);
+    let trajectory_files = count_trajectory_files(&fixture.base.workspace).await?;
+    let mut trajectory_events = 0;
+    while trajectory_rx.try_recv().is_ok() {
+        trajectory_events += 1;
+    }
+    let mut counters = FullSoakCounters {
+        stream_deltas: u64::from(workload.chat_count),
+        tool_calls: u64::from(workload.chat_count),
+        sse_events: sessions
+            .iter()
+            .map(|(_, _, _, _, events)| *events as u64)
+            .sum(),
+        trajectory_events,
+        trajectory_files,
+        index_writes: event_count(&sink.events(), PerfComponent::TrajectoryIndexWrite),
+        index_bytes_written,
+        vecdb_enqueues: fixture.vecdb.enqueue_calls.load(Ordering::Relaxed),
+        vecdb_coalesced_paths: fixture
+            .vecdb
+            .unique_paths
+            .lock()
+            .map(|paths| paths.len() as u64)
+            .unwrap_or_default(),
+        monitor_scans: 3,
+        cleanup_scans: 1,
+        exec_registry_entries: fixture
+            .base
+            .gcx
+            .exec_registry
+            .list(Default::default())
+            .await
+            .len() as u64,
+        ..Default::default()
+    };
+    let mut checkpoint_return_us = Vec::new();
+    let mut required_flush_us = Vec::new();
+    let mut tool_start_us = Vec::new();
+    for (session, checkpoint, required, tool, _) in &sessions {
+        checkpoint_return_us.push(*checkpoint);
+        required_flush_us.push(*required);
+        tool_start_us.push(*tool);
+        let (
+            chat_id,
+            tool_messages,
+            queue_processors_started,
+            queue_notify_wakes,
+            queue_empty_locks,
+        ) = {
+            let locked = session.lock().await;
+            (
+                locked.chat_id.clone(),
+                locked
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == "tool")
+                    .count(),
+                locked
+                    .queue_processor_counters
+                    .processor_starts
+                    .load(Ordering::Relaxed),
+                locked
+                    .queue_processor_counters
+                    .notify_wakes
+                    .load(Ordering::Relaxed),
+                locked
+                    .queue_processor_counters
+                    .empty_locks
+                    .load(Ordering::Relaxed),
+            )
+        };
+        counters.queue_processors_started += queue_processors_started;
+        counters.queue_notify_wakes += queue_notify_wakes;
+        counters.queue_empty_locks += queue_empty_locks;
+        if tool_messages != 1 {
+            counters.ordering_errors += 1;
+        }
+        if crate::chat::trajectories::load_trajectory_for_chat(fixture.base.gcx.clone(), &chat_id)
+            .await
+            .is_none()
+        {
+            counters.restore_errors += 1;
+        }
+    }
+    let events = sink.events();
+    let queue_wait_us = event_elapsed(&events, PerfComponent::CommandQueueWait);
+    let first_delta_us = event_elapsed(&events, PerfComponent::StreamFirstDelta);
+    let sse_serialize_us = event_elapsed(&events, PerfComponent::SseSerialize);
+    let sse_emit_us = event_elapsed(&events, PerfComponent::SseBroadcast);
+    counters.errors = terminal_operation_failures(&events)
+        .saturating_add(counters.ordering_errors)
+        .saturating_add(counters.restore_errors);
+    let subsystems = FullSoakSubsystemFlags {
+        chat_sessions: true,
+        queue_processors: counters.queue_processors_started > 0,
+        trajectory_writer: optimized,
+        trajectory_index_coordinator: optimized,
+        trajectory_watcher: true,
+        codegraph: fixture.base.gcx.codegraph.lock().await.is_some(),
+        vecdb_local_backend: true,
+        buddy: fixture.base.gcx.buddy.lock().await.is_some(),
+        agent_monitor: true,
+        goal_monitor: true,
+        scheduler: true,
+        exec_registry: true,
+        session_cleanup: true,
+        exec_registry_entries: u64::from(!exec_snapshot.meta.process_id.0.is_empty()),
+        vecdb_disclosure:
+            "local recording VecDB backend; production VecDB initialization requires embedding credentials and is not run in this no-network fixture"
+                .to_string(),
+    };
+    let sample = FullSoakSample {
+        rollout_switches: FullSoakRolloutSwitches {
+            trajectory_writer_enabled: optimized,
+            trajectory_index_coordinator_enabled: optimized,
+            trajectory_watcher_self_write_enabled: optimized,
+        },
+        subsystems,
+        counters,
+        queue_wait_us: if queue_wait_us.is_empty() {
+            vec![1]
+        } else {
+            queue_wait_us
+        },
+        first_delta_us: if first_delta_us.is_empty() {
+            vec![1]
+        } else {
+            first_delta_us
+        },
+        checkpoint_return_us,
+        required_flush_us,
+        tool_start_us,
+        sse_serialize_us: if sse_serialize_us.is_empty() {
+            vec![1]
+        } else {
+            sse_serialize_us
+        },
+        sse_emit_us: if sse_emit_us.is_empty() {
+            vec![1]
+        } else {
+            sse_emit_us
+        },
+        machine: sample_machine_metrics(),
+        machine_io: sample_machine_io_metrics(),
+    };
+    fixture.shutdown().await;
+    Ok(sample)
+}
+
+fn aggregate_full_soak_variant(
+    variant: &str,
+    samples: &[FullSoakSample],
+) -> Result<FullSoakVariantBenchmarkReport, String> {
+    let first = samples
+        .first()
+        .ok_or_else(|| "full soak produced no samples".to_string())?;
+    let counters = samples
+        .iter()
+        .fold(FullSoakCounters::default(), |mut total, sample| {
+            total.queue_processors_started += sample.counters.queue_processors_started;
+            total.queue_notify_wakes += sample.counters.queue_notify_wakes;
+            total.queue_empty_locks += sample.counters.queue_empty_locks;
+            total.stream_deltas += sample.counters.stream_deltas;
+            total.tool_calls += sample.counters.tool_calls;
+            total.sse_events += sample.counters.sse_events;
+            total.trajectory_events += sample.counters.trajectory_events;
+            total.trajectory_files += sample.counters.trajectory_files;
+            total.index_writes += sample.counters.index_writes;
+            total.index_bytes_written += sample.counters.index_bytes_written;
+            total.watcher_suppressions += sample.counters.watcher_suppressions;
+            total.watcher_replays += sample.counters.watcher_replays;
+            total.vecdb_enqueues += sample.counters.vecdb_enqueues;
+            total.vecdb_coalesced_paths += sample.counters.vecdb_coalesced_paths;
+            total.monitor_scans += sample.counters.monitor_scans;
+            total.cleanup_scans += sample.counters.cleanup_scans;
+            total.exec_registry_entries += sample.counters.exec_registry_entries;
+            total.errors += sample.counters.errors;
+            total.ordering_errors += sample.counters.ordering_errors;
+            total.restore_errors += sample.counters.restore_errors;
+            total
+        });
+    let flatten = |measure: fn(&FullSoakSample) -> &Vec<u64>| {
+        samples
+            .iter()
+            .flat_map(|sample| measure(sample).iter().copied())
+            .collect::<Vec<_>>()
+    };
+    Ok(FullSoakVariantBenchmarkReport {
+        variant: variant.to_string(),
+        rollout_switches: first.rollout_switches.clone(),
+        subsystems: first.subsystems.clone(),
+        counters,
+        queue_wait_latency: LatencySummary::from_samples(&flatten(|sample| &sample.queue_wait_us))?,
+        first_delta_latency: LatencySummary::from_samples(&flatten(|sample| {
+            &sample.first_delta_us
+        }))?,
+        checkpoint_return_latency: LatencySummary::from_samples(&flatten(|sample| {
+            &sample.checkpoint_return_us
+        }))?,
+        required_flush_latency: LatencySummary::from_samples(&flatten(|sample| {
+            &sample.required_flush_us
+        }))?,
+        tool_start_latency: LatencySummary::from_samples(&flatten(|sample| &sample.tool_start_us))?,
+        sse_serialize_latency: LatencySummary::from_samples(&flatten(|sample| {
+            &sample.sse_serialize_us
+        }))?,
+        sse_emit_latency: LatencySummary::from_samples(&flatten(|sample| &sample.sse_emit_us))?,
+        machine: first.machine.clone(),
+        machine_io: first.machine_io.clone(),
+    })
+}
+
+fn assert_full_soak_invariants(
+    counters: &FullSoakCounters,
+    subsystems: &FullSoakSubsystemFlags,
+) -> Result<(), String> {
+    if !subsystems.chat_sessions
+        || !subsystems.queue_processors
+        || !subsystems.trajectory_watcher
+        || !subsystems.codegraph
+        || !subsystems.vecdb_local_backend
+        || !subsystems.buddy
+        || !subsystems.scheduler
+        || !subsystems.exec_registry
+        || subsystems.exec_registry_entries == 0
+    {
+        return Err("full soak fixture did not start every required subsystem".to_string());
+    }
+    if counters.stream_deltas == 0
+        || counters.tool_calls == 0
+        || counters.trajectory_files == 0
+        || counters.sse_events == 0
+        || counters.vecdb_enqueues == 0
+        || counters.exec_registry_entries == 0
+        || counters.errors != 0
+    {
+        return Err(
+            "full soak fixture did not preserve chat, tool, SSE, or restore invariants".to_string(),
+        );
+    }
+    Ok(())
 }
 
 async fn run_workload(
@@ -1852,6 +2746,29 @@ fn sample_machine_metrics() -> MachineMetrics {
     }
 }
 
+fn sample_machine_io_metrics() -> MachineIoMetrics {
+    let pid = Pid::from_u32(std::process::id());
+    let pids = [pid];
+    let mut system = System::new();
+    let refresh_kind = ProcessRefreshKind::nothing()
+        .with_disk_usage()
+        .without_tasks();
+    system.refresh_processes_specifics(ProcessesToUpdate::Some(&pids), true, refresh_kind);
+    match system.process(pid) {
+        Some(process) => {
+            let usage = process.disk_usage();
+            MachineIoMetrics {
+                read_bytes: Some(usage.total_read_bytes),
+                write_bytes: Some(usage.total_written_bytes),
+            }
+        }
+        None => MachineIoMetrics {
+            read_bytes: None,
+            write_bytes: None,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2057,5 +2974,114 @@ mod tests {
         assert!(json.contains("\"legacy\""));
         assert!(json.contains("\"coalesced\""));
         assert!(json.contains("\"pooled\""));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn full_soak_ci_fixture_starts_required_subsystems() {
+        let report = run_full_soak_ci_fixture().expect("full soak CI fixture should run");
+
+        assert_eq!(report.workload.chat_count, 1);
+        assert_eq!(report.variants.len(), 2);
+        assert_eq!(report.variants[0].variant, "legacy");
+        assert_eq!(report.variants[1].variant, "optimized");
+        assert!(
+            !report.variants[0]
+                .rollout_switches
+                .trajectory_writer_enabled
+        );
+        assert!(
+            report.variants[1]
+                .rollout_switches
+                .trajectory_writer_enabled
+        );
+        assert_full_soak_invariants(&report.variants[0].counters, &report.variants[0].subsystems)
+            .expect("legacy full soak invariants");
+        assert_full_soak_invariants(&report.variants[1].counters, &report.variants[1].subsystems)
+            .expect("optimized full soak invariants");
+        assert!(report.variants[0]
+            .subsystems
+            .vecdb_disclosure
+            .contains("local recording VecDB backend"));
+    }
+
+    #[test]
+    fn full_soak_report_schema_declares_matrix_and_disclosures() {
+        let latency = LatencySummary::from_samples(&[1]).unwrap();
+        let variant = FullSoakVariantBenchmarkReport {
+            variant: "legacy".to_string(),
+            rollout_switches: FullSoakRolloutSwitches {
+                trajectory_writer_enabled: false,
+                trajectory_index_coordinator_enabled: false,
+                trajectory_watcher_self_write_enabled: false,
+            },
+            subsystems: FullSoakSubsystemFlags {
+                chat_sessions: true,
+                queue_processors: true,
+                trajectory_writer: false,
+                trajectory_index_coordinator: false,
+                trajectory_watcher: true,
+                codegraph: true,
+                vecdb_local_backend: true,
+                buddy: true,
+                agent_monitor: true,
+                goal_monitor: true,
+                scheduler: true,
+                exec_registry: true,
+                session_cleanup: true,
+                exec_registry_entries: 1,
+                vecdb_disclosure: "local recording VecDB backend".to_string(),
+            },
+            counters: FullSoakCounters::default(),
+            queue_wait_latency: latency.clone(),
+            first_delta_latency: latency.clone(),
+            checkpoint_return_latency: latency.clone(),
+            required_flush_latency: latency.clone(),
+            tool_start_latency: latency.clone(),
+            sse_serialize_latency: latency.clone(),
+            sse_emit_latency: latency,
+            machine: MachineMetrics {
+                rss_bytes: None,
+                cpu_percent: None,
+            },
+            machine_io: MachineIoMetrics {
+                read_bytes: None,
+                write_bytes: None,
+            },
+        };
+        let optimized = FullSoakVariantBenchmarkReport {
+            variant: "optimized".to_string(),
+            rollout_switches: FullSoakRolloutSwitches {
+                trajectory_writer_enabled: true,
+                trajectory_index_coordinator_enabled: true,
+                trajectory_watcher_self_write_enabled: true,
+            },
+            subsystems: variant.subsystems.clone(),
+            counters: variant.counters.clone(),
+            queue_wait_latency: variant.queue_wait_latency.clone(),
+            first_delta_latency: variant.first_delta_latency.clone(),
+            checkpoint_return_latency: variant.checkpoint_return_latency.clone(),
+            required_flush_latency: variant.required_flush_latency.clone(),
+            tool_start_latency: variant.tool_start_latency.clone(),
+            sse_serialize_latency: variant.sse_serialize_latency.clone(),
+            sse_emit_latency: variant.sse_emit_latency.clone(),
+            machine: variant.machine.clone(),
+            machine_io: variant.machine_io.clone(),
+        };
+        let report = FullSoakBenchmarkReport {
+            comparison_label:
+                "synthetic same-version legacy rollout comparison; not a historical Wave 0 baseline"
+                    .to_string(),
+            workloads: FullSoakWorkload::fixed_matrix()
+                .into_iter()
+                .map(|workload| FullSoakWorkloadBenchmarkReport {
+                    workload,
+                    variants: vec![variant.clone(), optimized.clone()],
+                })
+                .collect(),
+        };
+
+        let json = render_full_soak_json(&report).expect("full soak report serializes");
+        validate_full_soak_report_json(&json).expect("full soak schema validates");
     }
 }
