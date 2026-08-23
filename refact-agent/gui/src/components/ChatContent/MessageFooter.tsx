@@ -12,6 +12,7 @@ import {
 } from "../../utils/calculateUsageInputTokens";
 import { formatUsd } from "../../utils/getMetering";
 import { CheckpointButton } from "../../features/Checkpoints";
+import { Portal } from "../Portal";
 import { Icon, IconButton, Tooltip } from "../ui";
 import styles from "./MessageFooter.module.css";
 
@@ -165,94 +166,98 @@ export const MessageFooter: React.FC<MessageFooterProps> = ({
               </button>
             </HoverCard.Trigger>
             <HoverCard.Portal>
-              <HoverCard.Content
-                align="center"
-                className={`${styles.usageContent} rf-popover-motion`}
-                collisionPadding={12}
-                side="top"
-                sideOffset={8}
-              >
-                <Flex direction="column" gap="2">
-                  <Text size="2" weight="bold" mb="1">
-                    This Message
-                  </Text>
+              <Portal>
+                <HoverCard.Content
+                  align="center"
+                  className={`${styles.usageContent} rf-popover-motion`}
+                  collisionPadding={12}
+                  side="top"
+                  sideOffset={8}
+                >
+                  <Flex direction="column" gap="2">
+                    <Text size="2" weight="bold" mb="1">
+                      This Message
+                    </Text>
 
-                  {usage && (
-                    <>
-                      <TokenDisplay
-                        label="Context size"
-                        value={contextTokens}
-                      />
-                      {cacheReadTokens > 0 && (
+                    {usage && (
+                      <>
                         <TokenDisplay
-                          label="Cache read"
-                          value={cacheReadTokens}
+                          label="Context size"
+                          value={contextTokens}
                         />
-                      )}
-                      {cacheCreationTokens > 0 && (
-                        <TokenDisplay
-                          label="Cache creation"
-                          value={cacheCreationTokens}
-                        />
-                      )}
-                      <TokenDisplay
-                        label="Output tokens"
-                        value={outputTokens}
-                      />
-                      {usage.completion_tokens_details?.reasoning_tokens !=
-                        null &&
-                        usage.completion_tokens_details.reasoning_tokens >
-                          0 && (
+                        {cacheReadTokens > 0 && (
                           <TokenDisplay
-                            label="Reasoning tokens"
-                            value={
-                              usage.completion_tokens_details.reasoning_tokens
-                            }
-                          />
-                        )}
-                    </>
-                  )}
-
-                  {hasUsd && (
-                    <>
-                      <div className={styles.usageSeparator} />
-                      <Flex
-                        align="center"
-                        justify="between"
-                        width="100%"
-                        mb="1"
-                      >
-                        <Text size="2" weight="bold">
-                          Cost
-                        </Text>
-                        <Text size="2">{formatUsd(meteringUsd.total_usd)}</Text>
-                      </Flex>
-                      <UsdDisplay
-                        label="Prompt"
-                        value={meteringUsd.prompt_usd}
-                      />
-                      <UsdDisplay
-                        label="Completion"
-                        value={meteringUsd.generated_usd}
-                      />
-                      {meteringUsd.cache_read_usd !== undefined &&
-                        meteringUsd.cache_read_usd > 0 && (
-                          <UsdDisplay
                             label="Cache read"
-                            value={meteringUsd.cache_read_usd}
+                            value={cacheReadTokens}
                           />
                         )}
-                      {meteringUsd.cache_creation_usd !== undefined &&
-                        meteringUsd.cache_creation_usd > 0 && (
-                          <UsdDisplay
+                        {cacheCreationTokens > 0 && (
+                          <TokenDisplay
                             label="Cache creation"
-                            value={meteringUsd.cache_creation_usd}
+                            value={cacheCreationTokens}
                           />
                         )}
-                    </>
-                  )}
-                </Flex>
-              </HoverCard.Content>
+                        <TokenDisplay
+                          label="Output tokens"
+                          value={outputTokens}
+                        />
+                        {usage.completion_tokens_details?.reasoning_tokens !=
+                          null &&
+                          usage.completion_tokens_details.reasoning_tokens >
+                            0 && (
+                            <TokenDisplay
+                              label="Reasoning tokens"
+                              value={
+                                usage.completion_tokens_details.reasoning_tokens
+                              }
+                            />
+                          )}
+                      </>
+                    )}
+
+                    {hasUsd && (
+                      <>
+                        <div className={styles.usageSeparator} />
+                        <Flex
+                          align="center"
+                          justify="between"
+                          width="100%"
+                          mb="1"
+                        >
+                          <Text size="2" weight="bold">
+                            Cost
+                          </Text>
+                          <Text size="2">
+                            {formatUsd(meteringUsd.total_usd)}
+                          </Text>
+                        </Flex>
+                        <UsdDisplay
+                          label="Prompt"
+                          value={meteringUsd.prompt_usd}
+                        />
+                        <UsdDisplay
+                          label="Completion"
+                          value={meteringUsd.generated_usd}
+                        />
+                        {meteringUsd.cache_read_usd !== undefined &&
+                          meteringUsd.cache_read_usd > 0 && (
+                            <UsdDisplay
+                              label="Cache read"
+                              value={meteringUsd.cache_read_usd}
+                            />
+                          )}
+                        {meteringUsd.cache_creation_usd !== undefined &&
+                          meteringUsd.cache_creation_usd > 0 && (
+                            <UsdDisplay
+                              label="Cache creation"
+                              value={meteringUsd.cache_creation_usd}
+                            />
+                          )}
+                      </>
+                    )}
+                  </Flex>
+                </HoverCard.Content>
+              </Portal>
             </HoverCard.Portal>
           </HoverCard.Root>
         )}

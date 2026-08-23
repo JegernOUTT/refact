@@ -1,12 +1,14 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Theme } from "@radix-ui/themes";
 import { describe, expect, it } from "vitest";
+import { ThemePropsContext } from "../Theme/ThemePropsContext";
 import { MessageFooter } from "./MessageFooter";
 
 function renderFooter() {
   return render(
-    <Theme>
+    <ThemePropsContext.Provider
+      value={{ host: "web", themeProps: {}, appearance: "dark" }}
+    >
       <MessageFooter
         usage={{
           prompt_tokens: 3,
@@ -16,13 +18,15 @@ function renderFooter() {
           total_tokens: 16_014,
         }}
       />
-    </Theme>,
+    </ThemePropsContext.Provider>,
   );
 }
 
 function renderFooterWithAliases() {
   return render(
-    <Theme>
+    <ThemePropsContext.Provider
+      value={{ host: "web", themeProps: {}, appearance: "dark" }}
+    >
       <MessageFooter
         usage={{
           prompt_tokens: 3,
@@ -32,7 +36,7 @@ function renderFooterWithAliases() {
           total_tokens: 16_014,
         }}
       />
-    </Theme>,
+    </ThemePropsContext.Provider>,
   );
 }
 
@@ -47,6 +51,11 @@ describe("MessageFooter", () => {
     expect(screen.getByText("10.60k")).toBeInTheDocument();
     expect(screen.getByText("Cache creation")).toBeInTheDocument();
     expect(screen.getByText("5.40k")).toBeInTheDocument();
+
+    const themeRoot = screen
+      .getByText("This Message")
+      .closest(".radix-themes");
+    expect(themeRoot?.getAttribute("data-appearance")).toBe("dark");
   });
 
   it("shows cache usage token details from legacy aliases", async () => {
