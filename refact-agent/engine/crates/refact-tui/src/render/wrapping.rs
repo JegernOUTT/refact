@@ -3,7 +3,7 @@ use std::ops::Range;
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use textwrap::core::{display_width, Word};
+use textwrap::core::display_width;
 use textwrap::{Options, WordSeparator};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -680,13 +680,34 @@ fn map_owned_wrapped_line_to_range(
     wrapped: &str,
     synthetic_prefix: &str,
 ) -> Range<usize> {
-    let wrapped = if synthetic_prefix.is_empty() {
-        wrapped
-    } else {
-        wrapped.strip_prefix(synthetic_prefix).unwrap_or(wrapped)
+    let wrapped = match synthetic_prefix.is_empty() {
+        true => wrapped,
+        false => match wrapped.strip_prefix(synthetic_prefix) {
+            Some(wrapped) => wrapped,
+            None => {
+                tracing::warn!(
+                    wrapped = %wrapped,
+                    synthetic_prefix,
+                    cursor,
+                    "wrap_ranges owned line was missing its synthetic prefix"
+                );
+                wrapped
+            }
+        },
     };
 
-    let mut start = cursor;
+    let mut start = cursor.min(text.len());
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    if start != cursor {
+        tracing::warn!(
+            wrapped = %wrapped,
+            cursor,
+            start,
+            "wrap_ranges owned line cursor was not a character boundary"
+        );
+    }
     while start < text.len() && !wrapped.starts_with(' ') {
         let Some(ch) = text[start..].chars().next() else {
             break;
@@ -698,7 +719,6 @@ fn map_owned_wrapped_line_to_range(
     }
 
     let mut end = start;
-    let mut saw_source_char = false;
     let mut chars = wrapped.chars().peekable();
     while let Some(ch) = chars.next() {
         if end < text.len() {
@@ -707,16 +727,11 @@ fn map_owned_wrapped_line_to_range(
             };
             if ch == src {
                 end += src.len_utf8();
-                saw_source_char = true;
                 continue;
             }
         }
 
         if ch == '-' && chars.peek().is_none() {
-            continue;
-        }
-
-        if !saw_source_char {
             continue;
         }
 
@@ -729,7 +744,18 @@ fn map_owned_wrapped_line_to_range(
         break;
     }
 
-    start..end
+    if text.is_char_boundary(start) && text.is_char_boundary(end) {
+        start..end
+    } else {
+        tracing::warn!(
+            wrapped = %wrapped,
+            cursor,
+            start,
+            end,
+            "wrap_ranges owned line mapped to a non-character boundary"
+        );
+        start..start
+    }
 }
 
 fn trailing_ascii_spaces_len(text: &str) -> usize {
@@ -974,6 +1000,10 @@ impl MixedUrlWord {
 }
 
 fn mixed_url_wrap_line<'a>(line: &'a Line<'a>, rt_opts: RtOptions<'a>) -> Vec<Line<'a>> {
+    if rt_opts.width == 0 {
+        return vec![line.clone()];
+    }
+
     let (flat, span_bounds) = flatten_line_text(line);
     let initial_width = rt_opts
         .width
@@ -1036,23 +1066,23 @@ fn mixed_url_wrap_ranges(
     let mut line_limit = initial_width.max(1);
 
     for word in words {
-        let mut pending = split_mixed_url_word(text, word, line_limit);
-        let mut pending_idx = 0usize;
-
-        while let Some(piece) = pending.get(pending_idx).cloned() {
+        let mut piece_start = word.range.start;
+        while piece_start < word.range.end {
             let empty_line_prefix_width = if line_start.is_none() && lines.is_empty() {
                 leading_space_width
             } else {
                 0
             };
             let empty_line_piece_limit = line_limit.saturating_sub(empty_line_prefix_width).max(1);
-            if line_start.is_none() && !piece.is_url && piece.width(text) > empty_line_piece_limit {
-                pending.splice(
-                    pending_idx..=pending_idx,
-                    split_mixed_url_word(text, piece, empty_line_piece_limit),
-                );
-                continue;
-            }
+            let piece_limit = if line_start.is_none() {
+                empty_line_piece_limit
+            } else {
+                line_limit
+            };
+            let piece = MixedUrlWord {
+                range: piece_start..mixed_url_word_piece_end(text, &word, piece_start, piece_limit),
+                is_url: word.is_url,
+            };
 
             let piece_width = piece.width(text);
             let inter_word_space = line_start
@@ -1062,6 +1092,7 @@ fn mixed_url_wrap_ranges(
                 piece.is_url
                     || empty_line_prefix_width + piece_width <= line_limit
                     || empty_line_prefix_width >= line_limit
+                    || is_single_character_range(text, &piece.range)
             } else {
                 line_width + inter_word_space + piece_width <= line_limit
             };
@@ -1084,7 +1115,7 @@ fn mixed_url_wrap_ranges(
                     line_width += inter_word_space + piece_width;
                 }
                 line_end = piece.range.end;
-                pending_idx += 1;
+                piece_start = piece.range.end;
                 continue;
             }
 
@@ -1104,23 +1135,35 @@ fn mixed_url_wrap_ranges(
     lines
 }
 
-fn split_mixed_url_word(text: &str, word: MixedUrlWord, line_limit: usize) -> Vec<MixedUrlWord> {
-    if word.is_url || word.width(text) <= line_limit {
-        return vec![word];
+fn mixed_url_word_piece_end(
+    text: &str,
+    word: &MixedUrlWord,
+    start: usize,
+    line_limit: usize,
+) -> usize {
+    if word.is_url {
+        return word.range.end;
     }
 
-    let source = Word::from(&text[word.range.clone()]);
-    let mut offset = word.range.start;
-    let mut pieces = Vec::new();
-    for piece in source.break_apart(line_limit.max(1)) {
-        let end = offset + piece.word.len();
-        pieces.push(MixedUrlWord {
-            range: offset..end,
-            is_url: false,
-        });
-        offset = end;
+    let mut cursor = start;
+    let mut width = 0usize;
+    while cursor < word.range.end {
+        let ch = text[cursor..]
+            .chars()
+            .next()
+            .expect("word ranges always start at character boundaries");
+        let ch_width = char_width(ch).max(1);
+        if width > 0 && width + ch_width > line_limit {
+            break;
+        }
+        width += ch_width;
+        cursor += ch.len_utf8();
     }
-    pieces
+    cursor
+}
+
+fn is_single_character_range(text: &str, range: &Range<usize>) -> bool {
+    text[range.clone()].chars().count() == 1
 }
 
 fn flatten_line_text(line: &Line<'_>) -> (String, Vec<(Range<usize>, Style)>) {
@@ -1184,6 +1227,16 @@ fn slice_line_spans<'a>(
             let local_start = seg_start - start;
             let local_end = seg_end - start;
             let content = original.spans[idx].content.as_ref();
+            if !content.is_char_boundary(local_start) || !content.is_char_boundary(local_end) {
+                tracing::warn!(
+                    range_start = range.start,
+                    range_end = range.end,
+                    span_start = start,
+                    span_end = end,
+                    "wrapped range was not aligned to span character boundaries"
+                );
+                continue;
+            }
             spans.push(Span {
                 style: *style,
                 content: Cow::Borrowed(&content[local_start..local_end]),
@@ -1331,6 +1384,58 @@ mod tests {
                 "wrapping prose",
             ]
         );
+    }
+
+    #[test]
+    fn adaptive_wrap_line_terminates_for_wide_characters_before_urls_at_width_one() {
+        for text in ["见 https://a.co", "🎉 https://a.co"] {
+            let line = Line::from(text);
+            let out = adaptive_wrap_line(&line, RtOptions::new(1));
+            assert_eq!(
+                borrowed_plain(&out),
+                vec![text.split_once(' ').unwrap().0, "https://a.co"]
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_url_wrapping_matches_wrap_line_at_width_zero() {
+        let line = Line::from("见 🎉 https://a.co");
+        let adaptive = adaptive_wrap_line(&line, RtOptions::new(0));
+        let plain = plain(wrap_line(line_to_owned(&line), Some(0)));
+        assert_eq!(borrowed_plain(&adaptive), plain);
+    }
+
+    #[test]
+    fn adaptive_wrap_line_handles_cjk_emoji_and_urls_across_widths() {
+        let text = "见 🎉 https://a.co after";
+        for width in [0, 1, 2, 20, 40] {
+            let line = Line::from(text);
+            let out = adaptive_wrap_line(&line, RtOptions::new(width));
+            let rebuilt = borrowed_plain(&out)
+                .join("")
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>();
+            let expected = text
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>();
+            assert_eq!(rebuilt, expected);
+        }
+    }
+
+    #[test]
+    fn owned_range_mapping_and_slicing_reject_non_character_boundaries() {
+        let text = "🎉 https://a.co";
+        let mapped = map_owned_wrapped_line_to_range(text, 1, "x", "");
+        assert!(text.is_char_boundary(mapped.start));
+        assert!(text.is_char_boundary(mapped.end));
+
+        let line = Line::from(text);
+        let (_, span_bounds) = flatten_line_text(&line);
+        let sliced = slice_line_spans(&line, &span_bounds, &(1..2));
+        assert!(sliced.spans.is_empty());
     }
 
     #[test]
