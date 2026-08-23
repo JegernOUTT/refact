@@ -814,6 +814,7 @@ mod tests {
         }));
     }
 
+    #[serial]
     #[tokio::test]
     async fn more_than_thirty_two_parallel_safe_tools_start_together() {
         const TOOL_COUNT: usize = 40;
