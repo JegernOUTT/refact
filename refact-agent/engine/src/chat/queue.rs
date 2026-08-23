@@ -113,6 +113,27 @@ fn apply_manual_context_files(
     }
 }
 
+fn user_message_with_client_message_id(
+    content: ChatContent,
+    checkpoints: Vec<crate::git::checkpoints::Checkpoint>,
+    client_message_id: Option<String>,
+) -> ChatMessage {
+    let mut message = ChatMessage {
+        message_id: Uuid::new_v4().to_string(),
+        role: "user".to_string(),
+        content,
+        checkpoints,
+        ..Default::default()
+    };
+    if let Some(client_message_id) = client_message_id {
+        message.extra.insert(
+            CLIENT_MESSAGE_ID_EXTRA_KEY.to_string(),
+            serde_json::Value::String(client_message_id),
+        );
+    }
+    message
+}
+
 async fn aborted_before_start_generation(
     session_arc: &Arc<AMutex<super::types::ChatSession>>,
 ) -> bool {
@@ -184,6 +205,7 @@ pub async fn inject_priority_messages_if_any(
             attachments,
             context_files,
             suppress_auto_enrichment,
+            client_message_id,
         } = request.command
         {
             let (session_id, project_dir) = {
@@ -252,13 +274,11 @@ pub async fn inject_priority_messages_if_any(
                     thread: session.thread.clone(),
                     content: parsed_content.clone(),
                 };
-                let user_message = ChatMessage {
-                    message_id: Uuid::new_v4().to_string(),
-                    role: "user".to_string(),
-                    content: parsed_content,
+                let user_message = user_message_with_client_message_id(
+                    parsed_content,
                     checkpoints,
-                    ..Default::default()
-                };
+                    client_message_id,
+                );
                 session.add_message(user_message);
                 note_user_turn_resets_goal_pursuit(&mut session);
                 accepted
@@ -1416,6 +1436,7 @@ pub async fn process_command_queue(
                 attachments,
                 context_files,
                 suppress_auto_enrichment,
+                client_message_id,
             } => {
                 let mut skill_activation_info = None;
                 if let Some(text) = content.as_str() {
@@ -1638,6 +1659,7 @@ pub async fn process_command_queue(
                                 pending_message_id: pending_message_id.clone(),
                                 content: content.clone(),
                                 attachments: attachments.clone(),
+                                client_message_id: client_message_id.clone(),
                                 checkpoints: checkpoints.clone(),
                                 context_files: context_files.clone(),
                                 suppress_auto_enrichment,
@@ -1697,13 +1719,11 @@ pub async fn process_command_queue(
                         thread: session.thread.clone(),
                         content: parsed_content.clone(),
                     });
-                    let user_message = ChatMessage {
-                        message_id: Uuid::new_v4().to_string(),
-                        role: "user".to_string(),
-                        content: parsed_content.clone(),
+                    let user_message = user_message_with_client_message_id(
+                        parsed_content.clone(),
                         checkpoints,
-                        ..Default::default()
-                    };
+                        client_message_id,
+                    );
                     session.add_message(user_message);
                     note_user_turn_resets_goal_pursuit(&mut session);
                     if session.messages.iter().filter(|m| m.role == "user").count() == 1 {
@@ -1740,6 +1760,7 @@ pub async fn process_command_queue(
                             attachments: add_attachments,
                             context_files: add_ctx_files,
                             suppress_auto_enrichment: _,
+                            client_message_id: add_client_message_id,
                         } = additional.command
                         {
                             if !add_ctx_files.is_empty() {
@@ -1752,12 +1773,11 @@ pub async fn process_command_queue(
                                 thread: session.thread.clone(),
                                 content: add_parsed.clone(),
                             });
-                            let add_message = ChatMessage {
-                                message_id: Uuid::new_v4().to_string(),
-                                role: "user".to_string(),
-                                content: add_parsed,
-                                ..Default::default()
-                            };
+                            let add_message = user_message_with_client_message_id(
+                                add_parsed,
+                                Vec::new(),
+                                add_client_message_id,
+                            );
                             session.add_message(add_message);
                             note_user_turn_resets_goal_pursuit(&mut session);
                         }
@@ -2274,13 +2294,11 @@ pub async fn process_command_queue(
 
                     let parsed_content =
                         parse_content_with_attachments(&pending.content, &pending.attachments);
-                    let user_message = ChatMessage {
-                        message_id: Uuid::new_v4().to_string(),
-                        role: "user".to_string(),
-                        content: parsed_content,
-                        checkpoints: pending.checkpoints,
-                        ..Default::default()
-                    };
+                    let user_message = user_message_with_client_message_id(
+                        parsed_content,
+                        pending.checkpoints,
+                        pending.client_message_id,
+                    );
                     session.add_message(user_message);
                     note_user_turn_resets_goal_pursuit(&mut session);
 
@@ -3022,6 +3040,16 @@ mod tests {
             .expect("queue processor panicked");
     }
 
+    fn user_message_command(content: &str, client_message_id: Option<&str>) -> ChatCommand {
+        ChatCommand::UserMessage {
+            content: json!(content),
+            attachments: vec![],
+            context_files: vec![],
+            suppress_auto_enrichment: false,
+            client_message_id: client_message_id.map(str::to_string),
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn queue_notify_idle_processors_do_not_wake_without_notifications() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -3323,6 +3351,7 @@ mod tests {
                     attachments: vec![],
                     context_files: vec![],
                     suppress_auto_enrichment: false,
+                    client_message_id: None,
                 },
             },
             CommandRequest {
@@ -3640,6 +3669,7 @@ mod tests {
             attachments: vec![],
             context_files: vec![],
             suppress_auto_enrichment: false,
+            client_message_id: None,
         }));
         queue.push_back(make_request(ChatCommand::SetParams {
             patch: json!({"model": "gpt-4"}),
@@ -3655,6 +3685,7 @@ mod tests {
             attachments: vec![],
             context_files: vec![],
             suppress_auto_enrichment: false,
+            client_message_id: None,
         }));
         queue.push_back(make_request(ChatCommand::ToolDecision {
             tool_call_id: "tc1".into(),
@@ -3683,12 +3714,14 @@ mod tests {
             attachments: vec![],
             context_files: vec![],
             suppress_auto_enrichment: false,
+            client_message_id: None,
         }));
         queue.push_back(make_request(ChatCommand::UserMessage {
             content: json!("another"),
             attachments: vec![],
             context_files: vec![],
             suppress_auto_enrichment: false,
+            client_message_id: None,
         }));
         queue.push_back(make_request(ChatCommand::Abort {}));
         assert_eq!(find_allowed_command_while_paused(&queue), Some(2));
@@ -4178,6 +4211,7 @@ mod tests {
             attachments: vec![],
             context_files: vec![],
             suppress_auto_enrichment: false,
+            client_message_id: None,
         }));
         queue.push_back(make_request(ChatCommand::ToolDecision {
             tool_call_id: "tc1".into(),
@@ -4194,6 +4228,7 @@ mod tests {
             attachments: vec![],
             context_files: vec![],
             suppress_auto_enrichment: false,
+            client_message_id: None,
         }));
         queue.push_back(make_request(ChatCommand::IdeToolResult {
             tool_call_id: "tc1".into(),
@@ -4211,6 +4246,7 @@ mod tests {
             attachments: vec![],
             context_files: vec![],
             suppress_auto_enrichment: false,
+            client_message_id: None,
         }));
         queue.push_back(make_request(ChatCommand::Abort {}));
         assert_eq!(find_allowed_command_while_waiting_ide(&queue), Some(1));
@@ -4239,6 +4275,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         });
         queue.push_back(CommandRequest {
@@ -4249,6 +4286,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         });
         let priority_req = CommandRequest {
@@ -4259,6 +4297,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         };
         let insert_pos = queue
@@ -4282,6 +4321,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         });
         queue.push_back(CommandRequest {
@@ -4292,6 +4332,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         });
         let priority_req = CommandRequest {
@@ -4302,6 +4343,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         };
         let insert_pos = queue
@@ -4364,6 +4406,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         });
         queue.push_back(CommandRequest {
@@ -4374,6 +4417,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         });
         queue.push_back(CommandRequest {
@@ -4384,6 +4428,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         });
         queue.push_back(CommandRequest {
@@ -4419,6 +4464,7 @@ mod tests {
                     attachments: vec![],
                     context_files: vec![],
                     suppress_auto_enrichment: false,
+                    client_message_id: None,
                 },
             });
         }
@@ -4434,6 +4480,110 @@ mod tests {
                     .content_text_only()
                     .contains("resume pursuit")
         }));
+    }
+
+    #[tokio::test]
+    async fn priority_user_message_preserves_client_message_id_and_server_message_id() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(
+            "priority-client-message-id".to_string(),
+        )));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.checkpoints_enabled = false;
+            session.command_queue.push_back(CommandRequest {
+                client_request_id: "priority-user".to_string(),
+                priority: true,
+                command: user_message_command("same content", Some("optimistic-priority")),
+            });
+        }
+
+        assert!(inject_priority_messages_if_any(app, session_arc.clone()).await);
+
+        let session = session_arc.lock().await;
+        let message = session
+            .messages
+            .iter()
+            .find(|message| message.role == "user")
+            .expect("priority user message");
+        assert_eq!(
+            message.extra.get(CLIENT_MESSAGE_ID_EXTRA_KEY),
+            Some(&json!("optimistic-priority"))
+        );
+        assert_ne!(message.message_id, "optimistic-priority");
+        assert!(uuid::Uuid::parse_str(&message.message_id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn ordinary_batched_user_messages_preserve_distinct_client_message_ids() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(
+            "ordinary-client-message-ids".to_string(),
+        )));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.checkpoints_enabled = false;
+            session.command_queue.push_back(CommandRequest {
+                client_request_id: "ordinary-first".to_string(),
+                priority: false,
+                command: user_message_command("same content", Some("optimistic-1")),
+            });
+            session.command_queue.push_back(CommandRequest {
+                client_request_id: "ordinary-second".to_string(),
+                priority: false,
+                command: user_message_command("same content", Some("optimistic-2")),
+            });
+        }
+        let processor_running = session_arc.lock().await.queue_processor_running.clone();
+        processor_running.store(true, Ordering::SeqCst);
+        let handle = tokio::spawn(process_command_queue(
+            app,
+            session_arc.clone(),
+            processor_running,
+        ));
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if session_arc
+                    .lock()
+                    .await
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == "user")
+                    .count()
+                    == 2
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ordinary user messages were not added");
+
+        {
+            let session = session_arc.lock().await;
+            let messages = session
+                .messages
+                .iter()
+                .filter(|message| message.role == "user")
+                .collect::<Vec<_>>();
+            assert_eq!(messages.len(), 2);
+            assert_eq!(
+                messages[0].extra.get(CLIENT_MESSAGE_ID_EXTRA_KEY),
+                Some(&json!("optimistic-1"))
+            );
+            assert_eq!(
+                messages[1].extra.get(CLIENT_MESSAGE_ID_EXTRA_KEY),
+                Some(&json!("optimistic-2"))
+            );
+            assert_ne!(messages[0].message_id, messages[1].message_id);
+            assert!(uuid::Uuid::parse_str(&messages[0].message_id).is_ok());
+            assert!(uuid::Uuid::parse_str(&messages[1].message_id).is_ok());
+        }
+        close_processor(&session_arc, handle).await;
     }
 
     #[tokio::test]
@@ -4454,6 +4604,7 @@ mod tests {
                     attachments: vec![],
                     context_files: vec![],
                     suppress_auto_enrichment: true,
+                    client_message_id: None,
                 },
             });
         }
@@ -4493,6 +4644,7 @@ mod tests {
                     attachments: vec![],
                     context_files: vec![],
                     suppress_auto_enrichment: false,
+                    client_message_id: None,
                 },
             });
             assert!(session.reprioritize_queued_command("multimodal-user", true));
@@ -4526,6 +4678,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         });
         queue.push_back(CommandRequest {
@@ -4536,6 +4689,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         });
         queue.push_back(CommandRequest {
@@ -4546,6 +4700,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         });
         queue.push_back(CommandRequest {
@@ -4556,6 +4711,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         });
 

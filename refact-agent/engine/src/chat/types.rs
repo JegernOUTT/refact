@@ -20,7 +20,7 @@ pub use refact_chat_api::{
     CriterionVerdict, DeltaOp, DiffBox, EventEnvelope, GoalAttempt, GoalBudget, GoalCriterion,
     GoalEvent, GoalLedgerEntry, GoalLedgerOp, GoalProgress, GoalSnapshot, GoalStatus, PauseReason,
     QueuedItem, RuntimeState, SessionState, TaskMeta, ThreadParams, TimelineEntry,
-    ToolDecisionItem, WindowBounds, WorktreeMeta,
+    ToolDecisionItem, WindowBounds, WorktreeMeta, CLIENT_MESSAGE_ID_EXTRA_KEY,
 };
 
 fn epoch_ms_now() -> u64 {

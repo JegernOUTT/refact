@@ -153,6 +153,7 @@ fn user_message_command(content: String) -> ChatCommand {
         attachments: vec![],
         context_files: vec![],
         suppress_auto_enrichment: false,
+        client_message_id: None,
     }
 }
 

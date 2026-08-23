@@ -311,6 +311,7 @@ impl Tool for ToolAgentSteer {
                     attachments: vec![],
                     context_files: vec![],
                     suppress_auto_enrichment: false,
+                    client_message_id: None,
                 },
             )
             .await?;
@@ -700,6 +701,7 @@ mod tests {
                 attachments,
                 context_files,
                 suppress_auto_enrichment,
+                ..
             } => {
                 assert_eq!(
                     content.as_str(),

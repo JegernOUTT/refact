@@ -2963,6 +2963,7 @@ mod tests {
                 attachments: attachments.clone(),
                 context_files: context_files.clone(),
                 suppress_auto_enrichment: true,
+                client_message_id: None,
             },
         });
 
@@ -2980,6 +2981,7 @@ mod tests {
                 attachments: actual_attachments,
                 context_files: actual_context_files,
                 suppress_auto_enrichment,
+                ..
             } => {
                 assert_eq!(actual_content, &content);
                 assert_eq!(actual_attachments, &attachments);
@@ -5183,6 +5185,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         });
 
@@ -5974,6 +5977,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         });
         session.command_queue.push_back(CommandRequest {
@@ -6028,6 +6032,7 @@ mod tests {
                 attachments: vec![],
                 context_files: vec![],
                 suppress_auto_enrichment: false,
+                client_message_id: None,
             },
         });
         let snap = session.snapshot();

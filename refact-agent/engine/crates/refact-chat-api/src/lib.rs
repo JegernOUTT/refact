@@ -25,6 +25,24 @@ pub use refact_core::buddy_meta::BuddyThreadMeta;
 pub use refact_core::chat_types::{ChatMessage, ContextFile};
 pub use refact_core::worktree_meta::WorktreeMeta;
 
+pub const CLIENT_MESSAGE_ID_EXTRA_KEY: &str = "client_message_id";
+pub const MAX_CLIENT_MESSAGE_ID_CHARS: usize = 256;
+
+pub fn validate_client_message_id(client_message_id: Option<&str>) -> Result<(), String> {
+    let Some(client_message_id) = client_message_id else {
+        return Ok(());
+    };
+    if client_message_id.is_empty() {
+        return Err("client_message_id must be non-empty when provided".to_string());
+    }
+    if client_message_id.chars().count() > MAX_CLIENT_MESSAGE_ID_CHARS {
+        return Err(format!(
+            "client_message_id exceeds {MAX_CLIENT_MESSAGE_ID_CHARS} characters"
+        ));
+    }
+    Ok(())
+}
+
 fn default_true() -> bool {
     true
 }
@@ -787,6 +805,8 @@ pub enum ChatCommand {
         context_files: Vec<serde_json::Value>,
         #[serde(default)]
         suppress_auto_enrichment: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_message_id: Option<String>,
     },
     RetryFromIndex {
         index: usize,
@@ -1471,14 +1491,46 @@ mod tests {
                 content,
                 attachments,
                 context_files,
+                client_message_id,
                 suppress_auto_enrichment: _,
             } => {
                 assert_eq!(content, json!("hello"));
                 assert!(attachments.is_empty());
                 assert!(context_files.is_empty());
+                assert_eq!(client_message_id, None);
             }
             _ => panic!("Wrong variant"),
         }
+    }
+
+    #[test]
+    fn test_chat_command_user_message_client_message_id_roundtrips() {
+        let json = json!({
+            "type": "user_message",
+            "content": "hello",
+            "client_message_id": "optimistic-1"
+        });
+        let command: ChatCommand = serde_json::from_value(json.clone()).unwrap();
+        match &command {
+            ChatCommand::UserMessage {
+                client_message_id, ..
+            } => assert_eq!(client_message_id.as_deref(), Some("optimistic-1")),
+            _ => panic!("Wrong variant"),
+        }
+        let serialized = serde_json::to_value(command).unwrap();
+        assert_eq!(serialized["type"], json["type"]);
+        assert_eq!(serialized["content"], json["content"]);
+        assert_eq!(serialized["client_message_id"], json["client_message_id"]);
+    }
+
+    #[test]
+    fn test_client_message_id_validation_bounds() {
+        assert!(validate_client_message_id(None).is_ok());
+        assert!(validate_client_message_id(Some("optimistic-1")).is_ok());
+        assert!(validate_client_message_id(Some("")).is_err());
+        assert!(
+            validate_client_message_id(Some(&"a".repeat(MAX_CLIENT_MESSAGE_ID_CHARS + 1))).is_err()
+        );
     }
 
     #[test]

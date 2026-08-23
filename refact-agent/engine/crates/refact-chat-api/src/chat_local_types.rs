@@ -132,6 +132,7 @@ pub struct PendingBrowserMessage {
     pub pending_message_id: String,
     pub content: serde_json::Value,
     pub attachments: Vec<serde_json::Value>,
+    pub client_message_id: Option<String>,
     pub checkpoints: Vec<Checkpoint>,
     pub context_files: Vec<serde_json::Value>,
     pub suppress_auto_enrichment: bool,

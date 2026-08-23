@@ -1050,6 +1050,7 @@ impl CronRunner {
                     attachments: vec![],
                     context_files: vec![],
                     suppress_auto_enrichment: false,
+                    client_message_id: None,
                 },
             }) != EnqueueCommandOutcome::Accepted
             {
@@ -1206,6 +1207,7 @@ impl CronRunner {
                     attachments: vec![],
                     context_files: vec![],
                     suppress_auto_enrichment: false,
+                    client_message_id: None,
                 },
             }) != EnqueueCommandOutcome::Accepted
             {
@@ -3253,6 +3255,7 @@ mod tests {
                     attachments: vec![],
                     context_files: vec![],
                     suppress_auto_enrichment: false,
+                    client_message_id: None,
                 },
             });
         }

@@ -523,10 +523,14 @@ pub async fn handle_v1_chat_command(
             content,
             attachments,
             context_files,
+            client_message_id,
             suppress_auto_enrichment: _,
         } => validate_content_with_attachments(content, attachments)
             .err()
-            .or_else(|| validate_context_files(context_files).err()),
+            .or_else(|| validate_context_files(context_files).err())
+            .or_else(|| {
+                refact_chat_api::validate_client_message_id(client_message_id.as_deref()).err()
+            }),
         ChatCommand::RetryFromIndex {
             content,
             attachments,
@@ -905,6 +909,7 @@ mod tests {
                         json!({"file_name": "notes.md", "file_content": "context"}),
                     ],
                     suppress_auto_enrichment: true,
+                    client_message_id: None,
                 },
             });
             session
@@ -943,6 +948,8 @@ mod tests {
                 attachments,
                 context_files,
                 suppress_auto_enrichment,
+                client_message_id,
+                ..
             } => {
                 assert_eq!(content[0], json!({"type": "text", "text": "describe this"}));
                 assert_eq!(content[1]["type"], "image_url");
@@ -959,6 +966,7 @@ mod tests {
                     &vec![json!({"file_name": "notes.md", "file_content": "context"})]
                 );
                 assert!(*suppress_auto_enrichment);
+                assert_eq!(client_message_id, &None);
             }
             command => panic!("expected user message, got {command:?}"),
         }
@@ -1016,6 +1024,35 @@ mod tests {
             .read()
             .await
             .contains_key(&unknown_chat_id));
+    }
+
+    #[tokio::test]
+    async fn command_rejects_oversized_client_message_id() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+        let request = CommandRequest {
+            client_request_id: "oversized-client-message-id".to_string(),
+            priority: false,
+            command: ChatCommand::UserMessage {
+                content: json!("hello"),
+                attachments: vec![],
+                context_files: vec![],
+                suppress_auto_enrichment: false,
+                client_message_id: Some(
+                    "a".repeat(refact_chat_api::MAX_CLIENT_MESSAGE_ID_CHARS + 1),
+                ),
+            },
+        };
+
+        let response = handle_v1_chat_command(
+            State(app),
+            Path("oversized-client-message-id".to_string()),
+            hyper::body::Bytes::from(serde_json::to_vec(&request).unwrap()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
