@@ -1408,11 +1408,13 @@ mod tests {
 
     #[test]
     fn test_autonomous_no_confirm_bypasses_confirmation() {
-        let thread = ThreadParams {
-            autonomous_no_confirm: true,
-            ..Default::default()
-        };
+        let mut thread = ThreadParams::default();
+        let (changed, _) = crate::chat::queue::apply_setparams_patch(
+            &mut thread,
+            &serde_json::json!({"autonomous_no_confirm": true}),
+        );
 
+        assert!(changed);
         assert!(should_auto_approve_confirmation(&thread, "shell"));
         assert!(should_auto_approve_confirmation(&thread, "cat"));
         assert!(should_auto_approve_confirmation(&thread, "apply_patch"));

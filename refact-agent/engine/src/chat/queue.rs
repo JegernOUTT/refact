@@ -529,6 +529,12 @@ pub fn apply_setparams_patch(
             changed = true;
         }
     }
+    if let Some(val) = patch.get("autonomous_no_confirm").and_then(|v| v.as_bool()) {
+        if thread.autonomous_no_confirm != val {
+            thread.autonomous_no_confirm = val;
+            changed = true;
+        }
+    }
     if let Some(val) = patch.get("auto_enrichment_enabled") {
         if val.is_null() {
             if thread.auto_enrichment_enabled.is_some() {
@@ -539,6 +545,20 @@ pub fn apply_setparams_patch(
             let new_val = Some(b);
             if thread.auto_enrichment_enabled != new_val {
                 thread.auto_enrichment_enabled = new_val;
+                changed = true;
+            }
+        }
+    }
+    if let Some(val) = patch.get("auto_compact_enabled") {
+        if val.is_null() {
+            if thread.auto_compact_enabled.is_some() {
+                thread.auto_compact_enabled = None;
+                changed = true;
+            }
+        } else if let Some(b) = val.as_bool() {
+            let new_val = Some(b);
+            if thread.auto_compact_enabled != new_val {
+                thread.auto_compact_enabled = new_val;
                 changed = true;
             }
         }
@@ -3795,6 +3815,69 @@ mod tests {
         let (changed, _) = apply_setparams_patch(&mut thread, &patch);
         assert!(changed);
         assert!(!thread.checkpoints_enabled);
+    }
+
+    #[test]
+    fn test_apply_setparams_autonomous_no_confirm_persists_in_trajectory_snapshot() {
+        let mut thread = ThreadParams::default();
+        let (changed, sanitized) =
+            apply_setparams_patch(&mut thread, &json!({"autonomous_no_confirm": true}));
+
+        assert!(changed);
+        assert!(thread.autonomous_no_confirm);
+        assert_eq!(sanitized["autonomous_no_confirm"], json!(true));
+
+        let snapshot =
+            refact_chat_history::trajectory_snapshot::TrajectorySnapshot::from_thread_parts(
+                "autonomous-no-confirm".to_string(),
+                &thread,
+                Vec::new(),
+                "2026-08-24T00:00:00Z".to_string(),
+                1,
+            );
+        let encoded = serde_json::to_value(snapshot).unwrap();
+        let decoded: refact_chat_history::trajectory_snapshot::TrajectorySnapshot =
+            serde_json::from_value(encoded).unwrap();
+        assert!(decoded.autonomous_no_confirm);
+
+        let (changed, _) =
+            apply_setparams_patch(&mut thread, &json!({"autonomous_no_confirm": "invalid"}));
+        assert!(!changed);
+        assert!(thread.autonomous_no_confirm);
+    }
+
+    #[test]
+    fn test_apply_setparams_auto_compact_enabled_persists_in_trajectory_snapshot() {
+        let mut thread = ThreadParams::default();
+        let (changed, sanitized) =
+            apply_setparams_patch(&mut thread, &json!({"auto_compact_enabled": true}));
+
+        assert!(changed);
+        assert_eq!(thread.auto_compact_enabled, Some(true));
+        assert_eq!(sanitized["auto_compact_enabled"], json!(true));
+
+        let snapshot =
+            refact_chat_history::trajectory_snapshot::TrajectorySnapshot::from_thread_parts(
+                "auto-compact-enabled".to_string(),
+                &thread,
+                Vec::new(),
+                "2026-08-24T00:00:00Z".to_string(),
+                1,
+            );
+        let encoded = serde_json::to_value(snapshot).unwrap();
+        let decoded: refact_chat_history::trajectory_snapshot::TrajectorySnapshot =
+            serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.auto_compact_enabled, Some(true));
+
+        let (changed, _) =
+            apply_setparams_patch(&mut thread, &json!({"auto_compact_enabled": "invalid"}));
+        assert!(!changed);
+        assert_eq!(thread.auto_compact_enabled, Some(true));
+
+        let (changed, _) =
+            apply_setparams_patch(&mut thread, &json!({"auto_compact_enabled": null}));
+        assert!(changed);
+        assert_eq!(thread.auto_compact_enabled, None);
     }
 
     #[test]

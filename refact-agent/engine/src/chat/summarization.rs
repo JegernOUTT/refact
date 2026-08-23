@@ -7272,8 +7272,12 @@ mod tests {
     #[test]
     fn forced_context_limit_summarization_bypasses_auto_compact_disabled_gate() {
         let mut thread = crate::chat::types::ThreadParams::default();
-        thread.auto_compact_enabled = Some(false);
+        let (changed, _) = crate::chat::queue::apply_setparams_patch(
+            &mut thread,
+            &serde_json::json!({"auto_compact_enabled": false}),
+        );
 
+        assert!(changed);
         assert!(!should_attempt_segment_summarization(&thread, false));
         assert!(should_attempt_segment_summarization(&thread, true));
     }
