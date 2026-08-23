@@ -1649,6 +1649,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_tool_pool_returns_the_confirmation_instance_to_execution() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let registry = fixture_registry(gcx.clone(), builds);
+        let catalog = registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model"))
+            .await;
+        let pool = registry
+            .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
+            .await;
+
+        let confirmation_tool = registry
+            .take_turn_tool(
+                &pool,
+                registry.gcx.clone(),
+                "agent",
+                Some("provider/model"),
+                &catalog,
+                "fixture",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let confirmation_instance = confirmation_tool.tool_description().description;
+        AppToolRegistry::app_turn_tool_pool(&pool)
+            .unwrap()
+            .return_tool(confirmation_tool)
+            .await;
+        let execution_tool = registry
+            .take_turn_tool(
+                &pool,
+                registry.gcx.clone(),
+                "agent",
+                Some("provider/model"),
+                &catalog,
+                "fixture",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            confirmation_instance,
+            execution_tool.tool_description().description
+        );
+    }
+
+    #[tokio::test]
     async fn turn_tool_pool_same_name_parallelism_is_bounded_by_multiplicity() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let builds = Arc::new(AtomicUsize::new(0));

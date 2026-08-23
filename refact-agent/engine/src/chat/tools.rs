@@ -409,6 +409,15 @@ async fn record_tool_activity(
     }
 }
 
+fn tool_pool_key(desc: &refact_tool_api::ToolDesc) -> String {
+    format!(
+        "{}\u{1f}{:?}\u{1f}{}",
+        crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&desc.name),
+        desc.source.source_type,
+        desc.source.config_path
+    )
+}
+
 fn get_context_files_from_messages(messages: &[ChatMessage]) -> Vec<String> {
     let mut paths = Vec::new();
     for msg in messages {
@@ -3061,60 +3070,45 @@ async fn execute_parallel_batch(
     model_id: Option<&str>,
 ) -> Vec<(usize, bool, Vec<ChatMessage>, Vec<ContextFile>)> {
     if let Some(pool) = turn_tool_pool.as_ref() {
-        let mut required_slots: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut required_slots: std::collections::HashMap<
+            String,
+            (refact_tool_api::ToolDesc, usize),
+        > = std::collections::HashMap::new();
         for (_, tool_call) in batch {
-            let name = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(
+            let resolved_name = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(
                 &tool_call.function.name,
             );
-            let Some(desc) = catalog.index.tools.iter().find(|desc| desc.name == name) else {
+            let Some(desc) = catalog
+                .index
+                .tools
+                .iter()
+                .find(|desc| desc.name == resolved_name)
+            else {
                 continue;
             };
-            let key = format!(
-                "{}\u{1f}{:?}\u{1f}{}",
-                desc.name, desc.source.source_type, desc.source.config_path
-            );
-            *required_slots.entry(key).or_default() += 1;
+            let entry = required_slots
+                .entry(tool_pool_key(desc))
+                .or_insert_with(|| (desc.clone(), 0));
+            entry.1 += 1;
         }
-        let slots = required_slots
+        let requested_slots = required_slots
             .into_iter()
-            .filter_map(|(key, count)| {
+            .filter_map(|(key, (desc, count))| {
                 let required = count.min(max_parallel);
                 let prepared = prepared_parallel_slots
                     .get(&key)
                     .copied()
                     .unwrap_or_default();
-                (required > prepared).then(|| (key, required))
+                (required > prepared).then(|| (key, desc, required))
             })
             .collect::<Vec<_>>();
-        let requested_slots = slots
+        let descriptors = requested_slots
             .iter()
-            .map(|(key, count)| {
-                let mut parts = key.split('\u{1f}');
-                let name = parts.next().expect("tool pool key must include a name");
-                let source_type = parts
-                    .next()
-                    .expect("tool pool key must include source type");
-                let source_path = parts
-                    .next()
-                    .expect("tool pool key must include source path");
-                let desc = catalog
-                    .index
-                    .tools
-                    .iter()
-                    .find(|desc| {
-                        desc.name == name
-                            && format!("{:?}", desc.source.source_type) == source_type
-                            && desc.source.config_path == source_path
-                    })
-                    .expect("tool pool key must reference a catalog descriptor")
-                    .clone();
-                (desc, *count)
-            })
+            .map(|(_, desc, count)| (desc.clone(), *count))
             .collect::<Vec<_>>();
         if let Err(error) = app
             .tool_registry
-            .prepare_turn_tool_pool(pool, &catalog, mode_id, model_id, &requested_slots)
+            .prepare_turn_tool_pool(pool, &catalog, mode_id, model_id, &descriptors)
             .await
         {
             return batch
@@ -3138,7 +3132,7 @@ async fn execute_parallel_batch(
                 })
                 .collect();
         }
-        for (key, count) in slots {
+        for (key, _, count) in requested_slots {
             prepared_parallel_slots.insert(key, count);
         }
     }
