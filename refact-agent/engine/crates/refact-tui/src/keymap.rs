@@ -539,7 +539,10 @@ impl KeymapRegistry {
         };
         let normalized = binding.normalized();
         if let Some(action) = self.lookup.get(&(context, normalized)).copied() {
-            return KeyDispatch::action(action);
+            return KeyDispatch {
+                action: Some(action),
+                text: key_text(key),
+            };
         }
         key_text(key)
             .map(KeyDispatch::text)
@@ -1226,5 +1229,58 @@ newline = "enter"
         assert!(rows
             .iter()
             .any(|row| row.action == KeyAction::NextSession && row.bindings.contains("F7")));
+    }
+
+    #[test]
+    fn matched_printable_bindings_preserve_literal_text() {
+        let registry = KeymapRegistry::default();
+
+        for (character, action) in [
+            ('?', KeyAction::ShowHelp),
+            ('/', KeyAction::OpenSlashCommands),
+            ('@', KeyAction::OpenFileMention),
+        ] {
+            assert_eq!(
+                registry.dispatch(
+                    KeyContext::Main,
+                    key(KeyCode::Char(character), KeyModifiers::empty())
+                ),
+                KeyDispatch {
+                    action: Some(action),
+                    text: Some(character),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn matched_non_printable_binding_has_no_literal_text() {
+        let registry = KeymapRegistry::default();
+
+        assert_eq!(
+            registry.dispatch(KeyContext::Main, key(KeyCode::F(2), KeyModifiers::empty())),
+            KeyDispatch::action(KeyAction::ToggleEvents)
+        );
+    }
+
+    #[test]
+    fn every_default_printable_single_character_binding_preserves_text() {
+        let registry = KeymapRegistry::default();
+
+        for entry in &registry.entries {
+            for binding in &entry.bindings {
+                let event = key(binding.code, binding.modifiers);
+                let Some(text) = key_text(event) else {
+                    continue;
+                };
+                assert_eq!(
+                    registry.dispatch(entry.context, event).text,
+                    Some(text),
+                    "{} in {}",
+                    binding.display(),
+                    entry.context.label()
+                );
+            }
+        }
     }
 }
