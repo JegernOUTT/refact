@@ -1739,6 +1739,8 @@ mod tests {
                     "google_cloud_code_had_id": true,
                     "thoughtSignature": "sig-t"
                 })),
+                started_at_ms: None,
+                completed_at_ms: None,
             }]),
             ..Default::default()
         };
@@ -1821,6 +1823,8 @@ mod tests {
                     },
                     tool_type: "function".to_string(),
                     extra_content: Some(json!({"thoughtSignature": "sig-tool"})),
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 }]),
                 ..Default::default()
             },

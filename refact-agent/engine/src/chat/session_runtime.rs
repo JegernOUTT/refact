@@ -892,6 +892,8 @@ mod tests {
                         },
                         tool_type: "function".to_string(),
                         extra_content: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
                     })
                     .collect(),
             ),

@@ -2177,6 +2177,8 @@ index 1234567..abcdefg 100644
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             }]),
             ..Default::default()
         };
@@ -2216,6 +2218,8 @@ index 1234567..abcdefg 100644
                             },
                             tool_type: "function".to_string(),
                             extra_content: None,
+                            started_at_ms: None,
+                            completed_at_ms: None,
                         }]),
                         ..Default::default()
                     },
@@ -2530,6 +2534,8 @@ MSG_ID:2
                     },
                     tool_type: "function".to_string(),
                     extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
                 }]),
                 ..Default::default()
             },
@@ -2583,6 +2589,8 @@ MSG_ID:2
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             }]),
             ..Default::default()
         }

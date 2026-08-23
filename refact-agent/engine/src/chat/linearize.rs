@@ -518,6 +518,8 @@ mod tests {
             tool_type: "function".to_string(),
             index: None,
             extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         }]);
         let call = with_id(call, "src-call");
         let mut tool_result = ChatMessage {

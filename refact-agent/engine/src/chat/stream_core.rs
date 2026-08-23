@@ -3005,6 +3005,8 @@ pub fn normalize_tool_call(tc: &serde_json::Value) -> Option<crate::call_validat
         },
         tool_type,
         extra_content,
+        started_at_ms: None,
+        completed_at_ms: None,
     })
 }
 

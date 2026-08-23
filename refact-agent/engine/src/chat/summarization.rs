@@ -3869,6 +3869,8 @@ mod tests {
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             });
         }
         let preserved_tool = with_message_id(tool_with_id("call-1", "preserved output"), "t-1");
@@ -4061,6 +4063,8 @@ mod tests {
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             }]),
             finish_reason: Some("tool_calls".to_string()),
             ..Default::default()
@@ -4080,6 +4084,8 @@ mod tests {
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             }]),
             ..Default::default()
         }
@@ -5715,6 +5721,8 @@ mod tests {
                         },
                         tool_type: "function".to_string(),
                         extra_content: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
                     },
                     ChatToolCall {
                         id: "call_tree".to_string(),
@@ -5725,6 +5733,8 @@ mod tests {
                         },
                         tool_type: "function".to_string(),
                         extra_content: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
                     },
                 ]),
                 finish_reason: Some("tool_calls".to_string()),

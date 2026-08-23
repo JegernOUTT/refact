@@ -2044,6 +2044,8 @@ mod tests {
                     id: "call_123".to_string(),
                     tool_type: "function".to_string(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                     function: ChatToolFunction {
                         name: "get_weather".to_string(),
                         arguments: r#"{"location":"NYC"}"#.to_string(),
@@ -2415,6 +2417,8 @@ mod tests {
                     id: "call_weather".to_string(),
                     tool_type: "function".to_string(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                     function: ChatToolFunction {
                         name: "get_weather".to_string(),
                         arguments: r#"{"city":"Paris"}"#.to_string(),

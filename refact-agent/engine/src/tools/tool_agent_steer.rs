@@ -767,6 +767,8 @@ mod tests {
                     },
                     index: Some(0),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 }]),
                 ..Default::default()
             },
@@ -845,6 +847,8 @@ mod tests {
                     },
                     index: Some(0),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 }]),
                 ..Default::default()
             },
@@ -925,6 +929,8 @@ mod tests {
                     },
                     index: Some(0),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 }]),
                 ..Default::default()
             },

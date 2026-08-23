@@ -79,6 +79,14 @@ fn tool_execution_messages(
     }
 }
 
+fn tool_timestamp_ms() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .filter(|timestamp| *timestamp > 0)
+}
+
 pub(crate) const SHELL_PRIVACY_APPROVAL_RULE: &str =
     "Privacy approval required: command read guarded files";
 
@@ -616,6 +624,12 @@ mod tests {
             if self.runtime_failure {
                 return Err("deterministic runtime failure".to_string());
             }
+            let delay = if self.name == "sleep" {
+                std::time::Duration::from_secs(8)
+            } else {
+                std::time::Duration::from_millis(20)
+            };
+            tokio::time::sleep(delay).await;
             let mut message =
                 ChatMessage::new("tool".to_string(), "deterministic result".to_string());
             message.tool_call_id = tool_call_id.clone();
@@ -644,7 +658,7 @@ mod tests {
 
     impl DeterministicToolRegistry {
         fn tools(&self) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
-            ["alpha", "beta"]
+            ["alpha", "beta", "sleep"]
                 .into_iter()
                 .map(|name| {
                     Box::new(DeterministicTool {
@@ -722,13 +736,19 @@ mod tests {
             },
             tool_type: "function".to_string(),
             extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         }
     }
 
     async fn process_deterministic_tool_turn(
         registry: DeterministicToolRegistry,
         tool_calls: Vec<ChatToolCall>,
-    ) -> (ToolStepOutcome, Arc<MemoryPerfSink>) {
+    ) -> (
+        ToolStepOutcome,
+        Arc<MemoryPerfSink>,
+        Arc<AMutex<ChatSession>>,
+    ) {
         let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
         let (_guard, sink) = install_perf_recorder();
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -757,8 +777,8 @@ mod tests {
             .await
             .insert("same-turn-tools".to_string(), session.clone());
 
-        let outcome = process_tool_calls_once(app, session, "agent", None).await;
-        (outcome, sink)
+        let outcome = process_tool_calls_once(app, session.clone(), "agent", None).await;
+        (outcome, sink, session)
     }
 
     fn recorded_components(sink: &MemoryPerfSink) -> Vec<&'static str> {
@@ -768,7 +788,7 @@ mod tests {
     #[serial]
     #[tokio::test]
     async fn same_turn_tool_diagnostics_cover_stages_without_confirmation_wait() {
-        let (outcome, sink) = process_deterministic_tool_turn(
+        let (outcome, sink, _) = process_deterministic_tool_turn(
             DeterministicToolRegistry {
                 confirmation_result: MatchConfirmDenyResult::PASS,
                 runtime_failure: false,
@@ -903,7 +923,7 @@ mod tests {
     #[serial]
     #[tokio::test]
     async fn app_registry_runtime_starts_after_catalog_build() {
-        let (outcome, sink) = process_deterministic_tool_turn(
+        let (outcome, sink, _) = process_deterministic_tool_turn(
             DeterministicToolRegistry {
                 confirmation_result: MatchConfirmDenyResult::PASS,
                 runtime_failure: false,
@@ -935,7 +955,7 @@ mod tests {
     #[serial]
     #[tokio::test]
     async fn same_turn_tool_diagnostics_record_runtime_failure() {
-        let (outcome, sink) = process_deterministic_tool_turn(
+        let (outcome, sink, _) = process_deterministic_tool_turn(
             DeterministicToolRegistry {
                 confirmation_result: MatchConfirmDenyResult::PASS,
                 runtime_failure: true,
@@ -957,7 +977,7 @@ mod tests {
     #[serial]
     #[tokio::test]
     async fn same_turn_confirmation_pause_does_not_record_wait_time() {
-        let (outcome, sink) = process_deterministic_tool_turn(
+        let (outcome, sink, _) = process_deterministic_tool_turn(
             DeterministicToolRegistry {
                 confirmation_result: MatchConfirmDenyResult::CONFIRMATION,
                 runtime_failure: false,
@@ -973,6 +993,77 @@ mod tests {
         assert!(components
             .iter()
             .all(|component| *component != "tool.confirmation_wait"));
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn tool_call_timing_is_stamped_at_invocation_and_completion() {
+        let before = tool_timestamp_ms().unwrap();
+        let (outcome, _, session) = process_deterministic_tool_turn(
+            DeterministicToolRegistry {
+                confirmation_result: MatchConfirmDenyResult::PASS,
+                runtime_failure: false,
+            },
+            vec![deterministic_tool_call("tool-alpha", "alpha")],
+        )
+        .await;
+        let after = tool_timestamp_ms().unwrap();
+
+        assert!(matches!(outcome, ToolStepOutcome::Continue));
+        let session = session.lock().await;
+        let tool_call = session.messages[0]
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .first()
+            .unwrap();
+        let started_at_ms = tool_call.started_at_ms.unwrap();
+        let completed_at_ms = tool_call.completed_at_ms.unwrap();
+        assert!((before..=after).contains(&started_at_ms));
+        assert!((started_at_ms..=after).contains(&completed_at_ms));
+        assert!(completed_at_ms.saturating_sub(started_at_ms) >= 20);
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn sleep_tool_call_records_eight_second_duration() {
+        let (outcome, _, session) = process_deterministic_tool_turn(
+            DeterministicToolRegistry {
+                confirmation_result: MatchConfirmDenyResult::PASS,
+                runtime_failure: false,
+            },
+            vec![ChatToolCall {
+                id: "tool-sleep".to_string(),
+                index: None,
+                function: crate::call_validation::ChatToolFunction {
+                    name: "sleep".to_string(),
+                    arguments: r#"{"duration_ms":8000,"description":"Wait eight seconds"}"#
+                        .to_string(),
+                },
+                tool_type: "function".to_string(),
+                extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
+            }],
+        )
+        .await;
+
+        assert!(matches!(outcome, ToolStepOutcome::Continue));
+        let session = session.lock().await;
+        let tool_call = session.messages[0]
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .first()
+            .unwrap();
+        let duration_ms = tool_call
+            .completed_at_ms
+            .unwrap()
+            .saturating_sub(tool_call.started_at_ms.unwrap());
+        assert!(
+            (7_500..=9_000).contains(&duration_ms),
+            "duration: {duration_ms}ms"
+        );
     }
 
     fn sample_worktree() -> (tempfile::TempDir, crate::worktrees::types::WorktreeMeta) {
@@ -1069,6 +1160,8 @@ mod tests {
             },
             tool_type: "function".to_string(),
             extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         };
         let mut result = ChatMessage::new("tool".to_string(), "pending".to_string());
         result.tool_call_id = tool_call.id.clone();
@@ -1095,6 +1188,8 @@ mod tests {
             },
             tool_type: "function".to_string(),
             extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         };
 
         rewrite_cc_native_stub_tool_call(&mut tc);
@@ -1116,6 +1211,8 @@ mod tests {
             },
             tool_type: "function".to_string(),
             extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         };
 
         rewrite_cc_native_stub_tool_call(&mut tc);
@@ -1141,6 +1238,8 @@ mod tests {
             },
             tool_type: "function".to_string(),
             extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         };
 
         rewrite_cc_native_stub_tool_call(&mut tc);
@@ -1165,6 +1264,8 @@ mod tests {
             },
             tool_type: "function".to_string(),
             extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         };
         let mut grep = ChatToolCall {
             id: "call-grep".to_string(),
@@ -1175,6 +1276,8 @@ mod tests {
             },
             tool_type: "function".to_string(),
             extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         };
 
         rewrite_cc_native_stub_tool_call(&mut glob);
@@ -1202,6 +1305,8 @@ mod tests {
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             },
             ChatToolCall {
                 id: "call-tree".to_string(),
@@ -1212,6 +1317,8 @@ mod tests {
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             },
             ChatToolCall {
                 id: "call-glob".to_string(),
@@ -1222,6 +1329,8 @@ mod tests {
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             },
         ];
 
@@ -1365,6 +1474,8 @@ mod tests {
             },
             tool_type: "function".to_string(),
             extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         };
 
         let (confirmations, denials) = check_tools_confirmation(
@@ -1427,6 +1538,8 @@ mod tests {
             },
             tool_type: "function".to_string(),
             extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         };
 
         let (confirmations, denials) = check_tools_confirmation(
@@ -2813,14 +2926,6 @@ async fn execute_single_tool(
         cgcx.chat_id.clone()
     };
 
-    if let Some(session_arc) = {
-        let sessions_read = app.chat.sessions.read().await;
-        sessions_read.get(&session_id).cloned()
-    } {
-        let mut session = session_arc.lock().await;
-        session.mark_tool_started();
-    }
-
     if !allow_parallel {
         let resolved_name = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(
             &tool_call.function.name,
@@ -2847,7 +2952,16 @@ async fn execute_single_tool(
         }
     }
 
-    let (idx, had_corrections, mut msgs, files) = match app
+    if let Some(session_arc) = {
+        let sessions_read = app.chat.sessions.read().await;
+        sessions_read.get(&session_id).cloned()
+    } {
+        let mut session = session_arc.lock().await;
+        session.mark_tool_started();
+        session.stamp_tool_call_timing(&tool_call.id, tool_timestamp_ms(), None);
+    }
+
+    let execution = app
         .tool_registry
         .execute_tool_with_catalog_and_pool(
             &ccx,
@@ -2859,8 +2973,17 @@ async fn execute_single_tool(
             &tool_call.function.name,
             serde_json::Map::from_iter(args.into_iter()),
         )
-        .await
-    {
+        .await;
+
+    if let Some(session_arc) = {
+        let sessions_read = app.chat.sessions.read().await;
+        sessions_read.get(&session_id).cloned()
+    } {
+        let mut session = session_arc.lock().await;
+        session.stamp_tool_call_timing(&tool_call.id, None, tool_timestamp_ms());
+    }
+
+    let (idx, had_corrections, mut msgs, files) = match execution {
         Ok(Some(result)) => (
             idx,
             result.had_corrections,

@@ -291,6 +291,8 @@ mod tests {
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             }]),
             tool_call_id: "".to_string(),
             tool_failed: None,
@@ -593,6 +595,8 @@ mod tests {
                     },
                     tool_type: call_type,
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 };
                 existing.push(new_call);
             } else if !args.is_empty() {
@@ -634,6 +638,8 @@ mod tests {
             },
             tool_type: "function".to_string(),
             extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         }];
 
         let new_calls = vec![json!({
@@ -732,6 +738,8 @@ mod tests {
             },
             tool_type: "function".to_string(),
             extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         }];
 
         let new_calls = vec![json!({
@@ -1163,6 +1171,8 @@ mod tests {
             },
             tool_type,
             extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
         })
     }
 
@@ -1594,6 +1604,8 @@ mod tests {
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             }]),
             ..Default::default()
         }];
@@ -1623,6 +1635,8 @@ mod tests {
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             },
             ChatToolCall {
                 id: "srvtoolu_2".to_string(),
@@ -1633,6 +1647,8 @@ mod tests {
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             },
         ];
 

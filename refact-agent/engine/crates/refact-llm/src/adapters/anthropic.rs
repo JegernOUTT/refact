@@ -1558,6 +1558,8 @@ mod tests {
             id: id.to_string(),
             tool_type: "function".to_string(),
             extra_content: None,
+            started_at_ms: None,
+            completed_at_ms: None,
             function: ChatToolFunction {
                 name: name.to_string(),
                 arguments: "{}".to_string(),
@@ -1826,6 +1828,8 @@ mod tests {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                     function: ChatToolFunction {
                         name: "search".to_string(),
                         arguments: "{}".to_string(),
@@ -2031,6 +2035,8 @@ mod tests {
                         id: "call_1".to_string(),
                         tool_type: "function".to_string(),
                         extra_content: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
                         function: ChatToolFunction {
                             name: "lookup".to_string(),
                             arguments: r#"{"query":"cache"}"#.to_string(),
@@ -2716,6 +2722,8 @@ mod tests {
                         id: "call_1".to_string(),
                         tool_type: "function".to_string(),
                         extra_content: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
                         function: ChatToolFunction {
                             name: "tool_a".to_string(),
                             arguments: "{}".to_string(),
@@ -2726,6 +2734,8 @@ mod tests {
                         id: "call_2".to_string(),
                         tool_type: "function".to_string(),
                         extra_content: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
                         function: ChatToolFunction {
                             name: "tool_b".to_string(),
                             arguments: "{}".to_string(),
@@ -2779,6 +2789,8 @@ mod tests {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                     function: ChatToolFunction {
                         name: "search".to_string(),
                         arguments: "{}".to_string(),
@@ -2835,6 +2847,8 @@ mod tests {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                     function: ChatToolFunction {
                         name: "shell".to_string(),
                         arguments: "{}".to_string(),
@@ -2862,6 +2876,8 @@ mod tests {
                     id: "call_2".to_string(),
                     tool_type: "function".to_string(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                     function: ChatToolFunction {
                         name: "shell".to_string(),
                         arguments: "{}".to_string(),
@@ -2900,6 +2916,8 @@ mod tests {
                     id: "call_edit".to_string(),
                     tool_type: "function".to_string(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                     function: refact_core::chat_types::ChatToolFunction {
                         name: "file_edit".to_string(),
                         arguments: "{}".to_string(),
@@ -3269,6 +3287,8 @@ mod tests {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                     function: ChatToolFunction {
                         name: "tool_a".to_string(),
                         arguments: "{}".to_string(),
@@ -3381,6 +3401,8 @@ mod tests {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                     function: ChatToolFunction {
                         name: "get_weather".to_string(),
                         arguments: r#"{"city":"London"}"#.to_string(),
@@ -3466,6 +3488,8 @@ mod tests {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                     function: ChatToolFunction {
                         name: "search".to_string(),
                         arguments: "{}".to_string(),
@@ -3617,6 +3641,8 @@ mod tests {
                     id: "call_1".to_string(),
                     tool_type: "function".to_string(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                     function: ChatToolFunction {
                         name: "tool_a".to_string(),
                         arguments: "{}".to_string(),

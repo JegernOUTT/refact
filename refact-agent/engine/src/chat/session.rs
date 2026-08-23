@@ -1050,6 +1050,47 @@ impl ChatSession {
         self.last_activity = now;
     }
 
+    pub fn stamp_tool_call_timing(
+        &mut self,
+        tool_call_id: &str,
+        started_at_ms: Option<u64>,
+        completed_at_ms: Option<u64>,
+    ) -> bool {
+        let mut updated_message = None;
+        for message in self.messages.iter_mut().rev() {
+            let Some(tool_call) = message
+                .tool_calls
+                .as_mut()
+                .and_then(|tool_calls| tool_calls.iter_mut().find(|call| call.id == tool_call_id))
+            else {
+                continue;
+            };
+            let mut changed = false;
+            if tool_call.started_at_ms.is_none() && started_at_ms.is_some() {
+                tool_call.started_at_ms = started_at_ms;
+                changed = true;
+            }
+            if tool_call.completed_at_ms.is_none() && completed_at_ms.is_some() {
+                tool_call.completed_at_ms = completed_at_ms;
+                changed = true;
+            }
+            if changed {
+                updated_message = Some(message.clone());
+            }
+            break;
+        }
+        let Some(message) = updated_message else {
+            return false;
+        };
+        self.increment_version();
+        self.touch();
+        self.emit(ChatEvent::MessageUpdated {
+            message_id: message.message_id.clone(),
+            message,
+        });
+        true
+    }
+
     pub fn mark_tool_progress(&mut self) {
         let now = Instant::now();
         self.last_tool_progress_at = Some(now);
@@ -2903,6 +2944,8 @@ mod tests {
                     arguments: "{}".to_string(),
                 },
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             }]),
             ..Default::default()
         });
@@ -3877,6 +3920,8 @@ mod tests {
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             };
             session.add_message(ChatMessage {
                 role: "assistant".to_string(),
@@ -4781,6 +4826,8 @@ mod tests {
                     arguments: "{}".to_string(),
                 },
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             }]),
             ..Default::default()
         });
@@ -4806,6 +4853,8 @@ mod tests {
                     arguments: r#"{"duration_ms":30000,"description":"Wait briefly"}"#.to_string(),
                 },
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             }]),
             ..Default::default()
         });
@@ -5118,6 +5167,8 @@ mod tests {
                 },
                 tool_type: "function".into(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             }]),
             ..Default::default()
         });
@@ -5156,6 +5207,8 @@ mod tests {
                     },
                     tool_type: "function".into(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 },
                 ChatToolCall {
                     id: "tool-pending".into(),
@@ -5166,6 +5219,8 @@ mod tests {
                     },
                     tool_type: "function".into(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 },
             ]),
             ..Default::default()
@@ -6710,6 +6765,8 @@ mod tests {
                         },
                         tool_type: "function".to_string(),
                         extra_content: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
                     })
                     .collect(),
             ),

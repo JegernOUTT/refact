@@ -760,6 +760,56 @@ pub struct ChatToolCall {
     pub tool_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_content: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<u64>,
+}
+
+#[cfg(test)]
+mod chat_tool_call_tests {
+    use super::*;
+
+    #[derive(Deserialize)]
+    struct LegacyToolCall {
+        id: String,
+        function: ChatToolFunction,
+        #[serde(rename = "type")]
+        tool_type: String,
+    }
+
+    #[test]
+    fn timing_fields_are_optional_and_additive() {
+        let old_value = serde_json::json!({
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "sleep", "arguments": "{}"}
+        });
+        let old_call: ChatToolCall = serde_json::from_value(old_value).unwrap();
+        assert_eq!(old_call.started_at_ms, None);
+        assert_eq!(old_call.completed_at_ms, None);
+
+        let timed_call = ChatToolCall {
+            id: "call-1".to_string(),
+            index: None,
+            function: ChatToolFunction {
+                name: "sleep".to_string(),
+                arguments: "{}".to_string(),
+            },
+            tool_type: "function".to_string(),
+            extra_content: None,
+            started_at_ms: Some(1_700_000_000_000),
+            completed_at_ms: Some(1_700_000_008_000),
+        };
+        let value = serde_json::to_value(&timed_call).unwrap();
+        assert_eq!(value["started_at_ms"], 1_700_000_000_000_u64);
+        assert_eq!(value["completed_at_ms"], 1_700_000_008_000_u64);
+
+        let legacy: LegacyToolCall = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.id, "call-1");
+        assert_eq!(legacy.function.name, "sleep");
+        assert_eq!(legacy.tool_type, "function");
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]

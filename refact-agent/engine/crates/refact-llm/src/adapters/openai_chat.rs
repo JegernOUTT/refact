@@ -1723,6 +1723,8 @@ mod tests {
                         index: Some(0),
                         tool_type: "function".to_string(),
                         extra_content: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
                         function: ChatToolFunction {
                             name: "web_search".to_string(),
                             arguments: r#"{"query":"test"}"#.to_string(),
@@ -1733,6 +1735,8 @@ mod tests {
                         index: Some(1),
                         tool_type: "function".to_string(),
                         extra_content: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
                         function: ChatToolFunction {
                             name: "cat".to_string(),
                             arguments: r#"{"path":"file.txt"}"#.to_string(),

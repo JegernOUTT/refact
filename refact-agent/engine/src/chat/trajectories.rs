@@ -8421,6 +8421,18 @@ mod tests {
                 role: "assistant".to_string(),
                 content: ChatContent::SimpleText("answer".to_string()),
                 reasoning_content: Some("reasoning".to_string()),
+                tool_calls: Some(vec![crate::call_validation::ChatToolCall {
+                    id: "call-1".to_string(),
+                    index: Some(0),
+                    function: crate::call_validation::ChatToolFunction {
+                        name: "sleep".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    tool_type: "function".to_string(),
+                    extra_content: None,
+                    started_at_ms: Some(1_700_000_000_000),
+                    completed_at_ms: Some(1_700_000_008_000),
+                }]),
                 ..Default::default()
             },
             ChatMessage {
@@ -8433,7 +8445,7 @@ mod tests {
         ];
         let expected = serde_json::to_value(&messages).unwrap();
 
-        save_trajectory_snapshot(gcx, test_snapshot(chat_id, "All", messages))
+        save_trajectory_snapshot(gcx.clone(), test_snapshot(chat_id, "All", messages))
             .await
             .unwrap();
 
@@ -8441,6 +8453,15 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
         assert_eq!(saved["messages"], expected);
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        let tool_call = loaded.messages[1]
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .first()
+            .unwrap();
+        assert_eq!(tool_call.started_at_ms, Some(1_700_000_000_000));
+        assert_eq!(tool_call.completed_at_ms, Some(1_700_000_008_000));
     }
 
     #[tokio::test]
@@ -13021,6 +13042,8 @@ mod tests {
                     },
                     tool_type: "function".to_string(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 },
                 ChatToolCall {
                     id: "call_2".to_string(),
@@ -13031,6 +13054,8 @@ mod tests {
                     },
                     tool_type: "function".to_string(),
                     extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
                 },
             ]),
             ..Default::default()
@@ -13055,6 +13080,8 @@ mod tests {
                 },
                 tool_type: "function".to_string(),
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             }]),
             ..Default::default()
         }];
