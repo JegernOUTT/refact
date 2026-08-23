@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-const APP_RS_PRODUCTION_LINE_CAP: usize = 7_065;
-const RATCHET_SCHEDULE: &str = "7,065 production lines → semantic extraction caps → 2,000";
+const APP_RS_PRODUCTION_LINE_CAP: usize = 6_386;
+const RATCHET_SCHEDULE: &str = "6,386 production lines → semantic extraction caps → 2,000";
 const INLINE_TEST_BOUNDARY: &str = "\n#[cfg(test)]\nmod tests {";
 
 #[test]
