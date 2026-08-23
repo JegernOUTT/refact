@@ -11,10 +11,10 @@ use crate::ask_questions::{
     AskQuestionType, AskQuestionsForm, AskQuestionsOutcome, AskQuestionsRequest,
 };
 use crate::client::{
-    request_id, worker_state_label, ChatEvent, DaemonStatus, CompetitorImportInfoResponse,
-    CompetitorImportRunResponse, HooksResponse, KnowledgeGraphResponse, McpViewData,
-    OpenProjectResponse, ProjectEntry, ProviderListResponse, ProviderOAuthLogoutResponse,
-    SlashCommandsListResponse, ToolDecision, WorkerInfo,
+    request_id, ChatEvent, DaemonStatus, CompetitorImportInfoResponse, CompetitorImportRunResponse,
+    HooksResponse, KnowledgeGraphResponse, McpViewData, OpenProjectResponse, ProjectEntry,
+    ProviderListResponse, ProviderOAuthLogoutResponse, SlashCommandsListResponse, ToolDecision,
+    WorkerInfo,
 };
 use crate::commands::{
     command_by_name, command_picker_items, misc, session, workflow, CommandAction, CommandContext,
@@ -62,6 +62,7 @@ use crate::tools::{
 mod input;
 mod runtime;
 mod transcript;
+mod workers;
 
 pub use transcript::TranscriptItem;
 #[cfg(test)]
@@ -2226,7 +2227,7 @@ impl App {
                 self.daemon_online,
                 self.daemon_status.as_ref(),
                 self.daemon_base_url.clone(),
-                worker_status_line(self.current_worker()),
+                workers::worker_status_line(self.current_worker()),
                 self.current_project()
                     .map(|project| project.slug.clone())
                     .unwrap_or_else(|| "-".to_string()),
@@ -3836,23 +3837,10 @@ impl App {
     }
 
     fn update_current_worker_from_event(&mut self, event: &DaemonEventRecord) {
-        let Some(project_id) = event.project_id.as_deref() else {
-            return;
-        };
         let Some(project) = self.current_project.as_mut() else {
             return;
         };
-        if project.project_id != project_id {
-            return;
-        }
-        let state = match event.kind.as_str() {
-            "worker_starting" => Some("starting"),
-            "worker_ready" => Some("ready"),
-            "worker_stopped" => Some("stopped"),
-            "worker_crashed" => Some("crashed"),
-            _ => None,
-        };
-        let Some(state) = state else {
+        let Some(state) = workers::update_current_worker_from_event(project, event) else {
             return;
         };
         match state {
@@ -3862,37 +3850,6 @@ impl App {
             }
             _ => {}
         }
-        let previous = project.worker.clone();
-        project.worker = Some(WorkerInfo {
-            project_id: project.project_id.clone(),
-            pid: event
-                .payload
-                .get("pid")
-                .and_then(Value::as_u64)
-                .map(|pid| pid as u32)
-                .or_else(|| previous.as_ref().and_then(|worker| worker.pid)),
-            http_port: event
-                .payload
-                .get("http_port")
-                .and_then(Value::as_u64)
-                .map(|port| port as u16)
-                .or_else(|| previous.as_ref().map(|worker| worker.http_port))
-                .unwrap_or_default(),
-            lsp_port: event
-                .payload
-                .get("lsp_port")
-                .and_then(Value::as_u64)
-                .map(|port| port as u16)
-                .or_else(|| previous.as_ref().map(|worker| worker.lsp_port))
-                .unwrap_or_default(),
-            state: Value::String(state.to_string()),
-            last_error: event
-                .payload
-                .get("error")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| previous.and_then(|worker| worker.last_error)),
-        });
     }
 
     fn is_chat_active(&self) -> bool {
@@ -4841,30 +4798,6 @@ fn render_frame(terminal: &mut TerminalSession, app: &mut App) -> Result<(), Tui
         .terminal_mut()
         .draw(|frame| crate::ui::render(frame, app))?;
     Ok(())
-}
-
-fn worker_status_line(worker: Option<&WorkerInfo>) -> String {
-    let Some(worker) = worker else {
-        return "unknown".to_string();
-    };
-    let mut parts = vec![worker_state_label(Some(worker))];
-    if let Some(pid) = worker.pid {
-        parts.push(format!("pid {pid}"));
-    }
-    if worker.http_port > 0 {
-        parts.push(format!("http {}", worker.http_port));
-    }
-    if worker.lsp_port > 0 {
-        parts.push(format!("lsp {}", worker.lsp_port));
-    }
-    if let Some(error) = worker
-        .last_error
-        .as_deref()
-        .filter(|error| !error.trim().is_empty())
-    {
-        parts.push(format!("error {error}"));
-    }
-    parts.join(" · ")
 }
 
 fn approval_patch(modal: &ApprovalModalState) -> Value {
@@ -6821,6 +6754,42 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn worker_list_with_null_ports_reaches_events_pane() {
+        let mut app = App::new(project());
+        let worker: WorkerInfo = serde_json::from_value(json!({
+            "project_id": "stopping",
+            "slug": "stopping-project",
+            "root": "/tmp/stopping",
+            "root_exists": false,
+            "pinned": false,
+            "last_active_ms": 0,
+            "state": "stopping",
+            "pid": null,
+            "rss_bytes": null,
+            "cpu_percent": null,
+            "uptime_secs": null,
+            "http_port": null,
+            "lsp_port": null,
+            "lsp_clients": 0,
+            "busy_chats": 0,
+            "exec_running": 0,
+            "live_proxy_streams": 0,
+            "cron_next_fire_ms": null,
+            "idle_deadline_ms": null,
+            "last_status_report_ms": null,
+            "last_error": null,
+            "log_path": "/tmp/stopping.log"
+        }))
+        .unwrap();
+
+        app.set_workers(vec![worker]);
+
+        assert_eq!(app.events_pane().workers().len(), 1);
+        assert_eq!(app.events_pane().workers()[0].http_port, None);
+        assert_eq!(app.events_pane().workers()[0].lsp_port, None);
+    }
+
+    #[test]
     fn theme_command_applies_theme_live() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("tui.toml");
@@ -7385,10 +7354,11 @@ new-chat = "ctrl-x"
         app.set_workers(vec![WorkerInfo {
             project_id: "p1".to_string(),
             pid: Some(42),
-            http_port: 9000,
-            lsp_port: 9001,
+            http_port: Some(9000),
+            lsp_port: Some(9001),
             state: Value::String("ready".to_string()),
             last_error: None,
+            ..WorkerInfo::default()
         }]);
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),

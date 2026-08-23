@@ -28,6 +28,12 @@ const SSE_ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(3);
 const SSE_ERROR_BODY_TIMEOUT: Duration = Duration::from_millis(100);
 const DAEMON_DIR_ENV: &str = "REFACT_DAEMON_DIR";
 const STATUS_BODY_NOTICE_MAX_CHARS: usize = 300;
+#[cfg(not(test))]
+const OPEN_PROJECT_STARTING_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+#[cfg(test)]
+const OPEN_PROJECT_STARTING_INITIAL_BACKOFF: Duration = Duration::from_millis(1);
+const OPEN_PROJECT_STARTING_MAX_BACKOFF: Duration = Duration::from_secs(2);
+const OPEN_PROJECT_STARTING_MAX_ATTEMPTS: u32 = 8;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -137,7 +143,7 @@ pub struct ProjectEntry {
     pub settings: Value,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct OpenProjectResponse {
     pub project_id: String,
     pub slug: String,
@@ -147,14 +153,73 @@ pub struct OpenProjectResponse {
     pub cron_pending: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkerInfo {
     pub project_id: String,
-    pub pid: Option<u32>,
-    pub http_port: u16,
-    pub lsp_port: u16,
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default)]
+    pub root: PathBuf,
+    #[serde(default = "default_root_exists")]
+    pub root_exists: bool,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub last_active_ms: u64,
     pub state: Value,
+    pub pid: Option<u32>,
+    pub rss_bytes: Option<u64>,
+    pub cpu_percent: Option<f32>,
+    pub uptime_secs: Option<u64>,
+    pub http_port: Option<u16>,
+    pub lsp_port: Option<u16>,
+    #[serde(default)]
+    pub lsp_clients: usize,
+    #[serde(default)]
+    pub busy_chats: usize,
+    #[serde(default)]
+    pub exec_running: usize,
+    #[serde(default)]
+    pub live_proxy_streams: u64,
+    pub cron_next_fire_ms: Option<u64>,
+    pub idle_deadline_ms: Option<u64>,
+    pub last_status_report_ms: Option<u64>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub log_path: String,
+}
+
+impl Default for WorkerInfo {
+    fn default() -> Self {
+        Self {
+            project_id: String::new(),
+            slug: String::new(),
+            root: PathBuf::new(),
+            root_exists: true,
+            pinned: false,
+            last_active_ms: 0,
+            state: Value::Null,
+            pid: None,
+            rss_bytes: None,
+            cpu_percent: None,
+            uptime_secs: None,
+            http_port: None,
+            lsp_port: None,
+            lsp_clients: 0,
+            busy_chats: 0,
+            exec_running: 0,
+            live_proxy_streams: 0,
+            cron_next_fire_ms: None,
+            idle_deadline_ms: None,
+            last_status_report_ms: None,
+            last_error: None,
+            log_path: String::new(),
+        }
+    }
+}
+
+fn default_root_exists() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -677,15 +742,25 @@ impl DaemonClient {
     }
 
     pub async fn open_project(&self, root: &Path) -> Result<OpenProjectResponse, ClientError> {
-        let response = self
-            .with_auth(self.client.post(self.url("/daemon/v1/projects/open")))
-            .json(&json!({"root": root.to_string_lossy()}))
-            .send()
-            .await
-            .map_err(|error| ClientError::Http(format!("failed to open project: {error}")))?;
-        let project: OpenProjectResponse = decode_response(response).await?;
-        validate_open_project_response(&project)?;
-        Ok(project)
+        let mut retries = 0;
+        loop {
+            let response = self
+                .with_auth(self.client.post(self.url("/daemon/v1/projects/open")))
+                .json(&json!({"root": root.to_string_lossy()}))
+                .send()
+                .await
+                .map_err(|error| ClientError::Http(format!("failed to open project: {error}")))?;
+            let project: OpenProjectResponse = decode_response(response).await?;
+            if open_project_worker_is_starting(&project)
+                && retries < OPEN_PROJECT_STARTING_MAX_ATTEMPTS
+            {
+                tokio::time::sleep(open_project_starting_backoff(retries)).await;
+                retries += 1;
+                continue;
+            }
+            validate_open_project_response(&project)?;
+            return Ok(project);
+        }
     }
 
     pub async fn list_workers(&self) -> Result<Vec<WorkerInfo>, ClientError> {
@@ -1307,13 +1382,25 @@ fn validate_open_project_response(project: &OpenProjectResponse) -> Result<(), C
             project.project_id
         )));
     }
-    if worker.http_port == 0 || worker.lsp_port == 0 {
+    let http_port = worker.http_port.unwrap_or_default();
+    let lsp_port = worker.lsp_port.unwrap_or_default();
+    if http_port == 0 || lsp_port == 0 {
         return Err(ClientError::WorkerNotReady(format!(
             "project {} worker has invalid ports http={} lsp={}",
-            project.project_id, worker.http_port, worker.lsp_port
+            project.project_id, http_port, lsp_port
         )));
     }
     Ok(())
+}
+
+fn open_project_worker_is_starting(project: &OpenProjectResponse) -> bool {
+    worker_state_label(project.worker.as_ref()).eq_ignore_ascii_case("starting")
+}
+
+fn open_project_starting_backoff(retry: u32) -> Duration {
+    OPEN_PROJECT_STARTING_INITIAL_BACKOFF
+        .saturating_mul(1u32 << retry.min(8))
+        .min(OPEN_PROJECT_STARTING_MAX_BACKOFF)
 }
 
 async fn status_error(response: reqwest::Response) -> ClientError {
@@ -1391,8 +1478,23 @@ fn message_indicates_unreachable(message: &str) -> bool {
         || message.contains("timed out")
         || message.contains("timeout")
         || message.contains("broken pipe")
-        || message.contains("eof")
+        || has_word(message.as_bytes(), b"eof")
         || message.contains("end of file")
+}
+
+fn has_word(message: &[u8], word: &[u8]) -> bool {
+    message
+        .windows(word.len())
+        .enumerate()
+        .any(|(start, part)| {
+            part == word
+                && message
+                    .get(start.wrapping_sub(1))
+                    .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+                && message
+                    .get(start + word.len())
+                    .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
+        })
 }
 
 fn message_indicates_auth_stale(message: &str) -> bool {
@@ -1712,12 +1814,24 @@ mod tests {
         }
     }
 
-    fn spawn_open_project_server(response: Value) -> TestServer {
+    fn spawn_json_response_server(responses: Vec<Value>) -> TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
         let (stop, stopped) = mpsc::channel();
         let handle = thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
+            for response in responses {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if stopped.recv_timeout(Duration::from_millis(10)).is_ok() {
+                                return;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                };
                 read_request_headers(&mut stream);
                 let body = response.to_string();
                 let response = format!(
@@ -1734,6 +1848,24 @@ mod tests {
             stop,
             handle,
         }
+    }
+
+    fn open_project_response(state: &str, http_port: Option<u16>, lsp_port: Option<u16>) -> Value {
+        json!({
+            "project_id": "p1",
+            "slug": "fixture",
+            "root": "/tmp/fixture",
+            "pinned": false,
+            "worker": {
+                "project_id": "p1",
+                "pid": 7,
+                "http_port": http_port,
+                "lsp_port": lsp_port,
+                "state": state,
+                "last_error": null
+            },
+            "cron_pending": null
+        })
     }
 
     fn read_request_headers(stream: &mut std::net::TcpStream) {
@@ -2038,6 +2170,7 @@ mod tests {
             .is_unreachable());
         }
         assert!(ClientError::SseDisconnect("eof".to_string()).is_unreachable());
+        assert!(!ClientError::Http("TypeScript typeof check failed".to_string()).is_unreachable());
         assert!(ClientError::Status {
             status: 401,
             body: "Unauthorized".to_string(),
@@ -2059,53 +2192,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_project_requires_ready_worker_with_ports() {
-        let server = spawn_open_project_server(json!({
-            "project_id": "p1",
-            "slug": "fixture",
-            "root": "/tmp/fixture",
-            "pinned": false,
-            "worker": {
-                "project_id": "p1",
-                "pid": 7,
-                "http_port": 31000,
-                "lsp_port": 31001,
-                "state": "starting",
-                "last_error": null
-            },
-            "cron_pending": null
-        }));
+    async fn open_project_retries_starting_worker_until_ready() {
+        let server = spawn_json_response_server(vec![
+            open_project_response("starting", None, None),
+            open_project_response("ready", Some(31000), Some(31001)),
+        ]);
         let client = DaemonClient::new(&server.base_url, None).unwrap();
 
-        let error = client
+        let project = client
             .open_project(Path::new("/tmp/fixture"))
             .await
-            .unwrap_err();
+            .unwrap();
         server.stop();
 
-        match error {
-            ClientError::WorkerNotReady(message) => assert!(message.contains("starting")),
-            other => panic!("expected worker readiness error, got {other:?}"),
-        }
+        assert_eq!(
+            project.worker.unwrap().state,
+            Value::String("ready".to_string())
+        );
     }
 
     #[tokio::test]
     async fn open_project_accepts_ready_worker_with_nonzero_ports() {
-        let server = spawn_open_project_server(json!({
-            "project_id": "p1",
-            "slug": "fixture",
-            "root": "/tmp/fixture",
-            "pinned": false,
-            "worker": {
-                "project_id": "p1",
-                "pid": 7,
-                "http_port": 31000,
-                "lsp_port": 31001,
-                "state": "ready",
-                "last_error": null
-            },
-            "cron_pending": null
-        }));
+        let server = spawn_json_response_server(vec![open_project_response(
+            "ready",
+            Some(31000),
+            Some(31001),
+        )]);
         let client = DaemonClient::new(&server.base_url, None).unwrap();
 
         let project = client
@@ -2115,7 +2227,111 @@ mod tests {
         server.stop();
 
         assert_eq!(project.project_id, "p1");
-        assert_eq!(project.worker.unwrap().http_port, 31000);
+        assert_eq!(project.worker.unwrap().http_port, Some(31000));
+    }
+
+    #[tokio::test]
+    async fn worker_list_deserializes_non_ready_rows_and_all_telemetry() {
+        let server = spawn_json_response_server(vec![json!([
+            {
+                "project_id": "stopping",
+                "slug": "stopping-project",
+                "root": "/tmp/stopping",
+                "root_exists": false,
+                "pinned": true,
+                "last_active_ms": 1,
+                "state": "stopping",
+                "pid": null,
+                "rss_bytes": null,
+                "cpu_percent": null,
+                "uptime_secs": null,
+                "http_port": null,
+                "lsp_port": null,
+                "lsp_clients": 0,
+                "busy_chats": 0,
+                "exec_running": 0,
+                "live_proxy_streams": 0,
+                "cron_next_fire_ms": null,
+                "idle_deadline_ms": null,
+                "last_status_report_ms": null,
+                "last_error": null,
+                "log_path": "/tmp/stopping.log"
+            },
+            {
+                "project_id": "ready",
+                "slug": "ready-project",
+                "root": "/tmp/ready",
+                "root_exists": true,
+                "pinned": false,
+                "last_active_ms": 2,
+                "state": "ready",
+                "pid": 42,
+                "rss_bytes": 100,
+                "cpu_percent": 12.5,
+                "uptime_secs": 3,
+                "http_port": 31000,
+                "lsp_port": 31001,
+                "lsp_clients": 4,
+                "busy_chats": 5,
+                "exec_running": 6,
+                "live_proxy_streams": 7,
+                "cron_next_fire_ms": 8,
+                "idle_deadline_ms": 9,
+                "last_status_report_ms": 10,
+                "last_error": "none",
+                "log_path": "/tmp/ready.log"
+            }
+        ])]);
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+
+        let workers = client.list_workers().await.unwrap();
+        server.stop();
+
+        assert_eq!(workers.len(), 2);
+        let stopped = &workers[0];
+        assert_eq!(stopped.http_port, None);
+        assert_eq!(stopped.lsp_port, None);
+        let ready = &workers[1];
+        assert_eq!(ready.slug, "ready-project");
+        assert_eq!(ready.root, PathBuf::from("/tmp/ready"));
+        assert!(ready.root_exists);
+        assert!(!ready.pinned);
+        assert_eq!(ready.last_active_ms, 2);
+        assert_eq!(ready.rss_bytes, Some(100));
+        assert_eq!(ready.cpu_percent, Some(12.5));
+        assert_eq!(ready.uptime_secs, Some(3));
+        assert_eq!(ready.http_port, Some(31000));
+        assert_eq!(ready.lsp_port, Some(31001));
+        assert_eq!(ready.lsp_clients, 4);
+        assert_eq!(ready.busy_chats, 5);
+        assert_eq!(ready.exec_running, 6);
+        assert_eq!(ready.live_proxy_streams, 7);
+        assert_eq!(ready.cron_next_fire_ms, Some(8));
+        assert_eq!(ready.idle_deadline_ms, Some(9));
+        assert_eq!(ready.last_status_report_ms, Some(10));
+        assert_eq!(ready.last_error.as_deref(), Some("none"));
+        assert_eq!(ready.log_path, "/tmp/ready.log");
+        let round_trip = serde_json::to_value(ready).unwrap();
+        assert_eq!(round_trip["slug"], "ready-project");
+        assert_eq!(round_trip["root"], "/tmp/ready");
+        assert_eq!(round_trip["root_exists"], true);
+        assert_eq!(round_trip["pinned"], false);
+        assert_eq!(round_trip["last_active_ms"], 2);
+        assert_eq!(round_trip["rss_bytes"], 100);
+        assert_eq!(round_trip["cpu_percent"], 12.5);
+        assert_eq!(round_trip["uptime_secs"], 3);
+        assert_eq!(round_trip["lsp_clients"], 4);
+        assert_eq!(round_trip["busy_chats"], 5);
+        assert_eq!(round_trip["exec_running"], 6);
+        assert_eq!(round_trip["live_proxy_streams"], 7);
+        assert_eq!(round_trip["cron_next_fire_ms"], 8);
+        assert_eq!(round_trip["idle_deadline_ms"], 9);
+        assert_eq!(round_trip["last_status_report_ms"], 10);
+        assert_eq!(round_trip["log_path"], "/tmp/ready.log");
+        assert_eq!(
+            serde_json::from_value::<WorkerInfo>(round_trip).unwrap(),
+            *ready
+        );
     }
 
     #[test]

@@ -23,10 +23,11 @@ fn project() -> OpenProjectResponse {
         worker: Some(WorkerInfo {
             project_id: "p1".to_string(),
             pid: Some(42),
-            http_port: 32000,
-            lsp_port: 32001,
+            http_port: Some(32000),
+            lsp_port: Some(32001),
             state: json!("ready"),
             last_error: None,
+            ..WorkerInfo::default()
         }),
         cron_pending: Some(2),
     }

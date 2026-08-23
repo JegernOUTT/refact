@@ -154,9 +154,19 @@ fn worker_line(worker: &WorkerInfo, theme: &TuiTheme) -> Line<'static> {
         Span::styled(" pid=", theme.style(ThemeRole::Muted)),
         Span::raw(pid),
         Span::styled(" http=", theme.style(ThemeRole::Muted)),
-        Span::raw(worker.http_port.to_string()),
+        Span::raw(
+            worker
+                .http_port
+                .map(|port| port.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+        ),
         Span::styled(" lsp=", theme.style(ThemeRole::Muted)),
-        Span::raw(worker.lsp_port.to_string()),
+        Span::raw(
+            worker
+                .lsp_port
+                .map(|port| port.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+        ),
         Span::styled(" state=", theme.style(ThemeRole::Muted)),
         Span::raw(worker_state_label(Some(worker))),
     ])
@@ -205,10 +215,11 @@ mod tests {
         let worker = WorkerInfo {
             project_id: "abc".to_string(),
             pid: Some(42),
-            http_port: 9000,
-            lsp_port: 9001,
+            http_port: Some(9000),
+            lsp_port: Some(9001),
             state: Value::String("ready".to_string()),
             last_error: None,
+            ..WorkerInfo::default()
         };
 
         assert_eq!(
