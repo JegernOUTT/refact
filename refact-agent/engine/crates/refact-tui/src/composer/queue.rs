@@ -2,6 +2,9 @@ use std::collections::VecDeque;
 
 use serde_json::Value;
 
+// 100 prompts keeps deliberate batches practical without allowing unbounded local memory growth.
+pub const INPUT_QUEUE_CAPACITY: usize = 100;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueuedInput {
     pub id: u64,
@@ -60,11 +63,14 @@ impl InputQueue {
         self.editing_index().is_some()
     }
 
-    pub fn enqueue(&mut self, text: String, params: Value) -> u64 {
+    pub fn enqueue(&mut self, text: String, params: Value) -> bool {
+        if self.items.len() >= INPUT_QUEUE_CAPACITY {
+            return false;
+        }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1).max(1);
         self.items.push_back(QueuedInput { id, text, params });
-        id
+        true
     }
 
     pub fn clear(&mut self) {
@@ -221,5 +227,21 @@ mod tests {
         assert!(queue.pop_next_ready().is_none());
         queue.finish_edit("one edited".to_string());
         assert_eq!(queue.pop_next_ready().unwrap().text, "one edited");
+    }
+
+    #[test]
+    fn queue_refuses_enqueue_at_capacity() {
+        let mut queue = InputQueue::new();
+        for index in 0..INPUT_QUEUE_CAPACITY {
+            assert!(queue.enqueue(format!("prompt {index}"), json!({})));
+        }
+
+        assert!(!queue.enqueue("overflow".to_string(), json!({})));
+        assert_eq!(queue.len(), INPUT_QUEUE_CAPACITY);
+        assert_eq!(queue.items().front().unwrap().text, "prompt 0");
+        assert_eq!(
+            queue.items().back().unwrap().text,
+            format!("prompt {}", INPUT_QUEUE_CAPACITY - 1)
+        );
     }
 }

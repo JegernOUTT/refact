@@ -26,7 +26,7 @@ use crate::commands::{
     command_by_name, command_picker_items, misc, session, workflow, CommandAction, CommandContext,
     CommandPicker, InfoTopic, LocalToggle,
 };
-use crate::composer::queue::{InputQueue, QueuedInput};
+use crate::composer::queue::{InputQueue, QueuedInput, INPUT_QUEUE_CAPACITY};
 use crate::composer::{load_history, save_history, ComposerState, EnterDecision, HistorySearchView};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
 use crate::history::cells::{
@@ -2561,8 +2561,7 @@ impl App {
         }
         let params = self.take_submit_params(&prompt);
         if self.is_chat_active() && self.session_state != SessionState::WaitingUserInput {
-            self.input_queue.enqueue(prompt, params);
-            self.input_queue.clear_selection();
+            self.enqueue_input(prompt, params);
             Some(AppAction::None)
         } else {
             Some(self.start_prompt_turn(prompt, params))
@@ -2632,6 +2631,16 @@ impl App {
             return AppAction::None;
         };
         self.start_prompt_turn(text, params)
+    }
+
+    fn enqueue_input(&mut self, prompt: String, params: Value) {
+        if self.input_queue.enqueue(prompt, params) {
+            self.input_queue.clear_selection();
+        } else {
+            self.add_notice(format!(
+                "Warning: input queue is full (maximum {INPUT_QUEUE_CAPACITY} prompts); prompt was not queued"
+            ));
+        }
     }
 
     fn submit_ask_questions_reply(&mut self, prompt: String) -> AppAction {
@@ -2761,8 +2770,7 @@ impl App {
         let draft = self.composer.text().to_string();
         if !draft.trim().is_empty() && draft != prompt {
             let draft_params = self.take_pending_params();
-            self.input_queue.enqueue(draft, draft_params);
-            self.input_queue.clear_selection();
+            self.enqueue_input(draft, draft_params);
         }
         self.pending_send_retry = Some(PendingSendRetry {
             prompt: prompt.clone(),
