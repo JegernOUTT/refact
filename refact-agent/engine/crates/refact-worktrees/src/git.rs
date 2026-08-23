@@ -996,6 +996,24 @@ pub fn commits_ahead(root: &Path, base: &str, branch: &str) -> Result<u32, Strin
         .map_err(|e| format!("Failed to parse commits ahead count: {}", e))
 }
 
+pub fn base_relative_ahead_behind(
+    root: &Path,
+    base_commit: Option<&str>,
+    base_branch: Option<&str>,
+) -> Option<(usize, usize)> {
+    let repo = discover_repo(root).ok()?;
+    let head = repo.head().ok()?;
+    if !head.is_branch() {
+        return None;
+    }
+    let local_oid = head.peel_to_commit().ok()?.id();
+    let base_oid = base_branch
+        .and_then(|branch| commit_for_ref(&repo, branch).ok())
+        .or_else(|| base_commit.and_then(|commit| commit_for_ref(&repo, commit).ok()))
+        .and_then(|commit| git2::Oid::from_str(&commit).ok())?;
+    repo.graph_ahead_behind(local_oid, base_oid).ok()
+}
+
 pub fn head_rev(root: &Path) -> Result<String, String> {
     Ok(run_git(root, &["rev-parse", "HEAD"])?.trim().to_string())
 }

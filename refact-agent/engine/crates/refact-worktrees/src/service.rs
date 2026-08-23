@@ -512,12 +512,11 @@ impl WorktreeService {
             .find(|record| record.meta.id == id)
             .cloned()
             .ok_or_else(|| format!("Worktree '{}' not found", id))?;
-        self.validate_registered_record_checkout_record(&record)
-            .await?;
+        self.validate_registered_record_diff_record(&record).await?;
         let diff_root = record.meta.root.clone();
         let base_commit = record.meta.base_commit.clone();
         let base_branch = record.meta.base_branch.clone();
-        let (diff, status) = tokio::task::spawn_blocking(move || {
+        let (diff, status, ahead, behind) = tokio::task::spawn_blocking(move || {
             let diff = git::diff_for_path(
                 &diff_root,
                 base_commit.as_deref(),
@@ -525,7 +524,14 @@ impl WorktreeService {
                 max_patch_bytes,
             )?;
             let status = git::status_for_path(&diff_root);
-            Ok::<_, String>((diff, status))
+            let (ahead, behind) = git::base_relative_ahead_behind(
+                &diff_root,
+                base_commit.as_deref(),
+                base_branch.as_deref(),
+            )
+            .map(|(ahead, behind)| (Some(ahead), Some(behind)))
+            .unwrap_or((None, None));
+            Ok::<_, String>((diff, status, ahead, behind))
         })
         .await
         .map_err(|e| format!("Worktree diff task failed: {}", e))??;
@@ -534,6 +540,8 @@ impl WorktreeService {
             branch: record.meta.branch.clone(),
             base_branch: record.meta.base_branch.clone(),
             base_commit: record.meta.base_commit.clone(),
+            ahead,
+            behind,
             status,
             files: diff.files,
             stats: diff.stats,
@@ -1586,6 +1594,16 @@ impl WorktreeService {
             .map_err(|e| format!("Worktree validation task failed: {}", e))?
     }
 
+    async fn validate_registered_record_diff_record(
+        &self,
+        record: &WorktreeRegistryRecord,
+    ) -> Result<(), String> {
+        let record = record.clone();
+        tokio::task::spawn_blocking(move || validate_registered_record_diff(&record))
+            .await
+            .map_err(|e| format!("Worktree validation task failed: {}", e))?
+    }
+
     async fn record_view_with_status(
         &self,
         record: &WorktreeRegistryRecord,
@@ -1972,7 +1990,20 @@ fn validate_registered_record_checkout(record: &WorktreeRegistryRecord) -> Resul
     validate_worktree_meta_checkout(&record.meta)
 }
 
+fn validate_registered_record_diff(record: &WorktreeRegistryRecord) -> Result<(), String> {
+    validate_worktree_meta_repository(&record.meta).map(|_| ())
+}
+
 fn validate_worktree_meta_checkout(meta: &WorktreeMeta) -> Result<(), String> {
+    let registered_root = validate_worktree_meta_repository(meta)?;
+    let source_branch = meta
+        .branch
+        .clone()
+        .ok_or_else(|| format!("Worktree '{}' has no source branch", meta.id))?;
+    git::ensure_checkout_on_branch(&registered_root, "Source worktree", &source_branch)
+}
+
+fn validate_worktree_meta_repository(meta: &WorktreeMeta) -> Result<PathBuf, String> {
     if !meta.root.exists() {
         return Err(format!(
             "Worktree '{}' path '{}' does not exist",
@@ -2007,12 +2038,7 @@ fn validate_worktree_meta_checkout(meta: &WorktreeMeta) -> Result<(), String> {
             meta.root.display()
         ));
     }
-    let source_branch = meta
-        .branch
-        .clone()
-        .ok_or_else(|| format!("Worktree '{}' has no source branch", meta.id))?;
-    git::ensure_checkout_on_branch(&registered_root, "Source worktree", &source_branch)?;
-    Ok(())
+    Ok(registered_root)
 }
 
 fn fallback_merge_message(record: &WorktreeRegistryRecord, branch: &str) -> String {
@@ -2773,6 +2799,143 @@ mod worktree_registry_tests {
         }));
         assert!(diff.patch.contains("committed change"));
         assert!(!diff.status.dirty);
+    }
+
+    #[tokio::test]
+    async fn worktree_diff_reports_base_relative_counts_without_upstream() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/base-relative-counts".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let root = &created.worktree.meta.root;
+        let repo = git2::Repository::discover(root).unwrap();
+        let branch = repo
+            .find_branch("refact/chat/base-relative-counts", git2::BranchType::Local)
+            .unwrap();
+        assert!(branch.upstream().is_err());
+        commit_file(root, "file.txt", "first change\n", "first change");
+        commit_file(root, "file.txt", "second change\n", "second change");
+        commit_file(root, "file.txt", "third change\n", "third change");
+
+        let diff = service
+            .diff_worktree(&created.worktree.meta.id)
+            .await
+            .unwrap();
+
+        assert_eq!(diff.ahead, Some(3));
+        assert_eq!(diff.behind, Some(0));
+    }
+
+    #[tokio::test]
+    async fn worktree_diff_reports_zero_counts_when_level_with_base() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/base-relative-level".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let diff = service
+            .diff_worktree(&created.worktree.meta.id)
+            .await
+            .unwrap();
+
+        assert_eq!(diff.ahead, Some(0));
+        assert_eq!(diff.behind, Some(0));
+    }
+
+    #[tokio::test]
+    async fn worktree_diff_omits_counts_for_detached_head_or_missing_base() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let service = WorktreeService::new(cache, source).unwrap();
+        let missing_base = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/missing-base-counts".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut registry = service.load_registry().await.unwrap();
+        let record = registry
+            .records
+            .iter_mut()
+            .find(|record| record.meta.id == missing_base.worktree.meta.id)
+            .unwrap();
+        record.meta.base_commit = None;
+        record.meta.base_branch = None;
+        service.save_registry(&registry).await.unwrap();
+
+        let missing_base_diff = service
+            .diff_worktree(&missing_base.worktree.meta.id)
+            .await
+            .unwrap();
+
+        assert_eq!(missing_base_diff.ahead, None);
+        assert_eq!(missing_base_diff.behind, None);
+
+        let detached = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/detached-counts".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let detached_root = &detached.worktree.meta.root;
+        let head = run_git(detached_root, &["rev-parse", "HEAD"]);
+        run_git(detached_root, &["checkout", "--detach", head.trim()]);
+
+        let detached_diff = service
+            .diff_worktree(&detached.worktree.meta.id)
+            .await
+            .unwrap();
+
+        assert_eq!(detached_diff.ahead, None);
+        assert_eq!(detached_diff.behind, None);
+
+        let wrong_branch = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/wrong-branch-counts".to_string()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        run_git(
+            &wrong_branch.worktree.meta.root,
+            &["checkout", "-b", "manual-branch"],
+        );
+
+        let wrong_branch_diff = service
+            .diff_worktree(&wrong_branch.worktree.meta.id)
+            .await
+            .unwrap();
+
+        assert_eq!(wrong_branch_diff.ahead, Some(0));
+        assert_eq!(wrong_branch_diff.behind, Some(0));
     }
 
     #[tokio::test]

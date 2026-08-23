@@ -307,6 +307,10 @@ pub struct WorktreeDiffResponse {
     pub base_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind: Option<usize>,
     pub status: WorktreeStatus,
     pub files: Vec<WorktreeDiffFile>,
     pub stats: WorktreeDiffStats,

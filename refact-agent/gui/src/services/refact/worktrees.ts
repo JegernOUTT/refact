@@ -120,6 +120,8 @@ export type WorktreeDiffResponse = {
   branch?: string | null;
   base_branch?: string | null;
   base_commit?: string | null;
+  ahead?: number | null;
+  behind?: number | null;
   status: WorktreeStatus;
   files: WorktreeDiffFile[];
   stats: WorktreeDiffStats;
