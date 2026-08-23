@@ -87,7 +87,9 @@ pub fn default_chat_scratchpad() -> String {
 
 impl ChatModelRecord {
     pub fn has_reasoning_support(&self) -> bool {
-        self.reasoning_effort_options.is_some()
+        self.reasoning_effort_options
+            .as_ref()
+            .is_some_and(|options| !options.is_empty())
             || self.supports_thinking_budget
             || self.supports_adaptive_thinking_budget
     }
@@ -97,7 +99,11 @@ impl ChatModelRecord {
             Some("anthropic_effort".to_string())
         } else if self.supports_thinking_budget {
             Some("anthropic_budget".to_string())
-        } else if self.reasoning_effort_options.is_some() {
+        } else if self
+            .reasoning_effort_options
+            .as_ref()
+            .is_some_and(|options| !options.is_empty())
+        {
             Some("effort".to_string())
         } else {
             None
@@ -299,6 +305,13 @@ mod tests {
         let none = ChatModelRecord::default();
         assert!(!none.has_reasoning_support());
         assert_eq!(none.reasoning_type_string(), None);
+
+        let empty_effort = ChatModelRecord {
+            reasoning_effort_options: Some(vec![]),
+            ..Default::default()
+        };
+        assert!(!empty_effort.has_reasoning_support());
+        assert_eq!(empty_effort.reasoning_type_string(), None);
 
         let effort = ChatModelRecord {
             reasoning_effort_options: Some(vec!["low".to_string(), "high".to_string()]),

@@ -483,13 +483,20 @@ impl LiteLLMProvider {
         })
     }
 
-    fn supported_parameters(row: &Value) -> HashSet<&str> {
+    fn supported_parameters_array(row: &Value) -> Option<&Vec<Value>> {
         let info = Self::metadata_object(row);
-        info.get("supported_parameters")
-            .or_else(|| info.get("supported_openai_params"))
-            .or_else(|| row.get("supported_parameters"))
-            .or_else(|| row.get("supported_openai_params"))
+        row.get("supported_parameters")
             .and_then(Value::as_array)
+            .or_else(|| row.get("supported_openai_params").and_then(Value::as_array))
+            .or_else(|| info.get("supported_parameters").and_then(Value::as_array))
+            .or_else(|| {
+                info.get("supported_openai_params")
+                    .and_then(Value::as_array)
+            })
+    }
+
+    fn supported_parameters(row: &Value) -> HashSet<&str> {
+        Self::supported_parameters_array(row)
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
@@ -551,22 +558,57 @@ impl LiteLLMProvider {
             .map(|value| value as f32)
     }
 
-    fn parse_reasoning(info: &Value, parameters: &HashSet<&str>) -> Option<Vec<String>> {
+    fn is_sonnet_five(row: &Value, info: &Value) -> bool {
+        let routed_model = row
+            .get("litellm_params")
+            .and_then(|params| Self::string_field(params, &["model"]));
+        [
+            Self::string_field(row, &["id"]),
+            Self::string_field(row, &["model_name"]),
+            Self::string_field(row, &["model"]),
+            routed_model,
+            Self::string_field(info, &["base_model"]),
+            Self::string_field(info, &["model"]),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|model| model.to_ascii_lowercase().contains("sonnet-5"))
+    }
+
+    fn parse_reasoning(
+        row: &Value,
+        info: &Value,
+        parameters: &HashSet<&str>,
+    ) -> Option<Vec<String>> {
+        if Self::bool_field(row, &["supports_reasoning"]) == Some(false) {
+            return Some(Vec::new());
+        }
         let explicit = Self::string_list_field(
-            info,
+            row,
             &["reasoning_effort_options", "supported_reasoning_efforts"],
-        );
+        )
+        .or_else(|| {
+            Self::string_list_field(
+                info,
+                &["reasoning_effort_options", "supported_reasoning_efforts"],
+            )
+        });
         if explicit.is_some() {
             return explicit;
         }
-        let supports_reasoning = Self::bool_field(info, &["supports_reasoning"]);
+        let supports_reasoning = Self::bool_field(row, &["supports_reasoning"])
+            .or_else(|| Self::bool_field(info, &["supports_reasoning"]));
         if supports_reasoning == Some(false) {
             return Some(Vec::new());
         }
-        if supports_reasoning != Some(true) && !parameters.contains("reasoning_effort") {
+        if supports_reasoning != Some(true)
+            && !parameters.contains("reasoning_effort")
+            && !Self::is_sonnet_five(row, info)
+        {
             return None;
         }
         let mut efforts = Vec::new();
+        let mut has_explicit_effort_capability = false;
         for (name, supported) in [
             ("none", "supports_none_reasoning_effort"),
             ("minimal", "supports_minimal_reasoning_effort"),
@@ -576,12 +618,21 @@ impl LiteLLMProvider {
             ("xhigh", "supports_xhigh_reasoning_effort"),
             ("max", "supports_max_reasoning_effort"),
         ] {
-            if Self::bool_field(info, &[supported]) == Some(true) {
-                efforts.push(name.to_string());
+            if let Some(is_supported) =
+                Self::bool_field(row, &[supported]).or_else(|| Self::bool_field(info, &[supported]))
+            {
+                has_explicit_effort_capability = true;
+                if is_supported {
+                    efforts.push(name.to_string());
+                }
             }
         }
-        if efforts.is_empty() {
-            efforts.extend(["low".to_string(), "medium".to_string(), "high".to_string()]);
+        if efforts.is_empty() && !has_explicit_effort_capability {
+            if Self::is_sonnet_five(row, info) {
+                efforts.extend(["high".to_string(), "xhigh".to_string()]);
+            } else {
+                efforts.extend(["low".to_string(), "medium".to_string(), "high".to_string()]);
+            }
         }
         Some(efforts)
     }
@@ -589,19 +640,13 @@ impl LiteLLMProvider {
     fn parse_metadata(row: &Value) -> DeploymentMetadata {
         let info = Self::metadata_object(row);
         let parameters = Self::supported_parameters(row);
-        let supported_parameters = info
-            .get("supported_openai_params")
-            .or_else(|| info.get("supported_parameters"))
-            .or_else(|| row.get("supported_openai_params"))
-            .or_else(|| row.get("supported_parameters"))
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            });
+        let supported_parameters = Self::supported_parameters_array(row).map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        });
         let has_parameters = supported_parameters.is_some();
         let modalities = info
             .get("input_modalities")
@@ -669,10 +714,33 @@ impl LiteLLMProvider {
         );
         let (mode, mode_conflict) = Self::routing_mode(row);
         let routing_mode_missing = mode.is_none();
+        let reasoning_opted_out = Self::bool_field(row, &["supports_reasoning"])
+            .or_else(|| Self::bool_field(info, &["supports_reasoning"]))
+            == Some(false);
         let supports_thinking =
-            Self::bool_field(info, &["supports_thinking", "supports_thinking_budget"]);
+            Self::bool_field(row, &["supports_thinking", "supports_thinking_budget"]).or_else(
+                || Self::bool_field(info, &["supports_thinking", "supports_thinking_budget"]),
+            );
+        let supports_adaptive_thinking = Self::bool_field(
+            row,
+            &[
+                "supports_adaptive_thinking",
+                "supports_adaptive_thinking_budget",
+            ],
+        )
+        .or_else(|| {
+            Self::bool_field(
+                info,
+                &[
+                    "supports_adaptive_thinking",
+                    "supports_adaptive_thinking_budget",
+                ],
+            )
+        });
         let max_thinking_tokens =
-            Self::usize_field(info, &["max_thinking_tokens", "max_thinking_budget"]);
+            Self::usize_field(row, &["max_thinking_tokens", "max_thinking_budget"]).or_else(|| {
+                Self::usize_field(info, &["max_thinking_tokens", "max_thinking_budget"])
+            });
         let live = LiveModelFields {
             display_name: Self::string_field(info, &["display_name", "model_name"]),
             n_ctx: None,
@@ -706,25 +774,36 @@ impl LiteLLMProvider {
                 info,
                 &["supports_computer_use", "supports_clicks", "supports_click"],
             ),
-            reasoning_effort_options: Self::parse_reasoning(info, &parameters),
-            supports_thinking_budget: supports_thinking
-                .or_else(|| max_thinking_tokens.map(|_| true)),
-            supports_adaptive_thinking_budget: Self::bool_field(
-                info,
-                &[
-                    "supports_adaptive_thinking",
-                    "supports_adaptive_thinking_budget",
-                ],
-            ),
+            reasoning_effort_options: Self::parse_reasoning(row, info, &parameters),
+            supports_thinking_budget: if reasoning_opted_out {
+                Some(false)
+            } else {
+                supports_thinking.or_else(|| max_thinking_tokens.map(|_| true))
+            },
+            supports_adaptive_thinking_budget: if reasoning_opted_out {
+                Some(false)
+            } else {
+                supports_adaptive_thinking
+            },
             max_thinking_tokens,
             supports_cache_control: Self::bool_field(
-                info,
+                row,
                 &[
                     "supports_prompt_caching",
                     "supports_cache_control",
                     "supports_caching",
                 ],
-            ),
+            )
+            .or_else(|| {
+                Self::bool_field(
+                    info,
+                    &[
+                        "supports_prompt_caching",
+                        "supports_cache_control",
+                        "supports_caching",
+                    ],
+                )
+            }),
             tokenizer: Self::string_field_allow_empty(info, &["tokenizer"])
                 .and_then(Self::safe_tokenizer),
             pricing: Self::parse_pricing(info),
@@ -1078,7 +1157,14 @@ impl LiteLLMProvider {
             .collect::<HashSet<_>>();
         let mut models = Vec::new();
         for id in aliases {
-            let meta = metadata.get(&id).cloned().unwrap_or_default();
+            let meta = metadata.get(&id).cloned().unwrap_or_else(|| {
+                let mut meta = DeploymentMetadata::default();
+                if id.to_ascii_lowercase().contains("sonnet-5") {
+                    meta.live.reasoning_effort_options =
+                        Some(vec!["high".to_string(), "xhigh".to_string()]);
+                }
+                meta
+            });
             if meta.mode_conflict
                 || meta.routed_model_conflict
                 || Self::excluded_mode(meta.mode.as_deref())
@@ -1859,6 +1945,293 @@ mod tests {
         assert_eq!(
             model.endpoint_override.as_deref(),
             Some("http://localhost:4000/v1/responses")
+        );
+    }
+
+    #[test]
+    fn discovers_row_level_reasoning_efforts_exactly() {
+        let provider = LiteLLMProvider::default();
+        let models = json!({"data":[{"id":"reasoning-model"}]});
+        let info = json!({"data":[{
+            "model_name":"reasoning-model",
+            "supported_reasoning_efforts":["high","xhigh"],
+            "supports_prompt_caching":true,
+            "model_info":{
+                "mode":"chat",
+                "supported_reasoning_efforts":["low","medium"],
+                "supports_prompt_caching":false
+            }
+        }]});
+
+        let model = provider
+            .available_from_discovery(&models, Some(&info), &HashMap::new())
+            .pop()
+            .unwrap();
+
+        assert_eq!(
+            model.reasoning_effort_options.as_deref(),
+            Some(&["high".to_string(), "xhigh".to_string()][..])
+        );
+        assert!(model.supports_cache_control);
+    }
+
+    #[test]
+    fn row_level_reasoning_opt_out_overrides_nested_reasoning_capabilities() {
+        let provider = LiteLLMProvider::default();
+        let model = provider
+            .available_from_discovery(
+                &json!({"data":[{"id":"reasoning-model"}]}),
+                Some(&json!({"data":[{
+                    "model_name":"reasoning-model",
+                    "supports_reasoning":false,
+                    "model_info":{
+                        "supports_reasoning":true,
+                        "supported_reasoning_efforts":["low","high"],
+                        "supports_thinking":true,
+                        "supports_adaptive_thinking":true,
+                        "max_thinking_tokens":4096
+                    }
+                }]})),
+                &HashMap::new(),
+            )
+            .pop()
+            .unwrap();
+
+        assert_eq!(model.reasoning_effort_options.as_deref(), Some(&[][..]));
+        assert_eq!(model.live_fields.supports_thinking_budget, Some(false));
+        assert_eq!(
+            model.live_fields.supports_adaptive_thinking_budget,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn nested_reasoning_opt_out_disables_thinking_capabilities() {
+        let metadata = LiteLLMProvider::parse_metadata(&json!({
+            "model_name":"reasoning-model",
+            "model_info":{
+                "supports_reasoning":false,
+                "supports_thinking":true,
+                "supports_adaptive_thinking":true,
+                "max_thinking_tokens":4096
+            }
+        }));
+
+        assert_eq!(metadata.live.reasoning_effort_options.as_deref(), Some(&[][..]));
+        assert_eq!(metadata.live.supports_thinking_budget, Some(false));
+        assert_eq!(metadata.live.supports_adaptive_thinking_budget, Some(false));
+    }
+
+    #[test]
+    fn row_level_thinking_capabilities_override_nested_metadata() {
+        let metadata = LiteLLMProvider::parse_metadata(&json!({
+            "model_name":"reasoning-model",
+            "supports_thinking_budget":false,
+            "supports_adaptive_thinking_budget":false,
+            "max_thinking_budget":2048,
+            "model_info":{
+                "supports_thinking":true,
+                "supports_adaptive_thinking":true,
+                "max_thinking_tokens":4096
+            }
+        }));
+
+        assert_eq!(metadata.live.supports_thinking_budget, Some(false));
+        assert_eq!(metadata.live.supports_adaptive_thinking_budget, Some(false));
+        assert_eq!(metadata.live.max_thinking_tokens, Some(2048));
+    }
+
+    #[test]
+    fn row_level_supported_parameters_override_nested_generic_metadata() {
+        let provider = LiteLLMProvider::default();
+        let model = provider
+            .available_from_discovery(
+                &json!({"data":[{"id":"reasoning-model"}]}),
+                Some(&json!({"data":[{
+                    "model_name":"reasoning-model",
+                    "supported_openai_params":["reasoning_effort"],
+                    "model_info":{"supported_openai_params":["tools"]}
+                }]})),
+                &HashMap::new(),
+            )
+            .pop()
+            .unwrap();
+
+        assert_eq!(
+            model.reasoning_effort_options.as_deref(),
+            Some(&["low".to_string(), "medium".to_string(), "high".to_string()][..])
+        );
+        assert_eq!(
+            model.supported_parameters.as_deref(),
+            Some(&["reasoning_effort".to_string()][..])
+        );
+        assert!(!model.supports_tools);
+    }
+
+    #[test]
+    fn canonical_supported_parameters_skip_invalid_candidates_consistently() {
+        let metadata = LiteLLMProvider::parse_metadata(&json!({
+            "model_name":"reasoning-model",
+            "supported_parameters":null,
+            "supported_openai_params":["reasoning_effort"],
+            "model_info":{
+                "supported_parameters":["tools"],
+                "supported_openai_params":["temperature"]
+            }
+        }));
+
+        assert_eq!(
+            metadata.live.supported_parameters.as_deref(),
+            Some(&["reasoning_effort".to_string()][..])
+        );
+        assert_eq!(
+            metadata.live.reasoning_effort_options.as_deref(),
+            Some(&["low".to_string(), "medium".to_string(), "high".to_string()][..])
+        );
+        assert_eq!(metadata.live.supports_tools, Some(false));
+
+        let metadata = LiteLLMProvider::parse_metadata(&json!({
+            "supported_parameters":"invalid",
+            "supported_openai_params":null,
+            "model_info":{
+                "supported_parameters":"invalid",
+                "supported_openai_params":["tools"]
+            }
+        }));
+        assert_eq!(
+            metadata.live.supported_parameters.as_deref(),
+            Some(&["tools".to_string()][..])
+        );
+        assert_eq!(metadata.live.supports_tools, Some(true));
+    }
+
+    #[test]
+    fn canonical_supported_parameters_prefer_row_and_generic_arrays() {
+        let metadata = LiteLLMProvider::parse_metadata(&json!({
+            "supported_parameters":["tools"],
+            "supported_openai_params":["reasoning_effort"],
+            "model_info":{
+                "supported_parameters":["temperature"],
+                "supported_openai_params":["max_completion_tokens"]
+            }
+        }));
+
+        assert_eq!(
+            metadata.live.supported_parameters.as_deref(),
+            Some(&["tools".to_string()][..])
+        );
+        assert_eq!(metadata.live.supports_tools, Some(true));
+        assert!(metadata.live.reasoning_effort_options.is_none());
+    }
+
+    #[test]
+    fn sonnet_five_defaults_to_high_and_xhigh_reasoning_efforts() {
+        let provider = LiteLLMProvider::default();
+        let model = provider
+            .available_from_discovery(
+                &json!({"data":[{"id":"sonnet-5"}]}),
+                Some(&json!({"data":[{
+                    "model_name":"sonnet-5",
+                    "supports_reasoning":true,
+                    "model_info":{"mode":"chat"}
+                }]})),
+                &HashMap::new(),
+            )
+            .pop()
+            .unwrap();
+
+        assert_eq!(
+            model.reasoning_effort_options.as_deref(),
+            Some(&["high".to_string(), "xhigh".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn sonnet_five_identifiers_default_without_reasoning_advertisement() {
+        for row in [
+            json!({"model_name":"team-sonnet-5-alias","supported_parameters":["tools"]}),
+            json!({"model_name":"alias","litellm_params":{"model":"anthropic/sonnet-5-latest"}}),
+            json!({"model_name":"alias","model_info":{"base_model":"claude-sonnet-5-preview"}}),
+        ] {
+            assert_eq!(
+                LiteLLMProvider::parse_metadata(&row)
+                    .live
+                    .reasoning_effort_options
+                    .as_deref(),
+                Some(&["high".to_string(), "xhigh".to_string()][..])
+            );
+        }
+    }
+
+    #[test]
+    fn sonnet_five_detection_checks_id_and_model_name_independently() {
+        let metadata = LiteLLMProvider::parse_metadata(&json!({
+            "id":"unrelated-model",
+            "model_name":"team-sonnet-5-alias",
+            "supported_parameters":["tools"]
+        }));
+
+        assert_eq!(
+            metadata.live.reasoning_effort_options.as_deref(),
+            Some(&["high".to_string(), "xhigh".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn sonnet_five_respects_explicit_reasoning_data_and_row_false() {
+        for (row, expected) in [
+            (
+                json!({"model_name":"sonnet-5-alias","reasoning_effort_options":[]}),
+                Vec::<String>::new(),
+            ),
+            (
+                json!({"model_name":"sonnet-5-alias","supported_reasoning_efforts":["medium"]}),
+                vec!["medium".to_string()],
+            ),
+            (
+                json!({
+                    "model_name":"sonnet-5-alias",
+                    "supports_reasoning":false,
+                    "model_info":{"supports_reasoning":true}
+                }),
+                Vec::<String>::new(),
+            ),
+            (
+                json!({
+                    "model_name":"sonnet-5-alias",
+                    "supports_high_reasoning_effort":false,
+                    "model_info":{"supports_high_reasoning_effort":true}
+                }),
+                Vec::<String>::new(),
+            ),
+        ] {
+            assert_eq!(
+                LiteLLMProvider::parse_metadata(&row)
+                    .live
+                    .reasoning_effort_options,
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_free_sonnet_five_defaults_to_high_and_xhigh_reasoning_efforts() {
+        let provider = LiteLLMProvider::default();
+        let model = provider
+            .available_from_discovery(
+                &json!({"data":[{"id":"team-sonnet-5-latest"}]}),
+                Some(&json!({"data":[{
+                    "model_name":"another-model",
+                    "reasoning_effort_options":["low"]
+                }]})),
+                &HashMap::new(),
+            )
+            .pop()
+            .unwrap();
+
+        assert_eq!(
+            model.reasoning_effort_options.as_deref(),
+            Some(&["high".to_string(), "xhigh".to_string()][..])
         );
     }
 

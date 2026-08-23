@@ -553,7 +553,10 @@ fn adapt_sampling_for_reasoning_models(
         sampling_parameters.frequency_penalty = model_record.default_frequency_penalty;
     }
 
-    let has_reasoning_support = model_record.reasoning_effort_options.is_some()
+    let has_reasoning_support = model_record
+        .reasoning_effort_options
+        .as_ref()
+        .is_some_and(|options| !options.is_empty())
         || model_record.supports_thinking_budget
         || model_record.supports_adaptive_thinking_budget;
 
@@ -563,6 +566,20 @@ fn adapt_sampling_for_reasoning_models(
         sampling_parameters.thinking_budget = None;
         sampling_parameters.enable_thinking = None;
         return;
+    }
+
+    if let Some(ref options) = model_record.reasoning_effort_options {
+        if sampling_parameters
+            .reasoning_effort
+            .as_ref()
+            .is_some_and(|effort| {
+                !options
+                    .iter()
+                    .any(|option| ReasoningEffort::from_str_opt(option).as_ref() == Some(effort))
+            })
+        {
+            sampling_parameters.reasoning_effort = None;
+        }
     }
 
     if sampling_parameters.boost_reasoning {
@@ -577,19 +594,24 @@ fn adapt_sampling_for_reasoning_models(
         }
 
         if let Some(ref options) = model_record.reasoning_effort_options {
-            if sampling_parameters.reasoning_effort.is_none() && !options.is_empty() {
-                let default_effort = if options.contains(&"medium".to_string()) {
-                    ReasoningEffort::Medium
+            if sampling_parameters.reasoning_effort.is_none() {
+                let default_effort = if options.iter().any(|option| option == "medium") {
+                    Some(ReasoningEffort::Medium)
                 } else {
-                    ReasoningEffort::from_str_opt(&options[options.len() - 1])
-                        .unwrap_or(ReasoningEffort::Medium)
+                    options
+                        .last()
+                        .and_then(|option| ReasoningEffort::from_str_opt(option))
                 };
-                sampling_parameters.reasoning_effort = Some(default_effort);
+                sampling_parameters.reasoning_effort = default_effort;
             }
         }
     }
 
-    if model_record.reasoning_effort_options.is_none() {
+    if !model_record
+        .reasoning_effort_options
+        .as_ref()
+        .is_some_and(|options| !options.is_empty())
+    {
         sampling_parameters.reasoning_effort = None;
     }
     if !model_record.supports_thinking_budget && !model_record.supports_adaptive_thinking_budget {
@@ -603,7 +625,10 @@ fn sampling_params_to_reasoning_intent(
     sampling_parameters: &SamplingParameters,
     model_record: &ChatModelRecord,
 ) -> ReasoningIntent {
-    let has_reasoning_support = model_record.reasoning_effort_options.is_some()
+    let has_reasoning_support = model_record
+        .reasoning_effort_options
+        .as_ref()
+        .is_some_and(|options| !options.is_empty())
         || model_record.supports_thinking_budget
         || model_record.supports_adaptive_thinking_budget;
 
@@ -665,7 +690,10 @@ fn strip_thinking_blocks_if_disabled(
     sampling_parameters: &SamplingParameters,
     model_record: &ChatModelRecord,
 ) -> Vec<ChatMessage> {
-    let has_reasoning = model_record.reasoning_effort_options.is_some()
+    let has_reasoning = model_record
+        .reasoning_effort_options
+        .as_ref()
+        .is_some_and(|options| !options.is_empty())
         || model_record.supports_thinking_budget
         || model_record.supports_adaptive_thinking_budget;
     if !has_reasoning || !is_thinking_enabled(sampling_parameters) {
@@ -1650,6 +1678,45 @@ mod tests {
         assert!(params.reasoning_effort.is_none());
         assert!(params.thinking.is_none());
         assert!(params.enable_thinking.is_none());
+    }
+
+    #[test]
+    fn test_adapt_sampling_empty_effort_options_clear_reasoning() {
+        let mut params = make_sampling_params();
+        params.boost_reasoning = true;
+        params.reasoning_effort = Some(ReasoningEffort::High);
+        let model = make_model_record_effort(Some(vec![]));
+
+        adapt_sampling_for_reasoning_models(&mut params, &model);
+
+        assert!(params.reasoning_effort.is_none());
+        assert_eq!(
+            sampling_params_to_reasoning_intent(&params, &model),
+            ReasoningIntent::Off
+        );
+    }
+
+    #[test]
+    fn test_adapt_sampling_stale_effort_cleared_without_boost() {
+        let mut params = make_sampling_params();
+        params.reasoning_effort = Some(ReasoningEffort::Medium);
+        let model = make_model_record_effort(Some(vec!["high", "xhigh"]));
+
+        adapt_sampling_for_reasoning_models(&mut params, &model);
+
+        assert!(params.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn test_adapt_sampling_stale_effort_uses_default_with_boost() {
+        let mut params = make_sampling_params();
+        params.boost_reasoning = true;
+        params.reasoning_effort = Some(ReasoningEffort::Low);
+        let model = make_model_record_effort(Some(vec!["high", "xhigh"]));
+
+        adapt_sampling_for_reasoning_models(&mut params, &model);
+
+        assert_eq!(params.reasoning_effort, Some(ReasoningEffort::XHigh));
     }
 
     #[test]

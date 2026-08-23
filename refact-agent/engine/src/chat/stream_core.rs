@@ -374,6 +374,17 @@ fn xai_oauth_instance_id(model_rec: &BaseModelRecord) -> Option<&str> {
     .then_some(provider_name)
 }
 
+fn is_litellm_model(model_rec: &BaseModelRecord) -> bool {
+    model_rec
+        .id
+        .split_once('/')
+        .is_some_and(|(provider_name, _)| provider_name == "litellm")
+        || model_rec
+            .extra_headers
+            .get(crate::caps::caps::MODEL_BASE_PROVIDER_HEADER)
+            .is_some_and(|base_provider| base_provider == "litellm")
+}
+
 fn xai_rate_limit_headers(headers: &reqwest::header::HeaderMap) -> HashMap<String, String> {
     crate::providers::xai_oauth::XAIOAuthProvider::filter_rate_limit_headers(
         headers
@@ -2286,11 +2297,18 @@ pub async fn run_llm_stream<C: StreamCollector>(
     let wire_format = params.model_rec.wire_format;
     let adapter = get_adapter(wire_format);
 
+    let mut adapter_extra_headers = params.model_rec.extra_headers.clone();
+    if is_litellm_model(&params.model_rec) {
+        adapter_extra_headers.insert(
+            crate::caps::caps::MODEL_BASE_PROVIDER_HEADER.to_string(),
+            "litellm".to_string(),
+        );
+    }
     let adapter_settings = AdapterSettings {
         api_key: params.model_rec.api_key.clone(),
         auth_token: params.model_rec.auth_token.clone(),
         endpoint: params.model_rec.endpoint.clone(),
-        extra_headers: params.model_rec.extra_headers.clone(),
+        extra_headers: adapter_extra_headers,
         model_name: params.model_rec.name.clone(),
         supports_tools: params.supports_tools,
         supports_reasoning: params.supports_reasoning,
@@ -2847,8 +2865,8 @@ pub async fn run_llm_stream<C: StreamCollector>(
 /// 2. `(type, index)` pair (Anthropic signature deltas)
 /// 3. `(type, signature)` pair (LiteLLM blocks without index)
 ///
-/// When a duplicate is found, the existing block's signature is updated
-/// to the latest value (handles streaming signature updates).
+/// When a duplicate is found, reasoning and thinking blocks are enriched with
+/// all non-null incoming fields. Signatures use the latest incoming value.
 pub(crate) fn merge_thinking_blocks(
     dst: &mut Vec<serde_json::Value>,
     incoming: Vec<serde_json::Value>,
@@ -2882,7 +2900,7 @@ pub(crate) fn merge_thinking_blocks(
                     obj.insert("signature".to_string(), json!(new_sig));
                 }
             }
-            if block_type == "reasoning" {
+            if block_type == "reasoning" || block_type == "thinking" {
                 if let (Some(existing), Some(incoming)) =
                     (dst[pos].as_object_mut(), block.as_object())
                 {
@@ -3141,6 +3159,20 @@ mod tests {
             supports_web_search: false,
             supports_cache_control: false,
         }
+    }
+
+    #[test]
+    fn litellm_identity_supports_named_provider_instances() {
+        let direct = model_record("litellm");
+        let mut named = model_record("company-gateway");
+        named.extra_headers.insert(
+            crate::caps::caps::MODEL_BASE_PROVIDER_HEADER.to_string(),
+            "litellm".to_string(),
+        );
+
+        assert!(is_litellm_model(&direct));
+        assert!(is_litellm_model(&named));
+        assert!(!is_litellm_model(&model_record("custom")));
     }
 
     async fn app_with_privacy_policy(policy: PrivacyPolicy) -> AppState {
@@ -4612,6 +4644,41 @@ mod tests {
             dst[0]["signature"], "sig_v2",
             "Signature should be updated to latest"
         );
+    }
+
+    #[test]
+    fn test_merge_litellm_thinking_block_enriches_final_fields() {
+        let mut dst = vec![json!({
+            "index": 0,
+            "type": "thinking",
+            "thinking": "",
+            "signature": "sig_partial",
+            "provider_metadata": {"opaque": "old"},
+            "retained_extension": "keep"
+        })];
+
+        merge_thinking_blocks(
+            &mut dst,
+            vec![json!({
+                "index": 0,
+                "type": "thinking",
+                "thinking": "Final LiteLLM reasoning text",
+                "signature": "sig_final",
+                "provider_metadata": {"opaque": "final", "version": 2},
+                "provider_extension": "opaque-value",
+                "retained_extension": null
+            })],
+        );
+
+        assert_eq!(dst.len(), 1, "Matched block must be updated in place");
+        assert_eq!(dst[0]["thinking"], "Final LiteLLM reasoning text");
+        assert_eq!(dst[0]["signature"], "sig_final");
+        assert_eq!(
+            dst[0]["provider_metadata"],
+            json!({"opaque": "final", "version": 2})
+        );
+        assert_eq!(dst[0]["provider_extension"], "opaque-value");
+        assert_eq!(dst[0]["retained_extension"], "keep");
     }
 
     #[test]

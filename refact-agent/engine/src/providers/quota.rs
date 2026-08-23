@@ -12,6 +12,8 @@ pub const PROVIDER_QUOTA_CACHE_CAPACITY: usize = 100;
 pub enum ProviderQuotaSource {
     ClaudeCode,
     OpenaiCodex,
+    #[serde(rename = "openrouter")]
+    OpenRouter,
     Opencode,
     GoogleAntigravity,
     XaiOauth,
@@ -54,6 +56,8 @@ pub struct ProviderQuotaFact {
     pub id: String,
     pub label: String,
     pub value: ProviderQuotaFactValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

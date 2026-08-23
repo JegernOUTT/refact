@@ -45,6 +45,13 @@ pub struct OpenRouterAccountInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct OpenRouterQuotaInfo {
+    pub limit: Option<f64>,
+    pub usage: Option<f64>,
+    pub limit_remaining: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct OpenRouterHealthInfo {
     pub ok: bool,
     pub key_label: Option<String>,
@@ -53,6 +60,21 @@ pub struct OpenRouterHealthInfo {
 }
 
 impl OpenRouterProvider {
+    fn quota_info_from_key_json(key_json: &serde_json::Value) -> OpenRouterQuotaInfo {
+        let key_data = key_json.get("data");
+        OpenRouterQuotaInfo {
+            limit: key_data
+                .and_then(|data| data.get("limit"))
+                .and_then(|value| value.as_f64()),
+            usage: key_data
+                .and_then(|data| data.get("usage"))
+                .and_then(|value| value.as_f64()),
+            limit_remaining: key_data
+                .and_then(|data| data.get("limit_remaining"))
+                .and_then(|value| value.as_f64()),
+        }
+    }
+
     fn parse_price_value(raw: Option<&serde_json::Value>) -> Option<f64> {
         raw.and_then(|v| {
             if let Some(s) = v.as_str() {
@@ -569,6 +591,19 @@ impl OpenRouterProvider {
         })
     }
 
+    pub async fn fetch_quota_info(
+        &self,
+        http_client: &reqwest::Client,
+    ) -> Result<OpenRouterQuotaInfo, String> {
+        let api_key = resolve_env_var(&self.api_key, "", "openrouter api_key");
+        if api_key.is_empty() {
+            return Err("OpenRouter API key is not configured".to_string());
+        }
+
+        let key_json = self.fetch_key_json(http_client, &api_key).await?;
+        Ok(Self::quota_info_from_key_json(&key_json))
+    }
+
     pub async fn check_api_key_health(
         &self,
         http_client: &reqwest::Client,
@@ -830,6 +865,23 @@ available:
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn quota_info_uses_only_authenticated_key_fields() {
+        let quota = OpenRouterProvider::quota_info_from_key_json(&json!({
+            "data": {
+                "limit": 100.0,
+                "usage": 35.0,
+                "limit_remaining": 65.0,
+                "total_credits": 999.0,
+                "total_usage": 998.0
+            }
+        }));
+
+        assert_eq!(quota.limit, Some(100.0));
+        assert_eq!(quota.usage, Some(35.0));
+        assert_eq!(quota.limit_remaining, Some(65.0));
+    }
 
     #[test]
     fn ambiguous_endpoints_do_not_silently_supply_live_capabilities() {

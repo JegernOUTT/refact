@@ -3332,6 +3332,7 @@ fn quota_window_from_value(name: &str, value: &Value) -> ProviderQuotaWindow {
     let number = |keys: &[&str]| {
         keys.iter()
             .find_map(|key| value.get(*key).and_then(Value::as_f64))
+            .filter(|value| value.is_finite())
     };
     let string = |keys: &[&str]| {
         keys.iter()
@@ -3339,12 +3340,18 @@ fn quota_window_from_value(name: &str, value: &Value) -> ProviderQuotaWindow {
     };
     let limit = number(&["limit"]);
     let remaining = number(&["remaining"]);
-    let used_percent =
-        number(&["used_percent", "percent_used"]).or_else(|| match (limit, remaining) {
-            (Some(limit), Some(remaining))
-                if limit.is_finite() && limit > 0.0 && remaining.is_finite() && remaining > 0.0 =>
-            {
-                Some(100.0 * (1.0 - remaining / limit))
+    let used = number(&["used"]);
+    let used_percent = number(&["used_percent", "percent_used"])
+        .map(|percent| percent.clamp(0.0, 100.0))
+        .or_else(|| match (limit, remaining) {
+            (Some(limit), Some(remaining)) if limit > 0.0 => {
+                Some((100.0 * (1.0 - remaining / limit)).clamp(0.0, 100.0))
+            }
+            _ => None,
+        })
+        .or_else(|| match (limit, used) {
+            (Some(limit), Some(used)) if limit > 0.0 && used >= 0.0 => {
+                Some((100.0 * used / limit).clamp(0.0, 100.0))
             }
             _ => None,
         });
@@ -3353,7 +3360,7 @@ fn quota_window_from_value(name: &str, value: &Value) -> ProviderQuotaWindow {
         label: name.replace('_', " "),
         used_percent,
         limit,
-        used: number(&["used"]),
+        used,
         remaining,
         reset_at: string(&["reset_at", "resets_at", "reset"]),
         reset_after_seconds: value.get("reset_after_seconds").and_then(Value::as_u64),
@@ -3376,6 +3383,17 @@ fn quota_fact(name: &str, value: Option<&Value>) -> Option<ProviderQuotaFact> {
         id: name.to_string(),
         label: name.replace('_', " "),
         value,
+        unit: None,
+    })
+}
+
+fn quota_currency_fact(name: &str, value: Option<&Value>) -> Option<ProviderQuotaFact> {
+    let number = value?.as_f64().filter(|value| value.is_finite())?;
+    Some(ProviderQuotaFact {
+        id: name.to_string(),
+        label: name.replace('_', " "),
+        value: ProviderQuotaFactValue::Number(serde_json::Number::from_f64(number)?),
+        unit: Some("USD".to_string()),
     })
 }
 
@@ -3502,6 +3520,19 @@ fn quota_snapshot_from_details(
                 );
             }
         }
+        ProviderQuotaSource::OpenRouter => {
+            let window = quota_window_from_value(
+                "credits",
+                &json!({
+                    "limit": details.get("limit"),
+                    "used": details.get("usage"),
+                    "remaining": details.get("limit_remaining"),
+                }),
+            );
+            if window.limit.is_some() || window.used.is_some() || window.remaining.is_some() {
+                windows.push(window);
+            }
+        }
         ProviderQuotaSource::Opencode => {
             for key in ["rolling", "weekly", "monthly"] {
                 if let Some(value) = details.get(key).filter(|value| value.is_object()) {
@@ -3555,9 +3586,9 @@ fn quota_snapshot_from_details(
         ProviderQuotaSource::Litellm => {
             facts.extend(
                 [
-                    quota_fact("spend", details.get("spend")),
-                    quota_fact("max_budget", details.get("max_budget")),
-                    quota_fact("remaining", details.get("remaining")),
+                    quota_currency_fact("spend", details.get("spend")),
+                    quota_currency_fact("max_budget", details.get("max_budget")),
+                    quota_currency_fact("remaining", details.get("remaining")),
                 ]
                 .into_iter()
                 .flatten(),
@@ -3593,6 +3624,24 @@ async fn fetch_provider_quota(
             .await
             .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
             .map(|value| (ProviderQuotaSource::OpenaiCodex, value)),
+        "openrouter" => {
+            let resolved = resolve_provider_for_base(&gcx, provider_name, "openrouter").await;
+            match resolved {
+                Ok((provider, client)) => {
+                    match downcast_provider::<OpenRouterProvider>(provider.as_ref(), "OpenRouter") {
+                        Ok(provider) => provider
+                            .fetch_quota_info(&client)
+                            .await
+                            .and_then(|value| {
+                                serde_json::to_value(value).map_err(|error| error.to_string())
+                            })
+                            .map(|value| (ProviderQuotaSource::OpenRouter, value)),
+                        Err(error) => Err(error.message),
+                    }
+                }
+                Err(error) => Err(error.message),
+            }
+        }
         "google_antigravity" => fetch_google_antigravity_usage_with_refresh(gcx, provider_name)
             .await
             .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
@@ -3680,6 +3729,7 @@ async fn fetch_provider_quota(
             match base_provider {
                 "claude_code" => ProviderQuotaSource::ClaudeCode,
                 "openai_codex" => ProviderQuotaSource::OpenaiCodex,
+                "openrouter" => ProviderQuotaSource::OpenRouter,
                 "opencode" => ProviderQuotaSource::Opencode,
                 "google_antigravity" => ProviderQuotaSource::GoogleAntigravity,
                 "xai_oauth" => ProviderQuotaSource::XaiOauth,
@@ -4351,6 +4401,96 @@ mod tests {
     }
 
     #[test]
+    fn generic_quota_window_derives_exhausted_percentage() {
+        let window = quota_window_from_value("credits", &json!({"limit": 20, "remaining": 0}));
+        assert_eq!(window.used_percent, Some(100.0));
+
+        let over_limit = quota_window_from_value("credits", &json!({"limit": 20, "remaining": -1}));
+        assert_eq!(over_limit.used_percent, Some(100.0));
+    }
+
+    #[test]
+    fn litellm_budget_facts_include_usd_units() {
+        let snapshot = quota_snapshot_from_details(
+            "litellm-work",
+            "litellm",
+            ProviderQuotaSource::Litellm,
+            json!({"spend": 12.5, "max_budget": 20.0, "remaining": 7.5}),
+        );
+
+        for name in ["spend", "max_budget", "remaining"] {
+            let fact = snapshot
+                .facts
+                .iter()
+                .find(|fact| fact.id == name)
+                .unwrap_or_else(|| panic!("missing {name} fact"));
+            assert_eq!(fact.unit.as_deref(), Some("USD"));
+        }
+
+        let malformed = quota_snapshot_from_details(
+            "litellm-work",
+            "litellm",
+            ProviderQuotaSource::Litellm,
+            json!({"spend": null, "max_budget": "unknown", "remaining": 7.5}),
+        );
+        assert_eq!(malformed.facts.len(), 1);
+        assert_eq!(malformed.facts[0].id, "remaining");
+        assert_eq!(malformed.facts[0].unit.as_deref(), Some("USD"));
+    }
+
+    #[test]
+    fn openrouter_key_quota_normalizes_usage() {
+        let snapshot = quota_snapshot_from_details(
+            "openrouter-work",
+            "openrouter",
+            ProviderQuotaSource::OpenRouter,
+            json!({
+                "limit": 100.0,
+                "usage": 25.0
+            }),
+        );
+
+        assert_eq!(snapshot.source, ProviderQuotaSource::OpenRouter);
+        assert_eq!(snapshot.windows.len(), 1);
+        assert_eq!(snapshot.windows[0].id, "credits");
+        assert_eq!(snapshot.windows[0].limit, Some(100.0));
+        assert_eq!(snapshot.windows[0].used, Some(25.0));
+        assert_eq!(snapshot.windows[0].remaining, None);
+        assert_eq!(snapshot.windows[0].used_percent, Some(25.0));
+        assert_eq!(snapshot.windows[0].reset_at, None);
+        assert!(snapshot.facts.is_empty());
+
+        let with_remaining = quota_snapshot_from_details(
+            "openrouter-work",
+            "openrouter",
+            ProviderQuotaSource::OpenRouter,
+            json!({"limit": 100.0, "limit_remaining": 40.0}),
+        );
+        assert_eq!(with_remaining.windows[0].remaining, Some(40.0));
+        assert_eq!(with_remaining.windows[0].used_percent, Some(60.0));
+    }
+
+    #[test]
+    fn openrouter_key_quota_omits_empty_window_and_clamps_over_limit_usage() {
+        let absent = quota_snapshot_from_details(
+            "openrouter-work",
+            "openrouter",
+            ProviderQuotaSource::OpenRouter,
+            json!({"limit": null, "usage": "invalid", "limit_remaining": null}),
+        );
+        assert!(absent.windows.is_empty());
+
+        let over_limit = quota_snapshot_from_details(
+            "openrouter-work",
+            "openrouter",
+            ProviderQuotaSource::OpenRouter,
+            json!({"limit": 100.0, "usage": 125.0}),
+        );
+        assert_eq!(over_limit.windows.len(), 1);
+        assert_eq!(over_limit.windows[0].used_percent, Some(100.0));
+    }
+
+    #[test]
     fn antigravity_quota_mapping_normalizes_fraction_without_absolute_remaining() {
         let snapshot = quota_snapshot_from_details(
             "antigravity-work",
@@ -4361,7 +4501,9 @@ mod tests {
             }]}]}),
         );
         assert_eq!(snapshot.windows[0].remaining, None);
-        assert_eq!(snapshot.windows[0].used_percent, Some(20.0));
+        assert!(snapshot.windows[0]
+            .used_percent
+            .is_some_and(|value| (value - 20.0).abs() < 1e-9));
         assert_eq!(snapshot.windows[0].reset_at.as_deref(), Some("tomorrow"));
     }
 

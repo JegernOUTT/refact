@@ -22,6 +22,8 @@ const PROTECTED_FIELDS: &[&str] = &[
     "top_p",
 ];
 
+const BASE_PROVIDER_HEADER: &str = "x-refact-internal-base-provider";
+
 pub struct OpenAiChatAdapter;
 
 fn normalize_openai_tool_call_delta(tc: &Value, fallback_index: usize) -> Option<Value> {
@@ -122,22 +124,27 @@ impl LlmWireAdapter for OpenAiChatAdapter {
         insert_extra_headers(&mut headers, &settings.extra_headers);
         crate::provider_quirks::apply_github_copilot_request_headers(&mut headers, req, settings);
 
-        let mut messages = convert_messages_to_openai(&req.messages);
+        let litellm = is_litellm(settings);
+        let mut messages = convert_messages_to_openai(&req.messages, litellm);
 
-        let is_anthropic_family_target = is_anthropic_family_model(settings);
-
-        // Anthropic-family targets use provider automatic caching via the top-level field only.
+        // OpenRouter Anthropic targets use provider automatic caching via the top-level field only.
         let use_top_level_cache_control = matches!(req.cache_control, CacheControl::Ephemeral)
             && settings.supports_cache_control
+            && !litellm
             && is_openrouter_anthropic_model(settings);
 
-        // Legacy explicit block markers are only for non-Anthropic compatible providers.
+        // LiteLLM requires explicit message block markers. Preserve the existing generic
+        // strategy for non-Anthropic OpenAI-compatible endpoints.
         if matches!(req.cache_control, CacheControl::Ephemeral)
             && settings.supports_cache_control
             && !use_top_level_cache_control
-            && !is_anthropic_family_target
+            && (!is_anthropic_family_model(settings) || litellm)
         {
-            inject_cache_control(&mut messages);
+            if litellm {
+                inject_cache_control_bounded(&mut messages, 4);
+            } else {
+                inject_cache_control(&mut messages);
+            }
         }
 
         let mut body = json!({
@@ -314,6 +321,12 @@ impl LlmWireAdapter for OpenAiChatAdapter {
                         }
                     }
 
+                    if let Some(blocks) = nonempty_thinking_blocks(delta) {
+                        deltas.push(LlmStreamDelta::SetThinkingBlocks {
+                            blocks: blocks.clone(),
+                        });
+                    }
+
                     if let Some(tool_calls) = delta.get("tool_calls") {
                         if let Some(arr) = tool_calls.as_array() {
                             let normalized: Vec<_> = arr
@@ -371,6 +384,14 @@ impl LlmWireAdapter for OpenAiChatAdapter {
                         });
                     }
                 }
+
+                if let Some(message) = choice.get("message") {
+                    if let Some(blocks) = nonempty_thinking_blocks(message) {
+                        deltas.push(LlmStreamDelta::SetThinkingBlocks {
+                            blocks: blocks.clone(),
+                        });
+                    }
+                }
             }
         }
 
@@ -390,7 +411,24 @@ impl LlmWireAdapter for OpenAiChatAdapter {
     }
 }
 
-fn convert_messages_to_openai(messages: &[refact_core::chat_types::ChatMessage]) -> Vec<Value> {
+fn nonempty_thinking_blocks(value: &Value) -> Option<&Vec<Value>> {
+    value
+        .get("thinking_blocks")
+        .and_then(Value::as_array)
+        .filter(|blocks| !blocks.is_empty())
+        .or_else(|| {
+            value
+                .get("provider_specific_fields")
+                .and_then(|fields| fields.get("thinking_blocks"))
+                .and_then(Value::as_array)
+                .filter(|blocks| !blocks.is_empty())
+        })
+}
+
+fn convert_messages_to_openai(
+    messages: &[refact_core::chat_types::ChatMessage],
+    is_litellm: bool,
+) -> Vec<Value> {
     use super::render_extra::{
         append_text_to_tool_json, is_context_role, is_event_role, is_goal_role, is_plan_role,
         render_context_message, render_event_message, render_goal_message, render_plan_message,
@@ -568,6 +606,14 @@ fn convert_messages_to_openai(messages: &[refact_core::chat_types::ChatMessage])
             }
         }
 
+        if is_litellm && role == "assistant" {
+            if let Some(blocks) = &msg.thinking_blocks {
+                if !blocks.is_empty() {
+                    obj["thinking_blocks"] = Value::Array(blocks.clone());
+                }
+            }
+        }
+
         result.push(obj);
 
         if role == "tool" {
@@ -643,10 +689,21 @@ fn is_anthropic_family_model(settings: &AdapterSettings) -> bool {
     model.starts_with("anthropic/") || model.contains("claude")
 }
 
-/// Inject cache_control breakpoints for non-Anthropic compatible routing.
+fn is_litellm(settings: &AdapterSettings) -> bool {
+    settings
+        .extra_headers
+        .get(BASE_PROVIDER_HEADER)
+        .is_some_and(|provider| provider == "litellm")
+}
+
+/// Inject cache_control breakpoints for non-OpenRouter routing.
 /// Converts simple text messages to multipart format with cache_control on last block.
 /// Strategy: cache system message + 4 strategically positioned messages (quarter, middle, last2, last).
 fn inject_cache_control(messages: &mut [Value]) {
+    inject_cache_control_bounded(messages, 5);
+}
+
+fn inject_cache_control_bounded(messages: &mut [Value], max_markers: usize) {
     let cc = json!({"type": "ephemeral", "ttl": "1h"});
 
     fn add_cache_to_message(msg: &mut Value, cc: &Value) {
@@ -666,14 +723,16 @@ fn inject_cache_control(messages: &mut [Value]) {
         }
     }
 
-    if messages.is_empty() {
+    if messages.is_empty() || max_markers == 0 {
         return;
     }
 
     // Cache system message if present
+    let mut marker_count = 0;
     if let Some(first) = messages.first_mut() {
         if first.get("role").and_then(|r| r.as_str()) == Some("system") {
             add_cache_to_message(first, &cc);
+            marker_count += 1;
         }
     }
 
@@ -698,7 +757,12 @@ fn inject_cache_control(messages: &mut [Value]) {
     let mut selected_positions = vec![quarter_pos, middle_pos, last2_pos, last_pos];
     selected_positions.sort_unstable();
     selected_positions.dedup();
-    selected_positions.truncate(4);
+    let available_markers = max_markers.saturating_sub(marker_count);
+    selected_positions.truncate(available_markers);
+    if available_markers > 0 && !selected_positions.contains(&last_pos) {
+        selected_positions.pop();
+        selected_positions.push(last_pos);
+    }
 
     for pos in selected_positions {
         if let Some(&msg_idx) = non_system_indices.get(pos) {
@@ -882,7 +946,7 @@ mod tests {
             "Switched to agent",
         )];
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
 
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0]["role"], "user");
@@ -896,7 +960,7 @@ mod tests {
     fn convert_plan_to_user_wrapped_xml() {
         let messages = vec![plan_message("agent", 1, "Do the thing")];
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
 
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0]["role"], "user");
@@ -912,7 +976,7 @@ mod tests {
             plan_message("agent", 1, "Do the thing"),
         ];
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
         let serialized = json!({"messages": converted}).to_string();
 
         assert_eq!(serialized.matches("<goal mode=").count(), 1);
@@ -931,7 +995,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "third user".to_string()),
         ];
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
         let serialized = json!({"messages": converted}).to_string();
 
         assert_eq!(converted.len(), 5);
@@ -968,7 +1032,7 @@ mod tests {
             ChatMessage::new("assistant".to_string(), "Ok".to_string()),
         ];
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
         let body = json!({"messages": converted}).to_string();
 
         assert!(!body.contains("\"role\":\"event\""));
@@ -984,7 +1048,7 @@ mod tests {
             "checking progress",
         )];
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
         let serialized = json!({"messages": converted}).to_string();
 
         assert!(serialized.contains("<event subkind=\\\"goal_pursuit\\\""));
@@ -1001,7 +1065,7 @@ mod tests {
             "a < b & c > d",
         )];
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
         let text = converted[0]["content"][0]["text"].as_str().unwrap();
 
         assert!(text.contains("&lt;tag&gt;&amp;stuff"));
@@ -1333,6 +1397,89 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_stream_chunk_preserves_signed_delta_thinking_blocks() {
+        let adapter = OpenAiChatAdapter;
+        let expected = vec![json!({
+            "type": "thinking",
+            "thinking": "I should call the tool.",
+            "signature": "opaque-signed-delta==",
+            "provider_extension": {"version": 1}
+        })];
+        let chunk = json!({
+            "choices": [{"delta": {"thinking_blocks": expected.clone()}}]
+        })
+        .to_string();
+
+        let deltas = adapter.parse_stream_chunk(&chunk).unwrap();
+
+        assert_eq!(deltas.len(), 1);
+        match &deltas[0] {
+            LlmStreamDelta::SetThinkingBlocks { blocks } => assert_eq!(blocks, &expected),
+            _ => panic!("expected SetThinkingBlocks"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_chunk_preserves_signed_final_message_thinking_blocks() {
+        let adapter = OpenAiChatAdapter;
+        let expected = vec![json!({
+            "type": "thinking",
+            "thinking": "The accumulated thought.",
+            "signature": "opaque-signed-final/+/="
+        })];
+        let chunk = json!({
+            "choices": [{"message": {"thinking_blocks": expected.clone()}}]
+        })
+        .to_string();
+
+        let deltas = adapter.parse_stream_chunk(&chunk).unwrap();
+
+        assert_eq!(deltas.len(), 1);
+        match &deltas[0] {
+            LlmStreamDelta::SetThinkingBlocks { blocks } => assert_eq!(blocks, &expected),
+            _ => panic!("expected SetThinkingBlocks"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stream_chunk_preserves_provider_specific_thinking_blocks() {
+        let adapter = OpenAiChatAdapter;
+        let delta_blocks = vec![json!({
+            "type": "thinking",
+            "signature": "opaque-provider-delta==",
+            "provider_extension": {"nested": [1, true, null]}
+        })];
+        let final_blocks = vec![json!({
+            "type": "thinking",
+            "signature": "opaque-provider-final/+/=",
+            "unknown_field": "preserve verbatim"
+        })];
+        let chunk = json!({
+            "choices": [{
+                "delta": {
+                    "provider_specific_fields": {"thinking_blocks": delta_blocks.clone()}
+                },
+                "message": {
+                    "provider_specific_fields": {"thinking_blocks": final_blocks.clone()}
+                }
+            }]
+        })
+        .to_string();
+
+        let deltas = adapter.parse_stream_chunk(&chunk).unwrap();
+
+        assert_eq!(deltas.len(), 2);
+        match &deltas[0] {
+            LlmStreamDelta::SetThinkingBlocks { blocks } => assert_eq!(blocks, &delta_blocks),
+            _ => panic!("expected delta SetThinkingBlocks"),
+        }
+        match &deltas[1] {
+            LlmStreamDelta::SetThinkingBlocks { blocks } => assert_eq!(blocks, &final_blocks),
+            _ => panic!("expected final SetThinkingBlocks"),
+        }
+    }
+
+    #[test]
     fn test_parse_stream_chunk_done() {
         let adapter = OpenAiChatAdapter;
         let deltas = adapter.parse_stream_chunk("[DONE]").unwrap();
@@ -1422,7 +1569,7 @@ mod tests {
             ChatMessage::new("assistant".to_string(), "hello".to_string()),
         ];
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
 
         assert_eq!(converted.len(), 2);
         assert_eq!(converted[0]["role"], "user");
@@ -1439,7 +1586,7 @@ mod tests {
             ChatMessage::new("user".to_string(), "hi".to_string()),
         ];
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
 
         assert_eq!(converted.len(), 2);
         assert_eq!(converted[0]["role"], "developer");
@@ -1612,7 +1759,7 @@ mod tests {
             },
         ];
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
 
         // Should have 3 messages: user, assistant (with only regular tool call), tool result (only regular)
         assert_eq!(converted.len(), 3);
@@ -1680,7 +1827,7 @@ mod tests {
             },
         ];
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
 
         // Text-only Multimodal must be serialized as plain string, not array
         assert!(
@@ -1717,7 +1864,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
 
         // Multimodal with images must stay as array
         assert!(
@@ -1742,7 +1889,7 @@ mod tests {
             },
         ];
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
 
         assert_eq!(converted.len(), 2);
         assert_eq!(
@@ -1750,6 +1897,78 @@ mod tests {
             "Let me reason through this..."
         );
         assert_eq!(converted[1]["content"], "The answer");
+    }
+
+    #[test]
+    fn test_assistant_thinking_blocks_replayed_exactly_with_reasoning_and_tool_call() {
+        use refact_core::chat_types::{ChatToolCall, ChatToolFunction};
+
+        let thinking_blocks = vec![json!({
+            "type": "thinking",
+            "thinking": "Use the weather tool.",
+            "signature": "opaque-signature-must-not-be-rebuilt==",
+            "opaque": {"nested": [true, 7, null]}
+        })];
+        let messages = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText(String::new()),
+            reasoning_content: Some("Use the weather tool.".to_string()),
+            thinking_blocks: Some(thinking_blocks.clone()),
+            tool_calls: Some(vec![ChatToolCall {
+                id: "call_weather".to_string(),
+                index: Some(0),
+                tool_type: "function".to_string(),
+                function: ChatToolFunction {
+                    name: "get_weather".to_string(),
+                    arguments: r#"{"city":"Paris"}"#.to_string(),
+                },
+                extra_content: None,
+            }]),
+            ..Default::default()
+        }];
+
+        let req = LlmRequest::new("anthropic/claude-sonnet".to_string(), messages);
+        let mut settings = default_settings();
+        settings.model_name = "anthropic/claude-sonnet".to_string();
+        settings
+            .extra_headers
+            .insert(BASE_PROVIDER_HEADER.to_string(), "litellm".to_string());
+
+        let http = OpenAiChatAdapter
+            .build_http(&cleared(&req), &settings)
+            .unwrap();
+        let converted = http.body["messages"].as_array().unwrap();
+
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["thinking_blocks"], Value::Array(thinking_blocks));
+        assert_eq!(converted[0]["reasoning_content"], "Use the weather tool.");
+        assert_eq!(converted[0]["tool_calls"][0]["id"], "call_weather");
+        assert_eq!(
+            converted[0]["tool_calls"][0]["function"]["arguments"],
+            r#"{"city":"Paris"}"#
+        );
+    }
+
+    #[test]
+    fn test_non_litellm_request_omits_assistant_thinking_blocks() {
+        let thinking_blocks = vec![json!({
+            "type": "thinking",
+            "thinking": "Do not send this provider field to regular OpenAI targets.",
+            "signature": "opaque-signature=="
+        })];
+        let messages = vec![ChatMessage {
+            role: "assistant".to_string(),
+            content: ChatContent::SimpleText("Answer".to_string()),
+            thinking_blocks: Some(thinking_blocks),
+            ..Default::default()
+        }];
+        let req = LlmRequest::new("gpt-4".to_string(), messages);
+
+        let http = OpenAiChatAdapter
+            .build_http(&cleared(&req), &default_settings())
+            .unwrap();
+
+        assert!(http.body["messages"][0].get("thinking_blocks").is_none());
     }
 
     #[test]
@@ -1761,7 +1980,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
 
         assert!(converted[0].get("reasoning_content").is_none());
     }
@@ -1908,10 +2127,10 @@ mod tests {
     }
 
     #[test]
-    fn test_non_openrouter_anthropic_family_skips_block_level_cache_control() {
+    fn test_litellm_anthropic_uses_block_level_cache_control() {
         let adapter = OpenAiChatAdapter;
         let req = LlmRequest::new(
-            "claude-compatible".to_string(),
+            "anthropic/claude-sonnet-4.6".to_string(),
             vec![
                 ChatMessage::new("system".to_string(), "You are helpful".to_string()),
                 ChatMessage::new("user".to_string(), "Hello".to_string()),
@@ -1920,12 +2139,121 @@ mod tests {
         )
         .with_cache_control(CacheControl::Ephemeral);
         let mut settings = default_settings();
-        settings.model_name = "claude-compatible".to_string();
+        settings.endpoint = "http://localhost:4000/v1/chat/completions".to_string();
+        settings.model_name = "anthropic/claude-sonnet-4.6".to_string();
+        settings
+            .extra_headers
+            .insert(BASE_PROVIDER_HEADER.to_string(), "litellm".to_string());
 
         let http = adapter.build_http(&cleared(&req), &settings).unwrap();
 
         assert!(http.body.get("cache_control").is_none());
-        assert!(!http.body.to_string().contains("cache_control"));
+        let messages = http.body["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(
+            messages[1]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(
+            messages[2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn test_litellm_anthropic_on_openrouter_endpoint_uses_four_block_markers() {
+        let adapter = OpenAiChatAdapter;
+        let mut messages = vec![ChatMessage::new(
+            "system".to_string(),
+            "You are helpful".to_string(),
+        )];
+        for index in 0..6 {
+            let role = if index % 2 == 0 { "user" } else { "assistant" };
+            messages.push(ChatMessage::new(
+                role.to_string(),
+                format!("message {index}"),
+            ));
+        }
+        let req = LlmRequest::new("anthropic/claude-sonnet-4.6".to_string(), messages)
+            .with_cache_control(CacheControl::Ephemeral);
+        let mut settings = default_settings();
+        settings.endpoint = "https://openrouter.ai/api/v1/chat/completions".to_string();
+        settings.model_name = "anthropic/claude-sonnet-4.6".to_string();
+        settings
+            .extra_headers
+            .insert(BASE_PROVIDER_HEADER.to_string(), "litellm".to_string());
+
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
+        let messages = http.body["messages"].as_array().unwrap();
+        let marker_count = messages
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .filter(|block| block.get("cache_control").is_some())
+            .count();
+
+        assert_eq!(marker_count, 4);
+        assert!(messages.last().unwrap()["content"][0]
+            .get("cache_control")
+            .is_some());
+        assert!(http.body.get("cache_control").is_none());
+    }
+
+    #[test]
+    fn test_litellm_alias_limits_cache_control_to_four_markers() {
+        let adapter = OpenAiChatAdapter;
+        let mut messages = vec![ChatMessage::new(
+            "system".to_string(),
+            "You are helpful".to_string(),
+        )];
+        for index in 0..6 {
+            let role = if index % 2 == 0 { "user" } else { "assistant" };
+            messages.push(ChatMessage::new(
+                role.to_string(),
+                format!("message {index}"),
+            ));
+        }
+        let req = LlmRequest::new("sonnet-5".to_string(), messages)
+            .with_cache_control(CacheControl::Ephemeral);
+        let mut settings = default_settings();
+        settings.model_name = "sonnet-5".to_string();
+        settings
+            .extra_headers
+            .insert(BASE_PROVIDER_HEADER.to_string(), "litellm".to_string());
+
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
+        let marker_count = http.body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .filter(|block| block.get("cache_control").is_some())
+            .count();
+
+        assert_eq!(marker_count, 4);
+    }
+
+    #[test]
+    fn test_non_litellm_anthropic_compatible_provider_has_no_cache_markers() {
+        let adapter = OpenAiChatAdapter;
+        let req = LlmRequest::new(
+            "claude-sonnet".to_string(),
+            vec![
+                ChatMessage::new("system".to_string(), "You are helpful".to_string()),
+                ChatMessage::new("user".to_string(), "Hello".to_string()),
+            ],
+        )
+        .with_cache_control(CacheControl::Ephemeral);
+        let mut settings = default_settings();
+        settings.endpoint = "https://anthropic-compatible.example/v1/chat/completions".to_string();
+        settings.model_name = "claude-sonnet".to_string();
+
+        let http = adapter.build_http(&cleared(&req), &settings).unwrap();
+
+        assert!(http.body.get("cache_control").is_none());
+        assert!(!http.body["messages"].to_string().contains("cache_control"));
     }
 
     #[test]
