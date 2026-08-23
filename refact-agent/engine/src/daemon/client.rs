@@ -17,6 +17,13 @@ const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CONTROL_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROL_READINESS_TIMEOUT: Duration = Duration::from_secs(125);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+const DAEMON_NO_UPGRADE_ENV: &str = "REFACT_DAEMON_NO_UPGRADE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonUpgradeReason {
+    OlderVersion,
+    SameVersionDifferentExecutable,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControlRequestTimeout {
@@ -182,8 +189,15 @@ pub async fn shutdown_for_upgrade_if_stale(my_version: &str) -> Result<Option<Da
     if !daemon_needs_upgrade(&info, my_version) {
         return Ok(None);
     }
+    let Some(upgrade_reason) = daemon_upgrade_reason(&info, my_version) else {
+        return Ok(None);
+    };
     match ping_daemon(&info).await {
         DaemonPingStatus::Alive => {
+            eprintln!(
+                "{}",
+                daemon_takeover_warning(&info, my_version, upgrade_reason)
+            );
             post_shutdown(&info, "upgrade").await?;
             wait_until_dead(&info, STARTUP_TIMEOUT).await?;
         }
@@ -197,19 +211,65 @@ pub async fn shutdown_for_upgrade_if_stale(my_version: &str) -> Result<Option<Da
 }
 
 fn daemon_needs_upgrade(info: &DaemonInfo, my_version: &str) -> bool {
+    daemon_upgrade_reason(info, my_version).is_some_and(|reason| {
+        daemon_upgrade_is_enabled(
+            reason,
+            cfg!(debug_assertions),
+            daemon_hash_upgrade_opted_out(),
+        )
+    })
+}
+
+fn daemon_upgrade_reason(info: &DaemonInfo, my_version: &str) -> Option<DaemonUpgradeReason> {
     if version_is_older(&info.version, my_version) {
-        return true;
+        return Some(DaemonUpgradeReason::OlderVersion);
     }
     if info.version.trim() != my_version.trim() {
-        return false;
+        return None;
     }
     let Some(running_hash) = info.executable_sha256.as_deref() else {
-        return false;
+        return None;
     };
     let Some(current_hash) = crate::daemon::state::current_executable_sha256() else {
-        return false;
+        return None;
     };
-    running_hash != current_hash
+    (running_hash != current_hash).then_some(DaemonUpgradeReason::SameVersionDifferentExecutable)
+}
+
+fn daemon_upgrade_is_enabled(
+    reason: DaemonUpgradeReason,
+    debug_build: bool,
+    hash_upgrade_opted_out: bool,
+) -> bool {
+    match reason {
+        DaemonUpgradeReason::OlderVersion => true,
+        DaemonUpgradeReason::SameVersionDifferentExecutable => {
+            !debug_build && !hash_upgrade_opted_out
+        }
+    }
+}
+
+fn daemon_hash_upgrade_opted_out() -> bool {
+    std::env::var_os(DAEMON_NO_UPGRADE_ENV)
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+}
+
+fn daemon_takeover_warning(
+    info: &DaemonInfo,
+    my_version: &str,
+    reason: DaemonUpgradeReason,
+) -> String {
+    let reason = match reason {
+        DaemonUpgradeReason::OlderVersion => "the running daemon is older",
+        DaemonUpgradeReason::SameVersionDifferentExecutable => {
+            "the same-version executable hash differs"
+        }
+    };
+    format!(
+        "warning: replacing running daemon pid {} at {}:{} (version {}) with version {} because {reason}",
+        info.pid, info.bind, info.port, info.version, my_version
+    )
 }
 
 pub async fn get_json<T: DeserializeOwned>(
@@ -652,6 +712,11 @@ mod tests {
         let mut info = daemon_info(8488, None);
         info.version = "0.0.1".to_string();
         assert!(daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")));
+        assert!(daemon_upgrade_is_enabled(
+            DaemonUpgradeReason::OlderVersion,
+            true,
+            true
+        ));
     }
 
     #[test]
@@ -680,7 +745,63 @@ mod tests {
     fn daemon_needs_upgrade_same_version_different_hash_upgrades() {
         let mut info = daemon_info(8488, None);
         info.executable_sha256 = Some("0".repeat(64));
-        assert!(daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")));
+        assert!(!daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            daemon_upgrade_reason(&info, env!("CARGO_PKG_VERSION")),
+            Some(DaemonUpgradeReason::SameVersionDifferentExecutable)
+        );
+    }
+
+    #[test]
+    fn daemon_needs_upgrade_same_version_different_hash_upgrades_in_release() {
+        assert!(daemon_upgrade_is_enabled(
+            DaemonUpgradeReason::SameVersionDifferentExecutable,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn daemon_needs_upgrade_same_version_different_hash_keeps_debug_daemon() {
+        assert!(!daemon_upgrade_is_enabled(
+            DaemonUpgradeReason::SameVersionDifferentExecutable,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_needs_upgrade_same_version_different_hash_honors_opt_out() {
+        let previous = std::env::var_os(DAEMON_NO_UPGRADE_ENV);
+        std::env::set_var(DAEMON_NO_UPGRADE_ENV, "1");
+
+        assert!(daemon_hash_upgrade_opted_out());
+        assert!(!daemon_upgrade_is_enabled(
+            DaemonUpgradeReason::SameVersionDifferentExecutable,
+            false,
+            daemon_hash_upgrade_opted_out()
+        ));
+
+        if let Some(previous) = previous {
+            std::env::set_var(DAEMON_NO_UPGRADE_ENV, previous);
+        } else {
+            std::env::remove_var(DAEMON_NO_UPGRADE_ENV);
+        }
+    }
+
+    #[test]
+    fn daemon_takeover_warning_names_running_daemon() {
+        let mut info = daemon_info(8488, None);
+        info.pid = 42;
+        let warning = daemon_takeover_warning(
+            &info,
+            "2.0.0",
+            DaemonUpgradeReason::SameVersionDifferentExecutable,
+        );
+        assert!(warning.contains("pid 42"));
+        assert!(warning.contains("127.0.0.1:8488"));
+        assert!(warning.contains("same-version executable hash differs"));
     }
 
     #[tokio::test]

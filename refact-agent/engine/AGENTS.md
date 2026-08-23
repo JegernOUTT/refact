@@ -64,6 +64,12 @@ src/
   bin/refact.rs        — alternate entry point
 ```
 
+### Daemon upgrade safety
+
+Daemon clients automatically replace a running daemon when its version is older. An equal-version executable-SHA mismatch is replaced only by a release build and only when `REFACT_DAEMON_NO_UPGRADE` is unset or empty; set `REFACT_DAEMON_NO_UPGRADE=1` to keep that daemon. Debug builds always keep equal-version hash mismatches, preventing local binaries from replacing an active developer daemon. Every actual replacement writes a warning naming the running daemon PID and address before shutdown.
+
+`daemon_needs_upgrade_same_version_different_hash_upgrades` was inverted for debug builds because independently compiled local binaries commonly share a package version while having different executable hashes. The test continues to protect release hash replacement, opt-out behavior, and genuine version upgrades.
+
 ## Chat System
 
 ### Session State Machine
