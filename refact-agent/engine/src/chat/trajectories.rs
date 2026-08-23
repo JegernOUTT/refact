@@ -16055,6 +16055,9 @@ mod tests {
             user_interrupt_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
             queue_notify: Arc::new(Notify::new()),
+            queue_processor_counters: Arc::new(
+                crate::chat::types::QueueProcessorCounters::default(),
+            ),
             last_activity: Instant::now(),
             last_stream_delta_at: None,
             command_enqueued_at: std::collections::HashMap::new(),
@@ -16165,6 +16168,9 @@ mod tests {
             user_interrupt_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
             queue_notify: Arc::new(Notify::new()),
+            queue_processor_counters: Arc::new(
+                crate::chat::types::QueueProcessorCounters::default(),
+            ),
             last_activity: Instant::now(),
             last_stream_delta_at: None,
             command_enqueued_at: std::collections::HashMap::new(),

@@ -433,6 +433,7 @@ impl ChatSession {
             user_interrupt_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
             queue_notify: Arc::new(Notify::new()),
+            queue_processor_counters: Arc::new(QueueProcessorCounters::default()),
             last_activity: Instant::now(),
             last_stream_delta_at: None,
             command_enqueued_at: HashMap::new(),
@@ -538,6 +539,7 @@ impl ChatSession {
             user_interrupt_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
             queue_notify: Arc::new(Notify::new()),
+            queue_processor_counters: Arc::new(QueueProcessorCounters::default()),
             last_activity: Instant::now(),
             last_stream_delta_at: None,
             command_enqueued_at: HashMap::new(),
@@ -1102,6 +1104,7 @@ impl ChatSession {
         }
         let (new_tx, _) = broadcast::channel(limits().event_channel_capacity);
         self.event_tx = new_tx;
+        self.queue_notify.notify_waiters();
     }
 
     pub fn track_post_turn_task(&mut self, handle: tokio::task::JoinHandle<()>) {
@@ -1985,6 +1988,7 @@ impl ChatSession {
         );
         self.emit(event);
         self.emit_trajectory_state_change();
+        self.queue_notify.notify_waiters();
     }
 
     fn emit_trajectory_state_change(&self) {

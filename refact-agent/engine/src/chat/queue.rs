@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, VecDeque};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
@@ -1167,48 +1168,84 @@ pub async fn process_command_queue(
     session_arc: Arc<AMutex<ChatSession>>,
     processor_running: Arc<AtomicBool>,
 ) {
-    struct ProcessorGuard(Arc<AtomicBool>);
+    struct ProcessorGuard {
+        app: AppState,
+        processor_running: Arc<AtomicBool>,
+        session_arc: Arc<AMutex<ChatSession>>,
+    }
+
     impl Drop for ProcessorGuard {
         fn drop(&mut self) {
-            self.0.store(false, Ordering::SeqCst);
+            let app = self.app.clone();
+            let processor_running = self.processor_running.clone();
+            let session_arc = self.session_arc.clone();
+            tokio::spawn(async move {
+                let restart = {
+                    let session = session_arc.lock().await;
+                    session
+                        .queue_processor_counters
+                        .processor_exits
+                        .fetch_add(1, Ordering::Relaxed);
+                    processor_running.store(false, Ordering::SeqCst);
+                    !session.closed && !session.command_queue.is_empty()
+                };
+                if restart {
+                    if !processor_running.swap(true, Ordering::SeqCst) {
+                        tokio::spawn(process_command_queue(app, session_arc, processor_running));
+                    }
+                }
+            });
         }
     }
-    let _guard = ProcessorGuard(processor_running);
+    let _guard = ProcessorGuard {
+        app: app.clone(),
+        processor_running,
+        session_arc: session_arc.clone(),
+    };
+
+    {
+        let session = session_arc.lock().await;
+        session
+            .queue_processor_counters
+            .processor_starts
+            .fetch_add(1, Ordering::Relaxed);
+    }
 
     loop {
-        let command = {
+        let (command, waiter) = {
             let mut session = session_arc.lock().await;
 
             if session.closed {
                 return;
             }
 
+            let mut waiter = Box::pin(session.queue_notify.clone().notified_owned());
+            let _ = Pin::as_mut(&mut waiter).enable();
+
             let state = session.runtime.state;
             let is_busy =
                 state == SessionState::Generating || state == SessionState::ExecutingTools;
 
-            let notify = session.queue_notify.clone();
-            let waiter = notify.notified();
-            const QUEUE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
             if is_busy {
-                drop(session);
-                let _ = tokio::time::timeout(QUEUE_WAIT_TIMEOUT, waiter).await;
-                continue;
-            }
-
-            if state == SessionState::WaitingIde {
+                session
+                    .queue_processor_counters
+                    .empty_locks
+                    .fetch_add(1, Ordering::Relaxed);
+                (None, Some(waiter))
+            } else if state == SessionState::WaitingIde {
                 if let Some(idx) = find_allowed_command_while_waiting_ide(&session.command_queue) {
                     let cmd = session.command_queue.remove(idx);
                     if let Some(request) = cmd.as_ref() {
                         session.record_command_queue_wait(&request.client_request_id);
                     }
                     session.emit_queue_update();
-                    cmd
+                    (cmd, None)
                 } else {
-                    drop(session);
-                    let _ = tokio::time::timeout(QUEUE_WAIT_TIMEOUT, waiter).await;
-                    continue;
+                    session
+                        .queue_processor_counters
+                        .empty_locks
+                        .fetch_add(1, Ordering::Relaxed);
+                    (None, Some(waiter))
                 }
             } else if state == SessionState::Paused {
                 if let Some(idx) = find_allowed_command_while_paused(&session.command_queue) {
@@ -1217,39 +1254,20 @@ pub async fn process_command_queue(
                         session.record_command_queue_wait(&request.client_request_id);
                     }
                     session.emit_queue_update();
-                    cmd
+                    (cmd, None)
                 } else {
-                    drop(session);
-                    let _ = tokio::time::timeout(QUEUE_WAIT_TIMEOUT, waiter).await;
-                    continue;
+                    session
+                        .queue_processor_counters
+                        .empty_locks
+                        .fetch_add(1, Ordering::Relaxed);
+                    (None, Some(waiter))
                 }
             } else if session.command_queue.is_empty() {
-                let closed = session.closed;
-                drop(session);
-
-                if closed {
-                    return;
-                }
-
-                maybe_save_trajectory_background_with_intent(
-                    app.clone(),
-                    session_arc.clone(),
-                    TrajectoryCommitIntent::Checkpoint,
-                );
-
-                let session = session_arc.lock().await;
-                if session.closed {
-                    return;
-                }
-                if session.command_queue.is_empty() {
-                    drop(session);
-                    tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
-                        .await
-                        .ok();
-                    continue;
-                }
-                drop(session);
-                continue;
+                session
+                    .queue_processor_counters
+                    .empty_locks
+                    .fetch_add(1, Ordering::Relaxed);
+                (None, Some(waiter))
             } else {
                 let cmd = session.command_queue.pop_front();
                 if let Some(ref req) = cmd {
@@ -1266,9 +1284,19 @@ pub async fn process_command_queue(
                     }
                 }
                 session.emit_queue_update();
-                cmd
+                (cmd, None)
             }
         };
+
+        if let Some(waiter) = waiter {
+            waiter.await;
+            let session = session_arc.lock().await;
+            session
+                .queue_processor_counters
+                .notify_wakes
+                .fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
 
         let Some(request) = command else {
             continue;
@@ -2921,6 +2949,335 @@ mod tests {
             priority: false,
             command: cmd,
         }
+    }
+
+    fn abort_request(request_id: &str) -> CommandRequest {
+        CommandRequest {
+            client_request_id: request_id.to_string(),
+            priority: false,
+            command: ChatCommand::Abort {},
+        }
+    }
+
+    async fn wait_for_empty_lock(session_arc: &Arc<AMutex<ChatSession>>) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let waiting = session_arc
+                    .lock()
+                    .await
+                    .queue_processor_counters
+                    .empty_locks
+                    .load(Ordering::Relaxed);
+                if waiting > 0 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("queue processor did not wait for notification");
+    }
+
+    async fn wait_for_queue_to_drain(session_arc: &Arc<AMutex<ChatSession>>) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if session_arc.lock().await.command_queue.is_empty() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("queue processor did not drain queued command");
+    }
+
+    async fn close_processor(
+        session_arc: &Arc<AMutex<ChatSession>>,
+        handle: tokio::task::JoinHandle<()>,
+    ) {
+        session_arc.lock().await.close_event_channel();
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("queue processor did not exit after session close")
+            .expect("queue processor panicked");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queue_notify_idle_processors_do_not_wake_without_notifications() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(
+            "queue-notify-idle".to_string(),
+        )));
+        let processor_running = session_arc.lock().await.queue_processor_running.clone();
+        processor_running.store(true, Ordering::SeqCst);
+        let handle = tokio::spawn(process_command_queue(
+            app,
+            session_arc.clone(),
+            processor_running,
+        ));
+
+        wait_for_empty_lock(&session_arc).await;
+        let counters = session_arc.lock().await.queue_processor_counters.clone();
+        let empty_locks = counters.empty_locks.load(Ordering::Relaxed);
+        let notify_wakes = counters.notify_wakes.load(Ordering::Relaxed);
+
+        tokio::time::advance(std::time::Duration::from_secs(3_600)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(counters.empty_locks.load(Ordering::Relaxed), empty_locks);
+        assert_eq!(counters.notify_wakes.load(Ordering::Relaxed), notify_wakes);
+        assert_eq!(counters.timeout_wakes.load(Ordering::Relaxed), 0);
+
+        close_processor(&session_arc, handle).await;
+    }
+
+    #[tokio::test]
+    async fn queue_notify_processes_commands_enqueued_before_and_after_wait_registration() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let before_wait = Arc::new(AMutex::new(ChatSession::new(
+            "queue-notify-before".to_string(),
+        )));
+        let before_running = before_wait.lock().await.queue_processor_running.clone();
+        {
+            let mut session = before_wait.lock().await;
+            assert_eq!(
+                session.enqueue_accepted_command(abort_request("before-wait")),
+                EnqueueCommandOutcome::Accepted
+            );
+        }
+        before_running.store(true, Ordering::SeqCst);
+        let before_handle = tokio::spawn(process_command_queue(
+            app.clone(),
+            before_wait.clone(),
+            before_running,
+        ));
+        wait_for_queue_to_drain(&before_wait).await;
+        close_processor(&before_wait, before_handle).await;
+
+        let after_wait = Arc::new(AMutex::new(ChatSession::new(
+            "queue-notify-after".to_string(),
+        )));
+        let after_running = after_wait.lock().await.queue_processor_running.clone();
+        after_running.store(true, Ordering::SeqCst);
+        let after_handle = tokio::spawn(process_command_queue(
+            app,
+            after_wait.clone(),
+            after_running,
+        ));
+        wait_for_empty_lock(&after_wait).await;
+        {
+            let mut session = after_wait.lock().await;
+            assert_eq!(
+                session.enqueue_accepted_command(abort_request("after-wait")),
+                EnqueueCommandOutcome::Accepted
+            );
+        }
+        wait_for_queue_to_drain(&after_wait).await;
+        let counters = after_wait.lock().await.queue_processor_counters.clone();
+        assert!(counters.notify_wakes.load(Ordering::Relaxed) >= 1);
+        assert_eq!(counters.timeout_wakes.load(Ordering::Relaxed), 0);
+        close_processor(&after_wait, after_handle).await;
+    }
+
+    #[tokio::test]
+    async fn process_command_queue_restarts_after_enqueue_races_processor_teardown() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(
+            "queue-notify-teardown".to_string(),
+        )));
+        let processor_running = session_arc.lock().await.queue_processor_running.clone();
+        processor_running.store(true, Ordering::SeqCst);
+        let handle = tokio::spawn(process_command_queue(
+            app,
+            session_arc.clone(),
+            processor_running,
+        ));
+        wait_for_empty_lock(&session_arc).await;
+
+        {
+            let mut session = session_arc.lock().await;
+            session
+                .command_queue
+                .push_back(abort_request("teardown-race"));
+            session.queue_notify.notify_one();
+            handle.abort();
+        }
+        let _ = handle.await;
+
+        wait_for_queue_to_drain(&session_arc).await;
+        let counters = session_arc.lock().await.queue_processor_counters.clone();
+        assert!(counters.processor_starts.load(Ordering::Relaxed) >= 2);
+        assert!(counters.processor_exits.load(Ordering::Relaxed) >= 1);
+        let next_processor = session_arc.lock().await.queue_processor_running.clone();
+        assert!(next_processor.load(Ordering::SeqCst));
+        session_arc.lock().await.close_event_channel();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while next_processor.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("restarted queue processor did not exit after session close");
+    }
+
+    #[tokio::test]
+    async fn process_command_queue_wakes_for_paused_decision_enqueued_after_wait() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(
+            "queue-notify-paused".to_string(),
+        )));
+        let processor_running = session_arc.lock().await.queue_processor_running.clone();
+        {
+            let mut session = session_arc.lock().await;
+            session.runtime.pause_reasons.push(PauseReason {
+                reason_type: "confirmation".to_string(),
+                tool_name: "shell".to_string(),
+                command: "shell".to_string(),
+                rule: "ask".to_string(),
+                tool_call_id: "paused-tool".to_string(),
+                integr_config_path: None,
+            });
+            session.set_runtime_state(SessionState::Paused, None);
+        }
+        processor_running.store(true, Ordering::SeqCst);
+        let handle = tokio::spawn(process_command_queue(
+            app,
+            session_arc.clone(),
+            processor_running,
+        ));
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if session_arc
+                    .lock()
+                    .await
+                    .queue_processor_counters
+                    .empty_locks
+                    .load(Ordering::Relaxed)
+                    == 0
+                {
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                return;
+            }
+        })
+        .await
+        .expect("paused processor did not wait for a notification");
+        {
+            let mut session = session_arc.lock().await;
+            assert_eq!(
+                session.enqueue_accepted_command(CommandRequest {
+                    client_request_id: "paused-decision".to_string(),
+                    priority: false,
+                    command: ChatCommand::ToolDecision {
+                        tool_call_id: "paused-tool".to_string(),
+                        accepted: false,
+                    },
+                }),
+                EnqueueCommandOutcome::Accepted
+            );
+        }
+        wait_for_queue_to_drain(&session_arc).await;
+        assert_eq!(session_arc.lock().await.runtime.state, SessionState::Idle);
+        close_processor(&session_arc, handle).await;
+    }
+
+    #[tokio::test]
+    async fn process_command_queue_wakes_for_waiting_ide_callback_enqueued_after_wait() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(
+            "queue-notify-waiting-ide".to_string(),
+        )));
+        let processor_running = session_arc.lock().await.queue_processor_running.clone();
+        {
+            let mut session = session_arc.lock().await;
+            session.add_message(ChatMessage {
+                role: "assistant".to_string(),
+                tool_calls: Some(vec![crate::call_validation::ChatToolCall {
+                    id: "ide-tool".to_string(),
+                    index: None,
+                    tool_type: "function".to_string(),
+                    function: crate::call_validation::ChatToolFunction {
+                        name: "ide_action".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                    extra_content: None,
+                }]),
+                ..Default::default()
+            });
+            session.set_runtime_state(SessionState::WaitingIde, None);
+        }
+        processor_running.store(true, Ordering::SeqCst);
+        let handle = tokio::spawn(process_command_queue(
+            app,
+            session_arc.clone(),
+            processor_running,
+        ));
+
+        tokio::task::yield_now().await;
+        {
+            let mut session = session_arc.lock().await;
+            assert_eq!(
+                session.enqueue_accepted_command(CommandRequest {
+                    client_request_id: "ide-result".to_string(),
+                    priority: false,
+                    command: ChatCommand::IdeToolResult {
+                        tool_call_id: "ide-tool".to_string(),
+                        content: "accepted".to_string(),
+                        tool_failed: false,
+                    },
+                }),
+                EnqueueCommandOutcome::Accepted
+            );
+        }
+        wait_for_queue_to_drain(&session_arc).await;
+        assert!(session_arc
+            .lock()
+            .await
+            .messages
+            .iter()
+            .any(|message| { message.role == "tool" && message.tool_call_id == "ide-tool" }));
+        close_processor(&session_arc, handle).await;
+    }
+
+    #[tokio::test]
+    async fn queue_notify_rapid_enqueues_leave_no_stranded_commands() {
+        const COMMAND_COUNT: usize = 10_000;
+
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(
+            "queue-notify-rapid".to_string(),
+        )));
+        let processor_running = session_arc.lock().await.queue_processor_running.clone();
+        {
+            let mut session = session_arc.lock().await;
+            for index in 0..COMMAND_COUNT {
+                session.command_queue.push_back(CommandRequest {
+                    client_request_id: format!("rapid-{index}"),
+                    priority: false,
+                    command: ChatCommand::Regenerate {},
+                });
+            }
+            session.user_interrupt_flag.store(true, Ordering::SeqCst);
+        }
+        processor_running.store(true, Ordering::SeqCst);
+        let handle = tokio::spawn(process_command_queue(
+            app,
+            session_arc.clone(),
+            processor_running,
+        ));
+
+        wait_for_queue_to_drain(&session_arc).await;
+        assert_eq!(session_arc.lock().await.command_queue.len(), 0);
+        handle.abort();
+        let _ = handle.await;
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::RwLock as StdRwLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Notify, Mutex as AMutex};
@@ -307,6 +307,7 @@ pub struct ChatSession {
     pub user_interrupt_flag: Arc<AtomicBool>,
     pub queue_processor_running: Arc<AtomicBool>,
     pub queue_notify: Arc<Notify>,
+    pub queue_processor_counters: Arc<QueueProcessorCounters>,
     pub last_activity: Instant,
     pub last_stream_delta_at: Option<Instant>,
     pub command_enqueued_at: HashMap<String, Instant>,
@@ -357,4 +358,13 @@ pub struct ChatSession {
     pub goal_ledger: Vec<GoalLedgerEntry>,
     pub goal_turn_evidence: bool,
     pub goal_verification_blocked_until_ms: Option<u64>,
+}
+
+#[derive(Default)]
+pub struct QueueProcessorCounters {
+    pub notify_wakes: AtomicU64,
+    pub timeout_wakes: AtomicU64,
+    pub processor_starts: AtomicU64,
+    pub processor_exits: AtomicU64,
+    pub empty_locks: AtomicU64,
 }
