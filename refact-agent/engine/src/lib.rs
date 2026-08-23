@@ -77,6 +77,7 @@ pub mod indexing_routing;
 
 pub mod codegraph;
 pub mod postprocessing;
+pub mod runtime_config;
 pub mod scheduler;
 pub mod scratchpad_abstract;
 pub mod scratchpads;

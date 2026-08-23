@@ -17,7 +17,7 @@ impl Default for ChatLimits {
             event_channel_capacity: 4096,
             recent_request_ids_capacity: 100,
             max_images_per_message: 50,
-            max_parallel_tools: 32,
+            max_parallel_tools: usize::MAX,
             max_file_size: 40_000,
         }
     }

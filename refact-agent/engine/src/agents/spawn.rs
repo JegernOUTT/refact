@@ -22,7 +22,6 @@ use crate::global_context::GlobalContext;
 use crate::subchat::{SubchatConfig, SubchatResult, resolve_subchat_config_with_parent};
 use crate::worktrees::types::WorktreeMeta;
 
-pub const MAX_ACTIVE_AGENTS_PER_CHAT: usize = 8;
 const MAX_DIFF_SUMMARY_PATHSPECS: usize = 100;
 
 #[cfg(test)]
@@ -125,21 +124,6 @@ pub async fn spawn_background_agent(
         return Err(format!(
             "subchat depth limit ({}) exceeded",
             MAX_SUBCHAT_DEPTH
-        ));
-    }
-    let active_agents = app
-        .agents
-        .count_active_for_parent_root(
-            req.parent_root_chat_id
-                .as_deref()
-                .unwrap_or(&req.parent_chat_id),
-        )
-        .await;
-    if active_agents >= MAX_ACTIVE_AGENTS_PER_CHAT {
-        return Err(format!(
-            "Too many concurrent background agents for this chat ({} running, limit {}). \
-             Wait for some to finish, or cancel them with agent_cancel.",
-            active_agents, MAX_ACTIVE_AGENTS_PER_CHAT
         ));
     }
     let child_chat_id = format!("subchat-{}", Uuid::new_v4());

@@ -748,18 +748,69 @@ fn is_claude_code_model(model: &BaseModelRecord) -> bool {
     model.wire_format == crate::llm::WireFormat::AnthropicMessages && !model.auth_token.is_empty()
 }
 
-async fn maybe_enqueue_completion_activity_reaction(
+async fn completion_activity(session_arc: &Arc<AMutex<ChatSession>>) -> ChatActivityCompletion {
+    let session = session_arc.lock().await;
+    ChatActivityCompletion {
+        chat_id: session.chat_id.clone(),
+        thread: session.thread.clone(),
+    }
+}
+
+async fn spawn_completion_activity_reaction(app: AppState, session_arc: Arc<AMutex<ChatSession>>) {
+    let activity = completion_activity(&session_arc).await;
+    let mut session = session_arc.lock().await;
+    if session.closed {
+        return;
+    }
+    let handle = tokio::spawn(async move {
+        maybe_enqueue_chat_activity_reaction(app, activity).await;
+    });
+    session.track_post_turn_task(handle);
+}
+
+async fn spawn_chat_completion_side_effects(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
+    chat_id: String,
+    chat_label: String,
+    run_stop_hook: bool,
 ) {
-    let activity = {
-        let session = session_arc.lock().await;
-        ChatActivityCompletion {
-            chat_id: session.chat_id.clone(),
-            thread: session.thread.clone(),
+    let activity = completion_activity(&session_arc).await;
+    let mut session = session_arc.lock().await;
+    if session.closed {
+        return;
+    }
+    let handle = tokio::spawn(async move {
+        if run_stop_hook {
+            let project_dir = get_project_dir_string(app.clone()).await;
+            let payload = HookPayload {
+                hook_event_name: "Stop".to_string(),
+                session_id: chat_id.clone(),
+                project_dir,
+                tool_name: None,
+                tool_input: None,
+                tool_output: None,
+                user_prompt: None,
+                extra: std::collections::HashMap::new(),
+            };
+            run_hooks(app.clone(), HookEvent::Stop, payload).await;
         }
-    };
-    maybe_enqueue_chat_activity_reaction(app, activity).await;
+
+        let mut event = make_runtime_event(
+            "chat_completed",
+            &format!("Completed: {}", chat_label),
+            "chat",
+            &format!("chat_{}", chat_id),
+            "completed",
+            None,
+        );
+        event.chat_id = Some(chat_id);
+        app.buddy_event_sink
+            .apply_chat_completion(event, 4, "happy".to_string())
+            .await;
+        maybe_enqueue_chat_activity_reaction(app, activity).await;
+    });
+    session.track_post_turn_task(handle);
 }
 
 async fn ensure_claude_code_identity(
@@ -1317,11 +1368,7 @@ pub fn start_generation(
                         });
                         session.set_runtime_state(SessionState::Idle, None);
                         drop(session);
-                        maybe_enqueue_completion_activity_reaction(
-                            app.clone(),
-                            session_arc.clone(),
-                        )
-                        .await;
+                        spawn_completion_activity_reaction(app.clone(), session_arc.clone()).await;
                         maybe_save_trajectory_with_intent(
                             app.clone(),
                             session_arc.clone(),
@@ -1776,39 +1823,14 @@ pub fn start_generation(
                     if handle_goal_turn_end(app.clone(), session_arc.clone()).await {
                         break;
                     }
-                    let app_stop = AppState::from_gcx(gcx.clone()).await;
-                    let session_id_stop = chat_id.clone();
-                    let handle = tokio::spawn(async move {
-                        let project_dir = get_project_dir_string(app_stop.clone()).await;
-                        let payload = HookPayload {
-                            hook_event_name: "Stop".to_string(),
-                            session_id: session_id_stop,
-                            project_dir,
-                            tool_name: None,
-                            tool_input: None,
-                            tool_output: None,
-                            user_prompt: None,
-                            extra: std::collections::HashMap::new(),
-                        };
-                        run_hooks(app_stop, HookEvent::Stop, payload).await;
-                    });
-                    session_arc.lock().await.stop_hook_handle = Some(handle);
-                    {
-                        let mut ev = make_runtime_event(
-                            "chat_completed",
-                            &format!("Completed: {}", chat_label),
-                            "chat",
-                            &format!("chat_{}", chat_id),
-                            "completed",
-                            None,
-                        );
-                        ev.chat_id = Some(chat_id.to_string());
-                        app.buddy_event_sink
-                            .apply_chat_completion(ev, 4, "happy".to_string())
-                            .await;
-                    }
-                    maybe_enqueue_completion_activity_reaction(app.clone(), session_arc.clone())
-                        .await;
+                    spawn_chat_completion_side_effects(
+                        app.clone(),
+                        session_arc.clone(),
+                        chat_id.clone(),
+                        chat_label.clone(),
+                        true,
+                    )
+                    .await;
                     break;
                 }
                 ToolStepOutcome::Paused => {
@@ -1831,21 +1853,12 @@ pub fn start_generation(
                         session.runtime.state == SessionState::Completed
                     };
                     if completed {
-                        let mut ev = make_runtime_event(
-                            "chat_completed",
-                            &format!("Completed: {}", chat_label),
-                            "chat",
-                            &format!("chat_{}", chat_id),
-                            "completed",
-                            None,
-                        );
-                        ev.chat_id = Some(chat_id.to_string());
-                        app.buddy_event_sink
-                            .apply_chat_completion(ev, 4, "happy".to_string())
-                            .await;
-                        maybe_enqueue_completion_activity_reaction(
+                        spawn_chat_completion_side_effects(
                             app.clone(),
                             session_arc.clone(),
+                            chat_id.clone(),
+                            chat_label.clone(),
+                            false,
                         )
                         .await;
                     }
@@ -2983,6 +2996,33 @@ fn maybe_downgrade_bogus_tool_calls_finish_reason(result: &mut ChoiceFinal, stag
 mod tests {
     use super::*;
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
+
+    #[tokio::test]
+    async fn completion_side_effects_do_not_block_generation_on_buddy_lock() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let buddy_guard = app.buddy.buddy.lock().await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(
+            "completion-side-effects".to_string(),
+        )));
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            spawn_chat_completion_side_effects(
+                app.clone(),
+                session_arc.clone(),
+                "completion-side-effects".to_string(),
+                "Completion Side Effects".to_string(),
+                false,
+            ),
+        )
+        .await
+        .expect("completion side effects must detach before waiting for Buddy");
+
+        assert_eq!(session_arc.lock().await.post_turn_task_handles.len(), 1);
+        drop(buddy_guard);
+        session_arc.lock().await.close_event_channel();
+    }
 
     fn make_user_msg(content: &str) -> ChatMessage {
         ChatMessage {

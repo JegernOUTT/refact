@@ -936,7 +936,7 @@ async fn push_completion_to_parent_marks_pending_when_session_not_loaded_and_flu
 }
 
 #[tokio::test]
-async fn burst_guard_defers_sixth_background_completion_then_allows_later_flush() {
+async fn background_completion_burst_pushes_every_notice_without_queue_growth() {
     let (_gcx, app, session_arc) = app_with_parent_session("parent-burst").await;
     session_arc
         .lock()
@@ -963,39 +963,26 @@ async fn burst_guard_defers_sixth_background_completion_then_allows_later_flush(
             .expect("push");
     }
 
-    let queued_count = {
+    let (notice_count, queue_size) = {
         let session = session_arc.lock().await;
-        agents_spawn_system_notice_count(&session)
+        (
+            agents_spawn_system_notice_count(&session),
+            session.command_queue.len(),
+        )
     };
-    assert_eq!(queued_count, 5);
-    let deferred = app
-        .agents
-        .get("parent-burst", &completed[5].agent_id)
-        .await
-        .expect("deferred");
-    assert_eq!(deferred.completion_message_id.as_deref(), Some("deferred"));
-    assert!(deferred.deferred_at.is_some());
-
-    tokio::time::sleep(Duration::from_secs(11)).await;
-    let pushed = crate::agents::push::flush_pending_pushes_for_parent(app.clone(), "parent-burst")
-        .await
-        .expect("flush");
-
-    assert_eq!(pushed, 1);
-    let queued_count = {
-        let session = session_arc.lock().await;
-        agents_spawn_system_notice_count(&session)
-    };
-    assert_eq!(queued_count, 6);
-    let updated = app
-        .agents
-        .get("parent-burst", &completed[5].agent_id)
-        .await
-        .expect("updated");
-    assert_ne!(updated.completion_message_id.as_deref(), Some("deferred"));
-    assert_ne!(updated.completion_message_id.as_deref(), Some("pending"));
-    assert!(updated.completion_pushed_at.is_some());
-    assert!(updated.deferred_at.is_none());
+    assert_eq!(notice_count, 6);
+    assert_eq!(queue_size, 1);
+    for record in completed {
+        let updated = app
+            .agents
+            .get("parent-burst", &record.agent_id)
+            .await
+            .expect("updated");
+        assert_ne!(updated.completion_message_id.as_deref(), Some("deferred"));
+        assert_ne!(updated.completion_message_id.as_deref(), Some("pending"));
+        assert!(updated.completion_pushed_at.is_some());
+        assert!(updated.deferred_at.is_none());
+    }
 }
 
 #[serial]
@@ -1090,6 +1077,56 @@ async fn spawn_background_agent_returns_immediately_with_child_chat_id_and_emits
     }
 
     assert_eq!(statuses, vec!["queued", "running", "completed"]);
+}
+
+#[serial]
+#[tokio::test]
+async fn more_than_eight_background_agents_can_run_for_one_parent() {
+    const AGENT_COUNT: usize = 12;
+    let barrier = Arc::new(tokio::sync::Barrier::new(AGENT_COUNT + 1));
+    let _runner = {
+        let barrier = barrier.clone();
+        crate::agents::spawn::install_test_runner(Arc::new(move |_gcx, mut messages, config| {
+            let barrier = barrier.clone();
+            Box::pin(async move {
+                barrier.wait().await;
+                messages.push(ChatMessage::new(
+                    "assistant".to_string(),
+                    "Status: DONE\nCompleted concurrent spawn".to_string(),
+                ));
+                Ok(SubchatResult {
+                    messages,
+                    metering: serde_json::Map::new(),
+                    chat_id: config.chat_id,
+                })
+            })
+        }))
+    };
+    let (_gcx, app, _session_arc) = app_with_parent_session("parent-unbounded-spawn").await;
+    let mut handles = Vec::new();
+
+    for index in 0..AGENT_COUNT {
+        let mut request =
+            delegate_spawn_request("parent-unbounded-spawn", &format!("src/frog-{index}.rs"));
+        request.notify_parent = crate::agents::spawn::NotifyParent::Silent;
+        handles.push(
+            crate::agents::spawn::spawn_background_agent(app.clone(), request)
+                .await
+                .expect("spawn beyond former active-agent cap"),
+        );
+    }
+
+    let active = app
+        .agents
+        .count_active_for_parent_root("parent-unbounded-spawn")
+        .await;
+    assert_eq!(active, AGENT_COUNT);
+
+    barrier.wait().await;
+    for handle in handles {
+        let completed = handle.completion_rx.await.expect("completion");
+        assert_eq!(completed.status, BgAgentStatus::Completed);
+    }
 }
 
 #[serial]

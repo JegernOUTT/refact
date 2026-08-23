@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
-use tokio::sync::{Mutex as AMutex, Semaphore};
+use tokio::sync::Mutex as AMutex;
 use tracing::info;
 use uuid::Uuid;
 use futures::future::join_all;
@@ -124,7 +124,7 @@ use super::goal_verifier::{
     should_verify_goal_on_done, verify_goal_before_completion, GoalCompletionGateOutcome,
 };
 
-use super::config::{limits, tokens};
+use super::config::tokens;
 
 async fn get_effective_n_ctx(app: AppState, thread: &ThreadParams) -> usize {
     let default_n_ctx = tokens().default_n_ctx;
@@ -544,7 +544,7 @@ fn spawn_subchat_bridge(
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
     use crate::chat::perf_diagnostics::{MemoryPerfSink, PerfClock, PerfRecorder};
     use serial_test::serial;
 
@@ -657,6 +657,61 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct BarrierToolRegistry {
+        started: Arc<AtomicUsize>,
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+
+    struct BarrierTool {
+        started: Arc<AtomicUsize>,
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::tools_description::Tool for BarrierTool {
+        async fn tool_execute(
+            &mut self,
+            _ccx: Arc<AMutex<AtCommandsContext>>,
+            tool_call_id: &String,
+            _args: &std::collections::HashMap<String, serde_json::Value>,
+        ) -> Result<(bool, Vec<crate::call_validation::ContextEnum>), String> {
+            self.started.fetch_add(1, AtomicOrdering::SeqCst);
+            self.barrier.wait().await;
+            let mut message = ChatMessage::new("tool".to_string(), "released".to_string());
+            message.tool_call_id = tool_call_id.clone();
+            Ok((
+                false,
+                vec![crate::call_validation::ContextEnum::ChatMessage(message)],
+            ))
+        }
+
+        fn tool_description(&self) -> refact_tool_api::ToolDesc {
+            deterministic_tool_desc("parallel_barrier")
+        }
+
+        async fn match_against_confirm_deny(
+            &self,
+            _ccx: Arc<AMutex<AtCommandsContext>>,
+            _args: &std::collections::HashMap<String, serde_json::Value>,
+        ) -> Result<refact_tool_api::MatchConfirmDeny, String> {
+            Ok(refact_tool_api::MatchConfirmDeny {
+                result: MatchConfirmDenyResult::PASS,
+                command: "parallel_barrier".to_string(),
+                rule: "parallel test".to_string(),
+            })
+        }
+    }
+
+    impl BarrierToolRegistry {
+        fn tools(&self) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
+            vec![Box::new(BarrierTool {
+                started: self.started.clone(),
+                barrier: self.barrier.clone(),
+            })]
+        }
+    }
+
     fn deterministic_tool_call(id: &str, name: &str) -> ChatToolCall {
         ChatToolCall {
             id: id.to_string(),
@@ -733,7 +788,6 @@ mod tests {
             PerfComponent::ToolConfirmationPreflight,
             PerfComponent::ToolPolicyLookup,
             PerfComponent::ToolPreHook,
-            PerfComponent::ToolSemaphoreWait,
             PerfComponent::ToolRuntime,
             PerfComponent::ToolPostHook,
             PerfComponent::ToolResultMerge,
@@ -758,6 +812,63 @@ mod tests {
                 && event.batch_size == Some(1)
                 && event.execution_class.is_none()
         }));
+    }
+
+    #[tokio::test]
+    async fn more_than_thirty_two_parallel_safe_tools_start_together() {
+        const TOOL_COUNT: usize = 40;
+        let started = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(TOOL_COUNT + 1));
+        let registry = BarrierToolRegistry {
+            started: started.clone(),
+            barrier: barrier.clone(),
+        };
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let base_app = AppState::from_gcx(gcx).await;
+        let fixture = registry.clone();
+        let app = AppState {
+            tool_registry: Arc::new(
+                crate::app_state::AppToolRegistry::with_fixture_tool_factory(
+                    base_app.gcx.clone(),
+                    Arc::new(move || fixture.tools()),
+                ),
+            ),
+            ..base_app
+        };
+        let session = Arc::new(AMutex::new(ChatSession::new(
+            "unbounded-parallel-tools".to_string(),
+        )));
+        {
+            let mut locked = session.lock().await;
+            locked.thread.model = "model".to_string();
+            let mut assistant = ChatMessage::new("assistant".to_string(), String::new());
+            assistant.tool_calls = Some(
+                (0..TOOL_COUNT)
+                    .map(|index| {
+                        deterministic_tool_call(&format!("parallel-{index}"), "parallel_barrier")
+                    })
+                    .collect(),
+            );
+            locked.add_message(assistant);
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("unbounded-parallel-tools".to_string(), session.clone());
+
+        let execution = tokio::spawn(process_tool_calls_once(app, session, "agent", None));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while started.load(AtomicOrdering::SeqCst) < TOOL_COUNT {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all parallel-safe tools started before any completed");
+
+        barrier.wait().await;
+        let outcome = execution.await.expect("tool execution task");
+        assert!(matches!(outcome, ToolStepOutcome::Continue));
     }
 
     #[tokio::test]
@@ -1354,13 +1465,6 @@ mod tests {
         };
 
         assert!(should_auto_approve_confirmation(&thread, &reason.tool_name));
-    }
-
-    #[test]
-    fn test_max_parallel_clamp() {
-        assert!(1_usize.max(1) >= 1);
-        assert!(0_usize.max(1) >= 1);
-        assert!(100_usize.max(1) == 100);
     }
 
     #[test]
@@ -2876,8 +2980,6 @@ async fn execute_tools_inner(
     catalog: Arc<ToolCatalogSnapshot>,
     turn_tool_pool: Option<TurnToolPool>,
 ) -> (Vec<ChatMessage>, bool) {
-    let max_parallel = limits().max_parallel_tools.max(1);
-
     let policy_span = perf_diagnostics::span(PerfComponent::ToolPolicyLookup, None, None);
     let available_tools = &catalog.policy;
     policy_span.finish_tool(PerfOutcome::Success, 1, available_tools.len() as u64, None);
@@ -2964,7 +3066,6 @@ async fn execute_tools_inner(
                     turn_tool_pool.clone(),
                     &mut prepared_parallel_slots,
                     serial_registry.clone(),
-                    max_parallel,
                     mode_id,
                     model_id,
                 )
@@ -3000,7 +3101,6 @@ async fn execute_tools_inner(
             turn_tool_pool,
             &mut prepared_parallel_slots,
             serial_registry.clone(),
-            max_parallel,
             mode_id,
             model_id,
         )
@@ -3065,7 +3165,6 @@ async fn execute_parallel_batch(
     turn_tool_pool: Option<TurnToolPool>,
     prepared_parallel_slots: &mut std::collections::HashMap<String, usize>,
     serial_registry: Arc<SerialToolRegistry>,
-    max_parallel: usize,
     mode_id: &str,
     model_id: Option<&str>,
 ) -> Vec<(usize, bool, Vec<ChatMessage>, Vec<ContextFile>)> {
@@ -3094,7 +3193,7 @@ async fn execute_parallel_batch(
         let requested_slots = required_slots
             .into_iter()
             .filter_map(|(key, (desc, count))| {
-                let required = count.min(max_parallel);
+                let required = count;
                 let prepared = prepared_parallel_slots
                     .get(&key)
                     .copied()
@@ -3136,7 +3235,6 @@ async fn execute_parallel_batch(
             prepared_parallel_slots.insert(key, count);
         }
     }
-    let semaphore = Arc::new(Semaphore::new(max_parallel));
     let batch_size = batch.len();
 
     let futures: Vec<_> = batch
@@ -3144,7 +3242,6 @@ async fn execute_parallel_batch(
         .map(|(idx, tool_call)| {
             let gcx = app.clone();
             let ccx = ccx.clone();
-            let semaphore = semaphore.clone();
             let serial_registry = serial_registry.clone();
             let catalog = catalog.clone();
             let turn_tool_pool = turn_tool_pool.clone();
@@ -3155,15 +3252,6 @@ async fn execute_parallel_batch(
             let model_id = model_id.map(|s| s.to_string());
 
             async move {
-                let semaphore_span =
-                    perf_diagnostics::span(PerfComponent::ToolSemaphoreWait, None, None);
-                let _permit = semaphore.acquire().await.unwrap();
-                semaphore_span.finish_tool(
-                    PerfOutcome::Success,
-                    batch_size as u64,
-                    1,
-                    Some(ToolExecutionClass::Parallel),
-                );
                 execute_single_tool(
                     gcx,
                     ccx,

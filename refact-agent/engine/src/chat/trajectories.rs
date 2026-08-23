@@ -6920,8 +6920,7 @@ mod tests {
     use crate::chat::diagnostics::{is_ui_only_message, make_ui_only_error_message};
     use crate::chat::perf_diagnostics::{self, MemoryPerfSink, PerfClock, PerfRecorder};
     use crate::chat::types::{
-        ActiveCommandContext, BurstGuard, ChatEvent, CompressionPhase, CompressionReason,
-        EventEnvelope,
+        ActiveCommandContext, ChatEvent, CompressionPhase, CompressionReason, EventEnvelope,
     };
     use refact_chat_api::{
         BuddyThreadMeta, ClaudeCodeIdentity, FrozenRequestPrefix, GoalBudget, GoalProgress,
@@ -15587,12 +15586,11 @@ mod tests {
             skills_available_count: 0,
             skills_included: Vec::new(),
             pending_skill_deactivation: None,
-            stop_hook_handle: None,
+            post_turn_task_handles: Vec::new(),
             openai_codex_websocket: Default::default(),
             suppress_auto_enrichment_for_next_turn: false,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
-            background_completion_burst: BurstGuard::new(),
             background_agents: std::collections::HashMap::new(),
             goal_stopped_by_abort: false,
             goal_ledger: Vec::new(),
@@ -15698,12 +15696,11 @@ mod tests {
             skills_available_count: 0,
             skills_included: Vec::new(),
             pending_skill_deactivation: None,
-            stop_hook_handle: None,
+            post_turn_task_handles: Vec::new(),
             openai_codex_websocket: Default::default(),
             suppress_auto_enrichment_for_next_turn: false,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
-            background_completion_burst: BurstGuard::new(),
             background_agents: std::collections::HashMap::new(),
             goal_stopped_by_abort: false,
             goal_ledger: Vec::new(),

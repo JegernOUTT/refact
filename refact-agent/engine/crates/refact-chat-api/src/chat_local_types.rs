@@ -1,9 +1,6 @@
-use std::collections::VecDeque;
 use std::time::Duration;
 
 use refact_core::chat_types::{ChatMessage, Checkpoint};
-use tokio::sync::Mutex;
-
 use crate::diagnostics::is_ui_only_message;
 use crate::{TaskMeta, ThreadParams};
 
@@ -45,54 +42,6 @@ pub enum EnqueueCommandOutcome {
     Accepted,
     Duplicate,
     Full,
-}
-
-#[derive(Debug)]
-pub struct BurstGuard {
-    inner: Mutex<BurstGuardInner>,
-}
-
-#[derive(Debug, Default)]
-struct BurstGuardInner {
-    recent: VecDeque<chrono::DateTime<chrono::Utc>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BurstGuardDecision {
-    Allow,
-    Defer,
-}
-
-impl BurstGuard {
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(BurstGuardInner::default()),
-        }
-    }
-
-    pub async fn record_and_check(&self) -> BurstGuardDecision {
-        let now = chrono::Utc::now();
-        let mut guard = self.inner.lock().await;
-        while let Some(front) = guard.recent.front() {
-            if now.signed_duration_since(*front).num_seconds() > 10 {
-                guard.recent.pop_front();
-            } else {
-                break;
-            }
-        }
-        if guard.recent.len() >= 5 {
-            BurstGuardDecision::Defer
-        } else {
-            guard.recent.push_back(now);
-            BurstGuardDecision::Allow
-        }
-    }
-}
-
-impl Default for BurstGuard {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -215,36 +164,6 @@ mod tests {
     use super::*;
     use refact_core::chat_types::ChatContent;
     use serde_json::json;
-
-    #[tokio::test]
-    async fn burst_guard_allows_first_five_calls() {
-        let guard = BurstGuard::new();
-        for _ in 0..5 {
-            assert_eq!(guard.record_and_check().await, BurstGuardDecision::Allow);
-        }
-    }
-
-    #[tokio::test]
-    async fn burst_guard_defers_sixth_call() {
-        let guard = BurstGuard::new();
-        for _ in 0..5 {
-            assert_eq!(guard.record_and_check().await, BurstGuardDecision::Allow);
-        }
-
-        assert_eq!(guard.record_and_check().await, BurstGuardDecision::Defer);
-    }
-
-    #[tokio::test]
-    async fn burst_guard_allows_after_window_slides() {
-        let guard = BurstGuard::new();
-        for _ in 0..5 {
-            assert_eq!(guard.record_and_check().await, BurstGuardDecision::Allow);
-        }
-
-        tokio::time::sleep(std::time::Duration::from_secs(11)).await;
-
-        assert_eq!(guard.record_and_check().await, BurstGuardDecision::Allow);
-    }
 
     #[test]
     fn is_segment_summary_detects_assistant_compression_kind() {

@@ -11,9 +11,8 @@ use refact_runtime_api::{ToolCatalogSnapshot, TurnToolPool};
 
 pub use refact_chat_api::chat_local_types::{
     max_queue_size, session_cleanup_interval, session_idle_timeout, stream_heartbeat,
-    stream_idle_timeout, stream_total_timeout, BurstGuard, BurstGuardDecision,
-    EnqueueCommandOutcome, PendingBrowserMessage, PendingSkillDeactivation,
-    TrajectorySourceIdentity,
+    stream_idle_timeout, stream_total_timeout, EnqueueCommandOutcome, PendingBrowserMessage,
+    PendingSkillDeactivation, TrajectorySourceIdentity,
 };
 pub use refact_chat_api::{
     ActiveCommandContext, BackgroundAgentSummary, BrowserMeta, BrowserSnapshot, BrowserTabInfo,
@@ -345,12 +344,11 @@ pub struct ChatSession {
     pub skills_available_count: usize,
     pub skills_included: Vec<String>,
     pub pending_skill_deactivation: Option<PendingSkillDeactivation>,
-    pub stop_hook_handle: Option<tokio::task::JoinHandle<()>>,
+    pub post_turn_task_handles: Vec<tokio::task::JoinHandle<()>>,
     pub(crate) openai_codex_websocket: super::openai_codex_ws::OpenAICodexWebSocketSession,
     pub suppress_auto_enrichment_for_next_turn: bool,
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
     pub waiting_for_card_ids: Vec<String>,
-    pub background_completion_burst: BurstGuard,
     /// Latest known background agent summaries for this parent chat, keyed by `agent_id`.
     /// Kept in sync by `emit_background_agent_update` and snapshot enrichment paths so
     /// every `ChatEvent::Snapshot` carries the current agent set instead of an empty list.

@@ -32,7 +32,6 @@ pub enum PerfComponent {
     ToolAliasResolution,
     ToolConfirmationPreflight,
     ToolPolicyLookup,
-    ToolSemaphoreWait,
     ToolRuntime,
     ToolPreHook,
     ToolPostHook,
@@ -41,7 +40,7 @@ pub enum PerfComponent {
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 23] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -60,7 +59,6 @@ impl PerfComponent {
         Self::ToolAliasResolution,
         Self::ToolConfirmationPreflight,
         Self::ToolPolicyLookup,
-        Self::ToolSemaphoreWait,
         Self::ToolRuntime,
         Self::ToolPreHook,
         Self::ToolPostHook,
@@ -88,7 +86,6 @@ impl PerfComponent {
             Self::ToolAliasResolution => "tool.alias_resolution",
             Self::ToolConfirmationPreflight => "tool.confirmation_preflight",
             Self::ToolPolicyLookup => "tool.policy_lookup",
-            Self::ToolSemaphoreWait => "tool.semaphore_wait",
             Self::ToolRuntime => "tool.runtime",
             Self::ToolPreHook => "tool.pre_hook",
             Self::ToolPostHook => "tool.post_hook",

@@ -141,6 +141,21 @@ fn note_user_turn_resets_goal_pursuit(session: &mut ChatSession) {
     session.reactivate_goal_stopped_by_manual_abort();
 }
 
+fn drain_redundant_regenerates(
+    queue: &mut VecDeque<CommandRequest>,
+    priority: bool,
+) -> Vec<String> {
+    let mut removed = Vec::new();
+    while queue.front().is_some_and(|request| {
+        request.priority == priority && matches!(request.command, ChatCommand::Regenerate {})
+    }) {
+        if let Some(request) = queue.pop_front() {
+            removed.push(request.client_request_id);
+        }
+    }
+    removed
+}
+
 pub async fn inject_priority_messages_if_any(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
@@ -1153,6 +1168,13 @@ pub async fn process_command_queue(
                 let cmd = session.command_queue.pop_front();
                 if let Some(ref req) = cmd {
                     session.record_command_queue_wait(&req.client_request_id);
+                    if matches!(req.command, ChatCommand::Regenerate {}) {
+                        for request_id in
+                            drain_redundant_regenerates(&mut session.command_queue, req.priority)
+                        {
+                            session.record_command_queue_wait(&request_id);
+                        }
+                    }
                     if command_triggers_generation(&req.command) {
                         session.set_runtime_state(SessionState::Generating, None);
                     }
@@ -2775,6 +2797,44 @@ mod tests {
             priority: false,
             command: cmd,
         }
+    }
+
+    #[test]
+    fn redundant_regenerates_coalesce_until_next_command_boundary() {
+        let mut queue = VecDeque::from([
+            CommandRequest {
+                client_request_id: "regen-1".to_string(),
+                priority: true,
+                command: ChatCommand::Regenerate {},
+            },
+            CommandRequest {
+                client_request_id: "regen-2".to_string(),
+                priority: true,
+                command: ChatCommand::Regenerate {},
+            },
+            CommandRequest {
+                client_request_id: "user-1".to_string(),
+                priority: false,
+                command: ChatCommand::UserMessage {
+                    content: json!("keep ordering"),
+                    attachments: vec![],
+                    context_files: vec![],
+                    suppress_auto_enrichment: false,
+                },
+            },
+            CommandRequest {
+                client_request_id: "regen-3".to_string(),
+                priority: false,
+                command: ChatCommand::Regenerate {},
+            },
+        ]);
+
+        let removed = drain_redundant_regenerates(&mut queue, true);
+
+        assert_eq!(removed, vec!["regen-1", "regen-2"]);
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0].client_request_id, "user-1");
+        assert_eq!(queue[1].client_request_id, "regen-3");
     }
 
     fn sample_worktree(id: &str) -> WorktreeMeta {

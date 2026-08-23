@@ -470,12 +470,11 @@ impl ChatSession {
             skills_available_count: 0,
             skills_included: Vec::new(),
             pending_skill_deactivation: None,
-            stop_hook_handle: None,
+            post_turn_task_handles: Vec::new(),
             openai_codex_websocket: Default::default(),
             suppress_auto_enrichment_for_next_turn: false,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
-            background_completion_burst: BurstGuard::new(),
             background_agents: HashMap::new(),
             goal_stopped_by_abort: false,
             goal_ledger: Vec::new(),
@@ -576,12 +575,11 @@ impl ChatSession {
             skills_available_count: 0,
             skills_included: Vec::new(),
             pending_skill_deactivation: None,
-            stop_hook_handle: None,
+            post_turn_task_handles: Vec::new(),
             openai_codex_websocket: Default::default(),
             suppress_auto_enrichment_for_next_turn: false,
             wake_up_at,
             waiting_for_card_ids,
-            background_completion_burst: BurstGuard::new(),
             background_agents: HashMap::new(),
             goal_stopped_by_abort: false,
             goal_ledger: Vec::new(),
@@ -1099,11 +1097,17 @@ impl ChatSession {
         self.clear_stream_and_confirmation_timestamps();
         self.closed = true;
         self.closed_flag.store(true, Ordering::Relaxed);
-        if let Some(h) = self.stop_hook_handle.take() {
-            h.abort();
+        for handle in self.post_turn_task_handles.drain(..) {
+            handle.abort();
         }
         let (new_tx, _) = broadcast::channel(limits().event_channel_capacity);
         self.event_tx = new_tx;
+    }
+
+    pub fn track_post_turn_task(&mut self, handle: tokio::task::JoinHandle<()>) {
+        self.post_turn_task_handles
+            .retain(|task| !task.is_finished());
+        self.post_turn_task_handles.push(handle);
     }
 
     pub fn emit(&mut self, event: ChatEvent) {
@@ -2104,6 +2108,15 @@ impl ChatSession {
         mut request: CommandRequest,
     ) -> EnqueueCommandOutcome {
         request.priority = true;
+        if matches!(request.command, ChatCommand::Regenerate {})
+            && self.command_queue.iter().any(|queued| {
+                queued.priority && matches!(queued.command, ChatCommand::Regenerate {})
+            })
+        {
+            self.touch();
+            self.queue_notify.notify_one();
+            return EnqueueCommandOutcome::Accepted;
+        }
         if self.command_queue.len() >= max_queue_size()
             && !self.command_is_critical_for_queue(&request.command)
         {
