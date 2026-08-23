@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{json, Value};
+use serde::Serialize;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -154,6 +155,38 @@ pub struct CompressionCandidate {
     pub estimated_source_tokens: usize,
     pub estimated_preserved_tokens: usize,
     pub reason: CandidateReason,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ManualCompressionPreview {
+    pub eligible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trajectory_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
+    pub source_messages: usize,
+    pub approximate_source_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ManualCompressionApplyResult {
+    pub applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
+    pub source_messages: usize,
+    pub approximate_source_tokens: usize,
+    pub before_message_count: usize,
+    pub after_message_count: usize,
+    pub before_approx_tokens: usize,
+    pub after_approx_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2331,23 +2364,33 @@ async fn summarize_segment(
     Ok(make_segment_summary_message(summary, messages, &model))
 }
 
-async fn resolve_summary_model(
+async fn resolve_summary_model_for_request(
     gcx: Arc<GlobalContext>,
     thread_model: &str,
+    requested_model: Option<&str>,
 ) -> Result<(String, usize), SegmentSummaryFailure> {
     let caps = crate::global_context::try_load_caps_quickly_if_not_present(gcx, 0)
         .await
         .map_err(|e| SegmentSummaryFailure::Transient(e.message.clone()))?;
-    let mut candidates = Vec::new();
-    for candidate in [
-        thread_model,
-        &caps.defaults.chat_light_model,
-        &caps.defaults.chat_default_model,
-    ] {
-        if !candidate.is_empty() && !candidates.iter().any(|model| model == candidate) {
-            candidates.push(candidate.to_string());
-        }
-    }
+    let candidates = match requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        Some(model) => vec![model.to_string()],
+        None => [
+            thread_model,
+            &caps.defaults.chat_light_model,
+            &caps.defaults.chat_default_model,
+        ]
+        .into_iter()
+        .filter(|model| !model.is_empty())
+        .fold(Vec::new(), |mut models, model| {
+            if !models.iter().any(|existing| existing == model) {
+                models.push(model.to_string());
+            }
+            models
+        }),
+    };
 
     for model in candidates {
         let Ok(model_rec) = crate::caps::resolve_chat_model(caps.clone(), &model) else {
@@ -2362,6 +2405,94 @@ async fn resolve_summary_model(
     }
 
     Err(SegmentSummaryFailure::NoModelAvailable)
+}
+
+async fn resolve_summary_model(
+    gcx: Arc<GlobalContext>,
+    thread_model: &str,
+) -> Result<(String, usize), SegmentSummaryFailure> {
+    resolve_summary_model_for_request(gcx, thread_model, None).await
+}
+
+fn manual_candidate_for_model(
+    messages: &[ChatMessage],
+    model_n_ctx: usize,
+) -> Option<CompressionCandidate> {
+    let budget = summarizer_input_budget_tokens(model_n_ctx);
+    let mut candidates = compression_candidates(messages);
+    if let Some(packed) = largest_budget_fitting_old_run_batch(messages, budget) {
+        candidates.push(packed);
+    }
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate.estimated_source_tokens >= MIN_SOURCE_TOKENS_FOR_COMPRESSION
+                && candidate.estimated_source_tokens <= budget
+        })
+        .max_by_key(|candidate| candidate.estimated_source_tokens)
+}
+
+fn manual_unavailable_preview(reason: impl Into<String>) -> ManualCompressionPreview {
+    ManualCompressionPreview {
+        eligible: false,
+        trajectory_version: None,
+        resolved_model: None,
+        context_window: None,
+        source_messages: 0,
+        approximate_source_tokens: 0,
+        reason: Some(reason.into()),
+    }
+}
+
+pub async fn preview_manual_segment_summarization(
+    gcx: Arc<GlobalContext>,
+    session_state: SessionState,
+    compression_active: bool,
+    messages: &[ChatMessage],
+    thread: &crate::chat::types::ThreadParams,
+    requested_model: Option<&str>,
+) -> ManualCompressionPreview {
+    if !matches!(session_state, SessionState::Idle | SessionState::Error) {
+        return manual_unavailable_preview("Session must be idle or in error state");
+    }
+    if compression_active {
+        return manual_unavailable_preview("Context compression is already in progress");
+    }
+    if current_tail_has_active_pending_tool_calls(messages) {
+        return manual_unavailable_preview("The current tool call must finish before compression");
+    }
+    let (model, model_n_ctx) =
+        match resolve_summary_model_for_request(gcx, &thread.model, requested_model).await {
+            Ok(resolved) => resolved,
+            Err(SegmentSummaryFailure::NoModelAvailable) => {
+                return manual_unavailable_preview("No configured chat model is available");
+            }
+            Err(_) => {
+                return manual_unavailable_preview(
+                    "Summary model availability could not be checked",
+                )
+            }
+        };
+    let Some(candidate) = manual_candidate_for_model(messages, model_n_ctx) else {
+        return ManualCompressionPreview {
+            eligible: false,
+            trajectory_version: None,
+            resolved_model: Some(model),
+            context_window: Some(model_n_ctx),
+            source_messages: 0,
+            approximate_source_tokens: 0,
+            reason: Some("No safe segment is large enough to compress".to_string()),
+        };
+    };
+    ManualCompressionPreview {
+        eligible: true,
+        trajectory_version: None,
+        resolved_model: Some(model),
+        context_window: Some(model_n_ctx),
+        source_messages: source_messages_for_candidate(messages, &candidate).len(),
+        approximate_source_tokens: candidate.estimated_source_tokens,
+        reason: None,
+    }
 }
 
 #[cfg(test)]
@@ -2884,7 +3015,17 @@ pub async fn apply_segment_summarization_with_reason(
     reason: Option<CompressionReason>,
 ) -> CompactionOutcome {
     if force {
-        run_reserved_segment_summarization(gcx, session_arc, thread, true, reason, None).await
+        run_reserved_segment_summarization(
+            gcx,
+            session_arc,
+            thread,
+            true,
+            reason,
+            None,
+            false,
+            None,
+        )
+        .await
     } else {
         let Some(resolved_model) = proactive_gate_quiet(gcx.clone(), session_arc, thread).await
         else {
@@ -2897,8 +3038,120 @@ pub async fn apply_segment_summarization_with_reason(
             false,
             reason,
             Some(resolved_model),
+            false,
+            None,
         )
         .await
+    }
+}
+
+pub async fn apply_manual_segment_summarization(
+    gcx: Arc<GlobalContext>,
+    session_arc: &Arc<tokio::sync::Mutex<ChatSession>>,
+    requested_model: Option<&str>,
+    expected_trajectory_version: Option<u64>,
+) -> ManualCompressionApplyResult {
+    let (session_state, compression_active, messages, thread, trajectory_version) = {
+        let session = session_arc.lock().await;
+        (
+            session.runtime.state,
+            compression_attempt_active(&session),
+            session.messages.clone(),
+            session.thread.clone(),
+            session.trajectory_version,
+        )
+    };
+    if expected_trajectory_version != Some(trajectory_version) {
+        let before_tokens = crate::chat::trajectory_ops::approx_token_count(&messages);
+        return ManualCompressionApplyResult {
+            applied: false,
+            resolved_model: None,
+            context_window: None,
+            source_messages: 0,
+            approximate_source_tokens: 0,
+            before_message_count: messages.len(),
+            after_message_count: messages.len(),
+            before_approx_tokens: before_tokens,
+            after_approx_tokens: before_tokens,
+            reason: Some(
+                "Chat changed since preview; preview again before compressing".to_string(),
+            ),
+        };
+    }
+    let preview = preview_manual_segment_summarization(
+        gcx.clone(),
+        session_state,
+        compression_active,
+        &messages,
+        &thread,
+        requested_model,
+    )
+    .await;
+    let before = {
+        let session = session_arc.lock().await;
+        (
+            session.messages.len(),
+            crate::chat::trajectory_ops::approx_token_count(&session.messages),
+            thread,
+        )
+    };
+    if !preview.eligible {
+        return ManualCompressionApplyResult {
+            applied: false,
+            resolved_model: preview.resolved_model,
+            context_window: preview.context_window,
+            source_messages: preview.source_messages,
+            approximate_source_tokens: preview.approximate_source_tokens,
+            before_message_count: before.0,
+            after_message_count: before.0,
+            before_approx_tokens: before.1,
+            after_approx_tokens: before.1,
+            reason: preview.reason,
+        };
+    }
+    let resolved = (
+        preview
+            .resolved_model
+            .clone()
+            .expect("eligible preview has a model"),
+        preview
+            .context_window
+            .expect("eligible preview has a context window"),
+    );
+    let outcome = run_reserved_segment_summarization(
+        gcx,
+        session_arc,
+        &before.2,
+        true,
+        None,
+        Some(resolved),
+        true,
+        Some(trajectory_version),
+    )
+    .await;
+    let after = {
+        let session = session_arc.lock().await;
+        (
+            session.messages.len(),
+            crate::chat::trajectory_ops::approx_token_count(&session.messages),
+            session.compression_reason,
+        )
+    };
+    let applied = outcome.applied();
+    ManualCompressionApplyResult {
+        applied,
+        resolved_model: preview.resolved_model,
+        context_window: preview.context_window,
+        source_messages: preview.source_messages,
+        approximate_source_tokens: preview.approximate_source_tokens,
+        before_message_count: before.0,
+        after_message_count: after.0,
+        before_approx_tokens: before.1,
+        after_approx_tokens: after.1,
+        reason: (!applied).then(|| match after.2 {
+            Some(reason) => format!("Compression was not applied: {:?}", reason),
+            None => "Compression was not applied because the session changed".to_string(),
+        }),
     }
 }
 
@@ -3034,6 +3287,8 @@ async fn run_reserved_segment_summarization(
     force: bool,
     reason: Option<CompressionReason>,
     resolved_model: Option<(String, usize)>,
+    idle_or_error_only: bool,
+    expected_trajectory_version: Option<u64>,
 ) -> CompactionOutcome {
     let forced_context_limit = force && reason == Some(CompressionReason::ContextLengthStop);
     let (
@@ -3045,6 +3300,19 @@ async fn run_reserved_segment_summarization(
     ) = {
         let mut session = session_arc.lock().await;
         if compression_attempt_active(&session) {
+            return CompactionOutcome::NothingToCompact;
+        }
+        if expected_trajectory_version
+            .is_some_and(|expected| expected != session.trajectory_version)
+        {
+            return CompactionOutcome::NothingToCompact;
+        }
+        if idle_or_error_only
+            && !matches!(
+                session.runtime.state,
+                SessionState::Idle | SessionState::Error
+            )
+        {
             return CompactionOutcome::NothingToCompact;
         }
         if !should_attempt_segment_summarization(thread, force) {
@@ -3305,6 +3573,15 @@ async fn run_reserved_segment_summarization(
         .collect();
     let mut session = session_arc.lock().await;
     if !owns_compression_attempt(&session, attempt) {
+        return CompactionOutcome::NothingToCompact;
+    }
+    if idle_or_error_only
+        && !matches!(
+            session.runtime.state,
+            SessionState::Idle | SessionState::Error
+        )
+    {
+        emit_compression_skipped_if_owned(&mut session, attempt, CompressionReason::SourceChanged);
         return CompactionOutcome::NothingToCompact;
     }
     let current_source: Vec<ChatMessage> = session
@@ -7833,6 +8110,76 @@ mod tests {
 
         assert_eq!(model, thread_model);
         assert_eq!(n_ctx, 12_345);
+    }
+
+    #[tokio::test]
+    async fn explicit_summary_model_resolves_only_configured_requested_model() {
+        let gcx = make_test_gcx().await;
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models.insert(
+            "thread-model".to_string(),
+            chat_model_record("thread-model", 8_192),
+        );
+        caps.chat_models.insert(
+            "manual-model".to_string(),
+            chat_model_record("manual-model", 32_768),
+        );
+        install_caps(gcx.clone(), caps).await;
+
+        let resolved =
+            resolve_summary_model_for_request(gcx.clone(), "thread-model", Some(" manual-model "))
+                .await
+                .unwrap();
+        assert_eq!(resolved, ("manual-model".to_string(), 32_768));
+        assert!(matches!(
+            resolve_summary_model_for_request(gcx, "thread-model", Some("missing-model")).await,
+            Err(SegmentSummaryFailure::NoModelAvailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn manual_preview_is_read_only_and_reports_safe_candidate() {
+        let gcx = make_test_gcx().await;
+        let model = "manual-preview-model";
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models
+            .insert(model.to_string(), chat_model_record(model, 32_768));
+        install_caps(gcx.clone(), caps).await;
+        let thread = crate::chat::types::ThreadParams {
+            model: model.to_string(),
+            ..Default::default()
+        };
+        let messages = vec![
+            user("first"),
+            assistant(&"compressible output ".repeat(600)),
+            user("second"),
+        ];
+        let original = messages.clone();
+
+        let preview = preview_manual_segment_summarization(
+            gcx,
+            SessionState::Idle,
+            false,
+            &messages,
+            &thread,
+            None,
+        )
+        .await;
+
+        assert!(preview.eligible);
+        assert_eq!(preview.resolved_model.as_deref(), Some(model));
+        assert_eq!(preview.source_messages, 1);
+        assert!(preview.approximate_source_tokens >= MIN_SOURCE_TOKENS_FOR_COMPRESSION);
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| (&message.role, message.content.content_text_only()))
+                .collect::<Vec<_>>(),
+            original
+                .iter()
+                .map(|message| (&message.role, message.content.content_text_only()))
+                .collect::<Vec<_>>(),
+        );
     }
 
     #[tokio::test]

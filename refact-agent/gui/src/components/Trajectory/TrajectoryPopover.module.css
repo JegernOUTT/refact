@@ -19,7 +19,30 @@
 }
 
 .tabStrip [role="tab"] {
-  padding-inline: var(--rf-space-2);
+  min-width: 0;
+  padding-inline: var(--rf-space-1);
+  font-size: var(--rf-text-1);
+}
+
+.llmIntro {
+  margin-bottom: var(--rf-space-3);
+  color: var(--rf-color-muted);
+}
+
+.modelSection {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-2);
+  margin-bottom: var(--rf-space-3);
+}
+
+.previewDetails {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--rf-space-1);
+  margin-top: var(--rf-space-2);
 }
 
 .optionsSection {

@@ -3,10 +3,14 @@ import { Box, Flex, Popover, Text } from "../LongTailPrimitives";
 import { Checkbox } from "../Checkbox";
 import { Button, Tabs } from "../ui";
 import { useTrajectoryOps } from "../../hooks/useTrajectoryOps";
+import { useCapsForToolUse } from "../../hooks/useCapsForToolUse";
+import { ModelSelector } from "../Chat/ModelSelector";
+import { formatContextWindow } from "../../features/Providers/ProviderForm/ProviderModelsList/utils/groupModelsWithPricing";
 import styles from "./TrajectoryPopover.module.css";
 
 const TAB_OPTIONS = [
   { value: "compress", label: "Compress in-place" },
+  { value: "llm-compress", label: "LLM compression" },
   { value: "handoff", label: "Handoff" },
 ];
 
@@ -22,23 +26,32 @@ export const TrajectoryPopoverContent: React.FC<
     setActiveTab,
     transformOptions,
     handoffOptions,
+    llmCompressOptions,
     transformPreview,
     handoffPreview,
+    llmCompressPreview,
+    llmCompressError,
     isPreviewingTransform,
     isApplyingTransform,
     isPreviewingHandoff,
     isApplyingHandoff,
+    isPreviewingLlmCompress,
+    isApplyingLlmCompress,
     handlePreviewTransform,
     handleApplyTransform,
     handlePreviewHandoff,
     handleApplyHandoff,
+    handlePreviewLlmCompress,
+    handleApplyLlmCompress,
     clearPreviews,
     updateTransformOption,
     updateHandoffOption,
+    updateLlmCompressModel,
   } = useTrajectoryOps();
+  const caps = useCapsForToolUse();
 
   const handleTabChange = (value: string) => {
-    setActiveTab(value as "compress" | "handoff");
+    setActiveTab(value as "compress" | "llm-compress" | "handoff");
     clearPreviews();
   };
 
@@ -55,6 +68,13 @@ export const TrajectoryPopoverContent: React.FC<
 
   const handleApplyHandoffClick = async () => {
     const success = await handleApplyHandoff();
+    if (success) {
+      onClose();
+    }
+  };
+
+  const handleApplyLlmCompressClick = async () => {
+    const success = await handleApplyLlmCompress();
     if (success) {
       onClose();
     }
@@ -140,6 +160,14 @@ export const TrajectoryPopoverContent: React.FC<
             >
               Drop project information
             </Checkbox>
+            <Checkbox
+              checked={transformOptions.strip_metering}
+              onCheckedChange={(checked) =>
+                updateTransformOption("strip_metering", checked === true)
+              }
+            >
+              Remove usage and metering details
+            </Checkbox>
           </div>
 
           {transformPreview && (
@@ -188,6 +216,106 @@ export const TrajectoryPopoverContent: React.FC<
               disabled={!transformPreview}
             >
               Apply
+            </Button>
+          </Flex>
+        </Tabs.Content>
+
+        <Tabs.Content value="llm-compress">
+          <div className={styles.llmIntro}>
+            <Text size="2">
+              Creates a compact, source-preserving continuation summary for the
+              largest safe completed segment. Original chat messages remain
+              visible. The selected provider receives only content allowed by
+              your privacy policy.
+            </Text>
+          </div>
+
+          <div className={styles.modelSection}>
+            <Text size="2" weight="medium">
+              Summary model
+            </Text>
+            {caps.usableModels.length > 0 ? (
+              <ModelSelector
+                value={llmCompressOptions.summary_model}
+                defaultValue=""
+                onValueChange={(model) =>
+                  updateLlmCompressModel(model || undefined)
+                }
+                allowUnset
+                unsetLabel="Use automatic summary model"
+                showLabel={false}
+                compact={false}
+              />
+            ) : (
+              <Text size="2" color="gray">
+                Configure an eligible chat model in Providers before using LLM
+                compression.
+              </Text>
+            )}
+            {!llmCompressOptions.summary_model && caps.currentModel && (
+              <Text size="1" color="gray">
+                Current chat model: {caps.currentModel}
+              </Text>
+            )}
+          </div>
+
+          {llmCompressPreview && (
+            <Box className={styles.previewSection}>
+              <Text size="2" weight="medium">
+                {llmCompressPreview.eligible
+                  ? `${
+                      llmCompressPreview.source_messages
+                    } messages (~${llmCompressPreview.approximate_source_tokens.toLocaleString()} tokens) eligible`
+                  : "No segment is currently eligible"}
+              </Text>
+              <div className={styles.previewDetails}>
+                {llmCompressPreview.resolved_model && (
+                  <Text size="1" color="gray">
+                    Model: {llmCompressPreview.resolved_model}
+                  </Text>
+                )}
+                {llmCompressPreview.context_window !== undefined && (
+                  <Text size="1" color="gray">
+                    Context window:{" "}
+                    {formatContextWindow(llmCompressPreview.context_window)}
+                  </Text>
+                )}
+              </div>
+              {llmCompressPreview.reason && (
+                <Text size="2" color="red">
+                  {llmCompressPreview.reason}
+                </Text>
+              )}
+            </Box>
+          )}
+
+          {llmCompressError && (
+            <Box className={styles.errorCallout} role="alert">
+              <Text size="2">{llmCompressError}</Text>
+            </Box>
+          )}
+
+          <Flex className={styles.buttonRow}>
+            <Button
+              variant="soft"
+              size="sm"
+              loading={isPreviewingLlmCompress}
+              disabled={caps.usableModels.length === 0}
+              onClick={() => {
+                void handlePreviewLlmCompress();
+              }}
+            >
+              Preview
+            </Button>
+            <Button
+              size="sm"
+              loading={isApplyingLlmCompress}
+              disabled={!llmCompressPreview?.eligible}
+              onClick={() => {
+                void handleApplyLlmCompressClick();
+              }}
+            >
+              Summarize
             </Button>
           </Flex>
         </Tabs.Content>

@@ -5,6 +5,8 @@ import {
   TRAJECTORY_TRANSFORM_APPLY_URL,
   TRAJECTORY_HANDOFF_PREVIEW_URL,
   TRAJECTORY_HANDOFF_APPLY_URL,
+  TRAJECTORY_LLM_COMPRESS_PREVIEW_URL,
+  TRAJECTORY_LLM_COMPRESS_APPLY_URL,
   TRAJECTORY_MODE_TRANSITION_APPLY_URL,
 } from "./consts";
 import { buildApiUrlFromState } from "./apiUrl";
@@ -15,6 +17,12 @@ export type TransformOptions = {
   compress_non_agentic_tools?: boolean;
   drop_all_memories?: boolean;
   drop_project_information?: boolean;
+  strip_metering?: boolean;
+};
+
+export type LlmCompressOptions = {
+  summary_model?: string;
+  expected_trajectory_version?: number;
 };
 
 export type HandoffOptions = {
@@ -54,6 +62,26 @@ export type HandoffApplyResponse = {
   new_chat_id: string;
   stats: TransformStats;
   browser_runtime_id?: string | null;
+};
+
+export type LlmCompressPreviewResponse = {
+  eligible: boolean;
+  trajectory_version?: number;
+  resolved_model?: string;
+  context_window?: number;
+  source_messages: number;
+  approximate_source_tokens: number;
+  reason?: string;
+};
+
+export type LlmCompressApplyResponse = {
+  applied: boolean;
+  resolved_model?: string;
+  context_window?: number;
+  source_messages: number;
+  approximate_source_tokens: number;
+  stats: TransformStats;
+  reason?: string;
 };
 
 export type ModeTransitionApplyResponse = {
@@ -160,6 +188,46 @@ export const trajectoryApi = createApi({
       },
     }),
 
+    previewLlmCompress: builder.mutation<
+      LlmCompressPreviewResponse,
+      { chatId: string; options: LlmCompressOptions }
+    >({
+      async queryFn({ chatId, options }, api, _opts, baseQuery) {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(
+          state,
+          buildPath(TRAJECTORY_LLM_COMPRESS_PREVIEW_URL, chatId),
+        );
+        const result = await baseQuery({
+          url,
+          method: "POST",
+          body: { options },
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as LlmCompressPreviewResponse };
+      },
+    }),
+
+    applyLlmCompress: builder.mutation<
+      LlmCompressApplyResponse,
+      { chatId: string; options: LlmCompressOptions }
+    >({
+      async queryFn({ chatId, options }, api, _opts, baseQuery) {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(
+          state,
+          buildPath(TRAJECTORY_LLM_COMPRESS_APPLY_URL, chatId),
+        );
+        const result = await baseQuery({
+          url,
+          method: "POST",
+          body: { options },
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as LlmCompressApplyResponse };
+      },
+    }),
+
     applyModeTransition: builder.mutation<
       ModeTransitionApplyResponse,
       {
@@ -199,5 +267,7 @@ export const {
   useApplyTransformMutation,
   usePreviewHandoffMutation,
   useApplyHandoffMutation,
+  usePreviewLlmCompressMutation,
+  useApplyLlmCompressMutation,
   useApplyModeTransitionMutation,
 } = trajectoryApi;

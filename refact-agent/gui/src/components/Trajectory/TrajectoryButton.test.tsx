@@ -42,7 +42,7 @@ describe("TrajectoryButton", () => {
     expect(tabStrip).not.toContain("grid-auto-columns: max-content;");
   });
 
-  it("opens the full compress and handoff popover on click", async () => {
+  it("opens all compression and handoff tabs with preview-gated actions", async () => {
     const { user } = render(<TrajectoryButton />);
 
     await user.click(screen.getByTestId("trajectory-button"));
@@ -51,6 +51,9 @@ describe("TrajectoryButton", () => {
     expect(
       within(popover).getByRole("tab", { name: "Compress in-place" }),
     ).toBeInTheDocument();
+    expect(
+      within(popover).getByRole("tab", { name: "LLM compression" }),
+    ).toBeInTheDocument();
 
     const handoffTab = within(popover).getByRole("tab", { name: "Handoff" });
     expect(handoffTab).toBeInTheDocument();
@@ -58,11 +61,26 @@ describe("TrajectoryButton", () => {
       within(popover).getByRole("checkbox", { name: "Drop all context files" }),
     ).toBeInTheDocument();
     expect(
+      within(popover).getByRole("checkbox", {
+        name: "Remove usage and metering details",
+      }),
+    ).toBeInTheDocument();
+    expect(
       within(popover).getByRole("button", { name: "Preview" }),
     ).toBeInTheDocument();
     expect(
       within(popover).getByRole("button", { name: "Apply" }),
     ).toBeInTheDocument();
+
+    await user.click(
+      within(popover).getByRole("tab", { name: "LLM compression" }),
+    );
+    expect(
+      within(popover).getByText(/source-preserving continuation summary/i),
+    ).toBeInTheDocument();
+    expect(
+      within(popover).getByRole("button", { name: "Summarize" }),
+    ).toBeDisabled();
 
     await user.click(handoffTab);
 

@@ -33,6 +33,10 @@ export const TRAJECTORY_HANDOFF_PREVIEW_URL =
   "/v1/chats/{chat_id}/trajectory/handoff/preview";
 export const TRAJECTORY_HANDOFF_APPLY_URL =
   "/v1/chats/{chat_id}/trajectory/handoff/apply";
+export const TRAJECTORY_LLM_COMPRESS_PREVIEW_URL =
+  "/v1/chats/{chat_id}/trajectory/llm-compress/preview";
+export const TRAJECTORY_LLM_COMPRESS_APPLY_URL =
+  "/v1/chats/{chat_id}/trajectory/llm-compress/apply";
 export const TRAJECTORY_MODE_TRANSITION_APPLY_URL =
   "/v1/chats/{chat_id}/trajectory/mode-transition/apply";
 

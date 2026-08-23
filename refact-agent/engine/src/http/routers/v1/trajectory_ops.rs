@@ -20,6 +20,10 @@ use crate::agentic::mode_transition::{
 };
 use crate::chat::types::SessionState;
 use crate::chat::get_or_create_session_with_trajectory;
+use crate::chat::summarization::{
+    ManualCompressionApplyResult, ManualCompressionPreview, apply_manual_segment_summarization,
+    compression_attempt_active, preview_manual_segment_summarization,
+};
 use refact_chat_api::GoalSnapshot;
 use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 use crate::custom_error::ScratchError;
@@ -156,6 +160,152 @@ pub struct TransformRequest {
 #[derive(Deserialize)]
 pub struct HandoffRequest {
     pub options: HandoffOptions,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct LlmCompressOptions {
+    #[serde(default)]
+    pub summary_model: Option<String>,
+    #[serde(default)]
+    pub expected_trajectory_version: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct LlmCompressRequest {
+    #[serde(default)]
+    pub options: LlmCompressOptions,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LlmCompressApplyResponse {
+    pub applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<usize>,
+    pub source_messages: usize,
+    pub approximate_source_tokens: usize,
+    pub stats: TransformStats,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl From<ManualCompressionApplyResult> for LlmCompressApplyResponse {
+    fn from(result: ManualCompressionApplyResult) -> Self {
+        Self {
+            applied: result.applied,
+            resolved_model: result.resolved_model,
+            context_window: result.context_window,
+            source_messages: result.source_messages,
+            approximate_source_tokens: result.approximate_source_tokens,
+            stats: TransformStats {
+                before_message_count: result.before_message_count,
+                after_message_count: result.after_message_count,
+                before_approx_tokens: result.before_approx_tokens,
+                after_approx_tokens: result.after_approx_tokens,
+                context_messages_modified: 0,
+                tool_messages_modified: 0,
+            },
+            reason: result.reason,
+        }
+    }
+}
+
+impl LlmCompressRequest {
+    fn requested_model(&self) -> Option<&str> {
+        self.options
+            .summary_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+    }
+}
+
+fn parse_llm_compress_request(
+    body_bytes: &hyper::body::Bytes,
+) -> Result<LlmCompressRequest, ScratchError> {
+    if body_bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(LlmCompressRequest::default());
+    }
+    serde_json::from_slice(body_bytes)
+        .map_err(|_| ScratchError::new(StatusCode::BAD_REQUEST, "Invalid JSON request".to_string()))
+}
+
+fn json_response<T: Serialize>(value: &T) -> Result<Response<Body>, ScratchError> {
+    let body = serde_json::to_vec(value)
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .body(Body::from(body))
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+pub async fn handle_llm_compress_preview(
+    State(app): State<AppState>,
+    Path(chat_id): Path<String>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let req = parse_llm_compress_request(&body_bytes)?;
+    let gcx = app.gcx.clone();
+    let session_arc = get_or_create_session_with_trajectory(
+        AppState::from_gcx(gcx.clone()).await,
+        &gcx.chat_sessions,
+        &chat_id,
+    )
+    .await;
+    let (state, active, messages, thread, trajectory_version) = {
+        let session = session_arc.lock().await;
+        (
+            session.runtime.state,
+            compression_attempt_active(&session),
+            session.messages.clone(),
+            session.thread.clone(),
+            session.trajectory_version,
+        )
+    };
+    let mut preview: ManualCompressionPreview = preview_manual_segment_summarization(
+        gcx,
+        state,
+        active,
+        &messages,
+        &thread,
+        req.requested_model(),
+    )
+    .await;
+    preview.trajectory_version = Some(trajectory_version);
+    json_response(&preview)
+}
+
+pub async fn handle_llm_compress_apply(
+    State(app): State<AppState>,
+    Path(chat_id): Path<String>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let req = parse_llm_compress_request(&body_bytes)?;
+    let gcx = app.gcx.clone();
+    let session_arc = get_or_create_session_with_trajectory(
+        AppState::from_gcx(gcx.clone()).await,
+        &gcx.chat_sessions,
+        &chat_id,
+    )
+    .await;
+    let result: ManualCompressionApplyResult = apply_manual_segment_summarization(
+        gcx.clone(),
+        &session_arc,
+        req.requested_model(),
+        req.options.expected_trajectory_version,
+    )
+    .await;
+    if result.applied {
+        let _ = crate::chat::trajectories::try_save_trajectory_with_intent(
+            AppState::from_gcx(gcx).await,
+            session_arc,
+            crate::chat::types::TrajectoryCommitIntent::Required,
+        )
+        .await;
+    }
+    json_response(&LlmCompressApplyResponse::from(result))
 }
 
 #[derive(Serialize)]
@@ -911,6 +1061,29 @@ mod tests {
     use super::*;
     use refact_chat_api::{GoalAttempt, GoalBudget, GoalProgress, GoalStatus};
     use serde_json::json;
+
+    #[test]
+    fn llm_compress_request_blank_model_uses_automatic_resolution() {
+        let blank: LlmCompressRequest =
+            serde_json::from_str(r#"{"options":{"summary_model":"  "}}"#).unwrap();
+        let missing: LlmCompressRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(blank.requested_model(), None);
+        assert_eq!(missing.requested_model(), None);
+        let explicit: LlmCompressRequest =
+            serde_json::from_str(r#"{"options":{"summary_model":" configured-model "}}"#).unwrap();
+        assert_eq!(explicit.requested_model(), Some("configured-model"));
+    }
+
+    #[test]
+    fn llm_compress_request_parse_error_is_redacted() {
+        let error = parse_llm_compress_request(&hyper::body::Bytes::from_static(
+            br#"{"options":{"summary_model":"sk-secret""#,
+        ))
+        .unwrap_err();
+        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
+        assert_eq!(error.message, "Invalid JSON request");
+        assert!(!error.message.contains("sk-secret"));
+    }
 
     fn sample_worktree(root: &std::path::Path) -> crate::worktrees::types::WorktreeMeta {
         crate::worktrees::types::WorktreeMeta {

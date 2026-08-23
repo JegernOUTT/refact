@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useAppDispatch, useAppSelector } from "./index";
 import { selectChatId, selectThread } from "../features/Chat";
 import {
@@ -6,10 +6,14 @@ import {
   useApplyTransformMutation,
   usePreviewHandoffMutation,
   useApplyHandoffMutation,
+  usePreviewLlmCompressMutation,
+  useApplyLlmCompressMutation,
   TransformOptions,
   HandoffOptions,
   TransformPreviewResponse,
   HandoffPreviewResponse,
+  LlmCompressOptions,
+  LlmCompressPreviewResponse,
 } from "../services/refact/trajectory";
 import { trajectoriesApi } from "../services/refact/trajectories";
 import {
@@ -26,7 +30,7 @@ import { push } from "../features/Pages/pagesSlice";
 import { selectConfig, selectApiKey } from "../features/Config/configSlice";
 import { regenerate } from "../services/refact/chatCommands";
 
-export type TrajectoryTab = "compress" | "handoff";
+export type TrajectoryTab = "compress" | "llm-compress" | "handoff";
 
 export function useTrajectoryOps() {
   const dispatch = useAppDispatch();
@@ -45,6 +49,7 @@ export function useTrajectoryOps() {
     compress_non_agentic_tools: true,
     drop_all_memories: false,
     drop_project_information: false,
+    strip_metering: false,
   });
   const [handoffOptions, setHandoffOptions] = useState<HandoffOptions>({
     include_last_user_plus: false,
@@ -54,11 +59,25 @@ export function useTrajectoryOps() {
     llm_summary_for_excluded: true,
     include_all_user_assistant_only: false,
   });
+  const [llmCompressOptions, setLlmCompressOptions] =
+    useState<LlmCompressOptions>({});
 
   const [transformPreview, setTransformPreview] =
     useState<TransformPreviewResponse | null>(null);
   const [handoffPreview, setHandoffPreview] =
     useState<HandoffPreviewResponse | null>(null);
+  const [llmCompressPreview, setLlmCompressPreview] =
+    useState<LlmCompressPreviewResponse | null>(null);
+  const [llmCompressError, setLlmCompressError] = useState<string | null>(null);
+  const llmPreviewRequestId = useRef(0);
+  const llmPreviewChatId = useRef(chatId);
+  llmPreviewChatId.current = chatId;
+
+  useEffect(() => {
+    llmPreviewRequestId.current += 1;
+    setLlmCompressPreview(null);
+    setLlmCompressError(null);
+  }, [chatId]);
 
   const [previewTransform, { isLoading: isPreviewingTransform }] =
     usePreviewTransformMutation();
@@ -68,6 +87,76 @@ export function useTrajectoryOps() {
     usePreviewHandoffMutation();
   const [applyHandoff, { isLoading: isApplyingHandoff }] =
     useApplyHandoffMutation();
+  const [previewLlmCompress, { isLoading: isPreviewingLlmCompress }] =
+    usePreviewLlmCompressMutation();
+  const [applyLlmCompress, { isLoading: isApplyingLlmCompress }] =
+    useApplyLlmCompressMutation();
+
+  const handlePreviewLlmCompress = useCallback(async () => {
+    const previewChatId = chatId;
+    if (!previewChatId) return;
+    const requestId = ++llmPreviewRequestId.current;
+    setLlmCompressError(null);
+    try {
+      const result = await previewLlmCompress({
+        chatId: previewChatId,
+        options: llmCompressOptions,
+      }).unwrap();
+      if (
+        requestId === llmPreviewRequestId.current &&
+        previewChatId === llmPreviewChatId.current
+      ) {
+        setLlmCompressPreview(result);
+      }
+    } catch {
+      if (
+        requestId === llmPreviewRequestId.current &&
+        previewChatId === llmPreviewChatId.current
+      ) {
+        setLlmCompressPreview(null);
+        setLlmCompressError(
+          "Unable to preview LLM compression. Please try again.",
+        );
+      }
+    }
+  }, [chatId, llmCompressOptions, previewLlmCompress]);
+
+  const handleApplyLlmCompress = useCallback(async () => {
+    if (!chatId || !llmCompressPreview) return false;
+    setLlmCompressError(null);
+    try {
+      const result = await applyLlmCompress({
+        chatId,
+        options: {
+          ...llmCompressOptions,
+          expected_trajectory_version: llmCompressPreview.trajectory_version,
+        },
+      }).unwrap();
+      if (!result.applied) {
+        setLlmCompressError(
+          result.reason ?? "LLM compression was not applied.",
+        );
+        return false;
+      }
+      setLlmCompressPreview(null);
+      dispatch(requestSseRefresh({ chatId }));
+      void dispatch(
+        trajectoriesApi.endpoints.listAllTrajectories.initiate(undefined, {
+          forceRefetch: true,
+        }),
+      );
+      return true;
+    } catch {
+      setLlmCompressError("Unable to apply LLM compression. Please try again.");
+      return false;
+    }
+  }, [
+    applyLlmCompress,
+    chatId,
+    dispatch,
+    llmCompressOptions,
+    llmCompressPreview,
+  ]);
 
   const handlePreviewTransform = useCallback(async () => {
     if (!chatId) return;
@@ -234,8 +323,11 @@ export function useTrajectoryOps() {
   ]);
 
   const clearPreviews = useCallback(() => {
+    llmPreviewRequestId.current += 1;
     setTransformPreview(null);
     setHandoffPreview(null);
+    setLlmCompressPreview(null);
+    setLlmCompressError(null);
   }, []);
 
   const updateTransformOption = useCallback(
@@ -254,24 +346,39 @@ export function useTrajectoryOps() {
     [],
   );
 
+  const updateLlmCompressModel = useCallback((summaryModel?: string) => {
+    llmPreviewRequestId.current += 1;
+    setLlmCompressOptions(summaryModel ? { summary_model: summaryModel } : {});
+    setLlmCompressPreview(null);
+    setLlmCompressError(null);
+  }, []);
+
   return {
     chatId,
     activeTab,
     setActiveTab,
     transformOptions,
     handoffOptions,
+    llmCompressOptions,
     transformPreview,
     handoffPreview,
+    llmCompressPreview,
+    llmCompressError,
     isPreviewingTransform,
     isApplyingTransform,
     isPreviewingHandoff,
     isApplyingHandoff,
+    isPreviewingLlmCompress,
+    isApplyingLlmCompress,
     handlePreviewTransform,
     handleApplyTransform,
     handlePreviewHandoff,
     handleApplyHandoff,
+    handlePreviewLlmCompress,
+    handleApplyLlmCompress,
     clearPreviews,
     updateTransformOption,
     updateHandoffOption,
+    updateLlmCompressModel,
   };
 }
