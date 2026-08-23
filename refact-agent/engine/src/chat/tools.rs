@@ -22,7 +22,8 @@ use crate::yaml_configs::customization_registry::{
 };
 use crate::ext::hooks::HookEvent;
 use crate::ext::hooks_runner::{HookPayload, first_block_reason, get_project_dir_string, run_hooks};
-use refact_tool_api::{build_registry_from_names, MatchConfirmDenyResult};
+use refact_runtime_api::ToolCatalogSnapshot;
+use refact_tool_api::MatchConfirmDenyResult;
 use crate::exec::command_policy::escalation_from_args;
 
 fn make_runtime_event(
@@ -63,6 +64,7 @@ pub struct ExecuteToolsOptions {
     pub subchat_tool_parameters: Option<IndexMap<String, SubchatParameters>>,
     pub postprocess_settings: Option<PostprocessSettings>,
     pub allowed_tools: Vec<String>,
+    pub catalog: Option<Arc<ToolCatalogSnapshot>>,
 }
 
 fn tool_execution_messages(
@@ -220,20 +222,12 @@ fn rewrite_cc_native_stub_tool_call(tc: &mut ChatToolCall) {
     tc.function.arguments = serde_json::Value::Object(mapped).to_string();
 }
 
-pub async fn resolve_tool_call_aliases(
-    app: AppState,
+pub fn resolve_tool_call_aliases_with_catalog(
     tool_calls: Vec<ChatToolCall>,
-    mode_id: &str,
-    model_id: Option<&str>,
+    catalog: &ToolCatalogSnapshot,
 ) -> Vec<ChatToolCall> {
-    let tool_names: Vec<String> = app
-        .tool_registry
-        .get_tools_for_mode(mode_id, model_id)
-        .await
-        .into_iter()
-        .map(|t| t.name)
-        .collect();
-    let registry = build_registry_from_names(&tool_names);
+    let tool_names = &catalog.index.tools;
+    let registry = &catalog.aliases;
     let needs_cc = tool_calls.iter().any(|tc| {
         tc.function
             .name
@@ -275,11 +269,7 @@ pub async fn resolve_tool_call_aliases(
                 }
             } else if let Some(internal_name) = registry.resolve_alias(&tc.function.name) {
                 tc.function.name = internal_name.to_string();
-            } else if needs_cc
-                && !tool_names
-                    .iter()
-                    .any(|tool_name| tool_name == &tc.function.name)
-            {
+            } else if needs_cc && !tool_names.iter().any(|tool| tool.name == tc.function.name) {
                 let cc_resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(
                     &tc.function.name,
                 );
@@ -294,6 +284,19 @@ pub async fn resolve_tool_call_aliases(
         .collect::<Vec<_>>();
     span.finish_tool(PerfOutcome::Success, 1, item_count, None);
     resolved
+}
+
+pub async fn resolve_tool_call_aliases(
+    app: AppState,
+    tool_calls: Vec<ChatToolCall>,
+    mode_id: &str,
+    model_id: Option<&str>,
+) -> Vec<ChatToolCall> {
+    let catalog = app
+        .tool_registry
+        .acquire_tool_catalog(mode_id, model_id, None)
+        .await;
+    resolve_tool_call_aliases_with_catalog(tool_calls, &catalog)
 }
 
 const EDITING_TOOLS: &[&str] = &[
@@ -711,6 +714,34 @@ mod tests {
                 && event.batch_size == Some(1)
                 && event.execution_class.is_none()
         }));
+    }
+
+    #[tokio::test]
+    async fn catalog_aliases_remain_stable_when_tool_descriptors_change_mid_batch() {
+        let initial = ToolCatalogSnapshot {
+            index: refact_runtime_api::ToolRegistryIndex {
+                tools: vec![deterministic_tool_desc(
+                    "very_long_tool_name_that_exceeds_the_64_character_limit_for_provider_apis",
+                )],
+                mcp_lazy_mode: false,
+                mcp_total_count: 0,
+                mcp_tool_index: Vec::new(),
+            },
+            policy: Vec::new(),
+            aliases: refact_tool_api::build_registry_from_names(&vec![
+                "very_long_tool_name_that_exceeds_the_64_character_limit_for_provider_apis"
+                    .to_string(),
+            ]),
+        };
+        let alias = initial
+            .aliases
+            .get_alias(&initial.index.tools[0].name)
+            .unwrap();
+        let call = deterministic_tool_call("call-1", alias);
+
+        let resolved = resolve_tool_call_aliases_with_catalog(vec![call], &initial);
+
+        assert_eq!(resolved[0].function.name, initial.index.tools[0].name);
     }
 
     #[serial]
@@ -1185,6 +1216,7 @@ mod tests {
             &[tool_call],
             &[],
             &thread,
+            None,
             "agent",
             None,
             &[],
@@ -1246,6 +1278,7 @@ mod tests {
             &[tool_call],
             &[],
             &thread,
+            None,
             "agent",
             None,
             &[],
@@ -1759,7 +1792,27 @@ pub async fn process_tool_calls_once(
         return ToolStepOutcome::NoToolCalls;
     }
 
-    let tool_calls = resolve_tool_call_aliases(app.clone(), tool_calls, mode_id, model_id).await;
+    let session_catalog = {
+        let session = session_arc.lock().await;
+        session.tool_catalog.clone()
+    };
+    let catalog = match session_catalog {
+        Some(catalog) => catalog,
+        None => {
+            app.tool_registry
+                .acquire_tool_catalog(
+                    mode_id,
+                    model_id,
+                    thread
+                        .worktree
+                        .as_ref()
+                        .map(|worktree| worktree.root.to_string_lossy().into_owned())
+                        .as_deref(),
+                )
+                .await
+        }
+    };
+    let tool_calls = resolve_tool_call_aliases_with_catalog(tool_calls, &catalog);
 
     info!(
         "process_tool_calls_once: {} tool calls to process",
@@ -1771,6 +1824,7 @@ pub async fn process_tool_calls_once(
         &tool_calls,
         &messages,
         &thread,
+        Some(&catalog),
         mode_id,
         model_id,
         &allowed_tools,
@@ -1963,6 +2017,7 @@ pub async fn process_tool_calls_once(
         model_id,
         ExecuteToolsOptions {
             allowed_tools: allowed_tools.clone(),
+            catalog: Some(catalog),
             ..Default::default()
         },
     );
@@ -2174,6 +2229,7 @@ pub async fn check_tools_confirmation(
     tool_calls: &[crate::call_validation::ChatToolCall],
     messages: &[ChatMessage],
     thread: &ThreadParams,
+    catalog: Option<&ToolCatalogSnapshot>,
     mode_id: &str,
     model_id: Option<&str>,
     allowed_tools: &[String],
@@ -2268,11 +2324,31 @@ pub async fn check_tools_confirmation(
             }
         }
 
-        let Some(tool_result) = app
-            .tool_registry
-            .check_tool_confirmation(&ccx, mode_id, model_id, &tool_call.function.name, args)
-            .await
-        else {
+        let Some(tool_result) = (match catalog {
+            Some(catalog) => {
+                app.tool_registry
+                    .check_tool_confirmation_with_catalog(
+                        &ccx,
+                        catalog,
+                        mode_id,
+                        model_id,
+                        &tool_call.function.name,
+                        args,
+                    )
+                    .await
+            }
+            None => {
+                app.tool_registry
+                    .check_tool_confirmation(
+                        &ccx,
+                        mode_id,
+                        model_id,
+                        &tool_call.function.name,
+                        args,
+                    )
+                    .await
+            }
+        }) else {
             info!(
                 "Unknown tool: {}, skipping confirmation check",
                 tool_call.function.name
@@ -2369,18 +2445,35 @@ pub async fn execute_tools_with_session(
         return (vec![], false);
     }
 
-    let (prompt_messages, session_abort_flag, session_allowed_tools) = {
+    let (prompt_messages, session_abort_flag, session_allowed_tools, session_catalog) = {
         let session = session_arc.lock().await;
         let msgs = tool_execution_messages(messages, &session.last_prompt_messages);
         (
             msgs,
             session.abort_flag.clone(),
             session.active_command.allowed_tools.clone(),
+            session.tool_catalog.clone(),
         )
     };
     if options.allowed_tools.is_empty() {
         options.allowed_tools = session_allowed_tools;
     }
+    let catalog = match options.catalog.clone().or(session_catalog) {
+        Some(catalog) => catalog,
+        None => {
+            app.tool_registry
+                .acquire_tool_catalog(
+                    mode_id,
+                    model_id,
+                    thread
+                        .worktree
+                        .as_ref()
+                        .map(|worktree| worktree.root.to_string_lossy().into_owned())
+                        .as_deref(),
+                )
+                .await
+        }
+    };
 
     let n_ctx = get_effective_n_ctx(app.clone(), thread).await;
     let budget = match ToolBudget::try_from_n_ctx(n_ctx) {
@@ -2429,6 +2522,7 @@ pub async fn execute_tools_with_session(
         budget,
         options,
         &prompt_messages,
+        catalog,
     )
     .await;
 
@@ -2472,6 +2566,7 @@ async fn execute_single_tool(
     ccx: Arc<AMutex<AtCommandsContext>>,
     idx: usize,
     tool_call: ChatToolCall,
+    catalog: Arc<ToolCatalogSnapshot>,
     serial_registry: Arc<SerialToolRegistry>,
     allow_parallel: bool,
     batch_size: usize,
@@ -2549,8 +2644,9 @@ async fn execute_single_tool(
 
     let (idx, had_corrections, mut msgs, files) = match app
         .tool_registry
-        .execute_tool(
+        .execute_tool_with_catalog(
             &ccx,
+            &catalog,
             mode_id,
             model_id,
             &tool_call.id,
@@ -2681,14 +2777,12 @@ async fn execute_tools_inner(
     budget: ToolBudget,
     options: ExecuteToolsOptions,
     messages: &[ChatMessage],
+    catalog: Arc<ToolCatalogSnapshot>,
 ) -> (Vec<ChatMessage>, bool) {
     let max_parallel = limits().max_parallel_tools.max(1);
 
     let policy_span = perf_diagnostics::span(PerfComponent::ToolPolicyLookup, None, None);
-    let available_tools = app
-        .tool_registry
-        .get_tool_policy_info(mode_id, model_id)
-        .await;
+    let available_tools = &catalog.policy;
     policy_span.finish_tool(PerfOutcome::Success, 1, available_tools.len() as u64, None);
 
     let mut tool_allow_parallel: std::collections::HashMap<String, bool> =
@@ -2703,7 +2797,7 @@ async fn execute_tools_inner(
         if tool.effective_allow_parallel {
             continue;
         }
-        serial_registry.insert(tool.name);
+        serial_registry.insert(tool.name.clone());
     }
 
     let serial_registry = Arc::new(serial_registry);
@@ -2767,6 +2861,7 @@ async fn execute_tools_inner(
                     app.clone(),
                     ccx.clone(),
                     &current_parallel_batch,
+                    catalog.clone(),
                     serial_registry.clone(),
                     max_parallel,
                     mode_id,
@@ -2782,6 +2877,7 @@ async fn execute_tools_inner(
                 ccx.clone(),
                 idx,
                 tool_call.clone(),
+                catalog.clone(),
                 serial_registry.clone(),
                 false,
                 1,
@@ -2798,6 +2894,7 @@ async fn execute_tools_inner(
             app.clone(),
             ccx.clone(),
             &current_parallel_batch,
+            catalog,
             serial_registry.clone(),
             max_parallel,
             mode_id,
@@ -2860,6 +2957,7 @@ async fn execute_parallel_batch(
     app: AppState,
     ccx: Arc<AMutex<AtCommandsContext>>,
     batch: &[(usize, ChatToolCall)],
+    catalog: Arc<ToolCatalogSnapshot>,
     serial_registry: Arc<SerialToolRegistry>,
     max_parallel: usize,
     mode_id: &str,
@@ -2875,6 +2973,7 @@ async fn execute_parallel_batch(
             let ccx = ccx.clone();
             let semaphore = semaphore.clone();
             let serial_registry = serial_registry.clone();
+            let catalog = catalog.clone();
             let tool_call = tool_call.clone();
             let idx = *idx;
             let batch_size = batch_size;
@@ -2896,6 +2995,7 @@ async fn execute_parallel_batch(
                     ccx,
                     idx,
                     tool_call,
+                    catalog,
                     serial_registry,
                     true,
                     batch_size,
@@ -2973,6 +3073,22 @@ pub async fn execute_tools(
     if tool_calls.is_empty() {
         return (vec![], false);
     }
+    let catalog = match options.catalog.clone() {
+        Some(catalog) => catalog,
+        None => {
+            app.tool_registry
+                .acquire_tool_catalog(
+                    mode_id,
+                    model_id,
+                    thread
+                        .worktree
+                        .as_ref()
+                        .map(|worktree| worktree.root.to_string_lossy().into_owned())
+                        .as_deref(),
+                )
+                .await
+        }
+    };
 
     let n_ctx = get_effective_n_ctx(app.clone(), thread).await;
     let budget = match ToolBudget::try_from_n_ctx(n_ctx) {
@@ -3028,7 +3144,7 @@ pub async fn execute_tools(
     }
 
     let (result_msgs, had_corrections) = execute_tools_inner(
-        app, ccx, tool_calls, mode_id, model_id, budget, options, messages,
+        app, ccx, tool_calls, mode_id, model_id, budget, options, messages, catalog,
     )
     .await;
 

@@ -7,6 +7,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Notify, Mutex as AMutex};
 
 use crate::call_validation::{ChatMessage, ChatUsage};
+use refact_runtime_api::ToolCatalogSnapshot;
 
 pub use refact_chat_api::chat_local_types::{
     max_queue_size, session_cleanup_interval, session_idle_timeout, stream_heartbeat,
@@ -325,6 +326,7 @@ pub struct ChatSession {
     pub closed_flag: Arc<AtomicBool>,
     pub external_reload_pending: Option<ExternalReloadPending>,
     pub last_prompt_messages: Vec<ChatMessage>,
+    pub tool_catalog: Option<Arc<ToolCatalogSnapshot>>,
     pub tier1_compact_attempts: usize,
     pub tier1_compaction_disabled: bool,
     pub compression_insufficient_hashes: HashSet<String>,

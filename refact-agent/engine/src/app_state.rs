@@ -12,7 +12,7 @@ use refact_buddy_core::user_action::UserAction;
 use refact_chat_api::ChatMessage;
 use refact_runtime_api::{
     ActivitySink, BuddyEventSink, ToolConfirmationCheck, ToolExecutionResult, ToolPolicyInfo,
-    ToolRegistry, ToolRegistryIndex,
+    ToolCatalogSnapshot, ToolRegistry, ToolRegistryIndex,
 };
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 
@@ -324,12 +324,6 @@ pub struct ToolCatalogKey {
     extension_generation: u64,
 }
 
-#[derive(Clone)]
-pub struct ToolCatalogSnapshot {
-    pub index: ToolRegistryIndex,
-    pub policy: Vec<ToolPolicyInfo>,
-}
-
 const TOOL_CATALOG_SNAPSHOT_CACHE_LIMIT: usize = 128;
 
 #[derive(Default)]
@@ -463,18 +457,24 @@ impl AppToolRegistry {
             self.tools_for_mode(gcx, mode, model_id).await,
         );
         let policy = crate::tools::tools_list::catalog_policy_for_tools(&tools.tools);
+        let descriptions = tools
+            .tools
+            .iter()
+            .map(|tool| tool.tool_description())
+            .collect::<Vec<_>>();
+        let names = descriptions
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
         ToolCatalogSnapshot {
             index: ToolRegistryIndex {
-                tools: tools
-                    .tools
-                    .into_iter()
-                    .map(|tool| tool.tool_description())
-                    .collect(),
+                tools: descriptions,
                 mcp_lazy_mode: tools.mcp_lazy_mode,
                 mcp_total_count: tools.mcp_total_count,
                 mcp_tool_index: tools.mcp_tool_index,
             },
             policy,
+            aliases: refact_tool_api::build_registry_from_names(&names),
         }
     }
 
@@ -498,16 +498,13 @@ impl AppToolRegistry {
             .map(|scope| scope.effective_root().to_string_lossy().to_string())
     }
 
-    async fn fresh_tools_for_scope(
+    async fn fresh_tools_for_catalog(
         &self,
         gcx: SharedGlobalContext,
         mode: &str,
         model_id: Option<&str>,
-        execution_scope: Option<String>,
+        catalog: &ToolCatalogSnapshot,
     ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
-        let snapshot = self
-            .snapshot_for_mode_with_scope(gcx.clone(), mode, model_id, execution_scope)
-            .await;
         let span = perf_diagnostics::span(PerfComponent::ToolCatalogBuild, None, None);
         let tools = crate::tools::tools_list::apply_mcp_lazy_filter(
             self.tools_for_mode(gcx, mode, model_id).await,
@@ -516,10 +513,22 @@ impl AppToolRegistry {
         span.finish_tool(
             PerfOutcome::Success,
             1,
-            snapshot.index.tools.len() as u64,
+            catalog.index.tools.len() as u64,
             None,
         );
         tools
+    }
+
+    fn find_catalog_descriptor<'a>(
+        catalog: &'a ToolCatalogSnapshot,
+        tool_name: &str,
+    ) -> Option<&'a refact_tool_api::ToolDesc> {
+        let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
+        catalog
+            .index
+            .tools
+            .iter()
+            .find(|desc| desc.name == tool_name || desc.name == resolved.as_str())
     }
 
     async fn snapshot_for_mode_with_scope(
@@ -636,9 +645,46 @@ impl ToolRegistry for AppToolRegistry {
         .clone()
     }
 
+    async fn acquire_tool_catalog(
+        &self,
+        mode: &str,
+        model_id: Option<&str>,
+        execution_scope: Option<&str>,
+    ) -> Arc<ToolCatalogSnapshot> {
+        self.snapshot_for_mode_with_scope(
+            self.gcx.clone(),
+            mode,
+            model_id,
+            execution_scope.map(str::to_string),
+        )
+        .await
+    }
+
     async fn check_tool_confirmation(
         &self,
         ccx: &(dyn std::any::Any + Send + Sync),
+        mode: &str,
+        model_id: Option<&str>,
+        tool_name: &str,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Option<Result<ToolConfirmationCheck, String>> {
+        let execution_scope = match ccx
+            .downcast_ref::<Arc<AMutex<crate::at_commands::at_commands::AtCommandsContext>>>()
+        {
+            Some(ccx) => Self::execution_scope_from_ccx(ccx).await,
+            None => None,
+        };
+        let catalog = self
+            .acquire_tool_catalog(mode, model_id, execution_scope.as_deref())
+            .await;
+        self.check_tool_confirmation_with_catalog(ccx, &catalog, mode, model_id, tool_name, args)
+            .await
+    }
+
+    async fn check_tool_confirmation_with_catalog(
+        &self,
+        ccx: &(dyn std::any::Any + Send + Sync),
+        catalog: &ToolCatalogSnapshot,
         mode: &str,
         model_id: Option<&str>,
         tool_name: &str,
@@ -654,23 +700,27 @@ impl ToolRegistry for AppToolRegistry {
                 ))
             }
         };
-        let execution_scope = Self::execution_scope_from_ccx(&ccx).await;
         let tools = self
-            .fresh_tools_for_scope(self.gcx.clone(), mode, model_id, execution_scope)
+            .fresh_tools_for_catalog(self.gcx.clone(), mode, model_id, catalog)
             .await;
+        let catalog_desc = Self::find_catalog_descriptor(catalog, tool_name)?;
         let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
         for tool in tools {
             let desc = tool.tool_description();
             if desc.name == tool_name || desc.name == resolved.as_str() {
                 let mut coerced_args: HashMap<String, serde_json::Value> =
                     args.into_iter().collect();
-                refact_tool_api::coerce_hashmap_to_schema(&mut coerced_args, &desc.input_schema);
-                let integr_config_path = tool.has_config_path();
+                refact_tool_api::coerce_hashmap_to_schema(
+                    &mut coerced_args,
+                    &catalog_desc.input_schema,
+                );
+                let integr_config_path = (!catalog_desc.source.config_path.is_empty())
+                    .then(|| catalog_desc.source.config_path.clone());
                 return Some(
                     tool.match_against_confirm_deny(ccx, &coerced_args)
                         .await
                         .map(|result| ToolConfirmationCheck {
-                            tool_name: desc.name,
+                            tool_name: catalog_desc.name.clone(),
                             result,
                             integr_config_path,
                         }),
@@ -702,6 +752,29 @@ impl ToolRegistry for AppToolRegistry {
         tool_name: &str,
         args: serde_json::Map<String, serde_json::Value>,
     ) -> Result<Option<ToolExecutionResult>, String> {
+        let execution_scope = match ccx
+            .downcast_ref::<Arc<AMutex<crate::at_commands::at_commands::AtCommandsContext>>>()
+        {
+            Some(ccx) => Self::execution_scope_from_ccx(ccx).await,
+            None => None,
+        };
+        let catalog = self
+            .acquire_tool_catalog(mode, model_id, execution_scope.as_deref())
+            .await;
+        self.execute_tool_with_catalog(ccx, &catalog, mode, model_id, tool_call_id, tool_name, args)
+            .await
+    }
+
+    async fn execute_tool_with_catalog(
+        &self,
+        ccx: &(dyn std::any::Any + Send + Sync),
+        catalog: &ToolCatalogSnapshot,
+        mode: &str,
+        model_id: Option<&str>,
+        tool_call_id: &str,
+        tool_name: &str,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Option<ToolExecutionResult>, String> {
         let ccx = ccx
             .downcast_ref::<Arc<AMutex<crate::at_commands::at_commands::AtCommandsContext>>>()
             .ok_or_else(|| "invalid AtCommandsContext passed to ToolRegistry".to_string())?
@@ -710,10 +783,13 @@ impl ToolRegistry for AppToolRegistry {
             let cgcx = ccx.lock().await;
             cgcx.app.gcx.clone()
         };
-        let execution_scope = Self::execution_scope_from_ccx(&ccx).await;
         let tools = self
-            .fresh_tools_for_scope(gcx.clone(), mode, model_id, execution_scope)
+            .fresh_tools_for_catalog(gcx.clone(), mode, model_id, catalog)
             .await;
+        let catalog_desc = match Self::find_catalog_descriptor(catalog, tool_name) {
+            Some(desc) => desc,
+            None => return Ok(None),
+        };
         let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
         for mut tool in tools {
             let desc = tool.tool_description();
@@ -722,7 +798,7 @@ impl ToolRegistry for AppToolRegistry {
                     args.into_iter().collect();
                 let coercion_notes = refact_tool_api::coerce_hashmap_to_schema(
                     &mut coerced_args,
-                    &desc.input_schema,
+                    &catalog_desc.input_schema,
                 );
                 if !coercion_notes.is_empty() {
                     tracing::info!(

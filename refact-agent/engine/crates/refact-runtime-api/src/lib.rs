@@ -6,7 +6,7 @@ use refact_buddy_core::types::{BuddyRuntimeEvent, BuddySuggestion};
 use refact_buddy_core::user_action::UserAction;
 use refact_chat_api::{ChatCommand, ChatMessage, ContextFile, GoalSnapshot, PauseReason, ThreadParams};
 use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
-use refact_tool_api::ToolDesc;
+use refact_tool_api::{build_registry_from_names, ToolAliasRegistry, ToolDesc};
 
 pub use refact_chat_api::{SessionState, TaskMeta};
 pub use refact_tool_api::ToolDesc as RuntimeToolDesc;
@@ -64,6 +64,13 @@ pub struct ToolRegistryIndex {
 }
 
 #[derive(Clone)]
+pub struct ToolCatalogSnapshot {
+    pub index: ToolRegistryIndex,
+    pub policy: Vec<ToolPolicyInfo>,
+    pub aliases: ToolAliasRegistry,
+}
+
+#[derive(Clone)]
 pub struct ToolConfirmationCheck {
     pub tool_name: String,
     pub result: refact_tool_api::MatchConfirmDeny,
@@ -100,6 +107,27 @@ pub trait ToolRegistry: Send + Sync {
         let _ = execution_scope;
         self.get_tools_index_for_mode(mode, model_id).await
     }
+    async fn acquire_tool_catalog(
+        &self,
+        mode: &str,
+        model_id: Option<&str>,
+        execution_scope: Option<&str>,
+    ) -> std::sync::Arc<ToolCatalogSnapshot> {
+        let index = self
+            .get_tools_index_for_mode_and_scope(mode, model_id, execution_scope)
+            .await;
+        let names = index
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        let policy = self.get_tool_policy_info(mode, model_id).await;
+        std::sync::Arc::new(ToolCatalogSnapshot {
+            index,
+            policy,
+            aliases: build_registry_from_names(&names),
+        })
+    }
     async fn check_tool_confirmation(
         &self,
         ccx: &(dyn std::any::Any + Send + Sync),
@@ -108,6 +136,19 @@ pub trait ToolRegistry: Send + Sync {
         tool_name: &str,
         args: serde_json::Map<String, serde_json::Value>,
     ) -> Option<Result<ToolConfirmationCheck, String>>;
+    async fn check_tool_confirmation_with_catalog(
+        &self,
+        ccx: &(dyn std::any::Any + Send + Sync),
+        catalog: &ToolCatalogSnapshot,
+        mode: &str,
+        model_id: Option<&str>,
+        tool_name: &str,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Option<Result<ToolConfirmationCheck, String>> {
+        let _ = catalog;
+        self.check_tool_confirmation(ccx, mode, model_id, tool_name, args)
+            .await
+    }
     async fn get_tool_policy_info(&self, mode: &str, model_id: Option<&str>)
         -> Vec<ToolPolicyInfo>;
     async fn execute_tool(
@@ -119,6 +160,20 @@ pub trait ToolRegistry: Send + Sync {
         tool_name: &str,
         args: serde_json::Map<String, serde_json::Value>,
     ) -> Result<Option<ToolExecutionResult>, String>;
+    async fn execute_tool_with_catalog(
+        &self,
+        ccx: &(dyn std::any::Any + Send + Sync),
+        catalog: &ToolCatalogSnapshot,
+        mode: &str,
+        model_id: Option<&str>,
+        tool_call_id: &str,
+        tool_name: &str,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Option<ToolExecutionResult>, String> {
+        let _ = catalog;
+        self.execute_tool(ccx, mode, model_id, tool_call_id, tool_name, args)
+            .await
+    }
     async fn load_task_memories(&self, task_id: &str) -> Result<Vec<(PathBuf, String)>, String>;
 }
 

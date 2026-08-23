@@ -451,6 +451,7 @@ impl ChatSession {
             closed_flag: Arc::new(AtomicBool::new(false)),
             external_reload_pending: None,
             last_prompt_messages: Vec::new(),
+            tool_catalog: None,
             tier1_compact_attempts: 0,
             tier1_compaction_disabled: false,
             compression_insufficient_hashes: HashSet::new(),
@@ -553,6 +554,7 @@ impl ChatSession {
             closed: false,
             closed_flag: Arc::new(AtomicBool::new(false)),
             last_prompt_messages: Vec::new(),
+            tool_catalog: None,
             tier1_compact_attempts: 0,
             tier1_compaction_disabled: false,
             compression_insufficient_hashes: HashSet::new(),
@@ -2290,6 +2292,9 @@ impl ChatSession {
                     message_id: draft.message_id,
                 });
             }
+        }
+        if next_state != SessionState::ExecutingTools {
+            self.tool_catalog = None;
         }
         self.set_runtime_state(next_state, None);
         self.touch();

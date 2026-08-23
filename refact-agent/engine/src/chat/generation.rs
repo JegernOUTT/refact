@@ -32,7 +32,9 @@ use super::trajectories::{
     maybe_save_trajectory_background_with_intent,
 };
 use super::tools::{process_tool_calls_once, ToolStepOutcome};
-use super::prepare::{build_canonical_openai_tools, prepare_chat_passthrough, ChatPrepareOptions};
+use super::prepare::{
+    build_canonical_openai_tools_from_aliases, prepare_chat_passthrough, ChatPrepareOptions,
+};
 use super::prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messages;
 use super::stream_core::{
     run_llm_stream, StreamRunParams, StreamCollector, normalize_tool_call, ChoiceFinal,
@@ -1900,16 +1902,24 @@ pub async fn run_llm_generation(
         .worktree
         .as_ref()
         .map(|worktree| worktree.root.to_string_lossy().into_owned());
-    let tools_for_gen = app
-        .tool_registry
-        .get_tools_index_for_mode_and_scope(
-            &thread.mode,
-            Some(&model_rec.base.id),
-            execution_scope.as_deref(),
-        )
-        .await;
-    let mcp_lazy_active = tools_for_gen.mcp_lazy_mode;
-    let tools = tools_for_gen.tools;
+    let existing_catalog = {
+        let session = session_arc.lock().await;
+        session.tool_catalog.clone()
+    };
+    let catalog = match existing_catalog {
+        Some(catalog) => catalog,
+        None => {
+            app.tool_registry
+                .acquire_tool_catalog(
+                    &thread.mode,
+                    Some(&model_rec.base.id),
+                    execution_scope.as_deref(),
+                )
+                .await
+        }
+    };
+    let mcp_lazy_active = catalog.index.mcp_lazy_mode;
+    let tools = catalog.index.tools.clone();
 
     info!(
         "session generation: model={}, tools count = {} (mcp_lazy={})",
@@ -1925,13 +1935,12 @@ pub async fn run_llm_generation(
             session.thread.frozen_request_prefix.clone(),
         )
     };
-    let canonical_tools = build_canonical_openai_tools(
-        gcx.clone(),
+    let canonical_tools = build_canonical_openai_tools_from_aliases(
         &tools,
+        catalog.aliases.clone(),
         model_rec.supports_strict_tools,
         model_rec.supports_tools,
-    )
-    .await;
+    );
     let mut installed_frozen_prefix = false;
     let frozen_request_prefix = if existing_frozen_prefix
         .as_ref()
@@ -2087,6 +2096,7 @@ pub async fn run_llm_generation(
     {
         let mut session = session_arc.lock().await;
         session.last_prompt_messages = prepared.limited_messages.clone();
+        session.tool_catalog = Some(catalog);
         save_rag_results_to_session(&mut session, &prepared.rag_results);
     }
 

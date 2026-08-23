@@ -24,7 +24,7 @@ use super::generation::{start_generation, prepare_session_preamble_and_knowledge
 use super::goal_verifier::{
     should_verify_goal_on_done, verify_goal_before_completion, GoalCompletionGateOutcome,
 };
-use super::tools::{execute_tools_with_session, resolve_tool_call_aliases};
+use super::tools::{execute_tools_with_session, resolve_tool_call_aliases_with_catalog};
 use super::trajectories::{
     maybe_save_trajectory_with_intent, maybe_save_trajectory_background_with_intent,
 };
@@ -2505,13 +2505,28 @@ async fn handle_tool_decisions(
 
     let had_tool_calls = !tool_calls_to_execute.is_empty();
     if had_tool_calls {
-        let tool_calls_to_execute = resolve_tool_call_aliases(
-            app.clone(),
-            tool_calls_to_execute,
-            &thread.mode,
-            Some(&thread.model),
-        )
-        .await;
+        let session_catalog = {
+            let session = session_arc.lock().await;
+            session.tool_catalog.clone()
+        };
+        let catalog = match session_catalog {
+            Some(catalog) => catalog,
+            None => {
+                app.tool_registry
+                    .acquire_tool_catalog(
+                        &thread.mode,
+                        Some(&thread.model),
+                        thread
+                            .worktree
+                            .as_ref()
+                            .map(|worktree| worktree.root.to_string_lossy().into_owned())
+                            .as_deref(),
+                    )
+                    .await
+            }
+        };
+        let tool_calls_to_execute =
+            resolve_tool_call_aliases_with_catalog(tool_calls_to_execute, &catalog);
 
         {
             let mut session = session_arc.lock().await;
@@ -2525,8 +2540,11 @@ async fn handle_tool_decisions(
             &messages,
             &thread,
             &thread.mode,
-            Some(&thread.model),
-            super::tools::ExecuteToolsOptions::default(),
+            Some(thread.model.as_str()),
+            super::tools::ExecuteToolsOptions {
+                catalog: Some(catalog),
+                ..Default::default()
+            },
         )
         .await;
 

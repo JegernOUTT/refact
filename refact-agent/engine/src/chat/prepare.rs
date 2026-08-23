@@ -31,6 +31,39 @@ pub struct CanonicalOpenAiTools {
     pub alias_registry: ToolAliasRegistry,
 }
 
+pub fn build_canonical_openai_tools_from_aliases(
+    tools: &[ToolDesc],
+    aliases: ToolAliasRegistry,
+    mode_supports_strict: bool,
+    supports_tools: bool,
+) -> CanonicalOpenAiTools {
+    let filtered_tools: Vec<ToolDesc> = if supports_tools {
+        tools.to_vec()
+    } else {
+        vec![]
+    };
+    let openai_tools = filtered_tools
+        .iter()
+        .map(|tool| {
+            let alias = aliases
+                .get_alias(&tool.name)
+                .unwrap_or(&tool.name)
+                .to_string();
+            let mut value = tool.clone().into_openai_style(mode_supports_strict);
+            if alias != tool.name {
+                if let Some(function) = value.get_mut("function") {
+                    function["name"] = serde_json::Value::String(alias);
+                }
+            }
+            value
+        })
+        .collect();
+    CanonicalOpenAiTools {
+        tools: openai_tools,
+        alias_registry: aliases,
+    }
+}
+
 pub async fn build_canonical_openai_tools(
     gcx: Arc<GlobalContext>,
     tools: &[ToolDesc],

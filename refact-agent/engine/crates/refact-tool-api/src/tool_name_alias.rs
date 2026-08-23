@@ -39,6 +39,7 @@ pub fn generate_tool_alias(name: &str, max_len: usize) -> String {
     format!("{}_{}", prefix, hash8)
 }
 
+#[derive(Clone)]
 pub struct ToolAliasRegistry {
     name_to_alias: HashMap<String, String>,
     alias_to_name: HashMap<String, String>,
