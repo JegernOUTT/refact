@@ -9,7 +9,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const HISTORY_LIMIT: usize = 200;
 pub(crate) const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
-const PASTE_BURST_WINDOW: Duration = Duration::from_millis(35);
 const UNDO_LIMIT: usize = 100;
 const UNDO_COALESCE_WINDOW: Duration = Duration::from_millis(750);
 
@@ -30,8 +29,8 @@ pub enum EnterDecision {
 pub struct ComposerState {
     editor: TextEditor,
     history: InputHistory,
-    paste: PasteBurst,
     pending_large_pastes: Vec<PendingLargePaste>,
+    next_large_paste_id: u64,
     kill_buffer: String,
     undo: UndoHistory,
     history_search: Option<HistorySearch>,
@@ -56,8 +55,8 @@ impl ComposerState {
         Self {
             editor: TextEditor::new(),
             history: InputHistory::new(history),
-            paste: PasteBurst::new(),
             pending_large_pastes: Vec::new(),
+            next_large_paste_id: 0,
             kill_buffer: String::new(),
             undo: UndoHistory::new(),
             history_search: None,
@@ -73,7 +72,6 @@ impl ComposerState {
     }
 
     pub fn set_text(&mut self, text: impl Into<String>) {
-        self.paste.reset();
         self.pending_large_pastes.clear();
         self.history.reset_navigation();
         self.history_search = None;
@@ -82,7 +80,6 @@ impl ComposerState {
     }
 
     pub fn clear(&mut self) {
-        self.paste.reset();
         self.pending_large_pastes.clear();
         self.history.reset_navigation();
         self.history_search = None;
@@ -91,55 +88,37 @@ impl ComposerState {
     }
 
     pub fn insert_char(&mut self, ch: char, now: Instant) {
-        self.flush_pending_paste(now);
         self.history.reset_navigation();
         self.history_search = None;
-        let action = self.paste.push_char(ch, now);
         let before = self.editor.snapshot();
-        if self.apply_paste_action(action) {
-            self.record_edit(before, UndoKind::Typing, Some(now));
-        }
+        self.editor.insert_char(ch);
+        self.record_edit(before, UndoKind::Typing, Some(now));
     }
 
-    pub fn insert_explicit_newline(&mut self, now: Instant) {
-        self.flush_pending_paste(now);
+    pub fn insert_explicit_newline(&mut self, _now: Instant) {
         self.history.reset_navigation();
         self.history_search = None;
-        let action = self.paste.push_explicit_newline(now);
         let before = self.editor.snapshot();
-        if self.apply_paste_action(action) {
-            self.record_edit(before, UndoKind::Other, None);
-        }
+        self.editor.insert_str("\n");
+        self.record_edit(before, UndoKind::Other, None);
     }
 
-    pub fn enter(&mut self, now: Instant) -> EnterDecision {
-        if self.flush_pending_paste(now) {
-            return EnterDecision::Submit;
-        }
-        match self.paste.push_enter(now) {
-            PasteAction::None => EnterDecision::Submit,
-            action => {
-                self.history.reset_navigation();
-                self.history_search = None;
-                let before = self.editor.snapshot();
-                if self.apply_paste_action(action) {
-                    self.record_edit(before, UndoKind::Other, None);
-                }
-                EnterDecision::InsertedNewline
-            }
-        }
+    pub fn enter(&mut self, _now: Instant) -> EnterDecision {
+        EnterDecision::Submit
     }
 
     pub fn insert_paste(&mut self, text: &str) {
-        self.flush_pending_paste_force();
-        self.paste.reset();
         self.history.reset_navigation();
         self.history_search = None;
         self.prune_pending_large_pastes();
         let before = self.editor.snapshot();
         let char_count = text.chars().count();
         if char_count > LARGE_PASTE_CHAR_THRESHOLD {
-            let placeholder = large_paste_placeholder(char_count);
+            self.next_large_paste_id = self
+                .next_large_paste_id
+                .checked_add(1)
+                .expect("large paste identifier exhausted");
+            let placeholder = large_paste_placeholder(char_count, self.next_large_paste_id);
             self.editor.insert_str(&placeholder);
             self.pending_large_pastes.push(PendingLargePaste {
                 placeholder,
@@ -152,8 +131,6 @@ impl ComposerState {
     }
 
     pub fn insert_text(&mut self, text: &str) {
-        self.flush_pending_paste_force();
-        self.paste.reset();
         self.history.reset_navigation();
         self.history_search = None;
         let before = self.editor.snapshot();
@@ -161,35 +138,19 @@ impl ComposerState {
         self.record_edit(before, UndoKind::Other, None);
     }
 
-    pub fn flush_pending_paste(&mut self, now: Instant) -> bool {
-        if let Some(text) = self.paste.take_if_expired(now) {
-            let before = self.editor.snapshot();
-            self.editor.insert_str(&text);
-            self.record_edit(before, UndoKind::Other, None);
-            self.history.reset_navigation();
-            true
-        } else {
-            false
-        }
+    pub fn flush_pending_paste(&mut self, _now: Instant) -> bool {
+        false
     }
 
-    pub fn pending_paste_delay(&self, now: Instant) -> Option<Duration> {
-        self.paste.pending_delay(now)
+    pub fn pending_paste_delay(&self, _now: Instant) -> Option<Duration> {
+        None
     }
 
     pub fn flush_pending_paste_force(&mut self) -> bool {
-        if let Some(text) = self.paste.take_pending() {
-            let before = self.editor.snapshot();
-            self.editor.insert_str(&text);
-            self.record_edit(before, UndoKind::Other, None);
-            true
-        } else {
-            false
-        }
+        false
     }
 
     pub fn submit_text(&mut self) -> Option<String> {
-        self.flush_pending_paste_force();
         self.prune_pending_large_pastes();
         let prompt = self.expand_pending_large_pastes(self.editor.text().to_string());
         if prompt.trim().is_empty() {
@@ -200,7 +161,6 @@ impl ComposerState {
         self.undo.clear();
         self.history_search = None;
         self.pending_large_pastes.clear();
-        self.paste.reset();
         Some(prompt)
     }
 
@@ -275,9 +235,7 @@ impl ComposerState {
     }
 
     pub fn move_up_or_history(&mut self, select: bool) {
-        self.flush_pending_paste_force();
         if select || self.editor.can_move_up() {
-            self.paste.reset();
             self.history.reset_navigation();
             self.editor.move_up(select);
             return;
@@ -290,9 +248,7 @@ impl ComposerState {
     }
 
     pub fn move_down_or_history(&mut self, select: bool) {
-        self.flush_pending_paste_force();
         if select || self.editor.can_move_down() {
-            self.paste.reset();
             self.history.reset_navigation();
             self.editor.move_down(select);
             return;
@@ -323,8 +279,6 @@ impl ComposerState {
     }
 
     pub fn replace_current_token(&mut self, marker: char, replacement: &str) {
-        self.flush_pending_paste_force();
-        self.paste.reset();
         self.history.reset_navigation();
         self.history_search = None;
         let before = self.editor.snapshot();
@@ -353,14 +307,8 @@ impl ComposerState {
     }
 
     pub fn kill_to_line_start(&mut self) {
-        self.cancel_edit_tracking();
-        self.history.reset_navigation();
-        self.history_search = None;
-        let before = self.editor.snapshot();
-        if let Some(killed) = self.editor.kill_to_line_start() {
-            self.kill_buffer = killed;
-            self.record_edit(before, UndoKind::Other, None);
-        }
+        self.clear();
+        self.kill_buffer.clear();
     }
 
     pub fn yank(&mut self) {
@@ -390,8 +338,6 @@ impl ComposerState {
     }
 
     pub fn start_or_cycle_history_search(&mut self) {
-        self.flush_pending_paste_force();
-        self.paste.reset();
         self.history.reset_navigation();
         if let Some(search) = self.history_search.as_mut() {
             search.cycle();
@@ -466,33 +412,7 @@ impl ComposerState {
             .view(width.max(1) as usize, max_rows.max(1) as usize)
     }
 
-    fn apply_paste_action(&mut self, action: PasteAction) -> bool {
-        match action {
-            PasteAction::InsertAndTrack { ch, reset_start } => {
-                let start = self.editor.cursor();
-                self.editor.insert_char(ch);
-                if reset_start {
-                    self.paste.set_candidate_range(start, self.editor.cursor());
-                } else {
-                    self.paste.set_candidate_end(self.editor.cursor());
-                }
-                true
-            }
-            PasteAction::Insert(text) => {
-                self.editor.insert_str(&text);
-                true
-            }
-            PasteAction::RemoveAndHold { start, end } => {
-                self.editor.remove_range(start..end);
-                true
-            }
-            PasteAction::Hold | PasteAction::None => false,
-        }
-    }
-
     fn cancel_edit_tracking(&mut self) {
-        self.flush_pending_paste_force();
-        self.paste.reset();
         self.undo.finish_coalescing();
     }
 
@@ -533,8 +453,15 @@ impl ComposerState {
     }
 }
 
-fn large_paste_placeholder(char_count: usize) -> String {
-    format!("[Pasted {char_count} chars]")
+fn large_paste_placeholder(char_count: usize, id: u64) -> String {
+    let identifier = (0..16)
+        .rev()
+        .map(|shift| {
+            char::from_u32(0xfe00 + ((id >> (shift * 4)) & 0x0f) as u32)
+                .expect("variation selector")
+        })
+        .collect::<String>();
+    format!("[Pasted {char_count} chars]{identifier}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -874,20 +801,6 @@ impl TextEditor {
         self.remove_kill_range(self.cursor..end)
     }
 
-    fn kill_to_line_start(&mut self) -> Option<String> {
-        if let Some(range) = self.selection_range() {
-            return self.remove_kill_range(range);
-        }
-        let start = self.text[..self.cursor]
-            .rfind('\n')
-            .map(|idx| idx + 1)
-            .unwrap_or(0);
-        if start == self.cursor {
-            return None;
-        }
-        self.remove_kill_range(start..self.cursor)
-    }
-
     fn remove_kill_range(&mut self, range: Range<usize>) -> Option<String> {
         let start = clamp_boundary(&self.text, range.start);
         let end = clamp_boundary(&self.text, range.end);
@@ -1032,150 +945,6 @@ impl TextEditor {
 impl Default for TextEditor {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PasteBurst {
-    pending: Option<PendingPaste>,
-    candidate: Option<PasteCandidate>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingPaste {
-    text: String,
-    last_at: Instant,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PasteCandidate {
-    start: usize,
-    end: usize,
-    text: String,
-    last_at: Instant,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PasteAction {
-    None,
-    InsertAndTrack { ch: char, reset_start: bool },
-    Insert(String),
-    RemoveAndHold { start: usize, end: usize },
-    Hold,
-}
-
-impl PasteBurst {
-    fn new() -> Self {
-        Self {
-            pending: None,
-            candidate: None,
-        }
-    }
-
-    fn push_char(&mut self, ch: char, now: Instant) -> PasteAction {
-        if let Some(pending) = self.pending.as_mut() {
-            pending.text.push(ch);
-            pending.last_at = now;
-            return PasteAction::Hold;
-        }
-
-        if let Some(candidate) = self.candidate.as_mut() {
-            if now.duration_since(candidate.last_at) <= PASTE_BURST_WINDOW {
-                candidate.text.push(ch);
-                candidate.last_at = now;
-                return PasteAction::InsertAndTrack {
-                    ch,
-                    reset_start: false,
-                };
-            }
-        }
-
-        self.candidate = Some(PasteCandidate {
-            start: 0,
-            end: 0,
-            text: ch.to_string(),
-            last_at: now,
-        });
-        PasteAction::InsertAndTrack {
-            ch,
-            reset_start: true,
-        }
-    }
-
-    fn push_explicit_newline(&mut self, _now: Instant) -> PasteAction {
-        if self.pending.is_some() {
-            return self
-                .take_pending()
-                .map(|mut text| {
-                    text.push('\n');
-                    PasteAction::Insert(text)
-                })
-                .unwrap_or(PasteAction::None);
-        }
-        self.candidate = None;
-        PasteAction::Insert("\n".to_string())
-    }
-
-    fn push_enter(&mut self, now: Instant) -> PasteAction {
-        if let Some(pending) = self.pending.as_mut() {
-            pending.text.push('\n');
-            pending.last_at = now;
-            return PasteAction::Hold;
-        }
-        if let Some(candidate) = self.candidate.as_mut() {
-            if now.duration_since(candidate.last_at) <= PASTE_BURST_WINDOW
-                && candidate.text.chars().count() > 1
-            {
-                let mut candidate = self.candidate.take().expect("candidate checked");
-                candidate.text.push('\n');
-                self.pending = Some(PendingPaste {
-                    text: candidate.text,
-                    last_at: now,
-                });
-                return PasteAction::RemoveAndHold {
-                    start: candidate.start,
-                    end: candidate.end,
-                };
-            }
-        }
-        self.candidate = None;
-        PasteAction::None
-    }
-
-    fn set_candidate_range(&mut self, start: usize, end: usize) {
-        if let Some(candidate) = self.candidate.as_mut() {
-            candidate.start = start;
-            candidate.end = end;
-        }
-    }
-
-    fn set_candidate_end(&mut self, end: usize) {
-        if let Some(candidate) = self.candidate.as_mut() {
-            candidate.end = end;
-        }
-    }
-
-    fn take_if_expired(&mut self, now: Instant) -> Option<String> {
-        let pending = self.pending.as_ref()?;
-        if now.duration_since(pending.last_at) >= PASTE_BURST_WINDOW {
-            self.take_pending()
-        } else {
-            None
-        }
-    }
-
-    fn pending_delay(&self, now: Instant) -> Option<Duration> {
-        let pending = self.pending.as_ref()?;
-        Some(PASTE_BURST_WINDOW.saturating_sub(now.duration_since(pending.last_at)))
-    }
-
-    fn take_pending(&mut self) -> Option<String> {
-        self.pending.take().map(|pending| pending.text)
-    }
-
-    fn reset(&mut self) {
-        self.pending = None;
-        self.candidate = None;
     }
 }
 
@@ -1483,17 +1252,13 @@ mod tests {
     }
 
     #[test]
-    fn rapid_multiline_paste_buffers_without_submit() {
+    fn two_fast_characters_and_enter_submit_without_data_loss() {
         let mut composer = ComposerState::new(Vec::new());
         composer.insert_char('a', t(0));
         composer.insert_char('b', t(1));
-        assert_eq!(composer.enter(t(2)), EnterDecision::InsertedNewline);
-        composer.insert_char('c', t(3));
-        assert_eq!(composer.enter(t(4)), EnterDecision::InsertedNewline);
-        composer.insert_char('d', t(5));
-        assert_eq!(composer.text(), "");
-        assert!(composer.flush_pending_paste(t(80)));
-        assert_eq!(composer.text(), "ab\nc\nd");
+        assert_eq!(composer.enter(t(2)), EnterDecision::Submit);
+        assert_eq!(composer.submit_text().as_deref(), Some("ab"));
+        assert!(composer.is_empty());
     }
 
     #[test]
@@ -1512,14 +1277,73 @@ mod tests {
 
         assert_eq!(
             composer.pending_paste_placeholders(),
-            vec![format!("[Pasted {} chars]", LARGE_PASTE_CHAR_THRESHOLD + 7)]
+            vec![large_paste_placeholder(LARGE_PASTE_CHAR_THRESHOLD + 7, 1)]
         );
         assert_eq!(
             composer.text(),
-            format!("[Pasted {} chars]", LARGE_PASTE_CHAR_THRESHOLD + 7)
+            large_paste_placeholder(LARGE_PASTE_CHAR_THRESHOLD + 7, 1)
         );
         assert_eq!(composer.submit_text().as_deref(), Some(paste.as_str()));
         assert!(composer.pending_paste_placeholders().is_empty());
+    }
+
+    #[test]
+    fn same_length_large_pastes_expand_to_their_own_text() {
+        let mut composer = ComposerState::new(Vec::new());
+        let first = format!("first{}", "a".repeat(LARGE_PASTE_CHAR_THRESHOLD));
+        let second = format!("second{}", "b".repeat(LARGE_PASTE_CHAR_THRESHOLD - 1));
+        assert_eq!(first.chars().count(), second.chars().count());
+
+        composer.insert_paste(&first);
+        composer.move_home(false);
+        composer.insert_paste(&second);
+
+        assert_eq!(
+            composer.pending_paste_placeholders(),
+            vec![
+                large_paste_placeholder(first.chars().count(), 1),
+                large_paste_placeholder(second.chars().count(), 2),
+            ]
+        );
+        assert_eq!(
+            composer.submit_text().as_deref(),
+            Some(format!("{second}{first}").as_str())
+        );
+    }
+
+    #[test]
+    fn literal_paste_placeholder_text_is_not_substituted() {
+        let mut composer = ComposerState::new(Vec::new());
+        let paste = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 7);
+        let literal = "[Pasted 12 chars]";
+        let matching_literal = format!("[Pasted {} chars]", paste.chars().count());
+
+        composer.insert_text(literal);
+        composer.insert_text(&matching_literal);
+        composer.insert_paste(&paste);
+
+        assert_eq!(
+            composer.submit_text().as_deref(),
+            Some(format!("{literal}{matching_literal}{paste}").as_str())
+        );
+    }
+
+    #[test]
+    fn multiline_paste_round_trips_and_ctrl_u_clears_all_state() {
+        let mut composer = ComposerState::new(Vec::new());
+        let paste = "line one\nline two\nline three";
+
+        composer.insert_paste(paste);
+        assert_eq!(composer.submit_text().as_deref(), Some(paste));
+        composer.insert_paste(paste);
+        composer.kill_to_line_start();
+
+        assert!(composer.is_empty());
+        assert!(composer.pending_paste_placeholders().is_empty());
+        assert_eq!(composer.view(80, 8).lines, vec![String::new()]);
+        composer.yank();
+        assert!(composer.is_empty());
+        assert!(composer.submit_text().is_none());
     }
 
     #[test]
@@ -1600,23 +1424,11 @@ mod tests {
     }
 
     #[test]
-    fn kill_ring_cuts_and_yanks_line_segments() {
+    fn ctrl_u_clears_the_composer() {
         let mut composer = ComposerState::new(Vec::new());
         composer.insert_paste("alpha beta\ngamma");
         composer.kill_to_line_start();
-        assert_eq!(composer.text(), "alpha beta\n");
-        composer.yank();
-        assert_eq!(composer.text(), "alpha beta\ngamma");
-        composer.set_text("alpha beta\ngamma");
-        composer.move_word_backward(false);
-        composer.move_word_backward(false);
-        composer.move_home(false);
-        composer.kill_to_line_end();
-        assert_eq!(composer.text(), "\ngamma");
-        composer.yank();
-        assert_eq!(composer.text(), "alpha beta\ngamma");
-        composer.kill_to_line_end();
-        assert_eq!(composer.text(), "alpha betagamma");
+        assert!(composer.is_empty());
     }
 
     #[test]
@@ -1632,10 +1444,6 @@ mod tests {
         assert!(composer.redo());
         assert_eq!(composer.text(), "abc");
         composer.kill_to_line_start();
-        assert_eq!(composer.text(), "");
-        assert!(composer.undo());
-        assert_eq!(composer.text(), "abc");
-        assert!(composer.redo());
         assert_eq!(composer.text(), "");
     }
 

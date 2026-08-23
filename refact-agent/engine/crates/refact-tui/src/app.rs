@@ -11781,19 +11781,13 @@ new-chat = "ctrl-x"
     }
 
     #[test]
-    fn app_paste_burst_does_not_submit_on_embedded_enters() {
+    fn app_fast_typing_submits_on_enter() {
         let mut app = App::new(project());
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
         app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::empty()));
         let action = app.handle_key(key(KeyCode::Enter));
-        assert_eq!(action, AppAction::None);
-        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::empty()));
-        let action = app.handle_key(key(KeyCode::Enter));
-        assert_eq!(action, AppAction::None);
-        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty()));
-        app.composer
-            .flush_pending_paste(Instant::now() + Duration::from_millis(100));
-        assert_eq!(app.composer(), "ab\nc\nd");
+        assert!(matches!(action, AppAction::SendMessage { prompt, .. } if prompt == "ab"));
+        assert!(app.composer().is_empty());
     }
 
     #[test]
