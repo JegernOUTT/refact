@@ -9,6 +9,7 @@ use refact_tui::client::{
     discover_daemon_endpoint, discover_daemon_endpoint_from, resolve_daemon_endpoint, ChatEvent,
     ChatSeqDecision, ChatSeqTracker, DaemonClient, OpenProjectResponse, ToolDecision,
 };
+use refact_tui::protocol::{DeltaOp, TranscriptState};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use serde_json::{json, Value};
@@ -439,6 +440,45 @@ fn seq_gap_fixture_requests_resubscribe_without_applying_gap_delta() {
     let run = run_fixture("seq_gap.jsonl");
     assert!(run.recovery.unwrap().contains("expected 2, got 3"));
     assert!(!transcript_text(&run.app).contains("must not apply"));
+}
+
+#[test]
+fn interleaved_assistant_deltas_stay_with_their_message_ids() {
+    let mut transcript = TranscriptState::new();
+    transcript.start_assistant(Some("assistant-a"));
+
+    for (message_id, text) in [
+        ("assistant-a", "a1"),
+        ("assistant-b", "b1"),
+        ("assistant-a", "a2"),
+        ("assistant-b", "b2"),
+    ] {
+        transcript.apply_delta_ops(
+            Some(message_id),
+            &[DeltaOp::AppendContent {
+                text: text.to_string(),
+            }],
+        );
+    }
+
+    let messages = transcript.messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(
+        messages
+            .iter()
+            .find(|message| message.message_id.as_deref() == Some("assistant-a"))
+            .unwrap()
+            .content,
+        "a1a2"
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .find(|message| message.message_id.as_deref() == Some("assistant-b"))
+            .unwrap()
+            .content,
+        "b1b2"
+    );
 }
 
 #[test]

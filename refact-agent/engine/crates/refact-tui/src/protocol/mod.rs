@@ -669,11 +669,14 @@ impl TranscriptState {
                 if let Some(id) = normalized_id {
                     if self.messages[idx].message_id.is_none() {
                         self.messages[idx].message_id = Some(id.to_string());
+                        self.active_assistant_id = Some(id.to_string());
+                        self.messages[idx].stream_finished = false;
+                        return idx;
                     }
-                    self.active_assistant_id = Some(id.to_string());
+                } else {
+                    self.messages[idx].stream_finished = false;
+                    return idx;
                 }
-                self.messages[idx].stream_finished = false;
-                return idx;
             }
         }
         if let Some(id) = normalized_id.or(self.active_assistant_id.as_deref()) {
