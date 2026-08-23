@@ -747,9 +747,23 @@ pub fn content_text(message: &Value) -> Option<String> {
 
 fn sanitize_content_for_wire_role(role: Option<&str>, content: String) -> String {
     match role {
+        Some("user") => sanitize_inbound_user_text(content),
         Some("assistant" | "tool") => sanitize_tool_text(content),
         _ => content,
     }
+}
+
+fn sanitize_inbound_user_text(content: String) -> String {
+    let mut sanitized = String::with_capacity(content.len());
+    for part in content.split_inclusive('\t') {
+        if let Some(text) = part.strip_suffix('\t') {
+            sanitized.push_str(&sanitize_tool_text(text));
+            sanitized.push('\t');
+        } else {
+            sanitized.push_str(&sanitize_tool_text(part));
+        }
+    }
+    sanitized
 }
 
 fn sanitize_model_text_for_role(role: &TranscriptRole, content: String) -> String {
@@ -1100,18 +1114,49 @@ mod tests {
     }
 
     #[test]
-    fn user_snapshot_text_is_not_sanitized() {
+    fn inbound_user_text_is_sanitized_and_preserves_ordinary_content() {
         let injected = injected_model_text();
         let raw_user = json!({
             "role": "user",
             "content": injected,
-            "reasoning_content": injected,
         });
 
         let message = TranscriptMessage::from_wire(&raw_user);
 
-        assert_eq!(message.content, injected);
-        assert_eq!(message.reasoning, injected);
+        assert_escape_inert(&message.content);
+        assert_model_text_survives(&message.content);
+
+        let ordinary = "Hello, café 👋\n\tkeep this tab";
+        let ordinary_user = json!({"role": "user", "content": ordinary});
+        assert_eq!(
+            TranscriptMessage::from_wire(&ordinary_user).content,
+            ordinary
+        );
+    }
+
+    #[test]
+    fn locally_typed_user_text_is_not_sanitized() {
+        let injected = injected_model_text();
+        let mut state = TranscriptState::new();
+
+        state.push_user_message(injected);
+
+        assert_eq!(state.messages()[0].content, injected);
+    }
+
+    #[test]
+    fn sanitized_inbound_user_replay_deduplicates_by_message_id() {
+        let mut state = TranscriptState::new();
+        let message = json!({
+            "message_id": "u1",
+            "role": "user",
+            "content": "hello\x1b]0;pwned\x07\x1b[2J world",
+        });
+
+        assert!(state.add_message(&message));
+        assert!(!state.add_message(&message));
+        assert_eq!(state.messages().len(), 1);
+        assert_eq!(state.messages()[0].content, "hello world");
     }
 
     #[test]

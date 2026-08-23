@@ -11127,7 +11127,7 @@ new-chat = "ctrl-x"
     }
 
     #[test]
-    fn user_message_escape_text_stays_raw_in_transcript_state() {
+    fn inbound_user_message_escape_text_stays_inert_in_rendered_cells() {
         let mut app = App::new(project());
         let injected = injected_model_text();
         app.handle_chat_event(ChatEvent {
@@ -11143,7 +11143,13 @@ new-chat = "ctrl-x"
             .iter()
             .find(|message| message.role == TranscriptRole::User)
             .unwrap();
-        assert_eq!(user.content, injected);
+        assert_escape_inert(&user.content);
+        assert_model_text_survives(&user.content);
+        for item in app.visible_transcript() {
+            if matches!(item, TranscriptItem::User(_)) {
+                assert_rendered_item_escape_inert(item);
+            }
+        }
     }
 
     #[test]
