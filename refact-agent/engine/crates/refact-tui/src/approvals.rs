@@ -271,15 +271,11 @@ impl ApprovalModalState {
     }
 
     pub fn scroll_details_up(&mut self, amount: usize) {
-        if self.details_open {
-            self.detail_scroll = self.detail_scroll.saturating_sub(amount);
-        }
+        self.detail_scroll = self.detail_scroll.saturating_sub(amount);
     }
 
     pub fn scroll_details_down(&mut self, amount: usize) {
-        if self.details_open {
-            self.detail_scroll = self.detail_scroll.saturating_add(amount);
-        }
+        self.detail_scroll = self.detail_scroll.saturating_add(amount);
     }
 
     fn set_pending_after(&mut self, pending_after: usize) {
@@ -377,6 +373,7 @@ pub fn render_modal_lines(state: &ApprovalModalState, width: usize) -> Vec<Line<
             Span::styled(format!(" · {}", state.queue_label()), muted_style()),
         ]),
         approval_help_line(state.details_open()),
+        render_modal_subject_line(state, width),
     ];
     if state.details_open() {
         render_detail_lines(state, width, &mut lines);
@@ -384,6 +381,14 @@ pub fn render_modal_lines(state: &ApprovalModalState, width: usize) -> Vec<Line<
         render_summary_lines(state, width, &mut lines);
     }
     lines
+}
+
+pub fn render_modal_subject_line(state: &ApprovalModalState, width: usize) -> Line<'static> {
+    state
+        .reasons()
+        .first()
+        .map(|reason| summary_reason_line(state, 0, reason, width))
+        .unwrap_or_else(|| Line::from(Span::styled("No approval subject", muted_style())))
 }
 
 fn approval_help_line(details_open: bool) -> Line<'static> {
@@ -437,44 +442,9 @@ fn render_summary_lines(state: &ApprovalModalState, width: usize, lines: &mut Ve
         )));
     }
     for (idx, reason) in state.reasons().iter().enumerate() {
-        let current = idx == 0;
-        let command = reason
-            .command
-            .is_empty()
-            .then(|| args_preview(reason.args.as_deref()))
-            .flatten()
-            .unwrap_or_else(|| preview_command(&reason.command, width.saturating_sub(12).min(140)));
-        let prefix = if state.reasons().len() > 1 {
-            format!(
-                "{} {}/{} ",
-                cursor_marker(current),
-                idx + 1,
-                state.reasons().len()
-            )
-        } else {
-            format!("{} ", cursor_marker(current))
-        };
-        let prefix_style = if current {
-            accent_style()
-        } else {
-            muted_style()
-        };
-        let tool_style = if current {
-            accent_style()
-        } else {
-            Style::default().add_modifier(Modifier::BOLD)
-        };
-        let command_style = if current {
-            accent_style()
-        } else {
-            Style::default().fg(Color::White)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(prefix, prefix_style),
-            Span::styled(reason.tool_name.clone(), tool_style),
-            Span::styled("  ", Style::default()),
-            Span::styled(command, command_style),
-        ]));
+        if idx > 0 {
+            lines.push(summary_reason_line(state, idx, reason, width));
+        }
         if !reason.rule.is_empty() {
             lines.push(Line::from(Span::styled(
                 format!("  rule: {}", reason.rule),
@@ -482,6 +452,52 @@ fn render_summary_lines(state: &ApprovalModalState, width: usize, lines: &mut Ve
             )));
         }
     }
+}
+
+fn summary_reason_line(
+    state: &ApprovalModalState,
+    idx: usize,
+    reason: &PauseReason,
+    width: usize,
+) -> Line<'static> {
+    let current = idx == 0;
+    let command = reason
+        .command
+        .is_empty()
+        .then(|| args_preview(reason.args.as_deref()))
+        .flatten()
+        .unwrap_or_else(|| preview_command(&reason.command, width.saturating_sub(12).min(140)));
+    let prefix = if state.reasons().len() > 1 {
+        format!(
+            "{} {}/{} ",
+            cursor_marker(current),
+            idx + 1,
+            state.reasons().len()
+        )
+    } else {
+        format!("{} ", cursor_marker(current))
+    };
+    let prefix_style = if current {
+        accent_style()
+    } else {
+        muted_style()
+    };
+    let tool_style = if current {
+        accent_style()
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    };
+    let command_style = if current {
+        accent_style()
+    } else {
+        Style::default().fg(Color::White)
+    };
+    Line::from(vec![
+        Span::styled(prefix, prefix_style),
+        Span::styled(reason.tool_name.clone(), tool_style),
+        Span::styled("  ", Style::default()),
+        Span::styled(command, command_style),
+    ])
 }
 
 fn cursor_marker(current: bool) -> &'static str {
@@ -619,6 +635,10 @@ mod tests {
     fn detail_toggle_back_and_scroll_state_machine() {
         let mut modal = ApprovalModalState::new(vec![reason("call-1")]);
         assert!(!modal.details_open());
+        assert_eq!(modal.detail_scroll(), 0);
+        modal.scroll_details_down(1);
+        assert_eq!(modal.detail_scroll(), 1);
+        modal.scroll_details_up(1);
         assert_eq!(modal.detail_scroll(), 0);
         modal.toggle_details();
         assert!(modal.details_open());
