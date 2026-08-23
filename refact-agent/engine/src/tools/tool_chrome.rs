@@ -895,7 +895,20 @@ fn browser_step_schema_with_actions(
         serde_json::json!({"type": "string", "enum": ["local", "session"]}),
     );
     properties.insert("origin".to_string(), serde_json::json!({"type": "string"}));
-    properties.insert("items".to_string(), serde_json::json!({"type": "array", "items": {"type": "object", "required": ["name", "value"]}}));
+    properties.insert(
+        "items".to_string(),
+        serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["name", "value"],
+                "properties": {
+                    "name": {},
+                    "value": {}
+                }
+            }
+        }),
+    );
     properties.insert(
         "permissions".to_string(),
         serde_json::json!({"type": "array", "items": {"type": "string"}}),
@@ -1586,6 +1599,26 @@ mod tests {
                 "missing comparator {comparator}"
             );
         }
+    }
+
+    #[test]
+    fn chrome_schema_defines_storage_state_item_required_fields() {
+        let schema = chrome_input_schema();
+        let item_schema = schema
+            .pointer("/properties/request/properties/steps/items/properties/items/items")
+            .and_then(Value::as_object)
+            .unwrap();
+
+        assert_eq!(
+            item_schema.get("required"),
+            Some(&serde_json::json!(["name", "value"]))
+        );
+        let properties = item_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .unwrap();
+        assert!(properties.contains_key("name"));
+        assert!(properties.contains_key("value"));
     }
 
     #[test]
