@@ -3273,6 +3273,8 @@ mod tests {
 
     #[test]
     fn no_delta_abort_clears_stream_timestamp() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, _) = install_perf_recorder();
         let mut session = make_session();
         session.start_stream();
         assert!(session.stream_started_at.is_some());
@@ -5599,11 +5601,12 @@ mod tests {
         let mut session = make_session();
         let pool = refact_runtime_api::TurnToolPool::new(());
         session.turn_tool_pool = Some(pool.clone());
+        session.start_stream();
 
         session.set_runtime_state(SessionState::ExecutingTools, None);
         assert!(session.turn_tool_pool.is_some());
 
-        session.set_runtime_state(SessionState::Idle, None);
+        session.finish_stream(None);
         assert!(session.turn_tool_pool.is_none());
 
         session.turn_tool_pool = Some(pool);

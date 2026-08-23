@@ -1940,6 +1940,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn fixed_fixture_repeats_structural_counters_without_requiring_identical_wall_clock() {
         let first = run_ci_fixture().expect("first fixture run succeeds");
         let second = run_ci_fixture().expect("second fixture run succeeds");
@@ -1949,7 +1950,36 @@ mod tests {
         assert_eq!(second.variants.len(), 2);
         assert_eq!(first.workload, second.workload);
         assert_eq!(first_variant.counters, second_variant.counters);
-        assert_eq!(first_variant.diagnostics, second_variant.diagnostics);
+        assert_eq!(
+            first_variant.diagnostics.trajectory_snapshot,
+            second_variant.diagnostics.trajectory_snapshot
+        );
+        assert_eq!(
+            first_variant.diagnostics.trajectory_serialize,
+            second_variant.diagnostics.trajectory_serialize
+        );
+        assert_eq!(
+            first_variant.diagnostics.trajectory_atomic_write,
+            second_variant.diagnostics.trajectory_atomic_write
+        );
+        assert_eq!(
+            first_variant.diagnostics.trajectory_commit,
+            second_variant.diagnostics.trajectory_commit
+        );
+        assert_eq!(
+            first_variant.diagnostics.trajectory_index_rebuild,
+            second_variant.diagnostics.trajectory_index_rebuild
+        );
+        assert_eq!(
+            first_variant.diagnostics.tool_catalog_build,
+            second_variant.diagnostics.tool_catalog_build
+        );
+        assert!(first_variant.diagnostics.trajectory_index_lock_wait > 0);
+        assert!(first_variant.diagnostics.trajectory_index_read > 0);
+        assert!(first_variant.diagnostics.trajectory_index_write > 0);
+        assert!(second_variant.diagnostics.trajectory_index_lock_wait > 0);
+        assert!(second_variant.diagnostics.trajectory_index_read > 0);
+        assert!(second_variant.diagnostics.trajectory_index_write > 0);
         assert_ne!(first_variant.total_operation_latency.sample_count, 0);
         assert_ne!(second_variant.total_operation_latency.sample_count, 0);
     }
@@ -1962,6 +1992,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn ci_fixture_measures_real_saves_and_diagnostics() {
         let report = run_ci_fixture().expect("CI fixture should run");
         assert_eq!(report.variants.len(), 2);
@@ -1976,6 +2007,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn repeated_real_saves_scale_observed_save_and_diagnostic_counts() {
         let mut workload = ConcurrentChatWorkload::ci_fixture();
         workload.rapid_same_chat_checkpoints = 7;
@@ -1999,6 +2031,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn extra_real_operation_changes_measured_counters() {
         let report = run_ci_fixture().expect("CI fixture should run");
         let variant = &report.variants[0];
@@ -2008,6 +2041,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn report_compares_legacy_and_coalesced_writer_variants() {
         let tool_pool_workload = run_tool_pool_ci_fixture().expect("tool pool fixture should run");
         let report = ConcurrentChatBenchmarkReport {
