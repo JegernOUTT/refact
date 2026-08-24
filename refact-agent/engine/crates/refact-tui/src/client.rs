@@ -17,6 +17,7 @@ use crate::sessions::{PaginatedTrajectories, TrajectoryMeta};
 const DEFAULT_DAEMON_PORT: u16 = 8488;
 const PLAIN_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const PLAIN_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const OPEN_PROJECT_READINESS_TIMEOUT: Duration = Duration::from_secs(125);
 const SSE_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(not(test))]
 const SSE_HEADER_TIMEOUT: Duration = Duration::from_secs(15);
@@ -33,8 +34,27 @@ const OPEN_PROJECT_STARTING_INITIAL_BACKOFF: Duration = Duration::from_millis(25
 #[cfg(test)]
 const OPEN_PROJECT_STARTING_INITIAL_BACKOFF: Duration = Duration::from_millis(1);
 const OPEN_PROJECT_STARTING_MAX_BACKOFF: Duration = Duration::from_secs(2);
-const OPEN_PROJECT_STARTING_MAX_ATTEMPTS: u32 = 8;
+const OPEN_PROJECT_STARTING_MAX_ATTEMPTS: u32 = 65;
 const TRAJECTORIES_PAGE_SIZE: usize = 200;
+
+#[derive(Debug, Clone, Copy)]
+struct OpenProjectRetryPolicy {
+    deadline: Duration,
+    initial_backoff: Duration,
+    max_backoff: Duration,
+    max_attempts: u32,
+}
+
+impl OpenProjectRetryPolicy {
+    fn production() -> Self {
+        Self {
+            deadline: OPEN_PROJECT_READINESS_TIMEOUT,
+            initial_backoff: OPEN_PROJECT_STARTING_INITIAL_BACKOFF,
+            max_backoff: OPEN_PROJECT_STARTING_MAX_BACKOFF,
+            max_attempts: OPEN_PROJECT_STARTING_MAX_ATTEMPTS,
+        }
+    }
+}
 
 fn deserialize_default_on_null<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
@@ -125,6 +145,7 @@ pub struct DaemonClient {
     base_url: String,
     auth_token: Option<String>,
     client: reqwest::Client,
+    readiness_client: reqwest::Client,
     sse_client: reqwest::Client,
 }
 
@@ -739,11 +760,13 @@ impl DaemonClient {
         let base_url = trim_base_url(base_url.into());
         let bypass_proxy = should_bypass_proxy_for_base_url(&base_url);
         let client = build_plain_http_client(bypass_proxy)?;
+        let readiness_client = build_readiness_http_client(bypass_proxy)?;
         let sse_client = build_sse_http_client(bypass_proxy)?;
         Ok(Self {
             base_url,
             auth_token,
             client,
+            readiness_client,
             sse_client,
         })
     }
@@ -761,28 +784,66 @@ impl DaemonClient {
     }
 
     pub async fn list_projects(&self) -> Result<Vec<ProjectEntry>, ClientError> {
-        self.get_json("/daemon/v1/projects").await
+        let projects: Vec<ProjectEntry> = self.get_json("/daemon/v1/projects").await?;
+        Ok(projects
+            .into_iter()
+            .filter(|project| project_has_root(project))
+            .collect())
     }
 
     pub async fn open_project(&self, root: &Path) -> Result<OpenProjectResponse, ClientError> {
-        let mut retries = 0;
-        loop {
-            let response = self
-                .with_auth(self.client.post(self.url("/daemon/v1/projects/open")))
-                .json(&json!({"root": root.to_string_lossy()}))
-                .send()
-                .await
-                .map_err(|error| ClientError::Http(format!("failed to open project: {error}")))?;
-            let project: OpenProjectResponse = decode_response(response).await?;
-            if open_project_worker_is_starting(&project)
-                && retries < OPEN_PROJECT_STARTING_MAX_ATTEMPTS
-            {
-                tokio::time::sleep(open_project_starting_backoff(retries)).await;
-                retries += 1;
-                continue;
+        self.open_project_with_retry_policy(root, OpenProjectRetryPolicy::production())
+            .await
+    }
+
+    async fn open_project_with_retry_policy(
+        &self,
+        root: &Path,
+        policy: OpenProjectRetryPolicy,
+    ) -> Result<OpenProjectResponse, ClientError> {
+        let deadline = tokio::time::Instant::now() + policy.deadline;
+        let mut last_starting = None;
+
+        for attempt in 0..policy.max_attempts {
+            let project = tokio::time::timeout_at(deadline, async {
+                let response = self
+                    .with_auth(
+                        self.readiness_client
+                            .post(self.url("/daemon/v1/projects/open")),
+                    )
+                    .json(&json!({"root": root.to_string_lossy()}))
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        ClientError::Http(format!("failed to open project: {error}"))
+                    })?;
+                decode_response(response).await
+            })
+            .await
+            .map_err(|_| ClientError::WorkerNotReady("worker readiness timed out".to_string()))??;
+
+            validate_open_project_root(&project)?;
+            if !open_project_worker_is_starting(&project) {
+                validate_open_project_response(&project)?;
+                return Ok(project);
             }
-            validate_open_project_response(&project)?;
-            return Ok(project);
+
+            last_starting = Some(project);
+            if attempt + 1 == policy.max_attempts {
+                break;
+            }
+            let backoff = open_project_starting_backoff(policy, attempt);
+            if tokio::time::Instant::now() + backoff >= deadline {
+                break;
+            }
+            tokio::time::sleep(backoff).await;
+        }
+
+        match last_starting {
+            Some(project) => validate_open_project_response(&project).map(|()| project),
+            None => Err(ClientError::WorkerNotReady(
+                "worker readiness attempt limit is zero".to_string(),
+            )),
         }
     }
 
@@ -1845,6 +1906,7 @@ async fn decode_response<T: for<'de> Deserialize<'de>>(
 }
 
 fn validate_open_project_response(project: &OpenProjectResponse) -> Result<(), ClientError> {
+    validate_open_project_root(project)?;
     let Some(worker) = project.worker.as_ref() else {
         return Err(ClientError::WorkerNotReady(format!(
             "project {} opened without worker details",
@@ -1875,14 +1937,29 @@ fn validate_open_project_response(project: &OpenProjectResponse) -> Result<(), C
     Ok(())
 }
 
+fn validate_open_project_root(project: &OpenProjectResponse) -> Result<(), ClientError> {
+    if project.root.as_os_str().is_empty() {
+        return Err(ClientError::Json(format!(
+            "project {} opened with an empty root",
+            project.project_id
+        )));
+    }
+    Ok(())
+}
+
+fn project_has_root(project: &ProjectEntry) -> bool {
+    !project.root.as_os_str().is_empty()
+}
+
 fn open_project_worker_is_starting(project: &OpenProjectResponse) -> bool {
     worker_state_label(project.worker.as_ref()).eq_ignore_ascii_case("starting")
 }
 
-fn open_project_starting_backoff(retry: u32) -> Duration {
-    OPEN_PROJECT_STARTING_INITIAL_BACKOFF
+fn open_project_starting_backoff(policy: OpenProjectRetryPolicy, retry: u32) -> Duration {
+    policy
+        .initial_backoff
         .saturating_mul(1u32 << retry.min(8))
-        .min(OPEN_PROJECT_STARTING_MAX_BACKOFF)
+        .min(policy.max_backoff)
 }
 
 async fn status_error(response: reqwest::Response) -> ClientError {
@@ -2000,6 +2077,18 @@ fn build_plain_http_client(bypass_proxy: bool) -> Result<reqwest::Client, Client
     apply_proxy_bypass(builder, bypass_proxy)
         .build()
         .map_err(|error| ClientError::Http(format!("failed to build HTTP client: {error}")))
+}
+
+fn build_readiness_http_client(bypass_proxy: bool) -> Result<reqwest::Client, ClientError> {
+    let builder = reqwest::Client::builder()
+        .connect_timeout(PLAIN_HTTP_CONNECT_TIMEOUT)
+        .timeout(OPEN_PROJECT_READINESS_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none());
+    apply_proxy_bypass(builder, bypass_proxy)
+        .build()
+        .map_err(|error| {
+            ClientError::Http(format!("failed to build readiness HTTP client: {error}"))
+        })
 }
 
 fn build_sse_http_client(bypass_proxy: bool) -> Result<reqwest::Client, ClientError> {
@@ -3115,6 +3204,100 @@ mod tests {
             project.worker.unwrap().state,
             Value::String("ready".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn open_project_accepts_ready_worker_near_retry_deadline() {
+        let server = spawn_json_response_server(vec![
+            open_project_response("starting", None, None),
+            open_project_response("starting", None, None),
+            open_project_response("starting", None, None),
+            open_project_response("ready", Some(31000), Some(31001)),
+        ]);
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+        let started = Instant::now();
+
+        let project = client
+            .open_project_with_retry_policy(
+                Path::new("/tmp/fixture"),
+                OpenProjectRetryPolicy {
+                    deadline: Duration::from_millis(400),
+                    initial_backoff: Duration::from_millis(100),
+                    max_backoff: Duration::from_millis(100),
+                    max_attempts: 8,
+                },
+            )
+            .await
+            .unwrap();
+        server.stop();
+
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert_eq!(worker_state_label(project.worker.as_ref()), "ready");
+    }
+
+    #[tokio::test]
+    async fn open_project_stops_after_exact_maximum_starting_attempts() {
+        let (server, requests) = spawn_json_response_server_with_requests(
+            (0..8)
+                .map(|_| open_project_response("starting", None, None))
+                .collect(),
+        );
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+
+        let error = client
+            .open_project_with_retry_policy(
+                Path::new("/tmp/fixture"),
+                OpenProjectRetryPolicy {
+                    deadline: Duration::from_millis(100),
+                    initial_backoff: Duration::from_millis(1),
+                    max_backoff: Duration::from_millis(1),
+                    max_attempts: 8,
+                },
+            )
+            .await
+            .unwrap_err();
+        server.stop();
+
+        assert!(
+            matches!(error, ClientError::WorkerNotReady(message) if message.contains("starting"))
+        );
+        assert_eq!(
+            (0..8)
+                .map(|_| requests.recv().unwrap())
+                .collect::<Vec<_>>()
+                .len(),
+            8
+        );
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn list_projects_drops_rows_without_roots() {
+        let server = spawn_json_response_server(vec![json!([
+            {"id": "missing", "slug": "missing"},
+            {"id": "empty", "slug": "empty", "root": ""},
+            {"id": "valid", "slug": "valid", "root": "/tmp/valid"}
+        ])]);
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+
+        let projects = client.list_projects().await.unwrap();
+        server.stop();
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, "valid");
+    }
+
+    #[test]
+    fn open_project_rejects_empty_root() {
+        let mut project: OpenProjectResponse =
+            serde_json::from_value(open_project_response("ready", Some(31000), Some(31001)))
+                .unwrap();
+        project.root = PathBuf::new();
+
+        assert!(matches!(
+            validate_open_project_response(&project),
+            Err(ClientError::Json(message)) if message.contains("empty root")
+        ));
     }
 
     #[tokio::test]
