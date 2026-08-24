@@ -313,8 +313,14 @@ impl ComposerState {
     }
 
     pub fn kill_to_line_start(&mut self) {
-        self.clear();
-        self.kill_buffer.clear();
+        self.cancel_edit_tracking();
+        self.history.reset_navigation();
+        self.history_search = None;
+        let before = self.editor.snapshot();
+        if let Some(killed) = self.editor.kill_to_line_start() {
+            self.kill_buffer = killed;
+            self.record_edit(before, UndoKind::Other, None);
+        }
     }
 
     pub fn yank(&mut self) {
@@ -805,6 +811,20 @@ impl TextEditor {
             return None;
         }
         self.remove_kill_range(self.cursor..end)
+    }
+
+    fn kill_to_line_start(&mut self) -> Option<String> {
+        if let Some(range) = self.selection_range() {
+            return self.remove_kill_range(range);
+        }
+        let start = self.text[..self.cursor]
+            .rfind('\n')
+            .map(|idx| idx + 1)
+            .unwrap_or(0);
+        if start == self.cursor {
+            return None;
+        }
+        self.remove_kill_range(start..self.cursor)
     }
 
     fn remove_kill_range(&mut self, range: Range<usize>) -> Option<String> {
@@ -1331,21 +1351,17 @@ mod tests {
     }
 
     #[test]
-    fn multiline_paste_round_trips_and_ctrl_u_clears_all_state() {
+    fn clear_removes_pending_large_paste_metadata() {
         let mut composer = ComposerState::new(Vec::new());
-        let paste = "line one\nline two\nline three";
+        let paste = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 1);
 
-        composer.insert_paste(paste);
-        assert_eq!(composer.submit_text().as_deref(), Some(paste));
-        composer.insert_paste(paste);
-        composer.kill_to_line_start();
+        composer.insert_paste(&paste);
+        assert!(!composer.pending_paste_placeholders().is_empty());
+        composer.clear();
 
         assert!(composer.is_empty());
         assert!(composer.pending_paste_placeholders().is_empty());
         assert_eq!(composer.view(80, 8).lines, vec![String::new()]);
-        composer.yank();
-        assert!(composer.is_empty());
-        assert!(composer.submit_text().is_none());
     }
 
     #[test]
@@ -1426,11 +1442,108 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_u_clears_the_composer() {
+    fn ctrl_u_kills_to_current_line_start_and_yanks() {
         let mut composer = ComposerState::new(Vec::new());
-        composer.insert_paste("alpha beta\ngamma");
+        composer.set_text("alpha beta\ngamma");
+        composer.kill_to_line_start();
+        assert_eq!(composer.text(), "alpha beta\n");
+        composer.yank();
+        assert_eq!(composer.text(), "alpha beta\ngamma");
+    }
+
+    #[test]
+    fn ctrl_u_kills_first_line_from_middle_or_end() {
+        let mut middle = ComposerState::new(Vec::new());
+        middle.set_text("alpha beta\ngamma");
+        middle.move_home(false);
+        middle.move_up_or_history(false);
+        for _ in 0..5 {
+            middle.move_right(false);
+        }
+        middle.kill_to_line_start();
+        assert_eq!(middle.text(), " beta\ngamma");
+
+        let mut end = ComposerState::new(Vec::new());
+        end.set_text("alpha beta");
+        end.kill_to_line_start();
+        assert!(end.is_empty());
+
+        let mut later_middle = ComposerState::new(Vec::new());
+        later_middle.set_text("alpha\nbeta gamma");
+        later_middle.move_home(false);
+        for _ in 0..3 {
+            later_middle.move_right(false);
+        }
+        later_middle.kill_to_line_start();
+        assert_eq!(later_middle.text(), "alpha\na gamma");
+    }
+
+    #[test]
+    fn ctrl_u_kills_selection_and_whole_graphemes() {
+        let mut selected = ComposerState::new(Vec::new());
+        selected.set_text("first\nsecond");
+        for _ in 0..3 {
+            selected.move_left(true);
+        }
+        selected.kill_to_line_start();
+        assert_eq!(selected.text(), "first\nsec");
+        selected.yank();
+        assert_eq!(selected.text(), "first\nsecond");
+
+        let family = "👨‍👩‍👧‍👦";
+        let mut unicode = ComposerState::new(Vec::new());
+        unicode.set_text(format!("a{family}b"));
+        unicode.move_left(false);
+        unicode.kill_to_line_start();
+        assert_eq!(unicode.text(), "b");
+        unicode.yank();
+        assert_eq!(unicode.text(), format!("a{family}b"));
+    }
+
+    #[test]
+    fn ctrl_u_at_line_start_or_empty_line_keeps_prior_kill_buffer() {
+        let mut composer = ComposerState::new(Vec::new());
+        composer.set_text("alpha");
         composer.kill_to_line_start();
         assert!(composer.is_empty());
+
+        composer.kill_to_line_start();
+        composer.yank();
+        assert_eq!(composer.text(), "alpha");
+
+        composer.set_text("first\nsecond");
+        composer.move_home(false);
+        composer.kill_to_line_start();
+        assert_eq!(composer.text(), "first\nsecond");
+        composer.yank();
+        assert_eq!(composer.text(), "first\nalphasecond");
+
+        composer.set_text("first\nsecond");
+        composer.move_home(false);
+        composer.move_up_or_history(false);
+        composer.kill_to_line_start();
+        assert_eq!(composer.text(), "first\nsecond");
+        composer.yank();
+        assert_eq!(composer.text(), "alphafirst\nsecond");
+
+        composer.set_text("first\n\nthird");
+        composer.move_up_or_history(false);
+        composer.kill_to_line_start();
+        assert_eq!(composer.text(), "first\n\nthird");
+        composer.yank();
+        assert_eq!(composer.text(), "first\nalpha\nthird");
+    }
+
+    #[test]
+    fn ctrl_u_undo_and_redo_restore_the_editor() {
+        let mut composer = ComposerState::new(Vec::new());
+        composer.set_text("alpha beta\ngamma");
+        composer.kill_to_line_start();
+        assert_eq!(composer.text(), "alpha beta\n");
+        assert!(composer.undo());
+        assert_eq!(composer.text(), "alpha beta\ngamma");
+        assert!(composer.redo());
+        assert_eq!(composer.text(), "alpha beta\n");
     }
 
     #[test]

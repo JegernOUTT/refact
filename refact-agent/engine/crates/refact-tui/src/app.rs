@@ -5318,20 +5318,18 @@ new-chat = "ctrl-x"
     #[test]
     fn app_kill_yank_undo_redo_bindings_edit_composer() {
         let mut app = App::new(project());
-        app.composer.set_text("alpha beta");
-        app.composer.move_word_backward(false);
-        app.composer.move_word_backward(false);
-        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT));
-        assert_eq!(app.composer(), "");
+        app.composer.set_text("alpha beta\ngamma");
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(app.composer(), "alpha beta\n");
         app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
-        assert_eq!(app.composer(), "alpha beta");
+        assert_eq!(app.composer(), "alpha beta\ngamma");
         app.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
-        assert_eq!(app.composer(), "");
+        assert_eq!(app.composer(), "alpha beta\n");
         app.handle_key(KeyEvent::new(
             KeyCode::Char('z'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         ));
-        assert_eq!(app.composer(), "alpha beta");
+        assert_eq!(app.composer(), "alpha beta\ngamma");
     }
 
     #[test]
