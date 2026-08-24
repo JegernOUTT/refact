@@ -57,9 +57,7 @@ function quota(
 
 function renderOverview(quotas: ProviderQuotaSnapshot[]) {
   server.use(
-    http.get("*/v1/stats/llm/summary", () =>
-      HttpResponse.json(emptySummary),
-    ),
+    http.get("*/v1/stats/llm/summary", () => HttpResponse.json(emptySummary)),
     http.get("*/v1/providers/quotas", () => HttpResponse.json({ quotas })),
   );
 
