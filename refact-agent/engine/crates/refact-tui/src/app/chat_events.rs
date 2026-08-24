@@ -411,11 +411,11 @@ impl App {
     }
 
     pub(super) fn handle_runtime_updated(&mut self, raw: &Value) -> AppAction {
-        self.apply_runtime_state(raw);
+        let became_idle = self.apply_runtime_state(raw);
         self.maybe_open_pending_ask_questions_form();
         self.update_server_queue_from_runtime(raw);
         self.sync_runtime_approvals(raw);
-        if self.session_state == SessionState::Idle {
+        if became_idle {
             self.dispatch_next_queued_input()
         } else {
             AppAction::None
@@ -495,16 +495,20 @@ impl App {
         }
     }
 
-    pub(super) fn apply_runtime_state(&mut self, raw: &Value) {
+    pub(super) fn apply_runtime_state(&mut self, raw: &Value) -> bool {
         if raw
             .get("error")
             .and_then(Value::as_str)
             .is_some_and(|error| !error.is_empty())
         {
             self.set_session_state(SessionState::Error);
-            return;
+            return false;
         }
-        let state = match raw.get("state").and_then(Value::as_str).unwrap_or_default() {
+        let Some(runtime_state) = raw.get("state").and_then(Value::as_str) else {
+            self.add_notice("Runtime update omitted state; preserving current state");
+            return false;
+        };
+        let state = match runtime_state {
             "idle" => SessionState::Idle,
             "generating" => SessionState::Generating,
             "executing_tools" => SessionState::ExecutingTools,
@@ -513,9 +517,15 @@ impl App {
             "waiting_user_input" => SessionState::WaitingUserInput,
             "completed" => SessionState::Completed,
             "error" => SessionState::Error,
-            _ => SessionState::Idle,
+            _ => {
+                self.add_notice(format!(
+                    "Unknown runtime state {runtime_state:?}; preserving current state"
+                ));
+                return false;
+            }
         };
         self.set_session_state(state);
+        runtime_state == "idle"
     }
 
     pub(super) fn maybe_open_pending_ask_questions_form(&mut self) {
@@ -1009,12 +1019,12 @@ impl App {
             }
         }
         if let Some(runtime) = raw.get("runtime") {
-            self.apply_runtime_state(runtime);
+            let became_idle = self.apply_runtime_state(runtime);
             self.maybe_open_pending_ask_questions_form();
             self.update_usage(runtime);
             self.update_server_queue_from_runtime(runtime);
             self.sync_runtime_approvals(runtime);
-            if self.session_state == SessionState::Idle {
+            if became_idle {
                 return self.dispatch_next_queued_input();
             }
         }

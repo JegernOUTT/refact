@@ -1808,6 +1808,19 @@ mod tests {
         }
     }
 
+    fn app_with_queued_input() -> App {
+        let mut app = App::new(project());
+        app.composer.set_text("first");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SendMessage { prompt, .. } if prompt == "first"
+        ));
+        app.composer.set_text("second");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        assert_eq!(app.input_queue().len(), 1);
+        app
+    }
+
     #[derive(Clone, Default)]
     struct CommandState(Arc<(Mutex<Vec<Value>>, Condvar)>);
 
@@ -3240,6 +3253,69 @@ new-chat = "ctrl-x"
 
         assert!(app.composer().is_empty());
         assert_eq!(app.input_queue().items()[0].text, "queued for A");
+
+    #[test]
+fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
+        let invalid_states = [
+            ("missing", json!({}), "omitted state"),
+            ("null", json!({"state": null}), "omitted state"),
+            (
+                "unknown",
+                json!({"state": "not_a_runtime_state"}),
+                "Unknown runtime state",
+            ),
+        ];
+
+        for (event_name, snapshot) in [("runtime update", false), ("snapshot", true)] {
+            for (state_name, raw, notice) in &invalid_states {
+                let mut app = app_with_queued_input();
+                let action = app.handle_chat_event(ChatEvent {
+                    chat_id: Some(app.chat_id().to_string()),
+                    seq: None,
+                    kind: if snapshot {
+                        "snapshot".to_string()
+                    } else {
+                        "runtime_updated".to_string()
+                    },
+                    raw: if snapshot {
+                        json!({"runtime": raw})
+                    } else {
+                        raw.clone()
+                    },
+                });
+
+                assert_eq!(action, AppAction::None, "{event_name} {state_name}");
+                assert_eq!(app.session_state(), SessionState::Generating);
+                assert_eq!(app.input_queue().len(), 1);
+                assert!(app.visible_transcript().iter().any(|item| {
+                    matches!(item, TranscriptItem::Notice(text) if text.contains(notice))
+                }));
+            }
+
+            let mut app = app_with_queued_input();
+            let action = app.handle_chat_event(ChatEvent {
+                chat_id: Some(app.chat_id().to_string()),
+                seq: None,
+                kind: if snapshot {
+                    "snapshot".to_string()
+                } else {
+                    "runtime_updated".to_string()
+                },
+                raw: if snapshot {
+                    json!({"runtime": {"state": "idle"}})
+                } else {
+                    json!({"state": "idle"})
+                },
+            });
+
+            assert!(matches!(
+                action,
+                AppAction::SendMessage { prompt, .. } if prompt == "second"
+            ));
+            assert!(app.input_queue().is_empty());
+            assert_eq!(app.session_state(), SessionState::Generating);
+        }
+
     }
 
     #[test]
