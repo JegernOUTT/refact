@@ -4659,7 +4659,7 @@ new-chat = "ctrl-x"
         assert_eq!(app.execute_command_name("reasoning high"), AppAction::None);
         assert_eq!(app.reasoning_effort_label(), "off");
         assert!(app.visible_transcript().iter().any(|item| {
-            matches!(item, TranscriptItem::Notice(text) if text.contains("Reasoning effort is not available"))
+            matches!(item, TranscriptItem::Notice(text) if text.contains("Reasoning capability is not confirmed"))
         }));
     }
 

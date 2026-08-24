@@ -206,7 +206,16 @@ pub fn usage_label(
     context_window_tokens: Option<u64>,
 ) -> Option<String> {
     let usage = usage?;
-    let used = usage.tokens_used();
+    let Some(used) = usage.tokens_used() else {
+        return match (usage.prompt_tokens, usage.completion_tokens) {
+            (Some(prompt), Some(completion)) => {
+                Some(format!("{prompt} input · {completion} output reported"))
+            }
+            (Some(prompt), None) => Some(format!("{prompt} input reported")),
+            (None, Some(completion)) => Some(format!("{completion} output reported")),
+            (None, None) => None,
+        };
+    };
     match context_window_tokens.filter(|tokens| *tokens > 0) {
         Some(window) => Some(format!(
             "{}% context left ({} used)",
@@ -304,9 +313,9 @@ mod tests {
             runtime_state,
             worker: "ready".to_string(),
             usage: Some(UsageSummary {
-                prompt_tokens: 10,
-                completion_tokens: 0,
-                total_tokens: 10,
+                prompt_tokens: Some(10),
+                completion_tokens: Some(0),
+                total_tokens: Some(10),
             }),
             context_window_tokens: Some(100),
             retry_hint: None,
@@ -318,9 +327,9 @@ mod tests {
     #[test]
     fn usage_math_formats_context_left_and_compact_tokens() {
         let usage = Some(UsageSummary {
-            prompt_tokens: 12_000,
-            completion_tokens: 345,
-            total_tokens: 12_345,
+            prompt_tokens: Some(12_000),
+            completion_tokens: Some(345),
+            total_tokens: Some(12_345),
         });
 
         assert_eq!(
@@ -335,6 +344,32 @@ mod tests {
         assert_eq!(format_tokens_compact(1_200_000), "1.2M");
         assert_eq!(format_tokens_compact(1_234_567_890), "1.23B");
         assert_eq!(format_tokens_compact(1_234_567_890_123), "1.23T");
+    }
+
+    #[test]
+    fn usage_label_only_claims_reported_components() {
+        assert_eq!(
+            usage_label(
+                Some(UsageSummary {
+                    prompt_tokens: Some(12),
+                    completion_tokens: None,
+                    total_tokens: None,
+                }),
+                Some(100)
+            ),
+            Some("12 input reported".to_string())
+        );
+        assert_eq!(
+            usage_label(
+                Some(UsageSummary {
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    total_tokens: None,
+                }),
+                Some(100)
+            ),
+            None
+        );
     }
 
     #[test]

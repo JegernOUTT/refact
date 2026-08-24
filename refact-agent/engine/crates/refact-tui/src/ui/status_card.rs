@@ -198,40 +198,54 @@ fn token_usage_spans(snapshot: &StatusSnapshot, theme: &TuiTheme) -> Vec<Span<'s
     let Some(usage) = snapshot.usage.as_ref() else {
         return muted_value("not reported", theme);
     };
-    vec![
-        Span::from(format_tokens_compact(usage.total_tokens)),
-        Span::from(" total "),
-        Span::styled("(", theme.style(ThemeRole::Muted)),
-        Span::styled(
-            format_tokens_compact(usage.prompt_tokens),
-            theme.style(ThemeRole::Muted),
-        ),
-        Span::styled(" input + ", theme.style(ThemeRole::Muted)),
-        Span::styled(
-            format_tokens_compact(usage.completion_tokens),
-            theme.style(ThemeRole::Muted),
-        ),
-        Span::styled(" output)", theme.style(ThemeRole::Muted)),
+    let components = [
+        usage.prompt_tokens.map(|tokens| (tokens, "input")),
+        usage.completion_tokens.map(|tokens| (tokens, "output")),
     ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if usage.total_tokens.is_none() && components.is_empty() {
+        return muted_value("not reported", theme);
+    }
+    let has_components = !components.is_empty();
+    let mut spans = Vec::new();
+    if let Some(total) = usage.total_tokens {
+        spans.push(Span::from(format_tokens_compact(total)));
+        spans.push(Span::from(" total"));
+        if has_components {
+            spans.push(Span::styled(" (", theme.style(ThemeRole::Muted)));
+        }
+    }
+    for (index, (tokens, label)) in components.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" + ", theme.style(ThemeRole::Muted)));
+        }
+        spans.push(Span::styled(
+            format!("{} {label}", format_tokens_compact(tokens)),
+            theme.style(ThemeRole::Muted),
+        ));
+    }
+    if usage.total_tokens.is_some() && has_components {
+        spans.push(Span::styled(")", theme.style(ThemeRole::Muted)));
+    }
+    spans
 }
 
 fn context_window_spans(snapshot: &StatusSnapshot, theme: &TuiTheme) -> Vec<Span<'static>> {
     let Some(usage) = snapshot.usage.as_ref() else {
         return muted_value("not reported", theme);
     };
+    let Some(total) = usage.total_tokens else {
+        return muted_value("not reported", theme);
+    };
     let Some(window) = usage.context_window_tokens.filter(|window| *window > 0) else {
         return muted_value("not reported", theme);
     };
     vec![
-        Span::from(format!(
-            "{}% left",
-            context_left_percent(usage.total_tokens, window)
-        )),
+        Span::from(format!("{}% left", context_left_percent(total, window))),
         Span::styled(" (", theme.style(ThemeRole::Muted)),
-        Span::styled(
-            format_tokens_compact(usage.total_tokens),
-            theme.style(ThemeRole::Muted),
-        ),
+        Span::styled(format_tokens_compact(total), theme.style(ThemeRole::Muted)),
         Span::styled("/", theme.style(ThemeRole::Muted)),
         Span::styled(format_tokens_compact(window), theme.style(ThemeRole::Muted)),
         Span::styled(")", theme.style(ThemeRole::Muted)),
@@ -380,9 +394,9 @@ mod tests {
             },
             session_id: "abcdef123456".to_string(),
             usage: Some(StatusUsage {
-                prompt_tokens: 1_234,
-                completion_tokens: 5_678,
-                total_tokens: 6_912,
+                prompt_tokens: Some(1_234),
+                completion_tokens: Some(5_678),
+                total_tokens: Some(6_912),
                 context_window_tokens: Some(100_000),
             }),
             retry_hint: Some("retry after reconnect".to_string()),
@@ -452,6 +466,23 @@ mod tests {
             .find(|span| span.content.as_ref() == "retry after reconnect")
             .unwrap();
         assert_eq!(warning_span.style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn status_card_keeps_partial_usage_and_context_unknown() {
+        let mut snapshot = snapshot();
+        snapshot.usage = Some(StatusUsage {
+            prompt_tokens: Some(12),
+            completion_tokens: None,
+            total_tokens: None,
+            context_window_tokens: Some(100),
+        });
+
+        let rendered = text(&render_lines(100, &snapshot, &TuiTheme::dark()));
+
+        assert!(rendered.contains("12 input"));
+        assert!(!rendered.contains("0 output"));
+        assert!(rendered.contains("Context window:        not reported"));
     }
 
     #[test]

@@ -45,23 +45,29 @@ impl SessionState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct UsageSummary {
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub total_tokens: u64,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ReasoningModelCaps {
     effort_options: Vec<String>,
-    supports_thinking_budget: bool,
-    supports_adaptive_thinking_budget: bool,
+    supports_thinking_budget: Option<bool>,
+    supports_adaptive_thinking_budget: Option<bool>,
 }
 
 impl ReasoningModelCaps {
     fn has_reasoning_support(&self) -> bool {
         !self.effort_options.is_empty()
-            || self.supports_thinking_budget
-            || self.supports_adaptive_thinking_budget
+            || self.supports_thinking_budget == Some(true)
+            || self.supports_adaptive_thinking_budget == Some(true)
+    }
+
+    fn reasoning_support_is_confirmed_absent(&self) -> bool {
+        self.effort_options.is_empty()
+            && self.supports_thinking_budget == Some(false)
+            && self.supports_adaptive_thinking_budget == Some(false)
     }
 
     fn supports_effort(&self, level: command_session::ReasoningLevel) -> bool {
@@ -82,33 +88,38 @@ impl UsageSummary {
         let prompt_tokens = token_count(value, &["prompt_tokens", "input_tokens", "prompt"]);
         let completion_tokens =
             token_count(value, &["completion_tokens", "output_tokens", "completion"]);
-        let total_tokens = token_count(value, &["total_tokens", "total"])
-            .or_else(|| prompt_tokens.zip(completion_tokens).map(|(a, b)| a + b));
+        let total_tokens = token_count(value, &["total_tokens", "total"]).or_else(|| {
+            prompt_tokens
+                .zip(completion_tokens)
+                .and_then(|(prompt, completion)| prompt.checked_add(completion))
+        });
         if prompt_tokens.is_none() && completion_tokens.is_none() && total_tokens.is_none() {
             None
         } else {
             Some(Self {
-                prompt_tokens: prompt_tokens.unwrap_or_default(),
-                completion_tokens: completion_tokens.unwrap_or_default(),
-                total_tokens: total_tokens.unwrap_or_default(),
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
             })
         }
     }
 
     pub fn display(self) -> String {
-        if self.total_tokens > 0 {
-            format!("{} tok", self.total_tokens)
-        } else {
-            format!("{} in · {} out", self.prompt_tokens, self.completion_tokens)
+        match (
+            self.total_tokens,
+            self.prompt_tokens,
+            self.completion_tokens,
+        ) {
+            (Some(total), _, _) => format!("{total} tok"),
+            (None, Some(prompt), Some(completion)) => format!("{prompt} in · {completion} out"),
+            (None, Some(prompt), None) => format!("{prompt} in"),
+            (None, None, Some(completion)) => format!("{completion} out"),
+            (None, None, None) => "usage unavailable".to_string(),
         }
     }
 
-    pub fn tokens_used(self) -> u64 {
-        if self.total_tokens > 0 {
-            self.total_tokens
-        } else {
-            self.prompt_tokens.saturating_add(self.completion_tokens)
-        }
+    pub fn tokens_used(self) -> Option<u64> {
+        self.total_tokens
     }
 }
 
@@ -370,9 +381,20 @@ impl App {
 
     pub(super) fn add_reasoning_unsupported_notice(&mut self) {
         let model = self.model().unwrap_or("current model");
-        self.add_notice(format!(
-            "Reasoning effort is not available for {model}. Choose a reasoning-capable model first."
-        ));
+        let notice = self
+            .current_reasoning_caps()
+            .filter(|caps| caps.reasoning_support_is_confirmed_absent())
+            .map(|_| {
+                format!(
+                    "Reasoning effort is not available for {model}. Choose a reasoning-capable model first."
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "Reasoning capability is not confirmed for {model}. Choose a reasoning-capable model first."
+                )
+            });
+        self.add_notice(notice);
     }
 
     pub(super) fn show_status_card(&mut self) {
@@ -820,8 +842,8 @@ pub(super) fn reasoning_caps_from_model(model: &Value) -> ReasoningModelCaps {
     }
 }
 
-pub(super) fn bool_field(value: &Value, key: &str) -> bool {
-    value.get(key).and_then(Value::as_bool).unwrap_or(false)
+pub(super) fn bool_field(value: &Value, key: &str) -> Option<bool> {
+    value.get(key).and_then(Value::as_bool)
 }
 
 pub(super) fn context_window_from_model(model: &Value) -> Option<u64> {
@@ -1162,5 +1184,76 @@ mod tests {
         assert_eq!(app.session_state(), SessionState::Idle);
         assert!(!app.abort_in_flight);
         assert_eq!(app.visible_transcript().len(), before);
+    }
+
+    #[test]
+    fn usage_summary_preserves_partial_empty_and_complete_reports() {
+        let partial = UsageSummary::from_value(&serde_json::json!({"prompt_tokens": 12})).unwrap();
+        assert_eq!(partial.prompt_tokens, Some(12));
+        assert_eq!(partial.completion_tokens, None);
+        assert_eq!(partial.total_tokens, None);
+        assert_eq!(partial.tokens_used(), None);
+        assert_eq!(partial.display(), "12 in");
+
+        assert_eq!(UsageSummary::from_value(&serde_json::json!({})), None);
+
+        let complete = UsageSummary::from_value(&serde_json::json!({
+            "prompt_tokens": 12,
+            "completion_tokens": 8,
+        }))
+        .unwrap();
+        assert_eq!(complete.total_tokens, Some(20));
+        assert_eq!(complete.tokens_used(), Some(20));
+        assert_eq!(complete.display(), "20 tok");
+    }
+
+    #[test]
+    fn reasoning_capability_flags_preserve_unknown_and_gate_controls() {
+        for key in [
+            "supports_thinking_budget",
+            "supports_adaptive_thinking_budget",
+        ] {
+            for value in [
+                serde_json::json!({}),
+                serde_json::json!({(key): null}),
+                serde_json::json!({(key): "true"}),
+            ] {
+                let caps = reasoning_caps_from_model(&value);
+                assert_eq!(bool_field(&value, key), None);
+                assert!(!caps.has_reasoning_support());
+            }
+        }
+        for key in [
+            "supports_thinking_budget",
+            "supports_adaptive_thinking_budget",
+        ] {
+            let supported = serde_json::json!({(key): true});
+            assert_eq!(bool_field(&supported, key), Some(true));
+            assert!(reasoning_caps_from_model(&supported).has_reasoning_support());
+
+            let unsupported = serde_json::json!({(key): false});
+            assert_eq!(bool_field(&unsupported, key), Some(false));
+            assert!(!reasoning_caps_from_model(&unsupported).has_reasoning_support());
+        }
+
+        let mut app = App::new(project());
+        app.model = Some("unknown".to_string());
+        app.model_reasoning_caps.insert(
+            "unknown".to_string(),
+            reasoning_caps_from_model(&serde_json::json!({})),
+        );
+        assert!(!app.reasoning_level_supported(command_session::ReasoningLevel::On));
+
+        app.model_reasoning_caps.insert(
+            "unknown".to_string(),
+            reasoning_caps_from_model(&serde_json::json!({"supports_thinking_budget": true})),
+        );
+        assert!(app.reasoning_level_supported(command_session::ReasoningLevel::On));
+
+        app.model_reasoning_caps.insert(
+            "unknown".to_string(),
+            reasoning_caps_from_model(&serde_json::json!({"supports_thinking_budget": false})),
+        );
+        assert!(!app.reasoning_level_supported(command_session::ReasoningLevel::On));
     }
 }

@@ -473,7 +473,7 @@ fn golden_fixtures_drive_app_state_machine_offline() {
     let text = transcript_text(&streaming.app);
     assert!(text.contains("user:render a table"));
     assert!(text.contains("| one | two |"));
-    assert_eq!(streaming.app.usage().unwrap().total_tokens, 30);
+    assert_eq!(streaming.app.usage().unwrap().total_tokens, Some(30));
     assert_eq!(streaming.app.session_state(), SessionState::Idle);
 
     let reasoning = run_fixture("reasoning.jsonl");
@@ -492,7 +492,7 @@ fn golden_fixtures_drive_app_state_machine_offline() {
     );
 
     let usage = run_fixture("usage_updates.jsonl");
-    assert_eq!(usage.app.usage().unwrap().total_tokens, 27);
+    assert_eq!(usage.app.usage().unwrap().total_tokens, Some(27));
     assert_eq!(
         usage.app.transcript_state().usage().unwrap()["total_tokens"],
         27

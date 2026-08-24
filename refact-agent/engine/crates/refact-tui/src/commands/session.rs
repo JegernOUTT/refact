@@ -71,9 +71,9 @@ pub struct PermissionPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StatusUsage {
-    pub prompt_tokens: u64,
-    pub completion_tokens: u64,
-    pub total_tokens: u64,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
     pub context_window_tokens: Option<u64>,
 }
 
@@ -458,14 +458,29 @@ fn usage_line(usage: Option<&StatusUsage>) -> String {
     let Some(usage) = usage else {
         return "not reported".to_string();
     };
-    let base = format!(
-        "{} prompt + {} completion = {} total tokens",
-        usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
-    );
+    let components = [
+        usage.prompt_tokens.map(|tokens| format!("{tokens} prompt")),
+        usage
+            .completion_tokens
+            .map(|tokens| format!("{tokens} completion")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let Some(total) = usage.total_tokens else {
+        return (!components.is_empty())
+            .then(|| format!("{} tokens", components.join(" + ")))
+            .unwrap_or_else(|| "not reported".to_string());
+    };
+    let base = if components.is_empty() {
+        format!("{total} total tokens")
+    } else {
+        format!("{} = {total} total tokens", components.join(" + "))
+    };
     match usage.context_window_tokens.filter(|tokens| *tokens > 0) {
         Some(window) => format!(
             "{base}; {}% context left",
-            context_left_percent(usage.total_tokens, window)
+            context_left_percent(total, window)
         ),
         None => base,
     }
@@ -566,9 +581,9 @@ mod tests {
             },
             session_id: "abcdef123456".to_string(),
             usage: Some(StatusUsage {
-                prompt_tokens: 100,
-                completion_tokens: 50,
-                total_tokens: 150,
+                prompt_tokens: Some(100),
+                completion_tokens: Some(50),
+                total_tokens: Some(150),
                 context_window_tokens: Some(1000),
             }),
             retry_hint: None,
@@ -576,6 +591,37 @@ mod tests {
         assert_eq!(
             text,
             "Status\nDaemon: v1.2.3 on port 8488\nWorker: ready pid 42 http 9000 lsp 9001\nProject: demo (/tmp/demo)\nModel: gpt-demo · mode agent · reason:high\nTerminal background: unavailable (OSC 10/11 probe timed out or is unsupported)\nSession: abcdef12\nUsage: 100 prompt + 50 completion = 150 total tokens; 85% context left"
+        );
+    }
+
+    #[test]
+    fn usage_line_preserves_unknown_components() {
+        assert_eq!(
+            usage_line(Some(&StatusUsage {
+                prompt_tokens: Some(12),
+                completion_tokens: None,
+                total_tokens: None,
+                context_window_tokens: Some(100),
+            })),
+            "12 prompt tokens"
+        );
+        assert_eq!(
+            usage_line(Some(&StatusUsage {
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: Some(12),
+                context_window_tokens: Some(100),
+            })),
+            "12 total tokens; 88% context left"
+        );
+        assert_eq!(
+            usage_line(Some(&StatusUsage {
+                prompt_tokens: None,
+                completion_tokens: None,
+                total_tokens: None,
+                context_window_tokens: Some(100),
+            })),
+            "not reported"
         );
     }
 }
