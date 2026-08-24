@@ -9,6 +9,7 @@ use refact_tui::client::{
     discover_daemon_endpoint, discover_daemon_endpoint_from, resolve_daemon_endpoint, ChatEvent,
     ChatSeqDecision, ChatSeqTracker, ClientError, DaemonClient, OpenProjectResponse, ToolDecision,
 };
+use refact_tui::history::render_transcript_item_lines;
 use refact_tui::protocol::{DeltaOp, TranscriptState};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
@@ -305,6 +306,103 @@ fn fixture_directory_covers_required_protocol_cases() {
             "usage_updates.jsonl",
         ]
     );
+}
+
+#[test]
+fn live_wire_roles_produce_visible_cells() {
+    let fixtures = vec![
+        (
+            "system",
+            json!({"message_id": "system-1", "role": "system", "content": "System prompt"}),
+            "System",
+        ),
+        (
+            "context_file",
+            json!({"message_id": "context-1", "role": "context_file", "content": "src/lib.rs\nfn main() {}"}),
+            "context_file",
+        ),
+        (
+            "diff",
+            json!({"message_id": "diff-1", "role": "diff", "tool_call_id": "call-diff", "content": "--- a/src/lib.rs\n+++ b/src/lib.rs"}),
+            "diff",
+        ),
+        (
+            "plain_text",
+            json!({"message_id": "text-1", "role": "plain_text", "content": "Command output"}),
+            "plain_text",
+        ),
+        (
+            "cd_instruction",
+            json!({"message_id": "instruction-1", "role": "cd_instruction", "content": "Continue from the last tool call"}),
+            "cd_instruction",
+        ),
+        (
+            "compression_report",
+            json!({"message_id": "compression-1", "role": "compression_report", "content": "Compression saved 512 tokens"}),
+            "Compression report",
+        ),
+        (
+            "error",
+            json!({"message_id": "error-1", "role": "error", "content": "Provider unavailable", "_ui_only": true}),
+            "Error: Provider unavailable",
+        ),
+        (
+            "future_role",
+            json!({"message_id": "future-1", "role": "future_role", "content": "Future content", "marker": "future_payload"}),
+            "Unknown role: future_role",
+        ),
+    ];
+
+    for (role, message, expected) in fixtures {
+        let mut app = App::new(State::project());
+        app.set_native_scrollback(false);
+        let chat_id = app.chat_id().to_string();
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(chat_id),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": message}),
+        });
+
+        let rendered = app
+            .visible_transcript()
+            .iter()
+            .flat_map(|item| render_transcript_item_lines(item, 80, false))
+            .flat_map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<String>();
+        assert!(
+            !rendered.is_empty(),
+            "{role} did not produce a visible cell"
+        );
+        assert!(
+            rendered.contains(expected),
+            "{role} did not render {expected:?}: {rendered:?}"
+        );
+
+        if role == "diff" {
+            assert!(app.visible_transcript().iter().any(|item| {
+                matches!(item, TranscriptItem::Tool(card) if card.id == "call-diff" && card.name == "diff")
+            }));
+        }
+        if role == "future_role" {
+            assert!(rendered.contains("future_payload"));
+        }
+
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('t'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        let overlay = app.transcript_overlay().expect("transcript overlay opened");
+        assert!(
+            overlay.lines().iter().any(|line| line.contains(expected)),
+            "{role} disappeared from the transcript overlay"
+        );
+    }
 }
 
 #[test]

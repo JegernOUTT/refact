@@ -289,25 +289,50 @@ pub enum TranscriptRole {
     User,
     Assistant,
     Tool,
-    Notice,
+    ClientLocalNotice,
     Plan,
     Goal,
     Event,
-    Other(String),
+    System,
+    ContextFile,
+    Diff,
+    PlainText,
+    CdInstruction,
+    CompressionReport,
+    Error,
+    Unknown { role: String, raw: Value },
 }
 
 impl TranscriptRole {
     pub fn from_wire(role: &str) -> Self {
+        Self::from_wire_message(role, Value::Null)
+    }
+
+    pub fn from_wire_message(role: &str, raw: Value) -> Self {
         match role {
             "user" => Self::User,
             "assistant" => Self::Assistant,
             "tool" => Self::Tool,
-            "notice" => Self::Notice,
+            "notice" => Self::ClientLocalNotice,
             "plan" => Self::Plan,
             "goal" => Self::Goal,
             "event" => Self::Event,
-            other => Self::Other(other.to_string()),
+            "system" => Self::System,
+            "context_file" => Self::ContextFile,
+            "diff" => Self::Diff,
+            "plain_text" => Self::PlainText,
+            "cd_instruction" => Self::CdInstruction,
+            "compression_report" => Self::CompressionReport,
+            "error" => Self::Error,
+            other => Self::Unknown {
+                role: other.to_string(),
+                raw,
+            },
         }
+    }
+
+    pub fn is_tool_result(&self) -> bool {
+        matches!(self, Self::Tool | Self::Diff)
     }
 
     pub fn as_str(&self) -> &str {
@@ -315,11 +340,18 @@ impl TranscriptRole {
             Self::User => "user",
             Self::Assistant => "assistant",
             Self::Tool => "tool",
-            Self::Notice => "notice",
+            Self::ClientLocalNotice => "notice",
             Self::Plan => "plan",
             Self::Goal => "goal",
             Self::Event => "event",
-            Self::Other(role) => role.as_str(),
+            Self::System => "system",
+            Self::ContextFile => "context_file",
+            Self::Diff => "diff",
+            Self::PlainText => "plain_text",
+            Self::CdInstruction => "cd_instruction",
+            Self::CompressionReport => "compression_report",
+            Self::Error => "error",
+            Self::Unknown { role, .. } => role.as_str(),
         }
     }
 }
@@ -380,8 +412,11 @@ impl TranscriptMessage {
         let role = raw
             .get("role")
             .and_then(Value::as_str)
-            .map(TranscriptRole::from_wire)
-            .unwrap_or_else(|| TranscriptRole::Other(String::new()));
+            .map(|role| TranscriptRole::from_wire_message(role, raw.clone()))
+            .unwrap_or_else(|| TranscriptRole::Unknown {
+                role: "missing".to_string(),
+                raw: raw.clone(),
+            });
         let mut message = Self::new(role);
         message.message_id = raw
             .get("message_id")
@@ -509,7 +544,7 @@ impl TranscriptState {
     }
 
     pub fn push_notice(&mut self, text: impl Into<String>) {
-        let mut message = TranscriptMessage::new(TranscriptRole::Notice);
+        let mut message = TranscriptMessage::new(TranscriptRole::ClientLocalNotice);
         message.content = text.into();
         self.messages.push(message);
     }
@@ -568,13 +603,11 @@ impl TranscriptState {
 
     pub fn add_message_at(&mut self, raw: &Value, index: Option<usize>) -> bool {
         let mut message = TranscriptMessage::from_wire(raw);
-        if matches!(
-            message.role,
-            TranscriptRole::Assistant | TranscriptRole::Tool
-        ) && raw
-            .get("stream_finished")
-            .and_then(Value::as_bool)
-            .is_none()
+        if (message.role == TranscriptRole::Assistant || message.role.is_tool_result())
+            && raw
+                .get("stream_finished")
+                .and_then(Value::as_bool)
+                .is_none()
         {
             message.stream_finished = true;
         }
@@ -588,13 +621,11 @@ impl TranscriptState {
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
         }
-        if matches!(
-            message.role,
-            TranscriptRole::Assistant | TranscriptRole::Tool
-        ) && raw
-            .get("stream_finished")
-            .and_then(Value::as_bool)
-            .is_none()
+        if (message.role == TranscriptRole::Assistant || message.role.is_tool_result())
+            && raw
+                .get("stream_finished")
+                .and_then(Value::as_bool)
+                .is_none()
         {
             message.stream_finished = true;
         }

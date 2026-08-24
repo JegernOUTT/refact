@@ -22,7 +22,10 @@ use crate::render::highlight;
 use crate::sessions::{session_items_from_trajectories, TrajectoryMeta};
 use crate::theme::TuiTheme;
 
-use super::transcript::{line_to_plain_string, value_to_compact_string};
+use super::transcript::{
+    collapsed_unknown_payload, line_to_plain_string, value_to_compact_string,
+    visible_message_content,
+};
 use super::*;
 
 #[derive(Debug, Clone)]
@@ -826,10 +829,10 @@ impl App {
                         )));
                     }
                 }
-                TranscriptRole::Tool => items.push(TranscriptItem::Tool(
+                TranscriptRole::Tool | TranscriptRole::Diff => items.push(TranscriptItem::Tool(
                     ToolCard::from_tool_call(&json!({
                         "id": message.tool_call_id.clone().unwrap_or_default(),
-                        "name": "tool"
+                        "name": message.role.as_str()
                     }))
                     .with_result(
                         message.content.clone(),
@@ -840,17 +843,41 @@ impl App {
                         },
                     ),
                 )),
-                TranscriptRole::Notice => {
+                TranscriptRole::ClientLocalNotice => {
                     items.push(TranscriptItem::Notice(message.content.clone()))
                 }
-                TranscriptRole::Plan
-                | TranscriptRole::Goal
-                | TranscriptRole::Event
-                | TranscriptRole::Other(_) => {}
+                TranscriptRole::System => {
+                    items.push(info_message_item(message, "System"));
+                }
+                TranscriptRole::ContextFile
+                | TranscriptRole::PlainText
+                | TranscriptRole::CdInstruction => {
+                    items.push(info_message_item(message, message.role.as_str()));
+                }
+                TranscriptRole::CompressionReport => {
+                    items.push(info_message_item(message, "Compression report"));
+                }
+                TranscriptRole::Error => items.push(TranscriptItem::Notice(format!(
+                    "Error: {}",
+                    visible_message_content(message, "Unknown error")
+                ))),
+                TranscriptRole::Unknown { role, raw } => items.push(TranscriptItem::Info(vec![
+                    format!("Unknown role: {role}"),
+                    visible_message_content(message, "(empty)"),
+                    format!("Raw: {}", collapsed_unknown_payload(raw)),
+                ])),
+                TranscriptRole::Plan | TranscriptRole::Goal | TranscriptRole::Event => {}
             }
         }
         items
     }
+}
+
+fn info_message_item(message: &TranscriptMessage, label: &str) -> TranscriptItem {
+    TranscriptItem::Info(vec![
+        label.to_string(),
+        visible_message_content(message, "(empty)"),
+    ])
 }
 
 pub(super) fn persist_theme_name_to_path(path: &Path, name: &str) -> Result<(), String> {

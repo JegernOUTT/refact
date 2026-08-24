@@ -477,7 +477,7 @@ impl App {
             .iter()
             .rev()
             .take_while(|message| message.role != TranscriptRole::User)
-            .find(|message| message.role == TranscriptRole::Tool && !message.tool_failed)
+            .find(|message| message.role.is_tool_result() && !message.tool_failed)
             .cloned();
         if let Some(message) = pending.as_ref() {
             self.maybe_open_ask_questions_form(message);
@@ -583,7 +583,7 @@ impl App {
             if seen_tool && message.role == TranscriptRole::User {
                 return true;
             }
-            if message.role == TranscriptRole::Tool
+            if message.role.is_tool_result()
                 && message.tool_call_id.as_deref() == Some(tool_call_id)
             {
                 seen_tool = true;
@@ -713,7 +713,7 @@ impl App {
     ) -> bool {
         let mut updated = false;
         for message in self.transcript_state.messages_mut() {
-            if message.role == TranscriptRole::Tool
+            if message.role.is_tool_result()
                 && message.tool_call_id.as_deref() == Some(tool_call_id)
             {
                 updated = true;
@@ -747,6 +747,7 @@ impl App {
     pub(super) fn complete_tool(
         &mut self,
         id: &str,
+        name: &str,
         result: String,
         status: ToolStatus,
         completed_at_ms: u64,
@@ -775,7 +776,7 @@ impl App {
                 }
             }
         }
-        let mut card = ToolCard::from_tool_call(&json!({"id": id, "name": "tool"}));
+        let mut card = ToolCard::from_tool_call(&json!({"id": id, "name": name}));
         card.set_result(&result);
         card.status = status;
         card.duration_ms = Some(0);
@@ -834,7 +835,7 @@ impl App {
 
     pub(super) fn finalize_matching_tool_messages(&mut self, id: &str) {
         for message in self.transcript_state.messages_mut() {
-            if message.role == TranscriptRole::Tool
+            if message.role.is_tool_result()
                 && (message.tool_call_id.as_deref() == Some(id) || id.is_empty())
             {
                 message.stream_finished = true;
@@ -1008,7 +1009,7 @@ impl App {
         if replayed {
             return;
         }
-        if message.role == TranscriptRole::Tool && self.replace_state_tool_message(&message) {
+        if message.role.is_tool_result() && self.replace_state_tool_message(&message) {
             self.rebuild_remote_transcript_from_state();
             return;
         }
@@ -1030,14 +1031,23 @@ impl App {
         if insert_before_end {
             self.rebuild_remote_transcript_from_state();
         } else {
-            match message.role {
-                TranscriptRole::Tool => self.push_state_tool_result(&message),
+            match &message.role {
+                TranscriptRole::Tool | TranscriptRole::Diff => {
+                    self.push_state_tool_result(&message)
+                }
                 TranscriptRole::Assistant
                 | TranscriptRole::User
+                | TranscriptRole::ClientLocalNotice
                 | TranscriptRole::Plan
                 | TranscriptRole::Goal
-                | TranscriptRole::Event => self.append_render_message(&message),
-                _ => {}
+                | TranscriptRole::Event
+                | TranscriptRole::System
+                | TranscriptRole::ContextFile
+                | TranscriptRole::PlainText
+                | TranscriptRole::CdInstruction
+                | TranscriptRole::CompressionReport
+                | TranscriptRole::Error
+                | TranscriptRole::Unknown { .. } => self.append_render_message(&message),
             }
         }
         if let Some(index) = out_of_range_index {
@@ -1060,7 +1070,7 @@ impl App {
             .messages_mut()
             .iter_mut()
             .find(|existing| {
-                existing.role == TranscriptRole::Tool
+                existing.role.is_tool_result()
                     && existing.tool_call_id.as_deref() == Some(tool_call_id)
             })
         else {
@@ -1103,6 +1113,7 @@ impl App {
         }
         self.complete_tool(
             message.tool_call_id.as_deref().unwrap_or_default(),
+            message.role.as_str(),
             message.content.clone(),
             if message.tool_failed {
                 ToolStatus::Failed

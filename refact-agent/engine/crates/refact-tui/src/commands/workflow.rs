@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::{CommandAction, CommandAvailability, CommandDef};
-use crate::protocol::{TranscriptMessage, TranscriptRole};
+use crate::protocol::TranscriptMessage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowCommand {
@@ -168,17 +168,7 @@ fn goal_version(message: &TranscriptMessage) -> u64 {
 }
 
 fn is_role(message: &TranscriptMessage, role: &str) -> bool {
-    match (&message.role, role) {
-        (TranscriptRole::User, "user")
-        | (TranscriptRole::Assistant, "assistant")
-        | (TranscriptRole::Tool, "tool")
-        | (TranscriptRole::Notice, "notice")
-        | (TranscriptRole::Plan, "plan")
-        | (TranscriptRole::Goal, "goal")
-        | (TranscriptRole::Event, "event") => true,
-        (TranscriptRole::Other(value), _) => value == role,
-        _ => false,
-    }
+    message.role.as_str() == role
 }
 
 fn is_plan_delta(message: &TranscriptMessage) -> bool {

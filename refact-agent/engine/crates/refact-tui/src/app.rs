@@ -603,7 +603,7 @@ impl App {
             .transcript_state
             .messages()
             .iter()
-            .filter(|message| message.role == TranscriptRole::Tool)
+            .filter(|message| message.role.is_tool_result())
             .filter_map(|message| message.tool_call_id.clone())
             .collect::<Vec<_>>();
         let mut summaries = Vec::<SubagentSummary>::new();
@@ -2478,6 +2478,7 @@ mod tests {
 
         app.complete_tool(
             "call-1",
+            "tool",
             "done".to_string(),
             ToolStatus::Succeeded,
             now_ms(),
@@ -5942,6 +5943,7 @@ new-chat = "ctrl-x"
         assert_eq!(tool_cards(&app).len(), 1);
         app.complete_tool(
             "call-1",
+            "tool",
             "done".to_string(),
             ToolStatus::Succeeded,
             now_ms(),

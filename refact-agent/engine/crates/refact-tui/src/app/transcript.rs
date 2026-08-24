@@ -707,12 +707,25 @@ impl App {
                     self.push_tool_call(tool);
                 }
             }
-            TranscriptRole::Tool => self.push_state_tool_result(message),
-            TranscriptRole::Notice => {
+            TranscriptRole::Tool | TranscriptRole::Diff => self.push_state_tool_result(message),
+            TranscriptRole::ClientLocalNotice => {
                 self.push_state_history_item(
                     render_message_key(message, "notice", 0),
                     TranscriptItem::Notice(message.content.clone()),
                 );
+            }
+            TranscriptRole::System => self.push_state_info_message(message, "System"),
+            TranscriptRole::ContextFile
+            | TranscriptRole::PlainText
+            | TranscriptRole::CdInstruction => {
+                self.push_state_info_message(message, message.role.as_str());
+            }
+            TranscriptRole::CompressionReport => {
+                self.push_state_info_message(message, "Compression report");
+            }
+            TranscriptRole::Error => self.push_state_error_message(message),
+            TranscriptRole::Unknown { role, raw } => {
+                self.push_state_unknown_message(message, role, raw);
             }
             TranscriptRole::Plan => {
                 if message.stream_finished {
@@ -743,8 +756,43 @@ impl App {
                     self.push_internal_event(message);
                 }
             }
-            TranscriptRole::Other(_) => {}
         }
+    }
+
+    pub(super) fn push_state_info_message(&mut self, message: &TranscriptMessage, label: &str) {
+        self.push_state_history_item(
+            render_message_key(message, label, 0),
+            TranscriptItem::Info(vec![
+                label.to_string(),
+                visible_message_content(message, "(empty)"),
+            ]),
+        );
+    }
+
+    pub(super) fn push_state_error_message(&mut self, message: &TranscriptMessage) {
+        self.push_state_history_item(
+            render_message_key(message, "error", 0),
+            TranscriptItem::Notice(format!(
+                "Error: {}",
+                visible_message_content(message, "Unknown error")
+            )),
+        );
+    }
+
+    pub(super) fn push_state_unknown_message(
+        &mut self,
+        message: &TranscriptMessage,
+        role: &str,
+        raw: &Value,
+    ) {
+        self.push_state_history_item(
+            render_message_key(message, "unknown", 0),
+            TranscriptItem::Info(vec![
+                format!("Unknown role: {role}"),
+                visible_message_content(message, "(empty)"),
+                format!("Raw: {}", collapsed_unknown_payload(raw)),
+            ]),
+        );
     }
 
     pub(super) fn sync_backtrack_selection_after_rebuild(&mut self) {
@@ -975,6 +1023,17 @@ pub(super) fn value_to_compact_string(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
 
+pub(super) fn visible_message_content(message: &TranscriptMessage, empty: &str) -> String {
+    (!message.content.trim().is_empty())
+        .then(|| message.content.clone())
+        .unwrap_or_else(|| empty.to_string())
+}
+
+pub(super) fn collapsed_unknown_payload(raw: &Value) -> String {
+    let compact = sanitize_tool_inline(value_to_compact_string(raw));
+    truncate_graphemes(&compact, 160).0
+}
+
 pub(super) fn line_to_plain_string(line: &ratatui::text::Line<'_>) -> String {
     line.spans
         .iter()
@@ -1147,8 +1206,17 @@ pub(super) fn rendered_state_keys_for_message(message: &TranscriptMessage) -> Ve
             }
             keys
         }
-        TranscriptRole::Tool => vec![render_message_key(message, "tool", 0)],
-        TranscriptRole::Notice => vec![render_message_key(message, "notice", 0)],
+        TranscriptRole::Tool | TranscriptRole::Diff => vec![render_message_key(message, "tool", 0)],
+        TranscriptRole::ClientLocalNotice => vec![render_message_key(message, "notice", 0)],
+        TranscriptRole::System => vec![render_message_key(message, "System", 0)],
+        TranscriptRole::ContextFile | TranscriptRole::PlainText | TranscriptRole::CdInstruction => {
+            vec![render_message_key(message, message.role.as_str(), 0)]
+        }
+        TranscriptRole::CompressionReport => {
+            vec![render_message_key(message, "Compression report", 0)]
+        }
+        TranscriptRole::Error => vec![render_message_key(message, "error", 0)],
+        TranscriptRole::Unknown { .. } => vec![render_message_key(message, "unknown", 0)],
         TranscriptRole::Plan => vec![render_message_key(message, "plan", 0)],
         TranscriptRole::Goal => vec![render_message_key(message, "goal", 0)],
         TranscriptRole::Event => vec![render_message_key(
@@ -1162,7 +1230,6 @@ pub(super) fn rendered_state_keys_for_message(message: &TranscriptMessage) -> Ve
             },
             0,
         )],
-        TranscriptRole::Other(_) => Vec::new(),
     }
 }
 
