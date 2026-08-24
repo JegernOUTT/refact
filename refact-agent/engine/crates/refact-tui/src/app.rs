@@ -3199,7 +3199,12 @@ new-chat = "ctrl-x"
         );
         app.abort_in_flight = true;
         assert_eq!(
-            app.handle_command_finished(CommandContextTag::Abort, Ok(())),
+            app.handle_command_finished(
+                CommandContextTag::Abort {
+                    origin: app.command_origin(),
+                },
+                Ok(()),
+            ),
             AppAction::None
         );
 
