@@ -1075,6 +1075,8 @@ mod tests {
             agent_branch: None,
             agent_worktree: worktree,
             agent_worktree_name: None,
+            base_branch: None,
+            base_commit: None,
             ab_variants: None,
             team_members: vec![],
             target_files: vec![],

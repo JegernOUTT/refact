@@ -201,6 +201,8 @@ struct SpawnBatchItem {
     card_id: String,
     suggested_steps: Option<usize>,
     files_to_open: Vec<String>,
+    base_branch: Option<String>,
+    base_commit: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -248,7 +250,20 @@ fn parse_spawn_item(value: &Value) -> Result<SpawnBatchItem, String> {
         card_id: required_string(value, "card_id")?,
         suggested_steps: optional_usize(value, "suggested_steps")?,
         files_to_open: optional_string_vec(value.get("files_to_open"), "files_to_open")?,
+        base_branch: optional_nonempty_string(value, "base_branch")?,
+        base_commit: optional_nonempty_string(value, "base_commit")?,
     })
+}
+
+fn optional_nonempty_string(value: &Value, key: &str) -> Result<Option<String>, String> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.trim().is_empty() => {
+            Ok(Some(value.trim().to_string()))
+        }
+        Some(Value::String(_)) => Err(format!("'{}' must be a non-empty string", key)),
+        Some(_) => Err(format!("'{}' must be a string", key)),
+    }
 }
 
 fn parse_board_create_item(value: &Value) -> Result<BoardCreateBatchItem, String> {
@@ -657,6 +672,12 @@ fn spawn_args(task_id: &str, item: &SpawnBatchItem) -> HashMap<String, Value> {
     if !item.files_to_open.is_empty() {
         args.insert("files_to_open".to_string(), json!(item.files_to_open));
     }
+    if let Some(base_branch) = item.base_branch.as_ref() {
+        args.insert("base_branch".to_string(), json!(base_branch));
+    }
+    if let Some(base_commit) = item.base_commit.as_ref() {
+        args.insert("base_commit".to_string(), json!(base_commit));
+    }
     args
 }
 
@@ -746,7 +767,9 @@ impl Tool for ToolSpawnAgentsBatch {
                             "properties": {
                                 "card_id": { "type": "string" },
                                 "suggested_steps": { "type": "integer" },
-                                "files_to_open": { "type": "array", "items": { "type": "string" } }
+                                "files_to_open": { "type": "array", "items": { "type": "string" } },
+                                "base_branch": { "type": "string" },
+                                "base_commit": { "type": "string" }
                             },
                             "required": ["card_id"]
                         }
@@ -1262,6 +1285,8 @@ mod tests {
             agent_branch: None,
             agent_worktree: None,
             agent_worktree_name: None,
+            base_branch: None,
+            base_commit: None,
             ab_variants: None,
             team_members: vec![],
             target_files: vec![],
@@ -1416,22 +1441,41 @@ mod tests {
                 card_id: "T-1".to_string(),
                 suggested_steps: None,
                 files_to_open: vec![],
+                base_branch: None,
+                base_commit: None,
             }),
             Ok(SpawnBatchItem {
                 card_id: "T-2".to_string(),
                 suggested_steps: None,
                 files_to_open: vec![],
+                base_branch: None,
+                base_commit: None,
             }),
             Ok(SpawnBatchItem {
                 card_id: "T-3".to_string(),
                 suggested_steps: None,
                 files_to_open: vec![],
+                base_branch: None,
+                base_commit: None,
             }),
         ];
 
         let errors = validate_spawn_agent_cards(&board, &items);
 
         assert_eq!(errors, vec![None, None, None]);
+    }
+
+    #[test]
+    fn spawn_batch_forwards_card_base_refs() {
+        let item = parse_spawn_item(&json!({
+            "card_id": "T-1",
+            "base_branch": "release",
+            "base_commit": "abc123"
+        }))
+        .unwrap();
+        let args = spawn_args("task-1", &item);
+        assert_eq!(args.get("base_branch"), Some(&json!("release")));
+        assert_eq!(args.get("base_commit"), Some(&json!("abc123")));
     }
 
     #[test]

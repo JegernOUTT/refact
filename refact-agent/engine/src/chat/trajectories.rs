@@ -123,6 +123,8 @@ const TITLE_GENERATION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::f
 const TITLE_GENERATION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const TRAJECTORY_META_TITLE_MAX_CHARS: usize = 120;
 
+pub const TRAJECTORY_LABEL_MAX_CHARS: usize = TRAJECTORY_META_TITLE_MAX_CHARS;
+
 pub use refact_chat_history::trajectory_event::TrajectoryEvent;
 
 pub fn trajectory_writer_rollout_enabled() -> bool {
@@ -2316,12 +2318,20 @@ async fn synthesize_legacy_task_agent_worktree(
         source_workspace_root: source_workspace_root.clone(),
         repo_root: source_workspace_root,
         branch: card.agent_branch.clone(),
-        base_branch: task_record
-            .as_ref()
-            .and_then(|meta| meta.base_branch.clone()),
-        base_commit: task_record
-            .as_ref()
-            .and_then(|meta| meta.base_commit.clone()),
+        base_branch: if card.base_branch.is_some() || card.base_commit.is_some() {
+            card.base_branch.clone()
+        } else {
+            task_record
+                .as_ref()
+                .and_then(|meta| meta.base_branch.clone())
+        },
+        base_commit: if card.base_branch.is_some() || card.base_commit.is_some() {
+            card.base_commit.clone()
+        } else {
+            task_record
+                .as_ref()
+                .and_then(|meta| meta.base_commit.clone())
+        },
         task_id: Some(task_meta.task_id.clone()),
         card_id: Some(card.id.clone()),
         agent_id: task_meta.agent_id.clone().or_else(|| card.assignee.clone()),
@@ -2730,6 +2740,39 @@ pub async fn load_trajectory_for_chat(
 ) -> Option<LoadedTrajectory> {
     let candidate = find_trajectory_or_buddy_file(gcx.clone(), chat_id).await?;
     load_trajectory_candidate(gcx, chat_id, candidate).await
+}
+
+pub fn validate_trajectory_label(label: &str) -> Result<String, String> {
+    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    if label.is_empty() {
+        return Err("argument `label` must be non-empty".to_string());
+    }
+    if label.chars().count() > TRAJECTORY_LABEL_MAX_CHARS {
+        return Err(format!(
+            "argument `label` must be at most {TRAJECTORY_LABEL_MAX_CHARS} characters"
+        ));
+    }
+    Ok(label)
+}
+
+pub async fn set_trajectory_label(app: AppState, chat_id: &str, label: &str) -> Result<(), String> {
+    validate_trajectory_id(chat_id).map_err(|error| error.message)?;
+    let label = validate_trajectory_label(label)?;
+    let session_arc = app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get(chat_id)
+        .cloned()
+        .ok_or_else(|| format!("Live trajectory '{chat_id}' not found"))?;
+    {
+        let mut session = session_arc.lock().await;
+        session.set_title_from_trajectory_label(label);
+    }
+    try_save_trajectory_with_intent(app, session_arc, TrajectoryCommitIntent::Required)
+        .await
+        .map(|_| ())
 }
 
 pub async fn load_generic_trajectory_for_chat(
@@ -3356,6 +3399,7 @@ async fn save_trajectory_snapshot_inner(
         && snapshot.frozen_request_prefix.is_none()
         && snapshot.goal.is_none()
         && snapshot.auto_compression_cap.is_none()
+        && snapshot.title.is_empty()
         && existing_no_meta_path.is_none()
     {
         return Ok(());
@@ -19687,6 +19731,8 @@ mod tests {
                 agent_branch: Some("refact/task/card".to_string()),
                 agent_worktree: Some(agent_worktree.to_string_lossy().to_string()),
                 agent_worktree_name: Some("wt-legacy".to_string()),
+                base_branch: None,
+                base_commit: None,
                 ab_variants: None,
                 team_members: vec![],
                 target_files: Vec::new(),
@@ -19826,6 +19872,8 @@ mod tests {
                 agent_branch: Some("refact/task/card-mismatch".to_string()),
                 agent_worktree: Some(agent_worktree.to_string_lossy().to_string()),
                 agent_worktree_name: Some("wt-legacy-mismatch".to_string()),
+                base_branch: None,
+                base_commit: None,
                 ab_variants: None,
                 team_members: vec![],
                 target_files: Vec::new(),

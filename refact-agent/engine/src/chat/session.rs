@@ -2590,13 +2590,20 @@ impl ChatSession {
         self.thread.is_title_generated = is_generated;
         self.increment_version();
         self.touch();
+        if self.thread.task_meta.is_none() {
+            self.emit_trajectory_title_change(title);
+        }
+    }
+
+    pub fn set_title_from_trajectory_label(&mut self, title: String) {
+        self.thread.title = title.clone();
+        self.thread.is_title_generated = false;
+        self.increment_version();
+        self.touch();
         self.emit_trajectory_title_change(title);
     }
 
     fn emit_trajectory_title_change(&self, title: String) {
-        if self.thread.task_meta.is_some() {
-            return;
-        }
         if let Some(ref tx) = self.trajectory_events_tx {
             let effective_root = self
                 .thread

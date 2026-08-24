@@ -63,6 +63,8 @@ export interface BoardCard {
   agent_branch?: string;
   agent_worktree?: string;
   agent_worktree_name?: string;
+  base_branch?: string;
+  base_commit?: string;
   target_files: string[];
   comments?: CardComment[];
 }

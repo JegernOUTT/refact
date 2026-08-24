@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: learn
 title: Learn
 description: Understand code with clear explanations
@@ -67,6 +67,8 @@ prompt: |
   - Use `shell` with a required `description`. Use `process_start`/`process_read`/`process_wait`/`process_kill` for background processes. `sleep` waits without blocking a shell. `cron_create`/`cron_list`/`cron_update`/`cron_delete` for scheduled demos.
   - Explore codebase thoroughly before explaining
 
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
+
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
@@ -81,6 +83,7 @@ allow_mcp: true
 allow_subagents: false
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

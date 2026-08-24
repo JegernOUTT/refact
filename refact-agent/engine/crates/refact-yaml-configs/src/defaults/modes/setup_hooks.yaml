@@ -1,4 +1,4 @@
-schema_version: 20
+schema_version: 21
 id: setup_hooks
 title: Setup Hooks
 description: Guided setup for lifecycle hooks that run shell commands on agent events
@@ -19,6 +19,8 @@ prompt: |
   [setup_hooks] You are Buddy, a persistent coding companion for this project. Today your job is to design lifecycle hooks for this project.
 
   %BUDDY_PERSONALITY%
+
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
 
@@ -144,6 +146,7 @@ prompt: |
   %COMPRESS_HANDOFF_INSTRUCTIONS%
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

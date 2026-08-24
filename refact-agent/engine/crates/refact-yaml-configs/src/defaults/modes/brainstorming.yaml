@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 id: brainstorming
 title: Brainstorming
 description: Turn rough ideas into approved designs before planning or implementation
@@ -93,6 +93,8 @@ prompt: |
   - Keep the user involved through small, readable validation chunks.
   - Be concrete enough that Plan mode can turn the design into tasks.
 
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
+
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
@@ -108,6 +110,7 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

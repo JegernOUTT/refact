@@ -414,6 +414,15 @@ pub async fn system_prompt_add_extra_instructions(
         system_prompt = system_prompt.replace("%CODEGRAPH_INSTRUCTIONS%", replacement);
     }
 
+    if system_prompt.contains("%TRAJECTORY_LABEL_INSTRUCTIONS%") {
+        let replacement = if tool_names.contains("set_trajectory_label") {
+            "## Conversation Label\nUse `set_trajectory_label` once the user's goal is clear to give this conversation a short, specific label. Update it only if the goal substantially changes."
+        } else {
+            ""
+        };
+        system_prompt = system_prompt.replace("%TRAJECTORY_LABEL_INSTRUCTIONS%", replacement);
+    }
+
     if system_prompt.contains("%AGENT_EXECUTION_INSTRUCTIONS%") {
         let has_edit_tools =
             tool_names.contains("create_textdoc") || tool_names.contains("update_textdoc");
@@ -690,6 +699,8 @@ mod tests {
             agent_branch: None,
             agent_worktree: None,
             agent_worktree_name: None,
+            base_branch: None,
+            base_commit: None,
             ab_variants: None,
             team_members: vec![],
             target_files: Vec::new(),
@@ -1130,6 +1141,35 @@ mod tests {
         )
         .await;
         assert!(without_codegraph.is_empty());
+    }
+
+    #[tokio::test]
+    async fn trajectory_label_instructions_expand_only_when_tool_is_available() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let prompt = "%TRAJECTORY_LABEL_INSTRUCTIONS%".to_string();
+        let rendered = system_prompt_add_extra_instructions(
+            app.clone(),
+            prompt.clone(),
+            HashSet::from(["set_trajectory_label".to_string()]),
+            &ChatMeta::default(),
+            &None,
+            "ask",
+        )
+        .await;
+        assert!(rendered.contains("Use `set_trajectory_label`"));
+        assert!(!rendered.contains("%TRAJECTORY_LABEL_INSTRUCTIONS%"));
+
+        let without_tool = system_prompt_add_extra_instructions(
+            app,
+            prompt,
+            HashSet::new(),
+            &ChatMeta::default(),
+            &None,
+            "ask",
+        )
+        .await;
+        assert!(without_tool.is_empty());
     }
 
     #[tokio::test]

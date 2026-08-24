@@ -1,4 +1,4 @@
-schema_version: 17
+schema_version: 18
 id: explore
 title: Explore
 description: Read-only exploration for context gathering without editing
@@ -59,6 +59,8 @@ prompt: |
 
   %COMPRESS_HANDOFF_INSTRUCTIONS%
 
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
+
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
@@ -78,6 +80,7 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

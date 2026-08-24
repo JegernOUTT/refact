@@ -1,4 +1,4 @@
-schema_version: 23
+schema_version: 24
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -203,6 +203,8 @@ prompt: |
 
   %AGENT_WORKTREE%
 
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
+
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
@@ -212,6 +214,7 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

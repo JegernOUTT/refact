@@ -1,4 +1,4 @@
-schema_version: 26
+schema_version: 27
 id: task_planner
 title: Task Planner
 description: Task board management mode
@@ -313,6 +313,8 @@ prompt: |
 
   %CD_INSTRUCTIONS%
 
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
+
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
@@ -334,6 +336,7 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

@@ -1,4 +1,4 @@
-schema_version: 18
+schema_version: 19
 id: plan
 title: Plan
 description: Turn approved designs or requirements into precise implementation plans
@@ -168,6 +168,8 @@ prompt: |
   - Treat the approved design or user requirements as the source of truth.
   - Make plans boring, explicit, verifiable, and easy to execute.
 
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
+
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
@@ -183,6 +185,7 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

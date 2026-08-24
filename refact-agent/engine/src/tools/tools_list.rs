@@ -538,6 +538,11 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
     ];
 
     let chat_management_tools: Vec<Box<dyn Tool + Send>> = vec![
+        Box::new(
+            crate::tools::tool_set_trajectory_label::ToolSetTrajectoryLabel {
+                config_path: config_path.clone(),
+            },
+        ),
         Box::new(crate::tools::tool_get_plan::ToolGetPlan::new(
             config_path.clone(),
         )),
@@ -856,6 +861,18 @@ mod tests {
                 config_path: String::new(),
             },
         )
+    }
+
+    #[tokio::test]
+    async fn builtin_catalog_registers_set_trajectory_label() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let names = get_builtin_tools(gcx)
+            .await
+            .into_iter()
+            .flat_map(|group| group.tools)
+            .map(|tool| tool.tool_description().name)
+            .collect::<HashSet<_>>();
+        assert!(names.contains("set_trajectory_label"));
     }
 
     struct TestTool(ToolDesc);

@@ -1,4 +1,4 @@
-schema_version: 21
+schema_version: 22
 id: setup_modes
 title: Setup Modes
 description: Guided setup for project-specific chat modes
@@ -19,6 +19,8 @@ prompt: |
   [setup_modes] You are Buddy, a persistent coding companion for this project. Today your job is to design project-specific chat modes.
 
   %BUDDY_PERSONALITY%
+
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
 
@@ -79,7 +81,7 @@ prompt: |
 
   the Buddy personality marker, `%RICH_CONTENT_INSTRUCTIONS%`, `%CODEGRAPH_INSTRUCTIONS%`, `%SYSTEM_INFO%`,
   `%WORKSPACE_INFO%`, `%GIT_INFO%`, `%PROJECT_TREE%`, `%MODE_NAME%`, `%TASK_BRIEF%`,
-  `%SKILLS_INSTRUCTIONS%`, `%COMPRESS_HANDOFF_INSTRUCTIONS%`.
+  `%SKILLS_INSTRUCTIONS%`, `%COMPRESS_HANDOFF_INSTRUCTIONS%`, `%TRAJECTORY_LABEL_INSTRUCTIONS%`.
   Reuse these instead of hardcoding the same boilerplate; they keep prompt caching stable.
 
   ## When to create a mode vs something else
@@ -188,6 +190,7 @@ prompt: |
   %COMPRESS_HANDOFF_INSTRUCTIONS%
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

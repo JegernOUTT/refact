@@ -458,9 +458,14 @@ impl ToolTaskRestartAgent {
         let agent_id = Uuid::new_v4().to_string();
         let agent_chat_id = format!("agent-{}-{}", card_id, &agent_id[..8]);
 
+        let mut restart_task_meta = task_meta.clone();
+        if original_card.base_branch.is_some() || original_card.base_commit.is_some() {
+            restart_task_meta.base_branch = original_card.base_branch.clone();
+            restart_task_meta.base_commit = original_card.base_commit.clone();
+        }
         let prepared_worktree = prepare_agent_worktree(
             gcx.clone(),
-            task_meta,
+            &restart_task_meta,
             task_id,
             &agent_id,
             card_id,
@@ -477,6 +482,8 @@ impl ToolTaskRestartAgent {
         );
         let worktree_name = Some(prepared_worktree.worktree_name());
         let worktree_meta = prepared_worktree.worktree_meta();
+        let prepared_base_branch = worktree_meta.base_branch.clone();
+        let prepared_base_commit = worktree_meta.base_commit.clone();
         let card_id_owned = card_id.to_string();
         let agent_id_clone = agent_id.clone();
         let agent_chat_id_clone = agent_chat_id.clone();
@@ -496,6 +503,8 @@ impl ToolTaskRestartAgent {
                     worktree_path_str.clone(),
                     worktree_name.clone(),
                 );
+                card.base_branch = prepared_base_branch.clone();
+                card.base_commit = prepared_base_commit.clone();
                 Ok(())
             })
             .await;
@@ -836,6 +845,8 @@ mod tests {
             agent_branch: branch,
             agent_worktree: worktree,
             agent_worktree_name: None,
+            base_branch: None,
+            base_commit: None,
             ab_variants: None,
             team_members: vec![],
             target_files: vec![],
@@ -926,6 +937,8 @@ mod tests {
             agent_branch: None,
             agent_worktree: None,
             agent_worktree_name: None,
+            base_branch: None,
+            base_commit: None,
             ab_variants: None,
             team_members: vec![],
             target_files: vec![],

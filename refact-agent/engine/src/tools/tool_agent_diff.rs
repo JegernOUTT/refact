@@ -132,16 +132,29 @@ fn present(value: Option<String>) -> Option<String> {
 fn resolve_base(
     worktree_commit: Option<String>,
     worktree_branch: Option<String>,
+    card_commit: Option<String>,
+    card_branch: Option<String>,
     task_meta_commit: Option<String>,
     task_meta_branch: Option<String>,
 ) -> Result<DiffBase, String> {
-    if let Some(commit) = present(worktree_commit).or_else(|| present(task_meta_commit)) {
+    let card_pair_present =
+        present(card_commit.clone()).is_some() || present(card_branch.clone()).is_some();
+    let worktree_pair_present =
+        present(worktree_commit.clone()).is_some() || present(worktree_branch.clone()).is_some();
+    let (commit, branch) = if card_pair_present {
+        (present(card_commit), present(card_branch))
+    } else if worktree_pair_present {
+        (present(worktree_commit), present(worktree_branch))
+    } else {
+        (present(task_meta_commit), present(task_meta_branch))
+    };
+    if let Some(commit) = commit {
         return Ok(DiffBase {
             refish: commit.clone(),
             label: format!("commit {}", commit),
         });
     }
-    if let Some(branch) = present(worktree_branch).or_else(|| present(task_meta_branch)) {
+    if let Some(branch) = branch {
         return Ok(DiffBase {
             refish: branch.clone(),
             label: format!("branch {}", branch),
@@ -952,6 +965,8 @@ impl Tool for ToolAgentDiff {
         let base = resolve_base(
             worktree_commit,
             worktree_branch,
+            card.base_commit.clone(),
+            card.base_branch.clone(),
             task_meta.base_commit,
             task_meta.base_branch,
         )?;
@@ -984,6 +999,31 @@ mod tests {
     use super::*;
     use crate::app_state::AppState;
     use crate::chat::types::TaskMeta as ThreadTaskMeta;
+
+    #[test]
+    fn downstream_base_resolution_prefers_card_over_task_legacy_fallback() {
+        let base = resolve_base(
+            None,
+            None,
+            Some("card-commit".to_string()),
+            Some("card-branch".to_string()),
+            Some("task-commit".to_string()),
+            Some("task-branch".to_string()),
+        )
+        .unwrap();
+        assert_eq!(base.refish, "card-commit");
+
+        let legacy = resolve_base(
+            None,
+            None,
+            None,
+            None,
+            Some("task-commit".to_string()),
+            Some("task-branch".to_string()),
+        )
+        .unwrap();
+        assert_eq!(legacy.refish, "task-commit");
+    }
     use crate::tasks::types::{TaskBoard, TaskMeta, TaskStatus};
     use crate::tools::tools_description::Tool;
     use crate::worktrees::types::CreateWorktreeRequest;
@@ -1081,6 +1121,8 @@ mod tests {
             agent_branch: branch,
             agent_worktree: worktree,
             agent_worktree_name: worktree_name,
+            base_branch: None,
+            base_commit: None,
             ab_variants: None,
             team_members: vec![],
             target_files: vec![],

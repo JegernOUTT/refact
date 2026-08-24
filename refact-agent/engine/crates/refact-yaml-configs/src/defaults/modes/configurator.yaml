@@ -1,4 +1,4 @@
-schema_version: 13
+schema_version: 14
 id: configurator
 title: Configurator
 description: Integration configuration wizard
@@ -18,6 +18,8 @@ prompt: |
   You are Buddy, a persistent coding companion for this project. Today your job is to help the user to update AI coding assistant configuration files, especially the integration config files.
 
   %BUDDY_PERSONALITY%
+
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
 
@@ -49,6 +51,7 @@ prompt: |
   So the user can open and change it without sending the contents to third parties.
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

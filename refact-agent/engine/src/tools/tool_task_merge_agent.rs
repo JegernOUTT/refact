@@ -353,7 +353,7 @@ async fn worktree_id_is_valid_for_card(
     worktree_id: &str,
     task_id: &str,
     card: &crate::tasks::types::BoardCard,
-) -> Result<(), String> {
+) -> Result<WorktreeRecordView, String> {
     let view = service.get_worktree(worktree_id).await?;
     if !registered_record_matches_card(&view, task_id, card) {
         return Err(format!(
@@ -363,7 +363,8 @@ async fn worktree_id_is_valid_for_card(
     }
     service
         .validate_registered_worktree_checkout(worktree_id)
-        .await
+        .await?;
+    Ok(view)
 }
 
 fn verifier_merge_block_message(card_id: &str, concerns: &[String]) -> String {
@@ -783,14 +784,30 @@ async fn merge_registered_task_worktree(
         return Ok(None);
     };
     let task_meta = storage::load_task_meta(gcx.clone(), task_id).await?;
-    let target_branch = task_meta
-        .base_branch
-        .clone()
-        .ok_or("Task has no base branch set")?;
     let cache_dir = gcx.cache_dir.clone();
     let service = WorktreeService::new_async(cache_dir, workspace_root.to_path_buf()).await?;
-    worktree_id_is_valid_for_card(&service, &worktree_id, task_id, card).await?;
-    let diff = service.diff_worktree(&worktree_id).await.ok();
+    let registered = worktree_id_is_valid_for_card(&service, &worktree_id, task_id, card).await?;
+    let card_pair_present = card.base_branch.is_some() || card.base_commit.is_some();
+    let registered_pair_present =
+        registered.meta.base_branch.is_some() || registered.meta.base_commit.is_some();
+    let (base_branch, base_commit) = if card_pair_present {
+        (card.base_branch.clone(), card.base_commit.clone())
+    } else if registered_pair_present {
+        (
+            registered.meta.base_branch.clone(),
+            registered.meta.base_commit.clone(),
+        )
+    } else {
+        (task_meta.base_branch, task_meta.base_commit)
+    };
+    let target_branch = base_branch.clone().ok_or("Task has no base branch set")?;
+    let diff = crate::worktrees::git::diff_for_path(
+        &registered.meta.root,
+        base_commit.as_deref(),
+        base_branch.as_deref(),
+        1024 * 1024,
+    )
+    .ok();
     let changed_files = diff
         .as_ref()
         .map(|diff| {
@@ -997,10 +1014,12 @@ impl Tool for ToolTaskMergeAgent {
         let expected_agent_chat_id = card.agent_chat_id.clone();
 
         let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
-        let base_branch = task_meta
+        let base_branch = card
             .base_branch
             .as_ref()
+            .or(task_meta.base_branch.as_ref())
             .ok_or("Task has no base branch set")?;
+        let comparison_base = card.base_commit.as_deref().unwrap_or(base_branch);
 
         if card.agent_worktree_name.is_some() {
             match merge_registered_task_worktree(
@@ -1122,14 +1141,14 @@ Then call `merge_agent` again."#,
 
         let changed_files = crate::chat::task_agent_monitor::git_diff_name_only(
             std::path::Path::new(agent_worktree),
-            base_branch,
+            comparison_base,
             agent_branch,
         );
 
         let commits_ahead_result = run_git(&[
             "rev-list",
             "--count",
-            &format!("{}..{}", base_branch, agent_branch),
+            &format!("{}..{}", comparison_base, agent_branch),
         ]);
         let commits_ahead = match commits_ahead_result {
             Ok(output) => output
@@ -1140,7 +1159,7 @@ Then call `merge_agent` again."#,
                 return Err(format!(
                     "Failed to count commits ahead (base: {}, agent: {}): {}. \
                     Check that both branches exist and are valid.",
-                    base_branch, agent_branch, e
+                    comparison_base, agent_branch, e
                 ));
             }
         };
@@ -1256,8 +1275,8 @@ Then call `merge_agent` again."#,
 
         // Generate commit message before acquiring the lock: git diff base...agent is read-only
         // and produces the same content as git diff --cached after a squash merge.
-        let diff =
-            run_git(&["diff", &format!("{}...{}", base_branch, agent_branch)]).unwrap_or_default();
+        let diff = run_git(&["diff", &format!("{}...{}", comparison_base, agent_branch)])
+            .unwrap_or_default();
         let commit_msg =
             match crate::agentic::generate_commit_message::generate_commit_message_by_diff(
                 gcx.clone(),
@@ -1718,6 +1737,8 @@ mod worktree_merge_tool_tests {
             agent_branch: Some(branch.to_string()),
             agent_worktree: Some(root.to_string_lossy().to_string()),
             agent_worktree_name: worktree_id.map(str::to_string),
+            base_branch: None,
+            base_commit: None,
             ab_variants: None,
             team_members: vec![],
             target_files: vec![],

@@ -1,4 +1,4 @@
-schema_version: 24
+schema_version: 25
 id: design
 title: Design
 description: Evidence-driven UI implementation using the live design system and browser measurements
@@ -54,6 +54,8 @@ prompt: |
   - Preserve existing behavior, accessibility, responsiveness, and theme support unless the user explicitly changes them.
   - Do not create or update a visual baseline unless the user explicitly requests a baseline change.
 
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
+
   %RICH_CONTENT_INSTRUCTIONS%
 
   %WORKSPACE_INFO%
@@ -65,6 +67,7 @@ allow_mcp: false
 allow_subagents: false
 
 tools:
+  - set_trajectory_label
   - design_system
   - ui_probe
   - mark_elements

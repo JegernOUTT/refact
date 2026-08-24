@@ -78,6 +78,7 @@ export type CreateWorktreeRequest = {
   source_workspace_root?: string;
   branch?: string;
   base_branch?: string;
+  base_commit?: string;
   chat_id?: string;
   kind?: string;
   task_id?: string;

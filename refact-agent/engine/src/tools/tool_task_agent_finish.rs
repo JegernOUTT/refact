@@ -1143,6 +1143,8 @@ mod tests {
             agent_branch: Some("legacy-branch".to_string()),
             agent_worktree: worktree,
             agent_worktree_name: Some("legacy-id".to_string()),
+            base_branch: None,
+            base_commit: None,
             ab_variants: None,
             team_members: vec![],
             target_files: vec![],

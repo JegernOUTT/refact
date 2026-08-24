@@ -14,6 +14,7 @@ use crate::chat::verify_cmd::{parse_restricted_argv, verification_commands};
 use crate::exec::command_policy::{build_exec_request, CommandKind, CommandPolicyInput, ExecSource};
 use crate::exec::{ExecOutputStream, ExecStatus};
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
+use crate::worktrees::service::WorktreeService;
 use crate::tasks::storage;
 use crate::tasks::types::{
     BoardCard, StatusUpdate, VerificationOutcome, VerificationResult, VerifierReport,
@@ -82,6 +83,8 @@ fn verifier_card_fingerprint(card: &BoardCard) -> Value {
         "agent_branch": &card.agent_branch,
         "agent_worktree": &card.agent_worktree,
         "agent_worktree_name": &card.agent_worktree_name,
+        "base_branch": &card.base_branch,
+        "base_commit": &card.base_commit,
         "ab_variants": &card.ab_variants,
         "team_members": &card.team_members,
         "target_files": &card.target_files,
@@ -324,7 +327,39 @@ pub async fn verify_card(
         command_results.push(result);
     }
 
-    let diff_base = resolve_verifier_diff_base(task_meta.base_commit, task_meta.base_branch)?;
+    let worktree_base = if let Some(worktree_id) = card.agent_worktree_name.as_deref() {
+        let project_root = crate::files_correction::get_project_dirs(gcx.clone())
+            .await
+            .into_iter()
+            .next();
+        if let Some(project_root) = project_root {
+            match WorktreeService::new_async(gcx.cache_dir.clone(), project_root).await {
+                Ok(service) => service
+                    .get_worktree(worktree_id)
+                    .await
+                    .ok()
+                    .map(|view| (view.meta.base_commit, view.meta.base_branch)),
+                Err(_) => None,
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let card_pair_present = card.base_commit.is_some() || card.base_branch.is_some();
+    let (base_commit, base_branch) = if card_pair_present {
+        (card.base_commit.clone(), card.base_branch.clone())
+    } else if let Some((commit, branch)) = worktree_base {
+        if commit.is_some() || branch.is_some() {
+            (commit, branch)
+        } else {
+            (task_meta.base_commit, task_meta.base_branch)
+        }
+    } else {
+        (task_meta.base_commit, task_meta.base_branch)
+    };
+    let diff_base = resolve_verifier_diff_base(base_commit, base_branch)?;
     let diff = git_changed_files_summary(&worktree, &diff_base, MAX_DIFF_LINES)
         .await
         .unwrap_or_else(|error| format!("diff unavailable: {}", error));
@@ -758,6 +793,8 @@ mod tests {
             agent_branch: None,
             agent_worktree: None,
             agent_worktree_name: None,
+            base_branch: None,
+            base_commit: None,
             ab_variants: None,
             team_members: vec![],
             target_files: Vec::new(),

@@ -1,4 +1,4 @@
-schema_version: 20
+schema_version: 21
 id: setup_mcp
 title: Setup MCP
 description: Discover and configure suitable MCP servers for the project
@@ -22,6 +22,8 @@ prompt: |
   [setup_mcp] You are Buddy, a persistent coding companion for this project. Today your job is MCP server discovery and configuration.
 
   %BUDDY_PERSONALITY%
+
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
 
@@ -169,6 +171,7 @@ prompt: |
   %COMPRESS_HANDOFF_INSTRUCTIONS%
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

@@ -165,6 +165,52 @@ fn current_branch_for_workspace(
     Ok(git::current_branch(&repo))
 }
 
+fn optional_nonempty_string_arg(
+    args: &HashMap<String, Value>,
+    name: &str,
+) -> Result<Option<String>, String> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if !value.trim().is_empty() => {
+            Ok(Some(value.trim().to_string()))
+        }
+        Some(Value::String(_)) => Err(format!("'{}' must be a non-empty string", name)),
+        Some(_) => Err(format!("'{}' must be a string", name)),
+    }
+}
+
+fn git_base_at(path: &Path) -> Result<(Option<String>, String), String> {
+    let repo = git::discover_repo(path)?;
+    Ok((git::current_branch(&repo), git::head_commit(&repo)?))
+}
+
+fn resolve_spawn_base(
+    explicit_branch: Option<String>,
+    explicit_commit: Option<String>,
+    planner_worktree: Option<&WorktreeMeta>,
+    workspace_root: &Path,
+    task_meta: &StoredTaskMeta,
+) -> (Option<String>, Option<String>) {
+    if explicit_branch.is_some() || explicit_commit.is_some() {
+        let fallback = planner_worktree
+            .and_then(|worktree| git_base_at(&worktree.root).ok())
+            .or_else(|| git_base_at(workspace_root).ok());
+        return (
+            explicit_branch
+                .or_else(|| fallback.as_ref().and_then(|(branch, _)| branch.clone()))
+                .or_else(|| task_meta.base_branch.clone()),
+            explicit_commit,
+        );
+    }
+    if let Some(base) = planner_worktree.and_then(|worktree| git_base_at(&worktree.root).ok()) {
+        return (base.0, Some(base.1));
+    }
+    if let Ok((branch, commit)) = git_base_at(workspace_root) {
+        return (branch, Some(commit));
+    }
+    (task_meta.base_branch.clone(), task_meta.base_commit.clone())
+}
+
 fn task_base_branch_missing_error(branch: &str) -> String {
     format!(
         "Task base branch '{}' no longer exists. Update the task base branch or create a new task on the current branch.",
@@ -228,6 +274,31 @@ pub(crate) async fn prepare_agent_worktree_with_suffix(
     agent_chat_id: &str,
     branch_suffix: Option<&str>,
 ) -> Result<PreparedWorktree, String> {
+    prepare_agent_worktree_with_base_and_suffix(
+        gcx,
+        task_meta,
+        task_id,
+        agent_id,
+        card_id,
+        agent_chat_id,
+        task_meta.base_branch.clone(),
+        task_meta.base_commit.clone(),
+        branch_suffix,
+    )
+    .await
+}
+
+async fn prepare_agent_worktree_with_base_and_suffix(
+    gcx: Arc<GlobalContext>,
+    task_meta: &StoredTaskMeta,
+    task_id: &str,
+    agent_id: &str,
+    card_id: &str,
+    agent_chat_id: &str,
+    base_branch: Option<String>,
+    base_commit: Option<String>,
+    branch_suffix: Option<&str>,
+) -> Result<PreparedWorktree, String> {
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     let workspace_root = project_dirs.first().cloned().ok_or_else(|| {
         "No workspace folder found; task agents require an isolated git worktree".to_string()
@@ -248,7 +319,7 @@ pub(crate) async fn prepare_agent_worktree_with_suffix(
     }
     let cache_dir = gcx.cache_dir.clone();
     let service = WorktreeService::new_async(cache_dir, workspace_root.clone()).await?;
-    let task_base_branch = task_meta.base_branch.clone();
+    let task_base_branch = base_branch;
     let current_branch = if task_base_branch.is_some() {
         current_branch_for_workspace(&workspace_root)?
     } else {
@@ -275,6 +346,7 @@ pub(crate) async fn prepare_agent_worktree_with_suffix(
             source_workspace_root: Some(workspace_root.to_string_lossy().to_string()),
             branch: Some(branch_name),
             base_branch: task_base_branch,
+            base_commit,
             chat_id: Some(agent_chat_id.to_string()),
             kind: Some("task_agent".to_string()),
             task_id: Some(task_id.to_string()),
@@ -689,7 +761,9 @@ impl Tool for ToolTaskSpawnAgent {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "List of file paths to open immediately when the agent starts. The agent will see these files as context at the beginning of its session."
-                    }
+                    },
+                    "base_branch": { "type": "string", "description": "Optional merge target branch for this card" },
+                    "base_commit": { "type": "string", "description": "Optional exact commit from which to create this card's agent branch" }
                 },
                 "required": ["card_id"]
             }),
@@ -720,7 +794,7 @@ impl Tool for ToolTaskSpawnAgent {
 
         drop(ccx_lock);
 
-        let (gcx, current_model, task_id, chat_id, root_chat_id, task_meta) = {
+        let (gcx, current_model, task_id, chat_id, root_chat_id, task_meta, planner_worktree) = {
             let ccx_lock = ccx.lock().await;
             let task_id = ccx_lock
                 .task_meta
@@ -739,6 +813,10 @@ impl Tool for ToolTaskSpawnAgent {
                 ccx_lock.chat_id.clone(),
                 ccx_lock.root_chat_id.clone(),
                 ccx_lock.task_meta.clone(),
+                ccx_lock
+                    .execution_scope
+                    .as_ref()
+                    .map(|scope| scope.worktree().clone()),
             )
         };
         let planner_chat_id = resolve_invoking_planner_chat_id(
@@ -769,6 +847,8 @@ impl Tool for ToolTaskSpawnAgent {
         let suggested_steps = suggested_steps.min(50).max(1);
 
         let task_meta = storage::load_task_meta(gcx.clone(), &task_id).await?;
+        let explicit_base_branch = optional_nonempty_string_arg(args, "base_branch")?;
+        let explicit_base_commit = optional_nonempty_string_arg(args, "base_commit")?;
 
         let model = resolve_agent_model(gcx.clone(), &current_model).await?;
         crate::tools::task_tool_helpers::preflight_agent_model(gcx.clone(), &model).await?;
@@ -814,13 +894,27 @@ impl Tool for ToolTaskSpawnAgent {
         let agent_id = Uuid::new_v4().to_string();
         let agent_chat_id = format!("agent-{}-{}", card_id, &agent_id[..8]);
 
-        let prepared_worktree = prepare_agent_worktree(
+        let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
+        let workspace_root = project_dirs.first().ok_or_else(|| {
+            "No workspace folder found; task agents require an isolated git worktree".to_string()
+        })?;
+        let (base_branch, base_commit) = resolve_spawn_base(
+            explicit_base_branch,
+            explicit_base_commit,
+            planner_worktree.as_ref(),
+            workspace_root,
+            &task_meta,
+        );
+        let prepared_worktree = prepare_agent_worktree_with_base_and_suffix(
             gcx.clone(),
             &task_meta,
             &task_id,
             &agent_id,
             card_id,
             &agent_chat_id,
+            base_branch,
+            base_commit,
+            None,
         )
         .await?;
 
@@ -912,6 +1006,8 @@ impl Tool for ToolTaskSpawnAgent {
                     worktree_path_str.clone(),
                     worktree_name.clone(),
                 );
+                card.base_branch = base_branch_from_prep.clone();
+                card.base_commit = base_commit_from_prep.clone();
 
                 Ok(Some(agents_active_before == 0))
             },
@@ -941,8 +1037,6 @@ impl Tool for ToolTaskSpawnAgent {
                 return Err(e);
             }
         };
-        meta.base_branch = base_branch_from_prep;
-        meta.base_commit = base_commit_from_prep;
         if starting_new_run {
             meta.last_agents_summary_at = Some(Utc::now().to_rfc3339());
         } else if meta.last_agents_summary_at.is_none() {
@@ -1247,6 +1341,8 @@ mod tests {
             agent_branch: None,
             agent_worktree: worktree,
             agent_worktree_name: None,
+            base_branch: None,
+            base_commit: None,
             ab_variants: None,
             team_members: vec![],
             target_files: vec![],

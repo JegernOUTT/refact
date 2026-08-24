@@ -137,6 +137,8 @@ pub struct CreateWorktreeRequest {
     #[serde(default)]
     pub base_branch: Option<String>,
     #[serde(default)]
+    pub base_commit: Option<String>,
+    #[serde(default)]
     pub chat_id: Option<String>,
     #[serde(default)]
     pub kind: Option<String>,
@@ -562,5 +564,17 @@ mod tests {
 
         assert!(!request.delete_after_merge);
         assert!(!request.include_uncommitted);
+    }
+
+    #[test]
+    fn create_worktree_request_accepts_explicit_base_commit() {
+        let request: CreateWorktreeRequest = serde_json::from_value(serde_json::json!({
+            "base_branch": "main",
+            "base_commit": "abc123"
+        }))
+        .unwrap();
+
+        assert_eq!(request.base_branch.as_deref(), Some("main"));
+        assert_eq!(request.base_commit.as_deref(), Some("abc123"));
     }
 }

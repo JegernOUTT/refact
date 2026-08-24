@@ -1,4 +1,4 @@
-schema_version: 23
+schema_version: 24
 id: agent
 title: Agent
 description: Full multi-step workflow with tools and editing capabilities
@@ -226,6 +226,8 @@ prompt: |
 
   %COMPRESS_HANDOFF_INSTRUCTIONS%
 
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
+
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
@@ -247,6 +249,7 @@ allow_mcp: true
 allow_subagents: true
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

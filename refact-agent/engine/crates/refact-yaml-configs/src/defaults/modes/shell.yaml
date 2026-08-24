@@ -1,4 +1,4 @@
-schema_version: 12
+schema_version: 13
 id: shell
 title: Shell
 description: Execute shell commands for system tasks
@@ -43,6 +43,8 @@ prompt: |
   **Purpose**: why running this
   **Result**: summary of output
 
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
+
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
@@ -54,6 +56,7 @@ allow_mcp: false
 allow_subagents: false
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

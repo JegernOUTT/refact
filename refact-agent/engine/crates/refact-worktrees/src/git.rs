@@ -159,16 +159,21 @@ pub fn create_worktree(
     worktree_path: &Path,
     worktree_name: &str,
     branch_name: &str,
-    base_ref: Option<&str>,
+    base_branch_ref: Option<&str>,
+    base_commit_ref: Option<&str>,
 ) -> Result<WorktreeCreateResult, String> {
     let repo = discover_repo(source_root)?;
     let repo_root = repo_root(&repo)?;
-    let base_branch = base_ref
+    let base_branch = base_branch_ref
         .map(|s| s.to_string())
         .or_else(|| current_branch(&repo));
-    let base_commit = match base_ref {
-        Some(base) => commit_for_branch(&repo, base)?,
-        None => head_commit(&repo)?,
+    if let Some(branch) = base_branch_ref {
+        commit_for_branch(&repo, branch)?;
+    }
+    let base_commit = match (base_commit_ref, base_branch_ref) {
+        (Some(commit), _) => commit_for_ref(&repo, commit)?,
+        (None, Some(branch)) => commit_for_branch(&repo, branch)?,
+        (None, None) => head_commit(&repo)?,
     };
     let dirty_source = has_porcelain_changes(&repo_root).unwrap_or(false);
 
@@ -1007,9 +1012,9 @@ pub fn base_relative_ahead_behind(
         return None;
     }
     let local_oid = head.peel_to_commit().ok()?.id();
-    let base_oid = base_branch
-        .and_then(|branch| commit_for_ref(&repo, branch).ok())
-        .or_else(|| base_commit.and_then(|commit| commit_for_ref(&repo, commit).ok()))
+    let base_oid = base_commit
+        .and_then(|commit| commit_for_ref(&repo, commit).ok())
+        .or_else(|| base_branch.and_then(|branch| commit_for_ref(&repo, branch).ok()))
         .and_then(|commit| git2::Oid::from_str(&commit).ok())?;
     repo.graph_ahead_behind(local_oid, base_oid).ok()
 }

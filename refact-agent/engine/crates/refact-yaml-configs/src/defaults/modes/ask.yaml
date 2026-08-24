@@ -1,4 +1,4 @@
-schema_version: 11
+schema_version: 12
 id: ask
 title: Ask
 description: Quick Q&A with web research capability
@@ -45,6 +45,8 @@ prompt: |
 
   Example: `ask_questions(questions='[{"id":"q1","type":"free_text","text":"Can you be more specific about what you need?"}]')`
 
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
+
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
@@ -54,6 +56,7 @@ allow_mcp: true
 allow_subagents: false
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

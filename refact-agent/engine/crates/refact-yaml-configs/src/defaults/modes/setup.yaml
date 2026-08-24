@@ -1,4 +1,4 @@
-schema_version: 20
+schema_version: 21
 id: setup
 title: Setup Project
 description: Analyze the project and configure Refact artifacts (AGENTS, commands, skills, subagents, integrations, knowledge)
@@ -23,6 +23,8 @@ prompt: |
   decide what kind of setup it actually needs, and then create only the highest-leverage artifacts.
 
   %BUDDY_PERSONALITY%
+
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
 
@@ -232,6 +234,7 @@ prompt: |
   %COMPRESS_HANDOFF_INSTRUCTIONS%
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

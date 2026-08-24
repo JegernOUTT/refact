@@ -214,6 +214,7 @@ impl WorktreeService {
         let create_id = id.clone();
         let create_branch = branch.clone();
         let create_base_branch = request.base_branch.clone();
+        let create_base_commit = request.base_commit.clone();
         let (created, status) = match tokio::task::spawn_blocking(move || {
             let created = git::create_worktree(
                 &create_source,
@@ -221,6 +222,7 @@ impl WorktreeService {
                 &create_id,
                 &create_branch,
                 create_base_branch.as_deref(),
+                create_base_commit.as_deref(),
             )?;
             let status = git::status_for_path(&create_worktree_path);
             Ok::<_, String>((created, status))
@@ -2671,6 +2673,35 @@ mod worktree_registry_tests {
     }
 
     #[tokio::test]
+    async fn worktree_create_uses_explicit_commit_but_keeps_merge_target_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("repo");
+        let cache = temp.path().join("cache");
+        std::fs::create_dir_all(&source).unwrap();
+        init_repo(&source);
+        let exact = run_git(&source, &["rev-parse", "HEAD"]).trim().to_string();
+        commit_file(&source, "later.txt", "later\n", "later");
+        let service = WorktreeService::new(cache, source).unwrap();
+        let created = service
+            .create_worktree(CreateWorktreeRequest {
+                branch: Some("refact/chat/exact-base".to_string()),
+                base_branch: Some("main".to_string()),
+                base_commit: Some(exact.clone()),
+                kind: Some("chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(created.worktree.meta.base_branch.as_deref(), Some("main"));
+        assert_eq!(
+            created.worktree.meta.base_commit.as_deref(),
+            Some(exact.as_str())
+        );
+        assert!(!created.worktree.meta.root.join("later.txt").exists());
+    }
+
+    #[tokio::test]
     async fn worktree_registry_create_rejects_existing_branch_reuse() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("repo");
@@ -2707,6 +2738,7 @@ mod worktree_registry_tests {
             &invalid_worktree_path,
             "cleanup-failure",
             "refact/chat/cleanup-failure",
+            None,
             None,
         ) {
             Ok(_) => panic!("worktree creation unexpectedly succeeded"),

@@ -1,4 +1,4 @@
-schema_version: 20
+schema_version: 21
 id: setup_knowledge
 title: Seed Knowledge
 description: Guided seeding of durable project knowledge and memory
@@ -19,6 +19,8 @@ prompt: |
   [setup_knowledge] You are Buddy, a persistent coding companion for this project. Today your job is to seed durable project knowledge.
 
   %BUDDY_PERSONALITY%
+
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
 
@@ -94,6 +96,7 @@ prompt: |
   %COMPRESS_HANDOFF_INSTRUCTIONS%
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk

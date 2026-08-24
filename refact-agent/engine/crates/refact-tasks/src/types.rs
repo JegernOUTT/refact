@@ -447,6 +447,10 @@ pub struct BoardCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_worktree_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ab_variants: Option<AbVariants>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub team_members: Vec<TeamMember>,
@@ -589,6 +593,8 @@ mod tests {
             agent_branch: None,
             agent_worktree: None,
             agent_worktree_name: None,
+            base_branch: None,
+            base_commit: None,
             ab_variants: None,
             team_members: vec![],
             target_files: vec![],
@@ -1052,5 +1058,18 @@ mod tests {
             vec![("Reported dependency".into(), "finished cleanly".into())]
         );
         assert!(board.get_dependency_reports("missing").is_empty());
+    }
+
+    #[test]
+    fn legacy_card_serde_defaults_card_base_refs() {
+        let original = card("legacy", "Legacy", "planned", vec![]);
+        let mut json = serde_json::to_value(&original).unwrap();
+        json.as_object_mut().unwrap().remove("base_branch");
+        json.as_object_mut().unwrap().remove("base_commit");
+
+        let decoded: BoardCard = serde_json::from_value(json).unwrap();
+
+        assert!(decoded.base_branch.is_none());
+        assert!(decoded.base_commit.is_none());
     }
 }

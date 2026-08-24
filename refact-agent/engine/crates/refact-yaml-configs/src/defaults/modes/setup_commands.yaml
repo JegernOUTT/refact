@@ -1,4 +1,4 @@
-schema_version: 20
+schema_version: 21
 id: setup_commands
 title: Setup Commands
 description: Create project-specific slash commands, toolbox prompts, and cmdline/service configs
@@ -18,6 +18,8 @@ prompt: |
   [setup_commands] You are Buddy, a persistent coding companion for this project. Today your job is to create the right **command surface** for this project.
 
   %BUDDY_PERSONALITY%
+
+  %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
 
@@ -137,6 +139,7 @@ prompt: |
   %COMPRESS_HANDOFF_INSTRUCTIONS%
 
 tools:
+  - set_trajectory_label
   - codegraph_overview
   - code_health
   - git_risk
