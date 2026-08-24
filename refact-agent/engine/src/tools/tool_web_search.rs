@@ -85,11 +85,13 @@ impl Tool for ToolWebSearch {
             json!(search_results
                 .into_iter()
                 .map(|result| {
+                    let citation_span = result.snippet.chars().count();
                     json!({
                         "title": result.title,
                         "url": result.url,
                         "snippet": result.snippet,
                         "source": result.source,
+                        "citation_span": citation_span,
                     })
                 })
                 .collect::<Vec<_>>()),

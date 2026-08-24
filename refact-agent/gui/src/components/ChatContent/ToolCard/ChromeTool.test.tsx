@@ -14,6 +14,7 @@ function makeStore(toolMessage: {
   tool_call_id: string;
   content: string | { m_type: string; m_content: string }[];
   tool_failed?: boolean;
+  extra?: Record<string, unknown>;
 }) {
   return configureStore({
     reducer: {
@@ -31,6 +32,7 @@ function makeStore(toolMessage: {
                     tool_call_id: toolMessage.tool_call_id,
                     content: toolMessage.content,
                     tool_failed: toolMessage.tool_failed,
+                    extra: toolMessage.extra,
                   },
                 ],
               },
@@ -93,6 +95,44 @@ describe("ChromeTool", () => {
     ).toBeInTheDocument();
     expect(view.container.textContent).toContain("[REDACTED]");
     expect(view.container.textContent).not.toMatch(/secret-key|secret-id/);
+  });
+
+  test("keeps the specialized browser fallback with enrichment attached", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-browser-enrichment",
+      index: 0,
+      function: {
+        name: "chrome",
+        arguments: JSON.stringify({ request: { steps: [] } }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-browser-enrichment",
+      content: "raw browser fallback",
+      extra: {
+        tool_enrichment: {
+          schema_version: 1,
+          references: [
+            {
+              kind: "artifact",
+              target: "artifact:browser-1",
+              provenance: "native",
+            },
+          ],
+        },
+      },
+    });
+    render(
+      <Provider store={store}>
+        <Theme>
+          <ChromeTool toolCall={toolCall} />
+        </Theme>
+      </Provider>,
+    );
+
+    await user.click(screen.getByText(/Browser action/i));
+    expect(screen.getByText("raw browser fallback")).toBeInTheDocument();
   });
 
   test("summarizes drag, file drop, and coordinate mouse steps", async () => {

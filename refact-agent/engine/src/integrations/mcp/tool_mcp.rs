@@ -4,6 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use refact_tool_api::coerce_args_to_schema;
 use refact_privacy::{records_from_messages, FileRecord, PrivacyAuditError, PrivacyAudited};
+use sha2::{Digest, Sha256};
 
 /// Maximum bytes of text content returned from a single MCP tool call.
 /// Prevents runaway context window growth from excessively large tool responses.
@@ -117,6 +118,50 @@ fn truncate_to_byte_limit(text: String, limit: usize, total_bytes: &mut usize) -
             text.len() - boundary
         )
     }
+}
+
+fn mcp_result_type(content: &ChatContent) -> &'static str {
+    match content {
+        ChatContent::SimpleText(_) => "text",
+        ChatContent::Multimodal(elements)
+            if elements.iter().any(|element| element.m_type != "text") =>
+        {
+            "multimodal"
+        }
+        ChatContent::Multimodal(_) => "text",
+        ChatContent::ContextFiles(_) => "context_files",
+    }
+}
+
+fn mcp_metadata(tool: &ToolMCP, content: &ChatContent) -> Option<serde_json::Value> {
+    let schema = tool.mcp_tool.input_schema.as_ref();
+    let schema_hash = hex::encode(Sha256::digest(
+        serde_json::to_vec(schema).unwrap_or_default(),
+    ));
+    let config_path = PathBuf::from(&tool.config_path);
+    let server = config_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    if !mcp_metadata_name_is_safe(&server) || !mcp_metadata_name_is_safe(&tool.mcp_tool.name) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "server": server,
+        "tool": tool.mcp_tool.name.to_string(),
+        "status": "success",
+        "schema_hash": &schema_hash[..16],
+        "result_type": mcp_result_type(content),
+    }))
+}
+
+fn mcp_metadata_name_is_safe(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 pub struct ToolMCP {
@@ -450,6 +495,9 @@ impl Tool for ToolMCP {
                     tool_call_id: tool_call_id.clone(),
                     ..Default::default()
                 };
+                if let Some(metadata) = mcp_metadata(self, &message.content) {
+                    message.extra.insert("mcp".to_string(), metadata);
+                }
                 attach_mcp_observation(
                     &gcx,
                     observation.as_ref(),
@@ -635,6 +683,28 @@ mod tests {
             request_timeout: 30,
             auto_approve: false,
         }
+    }
+
+    #[test]
+    fn metadata_hashes_schema_and_uses_only_allowlisted_descriptors() {
+        let tool = make_tool_mcp(serde_json::json!({"type": "object"}));
+        let content = ChatContent::SimpleText("{\"ok\":true}".to_string());
+
+        let metadata = mcp_metadata(&tool, &content).unwrap();
+
+        assert_eq!(metadata["server"], "mcp_stdio_server");
+        assert_eq!(metadata["tool"], "test_tool");
+        assert_eq!(metadata["result_type"], "text");
+        assert_eq!(metadata["schema_hash"].as_str().unwrap().len(), 16);
+        assert!(!metadata.to_string().contains("args"));
+    }
+
+    #[test]
+    fn metadata_rejects_secret_like_tool_names() {
+        let mut tool = make_tool_mcp(serde_json::json!({"type": "object"}));
+        tool.mcp_tool.name = "get secret=token".into();
+
+        assert!(mcp_metadata(&tool, &ChatContent::SimpleText("ok".to_string())).is_none());
     }
 
     fn call_params(arguments: serde_json::Value) -> CallToolRequestParams {

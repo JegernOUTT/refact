@@ -130,4 +130,43 @@ describe("WebTool", () => {
     expect(screen.getByText("https://example.com")).toBeInTheDocument();
     expect(screen.getByText("Example snippet")).toBeInTheDocument();
   });
+
+  test("keeps the specialized web card when enrichment is present", async () => {
+    const user = userEvent.setup();
+    const toolCall: ToolCall = {
+      id: "tc-web-enrichment",
+      index: 0,
+      function: {
+        name: "web",
+        arguments: JSON.stringify({ url: "https://example.com" }),
+      },
+    };
+    const store = makeStore({
+      tool_call_id: "tc-web-enrichment",
+      content: "raw specialized result",
+      extra: {
+        tool_enrichment: {
+          schema_version: 1,
+          references: [
+            {
+              kind: "url",
+              target: "https://example.com",
+              provenance: "native",
+            },
+          ],
+        },
+      },
+    });
+
+    render(
+      <Provider store={store}>
+        <Theme>
+          <WebTool toolCall={toolCall} toolType="web" />
+        </Theme>
+      </Provider>,
+    );
+
+    await user.click(screen.getByRole("button", { expanded: false }));
+    expect(screen.getByText("raw specialized result")).toBeInTheDocument();
+  });
 });

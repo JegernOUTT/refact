@@ -5,7 +5,7 @@ use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
-use crate::at_commands::at_web::execute_at_web;
+use crate::at_commands::at_web::execute_at_web_result;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::postprocessing::pp_command_output::OutputFilter;
@@ -155,13 +155,24 @@ impl Tool for ToolWeb {
             Some(v) => return Err(format!("argument `options` is not an object: {:?}", v)),
         };
 
-        let text = execute_at_web(&url, options.as_ref()).await?;
-        let text = if text.is_empty() {
+        let fetched = execute_at_web_result(&url, options.as_ref()).await?;
+        let text = if fetched.text.is_empty() {
             "No content retrieved from the URL.".to_string()
         } else {
-            text
+            fetched.text
         };
         let output_filter = parse_output_filter(args);
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "web_fetch".to_string(),
+            serde_json::json!({
+                "requested_url": fetched.requested_url,
+                "final_url": fetched.final_url,
+                "status": fetched.status,
+                "content_type": fetched.content_type,
+                "source": fetched.source,
+            }),
+        );
 
         let result = vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
@@ -169,6 +180,7 @@ impl Tool for ToolWeb {
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
             output_filter: Some(output_filter),
+            extra,
             ..Default::default()
         })];
 

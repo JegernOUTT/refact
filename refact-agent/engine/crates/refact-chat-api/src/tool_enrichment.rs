@@ -290,7 +290,7 @@ fn merge_reference(existing: &mut ToolEnrichmentReference, incoming: ToolEnrichm
 }
 
 fn normalize_target(kind: ToolEnrichmentKind, target: &str) -> Option<String> {
-    if kind == ToolEnrichmentKind::Url {
+    if matches!(kind, ToolEnrichmentKind::Url | ToolEnrichmentKind::Citation) {
         return normalize_http_url(target);
     }
     if kind.requires_workspace_path() {
@@ -302,7 +302,7 @@ fn normalize_target(kind: ToolEnrichmentKind, target: &str) -> Option<String> {
     normalize_safe_text(target, MAX_TARGET_CHARS).map(|(text, _)| text)
 }
 
-fn normalize_http_url(value: &str) -> Option<String> {
+pub fn sanitize_http_url(value: &str) -> Option<String> {
     let mut url = Url::parse(value.trim()).ok()?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return None;
@@ -313,6 +313,10 @@ fn normalize_http_url(value: &str) -> Option<String> {
     url.set_fragment(None);
     let normalized = url.to_string();
     normalize_safe_text(&normalized, MAX_TARGET_CHARS).map(|(text, _)| text)
+}
+
+fn normalize_http_url(value: &str) -> Option<String> {
+    sanitize_http_url(value)
 }
 
 fn normalize_workspace_relative_path(value: &str) -> Option<String> {
@@ -497,6 +501,15 @@ mod tests {
                 .normalized()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn sanitize_http_url_strips_redirect_query_and_credentials() {
+        assert_eq!(
+            sanitize_http_url("https://user:token@example.test/final?token=secret#fragment"),
+            Some("https://example.test/final".to_string())
+        );
+        assert!(sanitize_http_url("file:///private/final").is_none());
     }
 
     #[test]

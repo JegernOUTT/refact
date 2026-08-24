@@ -9,6 +9,7 @@ use tokio::sync::Mutex as AMutex;
 use select::predicate::{Attr, Name};
 use html2text::render::text_renderer::{TaggedLine, TextDecorator};
 use serde_json::Value;
+use refact_chat_api::sanitize_http_url;
 
 use crate::at_commands::at_commands::{AtCommand, AtCommandsContext, AtParam};
 use crate::at_commands::execute_at::AtCommandMember;
@@ -88,14 +89,31 @@ const JINA_READER_BASE_URL: &str = "https://r.jina.ai/";
 const JINA_TIMEOUT_SECS: u64 = 60;
 const FALLBACK_TIMEOUT_SECS: u64 = 10;
 
+#[derive(Clone, Debug)]
+pub struct WebFetchResult {
+    pub text: String,
+    pub requested_url: String,
+    pub final_url: String,
+    pub status: u16,
+    pub content_type: Option<String>,
+    pub source: &'static str,
+}
+
 pub async fn execute_at_web(
     url: &str,
     options: Option<&HashMap<String, Value>>,
 ) -> Result<String, String> {
+    Ok(execute_at_web_result(url, options).await?.text)
+}
+
+pub async fn execute_at_web_result(
+    url: &str,
+    options: Option<&HashMap<String, Value>>,
+) -> Result<WebFetchResult, String> {
     match fetch_with_jina_reader(url, options).await {
-        Ok(text) => {
+        Ok(result) => {
             info!("successfully fetched {} via Jina Reader", url);
-            Ok(text)
+            Ok(result)
         }
         Err(jina_err) => {
             warn!(
@@ -103,9 +121,9 @@ pub async fn execute_at_web(
                 url, jina_err
             );
             match fetch_simple(url).await {
-                Ok(text) => {
+                Ok(result) => {
                     info!("successfully fetched {} via simple fetch (fallback)", url);
-                    Ok(text)
+                    Ok(result)
                 }
                 Err(simple_err) => {
                     Err(format!("Both Jina Reader and simple fetch failed.\nJina error: {}\nSimple fetch error: {}", jina_err, simple_err))
@@ -118,7 +136,7 @@ pub async fn execute_at_web(
 async fn fetch_with_jina_reader(
     url: &str,
     options: Option<&HashMap<String, Value>>,
-) -> Result<String, String> {
+) -> Result<WebFetchResult, String> {
     // Public web reads carry no provider credentials and need ordinary site redirects.
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
@@ -172,6 +190,18 @@ async fn fetch_with_jina_reader(
     }
 
     let response = request.send().await.map_err(|e| e.to_string())?;
+    let status = response.status().as_u16();
+    let final_url = response
+        .url()
+        .as_str()
+        .strip_prefix(JINA_READER_BASE_URL)
+        .unwrap_or(url)
+        .to_string();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToString::to_string);
 
     if !response.status().is_success() {
         return Err(format!(
@@ -190,7 +220,14 @@ async fn fetch_with_jina_reader(
         return Err("Jina Reader returned empty content".to_string());
     }
 
-    Ok(text)
+    Ok(WebFetchResult {
+        text,
+        requested_url: sanitize_http_url(url).unwrap_or_default(),
+        final_url: sanitize_http_url(&final_url).unwrap_or_default(),
+        status,
+        content_type,
+        source: "jina_reader",
+    })
 }
 
 async fn parse_streaming_response(response: reqwest::Response) -> Result<String, String> {
@@ -320,7 +357,7 @@ fn find_content(html: String) -> String {
     html
 }
 
-async fn fetch_html(url: &str, timeout: Duration) -> Result<String, String> {
+async fn fetch_html(url: &str, timeout: Duration) -> Result<WebFetchResult, String> {
     // Public web reads carry no provider credentials and need ordinary site redirects.
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
@@ -345,6 +382,13 @@ async fn fetch_html(url: &str, timeout: Duration) -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?;
 
+    let status = response.status().as_u16();
+    let final_url = response.url().to_string();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToString::to_string);
     if !response.status().is_success() {
         return Err(format!(
             "unable to fetch url: {}; status: {}",
@@ -352,19 +396,25 @@ async fn fetch_html(url: &str, timeout: Duration) -> Result<String, String> {
             response.status()
         ));
     }
-    let body = response.text().await.map_err(|e| e.to_string())?;
-    Ok(body)
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    Ok(WebFetchResult {
+        text,
+        requested_url: sanitize_http_url(url).unwrap_or_default(),
+        final_url: sanitize_http_url(&final_url).unwrap_or_default(),
+        status,
+        content_type,
+        source: "simple_fetch",
+    })
 }
 
-async fn fetch_simple(url: &str) -> Result<String, String> {
-    let html = fetch_html(url, Duration::from_secs(FALLBACK_TIMEOUT_SECS)).await?;
-    let html = find_content(html);
+async fn fetch_simple(url: &str) -> Result<WebFetchResult, String> {
+    let mut result = fetch_html(url, Duration::from_secs(FALLBACK_TIMEOUT_SECS)).await?;
+    let html = find_content(result.text);
 
-    let text = html2text::config::with_decorator(CustomTextConversion)
+    result.text = html2text::config::with_decorator(CustomTextConversion)
         .string_from_read(&html.as_bytes()[..], 200)
         .map_err(|_| "Unable to convert html to text".to_string())?;
-
-    Ok(text)
+    Ok(result)
 }
 
 #[cfg(test)]

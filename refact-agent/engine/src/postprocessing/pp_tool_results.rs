@@ -89,6 +89,22 @@ fn tool_result_is_privacy_restricted(message: &ChatMessage) -> bool {
     }
 }
 
+fn is_safe_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn is_safe_mime(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'+' | b'.' | b'-'))
+}
+
 fn native_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
     let mut references = Vec::new();
     if let ChatContent::ContextFiles(files) = &message.content {
@@ -141,8 +157,140 @@ fn native_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
                 .get("title")
                 .and_then(serde_json::Value::as_str)
                 .map(ToString::to_string);
+            reference.summary = result
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .filter(|source| is_safe_identifier(source))
+                .map(|source| {
+                    let span = result
+                        .get("citation_span")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|span| format!(" · span: {span}"))
+                        .unwrap_or_default();
+                    format!("source: {source}{span}")
+                });
             Some(reference)
         }));
+    }
+    if let Some(fetch) = message.extra.get("web_fetch") {
+        let source = fetch.get("source").and_then(serde_json::Value::as_str);
+        let status = fetch
+            .get("status")
+            .and_then(serde_json::Value::as_u64)
+            .map(|status| status.to_string());
+        let content_type = fetch
+            .get("content_type")
+            .and_then(serde_json::Value::as_str)
+            .filter(|content_type| is_safe_mime(content_type));
+        for (field, label) in [("requested_url", "requested"), ("final_url", "final")] {
+            let Some(url) = fetch.get(field).and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let mut reference = reference(ToolEnrichmentKind::Url, url);
+            reference.label = source
+                .filter(|source| matches!(*source, "jina_reader" | "simple_fetch"))
+                .map(|source| format!("{label} · {source}"));
+            reference.status = status.clone();
+            reference.summary = content_type.map(|content_type| content_type.to_string());
+            references.push(reference);
+        }
+    }
+    if let Some(browser) = message.extra.get("browser") {
+        if let Some(url) = browser.get("page_url").and_then(serde_json::Value::as_str) {
+            let mut reference = reference(ToolEnrichmentKind::Url, url);
+            reference.label = Some("browser page".to_string());
+            reference.status = browser
+                .get("status")
+                .and_then(serde_json::Value::as_u64)
+                .map(|status| status.to_string());
+            references.push(reference);
+        }
+        for (field, label) in [
+            ("network_count", "network requests"),
+            ("console_errors", "console errors"),
+            ("console_warnings", "console warnings"),
+        ] {
+            let Some(count) = browser.get(field).and_then(serde_json::Value::as_u64) else {
+                continue;
+            };
+            let mut reference = reference(
+                ToolEnrichmentKind::Diagnostic,
+                &format!("browser:{field}:{count}"),
+            );
+            reference.label = Some(label.to_string());
+            references.push(reference);
+        }
+        if let Some(artifacts) = browser
+            .get("artifacts")
+            .and_then(serde_json::Value::as_array)
+        {
+            references.extend(artifacts.iter().filter_map(|artifact| {
+                let id = artifact.get("id")?.as_str()?;
+                let kind = artifact.get("kind")?.as_str()?;
+                let mime = artifact.get("mime")?.as_str()?;
+                let bytes = artifact.get("bytes")?.as_u64()?;
+                if !is_safe_identifier(id) || !is_safe_identifier(kind) || !is_safe_mime(mime) {
+                    return None;
+                }
+                let mut reference =
+                    reference(ToolEnrichmentKind::Artifact, &format!("artifact:{id}"));
+                reference.label = Some(kind.to_string());
+                reference.summary = Some(format!("{mime} · {bytes} bytes"));
+                Some(reference)
+            }));
+        }
+    }
+    if let Some(mcp) = message.extra.get("mcp") {
+        let server = mcp.get("server").and_then(serde_json::Value::as_str);
+        let tool = mcp.get("tool").and_then(serde_json::Value::as_str);
+        let schema_hash = mcp.get("schema_hash").and_then(serde_json::Value::as_str);
+        let result_type = mcp.get("result_type").and_then(serde_json::Value::as_str);
+        let status = mcp.get("status").and_then(serde_json::Value::as_str);
+        if let (Some(server), Some(tool), Some(schema_hash), Some(result_type), Some(status)) =
+            (server, tool, schema_hash, result_type, status)
+        {
+            if !is_safe_identifier(server)
+                || !is_safe_identifier(tool)
+                || schema_hash.len() != 16
+                || !schema_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !matches!(
+                    result_type,
+                    "json" | "text" | "multimodal" | "context_files"
+                )
+                || !matches!(status, "success" | "failed")
+            {
+                return references;
+            }
+            let mut reference = reference(
+                ToolEnrichmentKind::Symbol,
+                &format!("mcp::{server}::{tool}"),
+            );
+            reference.label = Some(format!("MCP {server}/{tool}"));
+            reference.summary = Some(format!("schema {schema_hash} · {result_type}"));
+            reference.status = Some(status.to_string());
+            references.push(reference);
+        }
+    }
+    for citation in &message.citations {
+        let Some(url) = citation.get("url").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let mut reference = reference(ToolEnrichmentKind::Citation, url);
+        reference.label = citation
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string);
+        if let (Some(start), Some(end)) = (
+            citation
+                .get("start_char_index")
+                .and_then(serde_json::Value::as_u64),
+            citation
+                .get("end_char_index")
+                .and_then(serde_json::Value::as_u64),
+        ) {
+            reference.summary = Some(format!("span: {start}-{end}"));
+        }
+        references.push(reference);
     }
     if let Some(exec) = message.extra.get("exec") {
         if let Some(process_id) = exec.get("process_id").and_then(serde_json::Value::as_str) {
@@ -312,5 +460,137 @@ mod tests {
         assert!(enrichment.references.is_empty());
         assert!(enrichment.privacy.restricted);
         assert_eq!(message.content.content_text_only(), "raw result");
+    }
+
+    #[test]
+    fn native_web_metadata_keeps_redirect_status_and_strips_url_secrets() {
+        let mut message = ChatMessage::new("tool".to_string(), "raw result".to_string());
+        message.extra.insert(
+            "web_fetch".to_string(),
+            serde_json::json!({
+                "requested_url": "https://user:token@example.test/start?token=secret",
+                "final_url": "https://example.test/final?api_key=secret",
+                "status": 302,
+                "content_type": "text/html",
+                "source": "jina_reader",
+            }),
+        );
+
+        enrich_tool_messages(std::slice::from_mut(&mut message));
+
+        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
+        assert_eq!(enrichment.references.len(), 2);
+        assert_eq!(
+            enrichment.references[0].target,
+            "https://example.test/start"
+        );
+        assert_eq!(
+            enrichment.references[1].target,
+            "https://example.test/final"
+        );
+        assert!(enrichment.references.iter().all(|reference| {
+            reference.status.as_deref() == Some("302")
+                && reference.summary.as_deref() == Some("text/html")
+        }));
+        assert!(!serde_json::to_string(&enrichment)
+            .unwrap()
+            .contains("secret"));
+    }
+
+    #[test]
+    fn native_citation_metadata_uses_url_and_span_without_cited_text() {
+        let mut message = ChatMessage::new("tool".to_string(), "raw result".to_string());
+        message.citations = vec![serde_json::json!({
+            "url": "https://example.test/source?token=secret",
+            "title": "Source",
+            "cited_text": "secret citation body",
+            "start_char_index": 4,
+            "end_char_index": 12,
+        })];
+
+        enrich_tool_messages(std::slice::from_mut(&mut message));
+
+        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
+        assert_eq!(enrichment.references.len(), 1);
+        assert_eq!(enrichment.references[0].kind, ToolEnrichmentKind::Citation);
+        assert_eq!(
+            enrichment.references[0].target,
+            "https://example.test/source"
+        );
+        assert_eq!(
+            enrichment.references[0].summary.as_deref(),
+            Some("span: 4-12")
+        );
+        assert!(!serde_json::to_string(&enrichment)
+            .unwrap()
+            .contains("secret citation body"));
+    }
+
+    #[test]
+    fn native_browser_metadata_uses_artifact_ids_and_never_paths_or_payloads() {
+        let mut message = ChatMessage::new("tool".to_string(), "raw result".to_string());
+        message.extra.insert(
+            "browser".to_string(),
+            serde_json::json!({
+                "page_url": "https://example.test/dashboard?token=secret",
+                "status": 200,
+                "network_count": 3,
+                "console_errors": 1,
+                "console_warnings": 2,
+                "artifacts": [{
+                    "id": "image-1",
+                    "kind": "pdf",
+                    "mime": "application/pdf",
+                    "bytes": 4096,
+                    "path": "/tmp/private/report.pdf",
+                    "data": "secret payload"
+                }],
+            }),
+        );
+
+        enrich_tool_messages(std::slice::from_mut(&mut message));
+
+        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
+        assert!(enrichment
+            .references
+            .iter()
+            .any(|reference| reference.target == "artifact:image-1"));
+        let serialized = serde_json::to_string(&enrichment).unwrap();
+        assert!(!serialized.contains("/tmp/private/report.pdf"));
+        assert!(!serialized.contains("secret payload"));
+        assert!(!serialized.contains("token=secret"));
+    }
+
+    #[test]
+    fn native_mcp_metadata_ignores_unknown_json_and_never_includes_arguments() {
+        let mut message = ChatMessage::new("tool".to_string(), "raw result".to_string());
+        message.extra.insert(
+            "mcp".to_string(),
+            serde_json::json!({
+                "server": "github",
+                "tool": "get_issue",
+                "status": "success",
+                "schema_hash": "0123456789abcdef",
+                "result_type": "json",
+                "args": {"token": "secret"},
+                "response": {"password": "secret"}
+            }),
+        );
+
+        enrich_tool_messages(std::slice::from_mut(&mut message));
+
+        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
+        assert_eq!(enrichment.references.len(), 1);
+        assert_eq!(enrichment.references[0].target, "mcp::github::get_issue");
+        assert!(!serde_json::to_string(&enrichment)
+            .unwrap()
+            .contains("secret"));
+
+        message
+            .extra
+            .insert("mcp".to_string(), serde_json::json!({"args": "secret"}));
+        message.extra.remove("tool_enrichment");
+        enrich_tool_messages(std::slice::from_mut(&mut message));
+        assert!(refact_chat_api::tool_enrichment_from_extra(&message.extra).is_none());
     }
 }

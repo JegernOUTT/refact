@@ -1223,6 +1223,7 @@ impl Tool for ToolChrome {
 
         let mut multimodal_els = vec![];
         let mut typed_content: Option<Vec<MultimodalElement>> = None;
+        let mut browser_extra = None;
 
         if let Some(request_value) = args.get("request") {
             let request = parse_browser_action_request(request_value.clone())
@@ -1262,6 +1263,7 @@ impl Tool for ToolChrome {
                         format_controller_report(&report, "", &image_policy);
                     tool_log.extend(execute_log);
                     multimodal_els.extend(command_multimodal_els);
+                    browser_extra = Some(browser_metadata(&report));
                 }
                 Err(e) => {
                     let err_msg = format!("Failed to execute typed browser request: {}.", e);
@@ -1340,11 +1342,16 @@ impl Tool for ToolChrome {
             content
         };
 
+        let mut extra = serde_json::Map::new();
+        if let Some(browser_extra) = browser_extra {
+            extra.insert("browser".to_string(), browser_extra);
+        }
         let msg = ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
             content: ChatContent::Multimodal(content),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
+            extra,
             ..Default::default()
         });
 
@@ -1929,6 +1936,46 @@ mod tests {
     }
 
     #[test]
+    fn browser_metadata_uses_safe_urls_and_synthetic_artifact_ids() {
+        let report: ExecutionReport = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "steps": [{
+                "step_index": 0,
+                "ok": true,
+                "summary": "Generated report",
+                "data": {"artifact": {
+                    "kind": "pdf",
+                    "mime": "application/pdf",
+                    "bytes": 4096,
+                    "path": "/tmp/private/report.pdf",
+                    "data": "secret payload"
+                }}
+            }],
+            "url": "https://user:token@example.test/dashboard?token=secret",
+            "network": [{
+                "timestamp": 0.0,
+                "method": "GET",
+                "url": "https://example.test",
+                "resource_type": "Document",
+                "status": 200
+            }],
+            "dialogs": [],
+            "new_tabs": [],
+        }))
+        .unwrap();
+
+        let metadata = browser_metadata(&report);
+
+        assert_eq!(metadata["page_url"], "https://example.test/dashboard");
+        assert_eq!(metadata["network_count"], 1);
+        assert_eq!(metadata["artifacts"][0]["kind"], "pdf");
+        assert_eq!(metadata["artifacts"][0]["id"], "browser-0-pdf");
+        let serialized = metadata.to_string();
+        assert!(!serialized.contains("/tmp/private/report.pdf"));
+        assert!(!serialized.contains("secret payload"));
+    }
+
+    #[test]
     fn a_snapshot_only_report_delivers_zero_image_bytes_to_the_model() {
         let report: ExecutionReport = serde_json::from_value(serde_json::json!({
             "ok": true,
@@ -2485,6 +2532,51 @@ async fn execute_via_controller(
 
 fn step_image_is_attachable(report: &ExecutionReport, data: &Value) -> bool {
     report.screenshot.is_none() || data["artifact"]["kind"] == "filmstrip"
+}
+
+fn browser_metadata(report: &ExecutionReport) -> Value {
+    let mut artifacts = report
+        .steps
+        .iter()
+        .enumerate()
+        .filter_map(|(index, step)| step.data.as_ref().map(|data| (index, data)))
+        .filter_map(|(index, data)| data.get("artifact").map(|artifact| (index, artifact)))
+        .filter_map(|(index, artifact)| {
+            let kind = artifact.get("kind")?.as_str()?;
+            let mime = artifact.get("mime")?.as_str()?;
+            let bytes = artifact.get("bytes")?.as_u64()?;
+            Some(serde_json::json!({
+                "id": format!("browser-{index}-{kind}"),
+                "kind": kind,
+                "mime": mime,
+                "bytes": bytes,
+            }))
+        })
+        .collect::<Vec<_>>();
+    if let Some(snapshot) = report
+        .page
+        .as_ref()
+        .and_then(|page| page.snapshot.as_ref())
+        .and_then(|snapshot| snapshot.artifact.as_ref())
+    {
+        artifacts.push(serde_json::json!({
+            "id": "browser-page-snapshot",
+            "kind": snapshot.kind,
+            "mime": snapshot.mime,
+            "bytes": snapshot.bytes,
+        }));
+    }
+    artifacts.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+    artifacts.dedup_by(|left, right| left["id"] == right["id"]);
+
+    serde_json::json!({
+        "page_url": refact_chat_api::sanitize_http_url(report.url.as_deref().unwrap_or_default()),
+        "status": report.page.as_ref().and_then(|page| page.status),
+        "network_count": report.network.len(),
+        "console_errors": report.page.as_ref().map(|page| page.console.errors).unwrap_or_default(),
+        "console_warnings": report.page.as_ref().map(|page| page.console.warnings).unwrap_or_default(),
+        "artifacts": artifacts,
+    })
 }
 
 fn format_controller_report(
