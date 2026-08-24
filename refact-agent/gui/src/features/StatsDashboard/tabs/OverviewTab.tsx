@@ -194,7 +194,9 @@ const ProviderQuotaSection: React.FC = () => {
   const { data, isLoading, isError } = useGetProviderQuotasQuery(undefined, {
     pollingInterval: 5 * 60_000,
   });
-  const snapshots = data?.quotas ?? [];
+  const snapshots = (data?.quotas ?? []).filter(
+    (snapshot) => snapshot.available !== false,
+  );
 
   return (
     <section className={styles.quotaSection}>
