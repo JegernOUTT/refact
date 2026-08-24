@@ -207,6 +207,18 @@ impl LatestPathQueue {
             + self.in_flight_regular.len()
     }
 
+    fn pending_unique_len(&self) -> usize {
+        if self.coalescing_enabled {
+            self.pending_regular.len()
+        } else {
+            self.legacy_regular
+                .iter()
+                .map(|pending| pending.path.as_str())
+                .collect::<HashSet<_>>()
+                .len()
+        }
+    }
+
     fn is_idle(&self) -> bool {
         self.unprocessed_len() == 0
     }
@@ -225,6 +237,75 @@ impl LatestPathQueue {
 impl Default for LatestPathQueue {
     fn default() -> Self {
         Self::new(vecdb_path_coalescing_rollout_enabled())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VecdbDeferredQueueMetrics {
+    pub enqueue_requests: u64,
+    pub pending_unique_paths: usize,
+    pub processed_paths: u64,
+}
+
+impl VecdbDeferredQueueMetrics {
+    pub fn amplification_ratio(&self) -> f64 {
+        if self.pending_unique_paths == 0 {
+            0.0
+        } else {
+            self.processed_paths as f64 / self.pending_unique_paths as f64
+        }
+    }
+}
+
+pub struct VecdbDeferredQueueProbe {
+    queue: LatestPathQueue,
+    enqueue_requests: u64,
+    peak_pending_unique_paths: usize,
+    processed_paths: u64,
+}
+
+impl VecdbDeferredQueueProbe {
+    pub fn new(coalescing_enabled: bool) -> Self {
+        Self {
+            queue: LatestPathQueue::new(coalescing_enabled),
+            enqueue_requests: 0,
+            peak_pending_unique_paths: 0,
+            processed_paths: 0,
+        }
+    }
+
+    pub fn enqueue_deferred_paths(&mut self, documents: &[String]) {
+        for document in documents {
+            self.queue
+                .enqueue_regular(document.clone(), SystemTime::now());
+            self.enqueue_requests = self.enqueue_requests.saturating_add(1);
+            self.peak_pending_unique_paths = self
+                .peak_pending_unique_paths
+                .max(self.queue.pending_unique_len());
+        }
+    }
+
+    pub fn drain_after_cooldown(&mut self) {
+        let ready_at = SystemTime::now()
+            .checked_add(std::time::Duration::from_secs(COOLDOWN_SECONDS + 1))
+            .unwrap_or_else(SystemTime::now);
+        while let Some(work) = self.queue.take_next(ready_at) {
+            match work {
+                VecdbWork::RegularDocument { path, generation } => {
+                    self.processed_paths = self.processed_paths.saturating_add(1);
+                    self.queue.complete_regular(&path, generation);
+                }
+                VecdbWork::ImmediatelyRegularDocument(_) => {}
+            }
+        }
+    }
+
+    pub fn metrics(&self) -> VecdbDeferredQueueMetrics {
+        VecdbDeferredQueueMetrics {
+            enqueue_requests: self.enqueue_requests,
+            pending_unique_paths: self.peak_pending_unique_paths,
+            processed_paths: self.processed_paths,
+        }
     }
 }
 
@@ -972,6 +1053,30 @@ mod tests {
         queue.complete_regular(&in_flight_path, generation);
         assert_eq!(queue.pending_regular_len(), 1);
         assert_eq!(queue.in_flight_regular_len(), 0);
+    }
+
+    #[test]
+    fn deferred_probe_reports_repeated_path_coalescing() {
+        let path = "/workspace/project/.refact/knowledge/note.md".to_string();
+        let documents = vec![path.clone(), path.clone(), path.clone()];
+        let mut legacy = VecdbDeferredQueueProbe::new(false);
+        let mut coalesced = VecdbDeferredQueueProbe::new(true);
+
+        legacy.enqueue_deferred_paths(&documents);
+        coalesced.enqueue_deferred_paths(&documents);
+        legacy.drain_after_cooldown();
+        coalesced.drain_after_cooldown();
+
+        let legacy = legacy.metrics();
+        let coalesced = coalesced.metrics();
+        assert_eq!(legacy.enqueue_requests, 3);
+        assert_eq!(legacy.pending_unique_paths, 1);
+        assert_eq!(legacy.processed_paths, 3);
+        assert_eq!(legacy.amplification_ratio(), 3.0);
+        assert_eq!(coalesced.enqueue_requests, 3);
+        assert_eq!(coalesced.pending_unique_paths, 1);
+        assert_eq!(coalesced.processed_paths, 1);
+        assert_eq!(coalesced.amplification_ratio(), 1.0);
     }
 
     #[test]

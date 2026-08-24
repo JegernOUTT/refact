@@ -1,8 +1,8 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use refact_core::memory_plane::MemoryPlaneRoots;
@@ -371,8 +371,12 @@ pub struct FullSoakRolloutSwitches {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct FullSoakCounters {
     pub queue_processors_started: u64,
+    pub queue_processors_exited: u64,
     pub queue_notify_wakes: u64,
     pub queue_empty_locks: u64,
+    pub queue_lock_contention_events: u64,
+    pub tool_execution_wait_events: u64,
+    pub tool_execution_wait_us: u64,
     pub stream_deltas: u64,
     pub tool_calls: u64,
     pub sse_events: u64,
@@ -384,6 +388,9 @@ pub struct FullSoakCounters {
     pub watcher_replays: u64,
     pub vecdb_enqueues: u64,
     pub vecdb_coalesced_paths: u64,
+    pub vecdb_enqueue_requests: u64,
+    pub vecdb_pending_unique_paths: u64,
+    pub vecdb_processed_paths: u64,
     pub catalog_builds: u64,
     pub catalog_pool_builds: u64,
     pub monitor_scans: u64,
@@ -394,10 +401,23 @@ pub struct FullSoakCounters {
     pub restore_errors: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct MachineIoMetrics {
-    pub read_bytes: Option<u64>,
-    pub write_bytes: Option<u64>,
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct FullSoakProcessMetrics {
+    pub sample_count: usize,
+    pub cpu_time_delta_us: Option<u64>,
+    pub rss_baseline_bytes: Option<u64>,
+    pub rss_peak_bytes: Option<u64>,
+    pub rss_delta_bytes: Option<i64>,
+    pub read_bytes_delta: Option<u64>,
+    pub write_bytes_delta: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct FullSoakVecdbMetrics {
+    pub enqueue_requests: u64,
+    pub pending_unique_paths: u64,
+    pub processed_paths: u64,
+    pub amplification_ratio: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -432,8 +452,8 @@ pub struct FullSoakVariantBenchmarkReport {
     pub tool_call_stages: FullSoakToolCallStages,
     pub sse_serialize_latency: LatencySummary,
     pub sse_emit_latency: LatencySummary,
-    pub machine: MachineMetrics,
-    pub machine_io: MachineIoMetrics,
+    pub process_samples: Vec<FullSoakProcessMetrics>,
+    pub vecdb_deferred_queue: FullSoakVecdbMetrics,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1480,8 +1500,8 @@ pub fn validate_full_soak_report_json(json: &str) -> Result<(), String> {
                 "tool_call_stages",
                 "sse_serialize_latency",
                 "sse_emit_latency",
-                "machine",
-                "machine_io",
+                "process_samples",
+                "vecdb_deferred_queue",
             ] {
                 if variant.get(key).is_none() {
                     return Err(format!("full soak variant is missing {key}"));
@@ -1511,6 +1531,24 @@ pub fn validate_full_soak_report_json(json: &str) -> Result<(), String> {
                 if subsystems.get(key).is_none() {
                     return Err(format!("full soak subsystem disclosure is missing {key}"));
                 }
+            }
+            let process_samples = variant
+                .get("process_samples")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| "full soak process samples must be an array".to_string())?;
+            if process_samples.is_empty()
+                || process_samples.iter().any(|sample| {
+                    sample
+                        .get("sample_count")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0)
+                        < 2
+                })
+            {
+                return Err(
+                    "full soak process samples must include baseline and peak observations"
+                        .to_string(),
+                );
             }
         }
     }
@@ -1628,8 +1666,43 @@ impl FullSoakFixture {
 
 #[derive(Default)]
 struct FullSoakVecdb {
-    enqueue_calls: AtomicU64,
-    unique_paths: StdMutex<HashSet<String>>,
+    deferred_queue: StdMutex<Option<refact_vecdb::vdb_thread::VecdbDeferredQueueProbe>>,
+}
+
+impl FullSoakVecdb {
+    fn begin_sample(&self, coalescing_enabled: bool) -> Result<(), String> {
+        let mut probe = self
+            .deferred_queue
+            .lock()
+            .map_err(|_| "full soak VecDB probe lock poisoned".to_string())?;
+        *probe = Some(refact_vecdb::vdb_thread::VecdbDeferredQueueProbe::new(
+            coalescing_enabled,
+        ));
+        Ok(())
+    }
+
+    fn drain_deferred(&self) -> Result<(), String> {
+        let mut probe = self
+            .deferred_queue
+            .lock()
+            .map_err(|_| "full soak VecDB probe lock poisoned".to_string())?;
+        if let Some(probe) = probe.as_mut() {
+            probe.drain_after_cooldown();
+        }
+        Ok(())
+    }
+
+    fn metrics(&self) -> refact_vecdb::vdb_thread::VecdbDeferredQueueMetrics {
+        self.deferred_queue
+            .lock()
+            .ok()
+            .and_then(|probe| probe.as_ref().map(|probe| probe.metrics()))
+            .unwrap_or(refact_vecdb::vdb_thread::VecdbDeferredQueueMetrics {
+                enqueue_requests: 0,
+                pending_unique_paths: 0,
+                processed_paths: 0,
+            })
+    }
 }
 
 #[async_trait]
@@ -1649,11 +1722,7 @@ impl VecdbSearch for FullSoakVecdb {
     async fn get_status(&self) -> Result<VecDbStatus, String> {
         Ok(VecDbStatus {
             files_unprocessed: 0,
-            files_total: self
-                .unique_paths
-                .lock()
-                .map(|paths| paths.len())
-                .unwrap_or(0),
+            files_total: self.metrics().processed_paths as usize,
             requests_made_since_start: 0,
             vectors_made_since_start: 0,
             db_size: 0,
@@ -1665,23 +1734,22 @@ impl VecdbSearch for FullSoakVecdb {
         })
     }
 
-    async fn remove_file(&self, file_path: &PathBuf) -> Result<(), String> {
-        if let Ok(mut paths) = self.unique_paths.lock() {
-            paths.remove(&file_path.to_string_lossy().to_string());
-        }
+    async fn remove_file(&self, _file_path: &PathBuf) -> Result<(), String> {
         Ok(())
     }
 
     async fn vectorizer_enqueue_files(
         &self,
         documents: &[String],
-        _process_immediately: bool,
+        process_immediately: bool,
         _roots: MemoryPlaneRoots,
     ) {
-        self.enqueue_calls
-            .fetch_add(documents.len() as u64, Ordering::Relaxed);
-        if let Ok(mut paths) = self.unique_paths.lock() {
-            paths.extend(documents.iter().cloned());
+        if !process_immediately {
+            if let Ok(mut probe) = self.deferred_queue.lock() {
+                if let Some(probe) = probe.as_mut() {
+                    probe.enqueue_deferred_paths(documents);
+                }
+            }
         }
     }
 
@@ -1760,24 +1828,40 @@ async fn run_full_soak_workload(
     workload: &FullSoakWorkload,
     options: &BenchmarkOptions,
 ) -> Result<FullSoakWorkloadBenchmarkReport, String> {
-    let mut variants = Vec::with_capacity(2);
-    for (variant, optimized) in [("legacy", false), ("optimized", true)] {
-        for _ in 0..options.warmup_samples {
+    let mut legacy_samples = Vec::with_capacity(options.measured_samples);
+    let mut optimized_samples = Vec::with_capacity(options.measured_samples);
+    for sample_index in 0..options.warmup_samples {
+        for optimized in full_soak_variant_order(sample_index) {
             let sample = run_full_soak_sample(workload, optimized).await?;
             assert_full_soak_invariants(&sample.counters, &sample.subsystems)?;
         }
-        let mut samples = Vec::with_capacity(options.measured_samples);
-        for _ in 0..options.measured_samples {
+    }
+    for sample_index in 0..options.measured_samples {
+        for optimized in full_soak_variant_order(sample_index) {
             let sample = run_full_soak_sample(workload, optimized).await?;
             assert_full_soak_invariants(&sample.counters, &sample.subsystems)?;
-            samples.push(sample);
+            if optimized {
+                optimized_samples.push(sample);
+            } else {
+                legacy_samples.push(sample);
+            }
         }
-        variants.push(aggregate_full_soak_variant(variant, &samples)?);
     }
     Ok(FullSoakWorkloadBenchmarkReport {
         workload: workload.clone(),
-        variants,
+        variants: vec![
+            aggregate_full_soak_variant("legacy", &legacy_samples)?,
+            aggregate_full_soak_variant("optimized", &optimized_samples)?,
+        ],
     })
+}
+
+fn full_soak_variant_order(sample_index: usize) -> [bool; 2] {
+    if sample_index % 2 == 0 {
+        [false, true]
+    } else {
+        [true, false]
+    }
 }
 
 struct FullSoakSample {
@@ -1792,8 +1876,7 @@ struct FullSoakSample {
     tool_call_stage_samples: Vec<FullSoakToolCallStageSample>,
     sse_serialize_us: Vec<u64>,
     sse_emit_us: Vec<u64>,
-    machine: MachineMetrics,
-    machine_io: MachineIoMetrics,
+    process: FullSoakProcessMetrics,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1834,6 +1917,7 @@ async fn run_full_soak_sample(
         .map_err(|_| "full soak performance recorder lock poisoned".to_string())?;
     let _env = FullSoakEnvGuard::set(optimized);
     let fixture = FullSoakFixture::new(TOOL_POOL_DESCRIPTOR_COUNT as usize).await?;
+    fixture.vecdb.begin_sample(optimized)?;
     let sink = Arc::new(MemoryPerfSink::new());
     let recorder = Arc::new(PerfRecorder::with_salt(
         Arc::new(BenchmarkClock::default()),
@@ -1841,6 +1925,7 @@ async fn run_full_soak_sample(
         [29; 32],
     ));
     let _recorder_guard = perf_diagnostics::install_test_recorder(recorder);
+    let process_sampler = FullSoakProcessSampler::start()?;
     let mut trajectory_rx = fixture.base.app.chat.trajectory_events_tx.subscribe();
     let index_before = filesystem_snapshot(&fixture.base.workspace).await?;
     let exec_snapshot = fixture
@@ -1920,6 +2005,7 @@ async fn run_full_soak_sample(
         )
         .await;
         let required_flush = elapsed_us(required_started);
+        enqueue_repeated_vecdb_paths(&fixture, &session).await?;
         let catalog = fixture
             .base
             .app
@@ -1980,6 +2066,7 @@ async fn run_full_soak_sample(
         .trajectory_index_coordinator
         .flush_all()
         .await?;
+    fixture.vecdb.drain_deferred()?;
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     let index_after = filesystem_snapshot(&fixture.base.workspace).await?;
     let (_, index_bytes_written) = filesystem_delta(&index_before, &index_after);
@@ -1988,6 +2075,7 @@ async fn run_full_soak_sample(
     while trajectory_rx.try_recv().is_ok() {
         trajectory_events += 1;
     }
+    let vecdb_metrics = fixture.vecdb.metrics();
     let mut counters = FullSoakCounters {
         stream_deltas: u64::from(workload.chat_count),
         tool_calls: u64::from(workload.chat_count),
@@ -1999,13 +2087,11 @@ async fn run_full_soak_sample(
         trajectory_files,
         index_writes: event_count(&sink.events(), PerfComponent::TrajectoryIndexWrite),
         index_bytes_written,
-        vecdb_enqueues: fixture.vecdb.enqueue_calls.load(Ordering::Relaxed),
-        vecdb_coalesced_paths: fixture
-            .vecdb
-            .unique_paths
-            .lock()
-            .map(|paths| paths.len() as u64)
-            .unwrap_or_default(),
+        vecdb_enqueues: vecdb_metrics.enqueue_requests,
+        vecdb_coalesced_paths: vecdb_metrics.pending_unique_paths as u64,
+        vecdb_enqueue_requests: vecdb_metrics.enqueue_requests,
+        vecdb_pending_unique_paths: vecdb_metrics.pending_unique_paths as u64,
+        vecdb_processed_paths: vecdb_metrics.processed_paths,
         catalog_builds: event_count(&sink.events(), PerfComponent::ToolCatalogBuild),
         catalog_pool_builds: event_count(&sink.events(), PerfComponent::ToolMutableVectorBuild),
         monitor_scans: 3,
@@ -2032,6 +2118,7 @@ async fn run_full_soak_sample(
             chat_id,
             tool_messages,
             queue_processors_started,
+            queue_processors_exited,
             queue_notify_wakes,
             queue_empty_locks,
         ) = {
@@ -2049,6 +2136,10 @@ async fn run_full_soak_sample(
                     .load(Ordering::Relaxed),
                 locked
                     .queue_processor_counters
+                    .processor_exits
+                    .load(Ordering::Relaxed),
+                locked
+                    .queue_processor_counters
                     .notify_wakes
                     .load(Ordering::Relaxed),
                 locked
@@ -2058,6 +2149,7 @@ async fn run_full_soak_sample(
             )
         };
         counters.queue_processors_started += queue_processors_started;
+        counters.queue_processors_exited += queue_processors_exited;
         counters.queue_notify_wakes += queue_notify_wakes;
         counters.queue_empty_locks += queue_empty_locks;
         if tool_messages != 1 {
@@ -2072,6 +2164,8 @@ async fn run_full_soak_sample(
     }
     let events = sink.events();
     let queue_wait_us = event_elapsed(&events, PerfComponent::CommandQueueWait);
+    counters.tool_execution_wait_events = event_count(&events, PerfComponent::ToolExecutionWait);
+    counters.tool_execution_wait_us = event_elapsed_sum(&events, PerfComponent::ToolExecutionWait);
     let first_delta_us = event_elapsed(&events, PerfComponent::StreamFirstDelta);
     let sse_serialize_us = event_elapsed(&events, PerfComponent::SseSerialize);
     let sse_emit_us = event_elapsed(&events, PerfComponent::SseBroadcast);
@@ -2131,11 +2225,35 @@ async fn run_full_soak_sample(
         } else {
             sse_emit_us
         },
-        machine: sample_machine_metrics(),
-        machine_io: sample_machine_io_metrics(),
+        process: process_sampler.finish()?,
     };
     fixture.shutdown().await;
     Ok(sample)
+}
+
+async fn enqueue_repeated_vecdb_paths(
+    fixture: &FullSoakFixture,
+    session: &Arc<AMutex<ChatSession>>,
+) -> Result<(), String> {
+    let chat_id = session.lock().await.chat_id.clone();
+    let path = find_trajectory_path(fixture.base.gcx.clone(), &chat_id)
+        .await
+        .ok_or_else(|| "full soak trajectory path was unavailable for VecDB fixture".to_string())?
+        .to_string_lossy()
+        .into_owned();
+    let roots = crate::indexing_routing::memory_plane_roots(fixture.base.gcx.clone()).await;
+    let vecdb = fixture
+        .base
+        .gcx
+        .vec_db
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| "full soak VecDB fixture was unavailable".to_string())?;
+    vecdb
+        .vectorizer_enqueue_files(&[path.clone(), path], false, roots)
+        .await;
+    Ok(())
 }
 
 fn aggregate_full_soak_variant(
@@ -2149,8 +2267,12 @@ fn aggregate_full_soak_variant(
         .iter()
         .fold(FullSoakCounters::default(), |mut total, sample| {
             total.queue_processors_started += sample.counters.queue_processors_started;
+            total.queue_processors_exited += sample.counters.queue_processors_exited;
             total.queue_notify_wakes += sample.counters.queue_notify_wakes;
             total.queue_empty_locks += sample.counters.queue_empty_locks;
+            total.queue_lock_contention_events += sample.counters.queue_lock_contention_events;
+            total.tool_execution_wait_events += sample.counters.tool_execution_wait_events;
+            total.tool_execution_wait_us += sample.counters.tool_execution_wait_us;
             total.stream_deltas += sample.counters.stream_deltas;
             total.tool_calls += sample.counters.tool_calls;
             total.sse_events += sample.counters.sse_events;
@@ -2162,6 +2284,9 @@ fn aggregate_full_soak_variant(
             total.watcher_replays += sample.counters.watcher_replays;
             total.vecdb_enqueues += sample.counters.vecdb_enqueues;
             total.vecdb_coalesced_paths += sample.counters.vecdb_coalesced_paths;
+            total.vecdb_enqueue_requests += sample.counters.vecdb_enqueue_requests;
+            total.vecdb_pending_unique_paths += sample.counters.vecdb_pending_unique_paths;
+            total.vecdb_processed_paths += sample.counters.vecdb_processed_paths;
             total.catalog_builds += sample.counters.catalog_builds;
             total.catalog_pool_builds += sample.counters.catalog_pool_builds;
             total.monitor_scans += sample.counters.monitor_scans;
@@ -2200,6 +2325,16 @@ fn aggregate_full_soak_variant(
         .zip(accounted_us.iter())
         .map(|(total, accounted)| total.saturating_sub(*accounted))
         .collect::<Vec<_>>();
+    let vecdb_deferred_queue = FullSoakVecdbMetrics {
+        enqueue_requests: counters.vecdb_enqueue_requests,
+        pending_unique_paths: counters.vecdb_pending_unique_paths,
+        processed_paths: counters.vecdb_processed_paths,
+        amplification_ratio: if counters.vecdb_pending_unique_paths == 0 {
+            0.0
+        } else {
+            counters.vecdb_processed_paths as f64 / counters.vecdb_pending_unique_paths as f64
+        },
+    };
     Ok(FullSoakVariantBenchmarkReport {
         variant: variant.to_string(),
         rollout_switches: first.rollout_switches.clone(),
@@ -2240,8 +2375,11 @@ fn aggregate_full_soak_variant(
             &sample.sse_serialize_us
         }))?,
         sse_emit_latency: LatencySummary::from_samples(&flatten(|sample| &sample.sse_emit_us))?,
-        machine: first.machine.clone(),
-        machine_io: first.machine_io.clone(),
+        process_samples: samples
+            .iter()
+            .map(|sample| sample.process.clone())
+            .collect(),
+        vecdb_deferred_queue,
     })
 }
 
@@ -2266,6 +2404,8 @@ fn assert_full_soak_invariants(
         || counters.trajectory_files == 0
         || counters.sse_events == 0
         || counters.vecdb_enqueues == 0
+        || counters.vecdb_enqueue_requests <= counters.vecdb_pending_unique_paths
+        || counters.vecdb_processed_paths == 0
         || counters.exec_registry_entries == 0
         || counters.errors != 0
     {
@@ -3297,47 +3437,150 @@ fn elapsed_us(started: Instant) -> u64 {
         .max(1)
 }
 
-fn sample_machine_metrics() -> MachineMetrics {
+#[derive(Clone, Debug)]
+struct ProcessResourceSnapshot {
+    cpu_time_us: Option<u64>,
+    rss_bytes: Option<u64>,
+    read_bytes: Option<u64>,
+    write_bytes: Option<u64>,
+}
+
+struct FullSoakProcessSampler {
+    stop: Arc<AtomicBool>,
+    snapshots: Arc<StdMutex<Vec<ProcessResourceSnapshot>>>,
+    task: std::thread::JoinHandle<()>,
+}
+
+impl FullSoakProcessSampler {
+    fn start() -> Result<Self, String> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let snapshots = Arc::new(StdMutex::new(vec![sample_process_resources()]));
+        let task_stop = stop.clone();
+        let task_snapshots = snapshots.clone();
+        let task = std::thread::Builder::new()
+            .name("full-soak-process-sampler".to_string())
+            .spawn(move || {
+                while !task_stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(5));
+                    if let Ok(mut snapshots) = task_snapshots.lock() {
+                        snapshots.push(sample_process_resources());
+                    }
+                }
+            })
+            .map_err(|error| format!("failed to start full soak process sampler: {error}"))?;
+        Ok(Self {
+            stop,
+            snapshots,
+            task,
+        })
+    }
+
+    fn finish(self) -> Result<FullSoakProcessMetrics, String> {
+        self.stop.store(true, Ordering::Relaxed);
+        self.task
+            .join()
+            .map_err(|_| "full soak process sampler panicked".to_string())?;
+        let mut snapshots = self
+            .snapshots
+            .lock()
+            .map_err(|_| "full soak process sampler lock poisoned".to_string())?
+            .clone();
+        snapshots.push(sample_process_resources());
+        Ok(process_metrics_from_snapshots(&snapshots))
+    }
+}
+
+fn process_metrics_from_snapshots(snapshots: &[ProcessResourceSnapshot]) -> FullSoakProcessMetrics {
+    let first = snapshots.first();
+    let last = snapshots.last();
+    let baseline_rss = first.and_then(|sample| sample.rss_bytes);
+    let peak_rss = snapshots.iter().filter_map(|sample| sample.rss_bytes).max();
+    FullSoakProcessMetrics {
+        sample_count: snapshots.len(),
+        cpu_time_delta_us: option_delta(
+            first.and_then(|sample| sample.cpu_time_us),
+            last.and_then(|sample| sample.cpu_time_us),
+        ),
+        rss_baseline_bytes: baseline_rss,
+        rss_peak_bytes: peak_rss,
+        rss_delta_bytes: baseline_rss
+            .zip(peak_rss)
+            .map(|(first, peak)| peak as i64 - first as i64),
+        read_bytes_delta: option_delta(
+            first.and_then(|sample| sample.read_bytes),
+            last.and_then(|sample| sample.read_bytes),
+        ),
+        write_bytes_delta: option_delta(
+            first.and_then(|sample| sample.write_bytes),
+            last.and_then(|sample| sample.write_bytes),
+        ),
+    }
+}
+
+fn option_delta(before: Option<u64>, after: Option<u64>) -> Option<u64> {
+    before
+        .zip(after)
+        .map(|(before, after)| after.saturating_sub(before))
+}
+
+fn sample_process_resources() -> ProcessResourceSnapshot {
     let pid = Pid::from_u32(std::process::id());
     let pids = [pid];
     let mut system = System::new();
     let refresh_kind = ProcessRefreshKind::nothing()
         .with_memory()
-        .with_cpu()
-        .without_tasks();
-    system.refresh_processes_specifics(ProcessesToUpdate::Some(&pids), true, refresh_kind);
-    match system.process(pid) {
-        Some(process) => MachineMetrics {
-            rss_bytes: Some(process.memory()),
-            cpu_percent: Some(process.cpu_usage()),
-        },
-        None => MachineMetrics {
-            rss_bytes: None,
-            cpu_percent: None,
-        },
-    }
-}
-
-fn sample_machine_io_metrics() -> MachineIoMetrics {
-    let pid = Pid::from_u32(std::process::id());
-    let pids = [pid];
-    let mut system = System::new();
-    let refresh_kind = ProcessRefreshKind::nothing()
         .with_disk_usage()
         .without_tasks();
     system.refresh_processes_specifics(ProcessesToUpdate::Some(&pids), true, refresh_kind);
     match system.process(pid) {
         Some(process) => {
             let usage = process.disk_usage();
-            MachineIoMetrics {
+            ProcessResourceSnapshot {
+                cpu_time_us: read_process_cpu_time_us(),
+                rss_bytes: Some(process.memory()),
                 read_bytes: Some(usage.total_read_bytes),
                 write_bytes: Some(usage.total_written_bytes),
             }
         }
-        None => MachineIoMetrics {
+        None => ProcessResourceSnapshot {
+            cpu_time_us: None,
+            rss_bytes: None,
             read_bytes: None,
             write_bytes: None,
         },
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_process_cpu_time_us() -> Option<u64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let close = stat.rfind(')')?;
+    let fields = stat
+        .get(close + 2..)?
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let user_ticks = fields.get(11)?.parse::<u64>().ok()?;
+    let system_ticks = fields.get(12)?.parse::<u64>().ok()?;
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks_per_second <= 0 {
+        return None;
+    }
+    user_ticks
+        .saturating_add(system_ticks)
+        .checked_mul(1_000_000)?
+        .checked_div(ticks_per_second as u64)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_process_cpu_time_us() -> Option<u64> {
+    None
+}
+
+fn sample_machine_metrics() -> MachineMetrics {
+    let snapshot = sample_process_resources();
+    MachineMetrics {
+        rss_bytes: snapshot.rss_bytes,
+        cpu_percent: None,
     }
 }
 
@@ -3353,6 +3596,45 @@ mod tests {
         assert_eq!(percentile_us(&samples, 95), 50);
         assert_eq!(percentile_us(&samples, 99), 50);
         assert_eq!(percentile_us(&[], 50), 0);
+    }
+
+    #[test]
+    fn full_soak_process_metrics_use_baseline_delta_and_peak() {
+        let metrics = process_metrics_from_snapshots(&[
+            ProcessResourceSnapshot {
+                cpu_time_us: Some(100),
+                rss_bytes: Some(1_000),
+                read_bytes: Some(50),
+                write_bytes: Some(75),
+            },
+            ProcessResourceSnapshot {
+                cpu_time_us: Some(125),
+                rss_bytes: Some(900),
+                read_bytes: Some(60),
+                write_bytes: Some(80),
+            },
+            ProcessResourceSnapshot {
+                cpu_time_us: Some(160),
+                rss_bytes: Some(1_250),
+                read_bytes: Some(90),
+                write_bytes: Some(110),
+            },
+        ]);
+
+        assert_eq!(metrics.sample_count, 3);
+        assert_eq!(metrics.cpu_time_delta_us, Some(60));
+        assert_eq!(metrics.rss_baseline_bytes, Some(1_000));
+        assert_eq!(metrics.rss_peak_bytes, Some(1_250));
+        assert_eq!(metrics.rss_delta_bytes, Some(250));
+        assert_eq!(metrics.read_bytes_delta, Some(40));
+        assert_eq!(metrics.write_bytes_delta, Some(35));
+    }
+
+    #[test]
+    fn full_soak_variant_order_alternates() {
+        assert_eq!(full_soak_variant_order(0), [false, true]);
+        assert_eq!(full_soak_variant_order(1), [true, false]);
+        assert_eq!(full_soak_variant_order(2), [false, true]);
     }
 
     #[test]
@@ -3625,6 +3907,26 @@ mod tests {
                 variant.tool_call_stages.unattributed_latency.sample_count,
                 1
             );
+            let process = variant
+                .process_samples
+                .first()
+                .expect("full soak process sample");
+            assert!(process.sample_count >= 2);
+            assert!(process.cpu_time_delta_us.is_some());
+            assert!(process.rss_baseline_bytes.is_some());
+            assert!(process.rss_peak_bytes.is_some());
+            assert!(process.read_bytes_delta.is_some());
+            assert!(process.write_bytes_delta.is_some());
+            assert!(
+                variant.counters.vecdb_enqueue_requests
+                    > variant.counters.vecdb_pending_unique_paths
+            );
+            assert!(variant.counters.vecdb_processed_paths > 0);
+            assert_eq!(
+                variant.vecdb_deferred_queue.enqueue_requests,
+                variant.counters.vecdb_enqueue_requests
+            );
+            assert!(variant.vecdb_deferred_queue.amplification_ratio >= 1.0);
         }
     }
 
@@ -3699,14 +4001,11 @@ mod tests {
             },
             sse_serialize_latency: latency.clone(),
             sse_emit_latency: latency,
-            machine: MachineMetrics {
-                rss_bytes: None,
-                cpu_percent: None,
-            },
-            machine_io: MachineIoMetrics {
-                read_bytes: None,
-                write_bytes: None,
-            },
+            process_samples: vec![FullSoakProcessMetrics {
+                sample_count: 2,
+                ..Default::default()
+            }],
+            vecdb_deferred_queue: FullSoakVecdbMetrics::default(),
         };
         let optimized = FullSoakVariantBenchmarkReport {
             variant: "optimized".to_string(),
@@ -3727,8 +4026,8 @@ mod tests {
             tool_call_stages: variant.tool_call_stages.clone(),
             sse_serialize_latency: variant.sse_serialize_latency.clone(),
             sse_emit_latency: variant.sse_emit_latency.clone(),
-            machine: variant.machine.clone(),
-            machine_io: variant.machine_io.clone(),
+            process_samples: variant.process_samples.clone(),
+            vecdb_deferred_queue: variant.vecdb_deferred_queue.clone(),
         };
         let report = FullSoakBenchmarkReport {
             comparison_label:
