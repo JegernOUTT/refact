@@ -1228,19 +1228,32 @@ impl TranscriptState {
         self.active_assistant_index = None;
     }
 
-    pub fn replace_optimistic_user_message(&mut self, message: TranscriptMessage) -> bool {
+    pub fn replace_optimistic_user_message_at(
+        &mut self,
+        message: TranscriptMessage,
+        index: Option<usize>,
+    ) -> bool {
         let Some(client_message_id) = message.client_message_id() else {
             return false;
         };
-        let Some(index) = self.messages.iter().position(|existing| {
+        let Some(existing_index) = self.messages.iter().position(|existing| {
             existing.role == TranscriptRole::User
                 && existing.message_id.is_none()
                 && existing.client_message_id() == Some(client_message_id)
         }) else {
             return false;
         };
-        self.messages[index] = message;
-        self.refresh_cached_indexes();
+        if let Some(server_index) = self.message_index_by_id(message.message_id.as_deref()) {
+            self.messages.remove(existing_index);
+            let server_index = if existing_index < server_index {
+                server_index - 1
+            } else {
+                server_index
+            };
+            self.replace_message_at(server_index, message, index);
+            return true;
+        }
+        self.replace_message_at(existing_index, message, index);
         true
     }
 
@@ -1292,11 +1305,7 @@ impl TranscriptState {
 
     fn add_transcript_message(&mut self, message: TranscriptMessage, index: Option<usize>) -> bool {
         if let Some(idx) = self.message_index_by_id(message.message_id.as_deref()) {
-            if let Some(usage) = message.usage.clone() {
-                self.usage = Some(usage);
-            }
-            self.messages[idx] = message;
-            self.refresh_cached_indexes();
+            self.replace_message_at(idx, message, index);
             return false;
         }
         if let Some(usage) = message.usage.clone() {
@@ -1323,6 +1332,29 @@ impl TranscriptState {
             self.active_assistant_index = Some(index);
         }
         true
+    }
+
+    fn replace_message_at(
+        &mut self,
+        existing_index: usize,
+        message: TranscriptMessage,
+        index: Option<usize>,
+    ) {
+        let active_assistant_id = self.active_assistant_id.clone();
+        self.messages.remove(existing_index);
+        let index = index.unwrap_or(existing_index).min(self.messages.len());
+        self.messages.insert(index, message);
+        self.refresh_cached_indexes();
+        if let Some(active_assistant_id) = active_assistant_id {
+            if let Some(active_assistant_index) = self.messages.iter().position(|message| {
+                message.role == TranscriptRole::Assistant
+                    && message.message_id.as_deref() == Some(&active_assistant_id)
+                    && !message.stream_finished
+            }) {
+                self.active_assistant_id = Some(active_assistant_id);
+                self.active_assistant_index = Some(active_assistant_index);
+            }
+        }
     }
 
     fn message_index_by_id(&self, message_id: Option<&str>) -> Option<usize> {
@@ -2045,10 +2077,134 @@ mod tests {
             "extra": {"client_message_id": "optimistic-2"},
         }));
 
-        assert!(state.replace_optimistic_user_message(matching));
-        assert!(!state.replace_optimistic_user_message(different));
+        assert!(state.replace_optimistic_user_message_at(matching, None));
+        assert!(!state.replace_optimistic_user_message_at(different, None));
         assert_eq!(state.messages().len(), 1);
         assert_eq!(state.messages()[0].message_id.as_deref(), Some("server-1"));
+    }
+
+    #[test]
+    fn authoritative_index_replaces_existing_message_at_start_middle_and_end() {
+        let initial = json!([
+            {"message_id": "a", "role": "assistant", "content": "a", "stream_finished": true},
+            {"message_id": "b", "role": "assistant", "content": "b", "stream_finished": true},
+            {"message_id": "c", "role": "assistant", "content": "c", "stream_finished": true},
+        ]);
+
+        for (message_id, index, expected) in [
+            ("c", 0, ["c", "a", "b"]),
+            ("a", 1, ["b", "a", "c"]),
+            ("a", 2, ["b", "c", "a"]),
+        ] {
+            let mut state = TranscriptState::new();
+            state.reset_from_messages(initial.as_array().unwrap());
+            assert!(!state.add_message_at(
+                &json!({
+                    "message_id": message_id,
+                    "role": "assistant",
+                    "content": format!("{message_id} updated"),
+                    "stream_finished": true,
+                }),
+                Some(index),
+            ));
+            assert_eq!(
+                state
+                    .messages()
+                    .iter()
+                    .map(|message| message.message_id.as_deref().unwrap())
+                    .collect::<Vec<_>>(),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn authoritative_index_moves_exact_optimistic_user_match() {
+        let mut state = TranscriptState::new();
+        state.add_message(&json!({"message_id": "before", "role": "user", "content": "before"}));
+        state.push_optimistic_user_message("same", "client-1");
+        state.add_message(&json!({"message_id": "after", "role": "user", "content": "after"}));
+
+        assert!(state.replace_optimistic_user_message_at(
+            TranscriptMessage::from_wire(&json!({
+                "message_id": "server-1",
+                "role": "user",
+                "content": "same",
+                "extra": {"client_message_id": "client-1"},
+            })),
+            Some(0),
+        ));
+        assert_eq!(
+            state
+                .messages()
+                .iter()
+                .map(|message| message.message_id.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("server-1"), Some("before"), Some("after")],
+        );
+    }
+
+    #[test]
+    fn optimistic_reconciliation_removes_a_duplicate_server_message() {
+        let mut state = TranscriptState::new();
+        state.add_message(&json!({"message_id": "server-1", "role": "user", "content": "same"}));
+        state.push_optimistic_user_message("same", "client-1");
+
+        assert!(state.replace_optimistic_user_message_at(
+            TranscriptMessage::from_wire(&json!({
+                "message_id": "server-1",
+                "role": "user",
+                "content": "same",
+                "extra": {"client_message_id": "client-1"},
+            })),
+            Some(0),
+        ));
+        assert_eq!(state.messages().len(), 1);
+        assert_eq!(state.messages()[0].message_id.as_deref(), Some("server-1"));
+        assert_eq!(state.messages()[0].client_message_id(), Some("client-1"));
+    }
+
+    #[test]
+    fn authoritative_index_keeps_active_assistant_and_out_of_range_reconciliation_safe() {
+        let mut state = TranscriptState::new();
+        state.reset_from_messages(&[
+            json!({"message_id": "a", "role": "assistant", "content": "a", "stream_finished": true}),
+            json!({"message_id": "b", "role": "assistant", "content": "b", "stream_finished": false}),
+            json!({"message_id": "c", "role": "assistant", "content": "c", "stream_finished": true}),
+        ]);
+
+        assert!(!state.add_message_at(
+            &json!({
+                "message_id": "b",
+                "role": "assistant",
+                "content": "b",
+                "stream_finished": false,
+            }),
+            Some(0),
+        ));
+        state.apply_delta_ops(
+            Some("b"),
+            &[DeltaOp::AppendContent {
+                text: " updated".to_string(),
+            }],
+        );
+        assert_eq!(state.messages()[0].message_id.as_deref(), Some("b"));
+        assert_eq!(state.messages()[0].content, "b updated");
+
+        assert!(!state.add_message_at(
+            &json!({
+                "message_id": "a",
+                "role": "assistant",
+                "content": "a updated",
+                "stream_finished": true,
+            }),
+            Some(99),
+        ));
+        assert_eq!(
+            state.messages().last().unwrap().message_id.as_deref(),
+            Some("a")
+        );
+        assert_eq!(state.messages().len(), 3);
     }
 
     #[test]

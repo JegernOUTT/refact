@@ -1316,16 +1316,6 @@ fn is_empty_live_assistant(message: &TranscriptMessage) -> bool {
         && message.unknown_delta_ops.is_empty()
 }
 
-fn active_assistant_matches_message(
-    existing: &TranscriptMessage,
-    next: &TranscriptMessage,
-) -> bool {
-    existing.role == TranscriptRole::Assistant
-        && !existing.stream_finished
-        && next.role == TranscriptRole::Assistant
-        && existing.message_id == next.message_id
-}
-
 fn split_command_name_and_args(input: &str) -> (&str, &str) {
     let input = input.trim().trim_start_matches('/').trim_start();
     match input.find(char::is_whitespace) {
@@ -3453,6 +3443,170 @@ new-chat = "ctrl-x"
             .in_flight_send
             .as_ref()
             .is_some_and(|send| send.accepted));
+    }
+
+    #[test]
+    fn message_added_reconciliation_uses_authoritative_index_in_alternate_and_native_modes() {
+        for native_scrollback in [false, true] {
+            let mut app = App::new(project());
+            app.set_native_scrollback(native_scrollback);
+            app.handle_chat_event(snapshot_event(
+                &app,
+                vec![
+                    json!({"message_id": "a", "role": "assistant", "content": "a", "stream_finished": true}),
+                    json!({"message_id": "b", "role": "assistant", "content": "b", "stream_finished": true}),
+                    json!({"message_id": "c", "role": "assistant", "content": "c", "stream_finished": true}),
+                ],
+            ));
+            if native_scrollback {
+                app.pending_history_insertions(80);
+            }
+
+            for (index, message_id, content) in [
+                (0, "c", "c updated"),
+                (1, "a", "a updated"),
+                (2, "a", "a final"),
+            ] {
+                app.handle_chat_event(ChatEvent {
+                    chat_id: Some(app.chat_id().to_string()),
+                    seq: None,
+                    kind: "message_added".to_string(),
+                    raw: json!({"index": index, "message": {
+                        "message_id": message_id,
+                        "role": "assistant",
+                        "content": content,
+                        "stream_finished": true,
+                    }}),
+                });
+            }
+
+            assert_eq!(
+                app.transcript_state()
+                    .messages()
+                    .iter()
+                    .map(|message| message.message_id.as_deref())
+                    .collect::<Vec<_>>(),
+                [Some("c"), Some("b"), Some("a")],
+            );
+            assert_eq!(
+                app.transcript_state()
+                    .messages()
+                    .iter()
+                    .filter(|message| message.message_id.as_deref() == Some("a"))
+                    .count(),
+                1,
+            );
+            let pending_before_snapshot = app.history_pending_count();
+            app.handle_chat_event(snapshot_event(&app, vec![
+                json!({"message_id": "c", "role": "assistant", "content": "c updated", "stream_finished": true}),
+                json!({"message_id": "b", "role": "assistant", "content": "b", "stream_finished": true}),
+                json!({"message_id": "a", "role": "assistant", "content": "a final", "stream_finished": true}),
+            ]));
+            assert_eq!(app.transcript_state().messages().len(), 3);
+            if native_scrollback {
+                assert_eq!(app.history_pending_count(), pending_before_snapshot);
+                let insertions = app.resize_reflow_insertions(80);
+                let text = insertions
+                    .iter()
+                    .flat_map(|insertion| insertion.lines.iter())
+                    .map(|line| line_to_plain_string(&line.line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(text.contains("c updated"));
+                assert!(text.contains("a final"));
+                assert_eq!(text.matches("a final").count(), 1);
+            } else {
+                assert_eq!(assistant_cell_count(&app), 3);
+                assert_eq!(assistant_text(&app), "c updatedba final");
+            }
+        }
+    }
+
+    #[test]
+    fn optimistic_message_added_reconciliation_uses_authoritative_index() {
+        for native_scrollback in [false, true] {
+            let mut app = App::new(project());
+            app.transcript_state.reset();
+            app.set_native_scrollback(native_scrollback);
+            app.transcript_state
+                .push_optimistic_user_message("same", "client-message-1");
+            app.transcript_state
+                .add_message(&json!({"message_id": "later", "role": "user", "content": "later"}));
+            app.rebuild_render_transcript_from_state();
+            if native_scrollback {
+                app.pending_history_insertions(80);
+            }
+
+            app.handle_chat_event(ChatEvent {
+                chat_id: Some(app.chat_id().to_string()),
+                seq: None,
+                kind: "message_added".to_string(),
+                raw: json!({"index": 1, "message": {
+                    "message_id": "server-user-1",
+                    "role": "user",
+                    "content": "same",
+                    "extra": {"client_message_id": "client-message-1"},
+                }}),
+            });
+
+            assert_eq!(
+                app.transcript_state()
+                    .messages()
+                    .iter()
+                    .map(|message| message.message_id.as_deref())
+                    .collect::<Vec<_>>(),
+                [Some("later"), Some("server-user-1")],
+            );
+            if native_scrollback {
+                let insertions = app.resize_reflow_insertions(80);
+                let text = insertions
+                    .iter()
+                    .flat_map(|insertion| insertion.lines.iter())
+                    .map(|line| line_to_plain_string(&line.line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(text.contains("same"));
+                assert!(text.contains("later"));
+                assert_eq!(text.matches("same").count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn message_added_reconciliation_keeps_the_active_assistant_stream() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_started".to_string(),
+            raw: json!({"message_id": "active"}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"message_id": "active", "ops": [{"op": "append_content", "text": "before"}]}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"index": 0, "message": {
+                "message_id": "active",
+                "role": "assistant",
+                "content": "before",
+                "stream_finished": false,
+            }}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"message_id": "active", "ops": [{"op": "append_content", "text": " after"}]}),
+        });
+
+        assert_eq!(app.transcript_state().messages()[0].content, "before after");
+        assert!(assistant_text(&app).contains("before after"));
     }
 
     #[test]

@@ -1055,9 +1055,11 @@ impl App {
         let message = TranscriptMessage::from_wire(raw_message);
         if message.role == TranscriptRole::User {
             let client_message_id = message.client_message_id().map(str::to_string);
+            let message_count = self.transcript_state.messages().len();
+            let out_of_range_index = index.filter(|index| *index > message_count);
             if self
                 .transcript_state
-                .replace_optimistic_user_message(message.clone())
+                .replace_optimistic_user_message_at(message.clone(), index)
             {
                 if let Some(client_message_id) = client_message_id {
                     if let Some(in_flight) = self.in_flight_send.as_mut().filter(|in_flight| {
@@ -1067,6 +1069,14 @@ impl App {
                     }
                 }
                 self.rebuild_remote_transcript_from_state();
+                if self.native_scrollback && self.history.inserted_cell_count() > 0 {
+                    self.resize_reflow.schedule_immediate();
+                }
+                if let Some(index) = out_of_range_index {
+                    self.add_notice(format!(
+                        "Server message index {index} exceeds transcript length {message_count}; appended"
+                    ));
+                }
                 return;
             }
             if message.client_message_id().is_none()
@@ -1086,26 +1096,37 @@ impl App {
                         .iter()
                         .any(|existing| existing == &key)
             });
-        if replayed {
+        let server_message_index = message.message_id.as_deref().and_then(|message_id| {
+            self.transcript_state
+                .messages()
+                .iter()
+                .position(|existing| existing.message_id.as_deref() == Some(message_id))
+        });
+        if replayed && (index.is_none() || server_message_index == index) {
             return;
         }
-        if message.role.is_tool_result() && self.replace_state_tool_message(&message) {
+        let replaces_server_message = server_message_index.is_some();
+        if !replaces_server_message
+            && message.role.is_tool_result()
+            && self.replace_state_tool_message(&message)
+        {
             self.rebuild_remote_transcript_from_state();
             return;
         }
-        let replaces_active_stream = message.role == TranscriptRole::Assistant
-            && (self.assistant_stream_active() || self.reasoning_stream_active)
-            && self
-                .transcript_state
-                .messages()
-                .iter()
-                .any(|existing| active_assistant_matches_message(existing, &message));
         let message_count = self.transcript_state.messages().len();
         let insert_before_end = index.is_some_and(|index| index < message_count);
         let out_of_range_index = index.filter(|index| *index > message_count);
         let added = self.transcript_state.add_message_at(raw_message, index);
-        if !added && !replaces_active_stream {
+        if !added {
             self.rebuild_remote_transcript_from_state();
+            if self.native_scrollback && self.history.inserted_cell_count() > 0 {
+                self.resize_reflow.schedule_immediate();
+            }
+            if let Some(index) = out_of_range_index {
+                self.add_notice(format!(
+                    "Server message index {index} exceeds transcript length {message_count}; appended"
+                ));
+            }
             return;
         }
         if insert_before_end {

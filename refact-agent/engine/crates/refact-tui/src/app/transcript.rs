@@ -749,9 +749,7 @@ impl App {
         self.history.clear_pending();
         self.selected_tool_index = None;
         self.rendered_state_cursor = 0;
-        if !self.native_scrollback {
-            self.rendered_state_keys.clear();
-        }
+        self.rendered_state_keys.clear();
         let messages = self.transcript_state.messages().to_vec();
         for message in &messages {
             self.append_render_message(message);
