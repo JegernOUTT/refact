@@ -749,7 +749,9 @@ impl App {
         self.history.clear_pending();
         self.selected_tool_index = None;
         self.rendered_state_cursor = 0;
-        self.rendered_state_keys.clear();
+        if !self.native_scrollback {
+            self.rendered_state_keys.clear();
+        }
         let messages = self.transcript_state.messages().to_vec();
         for message in &messages {
             self.append_render_message(message);
@@ -1032,6 +1034,9 @@ impl App {
 
     pub(super) fn rebuild_remote_transcript_from_state(&mut self) {
         let include_header = self.show_session_header || self.session_title.is_some();
+        if self.native_scrollback && self.plan_stream_controller.is_none() {
+            self.rendered_state_keys.clear();
+        }
         self.rebuild_render_transcript_from_state();
         if include_header && !self.native_scrollback {
             self.transcript.insert(0, self.session_header_item());
