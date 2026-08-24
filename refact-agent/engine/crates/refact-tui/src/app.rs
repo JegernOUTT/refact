@@ -3282,9 +3282,10 @@ new-chat = "ctrl-x"
 
         assert!(app.composer().is_empty());
         assert_eq!(app.input_queue().items()[0].text, "queued for A");
+    }
 
     #[test]
-fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
+    fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
         let invalid_states = [
             ("missing", json!({}), "omitted state"),
             ("null", json!({"state": null}), "omitted state"),
@@ -3344,7 +3345,6 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
             assert!(app.input_queue().is_empty());
             assert_eq!(app.session_state(), SessionState::Generating);
         }
-
     }
 
     #[test]
