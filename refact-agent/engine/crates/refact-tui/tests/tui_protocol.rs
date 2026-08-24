@@ -510,7 +510,7 @@ fn subchat_running_card_is_cleaned_at_turn_end() {
         .collect::<Vec<_>>();
     assert_eq!(cards.len(), 1);
     assert_eq!(cards[0].id, "call-sub");
-    assert_eq!(cards[0].status, refact_tui::tools::ToolStatus::Success);
+    assert_eq!(cards[0].status, refact_tui::tools::ToolStatus::Succeeded);
     assert!(!cards[0].subchat_active);
     assert_eq!(cards[0].attached_files, vec!["src/lib.rs".to_string()]);
 }

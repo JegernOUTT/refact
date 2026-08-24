@@ -45,7 +45,7 @@ impl HistoryCell for SearchToolCell {
     }
 
     fn is_final(&self) -> bool {
-        self.card.status != ToolStatus::Running
+        self.card.status.is_final()
     }
 
     fn revision(&self) -> u64 {
@@ -54,7 +54,7 @@ impl HistoryCell for SearchToolCell {
 }
 
 fn search_header_lines(card: &ToolCard, width: usize) -> Vec<Line<'static>> {
-    let header = if card.status == ToolStatus::Running {
+    let header = if card.status.is_active() {
         "Searching the web"
     } else {
         "Searched the web"
@@ -63,7 +63,7 @@ fn search_header_lines(card: &ToolCard, width: usize) -> Vec<Line<'static>> {
     let line = if detail.is_empty() {
         Line::from(bold_span(header))
     } else {
-        let separator = if card.status == ToolStatus::Running {
+        let separator = if card.status.is_active() {
             " "
         } else {
             " for "
@@ -106,7 +106,7 @@ mod tests {
         let rendered = text(&SearchToolCell::new(card, false).render(80));
         assert_eq!(
             rendered,
-            "• Searched the web for needle\n▾ ✅ search_pattern · needle · 1.2s\n  └ src/main.rs:1: needle\n"
+            "• Searched the web for needle\n▾ ✅ succeeded search_pattern · needle · 1.2s\n  └ src/main.rs:1: needle\n"
         );
     }
 
@@ -118,7 +118,7 @@ mod tests {
         let rendered = text(&SearchToolCell::new(card, false).render(80));
         assert_eq!(
             rendered,
-            "• Searching the web needle\n▾ ⏳ search_pattern · needle\n"
+            "• Searching the web needle\n▾ ⏳ running search_pattern · needle\n"
         );
     }
 }

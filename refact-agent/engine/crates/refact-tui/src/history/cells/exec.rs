@@ -45,7 +45,7 @@ impl HistoryCell for ToolCallCell {
     }
 
     fn is_final(&self) -> bool {
-        self.card.status != ToolStatus::Running
+        self.card.status.is_final()
     }
 
     fn revision(&self) -> u64 {
@@ -132,7 +132,7 @@ impl HistoryCell for ExecToolCell {
     }
 
     fn is_final(&self) -> bool {
-        self.card.status != ToolStatus::Running
+        self.card.status.is_final()
     }
 
     fn revision(&self) -> u64 {
@@ -189,7 +189,7 @@ fn exec_output_lines(card: &ToolCard, width: usize) -> Vec<Line<'static>> {
 }
 
 fn failed_exit(card: &ToolCard) -> bool {
-    card.status == ToolStatus::Error
+    card.status == ToolStatus::Failed
         || exit_code_from_result(&card.result)
             .is_some_and(|code| code.trim() != "0" && code.trim() != "<none>")
 }
@@ -402,7 +402,7 @@ mod tests {
         let card = tool_card("totally_unknown", json!({"x": 1}), "line 1");
         let cell = ToolCallCell::new(card, true);
         assert!(cell.is_final());
-        assert!(text(&cell.render(80)).contains("tool selected\n▾ ✅ totally_unknown"));
+        assert!(text(&cell.render(80)).contains("tool selected\n▾ ✅ succeeded totally_unknown"));
         assert!(text(&cell.render(80)).contains("line 1"));
     }
 
@@ -416,7 +416,7 @@ mod tests {
         let cell = cell_from_tool_card(card, true);
         assert_eq!(cell.kind(), HistoryCellKind::Exec);
         let rendered = text(&cell.render(80));
-        assert!(rendered.contains("exec selected\n▾ ✅ $ echo hi · exit 0 · 1.2s"));
+        assert!(rendered.contains("exec selected\n▾ ✅ succeeded $ echo hi · exit 0 · 1.2s"));
         assert!(rendered.contains("  └ hi"));
         assert!(!rendered.contains("The command was running"));
     }
@@ -461,11 +461,11 @@ mod tests {
             "STDOUT\n```\nbuild ok\n```\n\nSTDERR\n```\n{stderr}\n```\n\nThe command was running 0.120s, finished with exit code 2"
         );
         let mut card = tool_card("shell", json!({"command": "cargo test"}), &result);
-        card.status = ToolStatus::Error;
+        card.status = ToolStatus::Failed;
         card.expanded = false;
         let rendered_lines = ExecToolCell::new(card, false).render(80);
         let rendered = text(&rendered_lines);
-        assert!(rendered.contains("▸ ❌ $ cargo test · exit 2 · 1.2s"));
+        assert!(rendered.contains("▸ ❌ failed $ cargo test · exit 2 · 1.2s"));
         assert!(rendered.contains("  └ … +10 lines"));
         assert!(rendered.contains("    err 59"));
         assert!(!rendered.contains("build ok"));

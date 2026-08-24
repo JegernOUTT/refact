@@ -1,35 +1,19 @@
 use super::*;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ApprovalOutcome {
-    ApprovedOnce,
-    ApprovedForChat,
-    Denied,
-}
-
-impl ApprovalOutcome {
-    fn label(self) -> &'static str {
-        match self {
-            Self::ApprovedOnce => "approved once",
-            Self::ApprovedForChat => "approved for chat",
-            Self::Denied => "denied",
-        }
-    }
-}
+use crate::tools::ToolStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalCell {
     state: ApprovalModalState,
-    outcome: Option<ApprovalOutcome>,
+    status: Option<ToolStatus>,
 }
 
 impl ApprovalCell {
-    pub fn new(state: ApprovalModalState, outcome: Option<ApprovalOutcome>) -> Self {
-        Self { state, outcome }
+    pub fn new(state: ApprovalModalState, status: Option<ToolStatus>) -> Self {
+        Self { state, status }
     }
 
-    pub fn set_outcome(&mut self, outcome: ApprovalOutcome) {
-        self.outcome = Some(outcome);
+    pub fn set_status(&mut self, status: ToolStatus) {
+        self.status = Some(status);
     }
 }
 
@@ -40,9 +24,9 @@ impl HistoryCell for ApprovalCell {
 
     fn render(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines = render_modal_lines(&self.state, width);
-        if let Some(outcome) = self.outcome {
+        if let Some(status) = self.status {
             lines.push(Line::from(Span::styled(
-                format!("approval {}", outcome.label()),
+                format!("approval {}", status.visual()),
                 Style::default().fg(Color::DarkGray),
             )));
         }
@@ -50,7 +34,7 @@ impl HistoryCell for ApprovalCell {
     }
 
     fn is_final(&self) -> bool {
-        self.outcome.is_some()
+        self.status.is_some()
     }
 
     fn revision(&self) -> u64 {
@@ -74,7 +58,7 @@ impl HistoryCell for ApprovalCell {
             self.state.full_args(),
             self.state.pending_after(),
             reasons,
-            self.outcome,
+            self.status,
         ))
     }
 }
@@ -89,8 +73,8 @@ mod tests {
         let mut cell = ApprovalCell::new(approval_state(), None);
         assert!(!cell.is_final());
         assert!(text(&cell.render(80)).contains("Approval required"));
-        cell.set_outcome(ApprovalOutcome::ApprovedOnce);
+        cell.set_status(ToolStatus::ApprovedOnce);
         assert!(cell.is_final());
-        assert!(text(&cell.render(80)).contains("approval approved once"));
+        assert!(text(&cell.render(80)).contains("approval ✓ approved once"));
     }
 }

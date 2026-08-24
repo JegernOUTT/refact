@@ -370,7 +370,7 @@ help = "f1"
         app.set_native_scrollback(false);
         app.test_push_tool(
             ToolCard::from_tool_call(&serde_json::json!({"id": "call-1", "name": "shell"}))
-                .with_result("+ok", ToolStatus::Success),
+                .with_result("+ok", ToolStatus::Succeeded),
         );
         app.test_set_approval(ApprovalModalState::new(vec![PauseReason {
             reason_type: "confirmation".to_string(),

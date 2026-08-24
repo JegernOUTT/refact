@@ -834,9 +834,9 @@ impl App {
                     .with_result(
                         message.content.clone(),
                         if message.tool_failed {
-                            ToolStatus::Error
+                            ToolStatus::Failed
                         } else {
-                            ToolStatus::Success
+                            ToolStatus::Succeeded
                         },
                     ),
                 )),

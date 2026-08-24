@@ -7,9 +7,10 @@ impl App {
             Some(KeyAction::ApprovalApproveOnce) => self
                 .pop_current_approval()
                 .map(|modal| {
+                    self.set_tool_statuses(modal.tool_call_ids(), ToolStatus::ApprovedOnce);
                     self.push_history_item(TranscriptItem::Approval(
                         modal.clone(),
-                        Some(ApprovalOutcome::ApprovedOnce),
+                        Some(ToolStatus::ApprovedOnce),
                     ));
                     AppAction::SendToolDecisions {
                         decisions: modal.decisions(true),
@@ -21,9 +22,10 @@ impl App {
                 .pop_current_approval()
                 .map(|modal| {
                     let patch = approval_patch(&modal);
+                    self.set_tool_statuses(modal.tool_call_ids(), ToolStatus::ApprovedForChat);
                     self.push_history_item(TranscriptItem::Approval(
                         modal.clone(),
-                        Some(ApprovalOutcome::ApprovedForChat),
+                        Some(ToolStatus::ApprovedForChat),
                     ));
                     AppAction::SendToolDecisions {
                         patch: Some(patch),
@@ -34,9 +36,10 @@ impl App {
             Some(KeyAction::ApprovalDeny) => self
                 .pop_current_approval()
                 .map(|modal| {
+                    self.set_tool_statuses(modal.tool_call_ids(), ToolStatus::Denied);
                     self.push_history_item(TranscriptItem::Approval(
                         modal.clone(),
-                        Some(ApprovalOutcome::Denied),
+                        Some(ToolStatus::Denied),
                     ));
                     AppAction::SendToolDecisions {
                         decisions: modal.decisions(false),

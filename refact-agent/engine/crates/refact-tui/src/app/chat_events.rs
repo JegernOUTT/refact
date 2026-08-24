@@ -70,15 +70,41 @@ impl App {
     }
 
     pub(super) fn clear_approvals(&mut self) {
+        let ids = self.approval_queue.tool_call_ids();
         self.approval_queue.clear();
         self.pending_approval_clears.clear();
+        for item in &mut self.transcript {
+            if let TranscriptItem::Tool(card) = item {
+                if ids.iter().any(|id| id == &card.id)
+                    && card.status == ToolStatus::AwaitingApproval
+                {
+                    card.status = ToolStatus::Cancelled;
+                    card.subchat_active = false;
+                }
+            }
+        }
+    }
+
+    pub(super) fn set_tool_statuses(&mut self, ids: &[String], status: ToolStatus) {
+        for item in &mut self.transcript {
+            if let TranscriptItem::Tool(card) = item {
+                if ids.iter().any(|id| id == &card.id) {
+                    card.status = status;
+                    if status.is_final() {
+                        card.subchat_active = false;
+                    }
+                }
+            }
+        }
     }
 
     pub(super) fn enqueue_approval(&mut self, modal: ApprovalModalState) {
         if self.approval_scope_pending_clear(modal.scope()) {
             return;
         }
+        let ids = modal.tool_call_ids().to_vec();
         if self.approval_queue.push(modal) {
+            self.set_tool_statuses(&ids, ToolStatus::AwaitingApproval);
             self.queue_notification(NotificationKind::ApprovalNeeded);
         }
     }
@@ -764,8 +790,8 @@ impl App {
             };
             if card.subchat_active {
                 card.subchat_active = false;
-                if card.status == ToolStatus::Running {
-                    card.status = ToolStatus::Success;
+                if card.status.is_active() {
+                    card.status = ToolStatus::Succeeded;
                     card.duration_ms = Some(completed_at_ms.saturating_sub(card.started_at_ms));
                 }
             }
@@ -780,7 +806,7 @@ impl App {
         while idx < self.transcript.len() {
             let completed = matches!(
                 self.transcript.get(idx),
-                Some(TranscriptItem::Tool(card)) if card.status != ToolStatus::Running
+                Some(TranscriptItem::Tool(card)) if card.status.is_final()
             );
             if !completed {
                 idx += 1;
@@ -1049,9 +1075,9 @@ impl App {
             message.tool_call_id.as_deref().unwrap_or_default(),
             message.content.clone(),
             if message.tool_failed {
-                ToolStatus::Error
+                ToolStatus::Failed
             } else {
-                ToolStatus::Success
+                ToolStatus::Succeeded
             },
             now_ms(),
         );

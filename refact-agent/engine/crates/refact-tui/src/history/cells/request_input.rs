@@ -73,7 +73,7 @@ impl HistoryCell for RequestInputToolCell {
     }
 
     fn is_final(&self) -> bool {
-        self.card.status != ToolStatus::Running
+        self.card.status.is_final()
     }
 
     fn revision(&self) -> u64 {
@@ -322,7 +322,7 @@ mod tests {
         let rendered = text(&RequestInputToolCell::new(card, true).render(80));
         assert_eq!(
             rendered,
-            "• Questions\n▾ ✅ Which file should I edit? · 1.2s\n  • Which file should I edit?\n  └ waiting for user input\n"
+            "• Questions\n▾ ✅ succeeded Which file should I edit? · 1.2s\n  • Which file should I edit?\n  └ waiting for user input\n"
         );
     }
 
@@ -339,7 +339,7 @@ mod tests {
         let rendered = text(&RequestInputToolCell::new(card, false).render(80));
         assert_eq!(
             rendered,
-            "• Questions\n▾ ✅ 2 questions · 1.2s\n  • Name?\n    answer: Pixel\n  • Token?\n    answer: ••••••\n"
+            "• Questions\n▾ ✅ succeeded 2 questions · 1.2s\n  • Name?\n    answer: Pixel\n  • Token?\n    answer: ••••••\n"
         );
     }
 }

@@ -32,7 +32,7 @@ mod search;
 mod server;
 mod session;
 
-pub use approval::{ApprovalCell, ApprovalOutcome};
+pub use approval::ApprovalCell;
 pub use exec::{ExecToolCell, SubchatCell, ToolCallCell};
 pub use messages::{AssistantCell, AssistantStreamCell, ReasoningCell, UserCell};
 pub use notices::{EventCell, EventCellData, InfoCell, NoticeCell, StatusCell};
@@ -480,7 +480,7 @@ fn tool_summary_line(card: &ToolCard, title: String, meta: String) -> Line<'stat
     let mut spans = vec![
         Span::styled(marker, Style::default().fg(Color::Cyan)),
         Span::raw(" "),
-        Span::styled(card.status.icon(), status_style(card.status)),
+        Span::styled(card.status.visual(), status_style(card.status)),
         Span::raw(" "),
         Span::styled(title, Style::default().fg(Color::White)),
     ];
@@ -495,9 +495,13 @@ fn tool_summary_line(card: &ToolCard, title: String, meta: String) -> Line<'stat
 
 fn status_style(status: ToolStatus) -> Style {
     match status {
+        ToolStatus::Queued => Style::default().fg(Color::DarkGray),
+        ToolStatus::AwaitingApproval => Style::default().fg(Color::Yellow),
+        ToolStatus::ApprovedOnce | ToolStatus::ApprovedForChat => Style::default().fg(Color::Cyan),
         ToolStatus::Running => Style::default().fg(Color::Yellow),
-        ToolStatus::Success => Style::default().fg(Color::Green),
-        ToolStatus::Error => Style::default().fg(Color::Red),
+        ToolStatus::Succeeded => Style::default().fg(Color::Green),
+        ToolStatus::Failed | ToolStatus::Denied => Style::default().fg(Color::Red),
+        ToolStatus::Cancelled => Style::default().fg(Color::DarkGray),
     }
 }
 
@@ -519,15 +523,21 @@ fn cyan_span(text: impl Into<String>) -> Span<'static> {
 
 fn tool_status_bullet(status: ToolStatus) -> Span<'static> {
     match status {
-        ToolStatus::Running => dim_span("•"),
-        ToolStatus::Success => Span::styled(
-            "•",
+        ToolStatus::Queued | ToolStatus::Cancelled => dim_span(status.icon()),
+        ToolStatus::AwaitingApproval | ToolStatus::Running => {
+            Span::styled(status.icon(), Style::default().fg(Color::Yellow))
+        }
+        ToolStatus::ApprovedOnce | ToolStatus::ApprovedForChat => {
+            Span::styled(status.icon(), Style::default().fg(Color::Cyan))
+        }
+        ToolStatus::Succeeded => Span::styled(
+            status.icon(),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        ToolStatus::Error => Span::styled(
-            "•",
+        ToolStatus::Failed | ToolStatus::Denied => Span::styled(
+            status.icon(),
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
     }
@@ -835,7 +845,7 @@ pub(super) mod test_support {
             "id": format!("call-{name}"),
             "function": {"name": name, "arguments": args.to_string()}
         }))
-        .with_result(result, ToolStatus::Success);
+        .with_result(result, ToolStatus::Succeeded);
         card.duration_ms = Some(1200);
         card.expanded = true;
         card

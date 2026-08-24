@@ -5,8 +5,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use crate::history::cells::{
-    synthesize_goal_content, synthesize_plan_content, ApprovalOutcome, GoalCellData,
-    HistoryCellKind, PlanCellData,
+    synthesize_goal_content, synthesize_plan_content, GoalCellData, HistoryCellKind, PlanCellData,
 };
 use crate::tools::{ToolCard, ToolStatus};
 
@@ -27,7 +26,7 @@ pub enum TranscriptItem {
     Notice(String),
     Info(Vec<String>),
     Status(session::StatusSnapshot, TuiTheme),
-    Approval(ApprovalModalState, Option<ApprovalOutcome>),
+    Approval(ApprovalModalState, Option<ToolStatus>),
     Session {
         title: String,
         subtitle: Option<String>,
@@ -36,7 +35,7 @@ pub enum TranscriptItem {
 
 impl TranscriptItem {
     pub(super) fn keeps_live(&self) -> bool {
-        matches!(self, Self::Tool(card) if card.status == ToolStatus::Running)
+        matches!(self, Self::Tool(card) if card.status.is_active())
             || matches!(self, Self::Approval(_, None))
             || matches!(self, Self::Plan(_))
             || matches!(self, Self::Goal(_))

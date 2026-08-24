@@ -19,18 +19,75 @@ const SUBCHAT_TREE_WIDTH: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolStatus {
+    Queued,
+    AwaitingApproval,
+    ApprovedOnce,
+    ApprovedForChat,
     Running,
-    Success,
-    Error,
+    Succeeded,
+    Failed,
+    Denied,
+    Cancelled,
 }
 
 impl ToolStatus {
+    pub const ALL: [Self; 9] = [
+        Self::Queued,
+        Self::AwaitingApproval,
+        Self::ApprovedOnce,
+        Self::ApprovedForChat,
+        Self::Running,
+        Self::Succeeded,
+        Self::Failed,
+        Self::Denied,
+        Self::Cancelled,
+    ];
+
     pub fn icon(self) -> &'static str {
         match self {
-            ToolStatus::Running => "⏳",
-            ToolStatus::Success => "✅",
-            ToolStatus::Error => "❌",
+            Self::Queued => "○",
+            Self::AwaitingApproval => "?",
+            Self::ApprovedOnce => "✓",
+            Self::ApprovedForChat => "✓✓",
+            Self::Running => "⏳",
+            Self::Succeeded => "✅",
+            Self::Failed => "❌",
+            Self::Denied => "⊘",
+            Self::Cancelled => "⊗",
         }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::AwaitingApproval => "awaiting approval",
+            Self::ApprovedOnce => "approved once",
+            Self::ApprovedForChat => "approved for chat",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Denied => "denied",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn visual(self) -> String {
+        format!("{} {}", self.icon(), self.label())
+    }
+
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Queued
+                | Self::AwaitingApproval
+                | Self::ApprovedOnce
+                | Self::ApprovedForChat
+                | Self::Running
+        )
+    }
+
+    pub fn is_final(self) -> bool {
+        !self.is_active()
     }
 }
 
@@ -86,7 +143,7 @@ impl ToolCard {
             args: raw_args.clone(),
             args_preview: compact_preview(&raw_args, 96),
             result: String::new(),
-            status: ToolStatus::Running,
+            status: tool_status_from_value(value),
             duration_ms: None,
             started_at_ms: now_ms(),
             expanded: false,
@@ -128,12 +185,12 @@ impl ToolCard {
         self.name = update.name;
         self.args = update.args;
         self.args_preview = update.args_preview;
-        if !update.subchat_log.is_empty() {
-            self.subchat_log = update.subchat_log;
-        }
-        if !update.attached_files.is_empty() {
-            self.attached_files = update.attached_files;
-        }
+        self.subchat_log = update.subchat_log;
+        self.attached_files = update.attached_files;
+        self.subchat_depth = update.subchat_depth;
+        self.subchat_active = update.subchat_active;
+        self.subchat_updates = update.subchat_updates;
+        self.subchat_truncated = update.subchat_truncated;
     }
 
     pub fn clear_subchat(&mut self) {
@@ -157,14 +214,14 @@ impl ToolCard {
         if duration.is_empty() {
             format!(
                 "{} {}({})",
-                self.status.icon(),
+                self.status.visual(),
                 self.name,
                 self.args_preview
             )
         } else {
             format!(
                 "{} {}({}) · {}",
-                self.status.icon(),
+                self.status.visual(),
                 self.name,
                 self.args_preview,
                 duration
@@ -335,8 +392,26 @@ fn subchat_log_from_value(value: &Value) -> Vec<String> {
             log.push(sanitize_tool_text(subchat));
         }
     }
-    log.truncate(1);
-    log
+    log.pop().into_iter().collect()
+}
+
+fn tool_status_from_value(value: &Value) -> ToolStatus {
+    let status = value
+        .get("status")
+        .or_else(|| value.get("state"))
+        .and_then(Value::as_str)
+        .map(|status| status.to_ascii_lowercase().replace(['_', '-'], " "));
+    match status.as_deref() {
+        Some("queued") | Some("pending") => ToolStatus::Queued,
+        Some("awaiting approval") | Some("approval required") => ToolStatus::AwaitingApproval,
+        Some("approved once") => ToolStatus::ApprovedOnce,
+        Some("approved for chat") => ToolStatus::ApprovedForChat,
+        Some("succeeded") | Some("success") | Some("completed") => ToolStatus::Succeeded,
+        Some("failed") | Some("error") => ToolStatus::Failed,
+        Some("denied") | Some("rejected") => ToolStatus::Denied,
+        Some("cancelled") | Some("canceled") | Some("aborted") => ToolStatus::Cancelled,
+        _ => ToolStatus::Running,
+    }
 }
 
 fn string_array_field(value: &Value, field: &str) -> Vec<String> {
@@ -462,12 +537,89 @@ mod tests {
             "id": "call-1",
             "function": {"name": "shell", "arguments": "{\"cmd\":\"echo hi\"}"}
         }))
-        .with_result("+ok\n-no", ToolStatus::Success);
+        .with_result("+ok\n-no", ToolStatus::Succeeded);
         assert_eq!(card.render_lines(80).len(), 1);
         card.toggle();
         let lines = card.render_lines(80);
         assert!(lines.len() > 1);
         assert!(format!("{:?}", lines).contains("+ok"));
+    }
+
+    #[test]
+    fn status_visuals_distinguish_every_state_without_color() {
+        let visuals = ToolStatus::ALL
+            .into_iter()
+            .map(ToolStatus::visual)
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(visuals.len(), ToolStatus::ALL.len());
+    }
+
+    #[test]
+    fn denied_tool_renders_denied_not_running() {
+        let card = ToolCard::from_tool_call(&json!({
+            "id": "call-1",
+            "name": "shell",
+            "status": "denied"
+        }));
+
+        assert_eq!(card.status, ToolStatus::Denied);
+        assert!(card.summary().contains("⊘ denied"));
+        assert!(!card.summary().contains("⏳ running"));
+    }
+
+    #[test]
+    fn queued_and_awaiting_approval_are_distinct_from_running() {
+        let queued = ToolCard::from_tool_call(&json!({"status": "queued"}));
+        let awaiting = ToolCard::from_tool_call(&json!({"status": "awaiting_approval"}));
+        let running = ToolCard::from_tool_call(&json!({}));
+
+        assert_ne!(queued.summary(), running.summary());
+        assert_ne!(awaiting.summary(), running.summary());
+        assert!(queued.summary().contains("○ queued"));
+        assert!(awaiting.summary().contains("? awaiting approval"));
+        assert!(running.summary().contains("⏳ running"));
+    }
+
+    #[test]
+    fn update_from_tool_call_refreshes_subchat_fields_and_clears_files() {
+        let mut card = ToolCard::from_tool_call(&json!({
+            "id": "call-1",
+            "subchat": "old",
+            "subchat_log": ["old progress"],
+            "attached_files": ["old.rs"],
+            "subchat_depth": 1,
+            "subchat_updates": 1,
+            "subchat_truncated": true
+        }));
+        let update = ToolCard::from_tool_call(&json!({
+            "id": "call-1",
+            "subchat": "new",
+            "subchat_log": ["new progress"],
+            "attached_files": [],
+            "subchat_depth": 3,
+            "subchat_updates": 4,
+            "subchat_truncated": false
+        }));
+
+        card.update_from_tool_call(update);
+
+        assert_eq!(card.subchat_log, ["new progress"]);
+        assert!(card.attached_files.is_empty());
+        assert_eq!(card.subchat_depth, 3);
+        assert!(card.subchat_active);
+        assert_eq!(card.subchat_updates, 4);
+        assert!(!card.subchat_truncated);
+    }
+
+    #[test]
+    fn subchat_log_uses_newest_entry() {
+        let card = ToolCard::from_tool_call(&json!({
+            "subchat_log": ["first", "second", "latest"]
+        }));
+
+        assert_eq!(card.subchat_log, ["latest"]);
+        assert!(plain_text(&card.render_subchat_lines(80)).contains("latest"));
     }
 
     #[test]

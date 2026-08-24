@@ -20,7 +20,7 @@ use crate::commands::{command_by_name, misc, session, workflow, CommandAction, I
 use crate::composer::queue::{InputQueue, QueuedInput, INPUT_QUEUE_CAPACITY};
 use crate::composer::{load_history, save_history, ComposerState, EnterDecision, HistorySearchView};
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
-use crate::history::cells::{ApprovalOutcome, HistoryRenderMode};
+use crate::history::cells::HistoryRenderMode;
 use crate::history::{
     insert_history, resize_reflow_row_cap_from_env, HistoryBuffer, HistoryInsertion,
     ResizeReflowState, RESIZE_REFLOW_PENDING_CELL_CAP,
@@ -242,9 +242,7 @@ impl App {
 
     fn latest_tool_detail(&self) -> Option<String> {
         self.transcript.iter().rev().find_map(|item| match item {
-            TranscriptItem::Tool(card) if card.status == ToolStatus::Running => {
-                Some(card.summary())
-            }
+            TranscriptItem::Tool(card) if card.status.is_active() => Some(card.summary()),
             _ => None,
         })
     }
@@ -649,7 +647,7 @@ impl App {
                 progress: card.subchat_log.last().cloned(),
                 attached_files: card.attached_files.len(),
                 depth: card.subchat_depth,
-                active: card.subchat_active && card.status == ToolStatus::Running,
+                active: card.subchat_active && card.status.is_active(),
                 truncated: card.subchat_truncated,
             });
         }
@@ -2475,10 +2473,15 @@ mod tests {
         });
         assert_eq!(tool_cards(&app).len(), 1);
 
-        app.complete_tool("call-1", "done".to_string(), ToolStatus::Success, now_ms());
+        app.complete_tool(
+            "call-1",
+            "done".to_string(),
+            ToolStatus::Succeeded,
+            now_ms(),
+        );
 
         assert_eq!(tool_cards(&app).len(), 1);
-        assert_eq!(tool_cards(&app)[0].status, ToolStatus::Success);
+        assert_eq!(tool_cards(&app)[0].status, ToolStatus::Succeeded);
         assert_eq!(app.selected_tool_index(), Some(0));
         assert_eq!(app.history_pending_count(), 0);
 
@@ -5313,6 +5316,50 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn denied_approval_marks_matching_tool_denied() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{
+                "id": "call-denied",
+                "function": {"name": "shell", "arguments": "{}"}
+            }]}]}),
+        });
+        app.handle_chat_event(pause_event(&app, "call-denied", "shell"));
+        assert_eq!(tool_cards(&app)[0].status, ToolStatus::AwaitingApproval);
+
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('n'))),
+            AppAction::SendToolDecisions { .. }
+        ));
+
+        let card = tool_cards(&app)[0];
+        assert_eq!(card.status, ToolStatus::Denied);
+        assert!(rendered_item_plain_text(&TranscriptItem::Tool(card.clone())).contains("⊘ denied"));
+    }
+
+    #[test]
+    fn cleared_approval_marks_matching_tool_cancelled() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{
+                "id": "call-cancelled",
+                "function": {"name": "shell", "arguments": "{}"}
+            }]}]}),
+        });
+        app.handle_chat_event(pause_event(&app, "call-cancelled", "shell"));
+
+        app.clear_approvals();
+
+        assert_eq!(tool_cards(&app)[0].status, ToolStatus::Cancelled);
+    }
+
+    #[test]
     fn multi_tool_pause_yields_per_tool_decisions() {
         let mut app = App::new(project());
         app.handle_chat_event(ChatEvent {
@@ -5684,9 +5731,14 @@ new-chat = "ctrl-x"
             raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{"id": "call-1", "function": {"name": "shell", "arguments": "{\"cmd\":\"echo 1\"}"}}]}]}),
         });
         assert_eq!(tool_cards(&app).len(), 1);
-        app.complete_tool("call-1", "done".to_string(), ToolStatus::Success, now_ms());
+        app.complete_tool(
+            "call-1",
+            "done".to_string(),
+            ToolStatus::Succeeded,
+            now_ms(),
+        );
         if let [card] = tool_cards(&app).as_slice() {
-            assert_eq!(card.status, ToolStatus::Success);
+            assert_eq!(card.status, ToolStatus::Succeeded);
             assert_eq!(card.result, "done");
         } else {
             panic!("expected one card");
@@ -5701,7 +5753,7 @@ new-chat = "ctrl-x"
         });
         let cards = tool_cards(&app);
         assert_eq!(cards.len(), 1);
-        assert_eq!(cards[0].status, ToolStatus::Success);
+        assert_eq!(cards[0].status, ToolStatus::Succeeded);
         assert_eq!(cards[0].result, "done");
         assert!(cards[0].expanded);
         assert!(cards[0].args_preview.contains("echo 2"));
@@ -5845,7 +5897,7 @@ new-chat = "ctrl-x"
         });
         let cards = tool_cards(&app);
         assert_eq!(cards.len(), 1);
-        assert_eq!(cards[0].status, ToolStatus::Success);
+        assert_eq!(cards[0].status, ToolStatus::Succeeded);
         assert_eq!(cards[0].result, "done");
         assert!(cards[0].expanded);
     }
@@ -5959,10 +6011,7 @@ new-chat = "ctrl-x"
         assert!(matches!(action, AppAction::SendToolDecisions { .. }));
         assert!(matches!(
             app.visible_transcript().last(),
-            Some(TranscriptItem::Approval(
-                _,
-                Some(ApprovalOutcome::ApprovedOnce)
-            ))
+            Some(TranscriptItem::Approval(_, Some(ToolStatus::ApprovedOnce)))
         ));
     }
 

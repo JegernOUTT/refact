@@ -116,7 +116,7 @@ impl HistoryCell for DiffToolCell {
     }
 
     fn is_final(&self) -> bool {
-        self.card.status != ToolStatus::Running
+        self.card.status.is_final()
     }
 
     fn revision(&self) -> u64 {
@@ -274,7 +274,7 @@ mod tests {
         let cell = cell_from_tool_card(card, false);
         assert_eq!(cell.kind(), HistoryCellKind::Diff);
         let rendered = text(&cell.render(80));
-        assert!(rendered.contains("diff\n▾ ✅ 1 file · +1 -1 · 1.2s"));
+        assert!(rendered.contains("diff\n▾ ✅ succeeded 1 file · +1 -1 · 1.2s"));
         assert!(rendered.contains("• Edited x (+1 -1)"));
         assert!(rendered.contains("Δ x +1 -1"));
         assert!(rendered.contains("-old"));

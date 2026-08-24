@@ -256,11 +256,11 @@ fn transcript_cells_golden_snapshot() {
      ok      yes
 
   exec selected
-  ▸ ✅  $ cargo test -p refact-tui · exit 0 · <ms>
+  ▸ ✅  succeeded $ cargo test -p refact-tui · exit 0 · <ms>
     └ ok
 
   diff
-  ▸ ✅  1 file · +1 -1 · <ms>
+  ▸ ✅  succeeded 1 file · +1 -1 · <ms>
   • Edited src/lib.rs (+1 -1)
   Δ src/lib.rs +1 -1
 
@@ -434,7 +434,7 @@ fn ask_form_bottom_pane_golden_snapshot() {
         actual,
         r#"refact fixture | Ctrl-N new · Ctrl-P projects · Alt-M model · Ctrl-O mode · ? help
   • Questions
-  ▸ ✅  ask_questions({}) · <ms>
+  ▸ ✅  succeeded ask_questions({}) · <ms>
 
 
 

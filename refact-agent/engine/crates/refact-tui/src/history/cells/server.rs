@@ -92,7 +92,7 @@ impl HistoryCell for ServerToolCell {
     }
 
     fn is_final(&self) -> bool {
-        self.card.status != ToolStatus::Running
+        self.card.status.is_final()
     }
 
     fn revision(&self) -> u64 {
@@ -141,7 +141,7 @@ impl HistoryCell for CitationCell {
 
 fn server_call_header_lines(card: &ToolCard, width: usize) -> Vec<Line<'static>> {
     let invocation = server_invocation_line(card);
-    let header = if card.status == ToolStatus::Running {
+    let header = if card.status.is_active() {
         "Calling"
     } else {
         "Called"
@@ -262,7 +262,7 @@ mod tests {
         let rendered = text(&ServerToolCell::new(card, false).render(80));
         assert_eq!(
             rendered,
-            "• Called mcp.github_get_file_contents({\"owner\":\"me\",\"repo\":\"r\"})\n▾ ✅ mcp_call · 1.2s\n  └ README contents\n"
+            "✅ Called mcp.github_get_file_contents({\"owner\":\"me\",\"repo\":\"r\"})\n▾ ✅ succeeded mcp_call · 1.2s\n  └ README contents\n"
         );
     }
 

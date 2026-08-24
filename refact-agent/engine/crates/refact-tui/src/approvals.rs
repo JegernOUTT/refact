@@ -344,6 +344,13 @@ impl ApprovalQueue {
         self.pending.is_empty()
     }
 
+    pub fn tool_call_ids(&self) -> Vec<String> {
+        self.pending
+            .iter()
+            .flat_map(|modal| modal.tool_call_ids().iter().cloned())
+            .collect()
+    }
+
     fn refresh_pending_counts(&mut self) {
         let len = self.pending.len();
         for (idx, modal) in self.pending.iter_mut().enumerate() {
