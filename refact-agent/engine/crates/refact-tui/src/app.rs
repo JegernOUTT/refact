@@ -1767,11 +1767,15 @@ mod tests {
     }
 
     fn waiting_user_input_event(app: &App) -> ChatEvent {
+        runtime_updated_event(app, "waiting_user_input")
+    }
+
+    fn runtime_updated_event(app: &App, state: &str) -> ChatEvent {
         ChatEvent {
             chat_id: Some(app.chat_id().to_string()),
             seq: None,
             kind: "runtime_updated".to_string(),
-            raw: json!({"state": "waiting_user_input"}),
+            raw: json!({"state": state}),
         }
     }
 
@@ -2834,6 +2838,71 @@ new-chat = "ctrl-x"
         });
         assert_eq!(assistant_text(&app), "hi\n");
         assert_eq!(app.session_state(), SessionState::Idle);
+    }
+
+    #[test]
+    fn runtime_states_map_to_distinct_footer_states() {
+        let mut app = App::new(project());
+        let states = [
+            ("idle", SessionState::Idle, "idle"),
+            ("generating", SessionState::Generating, "generating"),
+            (
+                "executing_tools",
+                SessionState::ExecutingTools,
+                "running tools",
+            ),
+            ("paused", SessionState::Paused, "approval pending"),
+            ("waiting_ide", SessionState::WaitingIde, "waiting for IDE…"),
+            (
+                "waiting_user_input",
+                SessionState::WaitingUserInput,
+                "waiting for input",
+            ),
+            ("completed", SessionState::Completed, "completed"),
+            ("error", SessionState::Error, "error"),
+        ];
+
+        for (runtime_state, expected_state, expected_footer_label) in states {
+            app.handle_chat_event(runtime_updated_event(&app, runtime_state));
+
+            assert_eq!(app.session_state(), expected_state);
+            let footer = crate::ui::footer::FooterData::from_app(&app);
+            assert!(crate::ui::footer::footer_text(&footer).contains(expected_footer_label));
+        }
+    }
+
+    #[test]
+    fn waiting_ide_footer_is_blocked_and_abort_restores_idle() {
+        let mut app = App::new(project());
+        app.handle_chat_event(runtime_updated_event(&app, "waiting_ide"));
+
+        let footer = crate::ui::footer::footer_text(&crate::ui::footer::FooterData::from_app(&app));
+        assert!(footer.contains("waiting for IDE…"));
+        assert!(footer.contains("Esc to abort"));
+        assert!(!footer.contains("● idle"));
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::Abort);
+        assert!(app.abort_in_flight);
+
+        assert_eq!(
+            app.handle_command_finished(CommandContextTag::Abort, Ok(())),
+            AppAction::None
+        );
+        assert_eq!(app.session_state(), SessionState::Idle);
+        assert!(!app.abort_in_flight);
+    }
+
+    #[test]
+    fn stream_finished_preserves_completed_runtime_state() {
+        let mut app = App::new(project());
+        app.handle_chat_event(runtime_updated_event(&app, "completed"));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+
+        assert_eq!(app.session_state(), SessionState::Completed);
     }
 
     #[test]

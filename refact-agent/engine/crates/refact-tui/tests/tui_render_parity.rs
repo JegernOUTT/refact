@@ -184,7 +184,7 @@ fn keymap_help_golden_snapshot() {
 
 │› Ask Refact…
 │  Enter send   Ctrl-J newline
- fixture · default · agent · reason:off · ● idle · daemon online · worker ready"#,
+ ● idle · daemon online · fixture · default · agent · reason:off · worker ready"#,
     );
 }
 
@@ -271,7 +271,7 @@ fn transcript_cells_golden_snapshot() {
 
 │› Ask Refact…
 │  Enter send   Ctrl-J newline
- 98% context left (1.54K used) · fixture · gpt-demo · agent · reason:off · ● idle · daemon online ·…"#,
+ 98% context left (1.54K used) · ● idle · daemon online · fixture · gpt-demo · agent · reason:off ·…"#,
     );
 }
 
@@ -387,8 +387,8 @@ fn approval_overlay_golden_snapshot() {
    └──────────────────────────────────────────────────────────────────────────────────┘
 
 │› Ask Refact…
-│  approval pending   Enter send   Ctrl-J newline
- fixture · default · agent · reason:off · ◆ generating · Esc to interrupt · daemon online…"#,
+│  approval pending · Enter queues · Esc cancels   Enter send   Ctrl-J newline   Enter qu…
+ ◆ approval pending · Esc to interrupt · daemon online · fixture · default · agent · reas…"#,
     );
 }
 
@@ -455,7 +455,7 @@ fn ask_form_bottom_pane_golden_snapshot() {
 │Press Enter to confirm or Esc to go back                                                │
 │↑/↓ choose · ←/→ question                                                               │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- fixture · gpt-demo · agent · reason:off · ● idle · daemon online · worker ready"#,
+ ◆ waiting for input · Esc to interrupt · daemon online · fixture · gpt-demo · agent · re…"#,
     );
 }
 
@@ -504,7 +504,7 @@ fn status_footer_and_working_indicator_golden_snapshots() {
     });
     assert_snapshot(
         footer_actual,
-        r#" 98% context left (1.54K used) · fixture · gpt-demo · agent · reason:high · ◆ generating · Esc to in"#,
+        r#" 98% context left (1.54K used) · ◆ generating · Esc to interrupt · daemon online · fixture · gpt-dem"#,
     );
 }
 

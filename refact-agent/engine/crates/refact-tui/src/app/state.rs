@@ -613,6 +613,7 @@ impl App {
             SessionState::Generating
                 | SessionState::ExecutingTools
                 | SessionState::Paused
+                | SessionState::WaitingIde
                 | SessionState::WaitingUserInput
         )
     }

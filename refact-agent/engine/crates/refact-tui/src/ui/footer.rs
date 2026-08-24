@@ -15,6 +15,12 @@ use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
 pub enum FooterRuntimeState {
     Idle,
     Generating,
+    ExecutingTools,
+    Paused,
+    WaitingIde,
+    WaitingUserInput,
+    Completed,
+    Error,
     Waking,
     Offline,
 }
@@ -29,19 +35,28 @@ impl FooterRuntimeState {
         {
             return Self::Waking;
         }
-        if matches!(
-            app.session_state(),
-            SessionState::Generating | SessionState::ExecutingTools | SessionState::Paused
-        ) {
-            return Self::Generating;
+        match app.session_state() {
+            SessionState::Idle => Self::Idle,
+            SessionState::Generating => Self::Generating,
+            SessionState::ExecutingTools => Self::ExecutingTools,
+            SessionState::Paused => Self::Paused,
+            SessionState::WaitingIde => Self::WaitingIde,
+            SessionState::WaitingUserInput => Self::WaitingUserInput,
+            SessionState::Completed => Self::Completed,
+            SessionState::Error => Self::Error,
         }
-        Self::Idle
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::Idle => "idle",
             Self::Generating => "generating",
+            Self::ExecutingTools => "running tools",
+            Self::Paused => "approval pending",
+            Self::WaitingIde => "waiting for IDE…",
+            Self::WaitingUserInput => "waiting for input",
+            Self::Completed => "completed",
+            Self::Error => "error",
             Self::Waking => "waking",
             Self::Offline => "offline",
         }
@@ -51,6 +66,12 @@ impl FooterRuntimeState {
         match self {
             Self::Idle => "●",
             Self::Generating => "◆",
+            Self::ExecutingTools => "◆",
+            Self::Paused => "◆",
+            Self::WaitingIde => "◆",
+            Self::WaitingUserInput => "◆",
+            Self::Completed => "●",
+            Self::Error => "●",
             Self::Waking => "◐",
             Self::Offline => "○",
         }
@@ -60,6 +81,12 @@ impl FooterRuntimeState {
         match self {
             Self::Idle => Color::Green,
             Self::Generating => Color::Cyan,
+            Self::ExecutingTools => Color::Cyan,
+            Self::Paused => Color::Yellow,
+            Self::WaitingIde => Color::Yellow,
+            Self::WaitingUserInput => Color::Yellow,
+            Self::Completed => Color::Green,
+            Self::Error => Color::Red,
             Self::Waking => Color::Yellow,
             Self::Offline => Color::Red,
         }
@@ -129,6 +156,10 @@ pub fn footer_line(data: &FooterData) -> Line<'static> {
         spans.push(Span::styled(usage, Style::default().fg(Color::White)));
         spans.push(separator());
     }
+    spans.extend(runtime_spans(data.runtime_state, &data.interrupt_key));
+    spans.push(separator());
+    spans.push(Span::raw(format!("daemon {}", data.daemon_label())));
+    spans.push(separator());
     spans.push(Span::raw(data.project.clone()));
     spans.push(separator());
     spans.push(Span::raw(data.model.clone()));
@@ -136,10 +167,6 @@ pub fn footer_line(data: &FooterData) -> Line<'static> {
     spans.push(Span::raw(data.mode.clone()));
     spans.push(separator());
     spans.push(Span::raw(format!("reason:{}", data.reasoning)));
-    spans.push(separator());
-    spans.extend(runtime_spans(data.runtime_state, &data.interrupt_key));
-    spans.push(separator());
-    spans.push(Span::raw(format!("daemon {}", data.daemon_label())));
     spans.push(separator());
     spans.push(Span::raw(format!("worker {}", data.worker)));
     if let Some(retry_hint) = &data.retry_hint {
@@ -205,13 +232,21 @@ fn runtime_spans(state: FooterRuntimeState, interrupt_key: &str) -> Vec<Span<'st
         Span::raw(" "),
         Span::styled(state.label(), Style::default().fg(state.color())),
     ];
-    if state == FooterRuntimeState::Generating {
+    let escape_hint = match state {
+        FooterRuntimeState::WaitingIde => Some(" to abort"),
+        FooterRuntimeState::Generating
+        | FooterRuntimeState::ExecutingTools
+        | FooterRuntimeState::Paused
+        | FooterRuntimeState::WaitingUserInput => Some(" to interrupt"),
+        _ => None,
+    };
+    if let Some(escape_hint) = escape_hint {
         spans.push(separator());
         spans.push(Span::styled(
             interrupt_key.to_string(),
             Style::default().fg(Color::Yellow),
         ));
-        spans.push(Span::raw(" to interrupt"));
+        spans.push(Span::raw(escape_hint));
     }
     spans
 }
@@ -321,7 +356,7 @@ mod tests {
 
         assert_eq!(
             snapshot,
-            " 90% context left (10 used) · demo · model · agent · reason:off · ● idle · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · reason:off · ◆ generating · Esc to interrupt · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · reason:off · ◐ waking · daemon online · worker ready \n 90% context left (10 used) · demo · model · agent · reason:off · ○ offline · daemon offline · worker ready "
+            " 90% context left (10 used) · ● idle · daemon online · demo · model · agent · reason:off · worker ready \n 90% context left (10 used) · ◆ generating · Esc to interrupt · daemon online · demo · model · agent · reason:off · worker ready \n 90% context left (10 used) · ◐ waking · daemon online · demo · model · agent · reason:off · worker ready \n 90% context left (10 used) · ○ offline · daemon offline · demo · model · agent · reason:off · worker ready "
         );
 
         let colors = [

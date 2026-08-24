@@ -156,11 +156,17 @@ fn prompt_span(app: &App) -> Span<'static> {
 fn composer_status(app: &App) -> Option<String> {
     match app.session_state() {
         _ if app.composer_history_search().is_some() => Some(history_search_title(app)),
-        SessionState::Generating | SessionState::ExecutingTools => {
-            Some("generating · Enter queues · Esc cancels".to_string())
+        SessionState::Generating => Some("generating · Enter queues · Esc cancels".to_string()),
+        SessionState::ExecutingTools => {
+            Some("running tools · Enter queues · Esc cancels".to_string())
         }
-        SessionState::Paused => Some("approval pending".to_string()),
+        SessionState::Paused => Some("approval pending · Enter queues · Esc cancels".to_string()),
+        SessionState::WaitingIde => {
+            Some("waiting for IDE… · Enter queues · Esc aborts".to_string())
+        }
         SessionState::WaitingUserInput => Some("waiting for input".to_string()),
+        SessionState::Completed => Some("completed".to_string()),
+        SessionState::Error => Some("error".to_string()),
         _ if app.vim_enabled() => Some(format!("vim {}", app.vim_mode().label())),
         _ => None,
     }
@@ -185,7 +191,10 @@ fn composer_footer_line(app: &App, status: Option<String>) -> Line<'static> {
     spans.extend(key_hint::pair(newline, "newline").spans);
     if matches!(
         app.session_state(),
-        SessionState::Generating | SessionState::ExecutingTools
+        SessionState::Generating
+            | SessionState::ExecutingTools
+            | SessionState::Paused
+            | SessionState::WaitingIde
     ) {
         spans.push(Span::raw("   "));
         spans.extend(key_hint::pair("Enter", "queue").spans);

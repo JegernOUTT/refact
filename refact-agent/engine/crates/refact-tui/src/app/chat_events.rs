@@ -253,7 +253,10 @@ impl App {
                     self.update_usage(&raw);
                 }
                 self.queue_notification(NotificationKind::TurnComplete);
-                if self.session_state != SessionState::Paused {
+                if matches!(
+                    self.session_state,
+                    SessionState::Generating | SessionState::ExecutingTools
+                ) {
                     if self.ask_questions_form.is_some() {
                         self.set_session_state(SessionState::WaitingUserInput);
                     } else {
@@ -450,10 +453,13 @@ impl App {
             return;
         }
         let state = match raw.get("state").and_then(Value::as_str).unwrap_or_default() {
+            "idle" => SessionState::Idle,
             "generating" => SessionState::Generating,
             "executing_tools" => SessionState::ExecutingTools,
             "paused" => SessionState::Paused,
+            "waiting_ide" => SessionState::WaitingIde,
             "waiting_user_input" => SessionState::WaitingUserInput,
+            "completed" => SessionState::Completed,
             "error" => SessionState::Error,
             _ => SessionState::Idle,
         };

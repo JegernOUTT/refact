@@ -8,7 +8,9 @@ pub enum SessionState {
     Generating,
     ExecutingTools,
     Paused,
+    WaitingIde,
     WaitingUserInput,
+    Completed,
     Error,
 }
 
@@ -26,7 +28,9 @@ impl SessionState {
             SessionState::Generating => "generating",
             SessionState::ExecutingTools => "tools",
             SessionState::Paused => "paused",
+            SessionState::WaitingIde => "waiting for IDE",
             SessionState::WaitingUserInput => "waiting input",
+            SessionState::Completed => "completed",
             SessionState::Error => "error",
         }
     }

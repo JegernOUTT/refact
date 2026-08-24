@@ -198,6 +198,7 @@ impl App {
             SessionState::Generating
                 | SessionState::ExecutingTools
                 | SessionState::Paused
+                | SessionState::WaitingIde
                 | SessionState::WaitingUserInput
         ) {
             self.cancel_queue_edit();
@@ -281,6 +282,7 @@ impl App {
             SessionState::Generating
                 | SessionState::ExecutingTools
                 | SessionState::Paused
+                | SessionState::WaitingIde
                 | SessionState::WaitingUserInput
         ) {
             self.cancel_queue_edit();
