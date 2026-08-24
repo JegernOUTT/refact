@@ -8,6 +8,7 @@ use serde_json::json;
 use refact_core::model_caps::{resolve_model_caps, ModelCapabilities};
 use refact_core::provider_types::{available_model_from_catalog_and_live, LiveModelFields};
 use refact_core::llm_types::WireFormat;
+use refact_llm::adapter::OPENROUTER_EXTRA_BODY_HEADER;
 use crate::config::resolve_env_var;
 use crate::traits::{
     AvailableModel, CustomModelConfig, ModelPricing, ModelSource, ProviderRuntime, ProviderTrait,
@@ -20,6 +21,12 @@ const OPENROUTER_KEY_URL: &str = "https://openrouter.ai/api/v1/key";
 const OPENROUTER_AUTH_KEY_URL: &str = "https://openrouter.ai/api/v1/auth/key";
 const OPENROUTER_CREDITS_URL: &str = "https://openrouter.ai/api/v1/credits";
 const OPENROUTER_MODEL_ENDPOINTS_URL: &str = "https://openrouter.ai/api/v1/models";
+const OPENROUTER_APP_REFERER_HEADER: &str = "HTTP-Referer";
+const OPENROUTER_APP_TITLE_HEADER: &str = "X-OpenRouter-Title";
+const OPENROUTER_APP_CATEGORIES_HEADER: &str = "X-OpenRouter-Categories";
+const OPENROUTER_APP_REFERER_VALUE: &str = "https://github.com/JegernOUTT/refact";
+const OPENROUTER_APP_TITLE_VALUE: &str = "Refact";
+const OPENROUTER_APP_CATEGORIES_VALUE: &str = "ide-extension,cli-agent";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OpenRouterProvider {
@@ -31,6 +38,8 @@ pub struct OpenRouterProvider {
     pub custom_models: HashMap<String, CustomModelConfig>,
     #[serde(default)]
     pub selected_providers: HashMap<String, String>,
+    #[serde(default)]
+    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -633,6 +642,31 @@ impl OpenRouterProvider {
                 .cloned(),
         })
     }
+
+    fn runtime_extra_headers(&self) -> HashMap<String, String> {
+        let mut extra_headers = HashMap::new();
+        extra_headers.insert(
+            OPENROUTER_APP_REFERER_HEADER.to_string(),
+            OPENROUTER_APP_REFERER_VALUE.to_string(),
+        );
+        extra_headers.insert(
+            OPENROUTER_APP_TITLE_HEADER.to_string(),
+            OPENROUTER_APP_TITLE_VALUE.to_string(),
+        );
+        extra_headers.insert(
+            OPENROUTER_APP_CATEGORIES_HEADER.to_string(),
+            OPENROUTER_APP_CATEGORIES_VALUE.to_string(),
+        );
+        if let Some(fields) = &self.extra_body {
+            if !fields.is_empty() {
+                extra_headers.insert(
+                    OPENROUTER_EXTRA_BODY_HEADER.to_string(),
+                    serde_json::Value::Object(fields.clone()).to_string(),
+                );
+            }
+        }
+        extra_headers
+    }
 }
 
 #[async_trait]
@@ -676,6 +710,11 @@ fields:
     smartlinks:
       - sl_label: "Get API Key"
         sl_goto: "https://openrouter.ai/keys"
+  extra_body:
+    f_type: string_long
+    f_extra: true
+    f_desc: "Advanced JSON object merged into every chat request body. Protected fields (model, messages, stream, tools, tool_choice) are rejected."
+    f_label: "Extra Body"
 description: |
   OpenRouter aggregator - access models from multiple providers.
 available:
@@ -706,16 +745,52 @@ available:
                 }
             }
         }
+        match yaml.get("extra_body") {
+            None | Some(serde_yaml::Value::Null) => {
+                self.extra_body = None;
+            }
+            Some(serde_yaml::Value::String(text)) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    self.extra_body = None;
+                } else {
+                    let parsed: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
+                        format!("openrouter extra_body must be a valid JSON object: {e}")
+                    })?;
+                    match parsed {
+                        serde_json::Value::Object(map) => self.extra_body = Some(map),
+                        _ => {
+                            return Err(
+                                "openrouter extra_body must be a JSON/YAML object".to_string()
+                            )
+                        }
+                    }
+                }
+            }
+            Some(other) => {
+                let parsed = serde_json::to_value(other)
+                    .map_err(|e| format!("openrouter extra_body conversion failed: {e}"))?;
+                match parsed {
+                    serde_json::Value::Object(map) => self.extra_body = Some(map),
+                    _ => return Err("openrouter extra_body must be a JSON/YAML object".to_string()),
+                }
+            }
+        }
         Ok(())
     }
 
     fn provider_settings_as_json(&self) -> serde_json::Value {
+        let extra_body = self
+            .extra_body
+            .as_ref()
+            .map(|fields| serde_json::Value::Object(fields.clone()));
         json!({
             "api_key": if self.api_key.is_empty() { "" } else { "***" },
             "enabled": self.enabled,
             "enabled_models": self.enabled_models,
             "custom_models": self.custom_models,
-            "selected_providers": self.selected_providers
+            "selected_providers": self.selected_providers,
+            "extra_body": extra_body
         })
     }
 
@@ -734,7 +809,7 @@ available:
             api_key,
             auth_token: String::new(),
             tokenizer_api_key: String::new(),
-            extra_headers: HashMap::new(),
+            extra_headers: self.runtime_extra_headers(),
             supports_cache_control: true,
             chat_models: Vec::new(),
             completion_models: Vec::new(),
@@ -867,6 +942,25 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn build_runtime_sets_openrouter_app_attribution_headers() {
+        let provider = OpenRouterProvider::default();
+        let runtime = provider.build_runtime().unwrap();
+
+        assert_eq!(
+            runtime.extra_headers.get(OPENROUTER_APP_REFERER_HEADER),
+            Some(&OPENROUTER_APP_REFERER_VALUE.to_string())
+        );
+        assert_eq!(
+            runtime.extra_headers.get(OPENROUTER_APP_TITLE_HEADER),
+            Some(&OPENROUTER_APP_TITLE_VALUE.to_string())
+        );
+        assert_eq!(
+            runtime.extra_headers.get(OPENROUTER_APP_CATEGORIES_HEADER),
+            Some(&OPENROUTER_APP_CATEGORIES_VALUE.to_string())
+        );
+    }
+
+    #[test]
     fn quota_info_uses_only_authenticated_key_fields() {
         let quota = OpenRouterProvider::quota_info_from_key_json(&json!({
             "data": {
@@ -881,6 +975,69 @@ mod tests {
         assert_eq!(quota.limit, Some(100.0));
         assert_eq!(quota.usage, Some(35.0));
         assert_eq!(quota.limit_remaining, Some(65.0));
+    }
+
+    #[test]
+    fn extra_body_round_trips_through_settings_and_runtime() {
+        let mut provider = OpenRouterProvider::default();
+        provider
+            .provider_settings_apply(
+                serde_yaml::from_str(
+                    r#"
+extra_body: |
+  {"provider": {"sort": "throughput"}, "usage": {"include": true}}
+"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let settings = provider.provider_settings_as_json();
+        assert_eq!(settings["extra_body"]["provider"]["sort"], "throughput");
+        assert_eq!(settings["extra_body"]["usage"]["include"], true);
+
+        let runtime = provider.build_runtime().unwrap();
+        let raw = runtime
+            .extra_headers
+            .get(OPENROUTER_EXTRA_BODY_HEADER)
+            .expect("extra body header must be set");
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed["provider"]["sort"], json!("throughput"));
+        assert_eq!(parsed["usage"]["include"], json!(true));
+    }
+
+    #[test]
+    fn extra_body_yaml_mapping_and_clearing_work() {
+        let mut provider = OpenRouterProvider::default();
+        provider
+            .provider_settings_apply(serde_yaml::from_str("extra_body:\n  top_k: 40\n").unwrap())
+            .unwrap();
+        assert_eq!(
+            provider.extra_body.as_ref().unwrap().get("top_k"),
+            Some(&json!(40))
+        );
+
+        provider
+            .provider_settings_apply(serde_yaml::from_str("extra_body: null\n").unwrap())
+            .unwrap();
+        assert!(provider.extra_body.is_none());
+
+        provider.enabled = true;
+        provider.api_key = "sk-or-test".to_string();
+        provider.enabled_models = vec!["m".to_string()];
+        let runtime = provider.build_runtime().unwrap();
+        assert!(!runtime
+            .extra_headers
+            .contains_key(OPENROUTER_EXTRA_BODY_HEADER));
+    }
+
+    #[test]
+    fn extra_body_rejects_non_object_payloads() {
+        let mut provider = OpenRouterProvider::default();
+        let err = provider
+            .provider_settings_apply(serde_yaml::from_str("extra_body: \"[1,2]\"\n").unwrap())
+            .unwrap_err();
+        assert!(err.contains("must be a JSON/YAML object") || err.contains("valid JSON object"));
     }
 
     #[test]

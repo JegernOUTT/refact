@@ -14,6 +14,8 @@ pub struct HttpParts {
     pub body: serde_json::Value,
 }
 
+pub const OPENROUTER_EXTRA_BODY_HEADER: &str = "x-refact-internal-openrouter-extra-body";
+
 pub struct AdapterSettings {
     pub api_key: String,
     pub auth_token: String,

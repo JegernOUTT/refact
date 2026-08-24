@@ -237,6 +237,33 @@ impl LlmWireAdapter for OpenAiChatAdapter {
             }
         }
 
+        if let Some(raw) = settings
+            .extra_headers
+            .get(crate::adapter::OPENROUTER_EXTRA_BODY_HEADER)
+        {
+            match serde_json::from_str::<serde_json::Value>(raw.trim()) {
+                Ok(configured) => {
+                    if let (Some(obj), Some(fields)) =
+                        (body.as_object_mut(), configured.as_object())
+                    {
+                        for (k, v) in fields {
+                            if PROTECTED_FIELDS.contains(&k.as_str()) {
+                                tracing::warn!(
+                                    "openrouter extra_body attempted to override protected field '{}', ignoring",
+                                    k
+                                );
+                                continue;
+                            }
+                            obj.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!("openrouter extra_body header is not valid JSON, ignoring")
+                }
+            }
+        }
+
         crate::provider_quirks::apply_openai_chat_body_quirks(&mut body, req, settings);
 
         tracing::info!(
@@ -878,6 +905,54 @@ mod tests {
             supports_web_search: false,
             supports_cache_control: true,
         }
+    }
+
+    #[test]
+    fn openrouter_extra_body_header_merges_into_request_body() {
+        let req = LlmRequest::new(
+            "openai/gpt-4o".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hi".to_string())],
+        );
+        let mut settings = default_settings();
+        settings.endpoint = "https://openrouter.ai/api/v1/chat/completions".to_string();
+        settings.model_name = "openai/gpt-4o".to_string();
+        settings.extra_headers.insert(
+            crate::adapter::OPENROUTER_EXTRA_BODY_HEADER.to_string(),
+            r#"{"provider":{"sort":"throughput"},"usage":{"include":true}}"#.to_string(),
+        );
+
+        let http = OpenAiChatAdapter
+            .build_http(&cleared(&req), &settings)
+            .unwrap();
+
+        assert_eq!(http.body["provider"]["sort"], json!("throughput"));
+        assert_eq!(http.body["usage"]["include"], json!(true));
+    }
+
+    #[test]
+    fn openrouter_extra_body_header_protected_fields_are_rejected() {
+        let req = LlmRequest::new(
+            "openai/gpt-4o".to_string(),
+            vec![ChatMessage::new("user".to_string(), "Hi".to_string())],
+        );
+        let mut settings = default_settings();
+        settings.endpoint = "https://openrouter.ai/api/v1/chat/completions".to_string();
+        settings.model_name = "openai/gpt-4o".to_string();
+        settings.extra_headers.insert(
+            crate::adapter::OPENROUTER_EXTRA_BODY_HEADER.to_string(),
+            r#"{"model":"hacked","messages":[],"stream":false,"top_k":40}"#.to_string(),
+        );
+
+        let http = OpenAiChatAdapter
+            .build_http(&cleared(&req), &settings)
+            .unwrap();
+
+        assert_eq!(http.body["model"], json!("openai/gpt-4o"));
+        assert!(http.body["messages"]
+            .as_array()
+            .is_some_and(|m| m.len() == 1));
+        assert_eq!(http.body["stream"], json!(true));
+        assert_eq!(http.body["top_k"], json!(40));
     }
 
     #[test]
@@ -1927,6 +2002,8 @@ mod tests {
                     arguments: r#"{"city":"Paris"}"#.to_string(),
                 },
                 extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
             }]),
             ..Default::default()
         }];
