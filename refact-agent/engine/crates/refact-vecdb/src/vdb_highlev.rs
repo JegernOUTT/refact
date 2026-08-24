@@ -9,7 +9,7 @@ use tracing::info;
 use refact_core::memory_plane::MemoryPlaneRoots;
 use refact_core::vecdb_types::{
     EmbeddingModelConfig, FileReader, FileVectorizationGate, SearchResult, VecDbStatus,
-    VecdbRecord, VecdbSearch,
+    VecdbRecord, VecdbSearch, VecdbSearchScope,
 };
 
 use crate::fetch_embedding;
@@ -79,6 +79,40 @@ impl VecDb {
             .await
             .map_err(|e| e.to_string())?;
         Ok(self.compute_usefulness_and_filter(raw))
+    }
+
+    pub async fn vecdb_search_scopes_with_embedding(
+        &self,
+        embedding: &Vec<f32>,
+        scopes: &[VecdbSearchScope],
+    ) -> Result<Vec<Vec<VecdbRecord>>, String> {
+        let Some(max_top_n) = scopes.iter().map(|scope| scope.top_n).max() else {
+            return Ok(Vec::new());
+        };
+        let raw_results = {
+            let mut handler_locked = self.vecdb_handler.lock().await;
+            handler_locked
+                .vecdb_search(embedding, max_top_n, None)
+                .await
+                .map_err(|error| error.to_string())?
+        };
+
+        Ok(scopes
+            .iter()
+            .map(|scope| {
+                self.compute_usefulness_and_filter(
+                    raw_results.iter().take(scope.top_n).cloned().collect(),
+                )
+                .into_iter()
+                .filter(|record| {
+                    record
+                        .file_path
+                        .to_string_lossy()
+                        .starts_with(&scope.path_prefix)
+                })
+                .collect()
+            })
+            .collect())
     }
 
     pub async fn init(
@@ -236,6 +270,14 @@ impl VecdbSearch for VecDb {
         filter_mb: Option<String>,
     ) -> Result<Vec<VecdbRecord>, String> {
         VecDb::vecdb_search_with_embedding(self, embedding, top_n, filter_mb).await
+    }
+
+    async fn vecdb_search_scopes_with_embedding(
+        &self,
+        embedding: &Vec<f32>,
+        scopes: &[VecdbSearchScope],
+    ) -> Result<Vec<Vec<VecdbRecord>>, String> {
+        VecDb::vecdb_search_scopes_with_embedding(self, embedding, scopes).await
     }
 }
 

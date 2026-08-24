@@ -16,6 +16,12 @@ pub type FileReader = Arc<
 
 pub type FileVectorizationGate = Arc<dyn Fn(&PathBuf) -> Result<(), String> + Send + Sync>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VecdbSearchScope {
+    pub path_prefix: String,
+    pub top_n: usize,
+}
+
 #[async_trait]
 pub trait VecdbSearch: Send + Sync {
     async fn vecdb_search(
@@ -43,6 +49,32 @@ pub trait VecdbSearch: Send + Sync {
         top_n: usize,
         filter_mb: Option<String>,
     ) -> Result<Vec<VecdbRecord>, String>;
+    async fn vecdb_search_scopes_with_embedding(
+        &self,
+        embedding: &Vec<f32>,
+        scopes: &[VecdbSearchScope],
+    ) -> Result<Vec<Vec<VecdbRecord>>, String> {
+        let max_top_n = scopes.iter().map(|scope| scope.top_n).max().unwrap_or(0);
+        let results = self
+            .vecdb_search_with_embedding(embedding, max_top_n, None)
+            .await?;
+        Ok(scopes
+            .iter()
+            .map(|scope| {
+                results
+                    .iter()
+                    .take(scope.top_n)
+                    .filter(|record| {
+                        record
+                            .file_path
+                            .to_string_lossy()
+                            .starts_with(&scope.path_prefix)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .collect())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]

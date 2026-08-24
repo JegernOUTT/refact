@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use refact_core::memory_plane::MemoryPlaneRoots;
 use refact_core::vecdb_types::{
-    EmbeddingModelConfig, SearchResult, VecDbStatus, VecdbRecord, VecdbSearch,
+    EmbeddingModelConfig, SearchResult, VecDbStatus, VecdbRecord, VecdbSearch, VecdbSearchScope,
 };
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
@@ -1161,6 +1161,33 @@ impl VecdbSearch for AutoEnrichmentVecdb {
             tokio::time::sleep(self.delay).await;
         }
         Ok(self.records.clone())
+    }
+
+    async fn vecdb_search_scopes_with_embedding(
+        &self,
+        _embedding: &Vec<f32>,
+        scopes: &[VecdbSearchScope],
+    ) -> Result<Vec<Vec<VecdbRecord>>, String> {
+        let _guard = self.enter_search();
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        Ok(scopes
+            .iter()
+            .map(|scope| {
+                self.records
+                    .iter()
+                    .filter(|record| {
+                        record
+                            .file_path
+                            .to_string_lossy()
+                            .starts_with(&scope.path_prefix)
+                    })
+                    .take(scope.top_n)
+                    .cloned()
+                    .collect()
+            })
+            .collect())
     }
 }
 
@@ -4288,12 +4315,15 @@ mod tests {
         assert_eq!(report.workload.chat_count, 10);
         assert_eq!(report.privacy_exclusion_violations, 0);
         assert_eq!(report.repeated_work.attempts, 10);
-        assert!(report.repeated_work.scoped_searches >= 10);
+        assert_eq!(report.repeated_work.scoped_searches, 10);
         assert!(report.inserted_contexts > 0);
         assert!(report.injected_file_count > 0);
         assert!(report.injected_char_count > 0);
         assert!(report.injected_estimated_tokens > 0);
         assert!(report.max_concurrent_search >= 1);
+        assert!(
+            report.max_concurrent_search <= crate::memories::MAX_CONCURRENT_ENRICHMENT_SEARCHES
+        );
         assert!(report
             .stages
             .iter()

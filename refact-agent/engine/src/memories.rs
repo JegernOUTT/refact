@@ -1,10 +1,11 @@
 use std::path::{PathBuf, Path};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use chrono::{Local, Duration, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AMutex;
+use tokio::sync::Semaphore;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::{info, warn};
@@ -30,6 +31,10 @@ use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
 use crate::knowledge_graph::kg_subchat::{enrich_knowledge_metadata, check_deprecation};
 use crate::knowledge_graph::build_knowledge_graph;
 use crate::http::routers::v1::knowledge_ops::auto_link_memory;
+use refact_core::vecdb_types::VecdbSearchScope;
+
+pub(crate) const MAX_CONCURRENT_ENRICHMENT_SEARCHES: usize = 8;
+static ENRICHMENT_SEARCH_PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -664,7 +669,7 @@ pub async fn memories_add(
 
     let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
     let vec_db = gcx.vec_db.clone();
-    if let Some(vecdb) = vec_db.lock().await.as_ref() {
+    if let Some(vecdb) = vec_db.lock().await.clone() {
         vecdb
             .vectorizer_enqueue_files(&vec![file_path.to_string_lossy().to_string()], true, roots)
             .await;
@@ -1305,7 +1310,7 @@ async fn memories_search_inner(
     };
 
     let vecdb_lock_started = perf_diagnostics::is_enabled().then(Instant::now);
-    let vecdb_guard = vecdb_arc.lock().await;
+    let vecdb = vecdb_arc.lock().await.clone();
     record_enrichment_metric(
         diagnostic_chat_id,
         PerfComponent::EnrichmentVecdbLockWait,
@@ -1315,8 +1320,7 @@ async fn memories_search_inner(
         Some(1),
     );
     let vecdb_hold_started = perf_diagnostics::is_enabled().then(Instant::now);
-    if vecdb_guard.is_none() {
-        drop(vecdb_guard);
+    let Some(vecdb) = vecdb else {
         record_enrichment_metric(
             diagnostic_chat_id,
             PerfComponent::EnrichmentVecdbLockHold,
@@ -1334,9 +1338,20 @@ async fn memories_search_inner(
             diagnostic_chat_id,
         )
         .await;
-    }
+    };
+    record_enrichment_metric(
+        diagnostic_chat_id,
+        PerfComponent::EnrichmentVecdbLockHold,
+        PerfOutcome::Success,
+        elapsed_us(vecdb_hold_started),
+        None,
+        Some(0),
+    );
 
-    let vecdb = vecdb_guard.as_ref().unwrap();
+    let _enrichment_permit = enrichment_search_semaphore()
+        .acquire_owned()
+        .await
+        .map_err(|_| "knowledge enrichment search is shutting down".to_string())?;
 
     // Improve recall by doing two scoped searches:
     // - knowledge roots
@@ -1361,41 +1376,29 @@ async fn memories_search_inner(
     let k_knowledge = ((top_n_memories.max(1) + top_n_trajectories.max(1)) * 50).min(400);
     let k_trajectories = ((top_n_memories.max(1) + top_n_trajectories.max(1)) * 50).min(400);
 
-    let mut combined_results: Vec<crate::vecdb::vdb_structs::VecdbRecord> = Vec::new();
     let scoped_search_started = perf_diagnostics::is_enabled().then(Instant::now);
-    let mut scoped_searches = 0u64;
-
-    for kd in &knowledge_dirs {
-        let prefix = if kd.to_string_lossy().ends_with(std::path::MAIN_SEPARATOR) {
-            kd.to_string_lossy().to_string()
-        } else {
-            format!("{}{}", kd.to_string_lossy(), std::path::MAIN_SEPARATOR)
-        };
-        let filter = format!("(scope LIKE '{}%')", prefix.replace('"', "\\\""));
-        scoped_searches += 1;
-        if let Ok(res) = vecdb
-            .vecdb_search_with_embedding(&embedding, k_knowledge, Some(filter))
-            .await
-        {
-            combined_results.extend(res);
-        }
-    }
-
-    for td in &trajectory_dirs {
-        let prefix = if td.to_string_lossy().ends_with(std::path::MAIN_SEPARATOR) {
-            td.to_string_lossy().to_string()
-        } else {
-            format!("{}{}", td.to_string_lossy(), std::path::MAIN_SEPARATOR)
-        };
-        let filter = format!("(scope LIKE '{}%')", prefix.replace('"', "\\\""));
-        scoped_searches += 1;
-        if let Ok(res) = vecdb
-            .vecdb_search_with_embedding(&embedding, k_trajectories, Some(filter))
-            .await
-        {
-            combined_results.extend(res);
-        }
-    }
+    let scopes = knowledge_dirs
+        .iter()
+        .map(|dir| VecdbSearchScope {
+            path_prefix: scope_prefix(dir),
+            top_n: k_knowledge,
+        })
+        .chain(trajectory_dirs.iter().map(|dir| VecdbSearchScope {
+            path_prefix: scope_prefix(dir),
+            top_n: k_trajectories,
+        }))
+        .collect::<Vec<_>>();
+    let scoped_searches = u64::from(!scopes.is_empty());
+    let mut combined_results = vecdb
+        .vecdb_search_scopes_with_embedding(&embedding, &scopes)
+        .await
+        .unwrap_or_else(|error| {
+            warn!("memories: scoped VecDB search failed: {}", error);
+            vec![Vec::new(); scopes.len()]
+        })
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     record_enrichment_metric(
         diagnostic_chat_id,
         PerfComponent::EnrichmentScopedSearch,
@@ -1432,16 +1435,6 @@ async fn memories_search_inner(
         None,
         Some(search_result.results.len() as u64),
     );
-    drop(vecdb_guard);
-    record_enrichment_metric(
-        diagnostic_chat_id,
-        PerfComponent::EnrichmentVecdbLockHold,
-        PerfOutcome::Success,
-        elapsed_us(vecdb_hold_started),
-        None,
-        Some(scoped_searches),
-    );
-
     struct KnowledgeMatch {
         best_score: f32,
     }
@@ -1863,6 +1856,21 @@ fn elapsed_us(started: Option<Instant>) -> u64 {
         .unwrap_or(0)
 }
 
+fn enrichment_search_semaphore() -> Arc<Semaphore> {
+    ENRICHMENT_SEARCH_PERMITS
+        .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_ENRICHMENT_SEARCHES)))
+        .clone()
+}
+
+fn scope_prefix(dir: &Path) -> String {
+    let dir = dir.to_string_lossy();
+    if dir.ends_with(std::path::MAIN_SEPARATOR) {
+        dir.to_string()
+    } else {
+        format!("{}{}", dir, std::path::MAIN_SEPARATOR)
+    }
+}
+
 pub async fn deprecate_document(
     gcx: Arc<GlobalContext>,
     doc_path: &PathBuf,
@@ -1931,7 +1939,7 @@ pub async fn rewrite_memory_document(
 
     let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
     let vec_db = gcx.vec_db.clone();
-    if let Some(vecdb) = vec_db.lock().await.as_ref() {
+    if let Some(vecdb) = vec_db.lock().await.clone() {
         if frontmatter.is_archived() || frontmatter.is_deprecated() {
             let _ = vecdb.remove_file(&path_buf).await;
         } else {
@@ -2007,7 +2015,7 @@ pub async fn delete_document_from_disk(
     info!("Deleted document from disk: {}", doc_path.display());
 
     let vec_db = gcx.vec_db.clone();
-    if let Some(vecdb) = vec_db.lock().await.as_ref() {
+    if let Some(vecdb) = vec_db.lock().await.clone() {
         let _ = vecdb.remove_file(doc_path).await;
     }
 
@@ -2672,12 +2680,15 @@ mod firewall_tests {
         EmbeddingModelConfig, SearchResult, VecDbStatus, VecdbRecord, VecdbSearch,
     };
     use async_trait::async_trait;
+    use tokio::sync::Notify;
     use std::sync::Mutex as StdMutex;
 
     struct StubVecdb {
         record_path: PathBuf,
-        seen_filters: Arc<StdMutex<Vec<String>>>,
+        seen_scopes: Arc<StdMutex<Vec<Vec<VecdbSearchScope>>>>,
         embed_calls: Arc<StdMutex<usize>>,
+        search_calls: Arc<StdMutex<usize>>,
+        embed_gate: Option<(Arc<Notify>, Arc<Notify>)>,
     }
 
     #[async_trait]
@@ -2733,6 +2744,10 @@ mod firewall_tests {
 
         async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, String> {
             *self.embed_calls.lock().unwrap() += 1;
+            if let Some((started, release)) = &self.embed_gate {
+                started.notify_one();
+                release.notified().await;
+            }
             Ok(vec![0.1, 0.2, 0.3])
         }
 
@@ -2740,11 +2755,9 @@ mod firewall_tests {
             &self,
             _embedding: &Vec<f32>,
             _top_n: usize,
-            filter_mb: Option<String>,
+            _filter_mb: Option<String>,
         ) -> Result<Vec<VecdbRecord>, String> {
-            if let Some(filter) = filter_mb {
-                self.seen_filters.lock().unwrap().push(filter);
-            }
+            *self.search_calls.lock().unwrap() += 1;
             Ok(vec![VecdbRecord {
                 vector: None,
                 file_path: self.record_path.clone(),
@@ -2753,6 +2766,28 @@ mod firewall_tests {
                 distance: 0.1,
                 usefulness: 90.0,
             }])
+        }
+
+        async fn vecdb_search_scopes_with_embedding(
+            &self,
+            _embedding: &Vec<f32>,
+            scopes: &[VecdbSearchScope],
+        ) -> Result<Vec<Vec<VecdbRecord>>, String> {
+            *self.search_calls.lock().unwrap() += 1;
+            self.seen_scopes.lock().unwrap().push(scopes.to_vec());
+            Ok(scopes
+                .iter()
+                .map(|_| {
+                    vec![VecdbRecord {
+                        vector: None,
+                        file_path: self.record_path.clone(),
+                        start_line: 1,
+                        end_line: 1,
+                        distance: 0.1,
+                        usefulness: 90.0,
+                    }]
+                })
+                .collect())
         }
     }
 
@@ -2772,7 +2807,7 @@ mod firewall_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn memories_search_rides_only_on_vecdb_with_scope_filters() {
+    async fn memories_search_uses_one_embedding_and_batched_scopes() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         {
@@ -2792,12 +2827,15 @@ mod firewall_tests {
         )
         .await;
 
-        let seen_filters = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let seen_scopes = Arc::new(StdMutex::new(Vec::<Vec<VecdbSearchScope>>::new()));
         let embed_calls = Arc::new(StdMutex::new(0usize));
+        let search_calls = Arc::new(StdMutex::new(0usize));
         let stub: Arc<dyn VecdbSearch> = Arc::new(StubVecdb {
             record_path: PathBuf::new(),
-            seen_filters: seen_filters.clone(),
+            seen_scopes: seen_scopes.clone(),
             embed_calls: embed_calls.clone(),
+            search_calls: search_calls.clone(),
+            embed_gate: None,
         });
         *gcx.vec_db.lock().await = Some(stub);
 
@@ -2805,19 +2843,63 @@ mod firewall_tests {
             .await
             .unwrap();
 
-        assert!(
-            *embed_calls.lock().unwrap() >= 1,
-            "embed_query must be called by memories_search"
+        assert_eq!(
+            *embed_calls.lock().unwrap(),
+            1,
+            "memories_search must embed the query once"
         );
-        let filters = seen_filters.lock().unwrap().clone();
+        assert_eq!(*search_calls.lock().unwrap(), 1);
+        let scopes = seen_scopes.lock().unwrap().clone();
         let knowledge_str = knowledge_dir.to_string_lossy().to_string();
         assert!(
-            filters
+            scopes
                 .iter()
-                .any(|f| f.contains("scope LIKE") && f.contains(&knowledge_str)),
-            "expected a (scope LIKE '<knowledge_dir>%') filter, got {:?}",
-            filters
+                .flatten()
+                .any(|scope| scope.path_prefix.starts_with(&knowledge_str)),
+            "expected a scope rooted at {knowledge_str}, got {scopes:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn memories_search_survives_vecdb_reload_while_embedding() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        }
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let old_embed_calls = Arc::new(StdMutex::new(0usize));
+        let old: Arc<dyn VecdbSearch> = Arc::new(StubVecdb {
+            record_path: PathBuf::new(),
+            seen_scopes: Arc::new(StdMutex::new(Vec::new())),
+            embed_calls: old_embed_calls.clone(),
+            search_calls: Arc::new(StdMutex::new(0)),
+            embed_gate: Some((started.clone(), release.clone())),
+        });
+        *gcx.vec_db.lock().await = Some(old);
+
+        let search = tokio::spawn(memories_search(gcx.clone(), "reload", 1, 1, None));
+        tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+            .await
+            .expect("search started embedding");
+
+        let replacement: Arc<dyn VecdbSearch> = Arc::new(StubVecdb {
+            record_path: PathBuf::new(),
+            seen_scopes: Arc::new(StdMutex::new(Vec::new())),
+            embed_calls: Arc::new(StdMutex::new(0)),
+            search_calls: Arc::new(StdMutex::new(0)),
+            embed_gate: None,
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            *gcx.vec_db.lock().await = Some(replacement);
+        })
+        .await
+        .expect("VecDB reload must not wait for the embedding");
+        release.notify_one();
+
+        search.await.unwrap().unwrap();
+        assert_eq!(*old_embed_calls.lock().unwrap(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
