@@ -338,15 +338,26 @@ impl HistoryBuffer {
                 }
             }
             let lines_trailing_blank = lines.last().map(hyperlink_line_is_blank);
-            if !current_lines.is_empty() && current_lines.len() + lines.len() > MAX_INSERTION_LINES
-            {
-                insertions.push(HistoryInsertion {
-                    cell_ids: std::mem::take(&mut current_ids),
-                    lines: std::mem::take(&mut current_lines),
-                });
+            if lines.len() > MAX_INSERTION_LINES {
+                if !current_ids.is_empty() {
+                    insertions.push(HistoryInsertion {
+                        cell_ids: std::mem::take(&mut current_ids),
+                        lines: std::mem::take(&mut current_lines),
+                    });
+                }
+                insertions.extend(split_history_insertion(vec![entry.id], lines));
+            } else {
+                if !current_lines.is_empty()
+                    && current_lines.len() + lines.len() > MAX_INSERTION_LINES
+                {
+                    insertions.push(HistoryInsertion {
+                        cell_ids: std::mem::take(&mut current_ids),
+                        lines: std::mem::take(&mut current_lines),
+                    });
+                }
+                current_ids.push(entry.id);
+                current_lines.extend(lines);
             }
-            current_ids.push(entry.id);
-            current_lines.extend(lines);
             if let Some(trailing_blank) = lines_trailing_blank {
                 last_emitted_line_blank = Some(trailing_blank);
             }
@@ -427,7 +438,7 @@ impl HistoryBuffer {
         lines = lines.split_off(visible_start);
         self.emitted_history_lines = !lines.is_empty();
         self.emitted_history_trailing_blank = lines.last().is_some_and(hyperlink_line_is_blank);
-        let insertions = vec![HistoryInsertion { cell_ids, lines }];
+        let insertions = split_history_insertion(cell_ids, lines);
         let insertions = self.drain_insertions(insertions);
         self.cache.clear();
 
@@ -435,10 +446,15 @@ impl HistoryBuffer {
     }
 
     fn drain_insertions(&mut self, insertions: Vec<HistoryInsertion>) -> Vec<HistoryInsertion> {
-        let emitted_ids = insertions
+        let mut emitted_ids = Vec::new();
+        for id in insertions
             .iter()
             .flat_map(|insertion| insertion.cell_ids.iter().copied())
-            .collect::<Vec<_>>();
+        {
+            if !emitted_ids.contains(&id) {
+                emitted_ids.push(id);
+            }
+        }
         let pending_ids = emitted_ids
             .iter()
             .copied()
@@ -533,6 +549,8 @@ impl HistoryBuffer {
                 evicted_ids.push(entry.id);
             }
         }
+        self.pending
+            .retain(|entry| !evicted_ids.iter().any(|id| *id == entry.id));
         self.evict_cache_entries(&evicted_ids);
     }
 
@@ -557,6 +575,20 @@ impl HistoryBuffer {
             entry.cell = cell;
         }
     }
+}
+
+fn split_history_insertion(cell_ids: Vec<u64>, lines: Vec<HyperlinkLine>) -> Vec<HistoryInsertion> {
+    if lines.len() <= MAX_INSERTION_LINES {
+        return vec![HistoryInsertion { cell_ids, lines }];
+    }
+
+    lines
+        .chunks(MAX_INSERTION_LINES)
+        .map(|chunk| HistoryInsertion {
+            cell_ids: cell_ids.clone(),
+            lines: chunk.to_vec(),
+        })
+        .collect()
 }
 
 fn hyperlink_line_is_blank(line: &HyperlinkLine) -> bool {
@@ -622,13 +654,16 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct FixedCell {
-        text: &'static str,
+        text: String,
         continuation: bool,
     }
 
     impl FixedCell {
-        fn new(text: &'static str, continuation: bool) -> Self {
-            Self { text, continuation }
+        fn new(text: impl Into<String>, continuation: bool) -> Self {
+            Self {
+                text: text.into(),
+                continuation,
+            }
         }
     }
 
@@ -640,6 +675,17 @@ mod tests {
     impl MultiLineCell {
         fn new(lines: &'static [&'static str]) -> Self {
             Self { lines }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct RepeatedLineCell {
+        line_count: usize,
+    }
+
+    impl RepeatedLineCell {
+        fn new(line_count: usize) -> Self {
+            Self { line_count }
         }
     }
 
@@ -657,13 +703,29 @@ mod tests {
         }
     }
 
+    impl cells::HistoryCell for RepeatedLineCell {
+        fn kind(&self) -> cells::HistoryCellKind {
+            cells::HistoryCellKind::Info
+        }
+
+        fn render(&self, _width: usize) -> Vec<Line<'static>> {
+            (0..self.line_count)
+                .map(|index| Line::from(format!("line {index}")))
+                .collect()
+        }
+
+        fn revision(&self) -> u64 {
+            self.line_count as u64
+        }
+    }
+
     impl cells::HistoryCell for FixedCell {
         fn kind(&self) -> cells::HistoryCellKind {
             cells::HistoryCellKind::Info
         }
 
         fn render(&self, _width: usize) -> Vec<Line<'static>> {
-            vec![Line::from(self.text)]
+            vec![Line::from(self.text.clone())]
         }
 
         fn is_stream_continuation(&self) -> bool {
@@ -889,22 +951,22 @@ mod tests {
     #[test]
     fn resize_rewrap_caps_pending_cells_and_preserves_rest_for_next_frame() {
         let mut history = HistoryBuffer::new();
-        for idx in 0..1_001 {
+        for idx in 0..RESIZE_REFLOW_PENDING_CELL_CAP {
             history.enqueue(TranscriptItem::Assistant(format!(
                 "row {idx} alpha beta gamma delta epsilon"
             )));
         }
 
-        let first = history.drain_pending_capped(12, RESIZE_REFLOW_PENDING_CELL_CAP);
+        let first = history.drain_pending_capped(12, RESIZE_REFLOW_PENDING_CELL_CAP - 1);
         assert_eq!(
             first
                 .iter()
                 .map(|insertion| insertion.cell_ids.len())
                 .sum::<usize>(),
-            RESIZE_REFLOW_PENDING_CELL_CAP
+            RESIZE_REFLOW_PENDING_CELL_CAP - 1
         );
         assert_eq!(history.pending_cell_count(), 1);
-        assert_eq!(history.render_count(), RESIZE_REFLOW_PENDING_CELL_CAP);
+        assert_eq!(history.render_count(), RESIZE_REFLOW_PENDING_CELL_CAP - 1);
 
         let second = history.drain_pending_capped(40, RESIZE_REFLOW_PENDING_CELL_CAP);
         assert_eq!(
@@ -915,7 +977,7 @@ mod tests {
             1
         );
         assert_eq!(history.pending_cell_count(), 0);
-        assert_eq!(history.render_count(), RESIZE_REFLOW_PENDING_CELL_CAP + 1);
+        assert_eq!(history.render_count(), RESIZE_REFLOW_PENDING_CELL_CAP);
     }
 
     #[test]
@@ -1070,6 +1132,151 @@ mod tests {
         assert_eq!(history.source_cell_count(), HISTORY_RETENTION_CELL_CAP);
         assert!(!history.history.iter().any(|entry| entry.id == oldest_id));
         assert_eq!(history.pending_cell_count(), 0);
+    }
+
+    #[test]
+    fn history_retention_keeps_only_the_chronological_undrained_tail() {
+        let mut history = HistoryBuffer::new();
+        let ids = (0..=HISTORY_RETENTION_CELL_CAP)
+            .map(|index| {
+                history.enqueue_cell(Box::new(FixedCell::new(format!("cell {index}"), false)))
+            })
+            .collect::<Vec<_>>();
+
+        let expected = ids[1..].to_vec();
+        assert_eq!(history.source_cell_count(), HISTORY_RETENTION_CELL_CAP);
+        assert_eq!(history.pending_cell_count(), HISTORY_RETENTION_CELL_CAP);
+        assert_eq!(
+            history
+                .history
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            history
+                .pending
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+
+        let drained = history.drain_pending(80);
+        assert_eq!(
+            drained
+                .iter()
+                .flat_map(|insertion| insertion.cell_ids.iter().copied())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(history.pending_cell_count(), 0);
+    }
+
+    #[test]
+    fn history_retention_keeps_mixed_reflow_and_pending_drains_in_the_retained_tail() {
+        let mut history = HistoryBuffer::new();
+        let initial_ids = (0..500)
+            .map(|index| {
+                history.enqueue_cell(Box::new(FixedCell::new(format!("initial {index}"), false)))
+            })
+            .collect::<Vec<_>>();
+        history.drain_pending_capped(80, 250);
+
+        let pending_ids = (0..751)
+            .map(|index| {
+                history.enqueue_cell(Box::new(FixedCell::new(format!("pending {index}"), false)))
+            })
+            .collect::<Vec<_>>();
+        let expected = initial_ids[251..]
+            .iter()
+            .chain(pending_ids.iter())
+            .copied()
+            .collect::<Vec<_>>();
+
+        assert_eq!(history.source_cell_count(), HISTORY_RETENTION_CELL_CAP);
+        assert_eq!(
+            history
+                .history
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            history
+                .pending
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            initial_ids[251..]
+                .iter()
+                .chain(pending_ids.iter())
+                .copied()
+                .collect::<Vec<_>>()
+        );
+
+        let reflow = history.reflow_insertions(80, 3);
+        let reflow_ids = reflow
+            .iter()
+            .flat_map(|insertion| insertion.cell_ids.iter().copied())
+            .collect::<Vec<_>>();
+        assert_eq!(reflow_ids, expected[expected.len() - 2..]);
+
+        let later = history.drain_pending(80);
+        assert_eq!(
+            later
+                .iter()
+                .flat_map(|insertion| insertion.cell_ids.iter().copied())
+                .collect::<Vec<_>>(),
+            initial_ids[251..]
+                .iter()
+                .chain(pending_ids[..pending_ids.len() - 2].iter())
+                .copied()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn oversized_cells_split_at_rendered_line_boundaries_and_drain_once() {
+        let mut history = HistoryBuffer::new();
+        let id = history.enqueue_cell(Box::new(RepeatedLineCell::new(MAX_INSERTION_LINES * 2 + 1)));
+
+        let insertions = history.drain_pending(80);
+        assert_eq!(insertions.len(), 3);
+        assert!(insertions
+            .iter()
+            .all(|insertion| insertion.lines.len() <= MAX_INSERTION_LINES));
+        assert_eq!(insertions[0].cell_ids, vec![id]);
+        assert_eq!(insertions[1].cell_ids, vec![id]);
+        assert_eq!(insertions[2].cell_ids, vec![id]);
+        assert_eq!(
+            insertions
+                .iter()
+                .map(|insertion| insertion.lines.len())
+                .collect::<Vec<_>>(),
+            vec![MAX_INSERTION_LINES, MAX_INSERTION_LINES, 1]
+        );
+        assert_eq!(history.pending_cell_count(), 0);
+        assert_eq!(history.inserted_cell_count(), 1);
+        assert!(history.drain_pending(80).is_empty());
+    }
+
+    #[test]
+    fn reflow_insertions_split_oversized_visible_suffixes() {
+        let mut history = HistoryBuffer::new();
+        let id = history.enqueue_cell(Box::new(RepeatedLineCell::new(MAX_INSERTION_LINES + 1)));
+
+        let insertions = history.reflow_insertions(80, MAX_INSERTION_LINES + 1);
+        assert_eq!(insertions.len(), 2);
+        assert!(insertions
+            .iter()
+            .all(|insertion| insertion.lines.len() <= MAX_INSERTION_LINES));
+        assert_eq!(insertions[0].cell_ids, vec![id]);
+        assert_eq!(insertions[1].cell_ids, vec![id]);
+        assert_eq!(history.pending_cell_count(), 0);
+        assert_eq!(history.inserted_cell_count(), 1);
     }
 
     #[test]
