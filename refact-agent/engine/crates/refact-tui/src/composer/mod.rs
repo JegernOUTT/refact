@@ -40,6 +40,13 @@ pub struct ComposerState {
 struct PendingLargePaste {
     placeholder: String,
     text: String,
+    range: Range<usize>,
+}
+
+impl PendingLargePaste {
+    fn is_live_in(&self, text: &str) -> bool {
+        text.get(self.range.clone()) == Some(self.placeholder.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,15 +124,19 @@ impl ComposerState {
                 char_count,
                 LARGE_PASTE_NONCE.fetch_add(1, Ordering::Relaxed),
             );
+            let start = self.editor.cursor();
+            let range = start..start + placeholder.len();
             self.editor.insert_str(&placeholder);
+            self.record_edit(before, UndoKind::Other, None);
             self.pending_large_pastes.push(PendingLargePaste {
                 placeholder,
                 text: text.to_string(),
+                range,
             });
         } else {
             self.editor.insert_str(text);
+            self.record_edit(before, UndoKind::Other, None);
         }
-        self.record_edit(before, UndoKind::Other, None);
     }
 
     pub fn insert_text(&mut self, text: &str) {
@@ -240,6 +251,7 @@ impl ComposerState {
         }
         let current = self.editor.text().to_string();
         if let Some(text) = self.history.previous(current) {
+            self.pending_large_pastes.clear();
             self.editor.set_text(text);
             self.undo.clear();
         }
@@ -253,6 +265,7 @@ impl ComposerState {
         }
         let current = self.editor.text().to_string();
         if let Some(text) = self.history.next(current) {
+            self.pending_large_pastes.clear();
             self.editor.set_text(text);
             self.undo.clear();
         }
@@ -338,14 +351,22 @@ impl ComposerState {
         self.cancel_edit_tracking();
         self.history.reset_navigation();
         self.history_search = None;
-        self.undo.undo(&mut self.editor)
+        let changed = self.undo.undo(&mut self.editor);
+        if changed {
+            self.pending_large_pastes.clear();
+        }
+        changed
     }
 
     pub fn redo(&mut self) -> bool {
         self.cancel_edit_tracking();
         self.history.reset_navigation();
         self.history_search = None;
-        self.undo.redo(&mut self.editor)
+        let changed = self.undo.redo(&mut self.editor);
+        if changed {
+            self.pending_large_pastes.clear();
+        }
+        changed
     }
 
     pub fn start_or_cycle_history_search(&mut self) {
@@ -353,6 +374,7 @@ impl ComposerState {
         if let Some(search) = self.history_search.as_mut() {
             search.cycle();
         } else {
+            self.pending_large_pastes.clear();
             let draft = self.editor.snapshot();
             let mut search = HistorySearch::new(draft);
             search.refresh(self.history.entries());
@@ -403,14 +425,10 @@ impl ComposerState {
     }
 
     pub(crate) fn pending_paste_placeholders(&self) -> Vec<String> {
-        let mut text = self.editor.text().to_string();
         self.pending_large_pastes
             .iter()
-            .filter_map(|paste| {
-                let index = text.find(&paste.placeholder)?;
-                text.replace_range(index..index + paste.placeholder.len(), "");
-                Some(paste.placeholder.clone())
-            })
+            .filter(|paste| paste.is_live_in(self.editor.text()))
+            .map(|paste| paste.placeholder.clone())
             .collect()
     }
 
@@ -429,7 +447,33 @@ impl ComposerState {
 
     fn record_edit(&mut self, before: EditorSnapshot, kind: UndoKind, at: Option<Instant>) {
         let after = self.editor.snapshot();
+        self.update_pending_large_paste_ranges(&before, &after);
         self.undo.record(before, after, kind, at);
+    }
+
+    fn update_pending_large_paste_ranges(
+        &mut self,
+        before: &EditorSnapshot,
+        after: &EditorSnapshot,
+    ) {
+        if before.text == after.text {
+            return;
+        }
+        let Some((start, old_end, new_end)) = tracked_edit_range(before, after) else {
+            self.pending_large_pastes.clear();
+            return;
+        };
+        self.pending_large_pastes.retain_mut(|paste| {
+            if paste.range.end <= start {
+                return true;
+            }
+            if paste.range.start >= old_end {
+                paste.range.start = new_end + (paste.range.start - old_end);
+                paste.range.end = new_end + (paste.range.end - old_end);
+                return true;
+            }
+            false
+        });
     }
 
     fn apply_history_search_preview(&mut self) {
@@ -444,24 +488,55 @@ impl ComposerState {
     }
 
     fn expand_pending_large_pastes(&self, mut text: String) -> String {
-        for paste in &self.pending_large_pastes {
-            if text.contains(&paste.placeholder) {
-                text = text.replacen(&paste.placeholder, &paste.text, 1);
-            }
+        let mut pending = self
+            .pending_large_pastes
+            .iter()
+            .filter(|paste| paste.is_live_in(&text))
+            .collect::<Vec<_>>();
+        pending.sort_by(|left, right| right.range.start.cmp(&left.range.start));
+        for paste in pending {
+            text.replace_range(paste.range.clone(), &paste.text);
         }
         text
     }
 
     fn prune_pending_large_pastes(&mut self) {
-        let mut text = self.editor.text().to_string();
-        self.pending_large_pastes.retain(|paste| {
-            let Some(index) = text.find(&paste.placeholder) else {
-                return false;
-            };
-            text.replace_range(index..index + paste.placeholder.len(), "");
-            true
-        });
+        let text = self.editor.text();
+        self.pending_large_pastes
+            .retain(|paste| paste.is_live_in(text));
     }
+}
+
+fn tracked_edit_range(
+    before: &EditorSnapshot,
+    after: &EditorSnapshot,
+) -> Option<(usize, usize, usize)> {
+    if let Some(range) = before.selection_range() {
+        return Some((range.start, range.end, after.cursor));
+    }
+    if after.cursor > before.cursor {
+        let prefix = &before.text[..before.cursor];
+        let suffix = &before.text[before.cursor..];
+        if after.text.starts_with(prefix) && after.text.ends_with(suffix) {
+            return Some((before.cursor, before.cursor, after.cursor));
+        }
+    }
+    if after.cursor < before.cursor {
+        let prefix = &before.text[..after.cursor];
+        let suffix = &before.text[before.cursor..];
+        if after.text.starts_with(prefix) && after.text.ends_with(suffix) {
+            return Some((after.cursor, before.cursor, after.cursor));
+        }
+    }
+    let removed_len = before.text.len().checked_sub(after.text.len())?;
+    let old_end = before.cursor + removed_len;
+    let prefix = &before.text[..before.cursor];
+    let suffix = &before.text[old_end..];
+    (after.text.starts_with(prefix) && after.text.ends_with(suffix)).then_some((
+        before.cursor,
+        old_end,
+        before.cursor,
+    ))
 }
 
 fn large_paste_placeholder(char_count: usize, id: u64) -> String {
@@ -480,6 +555,19 @@ struct EditorSnapshot {
     text: String,
     cursor: usize,
     selection_anchor: Option<usize>,
+}
+
+impl EditorSnapshot {
+    fn selection_range(&self) -> Option<Range<usize>> {
+        let anchor = self.selection_anchor?;
+        if anchor < self.cursor {
+            Some(anchor..self.cursor)
+        } else if anchor > self.cursor {
+            Some(self.cursor..anchor)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1372,6 +1460,64 @@ mod tests {
         assert_eq!(
             composer.submit_text().as_deref(),
             Some(format!("{copied_placeholder}{paste}").as_str())
+        );
+    }
+
+    #[test]
+    fn copied_exact_large_paste_placeholder_stays_literal_around_tracked_occurrence() {
+        let paste = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 7);
+        let mut composer = ComposerState::new(Vec::new());
+
+        composer.insert_paste(&paste);
+        let placeholder = only_pending_placeholder(&composer);
+        composer.move_home(false);
+        composer.insert_text(&placeholder);
+        composer.move_end(false);
+        composer.insert_text(&placeholder);
+
+        assert_eq!(
+            composer.pending_paste_placeholders(),
+            vec![placeholder.clone()]
+        );
+        assert_eq!(
+            composer.submit_text().as_deref(),
+            Some(format!("{placeholder}{paste}{placeholder}").as_str())
+        );
+    }
+
+    #[test]
+    fn large_paste_tracking_survives_adjacent_cursor_edits() {
+        let paste = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 7);
+        let mut composer = ComposerState::new(Vec::new());
+
+        composer.insert_paste(&paste);
+        composer.move_home(false);
+        composer.insert_char('a', t(1));
+        composer.backspace();
+        composer.move_end(false);
+        composer.insert_char('z', t(2));
+        composer.move_left(false);
+        composer.delete();
+
+        assert_eq!(composer.submit_text().as_deref(), Some(paste.as_str()));
+    }
+
+    #[test]
+    fn editing_a_tracked_large_paste_placeholder_keeps_copied_tokens_literal() {
+        let paste = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 7);
+        let mut composer = ComposerState::new(Vec::new());
+
+        composer.insert_paste(&paste);
+        let placeholder = only_pending_placeholder(&composer);
+        composer.insert_text(&placeholder);
+        composer.move_home(false);
+        composer.move_right(false);
+        composer.delete();
+
+        assert!(composer.pending_paste_placeholders().is_empty());
+        assert_eq!(
+            composer.submit_text().as_deref(),
+            Some(format!("[{}{}", &placeholder[2..], placeholder).as_str())
         );
     }
 
