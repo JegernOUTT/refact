@@ -1,5 +1,4 @@
 use std::collections::{HashMap, VecDeque};
-use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
@@ -469,6 +468,7 @@ impl AppToolRegistry {
         tool_catalog_snapshot_rollout_enabled()
     }
 
+    #[cfg(test)]
     fn snapshot_cache_enabled_for(value: Option<&str>) -> bool {
         value.is_some_and(|value| {
             value == "1"

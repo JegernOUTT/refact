@@ -1507,6 +1507,21 @@ pub fn validate_full_soak_report_json(json: &str) -> Result<(), String> {
                     return Err(format!("full soak variant is missing {key}"));
                 }
             }
+            let rollout_switches = variant
+                .get("rollout_switches")
+                .and_then(serde_json::Value::as_object)
+                .ok_or_else(|| "full soak rollout switches must be an object".to_string())?;
+            for key in [
+                "trajectory_writer_enabled",
+                "trajectory_index_coordinator_enabled",
+                "trajectory_watcher_self_write_enabled",
+                "tool_catalog_snapshots_enabled",
+                "vecdb_path_coalescing_enabled",
+            ] {
+                if rollout_switches.get(key).is_none() {
+                    return Err(format!("full soak rollout switch is missing {key}"));
+                }
+            }
             let subsystems = variant
                 .get("subsystems")
                 .and_then(serde_json::Value::as_object)
