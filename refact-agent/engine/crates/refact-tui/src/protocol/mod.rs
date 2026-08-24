@@ -1535,6 +1535,15 @@ fn content_part_text(part: &Value) -> Option<String> {
     if content_part_is_audio(part) {
         return Some(audio_placeholder(part));
     }
+    if let Some(kind) = content_part_type(part) {
+        if !content_part_is_text_or_refusal(kind) {
+            return Some(format!(
+                "[content: {}] {}",
+                sanitize_tool_inline(kind),
+                sanitize_tool_text(value_to_compact_string(part))
+            ));
+        }
+    }
     part.get("refusal")
         .or_else(|| {
             part.get("content")
@@ -1595,6 +1604,10 @@ fn content_part_type(part: &Value) -> Option<&str> {
     part.get("type")
         .or_else(|| part.get("m_type"))
         .and_then(Value::as_str)
+}
+
+fn content_part_is_text_or_refusal(kind: &str) -> bool {
+    matches!(kind, "text" | "input_text" | "output_text" | "refusal")
 }
 
 fn content_part_is_image(part: &Value) -> bool {
@@ -2063,6 +2076,11 @@ mod tests {
             "role": "tool",
             "content": [{
                 "type": "future_content",
+                "text": "generic text",
+                "refusal": "generic refusal",
+                "input_text": "generic input",
+                "output_text": "generic output",
+                "content": "generic content",
                 "nested": {"escape": "\u{1b}[31mred", "bell": "ring\u{7}"}
             }]
         });
@@ -2071,10 +2089,26 @@ mod tests {
 
         assert_eq!(
             content,
-            r#"[content: future_content] {"type":"future_content","nested":{"escape":"\u001b[31mred","bell":"ring\u0007"}}"#
+            r#"[content: future_content] {"type":"future_content","text":"generic text","refusal":"generic refusal","input_text":"generic input","output_text":"generic output","content":"generic content","nested":{"escape":"\u001b[31mred","bell":"ring\u0007"}}"#
         );
         assert!(!content.contains('\x1b'));
         assert!(!content.contains('\x07'));
+    }
+
+    #[test]
+    fn content_text_keeps_specialized_text_and_refusal_parts() {
+        let message = json!({
+            "role": "tool",
+            "content": [
+                {"type": "text", "text": "ordinary text"},
+                {"type": "refusal", "refusal": "cannot comply"}
+            ]
+        });
+
+        assert_eq!(
+            content_text(&message).as_deref(),
+            Some("ordinary text\ncannot comply")
+        );
     }
 
     #[test]
