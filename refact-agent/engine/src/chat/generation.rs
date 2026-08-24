@@ -22,7 +22,10 @@ use crate::llm::LlmRequest;
 use crate::llm::params::CacheControl;
 use crate::scratchpad_abstract::HasTokenizerAndEot;
 use crate::constants::CHAT_TOP_N;
-use crate::knowledge::enrichment::enrich_messages_with_knowledge;
+use crate::knowledge::enrichment::{
+    enrich_messages_with_knowledge, enrichment_identity_from_context, enrichment_query_fingerprint,
+    record_enrichment_identity_on_user_message,
+};
 use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 
 use super::goal_monitor::handle_goal_turn_end;
@@ -705,6 +708,7 @@ pub async fn prepare_session_preamble_and_knowledge(
         user_count,
         has_manual_enrichment_for_turn,
         suppress_flag,
+        enrichment_turn,
     ) = {
         let snapshot_started = perf_diagnostics::is_enabled().then(std::time::Instant::now);
         let mut session = session_arc.lock().await;
@@ -729,6 +733,17 @@ pub async fn prepare_session_preamble_and_knowledge(
         if suppress {
             session.suppress_auto_enrichment_for_next_turn = false;
         }
+        let enrichment_turn = last_user_idx
+            .filter(|idx| *idx == session.messages.len().saturating_sub(1))
+            .and_then(|idx| session.messages.get(idx))
+            .filter(|message| message.role == "user")
+            .map(|message| EnrichmentTurnIdentity {
+                revision: session.trajectory_version,
+                latest_user_id: message.message_id.clone(),
+                query_fingerprint: enrichment_query_fingerprint(
+                    &message.content.content_text_only(),
+                ),
+            });
         let message_bytes = perf_diagnostics::is_enabled().then(|| {
             session
                 .messages
@@ -751,13 +766,14 @@ pub async fn prepare_session_preamble_and_knowledge(
             Some(session.messages.len() as u64),
             message_bytes.map(|bytes| (bytes as u64).saturating_add(3) / 4),
         );
-        (last_user, auto, count, manual, suppress)
+        (last_user, auto, count, manual, suppress, enrichment_turn)
     };
     if is_agentic_mode_id(&thread.mode)
         && last_is_user
         && auto_enrichment_enabled
         && !has_manual_enrichment_for_turn
         && !suppress_flag
+        && enrichment_turn.is_some()
     {
         let force_enrichment = user_count > 1;
         let mut messages = {
@@ -784,15 +800,39 @@ pub async fn prepare_session_preamble_and_knowledge(
                     let session_last_user_idx = session
                         .messages
                         .iter()
-                        .rposition(|m| is_prompt_turn_role(&m.role))
+                        .rposition(|m| m.role == "user")
                         .unwrap_or(0);
-                    let insertion_stale = session_last_user_idx
-                        != session.messages.len().saturating_sub(1)
-                        && session
+                    let turn = enrichment_turn
+                        .as_ref()
+                        .expect("turn checked before enrichment");
+                    let identity = enrichment_identity_from_context(enriched_msg);
+                    let insertion_stale = session.trajectory_version != turn.revision
+                        || session_last_user_idx != session.messages.len().saturating_sub(1)
+                        || session
                             .messages
                             .get(session_last_user_idx)
-                            .is_none_or(|message| !is_prompt_turn_role(&message.role));
-                    session.insert_message(session_last_user_idx, enriched_msg.clone());
+                            .is_none_or(|message| {
+                                message.message_id != turn.latest_user_id
+                                    || enrichment_query_fingerprint(
+                                        &message.content.content_text_only(),
+                                    ) != turn.query_fingerprint
+                            })
+                        || identity
+                            .as_deref()
+                            .is_none_or(|identity| session.has_enrichment_identity(identity));
+                    if !insertion_stale {
+                        let identity = identity.expect("identity checked before insertion");
+                        if let Some(user_message) = session.messages.get_mut(session_last_user_idx)
+                        {
+                            record_enrichment_identity_on_user_message(
+                                user_message,
+                                &identity,
+                                &turn.query_fingerprint,
+                            );
+                        }
+                        session.record_enrichment_identity(identity);
+                        session.insert_message(session_last_user_idx, enriched_msg.clone());
+                    }
                     if insertion_stale {
                         perf_diagnostics::record_enrichment(
                             PerfComponent::EnrichmentInsertionStale,
@@ -814,10 +854,12 @@ pub async fn prepare_session_preamble_and_knowledge(
                             None,
                         );
                     }
-                    info!(
-                        "Saved auto knowledge enrichment context_file to session at index {}",
-                        session_last_user_idx
-                    );
+                    if !insertion_stale {
+                        info!(
+                            "Saved auto knowledge enrichment context_file to session at index {}",
+                            session_last_user_idx
+                        );
+                    }
                 }
             }
         }
@@ -4390,6 +4432,29 @@ mod tests {
             !would_call_finish_stream_with_error,
             "PausedForUserDecision must not trigger finish_stream_with_error"
         );
+    }
+
+    #[test]
+    fn enrichment_identity_survives_compaction_and_restore_metadata() {
+        let mut session = ChatSession::new("enrichment-identity".to_string());
+        let identity = "query-fingerprint:result-fingerprint".to_string();
+        let query_fingerprint = "query-fingerprint".to_string();
+        let mut user = make_user_msg("query");
+        record_enrichment_identity_on_user_message(&mut user, &identity, &query_fingerprint);
+        session.add_message(user);
+        session.record_enrichment_identity(identity.clone());
+
+        let restored = ChatSession::new_with_trajectory(
+            "enrichment-identity".to_string(),
+            session.messages.clone(),
+            session.thread.clone(),
+            session.created_at.clone(),
+            None,
+            Vec::new(),
+            None,
+        );
+
+        assert!(restored.has_enrichment_identity(&identity));
     }
 
     #[test]

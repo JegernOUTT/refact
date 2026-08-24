@@ -66,13 +66,16 @@ pub enum PerfComponent {
     EnrichmentFileReread,
     EnrichmentFallback,
     EnrichmentCardBuild,
+    EnrichmentCacheMiss,
+    EnrichmentCacheHit,
+    EnrichmentCacheCoalesced,
     EnrichmentInsertion,
     EnrichmentInsertionStale,
     EnrichmentPersistenceScheduling,
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 60] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -127,6 +130,9 @@ impl PerfComponent {
         Self::EnrichmentFileReread,
         Self::EnrichmentFallback,
         Self::EnrichmentCardBuild,
+        Self::EnrichmentCacheMiss,
+        Self::EnrichmentCacheHit,
+        Self::EnrichmentCacheCoalesced,
         Self::EnrichmentInsertion,
         Self::EnrichmentInsertionStale,
         Self::EnrichmentPersistenceScheduling,
@@ -188,6 +194,9 @@ impl PerfComponent {
             Self::EnrichmentFileReread => "enrichment.file_reread",
             Self::EnrichmentFallback => "enrichment.fallback",
             Self::EnrichmentCardBuild => "enrichment.card_build",
+            Self::EnrichmentCacheMiss => "enrichment.cache_miss",
+            Self::EnrichmentCacheHit => "enrichment.cache_hit",
+            Self::EnrichmentCacheCoalesced => "enrichment.cache_coalesced",
             Self::EnrichmentInsertion => "enrichment.insertion",
             Self::EnrichmentInsertionStale => "enrichment.insertion_stale",
             Self::EnrichmentPersistenceScheduling => "enrichment.persistence_scheduling",

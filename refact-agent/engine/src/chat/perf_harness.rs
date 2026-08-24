@@ -1020,6 +1020,7 @@ pub struct AutoEnrichmentRepeatedWork {
     pub embedding_retries: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
+    pub cache_coalesced: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1472,8 +1473,18 @@ async fn run_auto_enrichment_workload(
         scoped_searches: event_item_count(&events, PerfComponent::EnrichmentScopedSearch),
         fallback_files_read: event_item_count(&events, PerfComponent::EnrichmentFallback),
         embedding_retries: 0,
-        cache_hits: 0,
-        cache_misses: 0,
+        cache_hits: events
+            .iter()
+            .filter(|event| event.component == PerfComponent::EnrichmentCacheHit.as_str())
+            .count() as u64,
+        cache_misses: events
+            .iter()
+            .filter(|event| event.component == PerfComponent::EnrichmentCacheMiss.as_str())
+            .count() as u64,
+        cache_coalesced: events
+            .iter()
+            .filter(|event| event.component == PerfComponent::EnrichmentCacheCoalesced.as_str())
+            .count() as u64,
     };
     let injected_file_count = events
         .iter()
@@ -4315,7 +4326,13 @@ mod tests {
         assert_eq!(report.workload.chat_count, 10);
         assert_eq!(report.privacy_exclusion_violations, 0);
         assert_eq!(report.repeated_work.attempts, 10);
-        assert_eq!(report.repeated_work.scoped_searches, 10);
+        assert!(report.repeated_work.scoped_searches <= 1);
+        assert!(report.repeated_work.cache_misses <= 1);
+        assert!(
+            report.repeated_work.cache_hits + report.repeated_work.cache_coalesced >= 9,
+            "{:#?}",
+            report.repeated_work
+        );
         assert!(report.inserted_contexts > 0);
         assert!(report.injected_file_count > 0);
         assert!(report.injected_char_count > 0);

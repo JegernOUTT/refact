@@ -1,15 +1,20 @@
 use crate::global_context::GlobalContext;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path as FilePath, PathBuf};
-use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use regex::Regex;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 
 use crate::call_validation::{ChatContent, ChatMessage, ContextFile};
 use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
-use crate::memories::memories_search_for_enrichment;
+use crate::files_correction::get_project_dirs;
+use crate::files_in_workspace::get_file_text_from_memory_or_disk;
+use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
+use crate::memories::{enrichment_current_root_id, memories_search_for_enrichment};
 use crate::subchat::{resolve_subchat_config, run_subchat};
 use crate::yaml_configs::customization_registry::get_subagent_config;
 
@@ -90,6 +95,303 @@ const KNOWLEDGE_ENRICHMENT_MARKER: &str = "knowledge_enrichment";
 pub const MAX_QUERY_LENGTH: usize = 2000;
 const MAX_ENRICHMENT_PREVIEW_ITEMS: usize = 5;
 const MAX_ENRICHMENT_PREVIEW_CANDIDATES: usize = 64;
+const ENRICHMENT_CACHE_MAX_ENTRIES: usize = 128;
+const ENRICHMENT_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
+const ENRICHMENT_CACHE_TTL: Duration = Duration::from_secs(30);
+const ENRICHMENT_EMPTY_CACHE_TTL: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct EnrichmentCacheKey {
+    query_fingerprint: [u8; 32],
+    workspace_scope_fingerprint: [u8; 32],
+    allowed_roots_fingerprint: [u8; 32],
+    privacy_generation: u64,
+    index_generation: u64,
+    embedding_config_fingerprint: [u8; 32],
+    current_root_fingerprint: [u8; 32],
+    top_n_memories: usize,
+    top_n_trajectories: usize,
+    score_threshold_bits: u32,
+}
+
+#[derive(Clone)]
+struct MemoSourceFingerprint {
+    path: PathBuf,
+    size: u64,
+    modified_ns: u128,
+    content_fingerprint: [u8; 32],
+}
+
+#[derive(Clone)]
+struct CachedMemo {
+    memo: crate::memories::MemoRecord,
+    source: MemoSourceFingerprint,
+}
+
+#[derive(Clone)]
+struct CachedEnrichmentResult {
+    memories: Vec<CachedMemo>,
+    result_fingerprint: [u8; 32],
+    bytes: usize,
+    cacheable: bool,
+}
+
+impl CachedEnrichmentResult {
+    fn empty() -> Self {
+        Self {
+            memories: Vec::new(),
+            result_fingerprint: fingerprint_bytes(&[b"empty-enrichment-result"]),
+            bytes: 0,
+            cacheable: true,
+        }
+    }
+}
+
+struct EnrichmentCacheEntry {
+    result: CachedEnrichmentResult,
+    expires_at: Instant,
+}
+
+#[derive(Default)]
+struct EnrichmentCacheState {
+    entries: HashMap<EnrichmentCacheKey, EnrichmentCacheEntry>,
+    lru: VecDeque<EnrichmentCacheKey>,
+    inflight: HashMap<EnrichmentCacheKey, watch::Sender<bool>>,
+    bytes: usize,
+}
+
+#[derive(Default)]
+pub struct EnrichmentCache {
+    state: StdMutex<EnrichmentCacheState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnrichmentCacheDisposition {
+    Hit,
+    Miss,
+    Coalesced,
+}
+
+impl EnrichmentCache {
+    async fn get_or_fetch<F, Fut>(
+        &self,
+        key: EnrichmentCacheKey,
+        fetch: F,
+    ) -> Result<(CachedEnrichmentResult, EnrichmentCacheDisposition), String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<CachedEnrichmentResult, String>>,
+    {
+        let mut fetch = Some(fetch);
+        let mut coalesced = false;
+        loop {
+            enum Next {
+                Hit(CachedEnrichmentResult),
+                Wait(watch::Receiver<bool>),
+                Fetch,
+            }
+            let next = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.purge_expired();
+                if let Some(entry) = state.entries.get(&key) {
+                    let result = entry.result.clone();
+                    state.touch(&key);
+                    Next::Hit(result)
+                } else if let Some(sender) = state.inflight.get(&key) {
+                    Next::Wait(sender.subscribe())
+                } else {
+                    let (sender, _) = watch::channel(false);
+                    state.inflight.insert(key, sender);
+                    Next::Fetch
+                }
+            };
+
+            match next {
+                Next::Hit(result) => {
+                    return Ok((
+                        result,
+                        if coalesced {
+                            EnrichmentCacheDisposition::Coalesced
+                        } else {
+                            EnrichmentCacheDisposition::Hit
+                        },
+                    ));
+                }
+                Next::Wait(mut receiver) => {
+                    coalesced = true;
+                    let _ = receiver.changed().await;
+                }
+                Next::Fetch => {
+                    let mut inflight = EnrichmentInFlightGuard {
+                        cache: self,
+                        key,
+                        active: true,
+                    };
+                    let result = fetch.take().expect("enrichment cache fetch used once")().await;
+                    let mut state = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let sender = state.inflight.remove(&key);
+                    if let Ok(result) = &result {
+                        if result.cacheable {
+                            state.insert(key, result.clone());
+                        }
+                    }
+                    if let Some(sender) = sender {
+                        sender.send_replace(true);
+                    }
+                    inflight.active = false;
+                    return result.map(|result| (result, EnrichmentCacheDisposition::Miss));
+                }
+            }
+        }
+    }
+
+    fn invalidate(&self, key: &EnrichmentCacheKey) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = state.entries.remove(key) {
+            state.bytes = state.bytes.saturating_sub(entry.result.bytes);
+        }
+        state.lru.retain(|cached_key| cached_key != key);
+    }
+}
+
+struct EnrichmentInFlightGuard<'a> {
+    cache: &'a EnrichmentCache,
+    key: EnrichmentCacheKey,
+    active: bool,
+}
+
+impl Drop for EnrichmentInFlightGuard<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut state = self
+            .cache
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(sender) = state.inflight.remove(&self.key) {
+            sender.send_replace(true);
+        }
+    }
+}
+
+impl EnrichmentCacheState {
+    fn purge_expired(&mut self) {
+        let now = Instant::now();
+        let expired = self
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| (entry.expires_at <= now).then_some(*key))
+            .collect::<Vec<_>>();
+        for key in expired {
+            if let Some(entry) = self.entries.remove(&key) {
+                self.bytes = self.bytes.saturating_sub(entry.result.bytes);
+            }
+        }
+        self.lru.retain(|key| self.entries.contains_key(key));
+    }
+
+    fn touch(&mut self, key: &EnrichmentCacheKey) {
+        self.lru.retain(|cached_key| cached_key != key);
+        self.lru.push_back(*key);
+    }
+
+    fn insert(&mut self, key: EnrichmentCacheKey, result: CachedEnrichmentResult) {
+        if let Some(previous) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(previous.result.bytes);
+        }
+        let ttl = if result.memories.is_empty() {
+            ENRICHMENT_EMPTY_CACHE_TTL
+        } else {
+            ENRICHMENT_CACHE_TTL
+        };
+        self.bytes = self.bytes.saturating_add(result.bytes);
+        self.entries.insert(
+            key,
+            EnrichmentCacheEntry {
+                result,
+                expires_at: Instant::now() + ttl,
+            },
+        );
+        self.touch(&key);
+        while self.entries.len() > ENRICHMENT_CACHE_MAX_ENTRIES
+            || self.bytes > ENRICHMENT_CACHE_MAX_BYTES
+        {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(entry.result.bytes);
+            }
+        }
+    }
+}
+
+fn fingerprint_bytes(parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part);
+    }
+    hasher.finalize().into()
+}
+
+fn fingerprint_strings<I>(parts: I) -> [u8; 32]
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    hasher.finalize().into()
+}
+
+fn fingerprint_hex(fingerprint: &[u8; 32]) -> String {
+    hex::encode(fingerprint)
+}
+
+pub(crate) fn enrichment_query_fingerprint(query: &str) -> String {
+    fingerprint_hex(&fingerprint_bytes(&[query.as_bytes()]))
+}
+
+pub(crate) fn enrichment_identity_from_context(message: &ChatMessage) -> Option<String> {
+    (message.role == "context_file" && message.tool_call_id == KNOWLEDGE_ENRICHMENT_MARKER)
+        .then(|| {
+            message
+                .extra
+                .get("knowledge_enrichment")
+                .and_then(|value| value.get("identity"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .flatten()
+}
+
+pub(crate) fn record_enrichment_identity_on_user_message(
+    message: &mut ChatMessage,
+    identity: &str,
+    query_fingerprint: &str,
+) {
+    message.extra.insert(
+        "knowledge_enrichment".to_string(),
+        serde_json::json!({
+            "identity": identity,
+            "query_fingerprint": query_fingerprint,
+        }),
+    );
+}
 
 pub async fn enrich_messages_with_knowledge(
     gcx: Arc<GlobalContext>,
@@ -265,6 +567,209 @@ pub async fn enrich_messages_with_knowledge(
             Some(0),
         );
     }
+}
+
+async fn enrichment_cache_key(
+    gcx: Arc<GlobalContext>,
+    query_text: &str,
+    current_chat_id: Option<&str>,
+    score_threshold: f32,
+) -> EnrichmentCacheKey {
+    crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+    let project_dirs = get_project_dirs(gcx.clone()).await;
+    let mut roots = project_dirs
+        .iter()
+        .map(|path| crate::files_correction::canonicalize_normalized_path(path.clone()))
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+    let allowed_roots_fingerprint = fingerprint_strings(
+        roots
+            .iter()
+            .map(|root| {
+                root.join(KNOWLEDGE_FOLDER_NAME)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .chain(std::iter::once(
+                gcx.config_dir
+                    .join("knowledge")
+                    .to_string_lossy()
+                    .into_owned(),
+            )),
+    );
+    let workspace_scope_fingerprint = fingerprint_strings(
+        roots
+            .iter()
+            .map(|root| root.to_string_lossy().into_owned())
+            .chain(std::iter::once(
+                gcx.config_dir.to_string_lossy().into_owned(),
+            )),
+    );
+    let current_root = enrichment_current_root_id(gcx.clone(), current_chat_id).await;
+    let current_root_fingerprint =
+        fingerprint_bytes(&[current_root.as_deref().unwrap_or_default().as_bytes()]);
+    let (embedding_config_fingerprint, index_generation) = {
+        let vecdb = gcx.vec_db.lock().await.clone();
+        match vecdb {
+            Some(vecdb) => {
+                let (config, splitter_window_size) = vecdb.current_constants();
+                let backend_identity = format!("{:p}", Arc::as_ptr(&vecdb));
+                let model = fingerprint_strings([
+                    backend_identity,
+                    config.model_id,
+                    config.endpoint,
+                    config.endpoint_style,
+                    config.embedding_endpoint_style,
+                    config.model_name,
+                    fingerprint_hex(&fingerprint_bytes(&[config.api_key.as_bytes()])),
+                    config.embedding_size.to_string(),
+                    config.dimensions.unwrap_or_default().to_string(),
+                    config.query_prefix,
+                    config.document_prefix,
+                    config.rejection_threshold.to_bits().to_string(),
+                    config.embedding_batch.to_string(),
+                    config.n_ctx.to_string(),
+                    splitter_window_size.to_string(),
+                ]);
+                (
+                    model,
+                    gcx.enrichment_generation
+                        .load(std::sync::atomic::Ordering::Acquire),
+                )
+            }
+            None => (
+                fingerprint_bytes(&[b"fallback-enrichment-search"]),
+                gcx.enrichment_generation
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ),
+        }
+    };
+    EnrichmentCacheKey {
+        query_fingerprint: fingerprint_bytes(&[query_text.as_bytes()]),
+        workspace_scope_fingerprint,
+        allowed_roots_fingerprint,
+        privacy_generation: gcx
+            .tool_catalog_generations
+            .privacy
+            .load(std::sync::atomic::Ordering::Acquire),
+        index_generation,
+        embedding_config_fingerprint,
+        current_root_fingerprint,
+        top_n_memories: KNOWLEDGE_TOP_N,
+        top_n_trajectories: TRAJECTORY_TOP_N,
+        score_threshold_bits: score_threshold.to_bits(),
+    }
+}
+
+async fn source_fingerprint(path: &FilePath, content: &str) -> Option<MemoSourceFingerprint> {
+    let metadata = tokio::fs::metadata(path).await.ok()?;
+    let modified_ns = metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(MemoSourceFingerprint {
+        path: path.to_path_buf(),
+        size: metadata.len(),
+        modified_ns,
+        content_fingerprint: fingerprint_bytes(&[content.as_bytes()]),
+    })
+}
+
+async fn cache_result_from_memories(
+    gcx: Arc<GlobalContext>,
+    memories: Vec<crate::memories::MemoRecord>,
+) -> CachedEnrichmentResult {
+    if memories.is_empty() {
+        return CachedEnrichmentResult::empty();
+    }
+    let mut cached = Vec::with_capacity(memories.len());
+    let mut bytes = 0usize;
+    let mut cacheable = true;
+    for memo in memories {
+        let Some(path) = memo.file_path.as_ref() else {
+            cacheable = false;
+            continue;
+        };
+        let Some(text) = get_file_text_from_memory_or_disk(gcx.clone(), path)
+            .await
+            .ok()
+        else {
+            cacheable = false;
+            continue;
+        };
+        let Some(source) = source_fingerprint(path, &text).await else {
+            cacheable = false;
+            continue;
+        };
+        bytes = bytes
+            .saturating_add(memo.content.len())
+            .saturating_add(memo.tags.iter().map(String::len).sum::<usize>())
+            .saturating_add(path.as_os_str().len());
+        cached.push(CachedMemo { memo, source });
+    }
+    if cached.is_empty() && !cacheable {
+        return CachedEnrichmentResult {
+            memories: cached,
+            result_fingerprint: fingerprint_bytes(&[b"uncacheable-enrichment-result"]),
+            bytes: 0,
+            cacheable: false,
+        };
+    }
+    let result_fingerprint = fingerprint_strings(cached.iter().map(|cached| {
+        format!(
+            "{}:{}:{}",
+            cached.memo.memid,
+            cached.source.path.display(),
+            fingerprint_hex(&cached.source.content_fingerprint)
+        )
+    }));
+    CachedEnrichmentResult {
+        memories: cached,
+        result_fingerprint,
+        bytes,
+        cacheable,
+    }
+}
+
+async fn revalidate_cached_memories(
+    gcx: Arc<GlobalContext>,
+    cached: &CachedEnrichmentResult,
+    score_threshold: f32,
+) -> Option<Vec<crate::memories::MemoRecord>> {
+    let mut memories = Vec::with_capacity(cached.memories.len());
+    for cached_memo in &cached.memories {
+        let path = &cached_memo.source.path;
+        let text = get_file_text_from_memory_or_disk(gcx.clone(), path)
+            .await
+            .ok()?;
+        let source = source_fingerprint(path, &text).await?;
+        if source.size != cached_memo.source.size
+            || source.modified_ns != cached_memo.source.modified_ns
+            || source.content_fingerprint != cached_memo.source.content_fingerprint
+        {
+            return None;
+        }
+        if cached_memo.memo.score.unwrap_or_default() < score_threshold {
+            return None;
+        }
+        let mut memo = cached_memo.memo.clone();
+        if memo.kind.as_deref() != Some("trajectory") {
+            let (frontmatter, content_start) = KnowledgeFrontmatter::parse(&text);
+            if frontmatter.is_archived() || frontmatter.is_deprecated() {
+                return None;
+            }
+            memo.content = text[content_start..].trim().to_string();
+            memo.tags = frontmatter.tags;
+            memo.title = frontmatter.title;
+            memo.created = frontmatter.created;
+            memo.kind = frontmatter.kind;
+        }
+        memories.push(memo);
+    }
+    Some(memories)
 }
 
 fn record_enrichment(
@@ -473,16 +978,53 @@ async fn create_knowledge_context(
     current_chat_id: Option<&str>,
     score_threshold: f32,
 ) -> Option<ChatMessage> {
-    let memories = memories_search_for_enrichment(
-        gcx.clone(),
-        query_text,
-        KNOWLEDGE_TOP_N,
-        TRAJECTORY_TOP_N,
+    let cache_key =
+        enrichment_cache_key(gcx.clone(), query_text, current_chat_id, score_threshold).await;
+    let gcx_for_fetch = gcx.clone();
+    let query_for_fetch = query_text.to_string();
+    let current_chat_for_fetch = current_chat_id.map(str::to_string);
+    let (cached, disposition) = gcx
+        .enrichment_cache
+        .get_or_fetch(cache_key, move || async move {
+            let memories = memories_search_for_enrichment(
+                gcx_for_fetch.clone(),
+                &query_for_fetch,
+                KNOWLEDGE_TOP_N,
+                TRAJECTORY_TOP_N,
+                current_chat_for_fetch.as_deref(),
+                current_chat_for_fetch.as_deref(),
+            )
+            .await?;
+            Ok(cache_result_from_memories(gcx_for_fetch, memories).await)
+        })
+        .await
+        .ok()?;
+    if enrichment_cache_key(gcx.clone(), query_text, current_chat_id, score_threshold).await
+        != cache_key
+    {
+        return None;
+    }
+    let memories = match revalidate_cached_memories(gcx.clone(), &cached, score_threshold).await {
+        Some(memories) => memories,
+        None => {
+            gcx.enrichment_cache.invalidate(&cache_key);
+            return None;
+        }
+    };
+    let cache_component = match disposition {
+        EnrichmentCacheDisposition::Miss => PerfComponent::EnrichmentCacheMiss,
+        EnrichmentCacheDisposition::Hit => PerfComponent::EnrichmentCacheHit,
+        EnrichmentCacheDisposition::Coalesced => PerfComponent::EnrichmentCacheCoalesced,
+    };
+    record_enrichment(
         current_chat_id,
-        current_chat_id,
-    )
-    .await
-    .ok()?;
+        cache_component,
+        PerfOutcome::Success,
+        0,
+        Some(cached.bytes as u64),
+        Some(cached.memories.len() as u64),
+        None,
+    );
 
     let high_score_memories: Vec<_> = memories
         .into_iter()
@@ -547,12 +1089,29 @@ async fn create_knowledge_context(
         );
     }
 
-    Some(ChatMessage {
+    let query_fingerprint = fingerprint_hex(&cache_key.query_fingerprint);
+    let result_fingerprint = fingerprint_hex(&cached.result_fingerprint);
+    let index_fingerprint = fingerprint_hex(&fingerprint_bytes(&[
+        cache_key.index_generation.to_string().as_bytes(),
+        &cache_key.embedding_config_fingerprint,
+    ]));
+    let identity = format!("{query_fingerprint}:{result_fingerprint}:{index_fingerprint}");
+    let mut context = ChatMessage {
         role: "context_file".to_string(),
         content: ChatContent::ContextFiles(context_files),
         tool_call_id: KNOWLEDGE_ENRICHMENT_MARKER.to_string(),
         ..Default::default()
-    })
+    };
+    context.extra.insert(
+        "knowledge_enrichment".to_string(),
+        serde_json::json!({
+            "identity": identity,
+            "query_fingerprint": query_fingerprint,
+            "result_fingerprint": result_fingerprint,
+            "index_fingerprint": index_fingerprint,
+        }),
+    );
+    Some(context)
 }
 
 fn has_knowledge_enrichment_near(messages: &[ChatMessage], user_idx: usize) -> bool {
@@ -1061,6 +1620,177 @@ mod tests {
         assert_eq!(
             context_message_stats(&message),
             (1, "private enrichment content".len() as u64, 7)
+        );
+    }
+
+    fn cache_key(seed: u8) -> EnrichmentCacheKey {
+        EnrichmentCacheKey {
+            query_fingerprint: [seed; 32],
+            workspace_scope_fingerprint: [1; 32],
+            allowed_roots_fingerprint: [2; 32],
+            privacy_generation: 1,
+            index_generation: 1,
+            embedding_config_fingerprint: [3; 32],
+            current_root_fingerprint: [4; 32],
+            top_n_memories: KNOWLEDGE_TOP_N,
+            top_n_trajectories: TRAJECTORY_TOP_N,
+            score_threshold_bits: KNOWLEDGE_SCORE_THRESHOLD.to_bits(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn enrichment_cache_coalesces_identical_concurrent_fetches() {
+        let cache = Arc::new(EnrichmentCache::default());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tasks = (0..100)
+            .map(|_| {
+                let cache = cache.clone();
+                let calls = calls.clone();
+                tokio::spawn(async move {
+                    cache
+                        .get_or_fetch(cache_key(1), move || async move {
+                            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                            Ok(CachedEnrichmentResult::empty())
+                        })
+                        .await
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = futures::future::join_all(tasks).await;
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(results
+            .into_iter()
+            .filter_map(Result::ok)
+            .any(|(_, disposition)| disposition == EnrichmentCacheDisposition::Coalesced));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn enrichment_cache_separates_scope_privacy_and_model_identities() {
+        let cache = EnrichmentCache::default();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        for seed in [1, 2, 3] {
+            cache
+                .get_or_fetch(cache_key(seed), || async {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(CachedEnrichmentResult::empty())
+                })
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn enrichment_cache_keeps_empty_results_and_cleans_failures() {
+        let cache = EnrichmentCache::default();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let key = cache_key(7);
+        cache
+            .get_or_fetch(key, || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(CachedEnrichmentResult::empty())
+            })
+            .await
+            .unwrap();
+        let (_, disposition) = cache
+            .get_or_fetch(key, || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(CachedEnrichmentResult::empty())
+            })
+            .await
+            .unwrap();
+        assert_eq!(disposition, EnrichmentCacheDisposition::Hit);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let failure_key = cache_key(8);
+        assert!(cache
+            .get_or_fetch(failure_key, || async { Err("fixture failure".to_string()) })
+            .await
+            .is_err());
+        let (_, disposition) = cache
+            .get_or_fetch(failure_key, || async {
+                Ok(CachedEnrichmentResult::empty())
+            })
+            .await
+            .unwrap();
+        assert_eq!(disposition, EnrichmentCacheDisposition::Miss);
+    }
+
+    #[test]
+    fn enrichment_cache_evicts_lru_entries_with_bounded_memory() {
+        let mut state = EnrichmentCacheState::default();
+        for seed in 0..=ENRICHMENT_CACHE_MAX_ENTRIES {
+            let mut key = cache_key(1);
+            key.privacy_generation = seed as u64;
+            state.insert(key, CachedEnrichmentResult::empty());
+        }
+
+        assert!(state.entries.len() <= ENRICHMENT_CACHE_MAX_ENTRIES);
+        let mut oldest = cache_key(1);
+        oldest.privacy_generation = 0;
+        assert!(!state.entries.contains_key(&oldest));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cached_memo_revalidation_rejects_changed_deleted_and_archived_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let path = dir.path().join("memory.md");
+        let frontmatter = crate::memories::create_frontmatter(
+            Some("Cached memory"),
+            &Vec::new(),
+            &Vec::new(),
+            &Vec::new(),
+            "memory",
+        );
+        let body = "Initial cached content";
+        tokio::fs::write(&path, format!("{}\n\n{}", frontmatter.to_yaml(), body))
+            .await
+            .unwrap();
+        let memo = crate::memories::MemoRecord {
+            memid: "cached".to_string(),
+            content: body.to_string(),
+            file_path: Some(path.clone()),
+            score: Some(0.9),
+            ..Default::default()
+        };
+        let cached = cache_result_from_memories(gcx.clone(), vec![memo]).await;
+        assert!(revalidate_cached_memories(gcx.clone(), &cached, 0.75)
+            .await
+            .is_some());
+
+        tokio::fs::write(
+            &path,
+            format!("{}\n\nChanged content", frontmatter.to_yaml()),
+        )
+        .await
+        .unwrap();
+        assert!(revalidate_cached_memories(gcx.clone(), &cached, 0.75)
+            .await
+            .is_none());
+
+        tokio::fs::remove_file(&path).await.unwrap();
+        assert!(revalidate_cached_memories(gcx, &cached, 0.75)
+            .await
+            .is_none());
+    }
+
+    #[test]
+    fn enrichment_identity_helpers_only_store_fingerprints() {
+        let mut user = ChatMessage::new("user".to_string(), "sensitive query".to_string());
+        let query_fingerprint = enrichment_query_fingerprint(&user.content.content_text_only());
+        record_enrichment_identity_on_user_message(&mut user, "query:result", &query_fingerprint);
+
+        assert!(!serde_json::Value::Object(user.extra.clone())
+            .to_string()
+            .contains("sensitive query"));
+        assert_eq!(
+            user.extra["knowledge_enrichment"]["query_fingerprint"],
+            query_fingerprint
         );
     }
 

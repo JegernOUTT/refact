@@ -474,6 +474,7 @@ impl ChatSession {
             post_turn_task_handles: Vec::new(),
             openai_codex_websocket: Default::default(),
             suppress_auto_enrichment_for_next_turn: false,
+            enrichment_identities: HashSet::new(),
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
             background_agents: HashMap::new(),
@@ -507,6 +508,17 @@ impl ChatSession {
         runtime.goal_tokens_used = goal_tokens_used;
         runtime.goal_no_progress_turns = goal_no_progress_turns;
         let (event_tx, _) = broadcast::channel(limits().event_channel_capacity);
+        let enrichment_identities = messages
+            .iter()
+            .filter_map(|message| {
+                message
+                    .extra
+                    .get("knowledge_enrichment")
+                    .and_then(|value| value.get("identity"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
         Self {
             chat_id,
             derived_privacy_zones: Arc::new(std::sync::RwLock::new(HashMap::new())),
@@ -580,6 +592,7 @@ impl ChatSession {
             post_turn_task_handles: Vec::new(),
             openai_codex_websocket: Default::default(),
             suppress_auto_enrichment_for_next_turn: false,
+            enrichment_identities,
             wake_up_at,
             waiting_for_card_ids,
             background_agents: HashMap::new(),
@@ -596,6 +609,14 @@ impl ChatSession {
         if self.trajectory_save_in_flight {
             self.trajectory_save_queued = true;
         }
+    }
+
+    pub(crate) fn has_enrichment_identity(&self, identity: &str) -> bool {
+        self.enrichment_identities.contains(identity)
+    }
+
+    pub(crate) fn record_enrichment_identity(&mut self, identity: String) {
+        self.enrichment_identities.insert(identity);
     }
 
     pub(crate) fn trajectory_commit_can_write(&self, version: u64) -> bool {

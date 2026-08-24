@@ -1700,6 +1700,7 @@ pub async fn add_folder(gcx: Arc<GlobalContext>, fpath: &PathBuf) {
         }
     };
     if was_added {
+        gcx.enrichment_generation.fetch_add(1, Ordering::SeqCst);
         tracing::info!("Added folder {} to workspace", canonical_path.display());
         on_workspaces_init(gcx.clone()).await;
     } else {
@@ -1721,6 +1722,7 @@ pub async fn remove_folder(gcx: Arc<GlobalContext>, path: &PathBuf) {
         folders.len() < before
     };
     if was_removed {
+        gcx.enrichment_generation.fetch_add(1, Ordering::SeqCst);
         tracing::info!("Removed folder {} from workspace", path.display());
         on_workspaces_init(gcx.clone()).await;
     } else {
@@ -2307,6 +2309,13 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
             {
                 gcx.tool_catalog_generations.advance_privacy();
             }
+        }
+        if event
+            .paths
+            .iter()
+            .any(|path| !path_is_refact_internal(path))
+        {
+            gcx.enrichment_generation.fetch_add(1, Ordering::SeqCst);
         }
         let mut blocklist_roots = gcx
             .documents_state

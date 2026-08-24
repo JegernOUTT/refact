@@ -265,6 +265,13 @@ pub enum TrajectoryCommitIntent {
     Ephemeral,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EnrichmentTurnIdentity {
+    pub revision: u64,
+    pub latest_user_id: String,
+    pub query_fingerprint: String,
+}
+
 impl TrajectoryCommitIntent {
     pub const fn persists(self) -> bool {
         !matches!(self, Self::Ephemeral)
@@ -348,6 +355,7 @@ pub struct ChatSession {
     pub post_turn_task_handles: Vec<tokio::task::JoinHandle<()>>,
     pub(crate) openai_codex_websocket: super::openai_codex_ws::OpenAICodexWebSocketSession,
     pub suppress_auto_enrichment_for_next_turn: bool,
+    pub(crate) enrichment_identities: HashSet<String>,
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
     pub waiting_for_card_ids: Vec<String>,
     /// Latest known background agent summaries for this parent chat, keyed by `agent_id`.
