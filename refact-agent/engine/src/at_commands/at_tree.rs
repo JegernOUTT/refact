@@ -182,6 +182,32 @@ impl TreeNode {
     pub fn is_dir(&self) -> bool {
         !self.children.is_empty()
     }
+
+    pub fn source_paths_limited(&self, limit: usize) -> Vec<PathBuf> {
+        fn collect(node: &TreeNode, paths: &mut Vec<PathBuf>, limit: usize) {
+            if paths.len() >= limit {
+                return;
+            }
+            if !node.is_dir() {
+                if let Some(path) = &node.source_path {
+                    paths.push(path.clone());
+                }
+                return;
+            }
+            let mut children = node.children.iter().collect::<Vec<_>>();
+            children.sort_by(|left, right| left.0.cmp(right.0));
+            for (_, child) in children {
+                collect(child, paths, limit);
+                if paths.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        let mut paths = Vec::new();
+        collect(self, &mut paths, limit);
+        paths
+    }
 }
 
 fn should_skip_path(path: &Path) -> bool {

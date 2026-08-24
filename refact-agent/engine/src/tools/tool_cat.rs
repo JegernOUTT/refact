@@ -28,6 +28,7 @@ use crate::tools::scope_utils::{
     format_scope_notices, list_scoped_files_under_dir_limited_for_model_context,
     resolve_existing_path_with_execution_scope_for_model_context,
 };
+use crate::tools::native_enrichment::{workspace_roots, NativeReferences};
 
 use refact_core::image_policy::{resize_to_policy, ImagePolicy};
 
@@ -173,6 +174,10 @@ impl Tool for ToolCat {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let mut corrections = false;
         let (paths, symbols) = parse_cat_args(args)?;
+        let (gcx, execution_scope) = {
+            let cgcx = ccx.lock().await;
+            (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
+        };
         let (
             filenames_present,
             symbols_not_found,
@@ -225,6 +230,17 @@ impl Tool for ToolCat {
             })
             .collect();
 
+        let roots = workspace_roots(&gcx, execution_scope.as_ref());
+        let mut references = NativeReferences::new();
+        for result in &results {
+            if let ContextEnum::ContextFile(file) = result {
+                references.add_context_file(file, &roots, "read", "cat");
+            }
+        }
+        if expansion_capped_from_messages(&not_found_messages) {
+            references.mark_truncated();
+        }
+
         // Append related memories (short form) based on involved file paths.
         // This is fast: uses in-memory KnowledgeIndex only.
         let related_section = {
@@ -274,17 +290,23 @@ impl Tool for ToolCat {
             tool_call_id: tool_call_id.clone(),
             ..Default::default()
         };
-        let gcx = ccx.lock().await.app.gcx.clone();
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
         let records = crate::privacy::records::declared_file_records(
             &gcx,
             filenames_present.iter().map(PathBuf::from),
         )?;
         crate::privacy::records::merge_records(&mut tool_message, records);
+        references.attach(&mut tool_message);
         results.push(ContextEnum::ChatMessage(tool_message));
 
         Ok((corrections, results))
     }
+}
+
+fn expansion_capped_from_messages(messages: &[String]) -> bool {
+    messages
+        .iter()
+        .any(|message| message.contains("directory expansion produced more than"))
 }
 
 // todo: we can extract if from pipe, however PathBuf does not implement it
@@ -1002,6 +1024,18 @@ mod tests {
             .join("\n")
     }
 
+    fn tool_enrichment(results: &[ContextEnum]) -> refact_chat_api::ToolEnrichment {
+        results
+            .iter()
+            .find_map(|item| match item {
+                ContextEnum::ChatMessage(message) if message.role == "tool" => {
+                    refact_chat_api::tool_enrichment_from_extra(&message.extra)
+                }
+                _ => None,
+            })
+            .expect("tool enrichment")
+    }
+
     fn write_lines(path: &std::path::Path, lines: usize) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let content = (1..=lines)
@@ -1070,6 +1104,14 @@ mod tests {
             context_file_ranges(&results),
             vec![(normalized(&file), 2, 3), (normalized(&file), 6, 7)]
         );
+        let enrichment = tool_enrichment(&results);
+        assert_eq!(enrichment.references.len(), 2);
+        assert_eq!(enrichment.references[0].target, "f.rs");
+        assert_eq!(enrichment.references[0].line1, Some(2));
+        assert_eq!(enrichment.references[0].line2, Some(3));
+        assert_eq!(enrichment.references[1].line1, Some(6));
+        assert_eq!(enrichment.references[1].line2, Some(7));
+        assert_eq!(enrichment.references[0].source.as_deref(), Some("cat"));
     }
 
     #[tokio::test]

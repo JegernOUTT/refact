@@ -298,6 +298,10 @@ export type ToolEnrichmentReference = {
   summary?: string;
   confidence?: number;
   status?: string;
+  line1?: number;
+  line2?: number;
+  count?: number;
+  source?: string;
   truncated?: boolean;
   redacted?: boolean;
 };
@@ -346,6 +350,19 @@ function isToolEnrichmentReference(
     (value.label === undefined || typeof value.label === "string") &&
     (value.summary === undefined || typeof value.summary === "string") &&
     (value.status === undefined || typeof value.status === "string") &&
+    (value.line1 === undefined ||
+      (typeof value.line1 === "number" &&
+        Number.isInteger(value.line1) &&
+        value.line1 > 0)) &&
+    (value.line2 === undefined ||
+      (typeof value.line2 === "number" &&
+        Number.isInteger(value.line2) &&
+        value.line2 > 0)) &&
+    (value.count === undefined ||
+      (typeof value.count === "number" &&
+        Number.isInteger(value.count) &&
+        value.count > 0)) &&
+    (value.source === undefined || typeof value.source === "string") &&
     (value.confidence === undefined ||
       (typeof value.confidence === "number" &&
         Number.isFinite(value.confidence) &&

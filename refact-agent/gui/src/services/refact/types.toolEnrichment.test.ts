@@ -9,6 +9,13 @@ describe("getToolEnrichment", () => {
           schema_version: 1,
           references: [
             { kind: "path", target: "src/lib.rs", provenance: "native" },
+            {
+              kind: "query",
+              target: "search term",
+              provenance: "native",
+              count: 3,
+              source: "search_pattern",
+            },
           ],
         },
       }),

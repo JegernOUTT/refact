@@ -13,6 +13,7 @@ const MAX_TARGET_CHARS: usize = 512;
 const MAX_LABEL_CHARS: usize = 160;
 const MAX_SUMMARY_CHARS: usize = 320;
 const MAX_STATUS_CHARS: usize = 64;
+const MAX_SOURCE_CHARS: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,6 +87,14 @@ pub struct ToolEnrichmentReference {
     pub confidence: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line1: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line2: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -102,6 +111,10 @@ impl ToolEnrichmentReference {
             summary: None,
             confidence: None,
             status: None,
+            line1: None,
+            line2: None,
+            count: None,
+            source: None,
             truncated: false,
             redacted: false,
         }
@@ -116,14 +129,24 @@ impl ToolEnrichmentReference {
         self.summary =
             normalize_optional_text(self.summary, MAX_SUMMARY_CHARS, &mut self.truncated);
         self.status = normalize_optional_text(self.status, MAX_STATUS_CHARS, &mut self.truncated);
+        self.source = normalize_optional_text(self.source, MAX_SOURCE_CHARS, &mut self.truncated);
+        self.line1 = self.line1.filter(|line| *line > 0);
+        self.line2 = self.line2.filter(|line| *line > 0);
+        if self
+            .line2
+            .is_some_and(|line2| self.line1.is_none_or(|line1| line2 < line1))
+        {
+            self.line2 = None;
+        }
+        self.count = self.count.filter(|count| *count > 0);
         self.confidence = self
             .confidence
             .filter(|confidence| confidence.is_finite() && (0.0..=1.0).contains(confidence));
         Some(self)
     }
 
-    fn dedup_key(&self) -> (ToolEnrichmentKind, String) {
-        (self.kind, self.target.clone())
+    fn dedup_key(&self) -> (ToolEnrichmentKind, String, Option<usize>, Option<usize>) {
+        (self.kind, self.target.clone(), self.line1, self.line2)
     }
 }
 
@@ -251,6 +274,12 @@ fn merge_reference(existing: &mut ToolEnrichmentReference, incoming: ToolEnrichm
     existing.label = existing.label.take().or(incoming.label);
     existing.summary = existing.summary.take().or(incoming.summary);
     existing.status = existing.status.take().or(incoming.status);
+    existing.source = existing.source.take().or(incoming.source);
+    existing.count = match (existing.count, incoming.count) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (left @ Some(_), None) => left,
+        (None, right) => right,
+    };
     existing.confidence = match (existing.confidence, incoming.confidence) {
         (Some(left), Some(right)) => Some(left.max(right)),
         (left @ Some(_), None) => left,

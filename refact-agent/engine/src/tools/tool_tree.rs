@@ -23,6 +23,7 @@ use crate::tools::scope_utils::{
     format_scope_notices, is_worktree_root_alias, list_execution_scope_root_limited,
     list_scoped_files_under_dir_limited, resolve_existing_path_with_execution_scope,
 };
+use crate::tools::native_enrichment::{workspace_roots, NativeReferences};
 
 pub struct ToolTree {
     pub config_path: String,
@@ -254,6 +255,16 @@ impl Tool for ToolTree {
         };
         let content = format!("{}{}", format_scope_notices(&scope_notices), content);
 
+        let roots = workspace_roots(&gcx, execution_scope.as_ref());
+        let source_paths = tree.source_paths_limited(33);
+        let mut references = NativeReferences::new();
+        for path in source_paths.iter().take(32) {
+            references.add_path(path, &roots, 0, 0, "listed", None, "tree");
+        }
+        if source_paths.len() > 32 || build_budget.truncated {
+            references.mark_truncated();
+        }
+
         // Append related memories (short form). Since tree() is directory-oriented,
         // we try to surface memories that reference the directory itself via related_files.
         // This keeps the lookup fast (in-memory index) and doesn't require VecDB.
@@ -273,13 +284,17 @@ impl Tool for ToolTree {
 
         Ok((
             false,
-            vec![ContextEnum::ChatMessage(ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText(format!("{}{}", content, related_section)),
-                tool_calls: None,
-                tool_call_id: tool_call_id.clone(),
-                output_filter: Some(OutputFilter::no_limits()),
-                ..Default::default()
+            vec![ContextEnum::ChatMessage({
+                let mut message = ChatMessage {
+                    role: "tool".to_string(),
+                    content: ChatContent::SimpleText(format!("{}{}", content, related_section)),
+                    tool_calls: None,
+                    tool_call_id: tool_call_id.clone(),
+                    output_filter: Some(OutputFilter::no_limits()),
+                    ..Default::default()
+                };
+                references.attach(&mut message);
+                message
             })],
         ))
     }
@@ -402,6 +417,18 @@ mod privacy_and_bounds_tests {
             .join("\n")
     }
 
+    fn tool_enrichment(results: &[ContextEnum]) -> refact_chat_api::ToolEnrichment {
+        results
+            .iter()
+            .find_map(|item| match item {
+                ContextEnum::ChatMessage(message) if message.role == "tool" => {
+                    refact_chat_api::tool_enrichment_from_extra(&message.extra)
+                }
+                _ => None,
+            })
+            .expect("tool enrichment")
+    }
+
     #[tokio::test]
     async fn scoped_subdir_tree_hides_privacy_blocked_files() {
         let fixture = make_fixture();
@@ -426,5 +453,10 @@ mod privacy_and_bounds_tests {
             "privacy-blocked file must not leak into the tree listing: {text}"
         );
         assert!(!text.contains("SECRET_TOKEN"), "{text}");
+        let enrichment = tool_enrichment(&results);
+        assert_eq!(enrichment.references.len(), 1);
+        assert_eq!(enrichment.references[0].target, "subdir/allowed.rs");
+        assert_eq!(enrichment.references[0].status.as_deref(), Some("listed"));
+        assert_eq!(enrichment.references[0].source.as_deref(), Some("tree"));
     }
 }

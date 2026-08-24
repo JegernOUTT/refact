@@ -26,6 +26,7 @@ use crate::tools::tools_description::{
 };
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
 use crate::knowledge_index::format_related_memories_section;
+use crate::tools::native_enrichment::{workspace_roots, NativeReferences};
 use crate::worktrees::scope::ExecutionScope;
 
 pub struct ToolSearch {
@@ -395,6 +396,12 @@ impl Tool for ToolSearch {
             return Err("No valid queries provided".to_string());
         }
 
+        let (gcx, execution_scope) = {
+            let cgcx = ccx.lock().await;
+            (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
+        };
+        let roots = workspace_roots(&gcx, execution_scope.as_ref());
+        let mut references = NativeReferences::new();
         let mut all_context_files = Vec::new();
         let mut all_content = String::new();
 
@@ -408,6 +415,16 @@ impl Tool for ToolSearch {
             let (vector_of_context_file, scope_notices) =
                 execute_att_search(ccx.clone(), query, &scope, context_lines, max_total_recs)
                     .await?;
+            references.add_query(
+                query,
+                vector_of_context_file.len(),
+                if vector_of_context_file.is_empty() {
+                    "no_matches"
+                } else {
+                    "matched"
+                },
+                "search_semantic",
+            );
             all_content.push_str(&format_scope_notices(&scope_notices));
             info!(
                 "att-search: vector_of_context_file={:?}",
@@ -497,6 +514,7 @@ impl Tool for ToolSearch {
                             file_req.line1, file_req.line2, file_req.usefulness
                         ));
                         all_context_files.push((*file_req).clone());
+                        references.add_context_file(file_req, &roots, "match", "search_semantic");
                         total_emitted += 1;
                         per_file_emitted += 1;
                     }
@@ -505,6 +523,7 @@ impl Tool for ToolSearch {
             }
 
             if vector_of_context_file.len() > total_emitted {
+                references.mark_truncated();
                 all_content.push_str(&format!(
                     "⚠️ Attached {} records (of {}). Narrow scope/query or raise max_total_recs/max_files if needed.\n",
                     total_emitted,
@@ -514,7 +533,11 @@ impl Tool for ToolSearch {
         }
 
         if all_context_files.is_empty() {
-            return Ok(semantic_no_match_result(tool_call_id, all_content));
+            let (corrections, mut results) = semantic_no_match_result(tool_call_id, all_content);
+            if let Some(ContextEnum::ChatMessage(message)) = results.last_mut() {
+                references.attach(message);
+            }
+            return Ok((corrections, results));
         }
 
         // Append related memories (short form) based on involved file paths.
@@ -537,13 +560,15 @@ impl Tool for ToolSearch {
         };
 
         let mut results = vec_context_file_to_context_tools(all_context_files);
-        results.push(ContextEnum::ChatMessage(ChatMessage {
+        let mut tool_message = ChatMessage {
             role: "tool".to_string(),
             content: ChatContent::SimpleText(format!("{}{}", all_content, related_section)),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
             ..Default::default()
-        }));
+        };
+        references.attach(&mut tool_message);
+        results.push(ContextEnum::ChatMessage(tool_message));
         Ok((false, results))
     }
 

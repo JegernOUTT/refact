@@ -16,6 +16,7 @@ use crate::tools::tools_description::{
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::knowledge_index::format_related_memories_section;
+use crate::tools::native_enrichment::{workspace_roots, NativeReferences};
 use crate::worktrees::scope::ExecutionScope;
 use regex::Regex;
 
@@ -123,6 +124,8 @@ async fn symbol_def_via_codegraph(
     let mut all_messages = Vec::new();
     let mut all_context_files = Vec::new();
     let mut all_notices: Vec<String> = Vec::new();
+    let roots = workspace_roots(&gcx, execution_scope);
+    let mut references = NativeReferences::new();
 
     for symbol in symbols {
         if abort_flag.load(Ordering::SeqCst) {
@@ -132,6 +135,7 @@ async fn symbol_def_via_codegraph(
 
         let defs = service.definitions(symbol).await?;
         if defs.is_empty() {
+            references.add_symbol(symbol, "not_found", "search_symbol_definition");
             corrections = true;
             let fuzzy = service.definition_paths_fuzzy(symbol, 20).await?;
             if fuzzy.is_empty() {
@@ -183,12 +187,23 @@ async fn symbol_def_via_codegraph(
         }
 
         if context_files.is_empty() {
+            references.add_symbol(symbol, "suppressed", "search_symbol_definition");
             corrections = true;
             all_messages.push(format!(
                 "For symbol `{}`:\n⚠️ Definitions found only outside the active worktree and were suppressed. 💡 Use search_pattern() within the worktree\n",
                 symbol
             ));
             continue;
+        }
+
+        references.add_symbol(symbol, "found", "search_symbol_definition");
+        for context_file in &context_files {
+            references.add_context_file(
+                context_file,
+                &roots,
+                "definition",
+                "search_symbol_definition",
+            );
         }
 
         let file_paths = context_files
@@ -218,6 +233,7 @@ async fn symbol_def_via_codegraph(
             tool_message.push('\n');
         }
         if defs.len() > context_files.len() {
+            references.mark_truncated();
             tool_message.push_str(&format!(
                 "⚠️ {} more definitions not shown (limit: {}). 💡 Use more specific symbol name\n",
                 defs.len() - context_files.len(),
@@ -238,7 +254,7 @@ async fn symbol_def_via_codegraph(
     let related_section = compute_related_memories_section(gcx.clone(), files, symbols_str).await;
 
     let notices_section = format_scope_notices(&all_notices);
-    all_context_files.push(ContextEnum::ChatMessage(ChatMessage {
+    let mut tool_message = ChatMessage {
         role: "tool".to_string(),
         content: ChatContent::SimpleText(format!(
             "{}{}{}",
@@ -250,7 +266,9 @@ async fn symbol_def_via_codegraph(
         tool_call_id: tool_call_id.clone(),
         output_filter: Some(OutputFilter::no_limits()),
         ..Default::default()
-    }));
+    };
+    references.attach(&mut tool_message);
+    all_context_files.push(ContextEnum::ChatMessage(tool_message));
 
     Ok((corrections, all_context_files))
 }
@@ -533,6 +551,21 @@ mod tests {
             !text.contains(&format!("defined at {source_lib_str}")),
             "definition line must not use source path: {text}"
         );
+        let enrichment = results
+            .iter()
+            .find_map(|result| match result {
+                ContextEnum::ChatMessage(message) if message.role == "tool" => {
+                    refact_chat_api::tool_enrichment_from_extra(&message.extra)
+                }
+                _ => None,
+            })
+            .expect("definition enrichment");
+        assert_eq!(enrichment.references[0].target, "shared");
+        assert_eq!(enrichment.references[0].status.as_deref(), Some("found"));
+        assert!(enrichment
+            .references
+            .iter()
+            .any(|reference| reference.target == "src/lib.rs"));
     }
 
     #[tokio::test]

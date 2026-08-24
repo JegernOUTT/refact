@@ -15,9 +15,43 @@ use crate::memories::memories_search;
 use crate::knowledge_graph::build_knowledge_graph;
 use crate::knowledge_index::format_related_memories_section;
 use crate::postprocessing::pp_command_output::OutputFilter;
+use crate::tools::native_enrichment::{workspace_roots, NativeReferences};
 
 pub struct ToolGetKnowledge {
     pub config_path: String,
+}
+
+fn add_knowledge_references(
+    references: &mut NativeReferences,
+    memories: &[crate::memories::MemoRecord],
+    roots: &[std::path::PathBuf],
+) {
+    if memories.len() > 8 {
+        references.mark_truncated();
+    }
+    for memory in memories.iter().take(8) {
+        references.add_artifact(
+            &memory.memid,
+            memory.title.clone(),
+            memory.kind.clone(),
+            Some("knowledge".to_string()),
+        );
+        if let Some(path) = &memory.file_path {
+            let (line1, line2) = memory
+                .line_range
+                .map(|(line1, line2)| (line1 as usize, line2 as usize))
+                .unwrap_or((0, 0));
+            references.add_path(
+                path,
+                roots,
+                line1,
+                line2,
+                "memory",
+                memory.score,
+                "knowledge",
+            );
+        }
+    }
 }
 
 #[async_trait]
@@ -47,7 +81,10 @@ impl Tool for ToolGetKnowledge {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         info!("knowledge search {:?}", args);
 
-        let gcx = ccx.lock().await.app.gcx.clone();
+        let (gcx, execution_scope) = {
+            let cgcx = ccx.lock().await;
+            (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
+        };
 
         let search_key = match args.get("search_key") {
             Some(Value::String(s)) => s.clone(),
@@ -102,6 +139,20 @@ impl Tool for ToolGetKnowledge {
             a_is_traj.cmp(&b_is_traj)
         });
 
+        let roots = workspace_roots(&gcx, execution_scope.as_ref());
+        let mut references = NativeReferences::new();
+        references.add_query(
+            &search_key,
+            unique_memories.len(),
+            if unique_memories.is_empty() {
+                "no_matches"
+            } else {
+                "matched"
+            },
+            "knowledge",
+        );
+        add_knowledge_references(&mut references, &unique_memories, &roots);
+
         let memories_str = if unique_memories.is_empty() {
             "No relevant knowledge found.".to_string()
         } else {
@@ -153,18 +204,71 @@ impl Tool for ToolGetKnowledge {
 
         Ok((
             false,
-            vec![ContextEnum::ChatMessage(ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText(memories_str),
-                tool_calls: None,
-                tool_call_id: tool_call_id.clone(),
-                output_filter: Some(OutputFilter::no_limits()),
-                ..Default::default()
+            vec![ContextEnum::ChatMessage({
+                let mut message = ChatMessage {
+                    role: "tool".to_string(),
+                    content: ChatContent::SimpleText(memories_str),
+                    tool_calls: None,
+                    tool_call_id: tool_call_id.clone(),
+                    output_filter: Some(OutputFilter::no_limits()),
+                    ..Default::default()
+                };
+                crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+                let records = crate::privacy::records::declared_file_records(
+                    &gcx,
+                    unique_memories
+                        .iter()
+                        .filter_map(|memory| memory.file_path.clone()),
+                )?;
+                crate::privacy::records::merge_records(&mut message, records);
+                references.attach(&mut message);
+                message
             })],
         ))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
         vec!["knowledge".to_string()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn knowledge_references_use_native_query_artifact_and_workspace_path_metadata() {
+        let memory = crate::memories::MemoRecord {
+            memid: "memory-1".to_string(),
+            file_path: Some(std::path::PathBuf::from(
+                "/workspace/.refact/knowledge/memory.md",
+            )),
+            line_range: Some((3, 5)),
+            title: Some("Memory title".to_string()),
+            kind: Some("decision".to_string()),
+            score: Some(0.8),
+            ..Default::default()
+        };
+        let mut references = NativeReferences::new();
+        references.add_query("remember this", 1, "matched", "knowledge");
+        add_knowledge_references(
+            &mut references,
+            &[memory],
+            &[std::path::PathBuf::from("/workspace")],
+        );
+        let mut message = ChatMessage::new("tool".to_string(), "raw knowledge".to_string());
+        references.attach(&mut message);
+
+        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
+        assert_eq!(enrichment.references.len(), 3);
+        assert_eq!(enrichment.references[0].target, "remember this");
+        assert_eq!(enrichment.references[1].target, "artifact:memory-1");
+        assert_eq!(
+            enrichment.references[2].target,
+            ".refact/knowledge/memory.md"
+        );
+        assert_eq!(enrichment.references[2].line1, Some(3));
+        assert_eq!(enrichment.references[2].line2, Some(5));
+        assert_eq!(message.content.content_text_only(), "raw knowledge");
     }
 }

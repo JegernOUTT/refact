@@ -29,6 +29,7 @@ use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
 };
 use crate::knowledge_index::format_related_memories_section;
+use crate::tools::native_enrichment::{workspace_roots, NativeReferences};
 
 pub struct ToolRegexSearch {
     pub config_path: String,
@@ -408,6 +409,7 @@ impl Tool for ToolRegexSearch {
                 cgcx.abort_flag.clone(),
             )
         };
+        let roots = workspace_roots(&gcx, execution_scope.as_ref());
 
         let scoped_files = resolve_scope_with_execution_scope_limited_for_model_context(
             gcx.clone(),
@@ -456,6 +458,17 @@ impl Tool for ToolRegexSearch {
             files_total,
             stopped_early,
         } = search_outcome;
+        let mut references = NativeReferences::new();
+        references.add_query(
+            &pattern,
+            search_results.len(),
+            if search_results.is_empty() {
+                "no_matches"
+            } else {
+                "matched"
+            },
+            "search_pattern",
+        );
         if search_results.is_empty() {
             all_content.push_str(&format!(
                 "\nNo matches found for pattern '{}' in {}. 💡 Try broader scope ('workspace'), a simpler pattern, or use (?i) for case-insensitive search.\n",
@@ -510,12 +523,22 @@ impl Tool for ToolRegexSearch {
                         usefulness: 100.0,
                         skip_pp: true,
                     });
+                    references.add_path(
+                        PathBuf::from(&file).as_path(),
+                        &roots,
+                        m.context_start,
+                        m.context_end_inclusive,
+                        "match",
+                        Some(1.0),
+                        "search_pattern",
+                    );
                     total_emitted += 1;
                     files_emitted.insert(file.clone());
                 }
             }
 
             if search_results.len() > total_emitted {
+                references.mark_truncated();
                 all_content.push_str(&format!(
                     "\n⚠️ Attached {} match windows (of {}). Narrow scope/pattern or raise max_total_matches/max_files if needed.\n",
                     total_emitted,
@@ -525,6 +548,7 @@ impl Tool for ToolRegexSearch {
         }
 
         if stopped_early {
+            references.mark_truncated();
             all_content.push_str(&format!(
                 "\n⚠️ Search stopped after scanning {} of {} files because the requested match limits were reached. Narrow the scope or raise max_files/max_total_matches for more results.\n",
                 files_scanned, files_total
@@ -560,6 +584,7 @@ impl Tool for ToolRegexSearch {
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
         let records = crate::privacy::records::declared_file_records(&gcx, scanned_paths)?;
         crate::privacy::records::merge_records(&mut tool_message, records);
+        references.attach(&mut tool_message);
         results.push(ContextEnum::ChatMessage(tool_message));
 
         Ok((false, results))
@@ -642,6 +667,18 @@ mod tests {
         assert!(text.contains("No matches found for pattern 'absent' in workspace."));
         assert!(text.contains("Try broader scope"));
         assert!(message.output_filter.is_some());
+        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
+        assert_eq!(enrichment.references.len(), 1);
+        assert_eq!(
+            enrichment.references[0].kind,
+            refact_chat_api::ToolEnrichmentKind::Query
+        );
+        assert_eq!(enrichment.references[0].target, "absent");
+        assert_eq!(
+            enrichment.references[0].status.as_deref(),
+            Some("no_matches")
+        );
+        assert_eq!(message.content.content_text_only(), *text);
     }
 
     #[tokio::test]

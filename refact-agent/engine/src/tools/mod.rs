@@ -1,3 +1,4 @@
+pub(crate) mod native_enrichment;
 pub mod review_agents;
 pub mod review_candidates;
 pub mod review_evidence;

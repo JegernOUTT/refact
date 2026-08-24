@@ -532,6 +532,8 @@ describe("ToolsContent routing", () => {
             target: "src/lib.rs",
             label: "lib.rs",
             provenance: "native",
+            line1: 2,
+            line2: 4,
             status: "updated",
           },
         ],
@@ -540,7 +542,7 @@ describe("ToolsContent routing", () => {
 
     openToolCard();
     expect(screen.getByTestId("tool-enrichment")).toBeInTheDocument();
-    expect(screen.getByText("path: lib.rs (updated)")).toBeInTheDocument();
+    expect(screen.getByText("path: lib.rs:2-4 (updated)")).toBeInTheDocument();
     expect(screen.getByText("raw legacy fallback")).toBeInTheDocument();
   });
 

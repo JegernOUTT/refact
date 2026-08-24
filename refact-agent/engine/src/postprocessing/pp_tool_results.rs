@@ -93,12 +93,40 @@ fn native_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
     let mut references = Vec::new();
     if let ChatContent::ContextFiles(files) = &message.content {
         for file in files {
-            references.push(reference(ToolEnrichmentKind::Path, &file.file_name));
-            references.extend(
-                file.symbols
-                    .iter()
-                    .map(|symbol| reference(ToolEnrichmentKind::Symbol, symbol)),
-            );
+            let mut path = reference(ToolEnrichmentKind::Path, &file.file_name);
+            path.line1 = (file.line1 > 0).then_some(file.line1);
+            path.line2 = (file.line2 > 0).then_some(file.line2);
+            path.source = Some("context_file".to_string());
+            references.push(path);
+            references.extend(file.symbols.iter().map(|symbol| {
+                let mut reference = reference(ToolEnrichmentKind::Symbol, symbol);
+                reference.source = Some("context_file".to_string());
+                reference
+            }));
+        }
+    }
+    if let Some(path_enrichment) = message.extra.get("path_enrichment") {
+        if let Some(paths) = path_enrichment
+            .get("references")
+            .and_then(serde_json::Value::as_array)
+        {
+            references.extend(paths.iter().filter_map(|path| {
+                let target = path.get("path")?.as_str()?;
+                let mut reference = reference(ToolEnrichmentKind::Path, target);
+                reference.line1 = path
+                    .get("line1")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|line| usize::try_from(line).ok());
+                reference.line2 = path
+                    .get("line2")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|line| usize::try_from(line).ok());
+                reference.source = path
+                    .get("source")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string);
+                Some(reference)
+            }));
         }
     }
     if let Some(results) = message
@@ -222,11 +250,39 @@ mod tests {
         assert_eq!(enrichment.references.len(), 2);
         assert_eq!(enrichment.references[0].kind, ToolEnrichmentKind::Path);
         assert_eq!(enrichment.references[0].target, "src/lib.rs");
+        assert_eq!(enrichment.references[0].line1, Some(1));
+        assert_eq!(enrichment.references[0].line2, Some(2));
         assert_eq!(enrichment.references[1].kind, ToolEnrichmentKind::Symbol);
         assert_eq!(enrichment.references[1].target, "crate::entry");
         assert!(!serde_json::to_string(&enrichment)
             .unwrap()
             .contains("large canonical payload"));
+    }
+
+    #[test]
+    fn native_enrichment_preserves_structured_process_path_ranges() {
+        let mut message = ChatMessage::new("tool".to_string(), "raw result".to_string());
+        message.extra.insert(
+            "path_enrichment".to_string(),
+            serde_json::json!({
+                "references": [{
+                    "path": "src/lib.rs",
+                    "line1": 4,
+                    "line2": 8,
+                    "source": "argv"
+                }]
+            }),
+        );
+
+        enrich_tool_messages(std::slice::from_mut(&mut message));
+
+        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
+        assert_eq!(enrichment.references.len(), 1);
+        assert_eq!(enrichment.references[0].target, "src/lib.rs");
+        assert_eq!(enrichment.references[0].line1, Some(4));
+        assert_eq!(enrichment.references[0].line2, Some(8));
+        assert_eq!(enrichment.references[0].source.as_deref(), Some("argv"));
+        assert_eq!(message.content.content_text_only(), "raw result");
     }
 
     #[test]
