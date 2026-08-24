@@ -2318,6 +2318,7 @@ mod tests {
             "defaults": {"chat_default_model": "openai/gpt-demo"},
             "chat_models": {"openai/gpt-demo": {"name": "GPT Demo"}}
         }));
+        assert!(app.resize_reflow_is_due());
         app.handle_chat_event(snapshot_event(&app, Vec::new()));
 
         assert_eq!(app.history_pending_count(), 0);

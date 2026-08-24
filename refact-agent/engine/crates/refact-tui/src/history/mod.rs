@@ -268,16 +268,16 @@ impl HistoryBuffer {
         removed_ids.len()
     }
 
-    pub fn replace_first_kind(
-        &mut self,
-        kind: cells::HistoryCellKind,
-        cell: Box<dyn cells::HistoryCell>,
-    ) -> Option<bool> {
+    pub fn replace_first_item_kind(&mut self, item: &TranscriptItem) -> Option<bool> {
+        let cell = cells::cell_from_transcript_item(item, false);
+        let kind = cell.kind();
         let id = self
             .history
             .iter()
             .chain(self.pending.iter())
-            .find_map(|entry| (entry.cell.kind() == kind).then_some(entry.id))?;
+            .find_map(|entry| {
+                (entry.item.is_some() && entry.cell.kind() == kind).then_some(entry.id)
+            })?;
         let revision = cell.revision();
         let changed = self
             .history
@@ -286,16 +286,28 @@ impl HistoryBuffer {
             .filter(|entry| entry.id == id)
             .any(|entry| entry.cell.revision() != revision);
         if !changed {
+            for entry in &mut self.history {
+                if entry.id == id {
+                    entry.item = Some(item.clone());
+                }
+            }
+            for entry in &mut self.pending {
+                if entry.id == id {
+                    entry.item = Some(item.clone());
+                }
+            }
             return Some(false);
         }
         for entry in &mut self.history {
             if entry.id == id {
                 entry.cell = cell.clone();
+                entry.item = Some(item.clone());
             }
         }
         for entry in &mut self.pending {
             if entry.id == id {
                 entry.cell = cell.clone();
+                entry.item = Some(item.clone());
             }
         }
         self.evict_cache_entries(&[id]);
@@ -1041,27 +1053,42 @@ mod tests {
     }
 
     #[test]
-    fn replace_first_kind_updates_pending_cell_without_adding_history() {
+    fn replace_first_kind_synchronizes_item_backed_source_and_cell() {
         let mut history = HistoryBuffer::new();
-        history.enqueue(TranscriptItem::Session {
+        let cell_only_id = history.enqueue_cell(Box::new(cells::SessionCell::new(
+            "cell only",
+            Some("model: raw".to_string()),
+        )));
+        let item_id = history.enqueue(TranscriptItem::Session {
             title: "New chat".to_string(),
             subtitle: Some("model: default".to_string()),
         });
+        history.pending_insertions(80);
+        assert_eq!(history.cache_entry_count(), 2);
 
-        let changed = history.replace_first_kind(
-            cells::HistoryCellKind::Session,
-            cells::cell_from_transcript_item(
-                &TranscriptItem::Session {
-                    title: "New chat".to_string(),
-                    subtitle: Some("model: gpt-demo".to_string()),
-                },
-                false,
-            ),
-        );
+        let updated = TranscriptItem::Session {
+            title: "New chat".to_string(),
+            subtitle: Some("model: gpt-demo".to_string()),
+        };
+
+        let changed = history.replace_first_item_kind(&updated);
 
         assert_eq!(changed, Some(true));
-        assert_eq!(history.pending_cell_count(), 1);
-        assert_eq!(history.source_cell_count(), 1);
+        assert_eq!(history.cache_entry_count(), 1);
+        for entry in history.history.iter().chain(history.pending.iter()) {
+            if entry.id == item_id {
+                assert_eq!(entry.item.as_ref(), Some(&updated));
+                assert_eq!(
+                    entry.cell.revision(),
+                    cells::cell_from_transcript_item(&updated, false).revision()
+                );
+            }
+            if entry.id == cell_only_id {
+                assert!(entry.item.is_none());
+            }
+        }
+        assert_eq!(history.pending_cell_count(), 2);
+        assert_eq!(history.source_cell_count(), 2);
         let lines = history
             .pending_insertions(80)
             .into_iter()
@@ -1071,6 +1098,39 @@ mod tests {
             .join("\n");
         assert!(lines.contains("model: gpt-demo"));
         assert!(!lines.contains("model: default"));
+
+        history.drain_pending(80);
+        let reflow = history
+            .reflow_insertions(80, 1_000)
+            .into_iter()
+            .flat_map(|insertion| insertion.lines)
+            .map(|line| line_to_plain(&line.line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(reflow.contains("model: gpt-demo"));
+        assert!(reflow.contains("model: raw"));
+    }
+
+    #[test]
+    fn replace_first_kind_syncs_source_when_cell_revision_is_unchanged() {
+        let mut history = HistoryBuffer::new();
+        let id = history.enqueue(TranscriptItem::Session {
+            title: "Original title".to_string(),
+            subtitle: Some("model: default".to_string()),
+        });
+        let updated = TranscriptItem::Session {
+            title: "Renamed title".to_string(),
+            subtitle: Some("model: default".to_string()),
+        };
+
+        history.replace_pending_cell(id, cells::cell_from_transcript_item(&updated, false));
+        assert_eq!(history.replace_first_item_kind(&updated), Some(false));
+        assert!(history
+            .history
+            .iter()
+            .chain(history.pending.iter())
+            .filter(|entry| entry.id == id)
+            .all(|entry| entry.item.as_ref() == Some(&updated)));
     }
 
     #[test]

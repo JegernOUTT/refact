@@ -1009,10 +1009,7 @@ impl App {
         {
             *existing = next;
         } else if self.native_scrollback {
-            let changed = self.history.replace_first_kind(
-                HistoryCellKind::Session,
-                crate::history::cells::cell_from_transcript_item(&next, false),
-            );
+            let changed = self.history.replace_first_item_kind(&next);
             match changed {
                 Some(true) => self.resize_reflow.schedule_immediate(),
                 None => {
