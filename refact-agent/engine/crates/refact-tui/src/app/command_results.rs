@@ -1,6 +1,25 @@
 use super::*;
 
+#[derive(Debug, Clone)]
+pub(super) struct CommandOrigin {
+    pub(super) project_id: String,
+    pub(super) chat_id: String,
+}
+
+impl CommandOrigin {
+    fn is_current(&self, app: &App) -> bool {
+        app.current_project_id() == Some(self.project_id.as_str()) && app.chat_id() == self.chat_id
+    }
+}
+
 impl App {
+    pub(super) fn command_origin(&self) -> CommandOrigin {
+        CommandOrigin {
+            project_id: self.current_project_id().unwrap_or_default().to_string(),
+            chat_id: self.chat_id().to_string(),
+        }
+    }
+
     pub(super) fn handle_command_finished(
         &mut self,
         context: CommandContextTag,

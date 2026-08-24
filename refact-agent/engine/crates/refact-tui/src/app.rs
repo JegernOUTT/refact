@@ -61,7 +61,7 @@ mod state;
 mod surfaces;
 mod transcript;
 mod workers;
-
+use self::command_results::CommandOrigin;
 pub use self::session_lifecycle::{ClipboardCopySource, SessionState, SubscriptionStatus, UsageSummary};
 pub use self::state::{App, ClientMessageCorrelation, ComposerMode};
 pub use surfaces::ProjectPickerState;
@@ -140,18 +140,6 @@ struct EditorCommand {
 }
 
 #[derive(Debug, Clone)]
-struct CommandOrigin {
-    project_id: String,
-    chat_id: String,
-}
-
-impl CommandOrigin {
-    fn is_current(&self, app: &App) -> bool {
-        app.current_project_id() == Some(self.project_id.as_str()) && app.chat_id() == self.chat_id
-    }
-}
-
-#[derive(Debug, Clone)]
 enum CommandContextTag {
     SendMessage {
         prompt: String,
@@ -188,13 +176,6 @@ enum CommandContextTag {
 }
 
 impl App {
-    fn command_origin(&self) -> CommandOrigin {
-        CommandOrigin {
-            project_id: self.current_project_id().unwrap_or_default().to_string(),
-            chat_id: self.chat_id().to_string(),
-        }
-    }
-
     fn apply_tui_config_content(&mut self, content: &str) {
         match KeymapRegistry::from_config_file_content(Some(content)) {
             Ok(keymap) => {
