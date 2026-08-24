@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { chatReducer } from "../features/Chat/Thread/reducer";
 import { newChatAction, applyChatEvent } from "../features/Chat/Thread/actions";
 import type { Chat } from "../features/Chat/Thread/types";
@@ -64,6 +64,11 @@ function createMockFetch(chunks: Uint8Array[]) {
   });
 }
 
+function percentile(samples: number[], ratio: number): number {
+  const ordered = [...samples].sort((a, b) => a - b);
+  return ordered[Math.max(0, Math.ceil(ordered.length * ratio) - 1)];
+}
+
 describe("Chat Streaming + Large History Stress", () => {
   let initialState: Chat;
   let chatId: string;
@@ -73,6 +78,10 @@ describe("Chat Streaming + Large History Stress", () => {
     const emptyState = chatReducer(undefined, { type: "@@INIT" });
     initialState = chatReducer(emptyState, newChatAction(undefined));
     chatId = initialState.current_thread_id;
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it("handles large history plus many stream deltas", () => {
@@ -145,6 +154,49 @@ describe("Chat Streaming + Large History Stress", () => {
     expect(finalMessage.content).toBe(chunkText.repeat(chunkCount));
     expect(runtime.streaming).toBe(false);
     expect(elapsedMs).toBeLessThan(10_000);
+  });
+
+  it("keeps reducer p95 below 16 ms for 50 MiB history and Unicode deltas", () => {
+    const historyBytes = 50 * 1024 * 1024;
+    const snapshot = createSnapshotEvent(chatId, [
+      { role: "user", content: "x".repeat(historyBytes), message_id: "large" },
+    ]);
+    let state = chatReducer(initialState, applyChatEvent(snapshot));
+    state = chatReducer(
+      state,
+      applyChatEvent({
+        chat_id: chatId,
+        seq: "2",
+        type: "stream_started",
+        message_id: "unicode-stream",
+      }),
+    );
+
+    const timings: number[] = [];
+    for (let index = 0; index < 128; index++) {
+      const startedAt = performance.now();
+      state = chatReducer(
+        state,
+        applyChatEvent({
+          chat_id: chatId,
+          seq: String(index + 3),
+          type: "stream_delta",
+          message_id: "unicode-stream",
+          ops: [
+            { op: "append_content", text: "🐛" },
+            { op: "append_reasoning", text: "🧠" },
+          ],
+        }),
+      );
+      timings.push(performance.now() - startedAt);
+    }
+
+    const runtime = state.threads[chatId];
+    if (!runtime) throw new Error(`Runtime not found for chat ${chatId}`);
+    const message = runtime.thread.messages.at(-1);
+    expect(message?.content).toBe("🐛".repeat(128));
+    expect(percentile(timings, 0.95)).toBeLessThan(16);
+    expect(percentile(timings, 0.99)).toBeLessThan(50);
   });
 
   it("keeps reducer stable under many duplicate seq events", () => {

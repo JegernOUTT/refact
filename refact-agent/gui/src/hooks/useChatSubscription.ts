@@ -18,6 +18,13 @@ import {
 } from "../services/refact/chatSubscription";
 import { invalidateChatParamsSyncState } from "../services/refact/chatCommands";
 import { processCompleted } from "../features/Notifications";
+import {
+  MAX_BUFFERED_STREAM_TEXT_UNITS,
+  MAX_MERGED_DELTA_OPS,
+  streamDeltaFlushDelayMs,
+  streamDeltaTextUnits,
+  subchatFlushDelayMs,
+} from "./chatStreamBatching";
 
 const DEBUG =
   typeof window !== "undefined" &&
@@ -141,18 +148,6 @@ export function useChatSubscription(
   // eslint-disable-next-line @typescript-eslint/no-empty-function
   const connectRef = useRef<() => void>(() => {});
 
-  const MAX_MERGED_DELTA_OPS = 256;
-
-  // Adaptive flush thresholds (JS string length units, i.e. UTF-16 code units)
-  const FLUSH_TIER_FAST_BYTES = 8_192;
-  const FLUSH_TIER_MEDIUM_BYTES = 200_000;
-  const FLUSH_MS_FAST = 50;
-  const FLUSH_MS_MEDIUM = 250;
-  const FLUSH_MS_SLOW = 750;
-  const SUBCHAT_FLUSH_MS = 150;
-  // Hard cap: force flush if buffered char-count (UTF-16 units) exceeds this
-  const MAX_BUFFERED_BYTES = 2_000_000;
-
   const clearStreamDeltaFlush = useCallback(() => {
     const handle = streamDeltaFlushRef.current;
     if (handle != null) {
@@ -189,15 +184,7 @@ export function useChatSubscription(
   const scheduleStreamDeltaFlush = useCallback(() => {
     if (streamDeltaFlushRef.current != null) return;
 
-    const bytes = streamedBytesRef.current;
-    let delayMs: number;
-    if (bytes < FLUSH_TIER_FAST_BYTES) {
-      delayMs = FLUSH_MS_FAST;
-    } else if (bytes < FLUSH_TIER_MEDIUM_BYTES) {
-      delayMs = FLUSH_MS_MEDIUM;
-    } else {
-      delayMs = FLUSH_MS_SLOW;
-    }
+    const delayMs = streamDeltaFlushDelayMs(true, streamedBytesRef.current);
 
     const flush = () => {
       streamDeltaFlushRef.current = null;
@@ -228,7 +215,7 @@ export function useChatSubscription(
 
     subchatFlushRef.current = {
       type: "timeout",
-      id: setTimeout(flush, SUBCHAT_FLUSH_MS),
+      id: setTimeout(flush, subchatFlushDelayMs(true)),
     };
   }, [flushPendingSubchatUpdate]);
 
@@ -238,16 +225,7 @@ export function useChatSubscription(
       // drives flush-tier selection.
       // pendingBytesRef: chars currently buffered, updated precisely after
       // merge/replace decision — drives the force-flush cap.
-      let deltaTextLen = 0;
-      for (const op of envelope.ops) {
-        if (
-          op.op === "append_content" ||
-          op.op === "append_reasoning" ||
-          op.op === "set_reasoning"
-        ) {
-          deltaTextLen += op.text.length;
-        }
-      }
+      const deltaTextLen = streamDeltaTextUnits(envelope.ops);
       streamedBytesRef.current += deltaTextLen;
 
       const pending = pendingStreamDeltaRef.current;
@@ -272,7 +250,7 @@ export function useChatSubscription(
       }
 
       // Force immediate flush if *buffered* (not total) chars exceed the cap
-      if (pendingBytesRef.current > MAX_BUFFERED_BYTES) {
+      if (pendingBytesRef.current > MAX_BUFFERED_STREAM_TEXT_UNITS) {
         clearStreamDeltaFlush();
         flushPendingStreamDelta();
         return;

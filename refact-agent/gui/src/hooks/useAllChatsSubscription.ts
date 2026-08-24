@@ -30,6 +30,13 @@ import {
 import { calculateBackoff } from "../utils/backoff";
 import type { ChatEventEnvelope } from "../services/refact/chatSubscription";
 import { processCompleted } from "../features/Notifications";
+import {
+  MAX_BUFFERED_STREAM_TEXT_UNITS,
+  MAX_MERGED_DELTA_OPS,
+  streamDeltaFlushDelayMs,
+  streamDeltaTextUnits,
+  subchatFlushDelayMs,
+} from "./chatStreamBatching";
 
 type FlushHandle =
   | { type: "timeout"; id: ReturnType<typeof setTimeout> }
@@ -157,20 +164,6 @@ export function useAllChatsSubscription() {
   >(null);
 
   const ACTIVITY_THROTTLE_MS = 500;
-  const MAX_MERGED_DELTA_OPS = 256;
-
-  // Adaptive flush thresholds (JS string length units, i.e. UTF-16 code units)
-  const FLUSH_TIER_FAST_BYTES = 8_192;
-  const FLUSH_TIER_MEDIUM_BYTES = 200_000;
-  // Flush intervals per tier (ms)
-  const FLUSH_MS_FAST = 50;
-  const FLUSH_MS_MEDIUM = 250;
-  const FLUSH_MS_SLOW = 750;
-  const FLUSH_MS_BACKGROUND = 750;
-  const SUBCHAT_FLUSH_MS_ACTIVE = 150;
-  const SUBCHAT_FLUSH_MS_BACKGROUND = 750;
-  // Hard cap: force flush if buffered char-count (UTF-16 units) exceeds this
-  const MAX_BUFFERED_BYTES = 2_000_000;
 
   const activeChatId = currentThreadId;
 
@@ -245,12 +238,10 @@ export function useAllChatsSubscription() {
 
   const getFlushDelayMs = useCallback(
     (chatId: string): number => {
-      const isActive = chatId === activeChatId;
-      if (!isActive) return FLUSH_MS_BACKGROUND;
-      const bytes = streamedBytesRef.current.get(chatId) ?? 0;
-      if (bytes < FLUSH_TIER_FAST_BYTES) return FLUSH_MS_FAST;
-      if (bytes < FLUSH_TIER_MEDIUM_BYTES) return FLUSH_MS_MEDIUM;
-      return FLUSH_MS_SLOW;
+      return streamDeltaFlushDelayMs(
+        chatId === activeChatId,
+        streamedBytesRef.current.get(chatId) ?? 0,
+      );
     },
     [activeChatId],
   );
@@ -290,10 +281,7 @@ export function useAllChatsSubscription() {
         subchatFlushRef.current.delete(chatId);
         flushPendingSubchatUpdateForChat(chatId);
       };
-      const delayMs =
-        chatId === activeChatId
-          ? SUBCHAT_FLUSH_MS_ACTIVE
-          : SUBCHAT_FLUSH_MS_BACKGROUND;
+      const delayMs = subchatFlushDelayMs(chatId === activeChatId);
 
       subchatFlushRef.current.set(chatId, {
         type: "timeout",
@@ -312,16 +300,7 @@ export function useAllChatsSubscription() {
       // used only for adaptive flush-tier selection.
       // pendingCharsRef: chars currently sitting in the pending buffer,
       // updated precisely after merge/replace — used for the force-flush cap.
-      let deltaTextLen = 0;
-      for (const op of envelope.ops) {
-        if (
-          op.op === "append_content" ||
-          op.op === "append_reasoning" ||
-          op.op === "set_reasoning"
-        ) {
-          deltaTextLen += op.text.length;
-        }
-      }
+      const deltaTextLen = streamDeltaTextUnits(envelope.ops);
       streamedBytesRef.current.set(
         chatId,
         (streamedBytesRef.current.get(chatId) ?? 0) + deltaTextLen,
@@ -353,7 +332,7 @@ export function useAllChatsSubscription() {
 
       // Force immediate flush if *buffered* (not total) chars exceed the cap
       const bufferedChars = pendingBytesRef.current.get(chatId) ?? 0;
-      if (bufferedChars > MAX_BUFFERED_BYTES) {
+      if (bufferedChars > MAX_BUFFERED_STREAM_TEXT_UNITS) {
         clearStreamDeltaFlushForChat(chatId);
         flushPendingStreamDeltaForChat(chatId);
         return;
