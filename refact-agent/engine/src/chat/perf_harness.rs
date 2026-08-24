@@ -3412,6 +3412,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn tool_pool_fixture_compares_real_legacy_and_pooled_operations() {
         let report = run_tool_pool_ci_fixture().expect("tool pool fixture should run");

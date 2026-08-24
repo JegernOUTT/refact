@@ -7361,6 +7361,26 @@ mod tests {
     use std::process::Command;
     use std::sync::Mutex as StdMutex;
 
+    struct TrajectoryWatcherSelfWriteEnvGuard(Option<std::ffi::OsString>);
+
+    impl TrajectoryWatcherSelfWriteEnvGuard {
+        fn enable() -> Self {
+            let previous = std::env::var_os(TRAJECTORY_WATCHER_SELF_WRITE_ENV);
+            std::env::set_var(TRAJECTORY_WATCHER_SELF_WRITE_ENV, "1");
+            Self(previous)
+        }
+    }
+
+    impl Drop for TrajectoryWatcherSelfWriteEnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                std::env::set_var(TRAJECTORY_WATCHER_SELF_WRITE_ENV, previous);
+            } else {
+                std::env::remove_var(TRAJECTORY_WATCHER_SELF_WRITE_ENV);
+            }
+        }
+    }
+
     struct BlockingRecordingVecdb {
         enqueued: Arc<StdMutex<Vec<String>>>,
         release_enqueue: Arc<Notify>,
@@ -19468,8 +19488,10 @@ mod tests {
         )));
     }
 
+    #[serial]
     #[tokio::test]
     async fn trajectory_watcher_self_write_consumes_exact_fingerprint_once() {
+        let _env = TrajectoryWatcherSelfWriteEnvGuard::enable();
         clear_trajectory_self_writes();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("self-write.json");
@@ -19486,8 +19508,10 @@ mod tests {
         clear_trajectory_self_writes();
     }
 
+    #[serial]
     #[tokio::test]
     async fn trajectory_watcher_self_write_does_not_consume_modified_or_deleted_files() {
+        let _env = TrajectoryWatcherSelfWriteEnvGuard::enable();
         clear_trajectory_self_writes();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("external-write.json");
@@ -19512,8 +19536,10 @@ mod tests {
         clear_trajectory_self_writes();
     }
 
+    #[serial]
     #[tokio::test]
     async fn trajectory_watcher_self_write_respects_source_and_expires_records() {
+        let _env = TrajectoryWatcherSelfWriteEnvGuard::enable();
         clear_trajectory_self_writes();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("same-id.json");

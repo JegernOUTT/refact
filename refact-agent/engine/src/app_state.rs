@@ -1413,6 +1413,27 @@ mod tests {
 
     use super::*;
     use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
+    use serial_test::serial;
+
+    struct ToolCatalogSnapshotsEnvGuard(Option<std::ffi::OsString>);
+
+    impl ToolCatalogSnapshotsEnvGuard {
+        fn enable() -> Self {
+            let previous = std::env::var_os(TOOL_CATALOG_SNAPSHOTS_ENV);
+            std::env::set_var(TOOL_CATALOG_SNAPSHOTS_ENV, "1");
+            Self(previous)
+        }
+    }
+
+    impl Drop for ToolCatalogSnapshotsEnvGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                std::env::set_var(TOOL_CATALOG_SNAPSHOTS_ENV, previous);
+            } else {
+                std::env::remove_var(TOOL_CATALOG_SNAPSHOTS_ENV);
+            }
+        }
+    }
 
     struct FixtureTool {
         _build_number: usize,
@@ -1475,8 +1496,10 @@ mod tests {
         )
     }
 
+    #[serial]
     #[tokio::test]
     async fn tool_catalog_snapshot_single_flights_and_reuses_descriptors() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let builds = Arc::new(AtomicUsize::new(0));
         let registry = Arc::new(fixture_registry(gcx.clone(), builds.clone()));
@@ -1502,8 +1525,10 @@ mod tests {
         assert_eq!(gcx.tool_catalog_cache.snapshot_count().await, 1);
     }
 
+    #[serial]
     #[tokio::test]
     async fn tool_catalog_snapshot_warm_acquisition_stays_below_two_milliseconds() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let builds = Arc::new(AtomicUsize::new(0));
         let registry = fixture_registry(gcx, builds.clone());
@@ -1524,8 +1549,10 @@ mod tests {
         assert!(samples[15] < std::time::Duration::from_millis(2));
     }
 
+    #[serial]
     #[tokio::test]
     async fn tool_catalog_generations_create_next_turn_snapshot_without_mutating_old_one() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let builds = Arc::new(AtomicUsize::new(0));
         let registry = fixture_registry(gcx.clone(), builds.clone());
@@ -1549,8 +1576,10 @@ mod tests {
         assert_eq!(third.index.tools[0].name, "fixture");
     }
 
+    #[serial]
     #[tokio::test]
     async fn tool_catalog_snapshot_cache_is_bounded_across_generations() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let builds = Arc::new(AtomicUsize::new(0));
         let registry = fixture_registry(gcx.clone(), builds);
@@ -1569,8 +1598,10 @@ mod tests {
         assert_eq!(gcx.tool_catalog_cache.build_lock_count().await, 0);
     }
 
+    #[serial]
     #[tokio::test]
     async fn tool_catalog_key_isolates_mode_and_model_and_keeps_mutable_instances_fresh() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let builds = Arc::new(AtomicUsize::new(0));
         let registry = fixture_registry(gcx.clone(), builds.clone());
@@ -1600,8 +1631,10 @@ mod tests {
         );
     }
 
+    #[serial]
     #[tokio::test]
     async fn tool_catalog_key_isolates_execution_scopes() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let builds = Arc::new(AtomicUsize::new(0));
         let registry = fixture_registry(gcx, builds.clone());
@@ -1624,8 +1657,10 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &second));
     }
 
+    #[serial]
     #[tokio::test]
     async fn turn_tool_pool_unique_batch_uses_one_mutable_vector() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let builds = Arc::new(AtomicUsize::new(0));
         let names = (0..200).map(|index| format!("tool-{index}")).collect();
@@ -1655,8 +1690,10 @@ mod tests {
         assert_eq!(builds.load(Ordering::SeqCst), builds_after_pool);
     }
 
+    #[serial]
     #[tokio::test]
     async fn turn_tool_pool_reuses_one_instance_for_sequential_calls() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let builds = Arc::new(AtomicUsize::new(0));
         let registry = fixture_registry(gcx.clone(), builds.clone());
@@ -1692,8 +1729,10 @@ mod tests {
         assert_eq!(builds.load(Ordering::SeqCst), builds_after_pool);
     }
 
+    #[serial]
     #[tokio::test]
     async fn turn_tool_pool_returns_the_confirmation_instance_to_execution() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let builds = Arc::new(AtomicUsize::new(0));
         let registry = fixture_registry(gcx.clone(), builds);
@@ -1740,8 +1779,10 @@ mod tests {
         );
     }
 
+    #[serial]
     #[tokio::test]
     async fn turn_tool_pool_same_name_parallelism_is_bounded_by_multiplicity() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let builds = Arc::new(AtomicUsize::new(0));
         let registry = fixture_registry(gcx.clone(), builds);
@@ -1772,8 +1813,10 @@ mod tests {
         );
     }
 
+    #[serial]
     #[tokio::test]
     async fn turn_tool_pools_are_isolated_between_turns() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let builds = Arc::new(AtomicUsize::new(0));
         let registry = fixture_registry(gcx.clone(), builds.clone());
@@ -1792,6 +1835,7 @@ mod tests {
         assert_eq!(builds.load(Ordering::SeqCst), 3);
     }
 
+    #[serial]
     #[test]
     fn tool_catalog_snapshot_rollout_switch_keeps_the_cold_fallback_available() {
         for disabled in [None, Some("0"), Some("false"), Some("no"), Some("off")] {
