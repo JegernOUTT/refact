@@ -31,9 +31,12 @@ pub enum PerfComponent {
     ToolCatalogBuild,
     ToolMutableVectorBuild,
     ToolPoolParallelExpansion,
+    ToolSessionExtraction,
+    ToolCatalogPoolAcquire,
     ToolAliasResolution,
     ToolConfirmationPreflight,
     ToolPolicyLookup,
+    ToolExecutionWait,
     ToolExecutionLookup,
     ToolSemaphoreWait,
     ToolRuntime,
@@ -41,10 +44,12 @@ pub enum PerfComponent {
     ToolPostHook,
     ToolResultPostprocess,
     ToolResultMerge,
+    ToolSessionMergeEvents,
+    ToolCheckpointScheduling,
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 32] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -62,9 +67,12 @@ impl PerfComponent {
         Self::ToolCatalogBuild,
         Self::ToolMutableVectorBuild,
         Self::ToolPoolParallelExpansion,
+        Self::ToolSessionExtraction,
+        Self::ToolCatalogPoolAcquire,
         Self::ToolAliasResolution,
         Self::ToolConfirmationPreflight,
         Self::ToolPolicyLookup,
+        Self::ToolExecutionWait,
         Self::ToolExecutionLookup,
         Self::ToolSemaphoreWait,
         Self::ToolRuntime,
@@ -72,6 +80,8 @@ impl PerfComponent {
         Self::ToolPostHook,
         Self::ToolResultPostprocess,
         Self::ToolResultMerge,
+        Self::ToolSessionMergeEvents,
+        Self::ToolCheckpointScheduling,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -93,9 +103,12 @@ impl PerfComponent {
             Self::ToolCatalogBuild => "tool.catalog_build",
             Self::ToolMutableVectorBuild => "tool.mutable_vector_build",
             Self::ToolPoolParallelExpansion => "tool.pool_parallel_expansion",
+            Self::ToolSessionExtraction => "tool.session_extraction",
+            Self::ToolCatalogPoolAcquire => "tool.catalog_pool_acquire",
             Self::ToolAliasResolution => "tool.alias_resolution",
             Self::ToolConfirmationPreflight => "tool.confirmation_preflight",
             Self::ToolPolicyLookup => "tool.policy_lookup",
+            Self::ToolExecutionWait => "tool.execution_wait",
             Self::ToolExecutionLookup => "tool.execution_lookup",
             Self::ToolSemaphoreWait => "tool.semaphore_wait",
             Self::ToolRuntime => "tool.runtime",
@@ -103,6 +116,8 @@ impl PerfComponent {
             Self::ToolPostHook => "tool.post_hook",
             Self::ToolResultPostprocess => "tool.result_postprocess",
             Self::ToolResultMerge => "tool.result_merge",
+            Self::ToolSessionMergeEvents => "tool.session_merge_events",
+            Self::ToolCheckpointScheduling => "tool.checkpoint_scheduling",
         }
     }
 }
@@ -664,7 +679,7 @@ mod tests {
             .iter()
             .map(|component| component.as_str())
             .collect();
-        assert_eq!(labels.len(), 27);
+        assert_eq!(labels.len(), 32);
         assert!(labels.iter().all(|label| label.len() <= 32));
         assert!(labels.contains(&"command.queue_wait"));
         assert!(labels.contains(&"stream.first_delta"));
@@ -674,7 +689,12 @@ mod tests {
         assert!(labels.contains(&"tool.confirmation_wait"));
         assert!(labels.contains(&"tool.mutable_vector_build"));
         assert!(labels.contains(&"tool.pool_parallel_expansion"));
+        assert!(labels.contains(&"tool.session_extraction"));
+        assert!(labels.contains(&"tool.catalog_pool_acquire"));
+        assert!(labels.contains(&"tool.execution_wait"));
         assert!(labels.contains(&"tool.execution_lookup"));
+        assert!(labels.contains(&"tool.session_merge_events"));
+        assert!(labels.contains(&"tool.checkpoint_scheduling"));
         assert_eq!(PerfOutcome::Success.as_str(), "success");
         assert_eq!(PerfOutcome::Failure.as_str(), "failure");
     }

@@ -377,6 +377,24 @@ pub struct MachineIoMetrics {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FullSoakToolCallStages {
+    pub session_extraction_history_clone_latency: LatencySummary,
+    pub catalog_pool_acquire_latency: LatencySummary,
+    pub alias_resolution_latency: LatencySummary,
+    pub confirmation_latency: LatencySummary,
+    pub prehooks_latency: LatencySummary,
+    pub execution_wait_latency: LatencySummary,
+    pub execution_lookup_latency: LatencySummary,
+    pub execution_runtime_latency: LatencySummary,
+    pub posthooks_latency: LatencySummary,
+    pub result_postprocess_privacy_latency: LatencySummary,
+    pub session_merge_events_latency: LatencySummary,
+    pub checkpoint_scheduling_latency: LatencySummary,
+    pub accounted_latency: LatencySummary,
+    pub unattributed_latency: LatencySummary,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct FullSoakVariantBenchmarkReport {
     pub variant: String,
     pub rollout_switches: FullSoakRolloutSwitches,
@@ -386,7 +404,8 @@ pub struct FullSoakVariantBenchmarkReport {
     pub first_delta_latency: LatencySummary,
     pub checkpoint_return_latency: LatencySummary,
     pub required_flush_latency: LatencySummary,
-    pub tool_start_latency: LatencySummary,
+    pub tool_call_end_to_end_latency: LatencySummary,
+    pub tool_call_stages: FullSoakToolCallStages,
     pub sse_serialize_latency: LatencySummary,
     pub sse_emit_latency: LatencySummary,
     pub machine: MachineMetrics,
@@ -1031,7 +1050,8 @@ pub fn validate_full_soak_report_json(json: &str) -> Result<(), String> {
                 "first_delta_latency",
                 "checkpoint_return_latency",
                 "required_flush_latency",
-                "tool_start_latency",
+                "tool_call_end_to_end_latency",
+                "tool_call_stages",
                 "sse_serialize_latency",
                 "sse_emit_latency",
                 "machine",
@@ -1340,11 +1360,41 @@ struct FullSoakSample {
     first_delta_us: Vec<u64>,
     checkpoint_return_us: Vec<u64>,
     required_flush_us: Vec<u64>,
-    tool_start_us: Vec<u64>,
+    tool_call_end_to_end_us: Vec<u64>,
+    tool_call_stage_samples: Vec<FullSoakToolCallStageSample>,
     sse_serialize_us: Vec<u64>,
     sse_emit_us: Vec<u64>,
     machine: MachineMetrics,
     machine_io: MachineIoMetrics,
+}
+
+#[derive(Clone, Debug, Default)]
+struct FullSoakToolCallStageSample {
+    session_extraction_history_clone_us: u64,
+    catalog_pool_acquire_us: u64,
+    alias_resolution_us: u64,
+    confirmation_us: u64,
+    prehooks_us: u64,
+    execution_wait_us: u64,
+    execution_lookup_us: u64,
+    execution_runtime_us: u64,
+    posthooks_us: u64,
+    result_postprocess_privacy_us: u64,
+    session_merge_events_us: u64,
+    checkpoint_scheduling_us: u64,
+}
+
+impl FullSoakToolCallStageSample {
+    fn accounted_us(&self) -> u64 {
+        self.session_extraction_history_clone_us
+            .saturating_add(self.catalog_pool_acquire_us)
+            .saturating_add(self.alias_resolution_us)
+            .saturating_add(self.confirmation_us)
+            .saturating_add(self.prehooks_us)
+            .saturating_add(self.execution_wait_us)
+            .saturating_add(self.session_merge_events_us)
+            .saturating_add(self.checkpoint_scheduling_us)
+    }
 }
 
 async fn run_full_soak_sample(
@@ -1442,7 +1492,6 @@ async fn run_full_soak_sample(
         )
         .await;
         let required_flush = elapsed_us(required_started);
-        let tool_started = Instant::now();
         let catalog = fixture
             .base
             .app
@@ -1467,6 +1516,8 @@ async fn run_full_soak_sample(
             }]);
             locked.add_message(assistant);
         }
+        let tool_event_start = sink.events().len();
+        let tool_started = Instant::now();
         let tool_outcome = process_tool_calls_once(
             fixture.base.app.clone(),
             session.clone(),
@@ -1479,7 +1530,9 @@ async fn run_full_soak_sample(
                 "full soak tool execution did not continue for chat {chat_index}"
             ));
         }
-        let tool_start = elapsed_us(tool_started);
+        let tool_end_to_end = elapsed_us(tool_started);
+        let tool_stage_sample =
+            full_soak_tool_call_stage_sample(&sink.events()[tool_event_start..]);
         let mut sse_events = 0;
         while sse_rx.try_recv().is_ok() {
             sse_events += 1;
@@ -1488,7 +1541,8 @@ async fn run_full_soak_sample(
             session,
             checkpoint_return,
             required_flush,
-            tool_start,
+            tool_end_to_end,
+            tool_stage_sample,
             sse_events,
         ));
     }
@@ -1511,7 +1565,7 @@ async fn run_full_soak_sample(
         tool_calls: u64::from(workload.chat_count),
         sse_events: sessions
             .iter()
-            .map(|(_, _, _, _, events)| *events as u64)
+            .map(|(_, _, _, _, _, events)| *events as u64)
             .sum(),
         trajectory_events,
         trajectory_files,
@@ -1537,11 +1591,13 @@ async fn run_full_soak_sample(
     };
     let mut checkpoint_return_us = Vec::new();
     let mut required_flush_us = Vec::new();
-    let mut tool_start_us = Vec::new();
-    for (session, checkpoint, required, tool, _) in &sessions {
+    let mut tool_call_end_to_end_us = Vec::new();
+    let mut tool_call_stage_samples = Vec::new();
+    for (session, checkpoint, required, tool, stages, _) in &sessions {
         checkpoint_return_us.push(*checkpoint);
         required_flush_us.push(*required);
-        tool_start_us.push(*tool);
+        tool_call_end_to_end_us.push(*tool);
+        tool_call_stage_samples.push(stages.clone());
         let (
             chat_id,
             tool_messages,
@@ -1631,7 +1687,8 @@ async fn run_full_soak_sample(
         },
         checkpoint_return_us,
         required_flush_us,
-        tool_start_us,
+        tool_call_end_to_end_us,
+        tool_call_stage_samples,
         sse_serialize_us: if sse_serialize_us.is_empty() {
             vec![1]
         } else {
@@ -1687,6 +1744,28 @@ fn aggregate_full_soak_variant(
             .flat_map(|sample| measure(sample).iter().copied())
             .collect::<Vec<_>>()
     };
+    let stage_samples = samples
+        .iter()
+        .flat_map(|sample| sample.tool_call_stage_samples.iter())
+        .collect::<Vec<_>>();
+    let stage_latency = |measure: fn(&FullSoakToolCallStageSample) -> u64| {
+        LatencySummary::from_samples(
+            &stage_samples
+                .iter()
+                .map(|sample| measure(sample))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let tool_call_end_to_end_us = flatten(|sample| &sample.tool_call_end_to_end_us);
+    let accounted_us = stage_samples
+        .iter()
+        .map(|sample| sample.accounted_us())
+        .collect::<Vec<_>>();
+    let unattributed_us = tool_call_end_to_end_us
+        .iter()
+        .zip(accounted_us.iter())
+        .map(|(total, accounted)| total.saturating_sub(*accounted))
+        .collect::<Vec<_>>();
     Ok(FullSoakVariantBenchmarkReport {
         variant: variant.to_string(),
         rollout_switches: first.rollout_switches.clone(),
@@ -1702,7 +1781,27 @@ fn aggregate_full_soak_variant(
         required_flush_latency: LatencySummary::from_samples(&flatten(|sample| {
             &sample.required_flush_us
         }))?,
-        tool_start_latency: LatencySummary::from_samples(&flatten(|sample| &sample.tool_start_us))?,
+        tool_call_end_to_end_latency: LatencySummary::from_samples(&tool_call_end_to_end_us)?,
+        tool_call_stages: FullSoakToolCallStages {
+            session_extraction_history_clone_latency: stage_latency(|sample| {
+                sample.session_extraction_history_clone_us
+            })?,
+            catalog_pool_acquire_latency: stage_latency(|sample| sample.catalog_pool_acquire_us)?,
+            alias_resolution_latency: stage_latency(|sample| sample.alias_resolution_us)?,
+            confirmation_latency: stage_latency(|sample| sample.confirmation_us)?,
+            prehooks_latency: stage_latency(|sample| sample.prehooks_us)?,
+            execution_wait_latency: stage_latency(|sample| sample.execution_wait_us)?,
+            execution_lookup_latency: stage_latency(|sample| sample.execution_lookup_us)?,
+            execution_runtime_latency: stage_latency(|sample| sample.execution_runtime_us)?,
+            posthooks_latency: stage_latency(|sample| sample.posthooks_us)?,
+            result_postprocess_privacy_latency: stage_latency(|sample| {
+                sample.result_postprocess_privacy_us
+            })?,
+            session_merge_events_latency: stage_latency(|sample| sample.session_merge_events_us)?,
+            checkpoint_scheduling_latency: stage_latency(|sample| sample.checkpoint_scheduling_us)?,
+            accounted_latency: LatencySummary::from_samples(&accounted_us)?,
+            unattributed_latency: LatencySummary::from_samples(&unattributed_us)?,
+        },
         sse_serialize_latency: LatencySummary::from_samples(&flatten(|sample| {
             &sample.sse_serialize_us
         }))?,
@@ -2225,6 +2324,45 @@ fn event_elapsed(events: &[PerfEvent], component: PerfComponent) -> Vec<u64> {
         .filter(|event| event.component == component.as_str())
         .map(|event| event.elapsed_us)
         .collect()
+}
+
+fn event_elapsed_sum(events: &[PerfEvent], component: PerfComponent) -> u64 {
+    event_elapsed(events, component).into_iter().sum()
+}
+
+fn full_soak_tool_call_stage_sample(events: &[PerfEvent]) -> FullSoakToolCallStageSample {
+    let confirmation_us = event_elapsed_sum(events, PerfComponent::ToolConfirmationPreflight);
+    FullSoakToolCallStageSample {
+        session_extraction_history_clone_us: event_elapsed_sum(
+            events,
+            PerfComponent::ToolSessionExtraction,
+        ),
+        catalog_pool_acquire_us: event_elapsed_sum(events, PerfComponent::ToolCatalogPoolAcquire),
+        alias_resolution_us: event_elapsed_sum(events, PerfComponent::ToolAliasResolution),
+        confirmation_us,
+        prehooks_us: event_elapsed_sum(events, PerfComponent::ToolPreHook),
+        execution_wait_us: event_elapsed_sum(events, PerfComponent::ToolExecutionWait),
+        execution_lookup_us: event_elapsed_sum(events, PerfComponent::ToolExecutionLookup),
+        execution_runtime_us: event_elapsed_sum(events, PerfComponent::ToolRuntime),
+        posthooks_us: event_elapsed_sum(events, PerfComponent::ToolPostHook),
+        result_postprocess_privacy_us: event_elapsed_sum(
+            events,
+            PerfComponent::ToolResultPostprocess,
+        ),
+        session_merge_events_us: event_elapsed_sum(events, PerfComponent::ToolSessionMergeEvents),
+        checkpoint_scheduling_us: event_elapsed_sum(
+            events,
+            PerfComponent::ToolCheckpointScheduling,
+        ),
+    }
+}
+
+#[cfg(test)]
+fn full_soak_stage_accounting_is_bounded(
+    end_to_end_us: u64,
+    stages: &FullSoakToolCallStageSample,
+) -> bool {
+    stages.accounted_us() <= end_to_end_us.saturating_add(stages.execution_wait_us)
 }
 
 fn tool_pool_errors(events: &[PerfEvent]) -> u64 {
@@ -3003,6 +3141,34 @@ mod tests {
             .subsystems
             .vecdb_disclosure
             .contains("local recording VecDB backend"));
+        for variant in &report.variants {
+            assert_eq!(
+                variant.tool_call_end_to_end_latency.sample_count,
+                variant.tool_call_stages.accounted_latency.sample_count
+            );
+            assert_eq!(
+                variant.tool_call_stages.unattributed_latency.sample_count,
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn full_soak_stage_accounting_bounds_nested_wall_clock_stages() {
+        let stages = FullSoakToolCallStageSample {
+            session_extraction_history_clone_us: 3,
+            catalog_pool_acquire_us: 4,
+            alias_resolution_us: 2,
+            confirmation_us: 5,
+            prehooks_us: 6,
+            execution_wait_us: 30,
+            session_merge_events_us: 3,
+            checkpoint_scheduling_us: 2,
+            ..Default::default()
+        };
+
+        assert!(full_soak_stage_accounting_is_bounded(25, &stages));
+        assert!(!full_soak_stage_accounting_is_bounded(10, &stages));
     }
 
     #[test]
@@ -3037,7 +3203,23 @@ mod tests {
             first_delta_latency: latency.clone(),
             checkpoint_return_latency: latency.clone(),
             required_flush_latency: latency.clone(),
-            tool_start_latency: latency.clone(),
+            tool_call_end_to_end_latency: latency.clone(),
+            tool_call_stages: FullSoakToolCallStages {
+                session_extraction_history_clone_latency: latency.clone(),
+                catalog_pool_acquire_latency: latency.clone(),
+                alias_resolution_latency: latency.clone(),
+                confirmation_latency: latency.clone(),
+                prehooks_latency: latency.clone(),
+                execution_wait_latency: latency.clone(),
+                execution_lookup_latency: latency.clone(),
+                execution_runtime_latency: latency.clone(),
+                posthooks_latency: latency.clone(),
+                result_postprocess_privacy_latency: latency.clone(),
+                session_merge_events_latency: latency.clone(),
+                checkpoint_scheduling_latency: latency.clone(),
+                accounted_latency: latency.clone(),
+                unattributed_latency: latency.clone(),
+            },
             sse_serialize_latency: latency.clone(),
             sse_emit_latency: latency,
             machine: MachineMetrics {
@@ -3062,7 +3244,8 @@ mod tests {
             first_delta_latency: variant.first_delta_latency.clone(),
             checkpoint_return_latency: variant.checkpoint_return_latency.clone(),
             required_flush_latency: variant.required_flush_latency.clone(),
-            tool_start_latency: variant.tool_start_latency.clone(),
+            tool_call_end_to_end_latency: variant.tool_call_end_to_end_latency.clone(),
+            tool_call_stages: variant.tool_call_stages.clone(),
             sse_serialize_latency: variant.sse_serialize_latency.clone(),
             sse_emit_latency: variant.sse_emit_latency.clone(),
             machine: variant.machine.clone(),

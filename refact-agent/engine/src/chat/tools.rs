@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::Utc;
 use tokio::sync::Mutex as AMutex;
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 use tracing::info;
 use uuid::Uuid;
 use futures::future::join_all;
@@ -454,14 +456,40 @@ fn get_context_files_from_messages(messages: &[ChatMessage]) -> Vec<String> {
     paths
 }
 
+struct SubchatBridge {
+    cancel_flag: Arc<AtomicBool>,
+    cancel_notify: Arc<Notify>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl SubchatBridge {
+    async fn shutdown(mut self) {
+        self.cancel_flag.store(true, Ordering::Relaxed);
+        self.cancel_notify.notify_one();
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for SubchatBridge {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
 fn spawn_subchat_bridge(
     ccx: Arc<AMutex<AtCommandsContext>>,
     session_arc: Arc<AMutex<ChatSession>>,
-) -> Arc<AtomicBool> {
+) -> SubchatBridge {
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let cancel_flag_clone = cancel_flag.clone();
+    let cancel_notify = Arc::new(Notify::new());
+    let cancel_notify_clone = cancel_notify.clone();
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let (subchat_rx, abort_flag) = {
             let cgcx = ccx.lock().await;
             (cgcx.subchat_rx.clone(), cgcx.abort_flag.clone())
@@ -490,9 +518,15 @@ fn spawn_subchat_bridge(
                 break;
             }
 
-            let recv_result = {
-                let mut rx = subchat_rx.lock().await;
-                tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+            let recv_result = tokio::select! {
+                _ = cancel_notify_clone.notified() => {
+                    cancel_flag_clone.store(true, Ordering::Relaxed);
+                    continue;
+                }
+                recv_result = async {
+                    let mut rx = subchat_rx.lock().await;
+                    tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+                } => recv_result,
             };
 
             match recv_result {
@@ -545,7 +579,11 @@ fn spawn_subchat_bridge(
         }
     });
 
-    cancel_flag
+    SubchatBridge {
+        cancel_flag,
+        cancel_notify,
+        task: Some(task),
+    }
 }
 
 #[cfg(test)]
@@ -804,14 +842,19 @@ mod tests {
         let components = recorded_components(&sink);
         for component in [
             PerfComponent::ToolCatalogBuild,
+            PerfComponent::ToolSessionExtraction,
+            PerfComponent::ToolCatalogPoolAcquire,
             PerfComponent::ToolAliasResolution,
             PerfComponent::ToolConfirmationPreflight,
             PerfComponent::ToolPolicyLookup,
             PerfComponent::ToolPreHook,
+            PerfComponent::ToolExecutionWait,
             PerfComponent::ToolRuntime,
             PerfComponent::ToolPostHook,
             PerfComponent::ToolResultMerge,
             PerfComponent::ToolResultPostprocess,
+            PerfComponent::ToolSessionMergeEvents,
+            PerfComponent::ToolCheckpointScheduling,
         ] {
             assert!(
                 components.contains(&component.as_str()),
@@ -1980,6 +2023,8 @@ pub async fn process_tool_calls_once(
     mode_id: &str,
     model_id: Option<&str>,
 ) -> ToolStepOutcome {
+    let session_extraction_span =
+        perf_diagnostics::span(PerfComponent::ToolSessionExtraction, None, None);
     let (
         tool_calls,
         server_tool_calls,
@@ -2011,6 +2056,12 @@ pub async fn process_tool_calls_once(
             _ => return ToolStepOutcome::NoToolCalls,
         }
     };
+    session_extraction_span.finish_tool(
+        PerfOutcome::Success,
+        1,
+        tool_calls.len().saturating_add(server_tool_calls.len()) as u64,
+        None,
+    );
 
     // Add synthetic tool results for server-executed tools (e.g., Anthropic's web_search).
     // These tools are executed by the LLM provider and their results are embedded in the
@@ -2057,6 +2108,8 @@ pub async fn process_tool_calls_once(
         return ToolStepOutcome::NoToolCalls;
     }
 
+    let catalog_pool_span =
+        perf_diagnostics::span(PerfComponent::ToolCatalogPoolAcquire, None, None);
     let session_catalog = {
         let session = session_arc.lock().await;
         session.tool_catalog.clone()
@@ -2077,10 +2130,11 @@ pub async fn process_tool_calls_once(
                 .await
         }
     };
-    let tool_calls = resolve_tool_call_aliases_with_catalog(tool_calls, &catalog);
     let turn_tool_pool =
         acquire_session_turn_tool_pool(&app, &session_arc, &thread, mode_id, model_id, &catalog)
             .await;
+    catalog_pool_span.finish_tool(PerfOutcome::Success, 1, tool_calls.len() as u64, None);
+    let tool_calls = resolve_tool_call_aliases_with_catalog(tool_calls, &catalog);
 
     info!(
         "process_tool_calls_once: {} tool calls to process",
@@ -2278,6 +2332,7 @@ pub async fn process_tool_calls_once(
         let session = session_arc.lock().await;
         session.user_interrupt_flag.clone()
     };
+    let execution_wait_span = perf_diagnostics::span(PerfComponent::ToolExecutionWait, None, None);
     let tool_execution = execute_tools_with_session(
         app.clone(),
         session_arc.clone(),
@@ -2297,15 +2352,24 @@ pub async fn process_tool_calls_once(
         result = tool_execution => result,
         _ = wait_for_tool_abort(session_arc.clone(), tool_interrupt_flag) => (Vec::new(), false),
     };
+    execution_wait_span.finish_tool(PerfOutcome::Success, 1, tools_to_execute.len() as u64, None);
 
     let privacy_approvals = shell_privacy_approval_reasons(&tools_to_execute, &tool_results);
     if !privacy_approvals.is_empty() {
+        let session_merge_span =
+            perf_diagnostics::span(PerfComponent::ToolSessionMergeEvents, None, None);
         let mut session = session_arc.lock().await;
         for result_msg in tool_results {
             session.add_message(result_msg);
         }
         session.drain_post_tool_side_effects();
         session.set_paused_with_reasons_and_auto_approved(privacy_approvals, Vec::new(), None);
+        session_merge_span.finish_tool(
+            PerfOutcome::Success,
+            1,
+            tools_to_execute.len() as u64,
+            None,
+        );
         return ToolStepOutcome::Paused;
     }
 
@@ -2357,6 +2421,8 @@ pub async fn process_tool_calls_once(
         session.abort_flag.load(Ordering::Relaxed)
     };
 
+    let session_merge_span =
+        perf_diagnostics::span(PerfComponent::ToolSessionMergeEvents, None, None);
     let mut verify_completion = false;
     {
         let mut session = session_arc.lock().await;
@@ -2387,6 +2453,7 @@ pub async fn process_tool_calls_once(
             session.set_runtime_state(SessionState::Generating, None);
         }
     }
+    session_merge_span.finish_tool(PerfOutcome::Success, 1, tools_to_execute.len() as u64, None);
 
     if verify_completion {
         let trigger = completion_trigger.as_deref().unwrap_or("task_done");
@@ -2423,6 +2490,8 @@ pub async fn process_tool_calls_once(
         }
     }
 
+    let checkpoint_span =
+        perf_diagnostics::span(PerfComponent::ToolCheckpointScheduling, None, None);
     if was_aborted || tool_initiated_stop {
         maybe_save_trajectory_with_intent(
             app.clone(),
@@ -2437,6 +2506,7 @@ pub async fn process_tool_calls_once(
             TrajectoryCommitIntent::Checkpoint,
         );
     }
+    checkpoint_span.finish_tool(PerfOutcome::Success, 1, 1, None);
 
     if was_aborted || tool_initiated_stop {
         ToolStepOutcome::Stop
@@ -2828,7 +2898,7 @@ pub async fn execute_tools_with_session(
         }
     }
 
-    let cancel_flag = spawn_subchat_bridge(ccx.clone(), session_arc.clone());
+    let subchat_bridge = spawn_subchat_bridge(ccx.clone(), session_arc.clone());
 
     let turn_tool_pool = options.turn_tool_pool.clone();
     let result = execute_tools_inner(
@@ -2845,8 +2915,7 @@ pub async fn execute_tools_with_session(
     )
     .await;
 
-    cancel_flag.store(true, Ordering::Relaxed);
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    subchat_bridge.shutdown().await;
 
     let context_files = get_context_files_from_messages(&result.0);
     if !context_files.is_empty() {
