@@ -39,10 +39,7 @@ impl App {
                 AppAction::RefreshWorkers
             }
             Some(KeyAction::Quit) => self.quit_action(),
-            Some(KeyAction::NewChat) => {
-                self.new_chat();
-                AppAction::SubscribeCurrent
-            }
+            Some(KeyAction::NewChat) => self.start_new_chat(),
             Some(KeyAction::PreviousSession) => self.switch_recent_session(-1),
             Some(KeyAction::NextSession) => self.switch_recent_session(1),
             Some(KeyAction::OpenProjects) => AppAction::LoadProjects,
@@ -237,7 +234,9 @@ impl App {
         }
         if self.composer.text().starts_with('/') {
             let command = self.composer.text().to_string();
-            self.composer.clear();
+            if split_command_name_and_args(&command).0 != "new" {
+                self.composer.clear();
+            }
             return self.execute_command_name(&command);
         }
         match self.composer.enter(Instant::now()) {

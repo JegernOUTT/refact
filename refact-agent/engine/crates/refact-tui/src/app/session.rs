@@ -203,9 +203,10 @@ impl App {
     ) -> AppAction {
         match command {
             command_session::SessionCommand::New => {
-                self.composer.clear();
-                self.new_chat();
-                AppAction::SubscribeCurrent
+                if self.composer.text().trim() == "/new" {
+                    self.composer.clear();
+                }
+                self.start_new_chat()
             }
             command_session::SessionCommand::Resume => {
                 self.composer.clear();
@@ -406,19 +407,22 @@ impl App {
     pub(super) fn set_project(&mut self, project: OpenProjectResponse) {
         self.cancel_backtrack();
         self.transcript_overlay = None;
-        let draft = self.composer.text().to_string();
+        self.save_local_input_handoff();
         self.history_path = Some(history_path_for_root(&project.root));
         let history_entries = self
             .history_path
             .as_deref()
             .map(load_history)
             .unwrap_or_default();
-        self.composer = ComposerState::new(history_entries);
-        self.composer.set_text(draft);
         self.server_queue_size = 0;
         self.server_queue_previews.clear();
         self.current_project = Some(project.clone());
-        self.chat_id = uuid::Uuid::new_v4().to_string();
+        self.chat_id = self
+            .last_chat_by_project
+            .get(&project.project_id)
+            .cloned()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        self.restore_local_input_handoff(history_entries);
         self.session_title = None;
         self.recent_sessions.clear();
         self.show_session_header = true;
@@ -456,6 +460,11 @@ impl App {
         );
     }
 
+    pub(super) fn start_new_chat(&mut self) -> AppAction {
+        self.new_chat();
+        AppAction::SubscribeCurrent
+    }
+
     pub(super) fn open_chat_shell(
         &mut self,
         chat_id: String,
@@ -464,7 +473,10 @@ impl App {
     ) {
         self.cancel_backtrack();
         self.transcript_overlay = None;
+        let history_entries = self.composer.history_entries().to_vec();
+        self.save_local_input_handoff();
         self.chat_id = chat_id;
+        self.restore_local_input_handoff(history_entries);
         self.session_title = title;
         self.show_session_header = true;
         self.server_queue_size = 0;
@@ -497,7 +509,10 @@ impl App {
     ) -> AppAction {
         self.cancel_backtrack();
         self.transcript_overlay = None;
+        let history_entries = self.composer.history_entries().to_vec();
+        self.save_local_input_handoff();
         self.chat_id = chat_id;
+        self.restore_local_input_handoff(history_entries);
         self.session_title = Some(title.clone());
         self.show_session_header = true;
         self.server_queue_size = 0;
@@ -600,6 +615,52 @@ impl App {
         self.pending_reasoning_rollback = None;
         self.pending_backtrack_rollback = None;
         self.pending_tool_decision_rollback = None;
+    }
+
+    pub(super) fn save_local_input_handoff(&mut self) {
+        let Some(owner) = self.input_queue_owner.take() else {
+            return;
+        };
+        self.last_chat_by_project
+            .insert(owner.project_id.clone(), owner.chat_id.clone());
+        self.local_input_handoffs.insert(
+            owner,
+            LocalInputHandoff {
+                composer: std::mem::replace(&mut self.composer, ComposerState::new(Vec::new())),
+                input_queue: std::mem::take(&mut self.input_queue),
+            },
+        );
+    }
+
+    pub(super) fn restore_local_input_handoff(&mut self, history_entries: Vec<String>) {
+        let owner = self.current_local_input_owner();
+        let handoff = owner
+            .as_ref()
+            .and_then(|owner| self.local_input_handoffs.remove(owner));
+        match handoff {
+            Some(handoff) => {
+                self.composer = handoff.composer;
+                self.input_queue = handoff.input_queue;
+            }
+            None => {
+                self.composer = ComposerState::new(history_entries);
+                self.input_queue = InputQueue::new();
+            }
+        }
+        self.input_queue_owner = owner;
+    }
+
+    pub(super) fn input_queue_matches_current_session(&self) -> bool {
+        self.input_queue_owner.as_ref() == self.current_local_input_owner().as_ref()
+    }
+
+    fn current_local_input_owner(&self) -> Option<LocalInputOwner> {
+        self.current_project
+            .as_ref()
+            .map(|project| LocalInputOwner {
+                project_id: project.project_id.clone(),
+                chat_id: self.chat_id.clone(),
+            })
     }
 
     pub(super) fn clear_ask_questions_state(&mut self) {
@@ -1002,26 +1063,38 @@ mod tests {
     }
 
     #[test]
-    fn resuming_a_chat_preserves_queued_prompts() {
+    fn resuming_a_chat_restores_its_queued_prompts() {
         let mut app = App::new(project());
         app.input_queue
             .enqueue("first queued prompt".to_string(), Value::Null);
         app.input_queue
             .enqueue("second queued prompt".to_string(), Value::Null);
+        app.composer.set_text("saved draft");
+        let original_chat_id = app.chat_id().to_string();
 
         app.resume_chat("chat-next".to_string(), "Next chat".to_string(), None);
+
+        assert!(app.input_queue.is_empty());
+        assert!(app.composer.is_empty());
+
+        app.resume_chat(original_chat_id, "Original chat".to_string(), None);
 
         assert_eq!(app.input_queue.len(), 2);
         assert_eq!(app.input_queue.items()[0].text, "first queued prompt");
         assert_eq!(app.input_queue.items()[1].text, "second queued prompt");
+        assert_eq!(app.composer.text(), "saved draft");
     }
 
     #[test]
-    fn switching_projects_preserves_composer_draft() {
+    fn switching_projects_recovers_the_original_composer_draft() {
         let mut app = App::new(project());
         app.composer.set_text("keep this draft");
 
         app.set_project(next_project());
+
+        assert!(app.composer.is_empty());
+
+        app.set_project(project());
 
         assert_eq!(app.composer(), "keep this draft");
     }

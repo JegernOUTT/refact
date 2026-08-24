@@ -22,6 +22,18 @@ pub(super) struct BacktrackTarget {
     pub(super) content: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct LocalInputOwner {
+    pub(super) project_id: String,
+    pub(super) chat_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct LocalInputHandoff {
+    pub(super) composer: ComposerState,
+    pub(super) input_queue: InputQueue,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct PendingSendRetry {
     pub(super) prompt: String,
@@ -108,6 +120,9 @@ pub struct App {
     pub(super) vim: VimState,
     pub(super) theme: TuiTheme,
     pub(super) input_queue: InputQueue,
+    pub(super) input_queue_owner: Option<LocalInputOwner>,
+    pub(super) local_input_handoffs: HashMap<LocalInputOwner, LocalInputHandoff>,
+    pub(super) last_chat_by_project: HashMap<String, String>,
     pub(super) server_queue_size: usize,
     pub(super) server_queue_previews: Vec<String>,
     pub(super) history_path: Option<PathBuf>,
@@ -193,6 +208,11 @@ impl App {
             .as_deref()
             .map(load_history)
             .unwrap_or_default();
+        let chat_id = uuid::Uuid::new_v4().to_string();
+        let input_queue_owner = Some(LocalInputOwner {
+            project_id: project.project_id.clone(),
+            chat_id: chat_id.clone(),
+        });
         let keymap = KeymapRegistry::default();
         let vim = VimState::new(keymap.vim_mode_enabled());
         let tui_config_path = default_tui_config_path();
@@ -215,6 +235,9 @@ impl App {
             vim,
             theme,
             input_queue: InputQueue::new(),
+            input_queue_owner,
+            local_input_handoffs: HashMap::new(),
+            last_chat_by_project: HashMap::new(),
             server_queue_size: 0,
             server_queue_previews: Vec::new(),
             history_path,
@@ -233,7 +256,7 @@ impl App {
             pending_approval_clears: VecDeque::new(),
             events_pane: EventsPaneState::new(),
             current_project: Some(project),
-            chat_id: uuid::Uuid::new_v4().to_string(),
+            chat_id,
             session_title: None,
             recent_sessions: Vec::new(),
             show_session_header: false,
@@ -305,6 +328,9 @@ impl App {
             vim: VimState::new(false),
             theme,
             input_queue: InputQueue::new(),
+            input_queue_owner: None,
+            local_input_handoffs: HashMap::new(),
+            last_chat_by_project: HashMap::new(),
             server_queue_size: 0,
             server_queue_previews: Vec::new(),
             history_path: None,

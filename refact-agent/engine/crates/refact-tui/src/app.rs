@@ -68,8 +68,9 @@ pub use surfaces::ProjectPickerState;
 pub use transcript::TranscriptItem;
 use self::session_lifecycle::{resolve_chat_model_id, ReasoningModelCaps};
 use self::state::{
-    BacktrackRollback, BacktrackTarget, HistorySaveRequest, InFlightSend, PendingApprovalClear,
-    PendingReasoningRollback, PendingSendRetry, ReasoningStateSnapshot, ToolDecisionRollback,
+    BacktrackRollback, BacktrackTarget, HistorySaveRequest, InFlightSend, LocalInputHandoff,
+    LocalInputOwner, PendingApprovalClear, PendingReasoningRollback, PendingSendRetry,
+    ReasoningStateSnapshot, ToolDecisionRollback,
 };
 use chat_events::SubagentSummary;
 #[cfg(test)]
@@ -789,6 +790,9 @@ impl App {
     }
 
     fn dispatch_next_queued_input(&mut self) -> AppAction {
+        if !self.input_queue_matches_current_session() {
+            return AppAction::None;
+        }
         let Some(QueuedInput { text, params, .. }) = self.input_queue.pop_next_ready() else {
             return AppAction::None;
         };
@@ -1490,6 +1494,17 @@ mod tests {
             project_id: "p1".to_string(),
             slug: "demo".to_string(),
             root: PathBuf::from("/tmp/demo"),
+            pinned: Some(false),
+            worker: None,
+            cron_pending: None,
+        }
+    }
+
+    fn project_b() -> OpenProjectResponse {
+        OpenProjectResponse {
+            project_id: "p2".to_string(),
+            slug: "other".to_string(),
+            root: PathBuf::from("/tmp/other"),
             pinned: Some(false),
             worker: None,
             cron_pending: None,
@@ -3075,6 +3090,112 @@ new-chat = "ctrl-x"
         assert_eq!(app.input_queue().len(), 1);
         assert_eq!(app.input_queue().items()[0].text, "third");
         assert_eq!(app.session_state(), SessionState::Generating);
+    }
+
+    #[test]
+    fn project_switch_handoff_prevents_cross_project_queue_dispatch() {
+        let project_a = project();
+        let mut app = App::new(project_a.clone());
+        let chat_a = app.chat_id().to_string();
+        app.input_queue
+            .enqueue("first for A".to_string(), Value::Null);
+        app.input_queue
+            .enqueue("second for A".to_string(), Value::Null);
+        app.composer.set_text("draft for A");
+
+        app.set_project(project_b());
+
+        assert!(app.input_queue().is_empty());
+        assert!(app.composer().is_empty());
+        assert_eq!(
+            app.handle_chat_event(runtime_updated_event(&app, "idle")),
+            AppAction::None
+        );
+        app.abort_in_flight = true;
+        assert_eq!(
+            app.handle_command_finished(CommandContextTag::Abort, Ok(())),
+            AppAction::None
+        );
+
+        app.set_project(project_a);
+
+        assert_eq!(app.chat_id(), chat_a);
+        assert_eq!(app.composer(), "draft for A");
+        assert_eq!(app.input_queue().len(), 2);
+        assert!(matches!(
+            app.handle_chat_event(runtime_updated_event(&app, "idle")),
+            AppAction::SendMessage { prompt, .. } if prompt == "first for A"
+        ));
+        assert_eq!(app.input_queue().items()[0].text, "second for A");
+    }
+
+    #[test]
+    fn chat_switch_handoff_restores_each_chat_draft_and_queue() {
+        let mut app = App::new(project());
+        let chat_a = app.chat_id().to_string();
+        app.input_queue
+            .enqueue("queued for A".to_string(), Value::Null);
+        app.composer.set_text("draft for A");
+
+        app.resume_chat("chat-b".to_string(), "Chat B".to_string(), None);
+
+        assert!(app.input_queue().is_empty());
+        assert!(app.composer().is_empty());
+        app.input_queue
+            .enqueue("queued for B".to_string(), Value::Null);
+        app.composer.set_text("draft for B");
+
+        app.resume_chat(chat_a, "Chat A".to_string(), None);
+
+        assert_eq!(app.composer(), "draft for A");
+        assert_eq!(app.input_queue().items()[0].text, "queued for A");
+
+        app.resume_chat("chat-b".to_string(), "Chat B".to_string(), None);
+
+        assert_eq!(app.composer(), "draft for B");
+        assert_eq!(app.input_queue().items()[0].text, "queued for B");
+    }
+
+    #[test]
+    fn new_chat_handoff_preserves_old_session_queue_for_ctrl_n_and_new() {
+        let mut app = App::new(project());
+        let chat_a = app.chat_id().to_string();
+        app.input_queue
+            .enqueue("queued for A".to_string(), Value::Null);
+        app.composer.set_text("draft for A");
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+            AppAction::SubscribeCurrent
+        );
+        assert!(app.input_queue().is_empty());
+        assert!(app.composer().is_empty());
+        assert_eq!(
+            app.handle_chat_event(runtime_updated_event(&app, "idle")),
+            AppAction::None
+        );
+
+        app.resume_chat(chat_a.clone(), "Chat A".to_string(), None);
+
+        assert_eq!(app.composer(), "draft for A");
+        assert_eq!(app.input_queue().items()[0].text, "queued for A");
+
+        app.composer.set_text("/new");
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SubscribeCurrent
+        );
+        assert!(app.input_queue().is_empty());
+        assert!(app.composer().is_empty());
+        assert_eq!(
+            app.handle_chat_event(runtime_updated_event(&app, "idle")),
+            AppAction::None
+        );
+
+        app.resume_chat(chat_a, "Chat A".to_string(), None);
+
+        assert!(app.composer().is_empty());
+        assert_eq!(app.input_queue().items()[0].text, "queued for A");
     }
 
     #[test]
