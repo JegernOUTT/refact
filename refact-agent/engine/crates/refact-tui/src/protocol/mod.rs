@@ -437,6 +437,118 @@ fn string_values(raw: &Value, keys: &[&str]) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeGoalBudgetSnapshot {
+    pub max_turns: Option<u64>,
+    pub max_minutes: Option<u64>,
+    pub max_tokens: Option<u64>,
+    pub max_cost_cents: Option<u64>,
+    pub no_progress_turns: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeGoalSnapshot {
+    pub active: Option<bool>,
+    pub status: Option<String>,
+    pub turn_count: Option<u64>,
+    pub token_count: Option<u64>,
+    pub no_progress_turn_count: Option<u64>,
+    pub budget: RuntimeGoalBudgetSnapshot,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RuntimeCompressionSnapshot {
+    pub active: bool,
+    pub phase: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RuntimeUpdatedEvent {
+    pub runtime_state: Option<String>,
+    pub goal: RuntimeGoalSnapshot,
+    pub compression: RuntimeCompressionSnapshot,
+    pub usage: Option<Value>,
+}
+
+impl RuntimeUpdatedEvent {
+    fn from_raw(raw: &Value) -> Self {
+        let goal = raw.get("goal").unwrap_or(raw);
+        let budget = goal
+            .get("budget")
+            .or_else(|| raw.get("goal_budget"))
+            .or_else(|| raw.get("budget"));
+        let compression = raw.get("compression").unwrap_or(raw);
+        let phase = optional_value_string(compression, &["phase", "compression_phase"]);
+        let active = first_value(compression, &["active", "compression_active"])
+            .or_else(|| raw.get("is_compressing"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && !matches!(phase.as_deref(), Some("applied" | "skipped" | "failed"));
+        Self {
+            runtime_state: optional_value_string(raw, &["state", "runtime_state"]),
+            goal: RuntimeGoalSnapshot {
+                active: first_value(goal, &["active", "goal_active"])
+                    .or_else(|| raw.get("goal_active"))
+                    .and_then(Value::as_bool),
+                status: optional_value_string(goal, &["status", "goal_status"])
+                    .or_else(|| optional_value_string(raw, &["goal_status"])),
+                turn_count: first_value(
+                    goal,
+                    &["turn_count", "turns", "goal_turn_count", "goal_turns_used"],
+                )
+                .or_else(|| raw.get("goal_turns_used"))
+                .and_then(Value::as_u64),
+                token_count: first_value(
+                    goal,
+                    &[
+                        "token_count",
+                        "tokens",
+                        "goal_token_count",
+                        "goal_tokens_used",
+                    ],
+                )
+                .or_else(|| raw.get("goal_tokens_used"))
+                .and_then(Value::as_u64),
+                no_progress_turn_count: first_value(
+                    goal,
+                    &[
+                        "no_progress_turn_count",
+                        "no_progress_turns",
+                        "goal_no_progress_turn_count",
+                        "goal_no_progress_turns",
+                    ],
+                )
+                .or_else(|| raw.get("goal_no_progress_turns"))
+                .and_then(Value::as_u64),
+                budget: RuntimeGoalBudgetSnapshot {
+                    max_turns: optional_budget_limit(budget, &["max_turns"]),
+                    max_minutes: optional_budget_limit(budget, &["max_minutes"]),
+                    max_tokens: optional_budget_limit(budget, &["max_tokens"]),
+                    max_cost_cents: optional_budget_limit(budget, &["max_cost_cents"]),
+                    no_progress_turns: optional_budget_limit(budget, &["no_progress_turns"]),
+                },
+            },
+            compression: RuntimeCompressionSnapshot {
+                active,
+                phase,
+                reason: optional_value_string(compression, &["reason", "compression_reason"]),
+            },
+            usage: raw
+                .get("usage")
+                .or_else(|| raw.get("last_usage"))
+                .or_else(|| raw.get("token_usage"))
+                .cloned(),
+        }
+    }
+}
+
+fn optional_budget_limit(raw: Option<&Value>, keys: &[&str]) -> Option<u64> {
+    raw.and_then(|raw| first_value(raw, keys))
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SseEvent {
     Snapshot {
@@ -465,7 +577,9 @@ pub enum SseEvent {
         usage: Option<Value>,
         finish_reason: Option<Value>,
     },
-    RuntimeUpdated,
+    RuntimeUpdated {
+        runtime: RuntimeUpdatedEvent,
+    },
     Ack {
         client_request_id: String,
         accepted: bool,
@@ -590,7 +704,9 @@ impl SseEvent {
                 usage: raw.get("usage").cloned(),
                 finish_reason: raw.get("finish_reason").cloned(),
             },
-            "runtime_updated" => Self::RuntimeUpdated,
+            "runtime_updated" => Self::RuntimeUpdated {
+                runtime: RuntimeUpdatedEvent::from_raw(raw),
+            },
             "ack" => match (
                 raw.get("client_request_id")
                     .and_then(Value::as_str)

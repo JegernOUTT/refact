@@ -285,7 +285,10 @@ impl App {
                     }
                 }
             }
-            SseEvent::RuntimeUpdated => return self.handle_runtime_updated(&raw),
+            SseEvent::RuntimeUpdated { runtime } => {
+                self.runtime_snapshot = Some(runtime);
+                return self.handle_runtime_updated(&raw);
+            }
             SseEvent::QueueUpdated {
                 queue_size,
                 queued_items,

@@ -2,6 +2,7 @@ use super::session_lifecycle::context_window_for_model;
 use super::*;
 use crate::client::request_id;
 use crate::commands::session as command_session;
+use crate::protocol::RuntimeUpdatedEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct HistorySaveRequest {
@@ -115,6 +116,7 @@ pub struct App {
     pub(super) transcript: Vec<TranscriptItem>,
     pub(super) transcript_state: TranscriptState,
     pub(super) inbound_event_state: InboundEventState,
+    pub(super) runtime_snapshot: Option<RuntimeUpdatedEvent>,
     pub(super) composer: ComposerState,
     pub(super) keymap: KeymapRegistry,
     pub(super) vim: VimState,
@@ -230,6 +232,7 @@ impl App {
                 project.root.display()
             )),
             inbound_event_state: InboundEventState::default(),
+            runtime_snapshot: None,
             composer: ComposerState::new(history_entries),
             keymap,
             vim,
@@ -323,6 +326,7 @@ impl App {
             transcript: vec![TranscriptItem::Notice(notice.clone())],
             transcript_state: notice_transcript_state(notice),
             inbound_event_state: InboundEventState::default(),
+            runtime_snapshot: None,
             composer: ComposerState::new(Vec::new()),
             keymap: KeymapRegistry::default(),
             vim: VimState::new(false),
@@ -505,6 +509,10 @@ impl App {
 
     pub fn inbound_event_state(&self) -> &InboundEventState {
         &self.inbound_event_state
+    }
+
+    pub fn runtime_snapshot(&self) -> Option<&RuntimeUpdatedEvent> {
+        self.runtime_snapshot.as_ref()
     }
 
     pub fn stream_has_committable_lines(&self) -> bool {

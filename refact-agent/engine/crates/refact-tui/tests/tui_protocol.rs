@@ -10,7 +10,7 @@ use refact_tui::client::{
     ChatSeqDecision, ChatSeqTracker, ClientError, DaemonClient, OpenProjectResponse, ToolDecision,
 };
 use refact_tui::history::render_transcript_item_lines;
-use refact_tui::protocol::{DeltaOp, TranscriptRole, TranscriptState};
+use refact_tui::protocol::{DeltaOp, SseEvent, TranscriptRole, TranscriptState};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use serde_json::{json, Value};
@@ -321,6 +321,7 @@ fn fixture_directory_covers_required_protocol_cases() {
             "sse_browser_toolbar_action.jsonl",
             "sse_ide_tool_required.jsonl",
             "sse_process_completed.jsonl",
+            "sse_runtime_updated.jsonl",
             "sse_snapshot_auxiliary.jsonl",
             "subchat_turn_cleanup.jsonl",
             "thinking_blocks.jsonl",
@@ -870,6 +871,88 @@ fn every_remaining_sse_event_fixture_is_parsed_and_stored() {
         Some("user_closed")
     );
     assert!(app.inbound_event_state().browser().is_none());
+}
+
+#[test]
+fn runtime_updated_parses_and_stores_goal_compression_and_usage() {
+    let mut app = App::new(State::project());
+    let chat_id = app.chat_id().to_string();
+    let event = chat_event_from_fixture(fixture_event("sse_runtime_updated.jsonl"), &chat_id);
+    assert!(matches!(
+        event.protocol_event(),
+        SseEvent::RuntimeUpdated { runtime }
+            if runtime.goal.token_count == Some(900) && runtime.compression.active
+    ));
+    app.apply_chat_event(event);
+
+    let runtime = app.runtime_snapshot().expect("runtime snapshot");
+    assert_eq!(runtime.runtime_state.as_deref(), Some("generating"));
+    assert_eq!(runtime.goal.active, Some(true));
+    assert_eq!(runtime.goal.status.as_deref(), Some("active"));
+    assert_eq!(runtime.goal.turn_count, Some(4));
+    assert_eq!(runtime.goal.token_count, Some(900));
+    assert_eq!(runtime.goal.no_progress_turn_count, Some(2));
+    assert_eq!(runtime.goal.budget.max_turns, Some(10));
+    assert_eq!(runtime.goal.budget.max_minutes, Some(15));
+    assert_eq!(runtime.goal.budget.max_tokens, Some(1200));
+    assert_eq!(runtime.goal.budget.max_cost_cents, Some(25));
+    assert_eq!(runtime.goal.budget.no_progress_turns, Some(3));
+    assert!(runtime.compression.active);
+    assert_eq!(runtime.compression.phase.as_deref(), Some("running"));
+    assert_eq!(
+        runtime.compression.reason.as_deref(),
+        Some("context_length_stop")
+    );
+    assert_eq!(runtime.usage.as_ref().unwrap()["total_tokens"], 900);
+}
+
+#[test]
+fn runtime_updated_treats_null_and_zero_budgets_as_unlimited() {
+    let event = SseEvent::from_raw(&json!({
+        "type": "runtime_updated",
+        "goal": {
+            "budget": {
+                "max_turns": null,
+                "max_minutes": 0,
+                "max_tokens": 0,
+                "max_cost_cents": null,
+                "no_progress_turns": 0
+            }
+        }
+    }));
+
+    let SseEvent::RuntimeUpdated { runtime } = event else {
+        panic!("expected runtime updated");
+    };
+    assert_eq!(runtime.goal.budget.max_turns, None);
+    assert_eq!(runtime.goal.budget.max_minutes, None);
+    assert_eq!(runtime.goal.budget.max_tokens, None);
+    assert_eq!(runtime.goal.budget.max_cost_cents, None);
+    assert_eq!(runtime.goal.budget.no_progress_turns, None);
+}
+
+#[test]
+fn runtime_updated_terminal_compression_clears_active_and_omitted_fields_stay_none() {
+    let event = SseEvent::from_raw(&json!({
+        "type": "runtime_updated",
+        "is_compressing": true,
+        "compression_phase": "applied",
+        "compression_reason": "manual"
+    }));
+
+    let SseEvent::RuntimeUpdated { runtime } = event else {
+        panic!("expected runtime updated");
+    };
+    assert!(!runtime.compression.active);
+    assert_eq!(runtime.compression.phase.as_deref(), Some("applied"));
+    assert_eq!(runtime.compression.reason.as_deref(), Some("manual"));
+    assert_eq!(runtime.runtime_state, None);
+    assert_eq!(runtime.goal.active, None);
+    assert_eq!(runtime.goal.status, None);
+    assert_eq!(runtime.goal.turn_count, None);
+    assert_eq!(runtime.goal.token_count, None);
+    assert_eq!(runtime.goal.no_progress_turn_count, None);
+    assert_eq!(runtime.usage, None);
 }
 
 #[test]
