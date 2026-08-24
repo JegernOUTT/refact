@@ -176,10 +176,9 @@ describe("Privacy shield", () => {
       },
     ] as ChatMessages);
 
-    const { store } = render(
-      <ChatShield threadId={chat.current_thread_id} />,
-      { preloadedState: { chat } },
-    );
+    const { store } = render(<ChatShield threadId={chat.current_thread_id} />, {
+      preloadedState: { chat },
+    });
     expect(await screen.findByText("1 item withheld")).toBeVisible();
 
     store.dispatch(

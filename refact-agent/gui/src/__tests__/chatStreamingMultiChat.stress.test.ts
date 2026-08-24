@@ -402,7 +402,11 @@ describe("Multi-Chat Streaming Stress Tests", () => {
           message_id: `gap-${recoveredChatId}`,
         },
       ];
-      const snapshot = createSnapshotEvent(recoveredChatId, recoveredMessages, "0");
+      const snapshot = createSnapshotEvent(
+        recoveredChatId,
+        recoveredMessages,
+        "0",
+      );
       if (snapshot.type === "snapshot") snapshot.runtime.state = "generating";
       state = chatReducer(state, applyChatEvent(snapshot));
 
@@ -422,7 +426,9 @@ describe("Multi-Chat Streaming Stress Tests", () => {
           throw new Error(`Runtime not found for chat ${backgroundChatId}`);
         }
         expect(backgroundRuntime.last_applied_seq).toBe("3");
-        expect(backgroundRuntime.thread.messages.at(-1)?.content).toBe("before-gap");
+        expect(backgroundRuntime.thread.messages.at(-1)?.content).toBe(
+          "before-gap",
+        );
         expect(backgroundRuntime.streaming).toBe(true);
       }
     }

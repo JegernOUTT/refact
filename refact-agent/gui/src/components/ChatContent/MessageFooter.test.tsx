@@ -52,9 +52,7 @@ describe("MessageFooter", () => {
     expect(screen.getByText("Cache creation")).toBeInTheDocument();
     expect(screen.getByText("5.40k")).toBeInTheDocument();
 
-    const themeRoot = screen
-      .getByText("This Message")
-      .closest(".radix-themes");
+    const themeRoot = screen.getByText("This Message").closest(".radix-themes");
     expect(themeRoot?.getAttribute("data-appearance")).toBe("dark");
   });
 
