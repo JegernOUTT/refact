@@ -1583,7 +1583,11 @@ fn content_part_placeholder(part: &Value) -> Option<String> {
     if kind.is_empty() {
         None
     } else {
-        Some(format!("[{}]", sanitize_tool_inline(kind)))
+        Some(format!(
+            "[content: {}] {}",
+            sanitize_tool_inline(kind),
+            sanitize_tool_text(value_to_compact_string(part))
+        ))
     }
 }
 
@@ -2051,6 +2055,26 @@ mod tests {
         assert!(content.contains("[image: image/png, 4 bytes]"));
         assert!(content.contains("[file: report.pdf, application/pdf, 1234 bytes]"));
         assert!(!content.contains("(no output)"));
+    }
+
+    #[test]
+    fn content_text_keeps_sanitized_json_for_unknown_content_parts() {
+        let message = json!({
+            "role": "tool",
+            "content": [{
+                "type": "future_content",
+                "nested": {"escape": "\u{1b}[31mred", "bell": "ring\u{7}"}
+            }]
+        });
+
+        let content = content_text(&message).unwrap();
+
+        assert_eq!(
+            content,
+            r#"[content: future_content] {"type":"future_content","nested":{"escape":"\u001b[31mred","bell":"ring\u0007"}}"#
+        );
+        assert!(!content.contains('\x1b'));
+        assert!(!content.contains('\x07'));
     }
 
     #[test]
