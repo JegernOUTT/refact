@@ -1944,7 +1944,10 @@ mod tests {
         let converted = http.body["messages"].as_array().unwrap();
 
         assert_eq!(converted.len(), 1);
-        assert_eq!(converted[0]["thinking_blocks"], Value::Array(thinking_blocks));
+        assert_eq!(
+            converted[0]["thinking_blocks"],
+            Value::Array(thinking_blocks)
+        );
         assert_eq!(converted[0]["reasoning_content"], "Use the weather tool.");
         assert_eq!(converted[0]["tool_calls"][0]["id"], "call_weather");
         assert_eq!(

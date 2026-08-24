@@ -2017,7 +2017,10 @@ mod tests {
             }
         }));
 
-        assert_eq!(metadata.live.reasoning_effort_options.as_deref(), Some(&[][..]));
+        assert_eq!(
+            metadata.live.reasoning_effort_options.as_deref(),
+            Some(&[][..])
+        );
         assert_eq!(metadata.live.supports_thinking_budget, Some(false));
         assert_eq!(metadata.live.supports_adaptive_thinking_budget, Some(false));
     }
