@@ -334,7 +334,7 @@ fn convert_syntect_color(color: SyntectColor) -> Option<Color> {
         ANSI_ALPHA_INDEX => Some(ansi_palette_color(color.r)),
         ANSI_ALPHA_DEFAULT => None,
         OPAQUE_ALPHA => Some(Color::Rgb(color.r, color.g, color.b)),
-        _ => Some(Color::Rgb(color.r, color.g, color.b)),
+        _ => None,
     }
 }
 
@@ -556,6 +556,92 @@ mod tests {
             }
             assert!(has_non_default);
         }
+    }
+
+    #[test]
+    fn default_color_marker_uses_terminal_default() {
+        assert_eq!(
+            convert_syntect_color(SyntectColor {
+                r: 1,
+                g: 2,
+                b: 3,
+                a: ANSI_ALPHA_DEFAULT,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn opaque_color_marker_uses_rgb() {
+        assert_eq!(
+            convert_syntect_color(SyntectColor {
+                r: 1,
+                g: 2,
+                b: 3,
+                a: OPAQUE_ALPHA,
+            }),
+            Some(Color::Rgb(1, 2, 3))
+        );
+    }
+
+    #[test]
+    fn ansi_color_marker_uses_palette() {
+        assert_eq!(
+            convert_syntect_color(SyntectColor {
+                r: 0x06,
+                g: 2,
+                b: 3,
+                a: ANSI_ALPHA_INDEX,
+            }),
+            Some(Color::Cyan)
+        );
+        assert_eq!(
+            convert_syntect_color(SyntectColor {
+                r: 0xA0,
+                g: 2,
+                b: 3,
+                a: ANSI_ALPHA_INDEX,
+            }),
+            Some(Color::Indexed(0xA0))
+        );
+    }
+
+    #[test]
+    fn unknown_alpha_marker_uses_terminal_default() {
+        assert_eq!(
+            convert_syntect_color(SyntectColor {
+                r: 1,
+                g: 2,
+                b: 3,
+                a: 0x02,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn invalid_custom_theme_color_uses_terminal_default() {
+        let theme = Theme {
+            settings: ThemeSettings::default(),
+            scopes: vec![ThemeItem {
+                scope: ScopeSelectors::from_str("string").unwrap(),
+                style: StyleModifier {
+                    foreground: Some(SyntectColor {
+                        r: 10,
+                        g: 20,
+                        b: 30,
+                        a: 0x02,
+                    }),
+                    ..StyleModifier::default()
+                },
+            }],
+            ..Theme::default()
+        };
+
+        assert_eq!(
+            foreground_style_for_scopes_with_theme(&theme, &["string"]),
+            None
+        );
     }
 
     #[test]
