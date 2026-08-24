@@ -4,12 +4,14 @@ pub mod queue;
 use std::fs;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const HISTORY_LIMIT: usize = 200;
 pub(crate) const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
 const UNDO_LIMIT: usize = 100;
 const UNDO_COALESCE_WINDOW: Duration = Duration::from_millis(750);
+static LARGE_PASTE_NONCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposerView {
@@ -29,7 +31,6 @@ pub struct ComposerState {
     editor: TextEditor,
     history: InputHistory,
     pending_large_pastes: Vec<PendingLargePaste>,
-    next_large_paste_id: u64,
     kill_buffer: String,
     undo: UndoHistory,
     history_search: Option<HistorySearch>,
@@ -55,7 +56,6 @@ impl ComposerState {
             editor: TextEditor::new(),
             history: InputHistory::new(history),
             pending_large_pastes: Vec::new(),
-            next_large_paste_id: 0,
             kill_buffer: String::new(),
             undo: UndoHistory::new(),
             history_search: None,
@@ -113,11 +113,10 @@ impl ComposerState {
         let before = self.editor.snapshot();
         let char_count = text.chars().count();
         if char_count > LARGE_PASTE_CHAR_THRESHOLD {
-            self.next_large_paste_id = self
-                .next_large_paste_id
-                .checked_add(1)
-                .expect("large paste identifier exhausted");
-            let placeholder = large_paste_placeholder(char_count, self.next_large_paste_id);
+            let placeholder = large_paste_placeholder(
+                char_count,
+                LARGE_PASTE_NONCE.fetch_add(1, Ordering::Relaxed),
+            );
             self.editor.insert_str(&placeholder);
             self.pending_large_pastes.push(PendingLargePaste {
                 placeholder,
@@ -1127,6 +1126,12 @@ mod tests {
         Instant::now() + Duration::from_millis(offset_ms)
     }
 
+    fn only_pending_placeholder(composer: &ComposerState) -> String {
+        let placeholders = composer.pending_paste_placeholders();
+        assert_eq!(placeholders.len(), 1);
+        placeholders.into_iter().next().unwrap()
+    }
+
     #[test]
     fn editor_inserts_moves_and_deletes() {
         let mut editor = TextEditor::new();
@@ -1296,17 +1301,37 @@ mod tests {
         let paste = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 7);
 
         composer.insert_paste(&paste);
+        let placeholder = only_pending_placeholder(&composer);
 
-        assert_eq!(
-            composer.pending_paste_placeholders(),
-            vec![large_paste_placeholder(LARGE_PASTE_CHAR_THRESHOLD + 7, 1)]
-        );
-        assert_eq!(
-            composer.text(),
-            large_paste_placeholder(LARGE_PASTE_CHAR_THRESHOLD + 7, 1)
-        );
+        assert_eq!(composer.text(), placeholder);
+        assert!(composer
+            .text()
+            .starts_with(&format!("[Pasted {} chars]", paste.chars().count())));
         assert_eq!(composer.submit_text().as_deref(), Some(paste.as_str()));
         assert!(composer.pending_paste_placeholders().is_empty());
+    }
+
+    #[test]
+    fn same_length_large_pastes_use_unique_placeholders_across_instances() {
+        let first = format!("first{}", "a".repeat(LARGE_PASTE_CHAR_THRESHOLD));
+        let second = format!("second{}", "b".repeat(LARGE_PASTE_CHAR_THRESHOLD - 1));
+        assert_eq!(first.chars().count(), second.chars().count());
+
+        let mut first_composer = ComposerState::new(Vec::new());
+        first_composer.insert_paste(&first);
+        let first_placeholder = only_pending_placeholder(&first_composer);
+
+        let mut second_composer = ComposerState::new(Vec::new());
+        second_composer.insert_paste(&second);
+        let second_placeholder = only_pending_placeholder(&second_composer);
+
+        assert_ne!(first_placeholder, second_placeholder);
+        assert_eq!(first_placeholder, first_composer.text());
+        assert_eq!(second_placeholder, second_composer.text());
+        assert!(first_placeholder.starts_with(&format!("[Pasted {} chars]", first.chars().count())));
+        assert!(
+            second_placeholder.starts_with(&format!("[Pasted {} chars]", second.chars().count()))
+        );
     }
 
     #[test]
@@ -1317,16 +1342,14 @@ mod tests {
         assert_eq!(first.chars().count(), second.chars().count());
 
         composer.insert_paste(&first);
+        let first_placeholder = only_pending_placeholder(&composer);
         composer.move_home(false);
         composer.insert_paste(&second);
+        let placeholders = composer.pending_paste_placeholders();
 
-        assert_eq!(
-            composer.pending_paste_placeholders(),
-            vec![
-                large_paste_placeholder(first.chars().count(), 1),
-                large_paste_placeholder(second.chars().count(), 2),
-            ]
-        );
+        assert_eq!(placeholders.len(), 2);
+        assert_eq!(placeholders[0], first_placeholder);
+        assert_ne!(placeholders[0], placeholders[1]);
         assert_eq!(
             composer.submit_text().as_deref(),
             Some(format!("{second}{first}").as_str())
@@ -1334,7 +1357,26 @@ mod tests {
     }
 
     #[test]
-    fn literal_paste_placeholder_text_is_not_substituted() {
+    fn copied_old_large_paste_placeholder_stays_literal_across_instances() {
+        let paste = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 7);
+        let mut source = ComposerState::new(Vec::new());
+        source.insert_paste(&paste);
+        let copied_placeholder = only_pending_placeholder(&source);
+
+        let mut composer = ComposerState::new(Vec::new());
+        composer.insert_text(&copied_placeholder);
+        composer.insert_paste(&paste);
+
+        let replacement_placeholder = only_pending_placeholder(&composer);
+        assert_ne!(replacement_placeholder, copied_placeholder);
+        assert_eq!(
+            composer.submit_text().as_deref(),
+            Some(format!("{copied_placeholder}{paste}").as_str())
+        );
+    }
+
+    #[test]
+    fn literal_large_paste_placeholder_text_is_not_substituted() {
         let mut composer = ComposerState::new(Vec::new());
         let paste = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 7);
         let literal = "[Pasted 12 chars]";
