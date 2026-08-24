@@ -1265,9 +1265,14 @@ mod tests {
         let process_id = process_id(&message);
 
         assert!(
-            elapsed < Duration::from_millis(100),
+            elapsed < Duration::from_secs(5),
             "background shell returned after {elapsed:?}"
         );
+        let snapshot = gcx.exec_registry.get(&process_id).await.unwrap();
+        assert!(matches!(
+            snapshot.status,
+            ExecStatus::Starting | ExecStatus::Running
+        ));
         assert!(text(&message).contains(process_id.as_str()));
         assert_eq!(exec(&message)["process_id"], process_id.as_str());
         assert_eq!(

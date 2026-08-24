@@ -452,7 +452,24 @@ pub fn record(
 }
 
 #[cfg(any(test, feature = "bench"))]
-pub(crate) static PERF_RECORDER_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) struct TestRecorderLock(std::sync::Mutex<()>);
+
+#[cfg(any(test, feature = "bench"))]
+impl TestRecorderLock {
+    pub(crate) const fn new() -> Self {
+        Self(std::sync::Mutex::new(()))
+    }
+
+    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, ()>, std::convert::Infallible> {
+        Ok(match self.0.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        })
+    }
+}
+
+#[cfg(any(test, feature = "bench"))]
+pub(crate) static PERF_RECORDER_TEST_LOCK: TestRecorderLock = TestRecorderLock::new();
 
 fn span_with_recorder(
     recorder: Option<Arc<PerfRecorder>>,

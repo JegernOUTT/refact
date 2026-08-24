@@ -692,7 +692,11 @@ mod tests {
         }
     }
 
-    fn install_perf_recorder() -> (perf_diagnostics::TestRecorderGuard, Arc<MemoryPerfSink>) {
+    fn install_perf_recorder() -> (
+        perf_diagnostics::TestRecorderGuard,
+        Arc<MemoryPerfSink>,
+        Arc<PerfRecorder>,
+    ) {
         let sink = Arc::new(MemoryPerfSink::new());
         let recorder = Arc::new(PerfRecorder::with_salt(
             Arc::new(TestClock {
@@ -701,13 +705,17 @@ mod tests {
             sink.clone(),
             [11; 32],
         ));
-        (perf_diagnostics::install_test_recorder(recorder), sink)
+        (
+            perf_diagnostics::install_test_recorder(recorder.clone()),
+            sink,
+            recorder,
+        )
     }
 
     #[test]
     fn perf_diagnostics_lagged_recovery_records_skip_count() {
         let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let (_guard, sink) = install_perf_recorder();
+        let (_guard, sink, _) = install_perf_recorder();
 
         record_lagged_recovery("chat-lag", PerfOutcome::Success, 47, 3);
 
@@ -721,12 +729,24 @@ mod tests {
     #[test]
     fn perf_diagnostics_initial_and_recovery_sse_serialization_record_outcomes() {
         let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
-        let (_guard, sink) = install_perf_recorder();
+        let (_guard, sink, recorder) = install_perf_recorder();
 
         record_sse_serialize("initial-chat", PerfOutcome::Success, 17, Some(23));
         record_sse_serialize("recovery-chat", PerfOutcome::Failure, 19, None);
 
-        let events = sink.events();
+        let initial_chat_hash = recorder.hash_identity_for_test("initial-chat");
+        let recovery_chat_hash = recorder.hash_identity_for_test("recovery-chat");
+        let events: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter(|event| {
+                event.component == "sse.serialize"
+                    && matches!(
+                        event.chat_id_hash.as_deref(),
+                        Some(hash) if hash == initial_chat_hash || hash == recovery_chat_hash
+                    )
+            })
+            .collect();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].component, "sse.serialize");
         assert_eq!(events[0].outcome, "success");
