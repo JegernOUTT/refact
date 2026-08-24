@@ -146,7 +146,6 @@ enum AskAnswerState {
     },
     Text {
         value: String,
-        answered: bool,
     },
 }
 
@@ -183,7 +182,6 @@ impl AskQuestionsForm {
                 },
                 AskQuestionType::FreeText => AskAnswerState::Text {
                     value: String::new(),
-                    answered: false,
                 },
             })
             .collect();
@@ -311,9 +309,8 @@ impl AskQuestionsForm {
     }
 
     pub fn insert_char(&mut self, ch: char) {
-        if let Some(AskAnswerState::Text { value, answered }) = self.answers.get_mut(self.current) {
+        if let Some(AskAnswerState::Text { value }) = self.answers.get_mut(self.current) {
             value.push(ch);
-            *answered = true;
         }
     }
 
@@ -321,16 +318,14 @@ impl AskQuestionsForm {
         if text.is_empty() {
             return;
         }
-        if let Some(AskAnswerState::Text { value, answered }) = self.answers.get_mut(self.current) {
+        if let Some(AskAnswerState::Text { value }) = self.answers.get_mut(self.current) {
             value.push_str(text);
-            *answered = true;
         }
     }
 
     pub fn insert_newline(&mut self) {
-        if let Some(AskAnswerState::Text { value, answered }) = self.answers.get_mut(self.current) {
+        if let Some(AskAnswerState::Text { value }) = self.answers.get_mut(self.current) {
             value.push('\n');
-            *answered = true;
         }
     }
 
@@ -408,8 +403,8 @@ impl AskQuestionsForm {
     fn answer_is_explicit(&self, index: usize) -> bool {
         match self.answers.get(index) {
             Some(AskAnswerState::Choice { answered, .. })
-            | Some(AskAnswerState::Multi { answered, .. })
-            | Some(AskAnswerState::Text { answered, .. }) => *answered,
+            | Some(AskAnswerState::Multi { answered, .. }) => *answered,
+            Some(AskAnswerState::Text { value }) => !value.trim().is_empty(),
             None => false,
         }
     }
@@ -447,8 +442,8 @@ impl AskQuestionsForm {
                     values.join(", ")
                 }
             }
-            AskAnswerState::Text { value, answered } => {
-                if !answered || value.trim().is_empty() {
+            AskAnswerState::Text { value } => {
+                if value.trim().is_empty() {
                     "(no answer)".to_string()
                 } else {
                     value.trim().to_string()
@@ -668,9 +663,58 @@ mod tests {
         form.backspace();
 
         assert_eq!(form.current_answer_text(), "Hi\nthere");
+        assert!(form.current_question_answered());
+        assert_eq!(
+            form.accept(),
+            AskQuestionsOutcome::Submitted(
+                "[QA:call-ask]\n> [notes] Notes?\n```\nHi\nthere\n```".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn erased_free_text_is_incomplete_and_formats_as_no_answer() {
+        let request = request_with_questions(json!([
+            {"id":"notes","type":"free_text","text":"Notes?"}
+        ]));
+        let mut form = AskQuestionsForm::new(request);
+
+        form.insert_text("Note");
+        assert!(form.current_question_answered());
+        for _ in 0..4 {
+            form.backspace();
+        }
+
+        assert!(!form.current_question_answered());
+        assert_eq!(form.current_answer_text(), "(no answer)");
+        assert_eq!(form.accept(), AskQuestionsOutcome::Incomplete);
+        assert_eq!(
+            form.submission_error().as_deref(),
+            Some("Answer outstanding question: 1")
+        );
         assert_eq!(
             form.format_answers(),
-            "[QA:call-ask]\n> [notes] Notes?\n```\nHi\nthere\n```"
+            "[QA:call-ask]\n> [notes] Notes?\n(no answer)"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_free_text_is_incomplete_and_formats_as_no_answer() {
+        let request = request_with_questions(json!([
+            {"id":"notes","type":"free_text","text":"Notes?"}
+        ]));
+        let mut form = AskQuestionsForm::new(request);
+
+        form.insert_text(" \t");
+        form.insert_newline();
+        form.insert_text("  ");
+
+        assert!(!form.current_question_answered());
+        assert_eq!(form.current_answer_text(), "(no answer)");
+        assert_eq!(form.accept(), AskQuestionsOutcome::Incomplete);
+        assert_eq!(
+            form.format_answers(),
+            "[QA:call-ask]\n> [notes] Notes?\n(no answer)"
         );
     }
 
