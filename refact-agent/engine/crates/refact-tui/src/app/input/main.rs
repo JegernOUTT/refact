@@ -187,8 +187,14 @@ impl App {
 
     pub(super) fn toggle_reasoning_items(&mut self) {
         for item in &mut self.transcript {
-            if let TranscriptItem::Reasoning(_, collapsed) = item {
-                *collapsed = !*collapsed;
+            match item {
+                TranscriptItem::Reasoning(_, collapsed) => *collapsed = !*collapsed,
+                TranscriptItem::ContentBlock {
+                    collapsed,
+                    expandable: true,
+                    ..
+                } => *collapsed = !*collapsed,
+                _ => {}
             }
         }
     }

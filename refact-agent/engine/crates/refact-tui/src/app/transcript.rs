@@ -16,12 +16,16 @@ pub enum TranscriptItem {
     User(String),
     Assistant(String),
     Reasoning(String, bool),
+    ContentBlock {
+        summary: String,
+        body: String,
+        collapsed: bool,
+        expandable: bool,
+    },
     Tool(ToolCard),
     Plan(PlanCellData),
     Goal(GoalCellData),
     PlanStream(Vec<crate::vendored::terminal_hyperlinks::HyperlinkLine>),
-    Citation(String),
-    ServerContentBlock(String),
     Diff(String),
     Notice(String),
     Info(Vec<String>),
@@ -44,6 +48,119 @@ impl TranscriptItem {
 
     pub(super) fn can_enter_history(&self) -> bool {
         !matches!(self, Self::Assistant(text) if text.is_empty())
+    }
+}
+
+pub(super) fn thinking_block_items(message: &TranscriptMessage) -> Vec<TranscriptItem> {
+    message
+        .thinking_blocks
+        .iter()
+        .map(thinking_block_item)
+        .collect()
+}
+
+pub(super) fn citation_item(citation: &Value) -> TranscriptItem {
+    let title = citation
+        .get("title")
+        .or_else(|| citation.get("name"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let url = citation
+        .get("url")
+        .or_else(|| citation.get("uri"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let summary = match (title, url) {
+        (Some(title), _) => format!("Citation: {}", sanitize_tool_inline(title)),
+        (None, Some(url)) => format!("Citation: {}", sanitize_tool_inline(url)),
+        (None, None) => "Citation".to_string(),
+    };
+    let mut body = Vec::new();
+    if let Some(title) = title {
+        body.push(format!("Title: {}", sanitize_tool_text(title)));
+    }
+    if let Some(url) = url {
+        body.push(format!("URL: {}", sanitize_tool_text(url)));
+    }
+    if let Some(text) = citation
+        .get("text")
+        .or_else(|| citation.get("content"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        body.push(format!("Excerpt: {}", sanitize_tool_text(text)));
+    }
+    TranscriptItem::ContentBlock {
+        summary,
+        body: body.join("\n"),
+        collapsed: true,
+        expandable: !body.is_empty(),
+    }
+}
+
+pub(super) fn server_content_block_item(block: &Value) -> TranscriptItem {
+    let kind = block
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("server content");
+    let status = block
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let summary = match status {
+        Some(status) => format!(
+            "Server: {} · {}",
+            sanitize_tool_inline(kind),
+            sanitize_tool_inline(status)
+        ),
+        None => format!("Server: {}", sanitize_tool_inline(kind)),
+    };
+    let body =
+        serde_json::to_string_pretty(block).unwrap_or_else(|_| value_to_compact_string(block));
+    TranscriptItem::ContentBlock {
+        summary,
+        body: sanitize_tool_text(body),
+        collapsed: true,
+        expandable: true,
+    }
+}
+
+fn thinking_block_item(block: &Value) -> TranscriptItem {
+    if block.get("type").and_then(Value::as_str) == Some("redacted_thinking") {
+        return TranscriptItem::ContentBlock {
+            summary: "🧠 [reasoning redacted by provider]".to_string(),
+            body: String::new(),
+            collapsed: true,
+            expandable: false,
+        };
+    }
+    let kind = block
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("reasoning");
+    let body = block
+        .get("thinking")
+        .or_else(|| block.get("text"))
+        .or_else(|| block.get("content"))
+        .or_else(|| block.get("summary"))
+        .and_then(thinking_block_text)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "(provider reasoning metadata)".to_string());
+    TranscriptItem::ContentBlock {
+        summary: format!("🧠 {}", sanitize_tool_inline(kind)),
+        body: sanitize_tool_text(body),
+        collapsed: true,
+        expandable: true,
+    }
+}
+
+fn thinking_block_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Null => None,
+        value => Some(value_to_compact_string(value)),
     }
 }
 
@@ -675,6 +792,13 @@ impl App {
                     }
                     part += 1;
                 }
+                for item in thinking_block_items(message) {
+                    self.push_state_history_item(
+                        render_message_key(message, "thinking", part),
+                        item,
+                    );
+                    part += 1;
+                }
                 if !message.content.is_empty() {
                     if message.stream_finished {
                         self.push_state_history_item(
@@ -692,14 +816,14 @@ impl App {
                 for citation in &message.citations {
                     self.push_state_history_item(
                         render_message_key(message, "citation", part),
-                        TranscriptItem::Citation(value_to_compact_string(citation)),
+                        citation_item(citation),
                     );
                     part += 1;
                 }
                 for block in &message.server_content_blocks {
                     self.push_state_history_item(
                         render_message_key(message, "server", part),
-                        TranscriptItem::ServerContentBlock(value_to_compact_string(block)),
+                        server_content_block_item(block),
                     );
                     part += 1;
                 }
@@ -1114,6 +1238,14 @@ pub(super) fn render_message_revision(
             &message.reasoning,
             message.stream_finished,
         )),
+        "thinking" => stable_revision(&(
+            message.role.as_str(),
+            part,
+            indexed_message_value(
+                &message.thinking_blocks,
+                index.saturating_sub(usize::from(!message.reasoning.is_empty())),
+            ),
+        )),
         "tool" => stable_revision(&(
             message.role.as_str(),
             part,
@@ -1158,7 +1290,7 @@ pub(super) fn render_message_revision(
 }
 
 pub(super) fn render_message_side_part_base(message: &TranscriptMessage) -> usize {
-    usize::from(!message.reasoning.is_empty()) + 1
+    usize::from(!message.reasoning.is_empty()) + message.thinking_blocks.len() + 1
 }
 
 pub(super) fn indexed_message_value(values: &[Value], index: usize) -> String {
@@ -1190,6 +1322,10 @@ pub(super) fn rendered_state_keys_for_message(message: &TranscriptMessage) -> Ve
                 keys.push(render_message_key(message, "reasoning", part));
             }
             if !message.reasoning.is_empty() {
+                part += 1;
+            }
+            for _ in &message.thinking_blocks {
+                keys.push(render_message_key(message, "thinking", part));
                 part += 1;
             }
             if message.stream_finished && !message.content.is_empty() {
@@ -1234,7 +1370,7 @@ pub(super) fn rendered_state_keys_for_message(message: &TranscriptMessage) -> Ve
 }
 
 pub(super) fn finalized_assistant_content_part(message: &TranscriptMessage) -> usize {
-    usize::from(!message.reasoning.is_empty())
+    usize::from(!message.reasoning.is_empty()) + message.thinking_blocks.len()
 }
 
 #[cfg(test)]
@@ -1257,6 +1393,22 @@ mod tests {
 
         assert_eq!(keys.len(), 4);
         assert!(keys.iter().all(|key| key.starts_with("assistant-1:")));
+    }
+
+    #[test]
+    fn thinking_blocks_add_individual_render_keys() {
+        let message = TranscriptMessage::from_wire(&json!({
+            "message_id": "assistant-1",
+            "role": "assistant",
+            "content": "answer",
+            "thinking_blocks": [{"type": "thinking", "thinking": "private reasoning"}],
+            "stream_finished": true,
+        }));
+
+        let keys = rendered_state_keys_for_message(&message);
+
+        assert_eq!(keys.len(), 2);
+        assert!(keys[0].contains(":thinking:"));
     }
 
     #[test]

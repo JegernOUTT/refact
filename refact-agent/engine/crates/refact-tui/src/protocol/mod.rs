@@ -894,7 +894,15 @@ fn content_part_text(part: &Value) -> Option<String> {
     if content_part_is_file(part) {
         return Some(file_placeholder(part));
     }
-    part.get("text")
+    if content_part_is_audio(part) {
+        return Some(audio_placeholder(part));
+    }
+    part.get("refusal")
+        .or_else(|| {
+            part.get("content")
+                .filter(|_| content_part_type(part) == Some("refusal"))
+        })
+        .or_else(|| part.get("text"))
         .or_else(|| {
             part.get("m_content")
                 .filter(|_| content_part_type(part) == Some("text"))
@@ -931,6 +939,9 @@ fn content_part_placeholder(part: &Value) -> Option<String> {
     if content_part_is_file(part) {
         return Some(file_placeholder(part));
     }
+    if content_part_is_audio(part) {
+        return Some(audio_placeholder(part));
+    }
     if kind.is_empty() {
         None
     } else {
@@ -957,6 +968,15 @@ fn content_part_is_file(part: &Value) -> bool {
         || part.get("file_id").is_some()
         || part.get("filename").is_some()
         || part.get("file_name").is_some()
+}
+
+fn content_part_is_audio(part: &Value) -> bool {
+    let kind = content_part_type(part).unwrap_or_default();
+    kind.starts_with("audio/")
+        || matches!(kind, "audio" | "audio_url" | "input_audio" | "output_audio")
+        || part.get("audio").is_some()
+        || part.get("input_audio").is_some()
+        || part.get("output_audio").is_some()
 }
 
 fn image_placeholder(part: &Value) -> String {
@@ -1007,6 +1027,40 @@ fn file_placeholder(part: &Value) -> String {
     }
 }
 
+fn audio_placeholder(part: &Value) -> String {
+    let audio = part
+        .get("audio")
+        .or_else(|| part.get("input_audio"))
+        .or_else(|| part.get("output_audio"));
+    let mime = part
+        .get("mime_type")
+        .or_else(|| part.get("media_type"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            content_part_type(part)
+                .filter(|kind| kind.starts_with("audio/"))
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            audio
+                .and_then(|audio| audio.get("mime_type").or_else(|| audio.get("media_type")))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            audio
+                .and_then(|audio| audio.get("format"))
+                .and_then(Value::as_str)
+                .map(|format| format!("audio/{format}"))
+        })
+        .unwrap_or_else(|| "audio".to_string());
+    match audio_bytes(part, audio) {
+        Some(bytes) => format!("[audio: {}, {} bytes]", sanitize_tool_inline(&mime), bytes),
+        None => format!("[audio: {}]", sanitize_tool_inline(&mime)),
+    }
+}
+
 fn image_url(part: &Value) -> Option<&str> {
     part.get("image_url").and_then(|value| match value {
         Value::String(url) => Some(url.as_str()),
@@ -1043,6 +1097,29 @@ fn file_bytes(part: &Value) -> Option<usize> {
         .map(|bytes| bytes as usize)
         .or_else(|| part.get("blob").and_then(Value::as_str).map(str::len))
         .or_else(|| part.get("data").and_then(Value::as_str).map(str::len))
+}
+
+fn audio_bytes(part: &Value, audio: Option<&Value>) -> Option<usize> {
+    part.get("bytes")
+        .and_then(Value::as_u64)
+        .map(|bytes| bytes as usize)
+        .or_else(|| {
+            part.get("data")
+                .and_then(Value::as_str)
+                .map(estimated_base64_bytes)
+        })
+        .or_else(|| {
+            audio
+                .and_then(|audio| audio.get("bytes"))
+                .and_then(Value::as_u64)
+                .map(|bytes| bytes as usize)
+        })
+        .or_else(|| {
+            audio
+                .and_then(|audio| audio.get("data"))
+                .and_then(Value::as_str)
+                .map(estimated_base64_bytes)
+        })
 }
 
 fn mime_from_data_url(url: &str) -> Option<&str> {

@@ -1,59 +1,6 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ServerContentBlockCell {
-    text: String,
-}
-
-impl ServerContentBlockCell {
-    pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
-    }
-}
-
-impl HistoryCell for ServerContentBlockCell {
-    fn kind(&self) -> HistoryCellKind {
-        HistoryCellKind::ServerContentBlock
-    }
-
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
-        let renderer = MarkdownRenderer::new(Some(width.saturating_sub(4).max(1)));
-        let mut lines = prefixed_wrapped_line(
-            Line::from(bold_span(server_content_label(&self.text))),
-            width,
-            Line::from(dim_span("• ")),
-            Line::from("  "),
-        );
-        lines.extend(prefix_lines(
-            renderer.render(&self.text),
-            dim_span("  └ "),
-            dim_span("    "),
-        ));
-        finish(lines)
-    }
-
-    fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
-        let renderer = MarkdownRenderer::new(Some(width.saturating_sub(4).max(1)));
-        let mut lines = plain_hyperlink_lines(prefixed_wrapped_line(
-            Line::from(bold_span(server_content_label(&self.text))),
-            width,
-            Line::from(dim_span("• ")),
-            Line::from("  "),
-        ));
-        lines.extend(prefix_link_lines(
-            renderer.render_with_links(&self.text),
-            dim_span("  └ "),
-            dim_span("    "),
-        ));
-        finish_links(lines)
-    }
-
-    fn revision(&self) -> u64 {
-        revision(&(self.kind(), &self.text))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ServerToolCell {
     card: ToolCard,
     selected: bool,
@@ -67,7 +14,7 @@ impl ServerToolCell {
 
 impl HistoryCell for ServerToolCell {
     fn kind(&self) -> HistoryCellKind {
-        HistoryCellKind::ServerContentBlock
+        HistoryCellKind::ContentBlock
     }
 
     fn render(&self, width: usize) -> Vec<Line<'static>> {
@@ -97,45 +44,6 @@ impl HistoryCell for ServerToolCell {
 
     fn revision(&self) -> u64 {
         revision(&(self.kind(), &self.card, self.selected))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct CitationCell {
-    text: String,
-}
-
-impl CitationCell {
-    pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
-    }
-}
-
-impl HistoryCell for CitationCell {
-    fn kind(&self) -> HistoryCellKind {
-        HistoryCellKind::Citation
-    }
-
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
-        let renderer = MarkdownRenderer::new(Some(width.saturating_sub(4).max(1)));
-        finish(prefix_lines(
-            renderer.render(&self.text),
-            dim_span("• "),
-            dim_span("  "),
-        ))
-    }
-
-    fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
-        let renderer = MarkdownRenderer::new(Some(width.saturating_sub(4).max(1)));
-        finish_links(prefix_link_lines(
-            renderer.render_with_links(&self.text),
-            dim_span("• "),
-            dim_span("  "),
-        ))
-    }
-
-    fn revision(&self) -> u64 {
-        revision(&(self.kind(), &self.text))
     }
 }
 
@@ -245,14 +153,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn server_content_block_cell_snapshot() {
-        assert_eq!(
-            text(&ServerContentBlockCell::new("{\"type\":\"web_search_call\",\"status\":\"completed\"}").render(80)),
-            "• server content · web_search_call · completed\n  └ {\"type\":\"web_search_call\",\"status\":\"completed\"}\n"
-        );
-    }
-
-    #[test]
     fn server_tool_cell_snapshot() {
         let card = tool_card(
             "mcp_call",
@@ -263,14 +163,6 @@ mod tests {
         assert_eq!(
             rendered,
             "✅ Called mcp.github_get_file_contents({\"owner\":\"me\",\"repo\":\"r\"})\n▾ ✅ succeeded mcp_call · 1.2s\n  └ README contents\n"
-        );
-    }
-
-    #[test]
-    fn citation_cell_snapshot() {
-        assert_eq!(
-            text(&CitationCell::new("{\"title\":\"README\"}").render(40)),
-            "• {\"title\":\"README\"}\n"
         );
     }
 }

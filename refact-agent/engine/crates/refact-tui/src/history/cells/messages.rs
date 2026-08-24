@@ -240,6 +240,70 @@ impl HistoryCell for ReasoningCell {
         revision(&(self.kind(), &self.text, self.collapsed))
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ContentBlockCell {
+    summary: String,
+    body: String,
+    collapsed: bool,
+    expandable: bool,
+}
+
+impl ContentBlockCell {
+    pub fn new(
+        summary: impl Into<String>,
+        body: impl Into<String>,
+        collapsed: bool,
+        expandable: bool,
+    ) -> Self {
+        Self {
+            summary: summary.into(),
+            body: body.into(),
+            collapsed,
+            expandable,
+        }
+    }
+}
+
+impl HistoryCell for ContentBlockCell {
+    fn kind(&self) -> HistoryCellKind {
+        HistoryCellKind::ContentBlock
+    }
+
+    fn render(&self, width: usize) -> Vec<Line<'static>> {
+        visible_lines(self.render_with_links(width))
+    }
+
+    fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
+        let mut lines = vec![HyperlinkLine::new(Line::from(Span::styled(
+            self.summary.clone(),
+            reasoning_style(),
+        )))];
+        if self.expandable && !self.collapsed && !self.body.is_empty() {
+            let renderer = MarkdownRenderer::new(Some(prefixed_body_width(width)));
+            lines.extend(prefix_hyperlink_lines(
+                style_hyperlink_lines(renderer.render_with_links(&self.body), reasoning_style()),
+                Span::styled("  └ ", reasoning_style()),
+                Span::styled("    ", reasoning_style()),
+            ));
+        }
+        prefix_hyperlink_lines(
+            lines,
+            Span::styled("• ", Style::default().add_modifier(Modifier::DIM)),
+            Span::raw("  "),
+        )
+    }
+
+    fn revision(&self) -> u64 {
+        revision(&(
+            self.kind(),
+            &self.summary,
+            &self.body,
+            self.collapsed,
+            self.expandable,
+        ))
+    }
+}
 fn user_wrap_width(width: usize) -> usize {
     width.saturating_sub(LIVE_PREFIX_COLS as usize + 1).max(1)
 }

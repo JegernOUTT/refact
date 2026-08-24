@@ -1,0 +1,1 @@
+{"chat_id":"chat-fixture","seq":"0","type":"snapshot","thread":{"id":"chat-fixture","model":"gpt-demo","mode":"agent"},"runtime":{"state":"idle"},"messages":[{"message_id":"assistant-1","role":"assistant","content":[{"type":"refusal","refusal":"I can't help with that request."}],"stream_finished":true}]}

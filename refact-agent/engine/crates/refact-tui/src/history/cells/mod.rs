@@ -12,9 +12,7 @@ use crate::render::wrapping::{adaptive_wrap_lines, line_width, RtOptions};
 use crate::render::{color_enabled_from_env, is_unified_diff, render_unified_diff, MarkdownRenderer};
 use crate::text_safety::{compact_tool_preview, sanitize_json_strings, sanitize_tool_text};
 use crate::tools::{ToolCard, ToolStatus};
-use crate::vendored::terminal_hyperlinks::{
-    plain_hyperlink_lines, prefix_hyperlink_lines, HyperlinkLine,
-};
+use crate::vendored::terminal_hyperlinks::{plain_hyperlink_lines, HyperlinkLine};
 
 const COLLAPSED_OUTPUT_LINES: usize = 12;
 const EXPANDED_OUTPUT_LINES: usize = 200;
@@ -34,13 +32,13 @@ mod session;
 
 pub use approval::ApprovalCell;
 pub use exec::{ExecToolCell, SubchatCell, ToolCallCell};
-pub use messages::{AssistantCell, AssistantStreamCell, ReasoningCell, UserCell};
+pub use messages::{AssistantCell, AssistantStreamCell, ContentBlockCell, ReasoningCell, UserCell};
 pub use notices::{EventCell, EventCellData, InfoCell, NoticeCell, StatusCell};
 pub use patches::{DiffCell, DiffToolCell};
 pub use plans::{GoalCell, GoalCellData, PlanCell, PlanCellData, PlanStreamCell};
 pub use request_input::RequestInputToolCell;
 pub use search::SearchToolCell;
-pub use server::{CitationCell, ServerContentBlockCell, ServerToolCell};
+pub use server::ServerToolCell;
 pub use session::SessionCell;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -48,6 +46,7 @@ pub enum HistoryCellKind {
     User,
     Assistant,
     Reasoning,
+    ContentBlock,
     Notice,
     Info,
     Tool,
@@ -56,8 +55,6 @@ pub enum HistoryCellKind {
     Diff,
     Plan,
     Goal,
-    Citation,
-    ServerContentBlock,
     Search,
     RequestInput,
     Event,
@@ -312,14 +309,21 @@ pub fn cell_from_transcript_item(item: &TranscriptItem, selected: bool) -> Box<d
         TranscriptItem::Reasoning(text, collapsed) => {
             Box::new(ReasoningCell::new(text.clone(), *collapsed))
         }
+        TranscriptItem::ContentBlock {
+            summary,
+            body,
+            collapsed,
+            expandable,
+        } => Box::new(ContentBlockCell::new(
+            summary.clone(),
+            body.clone(),
+            *collapsed,
+            *expandable,
+        )),
         TranscriptItem::Tool(card) => cell_from_tool_card(card.clone(), selected),
         TranscriptItem::Plan(data) => Box::new(PlanCell::new(data.clone())),
         TranscriptItem::Goal(data) => Box::new(GoalCell::new(data.clone())),
         TranscriptItem::PlanStream(lines) => Box::new(PlanStreamCell::new(lines.clone(), false)),
-        TranscriptItem::Citation(text) => Box::new(CitationCell::new(text.clone())),
-        TranscriptItem::ServerContentBlock(text) => {
-            Box::new(ServerContentBlockCell::new(text.clone()))
-        }
         TranscriptItem::Diff(text) => Box::new(DiffCell::new(text.clone())),
         TranscriptItem::Notice(text) => Box::new(NoticeCell::new(text.clone())),
         TranscriptItem::Info(lines) => Box::new(InfoCell::new(lines.clone())),
@@ -577,14 +581,6 @@ fn prefix_lines(
         .collect()
 }
 
-fn prefix_link_lines(
-    lines: Vec<HyperlinkLine>,
-    initial_prefix: Span<'static>,
-    subsequent_prefix: Span<'static>,
-) -> Vec<HyperlinkLine> {
-    prefix_hyperlink_lines(lines, initial_prefix, subsequent_prefix)
-}
-
 fn wrap_with_prefix(
     text: &str,
     width: usize,
@@ -792,24 +788,6 @@ fn diff_summary(stats: &[FileDiffStat]) -> String {
     let deleted = stats.iter().map(|stat| stat.deleted).sum::<usize>();
     let file_label = if files == 1 { "file" } else { "files" };
     format!("{} {file_label} · +{} -{}", files.max(1), added, deleted)
-}
-
-fn server_content_label(text: &str) -> String {
-    serde_json::from_str::<Value>(text)
-        .ok()
-        .and_then(|value| {
-            let kind = value.get("type").and_then(Value::as_str)?;
-            let status = value
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if status.is_empty() {
-                Some(format!("server content · {kind}"))
-            } else {
-                Some(format!("server content · {kind} · {status}"))
-            }
-        })
-        .unwrap_or_else(|| "server content".to_string())
 }
 
 #[cfg(test)]

@@ -207,6 +207,9 @@ fn transcript_text(app: &App) -> String {
             TranscriptItem::User(text) => format!("user:{text}"),
             TranscriptItem::Assistant(text) => format!("assistant:{text}"),
             TranscriptItem::Reasoning(text, _) => format!("reasoning:{text}"),
+            TranscriptItem::ContentBlock { summary, body, .. } => {
+                format!("content_block:{summary}:{body}")
+            }
             TranscriptItem::Tool(card) => format!("tool:{}:{}:{}", card.id, card.name, card.result),
             TranscriptItem::Plan(plan) => {
                 format!("plan:{}:{}:{}", plan.mode, plan.version, plan.content)
@@ -227,8 +230,6 @@ fn transcript_text(app: &App) -> String {
                     .collect::<Vec<_>>()
                     .join("|")
             ),
-            TranscriptItem::Citation(text) => format!("citation:{text}"),
-            TranscriptItem::ServerContentBlock(text) => format!("server:{text}"),
             TranscriptItem::Diff(text) => format!("diff:{text}"),
             TranscriptItem::Notice(text) => format!("notice:{text}"),
             TranscriptItem::Info(lines) => format!("info:{}", lines.join("|")),
@@ -291,10 +292,15 @@ fn fixture_directory_covers_required_protocol_cases() {
             "approvals.jsonl",
             "assistant_message_added_dedup.jsonl",
             "assistant_streaming.jsonl",
+            "audio_part.jsonl",
             "citations.jsonl",
             "extra_updates.jsonl",
+            "file_part.jsonl",
+            "image_part.jsonl",
             "protocol_mutations.jsonl",
             "reasoning.jsonl",
+            "redacted_thinking.jsonl",
+            "refusal.jsonl",
             "seq_gap.jsonl",
             "server_content_blocks.jsonl",
             "snapshot_recovery_content.jsonl",
@@ -439,7 +445,7 @@ fn golden_fixtures_drive_app_state_machine_offline() {
 
     let citations = run_fixture("citations.jsonl");
     let citations_state = citations.app.transcript_state();
-    assert!(transcript_text(&citations.app).contains("citation:"));
+    assert!(transcript_text(&citations.app).contains("Citation: README"));
     assert_eq!(
         citations_state.messages()[0].citations[0]["title"],
         "README"
@@ -450,7 +456,7 @@ fn golden_fixtures_drive_app_state_machine_offline() {
     assert_eq!(thinking_blocks[0]["signature"], "sig-demo");
 
     let server = run_fixture("server_content_blocks.jsonl");
-    assert!(transcript_text(&server.app).contains("server:"));
+    assert!(transcript_text(&server.app).contains("Server: web_search_call · completed"));
     assert_eq!(
         server.app.transcript_state().messages()[0].server_content_blocks[0]["type"],
         "web_search_call"
@@ -481,6 +487,80 @@ fn golden_fixtures_drive_app_state_machine_offline() {
     assert!(resumed_text.contains("assistant:old answer"));
     assert!(resumed_text.contains("tool:resume-call:cat:file body"));
     assert_eq!(resumed.app.session_state(), SessionState::Idle);
+}
+
+#[test]
+fn content_block_fixtures_produce_visible_cells() {
+    let fixtures = [
+        ("thinking_blocks.jsonl", "🧠 thinking"),
+        (
+            "redacted_thinking.jsonl",
+            "🧠 [reasoning redacted by provider]",
+        ),
+        ("refusal.jsonl", "I can't help with that request."),
+        ("citations.jsonl", "Citation: README"),
+        (
+            "server_content_blocks.jsonl",
+            "Server: web_search_call · completed",
+        ),
+        ("image_part.jsonl", "[image: image/png, 4 bytes]"),
+        (
+            "file_part.jsonl",
+            "[file: report.pdf, application/pdf, 42 bytes]",
+        ),
+        ("audio_part.jsonl", "[audio: audio/wav, 4 bytes]"),
+    ];
+
+    for (fixture, expected) in fixtures {
+        let run = run_fixture(fixture);
+        assert!(
+            run.recovery.is_none(),
+            "fixture {fixture} requested recovery"
+        );
+        let visible = run
+            .app
+            .visible_transcript()
+            .iter()
+            .flat_map(|item| render_transcript_item_lines(item, 80, false))
+            .flat_map(|line| line.spans)
+            .map(|span| span.content.into_owned())
+            .collect::<String>();
+        assert!(
+            visible.contains(expected),
+            "fixture {fixture} did not render {expected:?}: {visible:?}"
+        );
+    }
+}
+
+#[test]
+fn thinking_signatures_survive_wire_round_trip_byte_for_byte() {
+    let signature = "opaque-signed/+/=\u{1b}]8;;provider\u{7}";
+    let raw = json!({
+        "message_id": "assistant-thinking",
+        "role": "assistant",
+        "content": "answer",
+        "thinking_blocks": [{
+            "type": "thinking",
+            "thinking": "private reasoning",
+            "signature": signature,
+            "provider_extension": {"ordered": [1, true, null]},
+        }],
+        "stream_finished": true,
+    });
+    let expected = raw["thinking_blocks"][0]["signature"]
+        .as_str()
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let mut state = TranscriptState::new();
+
+    assert!(state.add_message(&raw));
+
+    let actual = state.messages()[0].thinking_blocks[0]["signature"]
+        .as_str()
+        .unwrap()
+        .as_bytes();
+    assert_eq!(actual, expected.as_slice());
 }
 
 #[test]

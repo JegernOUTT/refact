@@ -23,8 +23,8 @@ use crate::sessions::{session_items_from_trajectories, TrajectoryMeta};
 use crate::theme::TuiTheme;
 
 use super::transcript::{
-    collapsed_unknown_payload, line_to_plain_string, value_to_compact_string,
-    visible_message_content,
+    citation_item, collapsed_unknown_payload, line_to_plain_string, server_content_block_item,
+    thinking_block_items, value_to_compact_string, visible_message_content,
 };
 use super::*;
 
@@ -820,6 +820,12 @@ impl App {
                     if !message.reasoning.is_empty() {
                         items.push(TranscriptItem::Reasoning(message.reasoning.clone(), false));
                     }
+                    for mut item in thinking_block_items(message) {
+                        if let TranscriptItem::ContentBlock { collapsed, .. } = &mut item {
+                            *collapsed = false;
+                        }
+                        items.push(item);
+                    }
                     if !message.content.is_empty() || message.tool_calls.is_empty() {
                         items.push(TranscriptItem::Assistant(message.content.clone()));
                     }
@@ -827,12 +833,18 @@ impl App {
                         items.push(TranscriptItem::Tool(ToolCard::from_tool_call(tool)));
                     }
                     for citation in &message.citations {
-                        items.push(TranscriptItem::Citation(value_to_compact_string(citation)));
+                        let mut item = citation_item(citation);
+                        if let TranscriptItem::ContentBlock { collapsed, .. } = &mut item {
+                            *collapsed = false;
+                        }
+                        items.push(item);
                     }
                     for block in &message.server_content_blocks {
-                        items.push(TranscriptItem::ServerContentBlock(value_to_compact_string(
-                            block,
-                        )));
+                        let mut item = server_content_block_item(block);
+                        if let TranscriptItem::ContentBlock { collapsed, .. } = &mut item {
+                            *collapsed = false;
+                        }
+                        items.push(item);
                     }
                 }
                 TranscriptRole::Tool | TranscriptRole::Diff => items.push(TranscriptItem::Tool(

@@ -1,8 +1,9 @@
 use serde_json::{json, Value};
 
 use super::transcript::{
-    finalized_assistant_content_part, render_message_key, rendered_state_keys_for_message,
-    session_header_key, state_key_has_stable_identity, value_to_compact_string,
+    citation_item, finalized_assistant_content_part, render_message_key,
+    rendered_state_keys_for_message, server_content_block_item, session_header_key,
+    state_key_has_stable_identity,
 };
 use super::*;
 
@@ -503,6 +504,7 @@ impl App {
 
     pub(super) fn handle_stream_delta(&mut self, message_id: Option<&str>, ops: &[DeltaOp]) {
         self.transcript_state.apply_delta_ops(message_id, ops);
+        let mut thinking_blocks_changed = false;
         for op in ops {
             match op {
                 DeltaOp::AppendContent { text } => self.append_assistant(text),
@@ -512,24 +514,22 @@ impl App {
                 }
                 DeltaOp::SetUsage { usage } => self.update_usage_value(usage),
                 DeltaOp::AddCitation { citation } => {
-                    self.push_history_item(TranscriptItem::Citation(value_to_compact_string(
-                        citation,
-                    )));
+                    self.push_history_item(citation_item(citation));
                 }
                 DeltaOp::AddServerContentBlock { block } => {
-                    self.push_history_item(TranscriptItem::ServerContentBlock(
-                        value_to_compact_string(block),
-                    ));
+                    self.push_history_item(server_content_block_item(block));
                 }
+                DeltaOp::SetThinkingBlocks { .. } => thinking_blocks_changed = true,
                 DeltaOp::SetToolCalls { tool_calls } => {
                     for tool in tool_calls {
                         self.push_tool_call(tool);
                     }
                 }
-                DeltaOp::SetThinkingBlocks { .. }
-                | DeltaOp::MergeExtra { .. }
-                | DeltaOp::Unknown(_) => {}
+                DeltaOp::MergeExtra { .. } | DeltaOp::Unknown(_) => {}
             }
+        }
+        if thinking_blocks_changed {
+            self.rebuild_render_transcript_from_state();
         }
     }
 
