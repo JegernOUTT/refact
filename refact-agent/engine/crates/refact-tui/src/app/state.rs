@@ -102,6 +102,7 @@ impl BacktrackTarget {
 pub struct App {
     pub(super) transcript: Vec<TranscriptItem>,
     pub(super) transcript_state: TranscriptState,
+    pub(super) inbound_event_state: InboundEventState,
     pub(super) composer: ComposerState,
     pub(super) keymap: KeymapRegistry,
     pub(super) vim: VimState,
@@ -208,6 +209,7 @@ impl App {
                 project.slug,
                 project.root.display()
             )),
+            inbound_event_state: InboundEventState::default(),
             composer: ComposerState::new(history_entries),
             keymap,
             vim,
@@ -297,6 +299,7 @@ impl App {
         Self {
             transcript: vec![TranscriptItem::Notice(notice.clone())],
             transcript_state: notice_transcript_state(notice),
+            inbound_event_state: InboundEventState::default(),
             composer: ComposerState::new(Vec::new()),
             keymap: KeymapRegistry::default(),
             vim: VimState::new(false),
@@ -472,6 +475,10 @@ impl App {
 
     pub fn transcript_state(&self) -> &TranscriptState {
         &self.transcript_state
+    }
+
+    pub fn inbound_event_state(&self) -> &InboundEventState {
+        &self.inbound_event_state
     }
 
     pub fn stream_has_committable_lines(&self) -> bool {

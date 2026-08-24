@@ -198,7 +198,18 @@ impl App {
         let protocol_event = event.protocol_event();
         let raw = event.raw;
         match protocol_event {
-            SseEvent::Snapshot { .. } => return self.handle_snapshot(&raw),
+            SseEvent::Snapshot {
+                background_agents,
+                browser,
+                ..
+            } => {
+                self.inbound_event_state
+                    .apply_snapshot(background_agents, browser);
+                return self.handle_snapshot(&raw);
+            }
+            SseEvent::BackgroundAgentUpdated { agent } => {
+                self.inbound_event_state.update_background_agent(agent);
+            }
             SseEvent::StreamStarted { message_id } => {
                 self.set_session_state(SessionState::Generating);
                 self.clear_stream_controllers();
@@ -207,6 +218,15 @@ impl App {
             }
             SseEvent::StreamDelta { message_id, ops } => {
                 self.handle_stream_delta(message_id.as_deref(), &ops)
+            }
+            SseEvent::MalformedStreamDelta { message_id, reason } => {
+                let message = message_id
+                    .as_deref()
+                    .map(|id| format!(" for {id}"))
+                    .unwrap_or_default();
+                self.add_notice(format!(
+                    "Rejected malformed stream_delta{message}: {reason}"
+                ));
             }
             SseEvent::StreamFinished {
                 message_id, usage, ..
@@ -297,7 +317,33 @@ impl App {
                 accepted,
                 ..
             } => self.handle_send_ack(&client_request_id, accepted),
-            SseEvent::Unknown { .. } => {}
+            SseEvent::ProcessCompleted { event } => {
+                self.inbound_event_state.set_process_completed(event);
+            }
+            SseEvent::IdeToolRequired { event } => {
+                self.inbound_event_state.set_ide_tool_required(event);
+            }
+            SseEvent::BrowserFrame { event } => self.inbound_event_state.set_browser_frame(event),
+            SseEvent::BrowserStatus { event } => self.inbound_event_state.set_browser_status(event),
+            SseEvent::BrowserClosed { event } => self.inbound_event_state.set_browser_closed(event),
+            SseEvent::BrowserTimeline { event } => {
+                self.inbound_event_state.set_browser_timeline(event)
+            }
+            SseEvent::BrowserContextOversize { event } => {
+                self.inbound_event_state.set_browser_context_oversize(event)
+            }
+            SseEvent::BrowserToolbarAction { event } => {
+                self.inbound_event_state.set_browser_toolbar_action(event)
+            }
+            SseEvent::Unknown { event } => {
+                let kind = if event.kind.is_empty() {
+                    "(missing type)"
+                } else {
+                    event.kind.as_str()
+                };
+                self.add_notice(format!("Unknown SSE event: {kind}"));
+                self.inbound_event_state.record_unknown(event);
+            }
         }
         AppAction::None
     }
@@ -525,7 +571,11 @@ impl App {
                         self.push_tool_call(tool);
                     }
                 }
-                DeltaOp::MergeExtra { .. } | DeltaOp::Unknown(_) => {}
+                DeltaOp::MergeExtra { .. } => {}
+                DeltaOp::Unknown(unknown) => {
+                    let op = unknown.op.as_deref().unwrap_or("(missing op)");
+                    self.add_notice(format!("Unknown stream_delta op: {op}"));
+                }
             }
         }
         if thinking_blocks_changed {

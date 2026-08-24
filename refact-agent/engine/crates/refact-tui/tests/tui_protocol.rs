@@ -134,6 +134,12 @@ fn fixture_events(name: &str) -> Vec<Value> {
         .collect()
 }
 
+fn fixture_event(name: &str) -> Value {
+    let events = fixture_events(name);
+    assert_eq!(events.len(), 1, "expected one event in {name}");
+    events.into_iter().next().unwrap()
+}
+
 fn chat_event_from_fixture(raw: Value, chat_id: &str) -> ChatEvent {
     let seq = match raw.get("seq") {
         Some(Value::Number(number)) => number.as_u64(),
@@ -305,6 +311,17 @@ fn fixture_directory_covers_required_protocol_cases() {
             "server_content_blocks.jsonl",
             "snapshot_recovery_content.jsonl",
             "snapshot_resume.jsonl",
+            "sse_ack.jsonl",
+            "sse_background_agent_updated.jsonl",
+            "sse_browser_closed.jsonl",
+            "sse_browser_context_oversize.jsonl",
+            "sse_browser_frame.jsonl",
+            "sse_browser_status.jsonl",
+            "sse_browser_timeline.jsonl",
+            "sse_browser_toolbar_action.jsonl",
+            "sse_ide_tool_required.jsonl",
+            "sse_process_completed.jsonl",
+            "sse_snapshot_auxiliary.jsonl",
             "subchat_turn_cleanup.jsonl",
             "thinking_blocks.jsonl",
             "tool_calls.jsonl",
@@ -698,6 +715,227 @@ fn seq_gap_fixture_requests_resubscribe_without_applying_gap_delta() {
     let run = run_fixture("seq_gap.jsonl");
     assert!(run.recovery.unwrap().contains("expected 2, got 3"));
     assert!(!transcript_text(&run.app).contains("must not apply"));
+}
+
+#[test]
+fn every_remaining_sse_event_fixture_is_parsed_and_stored() {
+    let mut app = App::new(State::project());
+    let chat_id = app.chat_id().to_string();
+
+    app.apply_chat_event(chat_event_from_fixture(
+        fixture_event("sse_snapshot_auxiliary.jsonl"),
+        &chat_id,
+    ));
+    assert_eq!(app.inbound_event_state().background_agents().len(), 1);
+    assert_eq!(
+        app.inbound_event_state().background_agents()[0]
+            .child_chat_id
+            .as_deref(),
+        Some("child-1")
+    );
+    assert_eq!(
+        app.inbound_event_state().background_agents()[0].edited_files,
+        ["src/protocol.rs"]
+    );
+    assert_eq!(
+        app.inbound_event_state().background_agents()[0]
+            .diff_summary
+            .as_deref(),
+        Some("one file changed")
+    );
+    assert_eq!(
+        app.inbound_event_state().background_agents()[0]
+            .conflict_summary
+            .as_deref(),
+        Some("none")
+    );
+    assert_eq!(
+        app.inbound_event_state().background_agents()[0]
+            .result_summary
+            .as_deref(),
+        Some("partial")
+    );
+    assert_eq!(
+        app.inbound_event_state()
+            .browser()
+            .and_then(|snapshot| snapshot.active_tab.as_deref()),
+        Some("tab-1")
+    );
+
+    app.apply_chat_event(chat_event_from_fixture(
+        fixture_event("sse_background_agent_updated.jsonl"),
+        &chat_id,
+    ));
+    assert_eq!(app.inbound_event_state().background_agents().len(), 1);
+    assert_eq!(
+        app.inbound_event_state()
+            .last_background_agent_updated()
+            .map(|agent| agent.status.as_str()),
+        Some("completed")
+    );
+
+    let ack = chat_event_from_fixture(fixture_event("sse_ack.jsonl"), &chat_id);
+    assert!(matches!(
+        ack.protocol_event(),
+        refact_tui::protocol::SseEvent::Ack { client_request_id, accepted: true, result: Some(result) }
+            if client_request_id == "request-1" && result["queued"] == true
+    ));
+    app.apply_chat_event(ack);
+
+    app.apply_chat_event(chat_event_from_fixture(
+        fixture_event("sse_process_completed.jsonl"),
+        &chat_id,
+    ));
+    assert_eq!(
+        app.inbound_event_state()
+            .last_process_completed()
+            .map(|event| event.process_id.as_str()),
+        Some("exec-1")
+    );
+
+    app.apply_chat_event(chat_event_from_fixture(
+        fixture_event("sse_ide_tool_required.jsonl"),
+        &chat_id,
+    ));
+    assert_eq!(
+        app.inbound_event_state()
+            .ide_tool_required()
+            .map(|event| event.tool_call_id.as_str()),
+        Some("ide-call-1")
+    );
+
+    app.apply_chat_event(chat_event_from_fixture(
+        fixture_event("sse_browser_frame.jsonl"),
+        &chat_id,
+    ));
+    assert_eq!(
+        app.inbound_event_state()
+            .last_browser_frame()
+            .map(|event| event.data.as_str()),
+        Some("frame-data")
+    );
+
+    app.apply_chat_event(chat_event_from_fixture(
+        fixture_event("sse_browser_status.jsonl"),
+        &chat_id,
+    ));
+    assert_eq!(
+        app.inbound_event_state()
+            .last_browser_status()
+            .and_then(|event| event.snapshot.active_tab.as_deref()),
+        Some("tab-2")
+    );
+
+    app.apply_chat_event(chat_event_from_fixture(
+        fixture_event("sse_browser_timeline.jsonl"),
+        &chat_id,
+    ));
+    assert_eq!(
+        app.inbound_event_state()
+            .last_browser_timeline()
+            .map(|event| event.events.len()),
+        Some(1)
+    );
+
+    app.apply_chat_event(chat_event_from_fixture(
+        fixture_event("sse_browser_context_oversize.jsonl"),
+        &chat_id,
+    ));
+    assert_eq!(
+        app.inbound_event_state()
+            .browser_context_oversize()
+            .map(|event| event.pending_message_id.as_str()),
+        Some("pending-1")
+    );
+
+    app.apply_chat_event(chat_event_from_fixture(
+        fixture_event("sse_browser_toolbar_action.jsonl"),
+        &chat_id,
+    ));
+    assert_eq!(
+        app.inbound_event_state()
+            .last_browser_toolbar_action()
+            .map(|event| event.action.as_str()),
+        Some("screenshot")
+    );
+
+    app.apply_chat_event(chat_event_from_fixture(
+        fixture_event("sse_browser_closed.jsonl"),
+        &chat_id,
+    ));
+    assert_eq!(
+        app.inbound_event_state()
+            .last_browser_closed()
+            .map(|event| event.reason.as_str()),
+        Some("user_closed")
+    );
+    assert!(app.inbound_event_state().browser().is_none());
+}
+
+#[test]
+fn unknown_event_advances_sequence_only_with_a_visible_notice() {
+    let mut app = App::new(State::project());
+    let chat_id = app.chat_id().to_string();
+    let mut tracker = ChatSeqTracker::new();
+    let snapshot = chat_event_from_fixture(
+        json!({"seq": "0", "type": "snapshot", "thread": {}, "runtime": {"state": "idle"}, "messages": []}),
+        &chat_id,
+    );
+    assert_eq!(tracker.observe(&snapshot), ChatSeqDecision::Apply);
+    app.apply_chat_event(snapshot);
+
+    let unknown = chat_event_from_fixture(
+        json!({"seq": "1", "type": "future_event", "payload": {"version": 2}}),
+        &chat_id,
+    );
+    assert_eq!(tracker.observe(&unknown), ChatSeqDecision::Apply);
+    app.apply_chat_event(unknown);
+    assert_eq!(app.inbound_event_state().unknown_events().len(), 1);
+    assert!(transcript_text(&app).contains("notice:Unknown SSE event: future_event"));
+
+    let next = chat_event_from_fixture(
+        json!({"seq": "2", "type": "runtime_updated", "state": "generating"}),
+        &chat_id,
+    );
+    assert_eq!(tracker.observe(&next), ChatSeqDecision::Apply);
+    app.apply_chat_event(next);
+    assert_eq!(app.session_state(), SessionState::Generating);
+}
+
+#[test]
+fn malformed_stream_delta_is_rejected_without_mutating_transcript() {
+    let mut app = App::new(State::project());
+    let chat_id = app.chat_id().to_string();
+    let mut tracker = ChatSeqTracker::new();
+    let snapshot = chat_event_from_fixture(
+        json!({"seq": "0", "type": "snapshot", "thread": {}, "runtime": {"state": "idle"}, "messages": []}),
+        &chat_id,
+    );
+    assert_eq!(tracker.observe(&snapshot), ChatSeqDecision::Apply);
+    app.apply_chat_event(snapshot);
+    let malformed = chat_event_from_fixture(
+        json!({"seq": "1", "type": "stream_delta", "message_id": "assistant-1", "ops": {"op": "append_content", "text": "lost"}}),
+        &chat_id,
+    );
+
+    assert!(matches!(
+        malformed.protocol_event(),
+        refact_tui::protocol::SseEvent::MalformedStreamDelta { .. }
+    ));
+    assert!(matches!(
+        tracker.observe(&malformed),
+        ChatSeqDecision::Resubscribe(message) if message.contains("malformed stream_delta")
+    ));
+    app.apply_chat_event(malformed);
+
+    assert!(app
+        .transcript_state()
+        .messages()
+        .iter()
+        .all(|message| { message.role != refact_tui::protocol::TranscriptRole::Assistant }));
+    assert!(
+        transcript_text(&app).contains("notice:Rejected malformed stream_delta for assistant-1")
+    );
 }
 
 #[test]

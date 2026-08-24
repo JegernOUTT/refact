@@ -5,12 +5,448 @@ use crate::text_safety::{sanitize_tool_inline, sanitize_tool_text};
 
 const CLIENT_MESSAGE_ID_EXTRA_KEY: &str = "client_message_id";
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BackgroundAgentSummary {
+    pub agent_id: String,
+    pub parent_chat_id: String,
+    pub child_chat_id: Option<String>,
+    pub kind: String,
+    pub status: String,
+    pub title: String,
+    pub progress: Option<String>,
+    pub step_count: u64,
+    pub last_activity: Option<String>,
+    pub target_files: Vec<String>,
+    pub edited_files: Vec<String>,
+    pub diff_summary: Option<String>,
+    pub conflict_summary: Option<String>,
+    pub result_summary: Option<String>,
+    pub error: Option<String>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub change_seq: u64,
+}
+
+impl BackgroundAgentSummary {
+    fn from_raw(raw: &Value) -> Self {
+        Self {
+            agent_id: value_string(raw, &["agent_id", "agentId"]),
+            parent_chat_id: value_string(raw, &["parent_chat_id", "parentChatId"]),
+            child_chat_id: optional_value_string(raw, &["child_chat_id", "childChatId"]),
+            kind: value_string(raw, &["kind"]),
+            status: value_string(raw, &["status"]),
+            title: value_string(raw, &["title"]),
+            progress: optional_value_string(raw, &["progress"]),
+            step_count: value_u64(raw, &["step_count", "stepCount"]),
+            last_activity: optional_value_string(raw, &["last_activity", "lastActivity"]),
+            target_files: string_values(raw, &["target_files", "targetFiles"]),
+            edited_files: string_values(raw, &["edited_files", "editedFiles"]),
+            diff_summary: optional_value_string(raw, &["diff_summary", "diffSummary"]),
+            conflict_summary: optional_value_string(raw, &["conflict_summary", "conflictSummary"]),
+            result_summary: optional_value_string(raw, &["result_summary", "resultSummary"]),
+            error: optional_value_string(raw, &["error"]),
+            started_at: optional_value_string(raw, &["started_at", "startedAt"]),
+            finished_at: optional_value_string(raw, &["finished_at", "finishedAt"]),
+            change_seq: value_u64(raw, &["change_seq", "changeSeq"]),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BrowserTab {
+    pub tab_id: String,
+    pub url: String,
+    pub title: String,
+}
+
+impl BrowserTab {
+    fn from_raw(raw: &Value) -> Self {
+        Self {
+            tab_id: value_string(raw, &["tab_id", "tabId"]),
+            url: value_string(raw, &["url"]),
+            title: value_string(raw, &["title"]),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BrowserSnapshot {
+    pub runtime_id: String,
+    pub connected: bool,
+    pub active_tab: Option<String>,
+    pub url: Option<String>,
+    pub title: Option<String>,
+    pub tabs: Vec<BrowserTab>,
+}
+
+impl BrowserSnapshot {
+    fn from_raw(raw: &Value) -> Self {
+        Self {
+            runtime_id: value_string(raw, &["runtime_id", "runtimeId"]),
+            connected: value_bool(raw, &["connected"]),
+            active_tab: optional_value_string(raw, &["active_tab", "activeTab"]),
+            url: optional_value_string(raw, &["url"]),
+            title: optional_value_string(raw, &["title"]),
+            tabs: raw
+                .get("tabs")
+                .and_then(Value::as_array)
+                .map(|tabs| tabs.iter().map(BrowserTab::from_raw).collect())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProcessCompletedEvent {
+    pub process_id: String,
+    pub status: String,
+    pub exit_code: Option<i64>,
+    pub short_description: String,
+    pub mode: String,
+}
+
+impl ProcessCompletedEvent {
+    fn from_raw(raw: &Value) -> Self {
+        Self {
+            process_id: value_string(raw, &["process_id", "processId"]),
+            status: value_string(raw, &["status"]),
+            exit_code: raw
+                .get("exit_code")
+                .or_else(|| raw.get("exitCode"))
+                .and_then(Value::as_i64),
+            short_description: value_string(raw, &["short_description", "shortDescription"]),
+            mode: value_string(raw, &["mode"]),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IdeToolRequiredEvent {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub args: Value,
+}
+
+impl IdeToolRequiredEvent {
+    fn from_raw(raw: &Value) -> Self {
+        Self {
+            tool_call_id: value_string(raw, &["tool_call_id", "toolCallId"]),
+            tool_name: value_string(raw, &["tool_name", "toolName"]),
+            args: raw.get("args").cloned().unwrap_or(Value::Null),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BrowserFrameEvent {
+    pub tab_id: String,
+    pub mime: String,
+    pub data: String,
+    pub diff_boxes: Vec<Value>,
+    pub changed_text: Option<String>,
+}
+
+impl BrowserFrameEvent {
+    fn from_raw(raw: &Value) -> Self {
+        Self {
+            tab_id: value_string(raw, &["tab_id", "tabId"]),
+            mime: value_string(raw, &["mime"]),
+            data: value_string(raw, &["data"]),
+            diff_boxes: raw
+                .get("diff_boxes")
+                .or_else(|| raw.get("diffBoxes"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            changed_text: optional_value_string(raw, &["changed_text", "changedText"]),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BrowserStatusEvent {
+    pub snapshot: BrowserSnapshot,
+}
+
+impl BrowserStatusEvent {
+    fn from_raw(raw: &Value) -> Self {
+        Self {
+            snapshot: BrowserSnapshot::from_raw(raw),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BrowserClosedEvent {
+    pub runtime_id: String,
+    pub reason: String,
+}
+
+impl BrowserClosedEvent {
+    fn from_raw(raw: &Value) -> Self {
+        Self {
+            runtime_id: value_string(raw, &["runtime_id", "runtimeId"]),
+            reason: value_string(raw, &["reason"]),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BrowserTimelineEvent {
+    pub events: Vec<Value>,
+}
+
+impl BrowserTimelineEvent {
+    fn from_raw(raw: &Value) -> Self {
+        Self {
+            events: raw
+                .get("events")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BrowserContextOversizeEvent {
+    pub total_bytes: usize,
+    pub action_count: usize,
+    pub action_bytes: usize,
+    pub console_count: usize,
+    pub console_bytes: usize,
+    pub network_count: usize,
+    pub network_bytes: usize,
+    pub mutation_bytes: usize,
+    pub pending_message_id: String,
+}
+
+impl BrowserContextOversizeEvent {
+    fn from_raw(raw: &Value) -> Self {
+        Self {
+            total_bytes: value_usize(raw, &["total_bytes", "totalBytes"]),
+            action_count: value_usize(raw, &["action_count", "actionCount"]),
+            action_bytes: value_usize(raw, &["action_bytes", "actionBytes"]),
+            console_count: value_usize(raw, &["console_count", "consoleCount"]),
+            console_bytes: value_usize(raw, &["console_bytes", "consoleBytes"]),
+            network_count: value_usize(raw, &["network_count", "networkCount"]),
+            network_bytes: value_usize(raw, &["network_bytes", "networkBytes"]),
+            mutation_bytes: value_usize(raw, &["mutation_bytes", "mutationBytes"]),
+            pending_message_id: value_string(raw, &["pending_message_id", "pendingMessageId"]),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BrowserToolbarActionEvent {
+    pub action: String,
+}
+
+impl BrowserToolbarActionEvent {
+    fn from_raw(raw: &Value) -> Self {
+        Self {
+            action: value_string(raw, &["action"]),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnknownSseEvent {
+    pub kind: String,
+    pub raw: Value,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InboundEventState {
+    background_agents: Vec<BackgroundAgentSummary>,
+    browser: Option<BrowserSnapshot>,
+    last_background_agent_updated: Option<BackgroundAgentSummary>,
+    last_process_completed: Option<ProcessCompletedEvent>,
+    ide_tool_required: Option<IdeToolRequiredEvent>,
+    last_browser_frame: Option<BrowserFrameEvent>,
+    last_browser_status: Option<BrowserStatusEvent>,
+    last_browser_closed: Option<BrowserClosedEvent>,
+    last_browser_timeline: Option<BrowserTimelineEvent>,
+    browser_context_oversize: Option<BrowserContextOversizeEvent>,
+    last_browser_toolbar_action: Option<BrowserToolbarActionEvent>,
+    unknown_events: Vec<UnknownSseEvent>,
+}
+
+impl InboundEventState {
+    pub fn background_agents(&self) -> &[BackgroundAgentSummary] {
+        &self.background_agents
+    }
+
+    pub fn browser(&self) -> Option<&BrowserSnapshot> {
+        self.browser.as_ref()
+    }
+
+    pub fn last_background_agent_updated(&self) -> Option<&BackgroundAgentSummary> {
+        self.last_background_agent_updated.as_ref()
+    }
+
+    pub fn last_process_completed(&self) -> Option<&ProcessCompletedEvent> {
+        self.last_process_completed.as_ref()
+    }
+
+    pub fn ide_tool_required(&self) -> Option<&IdeToolRequiredEvent> {
+        self.ide_tool_required.as_ref()
+    }
+
+    pub fn last_browser_frame(&self) -> Option<&BrowserFrameEvent> {
+        self.last_browser_frame.as_ref()
+    }
+
+    pub fn last_browser_status(&self) -> Option<&BrowserStatusEvent> {
+        self.last_browser_status.as_ref()
+    }
+
+    pub fn last_browser_closed(&self) -> Option<&BrowserClosedEvent> {
+        self.last_browser_closed.as_ref()
+    }
+
+    pub fn last_browser_timeline(&self) -> Option<&BrowserTimelineEvent> {
+        self.last_browser_timeline.as_ref()
+    }
+
+    pub fn browser_context_oversize(&self) -> Option<&BrowserContextOversizeEvent> {
+        self.browser_context_oversize.as_ref()
+    }
+
+    pub fn last_browser_toolbar_action(&self) -> Option<&BrowserToolbarActionEvent> {
+        self.last_browser_toolbar_action.as_ref()
+    }
+
+    pub fn unknown_events(&self) -> &[UnknownSseEvent] {
+        &self.unknown_events
+    }
+
+    pub fn apply_snapshot(
+        &mut self,
+        background_agents: Vec<BackgroundAgentSummary>,
+        browser: Option<BrowserSnapshot>,
+    ) {
+        self.background_agents = background_agents;
+        self.browser = browser;
+    }
+
+    pub fn update_background_agent(&mut self, agent: BackgroundAgentSummary) {
+        if let Some(existing) = self
+            .background_agents
+            .iter_mut()
+            .find(|existing| !agent.agent_id.is_empty() && existing.agent_id == agent.agent_id)
+        {
+            *existing = agent.clone();
+        } else {
+            self.background_agents.push(agent.clone());
+        }
+        self.last_background_agent_updated = Some(agent);
+    }
+
+    pub fn set_process_completed(&mut self, event: ProcessCompletedEvent) {
+        self.last_process_completed = Some(event);
+    }
+
+    pub fn set_ide_tool_required(&mut self, event: IdeToolRequiredEvent) {
+        self.ide_tool_required = Some(event);
+    }
+
+    pub fn set_browser_frame(&mut self, event: BrowserFrameEvent) {
+        self.last_browser_frame = Some(event);
+    }
+
+    pub fn set_browser_status(&mut self, event: BrowserStatusEvent) {
+        self.browser = Some(event.snapshot.clone());
+        self.last_browser_status = Some(event);
+    }
+
+    pub fn set_browser_closed(&mut self, event: BrowserClosedEvent) {
+        if self
+            .browser
+            .as_ref()
+            .is_some_and(|browser| browser.runtime_id == event.runtime_id)
+        {
+            self.browser = None;
+        }
+        self.last_browser_closed = Some(event);
+    }
+
+    pub fn set_browser_timeline(&mut self, event: BrowserTimelineEvent) {
+        self.last_browser_timeline = Some(event);
+    }
+
+    pub fn set_browser_context_oversize(&mut self, event: BrowserContextOversizeEvent) {
+        self.browser_context_oversize = Some(event);
+    }
+
+    pub fn set_browser_toolbar_action(&mut self, event: BrowserToolbarActionEvent) {
+        self.last_browser_toolbar_action = Some(event);
+    }
+
+    pub fn record_unknown(&mut self, event: UnknownSseEvent) {
+        self.unknown_events.push(event);
+    }
+}
+
+fn first_value<'a>(raw: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter().find_map(|key| raw.get(*key))
+}
+
+fn value_string(raw: &Value, keys: &[&str]) -> String {
+    first_value(raw, keys)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn optional_value_string(raw: &Value, keys: &[&str]) -> Option<String> {
+    first_value(raw, keys)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn value_u64(raw: &Value, keys: &[&str]) -> u64 {
+    first_value(raw, keys)
+        .and_then(Value::as_u64)
+        .unwrap_or_default()
+}
+
+fn value_usize(raw: &Value, keys: &[&str]) -> usize {
+    value_u64(raw, keys) as usize
+}
+
+fn value_bool(raw: &Value, keys: &[&str]) -> bool {
+    first_value(raw, keys)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn string_values(raw: &Value, keys: &[&str]) -> Vec<String> {
+    first_value(raw, keys)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SseEvent {
     Snapshot {
         thread: Option<Value>,
         runtime: Option<Value>,
         messages: Vec<Value>,
+        background_agents: Vec<BackgroundAgentSummary>,
+        browser: Option<BrowserSnapshot>,
+    },
+    BackgroundAgentUpdated {
+        agent: BackgroundAgentSummary,
     },
     StreamStarted {
         message_id: Option<String>,
@@ -18,6 +454,10 @@ pub enum SseEvent {
     StreamDelta {
         message_id: Option<String>,
         ops: Vec<DeltaOp>,
+    },
+    MalformedStreamDelta {
+        message_id: Option<String>,
+        reason: String,
     },
     StreamFinished {
         message_id: Option<String>,
@@ -29,6 +469,12 @@ pub enum SseEvent {
         client_request_id: String,
         accepted: bool,
         result: Option<Value>,
+    },
+    ProcessCompleted {
+        event: ProcessCompletedEvent,
+    },
+    IdeToolRequired {
+        event: IdeToolRequiredEvent,
     },
     QueueUpdated {
         queue_size: usize,
@@ -59,9 +505,26 @@ pub enum SseEvent {
         attached_files: Vec<String>,
         depth: usize,
     },
+    BrowserFrame {
+        event: BrowserFrameEvent,
+    },
+    BrowserStatus {
+        event: BrowserStatusEvent,
+    },
+    BrowserClosed {
+        event: BrowserClosedEvent,
+    },
+    BrowserTimeline {
+        event: BrowserTimelineEvent,
+    },
+    BrowserContextOversize {
+        event: BrowserContextOversizeEvent,
+    },
+    BrowserToolbarAction {
+        event: BrowserToolbarActionEvent,
+    },
     Unknown {
-        kind: String,
-        raw: Value,
+        event: UnknownSseEvent,
     },
 }
 
@@ -87,13 +550,40 @@ impl SseEvent {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default(),
+                background_agents: raw
+                    .get("background_agents")
+                    .or_else(|| raw.get("backgroundAgents"))
+                    .and_then(Value::as_array)
+                    .map(|agents| {
+                        agents
+                            .iter()
+                            .map(BackgroundAgentSummary::from_raw)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                browser: raw
+                    .get("browser")
+                    .filter(|browser| !browser.is_null())
+                    .map(BrowserSnapshot::from_raw),
+            },
+            "background_agent_updated" => Self::BackgroundAgentUpdated {
+                agent: raw
+                    .get("agent")
+                    .map(BackgroundAgentSummary::from_raw)
+                    .unwrap_or_default(),
             },
             "stream_started" => Self::StreamStarted {
                 message_id: message_id(raw),
             },
-            "stream_delta" => Self::StreamDelta {
-                message_id: message_id(raw),
-                ops: delta_ops_from_value(raw.get("ops").unwrap_or(&Value::Null)),
+            "stream_delta" => match raw.get("ops").and_then(Value::as_array) {
+                Some(ops) => Self::StreamDelta {
+                    message_id: message_id(raw),
+                    ops: delta_ops_from_value(&Value::Array(ops.clone())),
+                },
+                None => Self::MalformedStreamDelta {
+                    message_id: message_id(raw),
+                    reason: "missing or non-array ops".to_string(),
+                },
             },
             "stream_finished" => Self::StreamFinished {
                 message_id: message_id(raw),
@@ -112,6 +602,12 @@ impl SseEvent {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 result: raw.get("result").cloned(),
+            },
+            "process_completed" => Self::ProcessCompleted {
+                event: ProcessCompletedEvent::from_raw(raw),
+            },
+            "ide_tool_required" => Self::IdeToolRequired {
+                event: IdeToolRequiredEvent::from_raw(raw),
             },
             "queue_updated" => Self::QueueUpdated {
                 queue_size: raw
@@ -179,9 +675,29 @@ impl SseEvent {
                     .and_then(Value::as_u64)
                     .unwrap_or(1) as usize,
             },
+            "browser_frame" => Self::BrowserFrame {
+                event: BrowserFrameEvent::from_raw(raw),
+            },
+            "browser_status" => Self::BrowserStatus {
+                event: BrowserStatusEvent::from_raw(raw),
+            },
+            "browser_closed" => Self::BrowserClosed {
+                event: BrowserClosedEvent::from_raw(raw),
+            },
+            "browser_timeline" => Self::BrowserTimeline {
+                event: BrowserTimelineEvent::from_raw(raw),
+            },
+            "browser_context_oversize" => Self::BrowserContextOversize {
+                event: BrowserContextOversizeEvent::from_raw(raw),
+            },
+            "browser_toolbar_action" => Self::BrowserToolbarAction {
+                event: BrowserToolbarActionEvent::from_raw(raw),
+            },
             _ => Self::Unknown {
-                kind: kind.to_string(),
-                raw: raw.clone(),
+                event: UnknownSseEvent {
+                    kind: kind.to_string(),
+                    raw: raw.clone(),
+                },
             },
         }
     }

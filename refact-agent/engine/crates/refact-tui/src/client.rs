@@ -609,6 +609,14 @@ impl ChatSeqTracker {
                 event.kind
             ));
         };
+        if matches!(
+            event.protocol_event(),
+            SseEvent::MalformedStreamDelta { .. }
+        ) {
+            return ChatSeqDecision::Resubscribe(format!(
+                "malformed stream_delta at seq {seq}: missing or non-array ops"
+            ));
+        }
         if event.kind == "snapshot" {
             if self.last_seq.is_some_and(|last_seq| seq < last_seq) {
                 return ChatSeqDecision::Suppress;

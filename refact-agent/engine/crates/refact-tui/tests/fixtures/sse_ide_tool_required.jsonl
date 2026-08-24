@@ -1,0 +1,1 @@
+{"type":"ide_tool_required","tool_call_id":"ide-call-1","tool_name":"apply_workspace_edit","args":{"uri":"file:///tmp/demo.rs"}}

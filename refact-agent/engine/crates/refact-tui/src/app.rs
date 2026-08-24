@@ -31,7 +31,9 @@ use crate::keymap::{
 use crate::notifications::{NotificationConfig, NotificationKind, NotificationManager};
 use crate::overlay::{PagerAction, PagerOverlay};
 use crate::pickers::{file_mention_items_from_completions, PickerItem, PickerKind, PickerState};
-use crate::protocol::{DeltaOp, SseEvent, TranscriptMessage, TranscriptRole, TranscriptState};
+use crate::protocol::{
+    DeltaOp, InboundEventState, SseEvent, TranscriptMessage, TranscriptRole, TranscriptState,
+};
 use crate::read_only_views::ReadOnlyView;
 use crate::render::highlight;
 use crate::sessions::{
