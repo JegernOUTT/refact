@@ -68,6 +68,26 @@ pub(super) struct PendingReasoningRollback {
     pub(super) previous: ReasoningStateSnapshot,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct BacktrackRollback {
+    pub(super) transcript_state: TranscriptState,
+    pub(super) session_state: SessionState,
+    pub(super) usage: Option<UsageSummary>,
+    pub(super) selected_backtrack_index: Option<usize>,
+    pub(super) backtrack_target: Option<BacktrackTarget>,
+    pub(super) backtrack_pending: Option<BacktrackTarget>,
+    pub(super) last_escape_at: Option<Instant>,
+    pub(super) prompt: String,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ToolDecisionRollback {
+    pub(super) approval_queue: ApprovalQueue,
+    pub(super) pending_approval_clears: VecDeque<PendingApprovalClear>,
+    pub(super) transcript: Vec<TranscriptItem>,
+    pub(super) history: HistoryBuffer,
+}
+
 impl BacktrackTarget {
     pub(super) fn matches(&self, message: &TranscriptMessage) -> bool {
         if let Some(message_id) = self.message_id.as_deref() {
@@ -114,6 +134,8 @@ pub struct App {
     pub(super) boost_reasoning: bool,
     pub(super) reasoning_effort: Option<String>,
     pub(super) pending_reasoning_rollback: Option<PendingReasoningRollback>,
+    pub(super) pending_backtrack_rollback: Option<BacktrackRollback>,
+    pub(super) pending_tool_decision_rollback: Option<ToolDecisionRollback>,
     pub(super) pending_model: Option<String>,
     pub(super) pending_mode: Option<String>,
     pub(super) in_flight_send: Option<InFlightSend>,
@@ -218,6 +240,8 @@ impl App {
             boost_reasoning: false,
             reasoning_effort: None,
             pending_reasoning_rollback: None,
+            pending_backtrack_rollback: None,
+            pending_tool_decision_rollback: None,
             pending_model: None,
             pending_mode: None,
             in_flight_send: None,
@@ -305,6 +329,8 @@ impl App {
             boost_reasoning: false,
             reasoning_effort: None,
             pending_reasoning_rollback: None,
+            pending_backtrack_rollback: None,
+            pending_tool_decision_rollback: None,
             pending_model: None,
             pending_mode: None,
             in_flight_send: None,

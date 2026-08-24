@@ -498,6 +498,7 @@ fn status_footer_and_working_indicator_golden_snapshots() {
         context_window_tokens: Some(100000),
         retry_hint: Some("retry available".to_string()),
         interrupt_key: "Esc".to_string(),
+        retry_key: "Ctrl-Shift-R".to_string(),
     };
     let footer_actual = render_widget_snapshot(100, 1, |frame| {
         Paragraph::new(footer::footer_line(&footer_data)).render(frame.area(), frame.buffer_mut());

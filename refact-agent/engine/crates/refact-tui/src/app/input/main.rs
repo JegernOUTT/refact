@@ -86,6 +86,7 @@ impl App {
                 self.composer.redo();
                 AppAction::None
             }
+            Some(KeyAction::RetrySubscription) => self.retry_subscription_action(),
             Some(KeyAction::CtrlC) => self.ctrl_c_action(),
             Some(KeyAction::Cancel) => self.cancel_action(),
             Some(KeyAction::CycleToolSelection) => {
@@ -300,8 +301,6 @@ impl App {
         ) {
             self.cancel_queue_edit();
             self.abort_in_flight = true;
-            self.clear_approvals();
-            self.clear_active_ask_questions();
             self.add_notice("Cancel requested");
             self.last_ctrl_c = None;
             return AppAction::Abort;
@@ -317,6 +316,15 @@ impl App {
             self.last_ctrl_c = Some(now);
         }
         AppAction::None
+    }
+
+    fn retry_subscription_action(&mut self) -> AppAction {
+        if self.subscription_status == SubscriptionStatus::Offline {
+            AppAction::SubscribeCurrent
+        } else {
+            self.add_notice("Subscription is already active");
+            AppAction::None
+        }
     }
 
     pub(super) fn dismiss_interrupt_surfaces(&mut self) {

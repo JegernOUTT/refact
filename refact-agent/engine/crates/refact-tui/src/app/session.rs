@@ -598,6 +598,8 @@ impl App {
         self.in_flight_send = None;
         self.pending_send_retry = None;
         self.pending_reasoning_rollback = None;
+        self.pending_backtrack_rollback = None;
+        self.pending_tool_decision_rollback = None;
     }
 
     pub(super) fn clear_ask_questions_state(&mut self) {

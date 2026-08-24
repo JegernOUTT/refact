@@ -4,49 +4,16 @@ impl App {
     pub(super) fn handle_approval_key(&mut self, key: KeyEvent) -> AppAction {
         let dispatch = self.keymap.dispatch(KeyContext::Approval, key);
         match dispatch.action {
-            Some(KeyAction::ApprovalApproveOnce) => self
-                .pop_current_approval()
-                .map(|modal| {
-                    self.set_tool_statuses(modal.tool_call_ids(), ToolStatus::ApprovedOnce);
-                    self.push_history_item(TranscriptItem::Approval(
-                        modal.clone(),
-                        Some(ToolStatus::ApprovedOnce),
-                    ));
-                    AppAction::SendToolDecisions {
-                        decisions: modal.decisions(true),
-                        patch: None,
-                    }
-                })
-                .unwrap_or(AppAction::None),
-            Some(KeyAction::ApprovalApproveForChat) => self
-                .pop_current_approval()
-                .map(|modal| {
-                    let patch = approval_patch(&modal);
-                    self.set_tool_statuses(modal.tool_call_ids(), ToolStatus::ApprovedForChat);
-                    self.push_history_item(TranscriptItem::Approval(
-                        modal.clone(),
-                        Some(ToolStatus::ApprovedForChat),
-                    ));
-                    AppAction::SendToolDecisions {
-                        patch: Some(patch),
-                        decisions: modal.decisions(true),
-                    }
-                })
-                .unwrap_or(AppAction::None),
-            Some(KeyAction::ApprovalDeny) => self
-                .pop_current_approval()
-                .map(|modal| {
-                    self.set_tool_statuses(modal.tool_call_ids(), ToolStatus::Denied);
-                    self.push_history_item(TranscriptItem::Approval(
-                        modal.clone(),
-                        Some(ToolStatus::Denied),
-                    ));
-                    AppAction::SendToolDecisions {
-                        decisions: modal.decisions(false),
-                        patch: None,
-                    }
-                })
-                .unwrap_or(AppAction::None),
+            Some(KeyAction::ApprovalApproveOnce) => {
+                self.send_current_tool_decision(true, None, ToolStatus::ApprovedOnce)
+            }
+            Some(KeyAction::ApprovalApproveForChat) => {
+                let patch = self.approval_modal().map(approval_patch);
+                self.send_current_tool_decision(true, patch, ToolStatus::ApprovedForChat)
+            }
+            Some(KeyAction::ApprovalDeny) => {
+                self.send_current_tool_decision(false, None, ToolStatus::Denied)
+            }
             Some(KeyAction::ApprovalToggleDetails) => {
                 if let Some(modal) = self.approval_queue.front_mut() {
                     modal.toggle_details();
@@ -88,6 +55,30 @@ impl App {
     }
 
     pub(super) fn handle_approval_paste(&mut self, _text: &str) {}
+
+    fn send_current_tool_decision(
+        &mut self,
+        accepted: bool,
+        patch: Option<Value>,
+        outcome: ToolStatus,
+    ) -> AppAction {
+        let rollback = ToolDecisionRollback {
+            approval_queue: self.approval_queue.clone(),
+            pending_approval_clears: self.pending_approval_clears.clone(),
+            transcript: self.transcript.clone(),
+            history: self.history.clone(),
+        };
+        let Some(modal) = self.pop_current_approval() else {
+            return AppAction::None;
+        };
+        self.set_tool_statuses(modal.tool_call_ids(), outcome);
+        self.push_history_item(TranscriptItem::Approval(modal.clone(), Some(outcome)));
+        self.pending_tool_decision_rollback = Some(rollback);
+        AppAction::SendToolDecisions {
+            decisions: modal.decisions(accepted),
+            patch,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -50,6 +50,7 @@ use crate::tools::{
 };
 
 mod chat_events;
+mod command_results;
 mod input;
 mod runtime;
 #[path = "app/session.rs"]
@@ -65,8 +66,8 @@ pub use surfaces::ProjectPickerState;
 pub use transcript::TranscriptItem;
 use self::session_lifecycle::{resolve_chat_model_id, ReasoningModelCaps};
 use self::state::{
-    BacktrackTarget, HistorySaveRequest, InFlightSend, PendingApprovalClear,
-    PendingReasoningRollback, PendingSendRetry, ReasoningStateSnapshot,
+    BacktrackRollback, BacktrackTarget, HistorySaveRequest, InFlightSend, PendingApprovalClear,
+    PendingReasoningRollback, PendingSendRetry, ReasoningStateSnapshot, ToolDecisionRollback,
 };
 use chat_events::SubagentSummary;
 #[cfg(test)]
@@ -135,7 +136,7 @@ struct EditorCommand {
     args: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 enum CommandContextTag {
     SendMessage {
         prompt: String,
@@ -144,6 +145,12 @@ enum CommandContextTag {
     },
     Reasoning {
         previous: ReasoningStateSnapshot,
+    },
+    RetryFromIndex {
+        rollback: Option<BacktrackRollback>,
+    },
+    ToolDecisions {
+        rollback: Option<ToolDecisionRollback>,
     },
     Abort,
     Rename {
@@ -710,6 +717,16 @@ impl App {
             self.add_notice("Backtrack target changed; open backtrack again");
             return AppAction::None;
         }
+        self.pending_backtrack_rollback = Some(BacktrackRollback {
+            transcript_state: self.transcript_state.clone(),
+            session_state: self.session_state,
+            usage: self.usage,
+            selected_backtrack_index: self.selected_backtrack_index,
+            backtrack_target: self.backtrack_target.clone(),
+            backtrack_pending: Some(target.clone()),
+            last_escape_at: self.last_escape_at,
+            prompt: prompt.clone(),
+        });
         self.transcript_state.truncate_messages(target.index);
         self.transcript_state.push_user_message(prompt.clone());
         self.transcript_state.start_assistant(None);
@@ -801,89 +818,6 @@ impl App {
                 CommandContextTag::Other
             }
             None => CommandContextTag::Other,
-        }
-    }
-
-    fn handle_command_finished(
-        &mut self,
-        context: CommandContextTag,
-        result: Result<(), String>,
-    ) -> AppAction {
-        match result {
-            Ok(()) => self.handle_command_success(context),
-            Err(error) => self.handle_command_failure(context, error),
-        }
-    }
-
-    fn handle_command_success(&mut self, context: CommandContextTag) -> AppAction {
-        match context {
-            CommandContextTag::SendMessage { correlation, .. } => {
-                self.clear_in_flight_send(&correlation.client_request_id);
-                AppAction::None
-            }
-            CommandContextTag::Abort => {
-                if !self.abort_in_flight {
-                    return AppAction::None;
-                }
-                self.abort_in_flight = false;
-                self.set_session_state(SessionState::Idle);
-                self.clear_approvals();
-                self.clear_active_ask_questions();
-                self.dispatch_next_queued_input()
-            }
-            CommandContextTag::Rename { title } => {
-                self.apply_renamed_chat(title);
-                AppAction::None
-            }
-            CommandContextTag::Fork {
-                target_chat_id,
-                title,
-            } => self.open_forked_chat(target_chat_id, title),
-            CommandContextTag::Archive { chat_id } => self.apply_archived_chat(chat_id),
-            CommandContextTag::Reasoning { .. } => AppAction::None,
-            _ => AppAction::None,
-        }
-    }
-
-    fn handle_command_failure(&mut self, context: CommandContextTag, error: String) -> AppAction {
-        match context {
-            CommandContextTag::SendMessage {
-                prompt,
-                params,
-                correlation,
-            } => self.handle_send_message_failure(prompt, params, correlation, error),
-            CommandContextTag::Abort => {
-                self.retry_hint = retry_hint_from_message(&error);
-                self.abort_in_flight = false;
-                self.add_notice(format!("Abort failed: {error}"));
-                AppAction::None
-            }
-            CommandContextTag::Rename { .. } => {
-                self.retry_hint = retry_hint_from_message(&error);
-                self.add_notice(format!("Rename failed: {error}"));
-                AppAction::None
-            }
-            CommandContextTag::Fork { .. } => {
-                self.retry_hint = retry_hint_from_message(&error);
-                self.add_notice(format!("Fork failed: {error}"));
-                AppAction::None
-            }
-            CommandContextTag::Archive { .. } => {
-                self.retry_hint = retry_hint_from_message(&error);
-                self.add_notice(format!("Archive failed: {error}"));
-                AppAction::None
-            }
-            CommandContextTag::Reasoning { previous } => {
-                self.retry_hint = retry_hint_from_message(&error);
-                self.restore_reasoning_snapshot(previous);
-                self.add_notice(format!("/reasoning failed: {error}"));
-                AppAction::None
-            }
-            _ => {
-                self.retry_hint = retry_hint_from_message(&error);
-                self.add_notice(format!("Command failed: {error}"));
-                AppAction::None
-            }
         }
     }
 
@@ -1013,6 +947,27 @@ impl App {
     fn cancel_backtrack(&mut self) {
         self.clear_backtrack_selection();
         self.backtrack_pending = None;
+        self.pending_backtrack_rollback = None;
+    }
+
+    fn restore_backtrack_rollback(&mut self, rollback: BacktrackRollback) {
+        self.transcript_state = rollback.transcript_state;
+        self.set_session_state(rollback.session_state);
+        self.usage = rollback.usage;
+        self.selected_backtrack_index = rollback.selected_backtrack_index;
+        self.backtrack_target = rollback.backtrack_target;
+        self.backtrack_pending = rollback.backtrack_pending;
+        self.last_escape_at = rollback.last_escape_at;
+        self.composer.set_text(rollback.prompt);
+        self.clear_stream_controllers();
+        self.rebuild_render_transcript_from_state();
+    }
+
+    fn restore_tool_decision_rollback(&mut self, rollback: ToolDecisionRollback) {
+        self.approval_queue = rollback.approval_queue;
+        self.pending_approval_clears = rollback.pending_approval_clears;
+        self.transcript = rollback.transcript;
+        self.history = rollback.history;
     }
 
     fn persist_history(&mut self) {
@@ -1068,8 +1023,9 @@ impl App {
 
     fn record_chat_disconnected(&mut self, message: &str, unreachable: bool, auth_stale: bool) {
         if auth_stale {
-            self.subscription_status = SubscriptionStatus::Offline;
-            self.daemon_online = true;
+            self.record_subscription_offline(
+                "SSE authentication is stale; refresh daemon credentials, then retry the subscription",
+            );
         } else if unreachable || worker_waking_message(message) {
             self.subscription_status = SubscriptionStatus::Waking;
             self.daemon_online = true;
@@ -1077,7 +1033,20 @@ impl App {
             self.subscription_status = SubscriptionStatus::Offline;
             self.daemon_online = false;
         }
-        self.retry_hint = retry_hint_from_message(message);
+        if !auth_stale {
+            self.retry_hint = retry_hint_from_message(message);
+        }
+    }
+
+    fn record_subscription_exhausted(&mut self) {
+        self.record_subscription_offline("SSE reconnect retries exhausted; retry the subscription");
+    }
+
+    fn record_subscription_offline(&mut self, reason: &str) {
+        self.subscription_status = SubscriptionStatus::Offline;
+        self.daemon_online = false;
+        self.set_session_state(SessionState::Error);
+        self.retry_hint = Some(reason.to_string());
     }
 
     fn handle_daemon_events_disconnected(&mut self, message: String, retrying: bool) {
@@ -4709,25 +4678,35 @@ new-chat = "ctrl-x"
     }
 
     #[test]
-    fn abort_failure_does_not_leave_ui_idle() {
+    fn ctrl_c_abort_failure_restores_approval_and_ask_form() {
         let mut app = App::new(project());
-        app.set_session_state(SessionState::Generating);
+        app.handle_chat_event(pause_event(&app, "call-approval", "shell"));
+        let request = AskQuestionsRequest::from_tool_content(
+            r#"{"type":"ask_questions","tool_call_id":"call-ask","questions":[{"id":"confirm","type":"yes_no","text":"Proceed?"}]}"#,
+            None,
+        )
+        .unwrap();
+        app.test_set_ask_questions_form(AskQuestionsForm::new(request));
+        assert!(app.approval_modal().is_some());
+        assert!(app.ask_questions_form().is_some());
 
-        assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::Abort);
-        assert_eq!(app.session_state(), SessionState::Generating);
-        assert!(app.abort_in_flight);
-
-        let action = app.handle_command_finished(
-            CommandContextTag::Abort,
-            Err("backend unavailable".to_string()),
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::Abort
         );
+        assert!(app.approval_modal().is_some());
+        assert!(app.ask_questions_form().is_some());
 
-        assert_eq!(action, AppAction::None);
-        assert_eq!(app.session_state(), SessionState::Generating);
+        assert_eq!(
+            app.handle_command_finished(
+                CommandContextTag::Abort,
+                Err("backend unavailable".to_string()),
+            ),
+            AppAction::None
+        );
         assert!(!app.abort_in_flight);
-        assert!(app.visible_transcript().iter().any(|item| {
-            matches!(item, TranscriptItem::Notice(text) if text.contains("Abort failed"))
-        }));
+        assert!(app.approval_modal().is_some());
+        assert!(app.ask_questions_form().is_some());
     }
 
     #[test]
@@ -5095,6 +5074,49 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn retry_from_index_failure_restores_transcript_and_leaves_generating() {
+        let mut app = App::new(project());
+        let chat_id = app.chat_id().to_string();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(chat_id),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "idle"}, "messages": [
+                {"message_id": "u1", "role": "user", "content": "first"},
+                {"message_id": "a1", "role": "assistant", "content": "one"},
+                {"message_id": "u2", "role": "user", "content": "second"},
+                {"message_id": "a2", "role": "assistant", "content": "two"}
+            ]}),
+        });
+        let before = app.transcript_state().messages().to_vec();
+
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(key(KeyCode::Enter));
+        app.composer.set_text("edited first");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::RetryFromIndex { .. }
+        ));
+        assert_eq!(app.session_state(), SessionState::Generating);
+
+        app.handle_command_finished(
+            CommandContextTag::RetryFromIndex {
+                rollback: app.pending_backtrack_rollback.clone(),
+            },
+            Err("retry rejected".to_string()),
+        );
+
+        assert_eq!(
+            &app.transcript_state().messages()[..before.len()],
+            before.as_slice()
+        );
+        assert_eq!(app.session_state(), SessionState::Idle);
+        assert_eq!(app.composer(), "edited first");
+    }
+
+    #[test]
     fn ctrl_t_overlay_opens_searches_and_enters_copy_mode() {
         let mut app = App::new(project());
         let chat_id = app.chat_id().to_string();
@@ -5448,7 +5470,7 @@ new-chat = "ctrl-x"
             app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             AppAction::Abort
         );
-        assert!(app.approval_modal().is_none());
+        assert!(app.approval_modal().is_some());
 
         let mut app = App::new(project());
         app.handle_chat_event(ask_questions_tool_event(
@@ -5464,7 +5486,7 @@ new-chat = "ctrl-x"
             app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             AppAction::Abort
         );
-        assert!(app.ask_questions_form().is_none());
+        assert!(app.ask_questions_form().is_some());
     }
 
     #[tokio::test]
@@ -5588,6 +5610,28 @@ new-chat = "ctrl-x"
         app.clear_approvals();
 
         assert_eq!(tool_cards(&app)[0].status, ToolStatus::Cancelled);
+    }
+
+    #[test]
+    fn tool_decision_failure_restores_approval_queue() {
+        let mut app = App::new(project());
+        app.handle_chat_event(pause_event(&app, "call-1", "shell"));
+        let action = app.handle_key(key(KeyCode::Char('y')));
+        assert!(matches!(action, AppAction::SendToolDecisions { .. }));
+        assert!(app.approval_modal().is_none());
+
+        app.handle_command_finished(
+            CommandContextTag::ToolDecisions {
+                rollback: app.pending_tool_decision_rollback.clone(),
+            },
+            Err("decision rejected".to_string()),
+        );
+
+        assert!(matches!(
+            app.approval_modal(),
+            Some(modal) if modal.tool_call_ids() == ["call-1"]
+        ));
+        assert_eq!(app.approval_pending_clear_count(), 0);
     }
 
     #[test]
@@ -6366,6 +6410,28 @@ new-chat = "ctrl-x"
         app.record_chat_resubscribe("request failed with status 429: retry-after: 2s");
         assert_eq!(app.subscription_status(), SubscriptionStatus::Waking);
         assert_eq!(app.retry_hint(), Some("rate limited; retry after 2s"));
+    }
+
+    #[test]
+    fn exhausted_reconnect_is_visible_and_retry_is_bound() {
+        let mut app = App::new(project());
+
+        app.record_subscription_exhausted();
+
+        assert_eq!(app.subscription_status(), SubscriptionStatus::Offline);
+        assert!(!app.daemon_online());
+        assert_eq!(app.session_state(), SessionState::Error);
+        assert_eq!(
+            app.retry_hint(),
+            Some("SSE reconnect retries exhausted; retry the subscription")
+        );
+        assert_eq!(
+            app.handle_key(KeyEvent::new(
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            )),
+            AppAction::SubscribeCurrent
+        );
     }
 
     #[test]

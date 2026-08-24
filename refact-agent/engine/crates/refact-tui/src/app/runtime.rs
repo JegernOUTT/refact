@@ -480,7 +480,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                     app.add_notice(format!("SSE resync: {message}"));
                     if let Err(error) = subscriptions.reconnect_current(client.clone(), tx.clone())
                     {
-                        app.record_chat_disconnected(&error, true, false);
+                        app.record_subscription_exhausted();
                         app.add_notice(error);
                     }
                 }
@@ -503,7 +503,10 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 }
                 match subscriptions.reconnect_current(client.clone(), tx.clone()) {
                     Ok(()) => app.add_notice(format!("SSE disconnected: {message}; reconnecting…")),
-                    Err(error) => app.add_notice(format!("SSE disconnected: {message}; {error}")),
+                    Err(error) => {
+                        app.record_subscription_exhausted();
+                        app.add_notice(format!("SSE disconnected: {message}; {error}"));
+                    }
                 }
             }
             RuntimeEvent::InputError(message) => app.add_notice(format!("Input error: {message}")),
@@ -935,6 +938,9 @@ pub(super) async fn run_action(
             }
         }
         AppAction::RetryFromIndex { index, content } => {
+            let context = CommandContextTag::RetryFromIndex {
+                rollback: app.pending_backtrack_rollback.clone(),
+            };
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
                 let generation = subscriptions.command_generation();
@@ -948,11 +954,16 @@ pub(super) async fn run_action(
                     let _ = tx
                         .send(RuntimeEvent::CommandFinished {
                             generation,
-                            context: CommandContextTag::Other,
+                            context,
                             result,
                         })
                         .await;
                 });
+            } else {
+                let _ = app.handle_command_finished(
+                    context,
+                    Err("no active project for retry".to_string()),
+                );
             }
         }
         AppAction::SetParams { patch } => {
@@ -1070,6 +1081,9 @@ pub(super) async fn run_action(
         AppAction::CopyToClipboard { .. } => {}
         AppAction::OpenExternalEditor { .. } => {}
         AppAction::SendToolDecisions { decisions, patch } => {
+            let context = CommandContextTag::ToolDecisions {
+                rollback: app.pending_tool_decision_rollback.clone(),
+            };
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
                 let generation = subscriptions.command_generation();
@@ -1089,11 +1103,16 @@ pub(super) async fn run_action(
                     let _ = tx
                         .send(RuntimeEvent::CommandFinished {
                             generation,
-                            context: CommandContextTag::Other,
+                            context,
                             result,
                         })
                         .await;
                 });
+            } else {
+                let _ = app.handle_command_finished(
+                    context,
+                    Err("no active project for tool decision".to_string()),
+                );
             }
         }
         AppAction::Abort => {

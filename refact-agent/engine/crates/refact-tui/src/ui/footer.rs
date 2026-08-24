@@ -105,6 +105,7 @@ pub struct FooterData {
     pub context_window_tokens: Option<u64>,
     pub retry_hint: Option<String>,
     pub interrupt_key: String,
+    pub retry_key: String,
 }
 
 impl FooterData {
@@ -126,6 +127,12 @@ impl FooterData {
             context_window_tokens: app.context_window_tokens(),
             retry_hint: app.retry_hint().map(str::to_string),
             interrupt_key: key_label(app.keymap(), KeyContext::Main, KeyAction::Cancel, "Esc"),
+            retry_key: key_label(
+                app.keymap(),
+                KeyContext::Main,
+                KeyAction::RetrySubscription,
+                "Ctrl-Shift-R",
+            ),
         }
     }
 
@@ -156,7 +163,11 @@ pub fn footer_line(data: &FooterData) -> Line<'static> {
         spans.push(Span::styled(usage, Style::default().fg(Color::White)));
         spans.push(separator());
     }
-    spans.extend(runtime_spans(data.runtime_state, &data.interrupt_key));
+    spans.extend(runtime_spans(
+        data.runtime_state,
+        &data.interrupt_key,
+        &data.retry_key,
+    ));
     spans.push(separator());
     spans.push(Span::raw(format!("daemon {}", data.daemon_label())));
     spans.push(separator());
@@ -226,7 +237,11 @@ fn context_left_percent(used: u64, window: u64) -> u64 {
     (((remaining as u128 * 100) + (window as u128 / 2)) / window as u128) as u64
 }
 
-fn runtime_spans(state: FooterRuntimeState, interrupt_key: &str) -> Vec<Span<'static>> {
+fn runtime_spans(
+    state: FooterRuntimeState,
+    interrupt_key: &str,
+    retry_key: &str,
+) -> Vec<Span<'static>> {
     let mut spans = vec![
         Span::styled(state.icon(), Style::default().fg(state.color())),
         Span::raw(" "),
@@ -247,6 +262,13 @@ fn runtime_spans(state: FooterRuntimeState, interrupt_key: &str) -> Vec<Span<'st
             Style::default().fg(Color::Yellow),
         ));
         spans.push(Span::raw(escape_hint));
+    } else if state == FooterRuntimeState::Offline {
+        spans.push(separator());
+        spans.push(Span::styled(
+            retry_key.to_string(),
+            Style::default().fg(Color::Yellow),
+        ));
+        spans.push(Span::raw(" to retry"));
     }
     spans
 }
@@ -289,6 +311,7 @@ mod tests {
             context_window_tokens: Some(100),
             retry_hint: None,
             interrupt_key: "Esc".to_string(),
+            retry_key: "Ctrl-Shift-R".to_string(),
         }
     }
 
@@ -356,7 +379,7 @@ mod tests {
 
         assert_eq!(
             snapshot,
-            " 90% context left (10 used) · ● idle · daemon online · demo · model · agent · reason:off · worker ready \n 90% context left (10 used) · ◆ generating · Esc to interrupt · daemon online · demo · model · agent · reason:off · worker ready \n 90% context left (10 used) · ◐ waking · daemon online · demo · model · agent · reason:off · worker ready \n 90% context left (10 used) · ○ offline · daemon offline · demo · model · agent · reason:off · worker ready "
+            " 90% context left (10 used) · ● idle · daemon online · demo · model · agent · reason:off · worker ready \n 90% context left (10 used) · ◆ generating · Esc to interrupt · daemon online · demo · model · agent · reason:off · worker ready \n 90% context left (10 used) · ◐ waking · daemon online · demo · model · agent · reason:off · worker ready \n 90% context left (10 used) · ○ offline · Ctrl-Shift-R to retry · daemon offline · demo · model · agent · reason:off · worker ready "
         );
 
         let colors = [
@@ -366,7 +389,7 @@ mod tests {
             FooterRuntimeState::Offline,
         ]
         .into_iter()
-        .map(|state| runtime_spans(state, "Esc")[0].style.fg)
+        .map(|state| runtime_spans(state, "Esc", "Ctrl-Shift-R")[0].style.fg)
         .collect::<Vec<_>>();
         assert_eq!(
             colors,
@@ -381,7 +404,7 @@ mod tests {
 
     #[test]
     fn generating_runtime_segment_matches_interrupt_hint_shape() {
-        let spans = runtime_spans(FooterRuntimeState::Generating, "Esc");
+        let spans = runtime_spans(FooterRuntimeState::Generating, "Esc", "Ctrl-Shift-R");
         let rendered = spans
             .iter()
             .map(|span| span.content.as_ref())
@@ -395,7 +418,7 @@ mod tests {
 
     #[test]
     fn generating_runtime_segment_uses_supplied_interrupt_key() {
-        let spans = runtime_spans(FooterRuntimeState::Generating, "Ctrl-C");
+        let spans = runtime_spans(FooterRuntimeState::Generating, "Ctrl-C", "Ctrl-Shift-R");
         let rendered = spans
             .iter()
             .map(|span| span.content.as_ref())
