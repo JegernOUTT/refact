@@ -7,16 +7,16 @@ import diagramStyles from "./DiagramBlock.module.css";
 import classNames from "classnames";
 import { useAppearance } from "../../hooks/useAppearance";
 import { reportBuddyFrontendError } from "../../features/Buddy/reportBuddyFrontendError";
-import {
-  clampPan,
-  makeCrispSvg,
-  parseSvgMeta,
-  type SvgMeta,
-} from "./renderUtils";
+import { makeCrispSvg, parseSvgMeta, type SvgMeta } from "./renderUtils";
 
 type MermaidTheme = "dark" | "light";
+type FlowchartRenderer = "dagre-wrapper" | "elk";
 
-let mermaidInitializedTheme: MermaidTheme | null = null;
+let mermaidInitializedConfig: {
+  theme: MermaidTheme;
+  flowchartRenderer: FlowchartRenderer;
+} | null = null;
+let mermaidElkAvailable: boolean | null = null;
 let mermaidTaskQueue: Promise<unknown> = Promise.resolve();
 const REPORTED_MERMAID_ERRORS = new Map<string, number>();
 const MERMAID_ERROR_REPORT_INTERVAL_MS = 60_000;
@@ -189,6 +189,98 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   });
 }
 
+function isRenderTimeout(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.startsWith("Mermaid render timed out after ")
+  );
+}
+
+function isFlowchart(
+  mermaid: (typeof import("mermaid"))["default"],
+  code: string,
+): boolean {
+  try {
+    const type = mermaid.detectType(code);
+    return (
+      type === "flowchart" ||
+      type === "flowchart-v2" ||
+      type === "flowchart-elk"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sourceRequestsElkLayout(code: string): boolean {
+  const frontmatter =
+    /^\s*---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/u.exec(code)?.[1] ?? "";
+  const initDirective = /^\s*%%\{init:\s*(.*?)\s*\}%%/su.exec(code)?.[1] ?? "";
+
+  return (
+    /(?:^|\n)\s*flowchart-elk\b/imu.test(code) ||
+    /\b(?:defaultRenderer|layout)\b[^,\n}]*\belk\b/iu.test(frontmatter) ||
+    /\b(?:defaultRenderer|layout)\b[^,\n}]*\belk\b/iu.test(initDirective)
+  );
+}
+
+async function canUseElkLayout(
+  mermaid: (typeof import("mermaid"))["default"],
+): Promise<boolean> {
+  if (mermaidElkAvailable !== null) return mermaidElkAvailable;
+
+  try {
+    const elkLayouts = (
+      await withTimeout(
+        import("@mermaid-js/layout-elk"),
+        MERMAID_RENDER_TIMEOUT_MS,
+      )
+    ).default;
+    mermaid.registerLayoutLoaders(elkLayouts);
+    mermaidElkAvailable = true;
+  } catch {
+    mermaidElkAvailable = false;
+    return false;
+  }
+
+  return mermaidElkAvailable;
+}
+
+function initializeMermaid(
+  mermaid: (typeof import("mermaid"))["default"],
+  theme: MermaidTheme,
+  flowchartRenderer: FlowchartRenderer,
+): void {
+  if (
+    mermaidInitializedConfig?.theme === theme &&
+    mermaidInitializedConfig.flowchartRenderer === flowchartRenderer
+  ) {
+    return;
+  }
+
+  const fontFamily = resolveAppFontFamily();
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: theme === "dark" ? "dark" : "default",
+    securityLevel: "strict",
+    fontFamily,
+    themeVariables: {
+      ...createMermaidThemeVariables(theme),
+      fontFamily,
+    },
+    flowchart: {
+      defaultRenderer: flowchartRenderer,
+      curve: "linear",
+      htmlLabels: false,
+      nodeSpacing: 70,
+      padding: 16,
+      rankSpacing: 90,
+      wrappingWidth: 240,
+    },
+  });
+  mermaidInitializedConfig = { theme, flowchartRenderer };
+}
+
 // Serializes mermaid.initialize + mermaid.render pairs. mermaid.initialize is
 // global, so without serialization two blocks rendering concurrently after a
 // theme change can race and render with the wrong theme variables. Each task
@@ -199,30 +291,32 @@ function enqueueMermaidRender(
   id: string,
   code: string,
 ): Promise<{ svg: string }> {
-  const task = mermaidTaskQueue.then(() =>
-    withTimeout(
-      (async () => {
-        const mermaid = (await import("mermaid")).default;
-        if (mermaidInitializedTheme !== theme) {
-          const fontFamily = resolveAppFontFamily();
-          mermaid.initialize({
-            startOnLoad: false,
-            theme: theme === "dark" ? "dark" : "default",
-            securityLevel: "strict",
-            fontFamily,
-            themeVariables: {
-              ...createMermaidThemeVariables(theme),
-              fontFamily,
-            },
-            flowchart: { curve: "basis", padding: 16, htmlLabels: false },
-          });
-          mermaidInitializedTheme = theme;
-        }
-        return mermaid.render(id, code);
-      })(),
+  const task = mermaidTaskQueue.then(async () => {
+    const mermaidModule = await withTimeout(
+      import("mermaid"),
       MERMAID_RENDER_TIMEOUT_MS,
-    ),
-  );
+    );
+    const mermaid = mermaidModule.default;
+    const flowchart = isFlowchart(mermaid, code);
+    const flowchartRenderer: FlowchartRenderer =
+      flowchart && (await canUseElkLayout(mermaid)) ? "elk" : "dagre-wrapper";
+    const retriesWithDagre =
+      flowchartRenderer === "elk" && !sourceRequestsElkLayout(code);
+    initializeMermaid(mermaid, theme, flowchartRenderer);
+
+    try {
+      return await withTimeout(
+        mermaid.render(id, code),
+        MERMAID_RENDER_TIMEOUT_MS,
+      );
+    } catch (error) {
+      if (!retriesWithDagre || isRenderTimeout(error)) throw error;
+
+      document.getElementById(id)?.remove();
+      initializeMermaid(mermaid, theme, "dagre-wrapper");
+      return withTimeout(mermaid.render(id, code), MERMAID_RENDER_TIMEOUT_MS);
+    }
+  });
   mermaidTaskQueue = task.then(
     () => undefined,
     () => undefined,
@@ -232,8 +326,6 @@ function enqueueMermaidRender(
 
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 10;
-const ZOOM_SENSITIVITY = 0.003;
-const FIT_PADDING = 16;
 
 function clampScale(s: number) {
   return Math.min(MAX_SCALE, Math.max(MIN_SCALE, s));
@@ -249,42 +341,14 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
   const [svgMeta, setSvgMeta] = useState<SvgMeta | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSource, setShowSource] = useState(false);
-  const [dragging, setDragging] = useState(false);
-  const [panX, setPanX] = useState(0);
-  const [panY, setPanY] = useState(0);
   const [scale, setScale] = useState(1);
 
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  const canvasCleanupRef = useRef<(() => void) | null>(null);
-  const dragStart = useRef({ x: 0, y: 0, px: 0, py: 0 });
-  const userInteractedRef = useRef(false);
   const renderSeqRef = useRef(0);
 
   const uniqueId = useId().replace(/:/g, "_");
   const { appearance } = useAppearance();
   const theme: MermaidTheme = appearance === "dark" ? "dark" : "light";
-
-  const fitToContainer = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !svgMeta) return;
-
-    const cw = canvas.clientWidth;
-    const ch = canvas.clientHeight;
-    const { width: sw, height: sh } = svgMeta;
-
-    const availW = cw - FIT_PADDING * 2;
-    const availH = ch - FIT_PADDING * 2;
-    if (sw <= 0 || sh <= 0 || availW <= 0 || availH <= 0) return;
-
-    const s = clampScale(Math.min(availW / sw, availH / sh));
-
-    setPanX((cw - sw * s) / 2);
-    setPanY((ch - sh * s) / 2);
-    setScale(s);
-  }, [svgMeta]);
-
-  const fitRef = useRef(fitToContainer);
-  fitRef.current = fitToContainer;
 
   useEffect(() => {
     let cancelled = false;
@@ -300,10 +364,15 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
 
         if (!cancelled) {
           const meta = parseSvgMeta(svg);
-          userInteractedRef.current = false;
+          const canvas = canvasRef.current;
+          if (canvas) {
+            canvas.scrollLeft = 0;
+            canvas.scrollTop = 0;
+          }
           setRawSvg(svg);
           setSvgMeta(meta);
           setError(null);
+          setScale(1);
         }
       } catch (err) {
         // Mermaid can leave a temporary element with the render id in the
@@ -337,115 +406,6 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
     };
   }, [code, uniqueId, theme]);
 
-  useEffect(() => {
-    if (!rawSvg || !svgMeta) return;
-    const raf = requestAnimationFrame(() => {
-      if (!userInteractedRef.current) fitRef.current();
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [rawSvg, svgMeta]);
-
-  const stateRef = useRef({ scale, panX, panY, svgMeta });
-  stateRef.current = { scale, panX, panY, svgMeta };
-
-  const canvasCallbackRef = useCallback((node: HTMLDivElement | null) => {
-    if (canvasCleanupRef.current) {
-      canvasCleanupRef.current();
-      canvasCleanupRef.current = null;
-    }
-
-    canvasRef.current = node;
-    if (!node) return;
-
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const { scale: s, panX: px, panY: py, svgMeta: meta } = stateRef.current;
-      if (!meta) return;
-
-      userInteractedRef.current = true;
-
-      const rect = node.getBoundingClientRect();
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
-
-      const delta = -e.deltaY * ZOOM_SENSITIVITY;
-      const newScale = clampScale(s * (1 + delta));
-      const ratio = newScale / s;
-
-      setPanX(
-        clampPan(
-          mx - (mx - px) * ratio,
-          node.clientWidth,
-          meta.width * newScale,
-        ),
-      );
-      setPanY(
-        clampPan(
-          my - (my - py) * ratio,
-          node.clientHeight,
-          meta.height * newScale,
-        ),
-      );
-      setScale(newScale);
-    };
-
-    node.addEventListener("wheel", onWheel, { passive: false });
-
-    let resizeObserver: ResizeObserver | null = null;
-    if (typeof ResizeObserver !== "undefined") {
-      // Refit whenever the canvas is (re)laid out — window resizes, panel
-      // resizes, and virtualization remounts — until the user pans or zooms.
-      resizeObserver = new ResizeObserver(() => {
-        if (!userInteractedRef.current) fitRef.current();
-      });
-      resizeObserver.observe(node);
-    }
-
-    canvasCleanupRef.current = () => {
-      node.removeEventListener("wheel", onWheel);
-      resizeObserver?.disconnect();
-    };
-  }, []);
-
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.button !== 0) return;
-      e.preventDefault();
-      userInteractedRef.current = true;
-      setDragging(true);
-      dragStart.current = { x: e.clientX, y: e.clientY, px: panX, py: panY };
-    },
-    [panX, panY],
-  );
-
-  useEffect(() => {
-    if (!dragging) return;
-
-    const handleMove = (e: MouseEvent) => {
-      const canvas = canvasRef.current;
-      const { scale: s, svgMeta: meta } = stateRef.current;
-      const nx = dragStart.current.px + e.clientX - dragStart.current.x;
-      const ny = dragStart.current.py + e.clientY - dragStart.current.y;
-      if (canvas && meta) {
-        setPanX(clampPan(nx, canvas.clientWidth, meta.width * s));
-        setPanY(clampPan(ny, canvas.clientHeight, meta.height * s));
-      } else {
-        setPanX(nx);
-        setPanY(ny);
-      }
-    };
-
-    const handleUp = () => setDragging(false);
-
-    window.addEventListener("mousemove", handleMove);
-    window.addEventListener("mouseup", handleUp);
-    return () => {
-      window.removeEventListener("mousemove", handleMove);
-      window.removeEventListener("mouseup", handleUp);
-    };
-  }, [dragging]);
-
   const handleToggleSource = useCallback(() => {
     setShowSource((v) => !v);
   }, []);
@@ -454,38 +414,33 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
     onCopyClick?.(code);
   }, [onCopyClick, code]);
 
-  const handleFit = useCallback(() => {
-    userInteractedRef.current = false;
-    fitToContainer();
-  }, [fitToContainer]);
+  const setZoom = useCallback(
+    (nextScale: number) => {
+      const canvas = canvasRef.current;
+      const previousScale = scale;
+      if (canvas && previousScale > 0) {
+        const ratio = nextScale / previousScale;
+        requestAnimationFrame(() => {
+          canvas.scrollLeft =
+            (canvas.scrollLeft + canvas.clientWidth / 2) * ratio -
+            canvas.clientWidth / 2;
+          canvas.scrollTop =
+            (canvas.scrollTop + canvas.clientHeight / 2) * ratio -
+            canvas.clientHeight / 2;
+        });
+      }
+      setScale(nextScale);
+    },
+    [scale],
+  );
+
+  const handleResetZoom = useCallback(() => setZoom(1), [setZoom]);
 
   const zoomBy = useCallback(
     (factor: number) => {
-      const canvas = canvasRef.current;
-      const meta = stateRef.current.svgMeta;
-      if (!canvas || !meta) return;
-      userInteractedRef.current = true;
-      const cx = canvas.clientWidth / 2;
-      const cy = canvas.clientHeight / 2;
-      const newScale = clampScale(scale * factor);
-      const ratio = newScale / scale;
-      setPanX(
-        clampPan(
-          cx - (cx - panX) * ratio,
-          canvas.clientWidth,
-          meta.width * newScale,
-        ),
-      );
-      setPanY(
-        clampPan(
-          cy - (cy - panY) * ratio,
-          canvas.clientHeight,
-          meta.height * newScale,
-        ),
-      );
-      setScale(newScale);
+      setZoom(clampScale(scale * factor));
     },
-    [scale, panX, panY],
+    [scale, setZoom],
   );
 
   const handleZoomIn = useCallback(() => zoomBy(1.4), [zoomBy]);
@@ -548,12 +503,12 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
                   <IconButton
                     size="sm"
                     variant="ghost"
-                    onClick={handleFit}
-                    aria-label="Fit to view"
+                    onClick={handleResetZoom}
+                    aria-label="Reset zoom to 100%"
                     icon={RotateCcw}
                   />
                 </Tooltip.Trigger>
-                <Tooltip.Content>Fit to view</Tooltip.Content>
+                <Tooltip.Content>Reset zoom to 100%</Tooltip.Content>
               </Tooltip>
             </>
           )}
@@ -596,19 +551,15 @@ const _MermaidBlock: React.FC<MermaidBlockProps> = ({ code, onCopyClick }) => {
           </div>
         ) : crispSvg ? (
           <div
-            ref={canvasCallbackRef}
-            className={classNames(
-              diagramStyles.diagram_canvas,
-              dragging && diagramStyles.diagram_canvas_dragging,
-            )}
-            onMouseDown={handleMouseDown}
+            data-testid="mermaid-canvas"
+            ref={canvasRef}
+            tabIndex={0}
+            aria-label="Mermaid diagram"
+            className={classNames("scrollX", diagramStyles.diagram_canvas)}
           >
             <div
               className={diagramStyles.diagram_render}
               style={{
-                position: "absolute",
-                left: panX,
-                top: panY,
                 width: displayW,
                 height: displayH,
               }}

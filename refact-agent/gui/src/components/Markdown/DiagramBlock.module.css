@@ -1,13 +1,21 @@
 .diagram_container {
+  width: fit-content;
+  min-width: min(
+    100%,
+    calc(
+      6 * var(--rf-control-h-icon-sm) + var(--rf-control-h-lg) + 7 *
+        var(--rf-space-1)
+    )
+  );
+  min-height: calc(var(--rf-control-h-icon-sm) + var(--rf-space-4));
   position: relative;
-  min-width: 0;
   max-width: 100%;
   border-radius: var(--rf-radius-card);
   background: var(--rf-surface-glass);
   border: var(--rf-hairline) solid var(--rf-border);
   box-shadow: var(--rf-elev-panel);
   backdrop-filter: blur(var(--rf-blur-overlay));
-  overflow: hidden;
+  overflow: visible;
 }
 
 @media (prefers-reduced-transparency: reduce) {
@@ -60,17 +68,15 @@
 }
 
 .diagram_canvas {
-  position: relative;
-  height: clamp(240px, 50vh, 560px);
-  cursor: grab;
-  touch-action: none;
-  overflow: hidden;
-  user-select: none;
-  -webkit-user-select: none;
+  width: fit-content;
+  max-width: 100%;
+  max-height: clamp(240px, 70vh, 720px);
+  overflow-y: auto;
 }
 
-.diagram_canvas_dragging {
-  cursor: grabbing;
+.diagram_canvas:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-color-accent);
+  outline-offset: calc(-1 * var(--rf-focus-ring-w));
 }
 
 .diagram_render {
@@ -85,15 +91,15 @@
 
 /* Non-interactive fallback when SVG metadata cannot be derived. */
 .diagram_fallback {
+  width: fit-content;
+  max-width: 100%;
   overflow: auto;
-  max-height: clamp(240px, 50vh, 560px);
-  padding: var(--rf-space-3);
+  max-height: clamp(240px, 70vh, 720px);
 }
 
 .diagram_fallback svg {
   display: block;
-  max-width: 100%;
-  height: auto;
+  max-width: none;
 }
 
 /* Standalone SVG preview: intrinsic sizing on a content-neutral checkerboard
@@ -119,7 +125,6 @@
   justify-content: center;
   align-items: center;
   padding: var(--rf-space-4);
-  height: clamp(240px, 50vh, 560px);
   color: var(--rf-color-muted);
   font-size: var(--rf-text-2);
 }

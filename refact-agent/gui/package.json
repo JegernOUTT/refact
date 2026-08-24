@@ -5,7 +5,8 @@
   "license": "BSD-3-Clause",
   "files": [
     "dist",
-    "dist/chat/style.css"
+    "dist/chat/style.css",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "main": "dist/chat/index.umd.cjs",
   "module": "dist/chat/index.js",
@@ -58,6 +59,7 @@
     "lint:boundaries": "eslint \"src/components/ui/**/*.{ts,tsx}\" \"src/styles/**/*.{ts,tsx}\" --max-warnings 0 --no-error-on-unmatched-pattern"
   },
   "dependencies": {
+    "@mermaid-js/layout-elk": "^0.2.2",
     "@parcel/watcher": "^2.5.1",
     "@reduxjs/toolkit": "^2.2.7",
     "@tanstack/react-table": "^8.20.6",

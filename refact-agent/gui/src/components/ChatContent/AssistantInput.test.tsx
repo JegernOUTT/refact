@@ -6,10 +6,17 @@ const mermaidMock = vi.hoisted(() => ({
     }),
   ),
   initialize: vi.fn(),
+  registerLayoutLoaders: vi.fn(),
+  detectType: vi.fn(() => "flowchart-v2"),
 }));
+const elkLayoutsMock = vi.hoisted(() => ({ layouts: [] }));
 
 vi.mock("mermaid", () => ({
   default: mermaidMock,
+}));
+
+vi.mock("@mermaid-js/layout-elk", () => ({
+  default: elkLayoutsMock,
 }));
 
 vi.mock("../../features/Buddy/reportBuddyFrontendError", async () => {
@@ -36,12 +43,23 @@ function expandReasoning() {
 
 type MermaidInitializeConfig = {
   themeVariables?: Record<string, string>;
+  flowchart?: {
+    curve?: string;
+    defaultRenderer?: string;
+    htmlLabels?: boolean;
+    nodeSpacing?: number;
+    rankSpacing?: number;
+    wrappingWidth?: number;
+  };
 };
 
 describe("AssistantInput", () => {
   beforeEach(() => {
     mermaidMock.render.mockClear();
     mermaidMock.initialize.mockClear();
+    mermaidMock.registerLayoutLoaders.mockClear();
+    mermaidMock.detectType.mockReset();
+    mermaidMock.detectType.mockReturnValue("flowchart-v2");
   });
 
   test("renders streaming message content as markdown immediately", () => {
@@ -96,6 +114,84 @@ describe("AssistantInput", () => {
 
     expect(themeVariables).toBeDefined();
     expect(JSON.stringify(themeVariables)).not.toContain("var(");
+    expect(initializeConfig?.flowchart).toMatchObject({
+      curve: "linear",
+      defaultRenderer: "elk",
+      htmlLabels: false,
+      nodeSpacing: 70,
+      rankSpacing: 90,
+      wrappingWidth: 240,
+    });
+    expect(mermaidMock.registerLayoutLoaders).toHaveBeenCalledWith(
+      elkLayoutsMock,
+    );
+    expect(screen.getByText("100%")).toBeInTheDocument();
+
+    const canvas = screen.getByTestId("mermaid-canvas");
+    const renderedSvg = canvas.querySelector("svg");
+    expect(renderedSvg?.parentElement).toHaveStyle({
+      width: "10px",
+      height: "10px",
+    });
+
+    const wheelEvent = new WheelEvent("wheel", {
+      cancelable: true,
+      deltaY: 100,
+    });
+    canvas.dispatchEvent(wheelEvent);
+    expect(wheelEvent.defaultPrevented).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
+    expect(screen.getByText("140%")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Reset zoom to 100%" }));
+    expect(screen.getByText("100%")).toBeInTheDocument();
+  });
+
+  test("falls back to Dagre when ELK cannot lay out a flowchart", async () => {
+    mermaidMock.render
+      .mockRejectedValueOnce(new Error("ELK layout failed"))
+      .mockResolvedValueOnce({
+        svg: '<svg viewBox="0 0 10 10" width="10" height="10"></svg>',
+      });
+
+    render(
+      <AssistantInput message={"```mermaid\nflowchart LR\nA --> B\n```"} />,
+    );
+
+    await waitFor(() => expect(mermaidMock.render).toHaveBeenCalledTimes(2));
+
+    const lastInitializeConfig = mermaidMock.initialize.mock.calls.at(
+      -1,
+    )?.[0] as MermaidInitializeConfig | undefined;
+    expect(lastInitializeConfig?.flowchart?.defaultRenderer).toBe(
+      "dagre-wrapper",
+    );
+  });
+
+  test("preserves an authored ELK layout when its render fails", async () => {
+    mermaidMock.detectType.mockReturnValue("flowchart-elk");
+    mermaidMock.render.mockRejectedValueOnce(new Error("ELK layout failed"));
+
+    render(
+      <AssistantInput message={"```mermaid\nflowchart-elk LR\nA --> B\n```"} />,
+    );
+
+    await waitFor(() => expect(mermaidMock.render).toHaveBeenCalledTimes(1));
+  });
+
+  test("does not load ELK for a non-flowchart Mermaid diagram", async () => {
+    mermaidMock.detectType.mockReturnValue("sequence");
+
+    render(
+      <AssistantInput
+        message={
+          "```mermaid\nsequenceDiagram\nAlice->>Bob: flowchart update\n```"
+        }
+      />,
+    );
+
+    await waitFor(() => expect(mermaidMock.render).toHaveBeenCalledTimes(1));
+    expect(mermaidMock.registerLayoutLoaders).not.toHaveBeenCalled();
   });
 
   test("keeps incomplete streaming html fence as raw code until the fence closes", () => {
