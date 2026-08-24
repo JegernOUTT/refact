@@ -3,7 +3,7 @@
 Run the provider-free quick baseline:
 
 ```bash
-cd refact-agent/engine && cargo run -p refact-lsp --bin concurrent_chat_bench -- --quick
+cd refact-agent/engine && cargo run -p refact-lsp --features bench --bin concurrent_chat_bench -- --quick
 ```
 
 The command writes one `refact.concurrent_chat_benchmark.v1` JSON report to stdout. It runs the fixed 1/4/8/16/32-chat, logical 1/10/50 MiB, 10/50/200-descriptor trajectory matrix plus a provider-free `turn-tool-pool-8-chats-50-tools` fixture in an isolated Tokio workspace. Quick mode caps materialized history at 8 KiB and reports both logical and materialized history bytes.
@@ -17,7 +17,7 @@ The turn-pool fixture serializes `REFACT_TOOL_CATALOG_SNAPSHOTS` while comparing
 Run the full-history soak benchmark explicitly in a release build:
 
 ```bash
-cd refact-agent/engine && cargo run --release -p refact-lsp --bin concurrent_chat_bench -- --soak
+cd refact-agent/engine && cargo run --release -p refact-lsp --features bench --bin concurrent_chat_bench -- --soak
 ```
 
 CI runs the bounded quick fixtures and structural invariant tests; soak is for deliberate local before/after measurements.
@@ -26,7 +26,7 @@ Run the provider-free full-system fixture in CI-sized form through its unit test
 
 ```bash
 cd refact-agent/engine && cargo test -p refact-lsp --lib chat::perf_harness::tests::full_soak_ci_fixture_starts_required_subsystems -- --test-threads=1
-cd refact-agent/engine && cargo run --release -p refact-lsp --bin concurrent_chat_bench -- --full-soak > /tmp/refact-full-soak.json
+cd refact-agent/engine && cargo run --release -p refact-lsp --features bench --bin concurrent_chat_bench -- --full-soak > /tmp/refact-full-soak.json
 ```
 
 `--full-soak` uses an isolated workspace and exercises actual chat sessions, queue processors, trajectory writer/index coordinator, trajectory watcher, CodeGraph's in-memory service and background scheduler, Buddy, task/goal and background-agent monitors, scheduler, exec registry, and session-cleanup startup. It uses deterministic local generation deltas and local tools; it makes no provider or network calls. The report compares `legacy` and `optimized` rollout switches serially on the same executable and machine, and labels this accurately as a **synthetic same-version comparison**, not a historical Wave 0 baseline.
@@ -38,7 +38,7 @@ Full soak sets all five switches to `0` for `legacy` and all five to `1` for `op
 Run the focused high-rate delta and large-history fanout fixture with:
 
 ```bash
-cd refact-agent/engine && cargo run --release -p refact-lsp --bin concurrent_chat_bench -- --fanout > /tmp/refact-chat-fanout.json
+cd refact-agent/engine && cargo run --release -p refact-lsp --features bench --bin concurrent_chat_bench -- --fanout > /tmp/refact-chat-fanout.json
 ```
 
 `--fanout` streams 512 deltas through a 3-active/1-lagging subscriber setup against a 256-message, 1 MiB history. It reports deltas/sec, operations/bytes per delta, emit-lock wait, SSE serialize/broadcast and first-delta latency, large-history snapshot clone/serialization bytes and time, subscriber counts, and verified lag recovery. It fails if an active subscriber lags or recovery sequence monotonicity is broken.
