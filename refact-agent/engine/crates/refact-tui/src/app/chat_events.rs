@@ -97,6 +97,17 @@ impl App {
                 }
             }
         }
+        let statuses = ids
+            .iter()
+            .cloned()
+            .map(|id| (id, status))
+            .collect::<Vec<_>>();
+        if self.history.set_tool_statuses(&statuses)
+            && self.native_scrollback
+            && self.history.inserted_cell_count() > 0
+        {
+            self.resize_reflow.schedule_immediate();
+        }
     }
 
     pub(super) fn enqueue_approval(&mut self, modal: ApprovalModalState) {

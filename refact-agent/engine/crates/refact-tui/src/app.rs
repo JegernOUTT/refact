@@ -984,23 +984,44 @@ impl App {
         for (tool_call_id, status) in rollback.tool_statuses {
             self.set_tool_statuses(&[tool_call_id], status);
         }
+        let history_changed = self.history.remove_approval_scope(&scope);
         if let Some(index) = self.transcript.iter().rposition(|item| {
             matches!(item, TranscriptItem::Approval(approval, Some(_)) if approval.scope() == scope)
         }) {
             self.transcript.remove(index);
         }
+        if history_changed && self.native_scrollback && self.history.inserted_cell_count() > 0 {
+            self.resize_reflow.schedule_immediate();
+        }
     }
 
     fn tool_statuses(&self, tool_call_ids: &[String]) -> Vec<(String, ToolStatus)> {
-        self.transcript
+        let mut seen = HashSet::new();
+        let mut statuses = self
+            .transcript
             .iter()
             .filter_map(|item| match item {
-                TranscriptItem::Tool(card) if tool_call_ids.iter().any(|id| id == &card.id) => {
-                    Some((card.id.clone(), card.status))
-                }
+                TranscriptItem::Tool(card) if tool_call_ids.iter().any(|id| id == &card.id) => seen
+                    .insert(card.id.clone())
+                    .then_some((card.id.clone(), card.status)),
                 _ => None,
             })
-            .collect()
+            .collect::<Vec<_>>();
+        statuses.extend(
+            self.history
+                .tool_statuses(tool_call_ids)
+                .into_iter()
+                .filter(|(tool_call_id, _)| seen.insert(tool_call_id.clone())),
+        );
+        statuses
+    }
+
+    #[cfg(test)]
+    fn history_tool_status_for_test(&self, tool_call_id: &str) -> Option<ToolStatus> {
+        self.history
+            .tool_statuses(&[tool_call_id.to_string()])
+            .into_iter()
+            .find_map(|(id, status)| (id == tool_call_id).then_some(status))
     }
 
     fn persist_history(&mut self) {
@@ -6035,6 +6056,167 @@ new-chat = "ctrl-x"
             Some(modal) if modal.tool_call_ids() == ["call-1"]
         ));
         assert_eq!(app.approval_pending_clear_count(), 0);
+    }
+
+    #[test]
+    fn native_scrollback_tool_decision_failure_restores_pending_history() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.handle_chat_event(tool_call_delta_event(&app, "call-1"));
+        app.complete_tool(
+            "call-1",
+            "tool",
+            "done".to_string(),
+            ToolStatus::Succeeded,
+            now_ms(),
+        );
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+        app.handle_chat_event(pause_event(&app, "call-1", "shell"));
+
+        let AppAction::SendToolDecisions { rollback, .. } = app.handle_key(key(KeyCode::Char('y')))
+        else {
+            panic!("expected tool decision action");
+        };
+        assert_eq!(
+            app.history_tool_status_for_test("call-1"),
+            Some(ToolStatus::ApprovedOnce)
+        );
+
+        app.handle_command_finished(
+            CommandContextTag::ToolDecisions {
+                client_request_id: "decision-1".to_string(),
+                rollback,
+            },
+            Err("decision rejected".to_string()),
+        );
+
+        assert_eq!(
+            app.history_tool_status_for_test("call-1"),
+            Some(ToolStatus::AwaitingApproval)
+        );
+        assert!(matches!(
+            app.approval_modal(),
+            Some(modal) if modal.tool_call_ids() == ["call-1"]
+        ));
+        assert!(!app.resize_reflow.has_pending_reflow());
+    }
+
+    #[test]
+    fn native_scrollback_tool_decision_failure_reflows_drained_history() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.handle_chat_event(tool_call_delta_event(&app, "call-1"));
+        app.complete_tool(
+            "call-1",
+            "tool",
+            "done".to_string(),
+            ToolStatus::Succeeded,
+            now_ms(),
+        );
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+        app.handle_chat_event(pause_event(&app, "call-1", "shell"));
+
+        let AppAction::SendToolDecisions { rollback, .. } = app.handle_key(key(KeyCode::Char('y')))
+        else {
+            panic!("expected tool decision action");
+        };
+        app.pending_history_insertions(80);
+        assert_eq!(app.history_pending_count(), 0);
+        app.resize_reflow.clear_pending_reflow();
+
+        app.handle_command_finished(
+            CommandContextTag::ToolDecisions {
+                client_request_id: "decision-1".to_string(),
+                rollback,
+            },
+            Err("decision rejected".to_string()),
+        );
+
+        assert_eq!(
+            app.history_tool_status_for_test("call-1"),
+            Some(ToolStatus::AwaitingApproval)
+        );
+        assert!(app.resize_reflow.has_pending_reflow());
+    }
+
+    #[test]
+    fn native_scrollback_out_of_order_failure_restores_only_its_scope() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        for tool_call_id in ["call-a", "call-b"] {
+            app.handle_chat_event(tool_call_delta_event(&app, tool_call_id));
+            app.complete_tool(
+                tool_call_id,
+                "tool",
+                "done".to_string(),
+                ToolStatus::Succeeded,
+                now_ms(),
+            );
+        }
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({}),
+        });
+        app.handle_chat_event(pause_event(&app, "call-a", "shell"));
+        app.handle_chat_event(pause_event(&app, "call-b", "cat"));
+
+        let AppAction::SendToolDecisions {
+            client_request_id: first_id,
+            rollback: first_rollback,
+            ..
+        } = app.handle_key(key(KeyCode::Char('y')))
+        else {
+            panic!("expected first tool decision action");
+        };
+        let AppAction::SendToolDecisions {
+            client_request_id: second_id,
+            rollback: second_rollback,
+            ..
+        } = app.handle_key(key(KeyCode::Char('n')))
+        else {
+            panic!("expected second tool decision action");
+        };
+
+        app.handle_command_finished(
+            CommandContextTag::ToolDecisions {
+                client_request_id: second_id,
+                rollback: second_rollback,
+            },
+            Ok(()),
+        );
+        app.handle_command_finished(
+            CommandContextTag::ToolDecisions {
+                client_request_id: first_id,
+                rollback: first_rollback,
+            },
+            Err("first decision rejected".to_string()),
+        );
+
+        assert_eq!(
+            app.history_tool_status_for_test("call-a"),
+            Some(ToolStatus::AwaitingApproval)
+        );
+        assert_eq!(
+            app.history_tool_status_for_test("call-b"),
+            Some(ToolStatus::Denied)
+        );
+        assert!(matches!(
+            app.approval_modal(),
+            Some(modal) if modal.tool_call_ids() == ["call-a"]
+        ));
     }
 
     #[test]
