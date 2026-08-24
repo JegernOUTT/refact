@@ -8383,17 +8383,23 @@ mod tests {
     #[tokio::test]
     async fn performance_diagnostics_record_failed_trajectory_commit() {
         let _lock = serial_test_guard();
-        let (_guard, sink, _) = install_perf_recorder();
+        let (_guard, sink, recorder) = install_perf_recorder();
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        let result =
-            save_trajectory_snapshot(gcx, test_snapshot("invalid/id", "Bad", Vec::new())).await;
+        let chat_id = "invalid/id";
+        let result = save_trajectory_snapshot(gcx, test_snapshot(chat_id, "Bad", Vec::new())).await;
 
         assert!(result.is_err());
-        let events = sink.events();
+        let expected_chat_hash = recorder.hash_identity_for_test(chat_id);
+        let events = sink
+            .events()
+            .into_iter()
+            .filter(|event| {
+                event.component == PerfComponent::TrajectoryCommit.as_str()
+                    && event.outcome == PerfOutcome::Failure.as_str()
+                    && event.chat_id_hash.as_deref() == Some(expected_chat_hash.as_str())
+            })
+            .collect::<Vec<_>>();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].component, "trajectory.commit");
-        assert_eq!(events[0].outcome, "failure");
-        assert!(events[0].chat_id_hash.is_some());
     }
 
     #[serial]

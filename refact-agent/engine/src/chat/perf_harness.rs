@@ -51,6 +51,17 @@ const FANOUT_ACTIVE_SUBSCRIBER_COUNT: usize = 3;
 const FANOUT_EVENT_CHANNEL_CAPACITY: usize = 128;
 const FANOUT_SNAPSHOT_RUNS: usize = 8;
 
+fn benchmark_runtime_builder() -> Builder {
+    #[cfg(test)]
+    {
+        Builder::new_current_thread()
+    }
+    #[cfg(not(test))]
+    {
+        Builder::new_multi_thread()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TurnMemoryRetainedBytes {
     pub canonical_messages: usize,
@@ -834,7 +845,7 @@ pub fn run_benchmark(options: BenchmarkOptions) -> Result<ConcurrentChatBenchmar
     if options.measured_samples == 0 {
         return Err("measured_samples must be greater than zero".to_string());
     }
-    Builder::new_multi_thread()
+    benchmark_runtime_builder()
         .enable_all()
         .build()
         .map_err(|error| format!("failed to start benchmark Tokio runtime: {error}"))?
@@ -861,7 +872,7 @@ async fn run_benchmark_async(
 }
 
 pub fn run_ci_fixture() -> Result<WorkloadBenchmarkReport, String> {
-    Builder::new_multi_thread()
+    benchmark_runtime_builder()
         .enable_all()
         .build()
         .map_err(|error| format!("failed to start benchmark Tokio runtime: {error}"))?
@@ -876,7 +887,7 @@ pub fn run_ci_fixture() -> Result<WorkloadBenchmarkReport, String> {
 }
 
 pub fn run_tool_pool_ci_fixture() -> Result<ToolPoolWorkloadBenchmarkReport, String> {
-    Builder::new_multi_thread()
+    benchmark_runtime_builder()
         .enable_all()
         .build()
         .map_err(|error| format!("failed to start benchmark Tokio runtime: {error}"))?
@@ -899,7 +910,7 @@ pub fn run_full_soak_benchmark(
     if options.measured_samples == 0 {
         return Err("measured_samples must be greater than zero".to_string());
     }
-    Builder::new_multi_thread()
+    benchmark_runtime_builder()
         .enable_all()
         .build()
         .map_err(|error| format!("failed to start full soak Tokio runtime: {error}"))?
@@ -923,7 +934,7 @@ async fn run_full_soak_benchmark_async(
 }
 
 pub fn run_full_soak_ci_fixture() -> Result<FullSoakWorkloadBenchmarkReport, String> {
-    Builder::new_multi_thread()
+    benchmark_runtime_builder()
         .enable_all()
         .build()
         .map_err(|error| format!("failed to start full soak CI Tokio runtime: {error}"))?
@@ -938,7 +949,7 @@ pub fn run_full_soak_ci_fixture() -> Result<FullSoakWorkloadBenchmarkReport, Str
 }
 
 pub fn run_fanout_benchmark() -> Result<FanoutBenchmarkReport, String> {
-    Builder::new_multi_thread()
+    benchmark_runtime_builder()
         .enable_all()
         .build()
         .map_err(|error| format!("failed to start fanout Tokio runtime: {error}"))?
@@ -3530,7 +3541,7 @@ mod tests {
     fn repeated_real_saves_scale_observed_save_and_diagnostic_counts() {
         let mut workload = ConcurrentChatWorkload::ci_fixture();
         workload.rapid_same_chat_checkpoints = 7;
-        let report = Builder::new_multi_thread()
+        let report = benchmark_runtime_builder()
             .enable_all()
             .build()
             .expect("runtime starts")

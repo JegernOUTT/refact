@@ -1,7 +1,5 @@
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
-#[cfg(any(test, feature = "bench"))]
-use std::sync::RwLock;
 use std::time::Instant;
 
 use rand::RngCore;
@@ -380,11 +378,10 @@ static PROCESS_RECORDER: OnceLock<Arc<PerfRecorder>> = OnceLock::new();
 static PROCESS_RECORDER_INITIALIZED: OnceLock<()> = OnceLock::new();
 
 #[cfg(any(test, feature = "bench"))]
-static TEST_RECORDER: OnceLock<RwLock<Option<Arc<PerfRecorder>>>> = OnceLock::new();
-
-#[cfg(any(test, feature = "bench"))]
-fn test_recorder_slot() -> &'static RwLock<Option<Arc<PerfRecorder>>> {
-    TEST_RECORDER.get_or_init(|| RwLock::new(None))
+thread_local! {
+    static TEST_RECORDERS: std::cell::RefCell<Vec<Arc<PerfRecorder>>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
 }
 
 pub fn initialize_from_environment() {
@@ -405,10 +402,7 @@ fn active_recorder() -> Option<Arc<PerfRecorder>> {
     PROCESS_RECORDER.get().cloned().or_else(|| {
         #[cfg(any(test, feature = "bench"))]
         {
-            return test_recorder_slot()
-                .read()
-                .ok()
-                .and_then(|recorder| recorder.clone());
+            return TEST_RECORDERS.with(|recorders| recorders.borrow().last().cloned());
         }
         #[cfg(not(any(test, feature = "bench")))]
         None
@@ -494,25 +488,24 @@ fn span_with_recorder(
 
 #[cfg(any(test, feature = "bench"))]
 pub(crate) struct TestRecorderGuard {
-    previous: Option<Arc<PerfRecorder>>,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 #[cfg(any(test, feature = "bench"))]
 impl Drop for TestRecorderGuard {
     fn drop(&mut self) {
-        *test_recorder_slot()
-            .write()
-            .expect("performance recorder lock poisoned") = self.previous.take();
+        TEST_RECORDERS.with(|recorders| {
+            recorders.borrow_mut().pop();
+        });
     }
 }
 
 #[cfg(any(test, feature = "bench"))]
 pub(crate) fn install_test_recorder(recorder: Arc<PerfRecorder>) -> TestRecorderGuard {
-    let mut slot = test_recorder_slot()
-        .write()
-        .expect("performance recorder lock poisoned");
-    let previous = slot.replace(recorder);
-    TestRecorderGuard { previous }
+    TEST_RECORDERS.with(|recorders| recorders.borrow_mut().push(recorder));
+    TestRecorderGuard {
+        _not_send: std::marker::PhantomData,
+    }
 }
 
 #[cfg(any(test, feature = "bench"))]
@@ -744,5 +737,96 @@ mod tests {
             event.execution_class,
             Some(ToolExecutionClass::Parallel.as_u8())
         );
+    }
+
+    #[test]
+    fn test_recorders_isolate_former_parallel_failures_and_restore_after_panics() {
+        use std::sync::Barrier;
+
+        let panic_sink = Arc::new(MemoryPerfSink::new());
+        let panic_recorder = Arc::new(PerfRecorder::with_salt(
+            Arc::new(TestClock::new(0)),
+            panic_sink.clone(),
+            [41; 32],
+        ));
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = install_test_recorder(panic_recorder);
+            record(
+                PerfComponent::TrajectoryCommit,
+                Some("panic-restoration"),
+                PerfOutcome::Failure,
+                1,
+                None,
+                None,
+                None,
+            );
+            panic!("test recorder scope panic");
+        }));
+        assert!(panic_result.is_err());
+        assert_eq!(panic_sink.events().len(), 1);
+
+        let barrier = Arc::new(Barrier::new(2));
+        let failed_commit_sink = Arc::new(MemoryPerfSink::new());
+        let full_soak_sink = Arc::new(MemoryPerfSink::new());
+        let failed_commit_recorder = Arc::new(PerfRecorder::with_salt(
+            Arc::new(TestClock::new(0)),
+            failed_commit_sink.clone(),
+            [42; 32],
+        ));
+        let full_soak_recorder = Arc::new(PerfRecorder::with_salt(
+            Arc::new(TestClock::new(0)),
+            full_soak_sink.clone(),
+            [43; 32],
+        ));
+
+        let failed_commit_thread = std::thread::spawn({
+            let barrier = barrier.clone();
+            move || {
+                let _guard = install_test_recorder(failed_commit_recorder);
+                barrier.wait();
+                for _ in 0..100 {
+                    record(
+                        PerfComponent::TrajectoryCommit,
+                        Some("failed-trajectory-commit"),
+                        PerfOutcome::Failure,
+                        1,
+                        None,
+                        None,
+                        None,
+                    );
+                }
+            }
+        });
+        let full_soak_thread = std::thread::spawn({
+            let barrier = barrier.clone();
+            move || {
+                let _guard = install_test_recorder(full_soak_recorder);
+                barrier.wait();
+                for _ in 0..100 {
+                    record(
+                        PerfComponent::ToolRuntime,
+                        Some("full-soak-fixture"),
+                        PerfOutcome::Success,
+                        1,
+                        None,
+                        None,
+                        None,
+                    );
+                }
+            }
+        });
+        failed_commit_thread.join().unwrap();
+        full_soak_thread.join().unwrap();
+
+        assert!(failed_commit_sink.events().iter().all(|event| {
+            event.component == PerfComponent::TrajectoryCommit.as_str()
+                && event.outcome == PerfOutcome::Failure.as_str()
+        }));
+        assert_eq!(failed_commit_sink.events().len(), 100);
+        assert!(full_soak_sink.events().iter().all(|event| {
+            event.component == PerfComponent::ToolRuntime.as_str()
+                && event.outcome == PerfOutcome::Success.as_str()
+        }));
+        assert_eq!(full_soak_sink.events().len(), 100);
     }
 }
