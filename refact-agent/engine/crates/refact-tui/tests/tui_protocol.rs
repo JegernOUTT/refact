@@ -1110,7 +1110,7 @@ async fn scripted_fake_worker_pause_approve_resumes_stream() {
     let mut stream = client.subscribe_chat("p1", "chat-1").await.unwrap();
 
     client
-        .send_user_message("p1", "chat-1", "hello")
+        .send_user_message("p1", "chat-1", "request-1", "message-1", "hello")
         .await
         .unwrap();
 

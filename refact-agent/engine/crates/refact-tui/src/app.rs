@@ -3361,11 +3361,11 @@ new-chat = "ctrl-x"
     }
 
     #[test]
-    fn new_logical_send_gets_a_new_request_id() {
+    fn new_logical_send_gets_a_new_correlation_pair() {
         let mut app = App::new(project());
         app.composer.set_text("first");
         let first = match app.handle_key(key(KeyCode::Enter)) {
-            AppAction::SendMessage { correlation, .. } => correlation.client_request_id,
+            AppAction::SendMessage { correlation, .. } => correlation,
             other => panic!("unexpected action: {other:?}"),
         };
         app.handle_chat_event(ChatEvent {
@@ -3376,11 +3376,12 @@ new-chat = "ctrl-x"
         });
         app.composer.set_text("second");
         let second = match app.handle_key(key(KeyCode::Enter)) {
-            AppAction::SendMessage { correlation, .. } => correlation.client_request_id,
+            AppAction::SendMessage { correlation, .. } => correlation,
             other => panic!("unexpected action: {other:?}"),
         };
 
-        assert_ne!(first, second);
+        assert_ne!(first.client_request_id, second.client_request_id);
+        assert_ne!(first.client_message_id, second.client_message_id);
     }
 
     #[test]

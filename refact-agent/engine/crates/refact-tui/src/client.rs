@@ -1082,22 +1082,6 @@ impl DaemonClient {
         &self,
         project_id: &str,
         chat_id: &str,
-        content: &str,
-    ) -> Result<(), ClientError> {
-        self.send_user_message_with_ids(
-            project_id,
-            chat_id,
-            &request_id("user-message"),
-            &request_id("client-message"),
-            content,
-        )
-        .await
-    }
-
-    pub async fn send_user_message_with_ids(
-        &self,
-        project_id: &str,
-        chat_id: &str,
         client_request_id: &str,
         client_message_id: &str,
         content: &str,
@@ -1111,23 +1095,6 @@ impl DaemonClient {
                 "type": "user_message",
                 "content": content,
             }),
-        )
-        .await
-    }
-
-    pub async fn send_user_message_with_id(
-        &self,
-        project_id: &str,
-        chat_id: &str,
-        client_request_id: &str,
-        content: &str,
-    ) -> Result<(), ClientError> {
-        self.send_user_message_with_ids(
-            project_id,
-            chat_id,
-            client_request_id,
-            &request_id("client-message"),
-            content,
         )
         .await
     }
@@ -3041,7 +3008,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_user_message_delivery_reuses_correlation_ids() {
+    async fn send_user_message_reuses_explicit_correlation_pair_for_retry() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (requests, received) = mpsc::channel();
@@ -3059,11 +3026,11 @@ mod tests {
         let client = DaemonClient::new(format!("http://{addr}"), None).unwrap();
 
         client
-            .send_user_message_with_ids("project", "chat", "request-1", "message-1", "hello")
+            .send_user_message("project", "chat", "request-1", "message-1", "hello")
             .await
             .unwrap();
         client
-            .send_user_message_with_ids("project", "chat", "request-1", "message-1", "hello")
+            .send_user_message("project", "chat", "request-1", "message-1", "hello")
             .await
             .unwrap();
 

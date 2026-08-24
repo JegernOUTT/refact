@@ -916,7 +916,7 @@ pub(super) async fn run_action(
                                 .await?;
                         }
                         client
-                            .send_user_message_with_ids(
+                            .send_user_message(
                                 &project_id,
                                 &chat_id,
                                 &correlation.client_request_id,
