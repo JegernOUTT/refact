@@ -24,6 +24,8 @@ use crate::chat::perf_diagnostics::{
     self, MemoryPerfSink, PerfClock, PerfComponent, PerfEvent, PerfRecorder,
 };
 use crate::chat::prepare::build_canonical_openai_tools;
+use crate::chat::types::{ChatEvent, ChatSession, DeltaOp, EventEnvelope};
+use crate::chat::generation::batch_stream_delta_ops;
 use crate::chat::trajectories::{
     find_trajectory_path, load_trajectory_for_chat, persist_trajectory_snapshot_with_intent,
     trajectory_snapshot_from_session,
@@ -38,9 +40,16 @@ use crate::tools::tools_description::{
 };
 
 pub const CONCURRENT_CHAT_BENCHMARK_SCHEMA: &str = "refact.concurrent_chat_benchmark.v1";
+pub const FANOUT_BENCHMARK_SCHEMA: &str = "refact.chat_fanout_benchmark.v1";
 const QUICK_HISTORY_BYTES_CAP: usize = 8 * 1024;
 const RAPID_CHECKPOINTS_PER_CHAT: u64 = 4;
 pub const TURN_MEMORY_FLEET_CHAT_COUNTS: [usize; 2] = [10, 100];
+const FANOUT_HISTORY_MESSAGE_COUNT: usize = 256;
+const FANOUT_HISTORY_MESSAGE_BYTES: usize = 4 * 1024;
+const FANOUT_DELTA_COUNT: usize = 512;
+const FANOUT_ACTIVE_SUBSCRIBER_COUNT: usize = 3;
+const FANOUT_EVENT_CHANNEL_CAPACITY: usize = 128;
+const FANOUT_SNAPSHOT_RUNS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TurnMemoryRetainedBytes {
@@ -537,6 +546,64 @@ impl LatencySummary {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FanoutBenchmarkWorkload {
+    pub history_message_count: usize,
+    pub history_message_bytes: usize,
+    pub delta_count: usize,
+    pub active_subscriber_count: usize,
+    pub lagging_subscriber_count: usize,
+    pub event_channel_capacity: usize,
+    pub snapshot_runs: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FanoutDeltaMetrics {
+    pub deltas_per_second: f64,
+    pub operations_per_delta: f64,
+    pub bytes_per_delta: f64,
+    pub coalesce_window_ms: u64,
+    pub baseline_event_count: usize,
+    pub coalesced_event_count: usize,
+    pub baseline_serialize_cpu_us: u64,
+    pub coalesced_serialize_cpu_us: u64,
+    pub serialization_cpu_reduction_percent: f64,
+    pub projected_first_delta_latency_us: u64,
+    pub emit_lock_wait_latency: LatencySummary,
+    pub serialize_latency: LatencySummary,
+    pub broadcast_latency: LatencySummary,
+    pub first_delta_latency: LatencySummary,
+    pub serialization_and_broadcast_percent_of_emit_wall_time: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FanoutSnapshotMetrics {
+    pub snapshot_count: usize,
+    pub clone_latency: LatencySummary,
+    pub clone_bytes: LatencySummary,
+    pub serialize_latency: LatencySummary,
+    pub serialized_bytes: LatencySummary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FanoutSubscriberMetrics {
+    pub subscriber_count: usize,
+    pub active_subscriber_count: usize,
+    pub active_received_delta_count: usize,
+    pub active_lag_recoveries: u64,
+    pub lag_recoveries: u64,
+    pub lagged_events: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FanoutBenchmarkReport {
+    pub schema: &'static str,
+    pub workload: FanoutBenchmarkWorkload,
+    pub delta: FanoutDeltaMetrics,
+    pub snapshot: FanoutSnapshotMetrics,
+    pub subscribers: FanoutSubscriberMetrics,
+}
+
 pub fn percentile_us(samples: &[u64], percentile: u8) -> u64 {
     if samples.is_empty() {
         return 0;
@@ -866,6 +933,345 @@ pub fn run_full_soak_ci_fixture() -> Result<FullSoakWorkloadBenchmarkReport, Str
         ))
 }
 
+pub fn run_fanout_benchmark() -> Result<FanoutBenchmarkReport, String> {
+    Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("failed to start fanout Tokio runtime: {error}"))?
+        .block_on(run_fanout_benchmark_async())
+}
+
+async fn run_fanout_benchmark_async() -> Result<FanoutBenchmarkReport, String> {
+    let _diagnostic_lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK
+        .lock()
+        .map_err(|_| "fanout performance recorder lock poisoned".to_string())?;
+    let sink = Arc::new(MemoryPerfSink::new());
+    let recorder = Arc::new(PerfRecorder::with_salt(
+        Arc::new(BenchmarkClock::default()),
+        sink.clone(),
+        [31; 32],
+    ));
+    let _recorder_guard = perf_diagnostics::install_test_recorder(recorder);
+    let workload = FanoutBenchmarkWorkload {
+        history_message_count: FANOUT_HISTORY_MESSAGE_COUNT,
+        history_message_bytes: FANOUT_HISTORY_MESSAGE_BYTES,
+        delta_count: FANOUT_DELTA_COUNT,
+        active_subscriber_count: FANOUT_ACTIVE_SUBSCRIBER_COUNT,
+        lagging_subscriber_count: 1,
+        event_channel_capacity: FANOUT_EVENT_CHANNEL_CAPACITY,
+        snapshot_runs: FANOUT_SNAPSHOT_RUNS,
+    };
+    let (event_tx, _) = tokio::sync::broadcast::channel(workload.event_channel_capacity);
+    let mut session = ChatSession::new("fanout-benchmark".to_string());
+    session.event_tx = event_tx;
+    session.messages = (0..workload.history_message_count)
+        .map(|index| ChatMessage {
+            message_id: format!("history-{index}"),
+            role: if index % 2 == 0 {
+                "user".to_string()
+            } else {
+                "assistant".to_string()
+            },
+            content: ChatContent::SimpleText("h".repeat(workload.history_message_bytes)),
+            ..Default::default()
+        })
+        .collect();
+    let session = Arc::new(AMutex::new(session));
+    {
+        let mut locked = session.lock().await;
+        locked
+            .start_stream()
+            .ok_or_else(|| "fanout fixture could not start stream".to_string())?;
+    }
+    let mut active_receivers = {
+        let locked = session.lock().await;
+        (0..workload.active_subscriber_count)
+            .map(|_| locked.subscribe())
+            .collect::<Vec<_>>()
+    };
+    let mut lagging_receiver = session.lock().await.subscribe();
+    let diagnostic_start = sink.events().len();
+    let mut emit_lock_wait_us = Vec::with_capacity(workload.delta_count);
+    let mut emit_wall_us = Vec::with_capacity(workload.delta_count);
+    let mut active_received_delta_count = 0usize;
+    let emit_started = Instant::now();
+    for index in 0..workload.delta_count {
+        let lock_started = Instant::now();
+        let mut locked = session.lock().await;
+        emit_lock_wait_us.push(elapsed_us(lock_started));
+        let emit_started_at = Instant::now();
+        locked.emit_stream_delta(vec![DeltaOp::AppendContent {
+            text: format!("d{index:04}"),
+        }]);
+        emit_wall_us.push(elapsed_us(emit_started_at));
+        drop(locked);
+        for receiver in &mut active_receivers {
+            active_received_delta_count += drain_active_delta_events(receiver)?;
+        }
+    }
+    let total_emit_elapsed = emit_started.elapsed();
+    let delta_events = sink.events()[diagnostic_start..].to_vec();
+    let baseline_event_count = workload.delta_count;
+    let coalesced_event_count = batch_stream_delta_ops(
+        (0..workload.delta_count)
+            .map(|index| DeltaOp::AppendContent {
+                text: format!("d{index:04}"),
+            })
+            .collect(),
+    )
+    .len();
+    let baseline_serialize_cpu_us = measure_delta_serialize_cpu_us(baseline_event_count, false)?;
+    let coalesced_serialize_cpu_us = measure_delta_serialize_cpu_us(baseline_event_count, true)?;
+    let projected_first_delta_latency_us = measure_first_delta_emit_latency_us()?;
+    let mut snapshot_clone_us = Vec::with_capacity(workload.snapshot_runs + 1);
+    let mut snapshot_clone_bytes = Vec::with_capacity(workload.snapshot_runs + 1);
+    let mut snapshot_serialize_us = Vec::with_capacity(workload.snapshot_runs + 1);
+    let mut snapshot_serialized_bytes = Vec::with_capacity(workload.snapshot_runs + 1);
+    for _ in 0..workload.snapshot_runs {
+        let sample = capture_fanout_snapshot(&session).await?;
+        snapshot_clone_us.push(sample.clone_us);
+        snapshot_clone_bytes.push(sample.clone_bytes);
+        snapshot_serialize_us.push(sample.serialize_us);
+        snapshot_serialized_bytes.push(sample.serialized_bytes);
+    }
+    let (lag_recoveries, lagged_events) = match lagging_receiver.try_recv() {
+        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+            let (mut recovered_receiver, recovery_snapshot) = {
+                let locked = session.lock().await;
+                let recovered_receiver = locked.subscribe();
+                let recovery_seq = locked.event_seq;
+                let clone_started = Instant::now();
+                let snapshot = locked.snapshot();
+                let clone_us = elapsed_us(clone_started);
+                (
+                    recovered_receiver,
+                    capture_fanout_snapshot_from_parts(
+                        locked.chat_id.clone(),
+                        recovery_seq,
+                        snapshot,
+                        clone_us,
+                    )?,
+                )
+            };
+            snapshot_clone_us.push(recovery_snapshot.clone_us);
+            snapshot_clone_bytes.push(recovery_snapshot.clone_bytes);
+            snapshot_serialize_us.push(recovery_snapshot.serialize_us);
+            snapshot_serialized_bytes.push(recovery_snapshot.serialized_bytes);
+            let recovery_seq = {
+                let mut locked = session.lock().await;
+                let next_seq = locked.event_seq + 1;
+                locked.emit(ChatEvent::PauseCleared {});
+                next_seq
+            };
+            let json = recovered_receiver.try_recv().map_err(|error| {
+                format!("fanout recovery receiver did not receive next event: {error}")
+            })?;
+            let envelope: EventEnvelope = serde_json::from_str(&json)
+                .map_err(|error| format!("fanout recovery event was not valid JSON: {error}"))?;
+            if envelope.seq != recovery_seq {
+                return Err(format!(
+                    "fanout recovery sequence regressed: expected {recovery_seq}, got {}",
+                    envelope.seq
+                ));
+            }
+            (1, skipped as u64)
+        }
+        Ok(_) => return Err("fanout lagging subscriber did not lag".to_string()),
+        Err(error) => return Err(format!("fanout lagging subscriber failed: {error}")),
+    };
+    let serialize_us = event_elapsed(&delta_events, PerfComponent::SseSerialize);
+    let broadcast_us = event_elapsed(&delta_events, PerfComponent::SseBroadcast);
+    let bytes = delta_events
+        .iter()
+        .filter(|event| event.component == PerfComponent::SseSerialize.as_str())
+        .filter_map(|event| event.size_bytes)
+        .collect::<Vec<_>>();
+    let first_delta_us = event_elapsed(&delta_events, PerfComponent::StreamFirstDelta);
+    if serialize_us.len() != workload.delta_count
+        || broadcast_us.len() != workload.delta_count
+        || bytes.len() != workload.delta_count
+        || first_delta_us.len() != 1
+    {
+        return Err("fanout diagnostics did not record every emitted delta".to_string());
+    }
+    let serialized_and_broadcast_us = serialize_us
+        .iter()
+        .chain(broadcast_us.iter())
+        .copied()
+        .sum::<u64>();
+    let emit_wall_total_us = emit_wall_us.iter().copied().sum::<u64>();
+    let snapshot = FanoutSnapshotMetrics {
+        snapshot_count: snapshot_clone_us.len(),
+        clone_latency: LatencySummary::from_samples(&snapshot_clone_us)?,
+        clone_bytes: LatencySummary::from_samples(&snapshot_clone_bytes)?,
+        serialize_latency: LatencySummary::from_samples(&snapshot_serialize_us)?,
+        serialized_bytes: LatencySummary::from_samples(&snapshot_serialized_bytes)?,
+    };
+    Ok(FanoutBenchmarkReport {
+        schema: FANOUT_BENCHMARK_SCHEMA,
+        workload: workload.clone(),
+        delta: FanoutDeltaMetrics {
+            deltas_per_second: workload.delta_count as f64
+                / total_emit_elapsed.as_secs_f64().max(f64::MIN_POSITIVE),
+            operations_per_delta: 1.0,
+            bytes_per_delta: bytes.iter().copied().sum::<u64>() as f64
+                / workload.delta_count as f64,
+            coalesce_window_ms: 10,
+            baseline_event_count,
+            coalesced_event_count,
+            baseline_serialize_cpu_us,
+            coalesced_serialize_cpu_us,
+            serialization_cpu_reduction_percent: if baseline_serialize_cpu_us == 0 {
+                0.0
+            } else {
+                (1.0 - coalesced_serialize_cpu_us as f64 / baseline_serialize_cpu_us as f64) * 100.0
+            },
+            projected_first_delta_latency_us,
+            emit_lock_wait_latency: LatencySummary::from_samples(&emit_lock_wait_us)?,
+            serialize_latency: LatencySummary::from_samples(&serialize_us)?,
+            broadcast_latency: LatencySummary::from_samples(&broadcast_us)?,
+            first_delta_latency: LatencySummary::from_samples(&first_delta_us)?,
+            serialization_and_broadcast_percent_of_emit_wall_time: if emit_wall_total_us == 0 {
+                0.0
+            } else {
+                serialized_and_broadcast_us as f64 * 100.0 / emit_wall_total_us as f64
+            },
+        },
+        snapshot,
+        subscribers: FanoutSubscriberMetrics {
+            subscriber_count: workload.active_subscriber_count + workload.lagging_subscriber_count,
+            active_subscriber_count: workload.active_subscriber_count,
+            active_received_delta_count,
+            active_lag_recoveries: 0,
+            lag_recoveries,
+            lagged_events,
+        },
+    })
+}
+
+fn measure_delta_serialize_cpu_us(event_count: usize, coalesced: bool) -> Result<u64, String> {
+    let ops = (0..event_count)
+        .map(|index| DeltaOp::AppendContent {
+            text: format!("d{index:04}"),
+        })
+        .collect::<Vec<_>>();
+    let batches = if coalesced {
+        batch_stream_delta_ops(ops)
+    } else {
+        ops.into_iter().map(|op| vec![op]).collect()
+    };
+    let started = Instant::now();
+    for (index, ops) in batches.into_iter().enumerate() {
+        serde_json::to_string(&EventEnvelope {
+            chat_id: "fanout-benchmark".to_string(),
+            seq: index as u64 + 1,
+            event: ChatEvent::StreamDelta {
+                message_id: "fanout-draft".to_string(),
+                ops,
+            },
+        })
+        .map_err(|error| format!("fanout delta serialization failed: {error}"))?;
+    }
+    Ok(elapsed_us(started))
+}
+
+fn measure_first_delta_emit_latency_us() -> Result<u64, String> {
+    let (event_tx, _) = tokio::sync::broadcast::channel(1);
+    let mut session = ChatSession::new("fanout-first-delta".to_string());
+    session.event_tx = event_tx;
+    session
+        .start_stream()
+        .ok_or_else(|| "fanout fixture could not start first-delta stream".to_string())?;
+    let started = Instant::now();
+    session.emit_stream_delta(vec![DeltaOp::AppendContent {
+        text: "first".to_string(),
+    }]);
+    Ok(elapsed_us(started))
+}
+
+struct FanoutSnapshotSample {
+    clone_us: u64,
+    clone_bytes: u64,
+    serialize_us: u64,
+    serialized_bytes: u64,
+}
+
+async fn capture_fanout_snapshot(
+    session: &Arc<AMutex<ChatSession>>,
+) -> Result<FanoutSnapshotSample, String> {
+    let (chat_id, seq, snapshot, clone_us) = {
+        let locked = session.lock().await;
+        let clone_started = Instant::now();
+        let snapshot = locked.snapshot();
+        (
+            locked.chat_id.clone(),
+            locked.event_seq,
+            snapshot,
+            elapsed_us(clone_started),
+        )
+    };
+    capture_fanout_snapshot_from_parts(chat_id, seq, snapshot, clone_us)
+}
+
+fn capture_fanout_snapshot_from_parts(
+    chat_id: String,
+    seq: u64,
+    snapshot: ChatEvent,
+    clone_us: u64,
+) -> Result<FanoutSnapshotSample, String> {
+    let clone_bytes = snapshot_message_bytes(&snapshot)?;
+    let serialize_started = Instant::now();
+    let serialized = serde_json::to_string(&EventEnvelope {
+        chat_id,
+        seq,
+        event: snapshot,
+    })
+    .map_err(|error| format!("fanout snapshot serialization failed: {error}"))?;
+    Ok(FanoutSnapshotSample {
+        clone_us,
+        clone_bytes,
+        serialize_us: elapsed_us(serialize_started),
+        serialized_bytes: serialized.len() as u64,
+    })
+}
+
+fn snapshot_message_bytes(snapshot: &ChatEvent) -> Result<u64, String> {
+    let ChatEvent::Snapshot { messages, .. } = snapshot else {
+        return Err("fanout fixture expected snapshot event".to_string());
+    };
+    messages.iter().try_fold(0u64, |total, message| {
+        serde_json::to_vec(message)
+            .map(|encoded| total.saturating_add(encoded.len() as u64))
+            .map_err(|error| format!("fanout snapshot message serialization failed: {error}"))
+    })
+}
+
+fn drain_active_delta_events(
+    receiver: &mut tokio::sync::broadcast::Receiver<Arc<String>>,
+) -> Result<usize, String> {
+    let mut received = 0usize;
+    loop {
+        match receiver.try_recv() {
+            Ok(json) => {
+                let envelope: EventEnvelope = serde_json::from_str(&json)
+                    .map_err(|error| format!("fanout active event was not valid JSON: {error}"))?;
+                if matches!(envelope.event, ChatEvent::StreamDelta { .. }) {
+                    received += 1;
+                }
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => return Ok(received),
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                return Err(format!(
+                    "fanout active subscriber lagged by {skipped} events"
+                ));
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                return Err("fanout active subscriber channel closed".to_string());
+            }
+        }
+    }
+}
+
 pub fn render_json(report: &ConcurrentChatBenchmarkReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|error| format!("failed to serialize benchmark report: {error}"))
@@ -874,6 +1280,11 @@ pub fn render_json(report: &ConcurrentChatBenchmarkReport) -> Result<String, Str
 pub fn render_full_soak_json(report: &FullSoakBenchmarkReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|error| format!("failed to serialize full soak benchmark report: {error}"))
+}
+
+pub fn render_fanout_json(report: &FanoutBenchmarkReport) -> Result<String, String> {
+    serde_json::to_string_pretty(report)
+        .map_err(|error| format!("failed to serialize fanout benchmark report: {error}"))
 }
 
 pub fn validate_report_json(json: &str) -> Result<(), String> {
@@ -2919,6 +3330,46 @@ mod tests {
         assert_eq!(percentile_us(&samples, 95), 50);
         assert_eq!(percentile_us(&samples, 99), 50);
         assert_eq!(percentile_us(&[], 50), 0);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn fanout_fixture_measures_high_rate_deltas_large_history_and_lag_recovery() {
+        let report = run_fanout_benchmark().expect("fanout fixture should run");
+
+        assert_eq!(report.schema, FANOUT_BENCHMARK_SCHEMA);
+        assert_eq!(
+            report.workload.history_message_count,
+            FANOUT_HISTORY_MESSAGE_COUNT
+        );
+        assert_eq!(
+            report.workload.history_message_bytes,
+            FANOUT_HISTORY_MESSAGE_BYTES
+        );
+        assert_eq!(report.workload.delta_count, FANOUT_DELTA_COUNT);
+        assert_eq!(
+            report.subscribers.active_received_delta_count,
+            report.workload.delta_count * report.workload.active_subscriber_count
+        );
+        assert_eq!(report.subscribers.active_lag_recoveries, 0);
+        assert_eq!(report.subscribers.lag_recoveries, 1);
+        assert!(report.subscribers.lagged_events > 0);
+        assert_eq!(
+            report.delta.serialize_latency.sample_count,
+            FANOUT_DELTA_COUNT
+        );
+        assert_eq!(
+            report.delta.broadcast_latency.sample_count,
+            FANOUT_DELTA_COUNT
+        );
+        assert_eq!(report.delta.first_delta_latency.sample_count, 1);
+        assert_eq!(report.delta.baseline_event_count, FANOUT_DELTA_COUNT);
+        assert!(report.delta.coalesced_event_count < report.delta.baseline_event_count);
+        assert!(report.delta.serialization_cpu_reduction_percent >= 50.0);
+        assert!(report.delta.projected_first_delta_latency_us <= 50_000);
+        assert_eq!(report.snapshot.snapshot_count, FANOUT_SNAPSHOT_RUNS + 1);
+        assert!(report.snapshot.clone_bytes.p95_us > 1_000_000);
+        assert!(report.snapshot.serialized_bytes.p95_us > 1_000_000);
     }
 
     #[test]

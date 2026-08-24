@@ -62,6 +62,140 @@ const RESPONSES_CONTEXT_CUTOFF_ERROR: &str =
     "context_length_exceeded: Responses stream ended before a terminal event at critical context pressure";
 
 const MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS: usize = 1;
+const DELTA_COALESCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(10);
+const MAX_DELTA_BATCH_EVENTS: usize = 64;
+const MAX_DELTA_OPS_PER_EMIT: usize = 128;
+const MAX_DELTA_TEXT_BYTES: usize = 64 * 1024;
+
+fn delta_ops_contain_visible_content(ops: &[DeltaOp]) -> bool {
+    ops.iter().any(|op| match op {
+        DeltaOp::AppendContent { text }
+        | DeltaOp::AppendReasoning { text }
+        | DeltaOp::SetReasoning { text } => !text.is_empty(),
+        DeltaOp::SetThinkingBlocks { blocks } => !blocks.is_empty(),
+        _ => false,
+    })
+}
+
+fn delta_is_coalescible_text(op: &DeltaOp) -> bool {
+    matches!(
+        op,
+        DeltaOp::AppendContent { .. } | DeltaOp::AppendReasoning { .. }
+    )
+}
+
+fn delta_text_len(op: &DeltaOp) -> usize {
+    match op {
+        DeltaOp::AppendContent { text } | DeltaOp::AppendReasoning { text } => text.len(),
+        _ => 0,
+    }
+}
+
+fn append_coalesced_text_op(ops: &mut Vec<DeltaOp>, op: DeltaOp) {
+    match op {
+        DeltaOp::AppendContent { text } => {
+            if let Some(DeltaOp::AppendContent { text: previous }) = ops.last_mut() {
+                previous.push_str(&text);
+            } else {
+                ops.push(DeltaOp::AppendContent { text });
+            }
+        }
+        DeltaOp::AppendReasoning { text } => {
+            if let Some(DeltaOp::AppendReasoning { text: previous }) = ops.last_mut() {
+                previous.push_str(&text);
+            } else {
+                ops.push(DeltaOp::AppendReasoning { text });
+            }
+        }
+        _ => ops.push(op),
+    }
+}
+
+fn split_delta_text(text: &str) -> Vec<String> {
+    if text.len() <= MAX_DELTA_TEXT_BYTES {
+        return vec![text.to_string()];
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    while start < text.len() {
+        let mut end = (start + MAX_DELTA_TEXT_BYTES).min(text.len());
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            end = text[start..]
+                .char_indices()
+                .nth(1)
+                .map(|(index, _)| start + index)
+                .unwrap_or(text.len());
+        }
+        chunks.push(text[start..end].to_string());
+        start = end;
+    }
+    chunks
+}
+
+fn split_large_delta_text_ops(ops: Vec<DeltaOp>) -> Vec<DeltaOp> {
+    let mut split = Vec::with_capacity(ops.len());
+    for op in ops {
+        match op {
+            DeltaOp::AppendContent { text } => split.extend(
+                split_delta_text(&text)
+                    .into_iter()
+                    .map(|text| DeltaOp::AppendContent { text }),
+            ),
+            DeltaOp::AppendReasoning { text } => split.extend(
+                split_delta_text(&text)
+                    .into_iter()
+                    .map(|text| DeltaOp::AppendReasoning { text }),
+            ),
+            DeltaOp::SetReasoning { text } => {
+                let chunks = split_delta_text(&text);
+                if let Some((first, rest)) = chunks.split_first() {
+                    split.push(DeltaOp::SetReasoning {
+                        text: first.clone(),
+                    });
+                    split.extend(
+                        rest.iter()
+                            .cloned()
+                            .map(|text| DeltaOp::AppendReasoning { text }),
+                    );
+                }
+            }
+            other => split.push(other),
+        }
+    }
+    split
+}
+
+pub(crate) fn batch_stream_delta_ops(ops: Vec<DeltaOp>) -> Vec<Vec<DeltaOp>> {
+    let mut batches = Vec::new();
+    let mut text_ops = Vec::new();
+    let mut text_bytes = 0usize;
+    let flush_text = |batches: &mut Vec<Vec<DeltaOp>>, text_ops: &mut Vec<DeltaOp>| {
+        if !text_ops.is_empty() {
+            batches.push(std::mem::take(text_ops));
+        }
+    };
+    for op in split_large_delta_text_ops(ops) {
+        if !delta_is_coalescible_text(&op) {
+            flush_text(&mut batches, &mut text_ops);
+            text_bytes = 0;
+            batches.push(vec![op]);
+            continue;
+        }
+        let op_bytes = delta_text_len(&op);
+        if text_ops.len() >= MAX_DELTA_OPS_PER_EMIT
+            || text_bytes.saturating_add(op_bytes) > MAX_DELTA_TEXT_BYTES
+        {
+            flush_text(&mut batches, &mut text_ops);
+        }
+        append_coalesced_text_op(&mut text_ops, op);
+        text_bytes = text_ops.iter().map(delta_text_len).sum();
+    }
+    flush_text(&mut batches, &mut text_ops);
+    batches
+}
 
 fn should_try_post_llm_deterministic_sweep(round: usize) -> bool {
     round == MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS + 1
@@ -2291,111 +2425,39 @@ async fn run_streaming_generation(
                     }
                 }
             }
-
-            fn coalesce_text_ops(ops: Vec<DeltaOp>) -> Vec<DeltaOp> {
-                if ops.len() <= 1 {
-                    return ops;
-                }
-                let mut out: Vec<DeltaOp> = Vec::with_capacity(ops.len());
-                for op in ops {
-                    match op {
-                        DeltaOp::AppendContent { text } => {
-                            if let Some(DeltaOp::AppendContent { text: ref mut prev }) =
-                                out.last_mut()
-                            {
-                                prev.push_str(&text);
-                            } else {
-                                out.push(DeltaOp::AppendContent { text });
-                            }
-                        }
-                        DeltaOp::AppendReasoning { text } => {
-                            if let Some(DeltaOp::AppendReasoning { text: ref mut prev }) =
-                                out.last_mut()
-                            {
-                                prev.push_str(&text);
-                            } else {
-                                out.push(DeltaOp::AppendReasoning { text });
-                            }
-                        }
-                        DeltaOp::SetReasoning { text } => {
-                            out.push(DeltaOp::SetReasoning { text });
-                        }
-                        other => out.push(other),
-                    }
-                }
-                out
-            }
-
-            fn split_utf8_chunks(text: &str, max_bytes: usize) -> Vec<String> {
-                if text.len() <= max_bytes {
-                    return vec![text.to_string()];
-                }
-                let mut chunks = Vec::new();
-                let mut start = 0usize;
-                while start < text.len() {
-                    let mut end = (start + max_bytes).min(text.len());
-                    while end > start && !text.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    if end == start {
-                        end = text[start..]
-                            .char_indices()
-                            .nth(1)
-                            .map(|(i, _)| start + i)
-                            .unwrap_or(text.len());
-                    }
-                    chunks.push(text[start..end].to_string());
-                    start = end;
-                }
-                chunks
-            }
-
-            fn split_large_text_ops(ops: Vec<DeltaOp>, max_text_bytes: usize) -> Vec<DeltaOp> {
-                let mut out = Vec::new();
-                for op in ops {
-                    match op {
-                        DeltaOp::AppendContent { text } => {
-                            for chunk in split_utf8_chunks(&text, max_text_bytes) {
-                                out.push(DeltaOp::AppendContent { text: chunk });
-                            }
-                        }
-                        DeltaOp::AppendReasoning { text } => {
-                            for chunk in split_utf8_chunks(&text, max_text_bytes) {
-                                out.push(DeltaOp::AppendReasoning { text: chunk });
-                            }
-                        }
-                        DeltaOp::SetReasoning { text } => {
-                            let chunks = split_utf8_chunks(&text, max_text_bytes);
-                            if let Some((first, rest)) = chunks.split_first() {
-                                out.push(DeltaOp::SetReasoning {
-                                    text: first.clone(),
-                                });
-                                out.extend(
-                                    rest.iter()
-                                        .cloned()
-                                        .map(|text| DeltaOp::AppendReasoning { text }),
-                                );
-                            }
-                        }
-                        other => out.push(other),
-                    }
-                }
-                out
-            }
-
-            const MAX_BATCH_EVENTS: usize = 64;
-            const MAX_DELTA_OPS_PER_EMIT: usize = 128;
-            const MAX_DELTA_TEXT_BYTES: usize = 64 * 1024;
             let mut pending = Vec::<CollectorEventPayload>::new();
+            let mut first_visible_delta_emitted = false;
 
             while let Some(first_event) = rx.recv().await {
+                let flush_immediately = match &first_event {
+                    CollectorEventPayload::Usage(_) => true,
+                    CollectorEventPayload::DeltaOps(ops) => {
+                        !first_visible_delta_emitted && delta_ops_contain_visible_content(ops)
+                            || ops.iter().any(|op| !delta_is_coalescible_text(op))
+                    }
+                };
                 pending.push(first_event);
 
-                while pending.len() < MAX_BATCH_EVENTS {
-                    match rx.try_recv() {
-                        Ok(event) => pending.push(event),
-                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+                if !flush_immediately {
+                    let deadline = tokio::time::Instant::now() + DELTA_COALESCE_WINDOW;
+                    while pending.len() < MAX_DELTA_BATCH_EVENTS {
+                        match tokio::time::timeout_at(deadline, rx.recv()).await {
+                            Ok(Some(event)) => {
+                                let must_flush = match &event {
+                                    CollectorEventPayload::Usage(_) => true,
+                                    CollectorEventPayload::DeltaOps(ops) => {
+                                        (!first_visible_delta_emitted
+                                            && delta_ops_contain_visible_content(ops))
+                                            || ops.iter().any(|op| !delta_is_coalescible_text(op))
+                                    }
+                                };
+                                pending.push(event);
+                                if must_flush {
+                                    break;
+                                }
+                            }
+                            Ok(None) | Err(_) => break,
+                        }
                     }
                 }
 
@@ -2406,8 +2468,7 @@ async fn run_streaming_generation(
                 if let Ok(mut guard) = overflow_ops.lock() {
                     if !guard.is_empty() {
                         let mut drained = std::mem::take(&mut *guard);
-                        drained.append(&mut batched_ops);
-                        batched_ops = drained;
+                        batched_ops.append(&mut drained);
                     }
                 }
                 if let Ok(mut guard) = overflow_usage.lock() {
@@ -2416,13 +2477,13 @@ async fn run_streaming_generation(
                     }
                 }
 
-                let batched_ops = coalesce_text_ops(batched_ops);
-                let batched_ops = split_large_text_ops(batched_ops, MAX_DELTA_TEXT_BYTES);
+                let batched_ops = batch_stream_delta_ops(batched_ops);
 
                 let mut session = session_arc_emitter.lock().await;
                 if !batched_ops.is_empty() {
-                    for chunk in batched_ops.chunks(MAX_DELTA_OPS_PER_EMIT) {
-                        session.emit_stream_delta(chunk.to_vec());
+                    for ops in batched_ops {
+                        first_visible_delta_emitted |= delta_ops_contain_visible_content(&ops);
+                        session.emit_stream_delta(ops);
                     }
                 }
                 if let Some(usage) = latest_usage {
@@ -2444,13 +2505,12 @@ async fn run_streaming_generation(
             }
 
             if !final_ops.is_empty() || final_usage.is_some() {
-                let final_ops = coalesce_text_ops(final_ops);
-                let final_ops = split_large_text_ops(final_ops, MAX_DELTA_TEXT_BYTES);
+                let final_ops = batch_stream_delta_ops(final_ops);
 
                 let mut session = session_arc_emitter.lock().await;
                 if !final_ops.is_empty() {
-                    for chunk in final_ops.chunks(MAX_DELTA_OPS_PER_EMIT) {
-                        session.emit_stream_delta(chunk.to_vec());
+                    for ops in final_ops {
+                        session.emit_stream_delta(ops);
                     }
                 }
                 if let Some(usage) = final_usage {
@@ -4155,6 +4215,64 @@ mod tests {
 
         assert_eq!(result.finish_reason.as_deref(), Some("stop"));
         assert!(!result.extra.contains_key("_tool_call_guard"));
+    }
+
+    #[test]
+    fn delta_batch_preserves_text_order_and_flushes_control_events() {
+        let batches = batch_stream_delta_ops(vec![
+            DeltaOp::AppendContent {
+                text: "hel".to_string(),
+            },
+            DeltaOp::AppendContent {
+                text: "lo".to_string(),
+            },
+            DeltaOp::AppendReasoning {
+                text: "think".to_string(),
+            },
+            DeltaOp::SetToolCalls {
+                tool_calls: vec![json!({"id": "tool-1"})],
+            },
+            DeltaOp::AppendContent {
+                text: "after".to_string(),
+            },
+        ]);
+
+        assert_eq!(batches.len(), 3);
+        assert!(matches!(
+            batches[0].as_slice(),
+            [
+                DeltaOp::AppendContent { text },
+                DeltaOp::AppendReasoning { text: reasoning },
+            ] if text == "hello" && reasoning == "think"
+        ));
+        assert!(matches!(
+            batches[1].as_slice(),
+            [DeltaOp::SetToolCalls { .. }]
+        ));
+        assert!(matches!(
+            batches[2].as_slice(),
+            [DeltaOp::AppendContent { text }] if text == "after"
+        ));
+    }
+
+    #[test]
+    fn delta_batch_caps_large_utf8_content_without_breaking_text() {
+        let text = "😀".repeat((MAX_DELTA_TEXT_BYTES / 4) + 2);
+        let batches = batch_stream_delta_ops(vec![DeltaOp::AppendContent { text: text.clone() }]);
+        let chunks = batches
+            .into_iter()
+            .flatten()
+            .filter_map(|op| match op {
+                DeltaOp::AppendContent { text } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(chunks.len() > 1);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.len() <= MAX_DELTA_TEXT_BYTES));
+        assert_eq!(chunks.concat(), text);
     }
 
     #[tokio::test]

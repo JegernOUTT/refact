@@ -5,8 +5,25 @@ fn main() {
         [flag] if flag == "--quick" => HarnessMode::Quick,
         [flag] if flag == "--soak" => HarnessMode::Soak,
         [flag] if flag == "--full-soak" => HarnessMode::FullSoak,
+        [flag] if flag == "--fanout" => {
+            let report = match perf_harness::run_fanout_benchmark() {
+                Ok(report) => report,
+                Err(error) => {
+                    eprintln!("fanout benchmark failed: {error}");
+                    std::process::exit(1);
+                }
+            };
+            match perf_harness::render_fanout_json(&report) {
+                Ok(json) => println!("{json}"),
+                Err(error) => {
+                    eprintln!("fanout benchmark report failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         _ => {
-            eprintln!("usage: concurrent_chat_bench --quick | --soak | --full-soak");
+            eprintln!("usage: concurrent_chat_bench --quick | --soak | --full-soak | --fanout");
             std::process::exit(2);
         }
     };
