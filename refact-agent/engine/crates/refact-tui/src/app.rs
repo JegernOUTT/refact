@@ -2594,7 +2594,7 @@ mod tests {
             seq: None,
             kind: "snapshot".to_string(),
             raw: json!({"runtime": {"state": "idle"}, "messages": [
-                {"message_id": "a1", "role": "assistant", "content": "stale"}
+                {"message_id": "a1", "role": "assistant", "content": "stale", "stream_finished": true}
             ]}),
         });
         let stale = app.pending_history_insertions(80);
@@ -2611,7 +2611,7 @@ mod tests {
             seq: None,
             kind: "snapshot".to_string(),
             raw: json!({"runtime": {"state": "idle"}, "messages": [
-                {"message_id": "a1", "role": "assistant", "content": "corrected"}
+                {"message_id": "a1", "role": "assistant", "content": "corrected", "stream_finished": true}
             ]}),
         });
         let corrected = app.pending_history_insertions(80);
@@ -2636,7 +2636,7 @@ mod tests {
             seq: None,
             kind: "snapshot".to_string(),
             raw: json!({"runtime": {"state": "idle"}, "messages": [
-                {"message_id": "a1", "role": "assistant", "content": "corrected"}
+                {"message_id": "a1", "role": "assistant", "content": "corrected", "stream_finished": true}
             ]}),
         });
         assert!(app.pending_history_insertions(80).is_empty());
@@ -3313,7 +3313,7 @@ new-chat = "ctrl-x"
                         "runtime_updated".to_string()
                     },
                     raw: if snapshot {
-                        json!({"runtime": raw})
+                        json!({"runtime": raw, "messages": []})
                     } else {
                         raw.clone()
                     },
@@ -3337,7 +3337,7 @@ new-chat = "ctrl-x"
                     "runtime_updated".to_string()
                 },
                 raw: if snapshot {
-                    json!({"runtime": {"state": "idle"}})
+                    json!({"runtime": {"state": "idle"}, "messages": []})
                 } else {
                     json!({"state": "idle"})
                 },
