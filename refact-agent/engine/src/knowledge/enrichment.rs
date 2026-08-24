@@ -14,7 +14,7 @@ use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
 use crate::files_correction::get_project_dirs;
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
-use crate::memories::{enrichment_current_root_id, memories_search_for_enrichment};
+use crate::memories::{enrichment_current_root_id, enrichment_root_id, memories_search_for_enrichment};
 use crate::subchat::{resolve_subchat_config, run_subchat};
 use crate::yaml_configs::customization_registry::get_subagent_config;
 
@@ -738,7 +738,9 @@ async fn revalidate_cached_memories(
     gcx: Arc<GlobalContext>,
     cached: &CachedEnrichmentResult,
     score_threshold: f32,
+    current_chat_id: Option<&str>,
 ) -> Option<Vec<crate::memories::MemoRecord>> {
+    let current_root = enrichment_current_root_id(gcx.clone(), current_chat_id).await;
     let mut memories = Vec::with_capacity(cached.memories.len());
     for cached_memo in &cached.memories {
         let path = &cached_memo.source.path;
@@ -761,11 +763,18 @@ async fn revalidate_cached_memories(
             if frontmatter.is_archived() || frontmatter.is_deprecated() {
                 return None;
             }
+            if frontmatter.source_chat_id.as_deref() == current_root.as_deref() {
+                return None;
+            }
             memo.content = text[content_start..].trim().to_string();
             memo.tags = frontmatter.tags;
             memo.title = frontmatter.title;
             memo.created = frontmatter.created;
             memo.kind = frontmatter.kind;
+        } else if let Some(trajectory_id) = path.file_stem().and_then(|name| name.to_str()) {
+            if Some(enrichment_root_id(gcx.clone(), trajectory_id).await) == current_root {
+                return None;
+            }
         }
         memories.push(memo);
     }
@@ -1004,13 +1013,16 @@ async fn create_knowledge_context(
     {
         return None;
     }
-    let memories = match revalidate_cached_memories(gcx.clone(), &cached, score_threshold).await {
-        Some(memories) => memories,
-        None => {
-            gcx.enrichment_cache.invalidate(&cache_key);
-            return None;
-        }
-    };
+    let memories =
+        match revalidate_cached_memories(gcx.clone(), &cached, score_threshold, current_chat_id)
+            .await
+        {
+            Some(memories) => memories,
+            None => {
+                gcx.enrichment_cache.invalidate(&cache_key);
+                return None;
+            }
+        };
     let cache_component = match disposition {
         EnrichmentCacheDisposition::Miss => PerfComponent::EnrichmentCacheMiss,
         EnrichmentCacheDisposition::Hit => PerfComponent::EnrichmentCacheHit,
@@ -1759,7 +1771,7 @@ mod tests {
             ..Default::default()
         };
         let cached = cache_result_from_memories(gcx.clone(), vec![memo]).await;
-        assert!(revalidate_cached_memories(gcx.clone(), &cached, 0.75)
+        assert!(revalidate_cached_memories(gcx.clone(), &cached, 0.75, None)
             .await
             .is_some());
 
@@ -1769,12 +1781,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(revalidate_cached_memories(gcx.clone(), &cached, 0.75)
+        assert!(revalidate_cached_memories(gcx.clone(), &cached, 0.75, None)
             .await
             .is_none());
 
         tokio::fs::remove_file(&path).await.unwrap();
-        assert!(revalidate_cached_memories(gcx, &cached, 0.75)
+        assert!(revalidate_cached_memories(gcx, &cached, 0.75, None)
             .await
             .is_none());
     }

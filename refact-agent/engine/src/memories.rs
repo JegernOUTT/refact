@@ -138,13 +138,17 @@ async fn resolve_root_chat_id(
     start_id.to_string()
 }
 
+pub async fn enrichment_root_id(gcx: Arc<GlobalContext>, chat_id: &str) -> String {
+    let mut cache = HashMap::new();
+    resolve_root_chat_id(gcx, chat_id, &mut cache).await
+}
+
 pub async fn enrichment_current_root_id(
     gcx: Arc<GlobalContext>,
     current_chat_id: Option<&str>,
 ) -> Option<String> {
     let current_chat_id = current_chat_id?;
-    let mut cache = HashMap::new();
-    Some(resolve_root_chat_id(gcx, current_chat_id, &mut cache).await)
+    Some(enrichment_root_id(gcx, current_chat_id).await)
 }
 
 pub fn create_frontmatter(
