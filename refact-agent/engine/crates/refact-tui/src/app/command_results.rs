@@ -130,4 +130,53 @@ impl App {
         self.add_notice(format!("{command} failed: {error}"));
         AppAction::None
     }
+
+    fn restore_tool_decision_rollback(&mut self, rollback: ToolDecisionRollback) {
+        let scope = rollback.approval.scope().to_string();
+        self.pending_approval_clears
+            .retain(|pending| pending.scope != scope);
+        self.approval_queue.remove_scope(&scope);
+        self.approval_queue.push_front(rollback.approval);
+        for (tool_call_id, status) in rollback.tool_statuses {
+            self.set_tool_statuses(&[tool_call_id], status);
+        }
+        let history_changed = self.history.remove_approval_scope(&scope);
+        if let Some(index) = self.transcript.iter().rposition(|item| {
+            matches!(item, TranscriptItem::Approval(approval, Some(_)) if approval.scope() == scope)
+        }) {
+            self.transcript.remove(index);
+        }
+        if history_changed && self.native_scrollback && self.history.inserted_cell_count() > 0 {
+            self.resize_reflow.schedule_immediate();
+        }
+    }
+
+    pub(super) fn tool_statuses(&self, tool_call_ids: &[String]) -> Vec<(String, ToolStatus)> {
+        let mut seen = HashSet::new();
+        let mut statuses = self
+            .transcript
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Tool(card) if tool_call_ids.iter().any(|id| id == &card.id) => seen
+                    .insert(card.id.clone())
+                    .then_some((card.id.clone(), card.status)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        statuses.extend(
+            self.history
+                .tool_statuses(tool_call_ids)
+                .into_iter()
+                .filter(|(tool_call_id, _)| seen.insert(tool_call_id.clone())),
+        );
+        statuses
+    }
+
+    #[cfg(test)]
+    pub(super) fn history_tool_status_for_test(&self, tool_call_id: &str) -> Option<ToolStatus> {
+        self.history
+            .tool_statuses(&[tool_call_id.to_string()])
+            .into_iter()
+            .find_map(|(id, status)| (id == tool_call_id).then_some(status))
+    }
 }
