@@ -539,7 +539,11 @@ fn spawn_subchat_bridge(
                     let subchat_id = value.get("subchat_id").and_then(|v| v.as_str());
 
                     if let (Some(tool_call_id), Some(subchat_id)) = (tool_call_id, subchat_id) {
-                        info!("spawn_subchat_bridge: emitting SubchatUpdate for tool_call_id={}, subchat_id={}", tool_call_id, subchat_id);
+                        info!(
+                            "spawn_subchat_bridge: emitting SubchatUpdate for tool_call_id={}, subchat_id={}b",
+                            tool_call_id,
+                            subchat_id.len()
+                        );
 
                         if !active_tool_call_ids.contains(&tool_call_id.to_string()) {
                             active_tool_call_ids.push(tool_call_id.to_string());
