@@ -33,6 +33,7 @@ const FALLBACK_RESIZE_REFLOW_MAX_ROWS: usize = 1_000;
 #[derive(Debug, Clone)]
 struct HistoryEntry {
     id: u64,
+    item: Option<TranscriptItem>,
     cell: Box<dyn cells::HistoryCell>,
 }
 
@@ -222,12 +223,25 @@ impl HistoryBuffer {
     }
 
     pub fn enqueue(&mut self, item: TranscriptItem) -> u64 {
-        self.enqueue_cell(cells::cell_from_transcript_item(&item, false))
+        let id = self.next_available_id();
+        let entry = HistoryEntry {
+            id,
+            cell: cells::cell_from_transcript_item(&item, false),
+            item: Some(item),
+        };
+        self.history.push_back(entry.clone());
+        self.pending.push_back(entry);
+        self.enforce_history_retention();
+        id
     }
 
     pub fn enqueue_cell(&mut self, cell: Box<dyn cells::HistoryCell>) -> u64 {
         let id = self.next_available_id();
-        let entry = HistoryEntry { id, cell };
+        let entry = HistoryEntry {
+            id,
+            item: None,
+            cell,
+        };
         self.history.push_back(entry.clone());
         self.pending.push_back(entry);
         self.enforce_history_retention();
@@ -486,6 +500,58 @@ impl HistoryBuffer {
         self.history.len()
     }
 
+    pub fn remove_approval_scope(&mut self, scope: &str) -> bool {
+        let ids = self
+            .history
+            .iter()
+            .chain(self.pending.iter())
+            .filter_map(|entry| match entry.item.as_ref() {
+                Some(TranscriptItem::Approval(approval, Some(_))) if approval.scope() == scope => {
+                    Some(entry.id)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut ids = ids;
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.is_empty() {
+            return false;
+        }
+        self.history
+            .retain(|entry| !ids.iter().any(|id| *id == entry.id));
+        self.pending
+            .retain(|entry| !ids.iter().any(|id| *id == entry.id));
+        self.evict_cache_entries(&ids);
+        true
+    }
+
+    pub fn set_tool_statuses(&mut self, statuses: &[(String, crate::tools::ToolStatus)]) -> bool {
+        let mut changed_ids = update_tool_statuses(&mut self.history, statuses);
+        changed_ids.extend(update_tool_statuses(&mut self.pending, statuses));
+        changed_ids.sort_unstable();
+        changed_ids.dedup();
+        self.evict_cache_entries(&changed_ids);
+        !changed_ids.is_empty()
+    }
+
+    pub fn tool_statuses(
+        &self,
+        tool_call_ids: &[String],
+    ) -> Vec<(String, crate::tools::ToolStatus)> {
+        self.history
+            .iter()
+            .filter_map(|entry| match entry.item.as_ref() {
+                Some(TranscriptItem::Tool(card))
+                    if tool_call_ids.iter().any(|id| id == &card.id) =>
+                {
+                    Some((card.id.clone(), card.status))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn render_count(&self) -> usize {
         self.render_count
     }
@@ -591,6 +657,31 @@ fn split_history_insertion(cell_ids: Vec<u64>, lines: Vec<HyperlinkLine>) -> Vec
         .collect()
 }
 
+fn update_tool_statuses(
+    entries: &mut VecDeque<HistoryEntry>,
+    statuses: &[(String, crate::tools::ToolStatus)],
+) -> Vec<u64> {
+    let mut changed_ids = Vec::new();
+    for entry in entries {
+        let Some(TranscriptItem::Tool(card)) = entry.item.as_mut() else {
+            continue;
+        };
+        let Some((_, status)) = statuses.iter().find(|(id, _)| id == &card.id) else {
+            continue;
+        };
+        if card.status == *status {
+            continue;
+        }
+        card.status = *status;
+        if status.is_final() {
+            card.subchat_active = false;
+        }
+        entry.cell = cells::cell_from_transcript_item(&TranscriptItem::Tool(card.clone()), false);
+        changed_ids.push(entry.id);
+    }
+    changed_ids
+}
+
 fn hyperlink_line_is_blank(line: &HyperlinkLine) -> bool {
     line.line
         .spans
@@ -647,10 +738,13 @@ pub fn render_transcript_item_hyperlink_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approvals::{ApprovalModalState, PauseReason};
     use crate::history::cells::NoticeCell;
     use crate::render::wrapping::line_to_plain;
+    use crate::tools::{ToolCard, ToolStatus};
     use ratatui::backend::TestBackend;
     use ratatui::{TerminalOptions, Viewport};
+    use serde_json::json;
 
     #[derive(Debug, Clone)]
     struct FixedCell {
@@ -754,6 +848,32 @@ mod tests {
         }
     }
 
+    fn approval(scope: &str, tool_call_id: &str) -> ApprovalModalState {
+        ApprovalModalState::with_scope(
+            scope,
+            vec![PauseReason {
+                reason_type: "confirmation".to_string(),
+                tool_name: "shell".to_string(),
+                command: "echo hi".to_string(),
+                rule: "default".to_string(),
+                tool_call_id: tool_call_id.to_string(),
+                integr_config_path: None,
+                args: None,
+                diff: None,
+            }],
+        )
+    }
+
+    fn tool_card(id: &str, status: ToolStatus) -> ToolCard {
+        let mut card = ToolCard::from_tool_call(&json!({
+            "id": id,
+            "function": {"name": "shell", "arguments": "{}"}
+        }));
+        card.status = status;
+        card.subchat_active = true;
+        card
+    }
+
     #[test]
     fn pending_cells_render_once_and_insert_once() {
         let mut history = HistoryBuffer::new();
@@ -785,6 +905,114 @@ mod tests {
             insert_history(&mut terminal, insertion).unwrap();
         }
         assert_eq!(terminal.backend().size().unwrap().width, 40);
+    }
+
+    #[test]
+    fn enqueue_retains_transcript_identity_but_enqueue_cell_does_not() {
+        let mut history = HistoryBuffer::new();
+        let item_id = history.enqueue(TranscriptItem::Notice("item".to_string()));
+        let cell_id = history.enqueue_cell(Box::new(NoticeCell::new("cell")));
+
+        assert!(matches!(
+            history.history.iter().find(|entry| entry.id == item_id),
+            Some(HistoryEntry {
+                item: Some(TranscriptItem::Notice(text)),
+                ..
+            }) if text == "item"
+        ));
+        assert!(history
+            .history
+            .iter()
+            .find(|entry| entry.id == cell_id)
+            .is_some_and(|entry| entry.item.is_none()));
+        assert!(history
+            .pending
+            .iter()
+            .find(|entry| entry.id == item_id)
+            .is_some_and(|entry| entry.item.is_some()));
+        assert!(history
+            .pending
+            .iter()
+            .find(|entry| entry.id == cell_id)
+            .is_some_and(|entry| entry.item.is_none()));
+    }
+
+    #[test]
+    fn remove_approval_scope_removes_only_optimistic_matching_entries_and_cache() {
+        let mut history = HistoryBuffer::new();
+        history.enqueue(TranscriptItem::Approval(
+            approval("scope-a", "call-a"),
+            Some(ToolStatus::ApprovedOnce),
+        ));
+        history.enqueue(TranscriptItem::Approval(
+            approval("scope-b", "call-b"),
+            Some(ToolStatus::Denied),
+        ));
+        history.enqueue(TranscriptItem::Approval(
+            approval("scope-a", "call-c"),
+            None,
+        ));
+        history.pending_insertions(80);
+        assert_eq!(history.cache_entry_count(), 3);
+
+        assert!(history.remove_approval_scope("scope-a"));
+        assert_eq!(history.source_cell_count(), 2);
+        assert_eq!(history.pending_cell_count(), 2);
+        assert_eq!(history.cache_entry_count(), 2);
+        assert!(!history.remove_approval_scope("scope-a"));
+        assert!(history.history.iter().any(|entry| {
+            matches!(
+                entry.item,
+                Some(TranscriptItem::Approval(ref modal, Some(ToolStatus::Denied)))
+                    if modal.scope() == "scope-b"
+            )
+        }));
+        assert!(history.history.iter().any(|entry| {
+            matches!(
+                entry.item,
+                Some(TranscriptItem::Approval(ref modal, None)) if modal.scope() == "scope-a"
+            )
+        }));
+    }
+
+    #[test]
+    fn tool_statuses_read_and_update_history_pending_and_cache() {
+        let mut history = HistoryBuffer::new();
+        history.enqueue(TranscriptItem::Tool(tool_card(
+            "call-a",
+            ToolStatus::AwaitingApproval,
+        )));
+        history.enqueue_cell(Box::new(NoticeCell::new("cell-only")));
+        history.pending_insertions(80);
+        assert_eq!(history.cache_entry_count(), 2);
+        assert_eq!(
+            history.tool_statuses(&[
+                "call-a".to_string(),
+                "missing".to_string(),
+                "call-b".to_string(),
+            ]),
+            vec![("call-a".to_string(), ToolStatus::AwaitingApproval)]
+        );
+
+        assert!(history.set_tool_statuses(&[("call-a".to_string(), ToolStatus::Denied)]));
+        assert_eq!(history.cache_entry_count(), 1);
+        assert!(!history.set_tool_statuses(&[("call-a".to_string(), ToolStatus::Denied)]));
+        assert!(!history.set_tool_statuses(&[("missing".to_string(), ToolStatus::Succeeded)]));
+        for entry in history.history.iter().chain(history.pending.iter()) {
+            if let Some(TranscriptItem::Tool(card)) = &entry.item {
+                assert_eq!(card.id, "call-a");
+                assert_eq!(card.status, ToolStatus::Denied);
+                assert!(!card.subchat_active);
+            }
+        }
+        let lines = history
+            .pending_insertions(80)
+            .into_iter()
+            .flat_map(|insertion| insertion.lines)
+            .map(|line| line_to_plain(&line.line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(lines.contains("denied"));
     }
 
     #[test]
