@@ -254,6 +254,7 @@ impl BrowserToolbarActionEvent {
 pub struct UnknownSseEvent {
     pub kind: String,
     pub raw: Value,
+    pub malformed_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -542,29 +543,28 @@ impl SseEvent {
     pub fn from_raw(raw: &Value) -> Self {
         let kind = raw.get("type").and_then(Value::as_str).unwrap_or_default();
         match kind {
-            "snapshot" => Self::Snapshot {
-                thread: raw.get("thread").cloned(),
-                runtime: raw.get("runtime").cloned(),
-                messages: raw
-                    .get("messages")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default(),
-                background_agents: raw
-                    .get("background_agents")
-                    .or_else(|| raw.get("backgroundAgents"))
-                    .and_then(Value::as_array)
-                    .map(|agents| {
-                        agents
-                            .iter()
-                            .map(BackgroundAgentSummary::from_raw)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                browser: raw
-                    .get("browser")
-                    .filter(|browser| !browser.is_null())
-                    .map(BrowserSnapshot::from_raw),
+            "snapshot" => match raw.get("messages").and_then(Value::as_array) {
+                Some(messages) => Self::Snapshot {
+                    thread: raw.get("thread").cloned(),
+                    runtime: raw.get("runtime").cloned(),
+                    messages: messages.clone(),
+                    background_agents: raw
+                        .get("background_agents")
+                        .or_else(|| raw.get("backgroundAgents"))
+                        .and_then(Value::as_array)
+                        .map(|agents| {
+                            agents
+                                .iter()
+                                .map(BackgroundAgentSummary::from_raw)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    browser: raw
+                        .get("browser")
+                        .filter(|browser| !browser.is_null())
+                        .map(BrowserSnapshot::from_raw),
+                },
+                None => malformed_authoritative_event(kind, raw, "missing or non-array messages"),
             },
             "background_agent_updated" => Self::BackgroundAgentUpdated {
                 agent: raw
@@ -591,17 +591,23 @@ impl SseEvent {
                 finish_reason: raw.get("finish_reason").cloned(),
             },
             "runtime_updated" => Self::RuntimeUpdated,
-            "ack" => Self::Ack {
-                client_request_id: raw
-                    .get("client_request_id")
+            "ack" => match (
+                raw.get("client_request_id")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                accepted: raw
-                    .get("accepted")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                result: raw.get("result").cloned(),
+                    .filter(|value| !value.trim().is_empty()),
+                raw.get("accepted").and_then(Value::as_bool),
+            ) {
+                (Some(client_request_id), Some(accepted)) => Self::Ack {
+                    client_request_id: client_request_id.to_string(),
+                    accepted,
+                    result: raw.get("result").cloned(),
+                },
+                (None, _) => {
+                    malformed_authoritative_event(kind, raw, "missing or empty client_request_id")
+                }
+                (_, None) => {
+                    malformed_authoritative_event(kind, raw, "missing or non-boolean accepted")
+                }
             },
             "process_completed" => Self::ProcessCompleted {
                 event: ProcessCompletedEvent::from_raw(raw),
@@ -639,12 +645,15 @@ impl SseEvent {
             "message_removed" => Self::MessageRemoved {
                 message_id: message_id(raw),
             },
-            "messages_truncated" => Self::MessagesTruncated {
-                from_index: raw
-                    .get("from_index")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as usize)
-                    .unwrap_or(usize::MAX),
+            "messages_truncated" => match raw.get("from_index").and_then(Value::as_u64) {
+                Some(from_index) => Self::MessagesTruncated {
+                    from_index: from_index as usize,
+                },
+                None => malformed_authoritative_event(
+                    kind,
+                    raw,
+                    "missing or invalid non-negative integer from_index",
+                ),
             },
             "subchat_update" => Self::SubchatUpdate {
                 tool_call_id: raw
@@ -697,9 +706,20 @@ impl SseEvent {
                 event: UnknownSseEvent {
                     kind: kind.to_string(),
                     raw: raw.clone(),
+                    malformed_reason: None,
                 },
             },
         }
+    }
+}
+
+fn malformed_authoritative_event(kind: &str, raw: &Value, reason: &str) -> SseEvent {
+    SseEvent::Unknown {
+        event: UnknownSseEvent {
+            kind: kind.to_string(),
+            raw: raw.clone(),
+            malformed_reason: Some(reason.to_string()),
+        },
     }
 }
 
@@ -977,10 +997,13 @@ impl TranscriptMessage {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        message.stream_finished = raw
-            .get("stream_finished")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
+        message.stream_finished = match raw.get("stream_finished").and_then(Value::as_bool) {
+            Some(stream_finished) => stream_finished,
+            None => !matches!(
+                message.role,
+                TranscriptRole::Assistant | TranscriptRole::Tool | TranscriptRole::Diff
+            ),
+        };
         message.extra = extra_fields(raw);
         message
     }
@@ -1118,15 +1141,7 @@ impl TranscriptState {
     }
 
     pub fn add_message_at(&mut self, raw: &Value, index: Option<usize>) -> bool {
-        let mut message = TranscriptMessage::from_wire(raw);
-        if (message.role == TranscriptRole::Assistant || message.role.is_tool_result())
-            && raw
-                .get("stream_finished")
-                .and_then(Value::as_bool)
-                .is_none()
-        {
-            message.stream_finished = true;
-        }
+        let message = TranscriptMessage::from_wire(raw);
         self.add_transcript_message(message, index)
     }
 
@@ -1136,14 +1151,6 @@ impl TranscriptState {
             message.message_id = message_id
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
-        }
-        if (message.role == TranscriptRole::Assistant || message.role.is_tool_result())
-            && raw
-                .get("stream_finished")
-                .and_then(Value::as_bool)
-                .is_none()
-        {
-            message.stream_finished = true;
         }
         let lookup_id = message.message_id.as_deref().or(message_id);
         if let Some(idx) = self.message_index_by_id(lookup_id) {

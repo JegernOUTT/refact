@@ -10,7 +10,7 @@ use refact_tui::client::{
     ChatSeqDecision, ChatSeqTracker, ClientError, DaemonClient, OpenProjectResponse, ToolDecision,
 };
 use refact_tui::history::render_transcript_item_lines;
-use refact_tui::protocol::{DeltaOp, TranscriptState};
+use refact_tui::protocol::{DeltaOp, TranscriptRole, TranscriptState};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 use serde_json::{json, Value};
@@ -936,6 +936,181 @@ fn malformed_stream_delta_is_rejected_without_mutating_transcript() {
     assert!(
         transcript_text(&app).contains("notice:Rejected malformed stream_delta for assistant-1")
     );
+}
+
+#[test]
+fn malformed_authoritative_envelopes_request_resubscribe_without_mutating_state() {
+    let mut app = App::new(State::project());
+    let chat_id = app.chat_id().to_string();
+    let mut tracker = ChatSeqTracker::new();
+    let snapshot = chat_event_from_fixture(
+        json!({
+            "seq": "0",
+            "type": "snapshot",
+            "messages": [{"message_id": "u1", "role": "user", "content": "kept"}]
+        }),
+        &chat_id,
+    );
+    assert_eq!(tracker.observe(&snapshot), ChatSeqDecision::Apply);
+    app.apply_chat_event(snapshot);
+
+    for (seq, raw, expected) in [
+        (
+            "1",
+            json!({"type": "snapshot"}),
+            "missing or non-array messages",
+        ),
+        (
+            "1",
+            json!({"type": "snapshot", "messages": null}),
+            "missing or non-array messages",
+        ),
+        (
+            "1",
+            json!({"type": "snapshot", "messages": {}}),
+            "missing or non-array messages",
+        ),
+        (
+            "1",
+            json!({"type": "ack", "accepted": true}),
+            "missing or empty client_request_id",
+        ),
+        (
+            "1",
+            json!({"type": "ack", "client_request_id": "", "accepted": true}),
+            "missing or empty client_request_id",
+        ),
+        (
+            "1",
+            json!({"type": "ack", "client_request_id": "request-1"}),
+            "missing or non-boolean accepted",
+        ),
+        (
+            "1",
+            json!({"type": "ack", "client_request_id": "request-1", "accepted": "true"}),
+            "missing or non-boolean accepted",
+        ),
+        (
+            "1",
+            json!({"type": "messages_truncated"}),
+            "missing or invalid non-negative integer from_index",
+        ),
+        (
+            "1",
+            json!({"type": "messages_truncated", "from_index": -1}),
+            "missing or invalid non-negative integer from_index",
+        ),
+        (
+            "1",
+            json!({"type": "messages_truncated", "from_index": "0"}),
+            "missing or invalid non-negative integer from_index",
+        ),
+    ] {
+        let mut raw = raw;
+        raw["seq"] = json!(seq);
+        let event = chat_event_from_fixture(raw, &chat_id);
+        assert!(matches!(
+            tracker.observe(&event),
+            ChatSeqDecision::Resubscribe(message) if message.contains(expected)
+        ));
+        assert_eq!(app.transcript_state().messages().len(), 1);
+        assert_eq!(app.transcript_state().messages()[0].content, "kept");
+    }
+
+    let valid_next = chat_event_from_fixture(
+        json!({
+            "seq": "1",
+            "type": "message_added",
+            "message": {"message_id": "u2", "role": "user", "content": "next"}
+        }),
+        &chat_id,
+    );
+    assert_eq!(tracker.observe(&valid_next), ChatSeqDecision::Apply);
+    app.apply_chat_event(valid_next);
+    assert_eq!(
+        app.transcript_state()
+            .messages()
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        ["kept", "next"]
+    );
+}
+
+#[test]
+fn missing_stream_finality_stays_unknown_until_a_terminal_event_arrives() {
+    let mut app = App::new(State::project());
+    let chat_id = app.chat_id().to_string();
+    app.apply_chat_event(chat_event_from_fixture(
+        json!({
+            "seq": "0",
+            "type": "snapshot",
+            "runtime": {"state": "generating"},
+            "messages": [
+                {"message_id": "a1", "role": "assistant", "content": "partial"}
+            ]
+        }),
+        &chat_id,
+    ));
+
+    let messages = app.transcript_state().messages();
+    assert_eq!(messages.len(), 1);
+    assert!(!messages[0].stream_finished, "{messages:?}");
+    assert!(messages
+        .iter()
+        .any(|message| message.role == TranscriptRole::Assistant));
+
+    app.apply_chat_event(chat_event_from_fixture(
+        json!({"seq": "1", "type": "stream_finished", "message_id": "a1"}),
+        &chat_id,
+    ));
+    assert!(app.transcript_state().messages()[0].stream_finished);
+
+    let mut transcript = TranscriptState::new();
+    assert!(transcript.add_message(&json!({"role": "tool", "content": "pending"})));
+    assert!(transcript.add_message(
+        &json!({"role": "assistant", "content": "still open", "stream_finished": false})
+    ));
+    assert!(transcript
+        .add_message(&json!({"role": "assistant", "content": "done", "stream_finished": true})));
+    assert_eq!(
+        transcript
+            .messages()
+            .iter()
+            .map(|message| message.stream_finished)
+            .collect::<Vec<_>>(),
+        [false, false, true]
+    );
+}
+
+#[test]
+fn duplicate_and_stale_snapshots_do_not_replace_newer_transcript_state() {
+    let mut app = App::new(State::project());
+    let chat_id = app.chat_id().to_string();
+    let mut tracker = ChatSeqTracker::new();
+    let first = chat_event_from_fixture(
+        json!({"seq": "10", "type": "snapshot", "messages": [{"role": "user", "content": "first"}]}),
+        &chat_id,
+    );
+    assert_eq!(tracker.observe(&first), ChatSeqDecision::Apply);
+    app.apply_chat_event(first);
+
+    for seq in ["10", "9"] {
+        let snapshot = chat_event_from_fixture(
+            json!({"seq": seq, "type": "snapshot", "messages": [{"role": "user", "content": "stale"}]}),
+            &chat_id,
+        );
+        assert_eq!(tracker.observe(&snapshot), ChatSeqDecision::Suppress);
+        assert_eq!(app.transcript_state().messages()[0].content, "first");
+    }
+
+    let fresh = chat_event_from_fixture(
+        json!({"seq": "11", "type": "snapshot", "messages": [{"role": "user", "content": "fresh"}]}),
+        &chat_id,
+    );
+    assert_eq!(tracker.observe(&fresh), ChatSeqDecision::Apply);
+    app.apply_chat_event(fresh);
+    assert_eq!(app.transcript_state().messages()[0].content, "fresh");
 }
 
 #[test]

@@ -617,8 +617,16 @@ impl ChatSeqTracker {
                 "malformed stream_delta at seq {seq}: missing or non-array ops"
             ));
         }
+        if let SseEvent::Unknown { event } = event.protocol_event() {
+            if let Some(reason) = event.malformed_reason {
+                return ChatSeqDecision::Resubscribe(format!(
+                    "malformed {} at seq {seq}: {reason}",
+                    event.kind
+                ));
+            }
+        }
         if event.kind == "snapshot" {
-            if self.last_seq.is_some_and(|last_seq| seq < last_seq) {
+            if self.last_seq.is_some_and(|last_seq| seq <= last_seq) {
                 return ChatSeqDecision::Suppress;
             }
             self.last_seq = Some(seq);
@@ -2836,7 +2844,7 @@ mod tests {
             chat_id: Some("chat".to_string()),
             seq: Some(100),
             kind: "snapshot".to_string(),
-            raw: json!({}),
+            raw: json!({"messages": []}),
         };
         let stale_snapshot = ChatEvent {
             seq: Some(40),
@@ -2860,7 +2868,7 @@ mod tests {
             chat_id: Some("chat".to_string()),
             seq: Some(1),
             kind: "snapshot".to_string(),
-            raw: json!({}),
+            raw: json!({"messages": []}),
         };
         let event = ChatEvent {
             seq: Some(2),
