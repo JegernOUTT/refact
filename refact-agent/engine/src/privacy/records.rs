@@ -10,8 +10,9 @@ use refact_privacy::{
 use refact_exec::ObservationStatus;
 
 use crate::call_validation::ChatMessage;
+use crate::exec::path_enrichment::{CollectedPathEnrichment, PathEnrichment};
 use crate::files_correction::registered_worktree_path_mappings;
-use crate::files_in_workspace::registered_alias_paths;
+use crate::files_in_workspace::{check_file_privacy_for_model_context, registered_alias_paths};
 use crate::global_context::GlobalContext;
 
 pub const SHELL_WITHHELD_MESSAGE: &str = "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry.";
@@ -92,6 +93,63 @@ pub fn shell_observation_needed_for_session(
                 .find(|zone| zone.name == *name)
                 .is_some_and(|zone| !destination.matches_send_to(&zone.send_to))
     })
+}
+
+pub async fn filter_path_enrichment_for_model_context(
+    gcx: Arc<GlobalContext>,
+    destination: &Destination,
+    derived_zones: &DerivedPrivacyZones,
+    collected: CollectedPathEnrichment,
+) -> PathEnrichment {
+    let mut metadata = collected.metadata;
+    let mut references = Vec::new();
+    let mut seen = HashSet::new();
+    for candidate in collected.candidates {
+        if check_file_privacy_for_model_context(gcx.clone(), &candidate.canonical_path)
+            .await
+            .is_err()
+            || !path_allowed_for_destination(
+                &gcx,
+                &candidate.canonical_path,
+                destination,
+                derived_zones,
+            )
+        {
+            metadata.withheld_count += 1;
+            continue;
+        }
+        let key = (
+            candidate.reference.path.clone(),
+            candidate.reference.line1,
+            candidate.reference.line2,
+            candidate.reference.column1,
+            candidate.reference.column2,
+        );
+        if seen.insert(key) {
+            references.push(candidate.reference);
+        }
+    }
+    metadata.references = references;
+    metadata
+}
+
+fn path_allowed_for_destination(
+    gcx: &Arc<GlobalContext>,
+    path: &Path,
+    destination: &Destination,
+    derived_zones: &DerivedPrivacyZones,
+) -> bool {
+    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+    let Ok(compiled) = policy.compile() else {
+        return false;
+    };
+    let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
+    let zone = zone_for_record_path(gcx, &compiled, path, &mappings, derived_zones);
+    zone != "blocked"
+        && compiled
+            .zone_named(&zone)
+            .map(|candidate| destination.matches_send_to(&candidate.send_to))
+            .unwrap_or(false)
 }
 
 fn zone_for_record_path(
@@ -656,6 +714,51 @@ mod tests {
             ..Default::default()
         });
         gcx
+    }
+
+    #[tokio::test]
+    async fn path_enrichment_omits_destination_guarded_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("public.rs");
+        let secret = temp.path().join("secret.rs");
+        std::fs::write(&public, "pub fn visible() {}\n").unwrap();
+        std::fs::write(&secret, "pub fn guarded() {}\n").unwrap();
+        let gcx = gcx_with_zones(
+            temp.path(),
+            vec![
+                Zone {
+                    name: "secrets".to_string(),
+                    patterns: vec!["secret.rs".to_string()],
+                    send_to: vec![],
+                    on_shell_read: ShellBehavior::Withhold,
+                },
+                Zone {
+                    name: "normal".to_string(),
+                    patterns: vec!["*".to_string()],
+                    send_to: vec!["*".to_string()],
+                    on_shell_read: ShellBehavior::Withhold,
+                },
+            ],
+        )
+        .await;
+        let collected = crate::exec::path_enrichment::collect(
+            "cat public.rs secret.rs",
+            temp.path(),
+            temp.path(),
+            "",
+        );
+
+        let enrichment = filter_path_enrichment_for_model_context(
+            gcx,
+            &provider_destination("untrusted/model"),
+            &new_derived_privacy_zones(),
+            collected,
+        )
+        .await;
+
+        assert_eq!(enrichment.references.len(), 1);
+        assert_eq!(enrichment.references[0].path, "public.rs");
+        assert_eq!(enrichment.withheld_count, 1);
     }
 
     #[test]

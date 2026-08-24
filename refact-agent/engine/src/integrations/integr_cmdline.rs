@@ -372,7 +372,7 @@ pub async fn execute_blocking_command(
     owner: ExecOwnerMeta,
     abort_flag: Arc<AtomicBool>,
     short_description: String,
-) -> Result<(String, ExecProcessSnapshot, Duration), String> {
+) -> Result<(String, String, ExecProcessSnapshot, Duration), String> {
     info!("EXEC workdir {:?}:\n{:?}", command_workdir, command);
 
     let timeout_secs = cfg.timeout.parse::<u64>().unwrap_or(10);
@@ -410,6 +410,7 @@ pub async fn execute_blocking_command(
         .read_raw_capture(&result.snapshot.meta.process_id)
         .await;
     let (stdout, stderr) = collect_foreground_output(&read, raw_output.as_ref());
+    let diagnostic_output = format!("{stdout}\n{stderr}");
 
     let stdout = output_mini_postprocessing(&cfg.output_filter, &stdout);
     let stderr = output_mini_postprocessing(&cfg.output_filter, &stderr);
@@ -435,7 +436,7 @@ pub async fn execute_blocking_command(
         }
     }
     append_status_line(&mut out, &result.snapshot.status, duration, timeout_secs);
-    Ok((out, result.snapshot, duration))
+    Ok((out, diagnostic_output, result.snapshot, duration))
 }
 
 fn _parse_command_args(
@@ -483,15 +484,19 @@ impl Tool for ToolCmdline {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (command, workdir) = _parse_command_args(args, &self.cfg)?;
 
-        let (gcx, exec_registry, abort_flag, chat_id) = {
+        let (gcx, exec_registry, abort_flag, chat_id, current_model, derived_privacy_zones) = {
             let cgcx = ccx.lock().await;
             (
                 cgcx.global_context.clone(),
                 cgcx.app.runtime.exec_registry.clone(),
                 cgcx.abort_flag.clone(),
                 cgcx.chat_id.clone(),
+                cgcx.current_model.clone(),
+                cgcx.derived_privacy_zones.clone(),
             )
         };
+        crate::privacy::load_privacy_if_needed(gcx.clone()).await;
+        let destination = crate::privacy::records::provider_destination(&current_model);
         let user_activity = gcx.user_activity.clone();
         if let Ok(mut ring) = user_activity.try_lock() {
             ring.push(UserAction::CommandRun {
@@ -517,8 +522,8 @@ impl Tool for ToolCmdline {
         };
         let short_description =
             cmdline_short_description(&self.name, &self.cfg.description, &command);
-        let (tool_output, snapshot, duration) = execute_blocking_command(
-            gcx,
+        let (tool_output, diagnostic_output, snapshot, duration) = execute_blocking_command(
+            gcx.clone(),
             &command,
             &self.cfg,
             &workdir,
@@ -531,6 +536,26 @@ impl Tool for ToolCmdline {
         )
         .await?;
 
+        let cwd = snapshot
+            .meta
+            .cwd
+            .as_deref()
+            .or(snapshot.meta.owner.workspace.as_deref())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let workspace = snapshot.meta.owner.workspace.as_deref().unwrap_or(cwd);
+        let enrichment = crate::privacy::records::filter_path_enrichment_for_model_context(
+            gcx,
+            &destination,
+            &derived_privacy_zones,
+            crate::exec::path_enrichment::collect(&command, cwd, workspace, &diagnostic_output),
+        )
+        .await;
+        let mut extra = exec_extra(&snapshot, duration);
+        extra.insert(
+            "path_enrichment".to_string(),
+            serde_json::to_value(enrichment).unwrap_or(Value::Null),
+        );
+
         let result = vec![ContextEnum::ChatMessage(ChatMessage {
             role: "tool".to_string(),
             content: ChatContent::SimpleText(tool_output),
@@ -538,7 +563,7 @@ impl Tool for ToolCmdline {
             tool_call_id: tool_call_id.clone(),
             tool_failed: tool_failed_for_status(&snapshot.status),
             output_filter: Some(OutputFilter::no_limits()),
-            extra: exec_extra(&snapshot, duration),
+            extra,
             ..Default::default()
         })];
 

@@ -20,6 +20,7 @@ import {
 } from "../../../features/Config/configSlice";
 import type {
   ExecToolMetadata,
+  PathEnrichmentMetadata,
   ToolCall,
   ToolMessage,
 } from "../../../services/refact/types";
@@ -34,6 +35,7 @@ type RenderExecToolOptions = {
   args?: Record<string, unknown>;
   content?: string;
   extra?: ExecToolMetadata;
+  pathEnrichment?: PathEnrichmentMetadata;
   failed?: boolean;
   host?: Config["host"];
   subchatLog?: string[];
@@ -100,7 +102,15 @@ function renderExecTool(options: RenderExecToolOptions = {}) {
           tool_call_id: id,
           content: options.content ?? "",
           tool_failed: options.failed,
-          extra: options.extra ? { exec: options.extra } : undefined,
+          extra:
+            options.extra ?? options.pathEnrichment
+              ? {
+                  ...(options.extra ? { exec: options.extra } : {}),
+                  ...(options.pathEnrichment
+                    ? { path_enrichment: options.pathEnrichment }
+                    : {}),
+                }
+              : undefined,
         }
       : undefined;
   const store = makeStore(message, options.host);
@@ -160,6 +170,52 @@ describe("ExecToolCard", () => {
     expect(screen.getByText("/workspace")).toBeInTheDocument();
     expect(screen.getByText("0.2s")).toBeInTheDocument();
     expect(screen.getByText("0")).toBeInTheDocument();
+  });
+
+  test("renders validated path references and opens a relative IDE file payload", () => {
+    const postMessageSpy = vi
+      .spyOn(window, "postMessage")
+      .mockImplementation(() => undefined);
+    try {
+      renderExecTool({
+        host: "vscode",
+        extra: {
+          process_id: "exec_paths_1",
+          status: "exited",
+          short_description: "Run path diagnostics",
+        },
+        pathEnrichment: {
+          schema_version: 1,
+          references: [
+            {
+              path: "src/main.rs",
+              line1: 7,
+              line2: 7,
+              column1: 3,
+              column2: 3,
+              source: "diagnostic",
+              confidence: "high",
+            },
+          ],
+          truncated: false,
+          omitted_count: 0,
+          withheld_count: 0,
+        },
+      });
+
+      fireEvent.click(screen.getByText("Run path diagnostics"));
+      fireEvent.click(screen.getByRole("button", { name: "src/main.rs:7" }));
+
+      expect(postMessageSpy).toHaveBeenCalledWith(
+        {
+          type: "ide/openFile",
+          payload: { file_path: "src/main.rs", line: 7 },
+        },
+        "*",
+      );
+    } finally {
+      postMessageSpy.mockRestore();
+    }
   });
 
   test("collapses with delayed unmount and persists reopened state by tool-call id", () => {

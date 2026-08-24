@@ -266,10 +266,21 @@ impl Tool for ToolProcessStart {
             &OutputFilter::no_limits(),
         ));
         append_sandbox_denial_hint(&mut content, &result.snapshot.status, sandbox_active);
+        let mut extra = exec_extra(&result.snapshot, Some(&read), None, Some(tty));
+        attach_path_enrichment(
+            &mut extra,
+            gcx.clone(),
+            &destination,
+            &derived_privacy_zones,
+            &result.snapshot,
+            &parsed.command,
+            &collect_combined(&read.chunks),
+        )
+        .await;
         let mut result_message = tool_message(
             tool_call_id,
             content,
-            Some(exec_extra(&result.snapshot, Some(&read), None, Some(tty))),
+            Some(extra),
             tool_failed_for_status(&result.snapshot.status),
         );
         if observe {
@@ -486,6 +497,7 @@ impl Tool for ToolProcessRead {
             ));
         }
         let read = exec_registry.read(&process_id, since_seq, None).await;
+        let mut diagnostic_output = collect_combined(&read.chunks);
         let mut content = format_process_snapshot("Process output", &snapshot);
         content.push_str(&format!(
             "\nsince_seq: {}\nnext_seq: {}\nlatest_seq: {}\n",
@@ -494,6 +506,7 @@ impl Tool for ToolProcessRead {
         if from_disk {
             if let Some(path) = read.disk_log_path.as_ref() {
                 let (text, truncated) = read_disk_log_tail(path).await?;
+                diagnostic_output = text.clone();
                 content.push_str(&format!(
                     "from_disk: true\npersisted_output_path: {}\n",
                     path.display()
@@ -511,17 +524,18 @@ impl Tool for ToolProcessRead {
         } else {
             content.push_str(&format_read_sections(&read, stream, &output_filter));
         }
-        let mut result_message = tool_message(
-            tool_call_id,
-            content,
-            Some(exec_extra(
-                &snapshot,
-                Some(&read),
-                Some(stream_label(stream)),
-                None,
-            )),
-            None,
-        );
+        let mut extra = exec_extra(&snapshot, Some(&read), Some(stream_label(stream)), None);
+        attach_path_enrichment(
+            &mut extra,
+            gcx.clone(),
+            &destination,
+            &derived_privacy_zones,
+            &snapshot,
+            &snapshot.meta.command,
+            &diagnostic_output,
+        )
+        .await;
+        let mut result_message = tool_message(tool_call_id, content, Some(extra), None);
         if let Some(observation) = process_observation_status(
             exec_registry.as_ref(),
             &process_id,
@@ -707,6 +721,16 @@ impl Tool for ToolProcessWait {
         if let Some(exec) = extra.get_mut("exec").and_then(Value::as_object_mut) {
             exec.insert("wait_timed_out".to_string(), Value::Bool(timed_out));
         }
+        attach_path_enrichment(
+            &mut extra,
+            gcx.clone(),
+            &destination,
+            &derived_privacy_zones,
+            &snapshot,
+            &snapshot.meta.command,
+            &collect_combined(&read.chunks),
+        )
+        .await;
         let mut result_message = tool_message(
             tool_call_id,
             content,
@@ -1611,6 +1635,35 @@ fn exec_extra(
     let mut extra = serde_json::Map::new();
     extra.insert("exec".to_string(), value);
     extra
+}
+
+async fn attach_path_enrichment(
+    extra: &mut serde_json::Map<String, Value>,
+    gcx: Arc<GlobalContext>,
+    destination: &refact_privacy::Destination,
+    derived_privacy_zones: &crate::privacy::records::DerivedPrivacyZones,
+    snapshot: &ExecProcessSnapshot,
+    command: &str,
+    output: &str,
+) {
+    let cwd = snapshot
+        .meta
+        .cwd
+        .as_deref()
+        .or(snapshot.meta.owner.workspace.as_deref())
+        .unwrap_or_else(|| Path::new("."));
+    let workspace = snapshot.meta.owner.workspace.as_deref().unwrap_or(cwd);
+    let enrichment = crate::privacy::records::filter_path_enrichment_for_model_context(
+        gcx,
+        destination,
+        derived_privacy_zones,
+        crate::exec::path_enrichment::collect(command, cwd, workspace, output),
+    )
+    .await;
+    extra.insert(
+        "path_enrichment".to_string(),
+        serde_json::to_value(enrichment).unwrap_or(Value::Null),
+    );
 }
 
 pub(super) fn read_value(read: &ExecReadResult) -> Value {

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -238,6 +238,16 @@ impl Tool for ToolShell {
                 extra: exec_extra(&result.snapshot, &read, duration, None, tty),
                 ..Default::default()
             };
+            attach_path_enrichment(
+                &mut message.extra,
+                gcx.clone(),
+                &destination,
+                &derived_privacy_zones,
+                &result.snapshot,
+                &parsed.command,
+                &collect_combined(&read.chunks),
+            )
+            .await;
             if observe {
                 let observation = exec_registry
                     .observation_reader(&result.snapshot.meta.process_id)
@@ -304,6 +314,16 @@ impl Tool for ToolShell {
             extra: exec_extra(&result.snapshot, &read, duration, Some(timeout), tty),
             ..Default::default()
         };
+        attach_path_enrichment(
+            &mut message.extra,
+            gcx.clone(),
+            &destination,
+            &derived_privacy_zones,
+            &result.snapshot,
+            &parsed.command,
+            &format!("{stdout}\n{stderr}"),
+        )
+        .await;
         if observe {
             apply_shell_privacy(
                 &gcx,
@@ -546,6 +566,13 @@ fn collect_exec_output(read: &ExecReadResult) -> (String, String) {
     (stdout, stderr)
 }
 
+fn collect_combined(chunks: &[ExecOutputChunk]) -> String {
+    chunks
+        .iter()
+        .map(|chunk| chunk.text.as_str())
+        .collect::<String>()
+}
+
 fn collect_foreground_output(
     read: &ExecReadResult,
     raw_output: Option<&ExecRawOutput>,
@@ -706,6 +733,35 @@ fn exec_extra(
     }
     extra.insert("exec".to_string(), exec);
     extra
+}
+
+async fn attach_path_enrichment(
+    extra: &mut serde_json::Map<String, Value>,
+    gcx: Arc<GlobalContext>,
+    destination: &refact_privacy::Destination,
+    derived_privacy_zones: &crate::privacy::records::DerivedPrivacyZones,
+    snapshot: &ExecProcessSnapshot,
+    command: &str,
+    output: &str,
+) {
+    let cwd = snapshot
+        .meta
+        .cwd
+        .as_deref()
+        .or(snapshot.meta.owner.workspace.as_deref())
+        .unwrap_or_else(|| Path::new("."));
+    let workspace = snapshot.meta.owner.workspace.as_deref().unwrap_or(cwd);
+    let enrichment = crate::privacy::records::filter_path_enrichment_for_model_context(
+        gcx,
+        destination,
+        derived_privacy_zones,
+        crate::exec::path_enrichment::collect(command, cwd, workspace, output),
+    )
+    .await;
+    extra.insert(
+        "path_enrichment".to_string(),
+        serde_json::to_value(enrichment).unwrap_or(Value::Null),
+    );
 }
 
 async fn parse_args(

@@ -1,4 +1,5 @@
 pub mod command_policy;
+pub mod path_enrichment;
 
 pub use refact_exec::{pty, registry, spawn, spill, transcript, types};
 pub use refact_exec::{

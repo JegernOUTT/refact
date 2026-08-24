@@ -130,6 +130,18 @@
   margin-bottom: 0;
 }
 
+.pathReferences {
+  min-width: 0;
+}
+
+.pathReference {
+  max-width: 100%;
+  overflow: hidden;
+  font-family: var(--rf-font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .logButton,
 .copyButton {
   cursor: pointer;

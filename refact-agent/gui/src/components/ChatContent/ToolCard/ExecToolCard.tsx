@@ -13,10 +13,12 @@ import type {
   ExecProcessMetadata,
   ExecProcessStatus,
   ExecToolMetadata,
+  PathEnrichmentReference,
   ToolCall,
 } from "../../../services/refact/types";
 import {
   extractExecMetadata,
+  extractPathEnrichmentMetadata,
   isExecProcessStatus,
 } from "../../../services/refact/types";
 import { ideOpenFile } from "../../../hooks/useEventBusForIDE";
@@ -347,6 +349,12 @@ function copyableOutputText(content: string | null): string | undefined {
   return content;
 }
 
+function pathReferenceLabel(reference: PathEnrichmentReference): string {
+  return reference.line1
+    ? `${reference.path}:${reference.line1}`
+    : reference.path;
+}
+
 function useRunningNowMs(isBusy: boolean): number {
   const [nowMs, setNowMs] = useState(() => Date.now());
 
@@ -376,6 +384,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
       ? maybeResult.content
       : null;
   const metadata = getExecMetadata(maybeResult?.extra);
+  const pathEnrichment = extractPathEnrichmentMetadata(maybeResult?.extra);
   const args = useMemo(
     () => parseArgs(toolCall.function.arguments),
     [toolCall.function.arguments],
@@ -430,6 +439,21 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
       postMessage(ideOpenFile({ file_path: logPath }));
     },
     [host, logPath, postMessage],
+  );
+  const handleOpenPath = useCallback(
+    (
+      event: React.MouseEvent<HTMLButtonElement>,
+      reference: PathEnrichmentReference,
+    ) => {
+      event.stopPropagation();
+      postMessage(
+        ideOpenFile({
+          file_path: reference.path,
+          line: reference.line1 ?? undefined,
+        }),
+      );
+    },
+    [postMessage],
   );
 
   const icon = toolName === "process_list" ? <Rows3 /> : <Code />;
@@ -517,6 +541,31 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
             output={copyableOutput}
             processId={process.processId}
           />
+
+          {pathEnrichment && pathEnrichment.references.length > 0 && (
+            <Flex
+              gap="1"
+              wrap="wrap"
+              className={styles.pathReferences}
+              data-testid="exec-path-references"
+            >
+              {pathEnrichment.references.map((reference) => (
+                <Button
+                  key={`${reference.path}:${reference.line1 ?? ""}:${
+                    reference.column1 ?? ""
+                  }`}
+                  type="button"
+                  size="sm"
+                  variant="soft"
+                  className={styles.pathReference}
+                  onClick={(event) => handleOpenPath(event, reference)}
+                  title={pathReferenceLabel(reference)}
+                >
+                  {pathReferenceLabel(reference)}
+                </Button>
+              ))}
+            </Flex>
+          )}
 
           {logPath && (
             <Flex gap="2" wrap="wrap" className={styles.controls}>
