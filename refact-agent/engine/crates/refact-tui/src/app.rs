@@ -3056,7 +3056,7 @@ new-chat = "ctrl-x"
     }
 
     #[test]
-    fn queue_while_generating_dispatches_in_order_after_finish() {
+    fn queued_input_waits_for_idle_runtime_after_stream_finished() {
         let mut app = App::new(project());
         app.composer.set_text("first");
         assert!(matches!(
@@ -3074,6 +3074,27 @@ new-chat = "ctrl-x"
             seq: None,
             kind: "stream_finished".to_string(),
             raw: json!({}),
+        });
+
+        assert_eq!(action, AppAction::None);
+        assert_eq!(app.input_queue().len(), 2);
+
+        let action = app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "runtime_updated".to_string(),
+            raw: json!({"state": "executing_tools"}),
+        });
+
+        assert_eq!(action, AppAction::None);
+        assert_eq!(app.input_queue().len(), 2);
+        assert_eq!(app.session_state(), SessionState::ExecutingTools);
+
+        let action = app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "runtime_updated".to_string(),
+            raw: json!({"state": "idle"}),
         });
 
         assert!(matches!(

@@ -406,6 +406,7 @@ impl App {
     pub(super) fn set_project(&mut self, project: OpenProjectResponse) {
         self.cancel_backtrack();
         self.transcript_overlay = None;
+        let draft = self.composer.text().to_string();
         self.history_path = Some(history_path_for_root(&project.root));
         let history_entries = self
             .history_path
@@ -413,7 +414,7 @@ impl App {
             .map(load_history)
             .unwrap_or_default();
         self.composer = ComposerState::new(history_entries);
-        self.input_queue.clear();
+        self.composer.set_text(draft);
         self.server_queue_size = 0;
         self.server_queue_previews.clear();
         self.current_project = Some(project.clone());
@@ -466,7 +467,6 @@ impl App {
         self.chat_id = chat_id;
         self.session_title = title;
         self.show_session_header = true;
-        self.input_queue.clear();
         self.server_queue_size = 0;
         self.server_queue_previews.clear();
         self.model = None;
@@ -500,7 +500,6 @@ impl App {
         self.chat_id = chat_id;
         self.session_title = Some(title.clone());
         self.show_session_header = true;
-        self.input_queue.clear();
         self.server_queue_size = 0;
         self.server_queue_previews.clear();
         self.model = None;
@@ -954,6 +953,17 @@ mod tests {
         }
     }
 
+    fn next_project() -> OpenProjectResponse {
+        OpenProjectResponse {
+            project_id: "p2".to_string(),
+            slug: "next".to_string(),
+            root: PathBuf::from("/tmp/next"),
+            pinned: Some(false),
+            worker: None,
+            cron_pending: None,
+        }
+    }
+
     #[test]
     fn new_chat_replaces_the_transcript_with_a_session_header() {
         let mut app = App::new(project());
@@ -987,5 +997,30 @@ mod tests {
         assert_eq!(app.switch_recent_session(1), AppAction::SubscribeCurrent);
         assert_eq!(app.chat_id(), "chat-next");
         assert_eq!(app.session_title(), Some("Next chat"));
+    }
+
+    #[test]
+    fn resuming_a_chat_preserves_queued_prompts() {
+        let mut app = App::new(project());
+        app.input_queue
+            .enqueue("first queued prompt".to_string(), Value::Null);
+        app.input_queue
+            .enqueue("second queued prompt".to_string(), Value::Null);
+
+        app.resume_chat("chat-next".to_string(), "Next chat".to_string(), None);
+
+        assert_eq!(app.input_queue.len(), 2);
+        assert_eq!(app.input_queue.items()[0].text, "first queued prompt");
+        assert_eq!(app.input_queue.items()[1].text, "second queued prompt");
+    }
+
+    #[test]
+    fn switching_projects_preserves_composer_draft() {
+        let mut app = App::new(project());
+        app.composer.set_text("keep this draft");
+
+        app.set_project(next_project());
+
+        assert_eq!(app.composer(), "keep this draft");
     }
 }

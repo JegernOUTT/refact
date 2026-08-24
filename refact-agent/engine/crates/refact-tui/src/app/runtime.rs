@@ -41,6 +41,41 @@ async fn show_startup_notice(message: String) -> Result<(), TuiError> {
     Ok(())
 }
 
+fn apply_caps_loaded(app: &mut App, project_id: &str, result: Result<Value, String>) {
+    match result {
+        _ if app.current_project_id() != Some(project_id) => {}
+        Ok(caps) => app.apply_caps(&caps),
+        Err(error) => {
+            if worker_waking_message(&error) {
+                app.subscription_status = SubscriptionStatus::Waking;
+            }
+            app.retry_hint = retry_hint_from_message(&error);
+        }
+    }
+}
+
+fn apply_models_loaded(app: &mut App, project_id: &str, result: Result<Value, String>) {
+    match result {
+        _ if app.current_project_id() != Some(project_id) => {}
+        Ok(caps) => app.open_model_picker(caps),
+        Err(error) => {
+            app.retry_hint = retry_hint_from_message(&error);
+            app.add_notice(format!("Failed to load models: {error}"));
+        }
+    }
+}
+
+fn apply_modes_loaded(app: &mut App, project_id: &str, result: Result<Value, String>) {
+    match result {
+        _ if app.current_project_id() != Some(project_id) => {}
+        Ok(modes) => app.open_mode_picker(modes),
+        Err(error) => {
+            app.retry_hint = retry_hint_from_message(&error);
+            app.add_notice(format!("Failed to load modes: {error}"));
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum RuntimeEvent {
     Input(Event),
@@ -71,9 +106,18 @@ pub(super) enum RuntimeEvent {
     },
     ProjectsLoaded(Result<Vec<ProjectEntry>, String>),
     ProjectOpened(Result<OpenProjectResponse, String>),
-    CapsLoaded(Result<Value, String>),
-    ModelsLoaded(Result<Value, String>),
-    ModesLoaded(Result<Value, String>),
+    CapsLoaded {
+        project_id: String,
+        result: Result<Value, String>,
+    },
+    ModelsLoaded {
+        project_id: String,
+        result: Result<Value, String>,
+    },
+    ModesLoaded {
+        project_id: String,
+        result: Result<Value, String>,
+    },
     FileMentionsLoaded(Result<Vec<String>, String>),
     McpViewLoaded(Result<McpViewData, String>),
     SkillsViewLoaded(Result<SlashCommandsListResponse, String>),
@@ -498,22 +542,14 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::ProjectOpened(Err(error)) => {
                 app.add_notice(format!("Failed to open project: {error}"))
             }
-            RuntimeEvent::CapsLoaded(Ok(caps)) => app.apply_caps(&caps),
-            RuntimeEvent::CapsLoaded(Err(error)) => {
-                if worker_waking_message(&error) {
-                    app.subscription_status = SubscriptionStatus::Waking;
-                }
-                app.retry_hint = retry_hint_from_message(&error);
+            RuntimeEvent::CapsLoaded { project_id, result } => {
+                apply_caps_loaded(&mut app, &project_id, result)
             }
-            RuntimeEvent::ModelsLoaded(Ok(caps)) => app.open_model_picker(caps),
-            RuntimeEvent::ModelsLoaded(Err(error)) => {
-                app.retry_hint = retry_hint_from_message(&error);
-                app.add_notice(format!("Failed to load models: {error}"))
+            RuntimeEvent::ModelsLoaded { project_id, result } => {
+                apply_models_loaded(&mut app, &project_id, result)
             }
-            RuntimeEvent::ModesLoaded(Ok(modes)) => app.open_mode_picker(modes),
-            RuntimeEvent::ModesLoaded(Err(error)) => {
-                app.retry_hint = retry_hint_from_message(&error);
-                app.add_notice(format!("Failed to load modes: {error}"))
+            RuntimeEvent::ModesLoaded { project_id, result } => {
+                apply_modes_loaded(&mut app, &project_id, result)
             }
             RuntimeEvent::FileMentionsLoaded(Ok(completions)) => {
                 app.open_file_mention_picker(file_mention_items_from_completions(completions))
@@ -656,7 +692,9 @@ pub(super) async fn run_action(
                         .get_caps(&project_id)
                         .await
                         .map_err(|error| error.to_string());
-                    let _ = tx.send(RuntimeEvent::ModelsLoaded(result)).await;
+                    let _ = tx
+                        .send(RuntimeEvent::ModelsLoaded { project_id, result })
+                        .await;
                 });
             }
         }
@@ -669,7 +707,9 @@ pub(super) async fn run_action(
                         .get_chat_modes(&project_id)
                         .await
                         .map_err(|error| error.to_string());
-                    let _ = tx.send(RuntimeEvent::ModesLoaded(result)).await;
+                    let _ = tx
+                        .send(RuntimeEvent::ModesLoaded { project_id, result })
+                        .await;
                 });
             }
         }
@@ -1444,7 +1484,9 @@ fn load_caps(client: DaemonClient, tx: mpsc::Sender<RuntimeEvent>, project_id: S
             .get_caps(&project_id)
             .await
             .map_err(|error| error.to_string());
-        let _ = tx.send(RuntimeEvent::CapsLoaded(result)).await;
+        let _ = tx
+            .send(RuntimeEvent::CapsLoaded { project_id, result })
+            .await;
     });
 }
 
@@ -1477,6 +1519,44 @@ fn reconnect_backoff(initial: Duration, max: Duration, attempt: u32, generation:
     let jitter_ms = jitter_seed % 97;
     base.saturating_add(Duration::from_millis(jitter_ms))
         .min(max)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn project(project_id: &str) -> OpenProjectResponse {
+        OpenProjectResponse {
+            project_id: project_id.to_string(),
+            slug: project_id.to_string(),
+            root: PathBuf::from(format!("/tmp/{project_id}")),
+            pinned: Some(false),
+            worker: None,
+            cron_pending: None,
+        }
+    }
+
+    #[test]
+    fn stale_caps_and_model_picker_responses_are_discarded_after_project_switch() {
+        let mut app = App::new(project("p1"));
+        app.set_project(project("p2"));
+
+        apply_caps_loaded(
+            &mut app,
+            "p1",
+            Ok(json!({"defaults": {"chat_default_model": "stale-model"}})),
+        );
+        apply_models_loaded(
+            &mut app,
+            "p1",
+            Ok(json!({"chat_models": {"stale-model": {"name": "Stale Model"}}})),
+        );
+
+        assert_eq!(app.model(), None);
+        assert!(app.modal_picker().is_none());
+    }
 }
 
 fn spawn_daemon_events_task(

@@ -197,7 +197,7 @@ impl App {
         let protocol_event = event.protocol_event();
         let raw = event.raw;
         match protocol_event {
-            SseEvent::Snapshot { .. } => self.handle_snapshot(&raw),
+            SseEvent::Snapshot { .. } => return self.handle_snapshot(&raw),
             SseEvent::StreamStarted { message_id } => {
                 self.set_session_state(SessionState::Generating);
                 self.clear_stream_controllers();
@@ -263,11 +263,8 @@ impl App {
                         self.set_session_state(SessionState::Idle);
                     }
                 }
-                if !self.is_chat_active() {
-                    return self.dispatch_next_queued_input();
-                }
             }
-            SseEvent::RuntimeUpdated => self.handle_runtime_updated(&raw),
+            SseEvent::RuntimeUpdated => return self.handle_runtime_updated(&raw),
             SseEvent::QueueUpdated {
                 queue_size,
                 queued_items,
@@ -363,11 +360,16 @@ impl App {
         self.refresh_session_header_item();
     }
 
-    pub(super) fn handle_runtime_updated(&mut self, raw: &Value) {
+    pub(super) fn handle_runtime_updated(&mut self, raw: &Value) -> AppAction {
         self.apply_runtime_state(raw);
         self.maybe_open_pending_ask_questions_form();
         self.update_server_queue_from_runtime(raw);
         self.sync_runtime_approvals(raw);
+        if self.session_state == SessionState::Idle {
+            self.dispatch_next_queued_input()
+        } else {
+            AppAction::None
+        }
     }
 
     pub(super) fn sync_runtime_approvals(&mut self, runtime: &Value) {
@@ -879,7 +881,7 @@ impl App {
 }
 
 impl App {
-    pub(super) fn handle_snapshot(&mut self, raw: &Value) {
+    pub(super) fn handle_snapshot(&mut self, raw: &Value) -> AppAction {
         if let Some(thread) = raw.get("thread") {
             if let Some(title) = thread
                 .get("title")
@@ -959,7 +961,11 @@ impl App {
             self.update_usage(runtime);
             self.update_server_queue_from_runtime(runtime);
             self.sync_runtime_approvals(runtime);
+            if self.session_state == SessionState::Idle {
+                return self.dispatch_next_queued_input();
+            }
         }
+        AppAction::None
     }
 }
 
