@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -42,6 +43,10 @@ use crate::worktrees::scope::ExecutionScope;
 const PROCESS_TRANSCRIPT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DISK_READ_MAX_BYTES: usize = 1024 * 1024;
 const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-terminal (PTY). Enables interactive stdin via process_write_stdin and merges stdout+stderr into a single combined stream. Defeats some pipe-only output buffering. Defaults to false.";
+
+static PATH_ENRICHMENT_CACHE: LazyLock<
+    Mutex<HashMap<(String, u64, u64), crate::exec::path_enrichment::CollectedPathEnrichment>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 async fn read_disk_log_tail(path: &std::path::Path) -> Result<(String, bool), String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -275,6 +280,7 @@ impl Tool for ToolProcessStart {
             &result.snapshot,
             &parsed.command,
             &collect_combined(&read.chunks),
+            read.latest_seq,
         )
         .await;
         let mut result_message = tool_message(
@@ -533,6 +539,7 @@ impl Tool for ToolProcessRead {
             &snapshot,
             &snapshot.meta.command,
             &diagnostic_output,
+            read.latest_seq,
         )
         .await;
         let mut result_message = tool_message(tool_call_id, content, Some(extra), None);
@@ -729,6 +736,7 @@ impl Tool for ToolProcessWait {
             &snapshot,
             &snapshot.meta.command,
             &collect_combined(&read.chunks),
+            read.latest_seq,
         )
         .await;
         let mut result_message = tool_message(
@@ -1645,6 +1653,7 @@ async fn attach_path_enrichment(
     snapshot: &ExecProcessSnapshot,
     command: &str,
     output: &str,
+    latest_seq: u64,
 ) {
     let cwd = snapshot
         .meta
@@ -1653,11 +1662,33 @@ async fn attach_path_enrichment(
         .or(snapshot.meta.owner.workspace.as_deref())
         .unwrap_or_else(|| Path::new("."));
     let workspace = snapshot.meta.owner.workspace.as_deref().unwrap_or(cwd);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    output.hash(&mut hasher);
+    let key = (
+        snapshot.meta.process_id.as_str().to_string(),
+        latest_seq,
+        hasher.finish(),
+    );
+    let collected = {
+        let mut cache = PATH_ENRICHMENT_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(collected) = cache.get(&key) {
+            collected.clone()
+        } else {
+            if cache.len() >= 128 {
+                cache.clear();
+            }
+            let collected = crate::exec::path_enrichment::collect(command, cwd, workspace, output);
+            cache.insert(key, collected.clone());
+            collected
+        }
+    };
     let enrichment = crate::privacy::records::filter_path_enrichment_for_model_context(
         gcx,
         destination,
         derived_privacy_zones,
-        crate::exec::path_enrichment::collect(command, cwd, workspace, output),
+        collected,
     )
     .await;
     extra.insert(
