@@ -81,14 +81,6 @@ pub(super) struct ThemePickerSnapshot {
 }
 
 impl App {
-    pub fn modal_picker(&self) -> Option<&PickerState> {
-        self.modal_picker.as_ref()
-    }
-
-    pub fn transcript_overlay(&self) -> Option<&PagerOverlay> {
-        self.transcript_overlay.as_ref()
-    }
-
     pub fn set_transcript_overlay_visible_height(&mut self, height: usize) {
         self.transcript_overlay_visible_height = Some(height);
     }

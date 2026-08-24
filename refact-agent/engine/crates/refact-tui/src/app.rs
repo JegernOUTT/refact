@@ -54,14 +54,20 @@ mod input;
 mod runtime;
 #[path = "app/session.rs"]
 mod session_lifecycle;
+mod state;
 mod surfaces;
 mod transcript;
 mod workers;
 
 pub use self::session_lifecycle::{ClipboardCopySource, SessionState, SubscriptionStatus, UsageSummary};
+pub use self::state::{App, ComposerMode};
 pub use surfaces::ProjectPickerState;
 pub use transcript::TranscriptItem;
 use self::session_lifecycle::{resolve_chat_model_id, ReasoningModelCaps};
+use self::state::{
+    BacktrackTarget, HistorySaveRequest, InFlightSend, PendingApprovalClear,
+    PendingReasoningRollback, PendingSendRetry, ReasoningStateSnapshot,
+};
 use chat_events::SubagentSummary;
 #[cfg(test)]
 use transcript::line_to_plain_string;
@@ -124,59 +130,9 @@ pub struct TuiOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct HistorySaveRequest {
-    path: PathBuf,
-    entries: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct EditorCommand {
     program: String,
     args: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComposerMode {
-    Chat,
-    ProjectPicker,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BacktrackTarget {
-    index: usize,
-    message_id: Option<String>,
-    content: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct PendingSendRetry {
-    prompt: String,
-    params: Value,
-    client_request_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct InFlightSend {
-    client_request_id: String,
-    accepted: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingApprovalClear {
-    scope: String,
-    tool_call_ids: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ReasoningStateSnapshot {
-    boost_reasoning: bool,
-    reasoning_effort: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct PendingReasoningRollback {
-    patch: Value,
-    previous: ReasoningStateSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -203,131 +159,7 @@ enum CommandContextTag {
     Other,
 }
 
-impl BacktrackTarget {
-    fn matches(&self, message: &TranscriptMessage) -> bool {
-        if let Some(message_id) = self.message_id.as_deref() {
-            message.message_id.as_deref() == Some(message_id)
-        } else {
-            message.role == TranscriptRole::User && message.content == self.content
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct App {
-    transcript: Vec<TranscriptItem>,
-    transcript_state: TranscriptState,
-    composer: ComposerState,
-    keymap: KeymapRegistry,
-    vim: VimState,
-    theme: TuiTheme,
-    input_queue: InputQueue,
-    server_queue_size: usize,
-    server_queue_previews: Vec<String>,
-    history_path: Option<PathBuf>,
-    pending_history_save: Option<HistorySaveRequest>,
-    history_save_in_flight: bool,
-    history_failure_notified: bool,
-    tui_config_path: Option<PathBuf>,
-    composer_mode: ComposerMode,
-    picker: surfaces::ProjectPickerState,
-    modal_picker: Option<PickerState>,
-    theme_picker_snapshot: Option<surfaces::ThemePickerSnapshot>,
-    approval_queue: ApprovalQueue,
-    ask_questions_form: Option<AskQuestionsForm>,
-    pending_manual_ask_questions: Option<AskQuestionsRequest>,
-    handled_ask_questions_tool_ids: HashSet<String>,
-    pending_approval_clears: VecDeque<PendingApprovalClear>,
-    events_pane: EventsPaneState,
-    current_project: Option<OpenProjectResponse>,
-    chat_id: String,
-    session_title: Option<String>,
-    recent_sessions: Vec<PickerItem>,
-    show_session_header: bool,
-    model: Option<String>,
-    mode: Option<String>,
-    boost_reasoning: bool,
-    reasoning_effort: Option<String>,
-    pending_reasoning_rollback: Option<PendingReasoningRollback>,
-    pending_model: Option<String>,
-    pending_mode: Option<String>,
-    in_flight_send: Option<InFlightSend>,
-    pending_send_retry: Option<PendingSendRetry>,
-    session_state: SessionState,
-    subscription_status: SubscriptionStatus,
-    daemon_online: bool,
-    daemon_status: Option<DaemonStatus>,
-    daemon_base_url: Option<String>,
-    permission_policy: session::PermissionPolicy,
-    retry_hint: Option<String>,
-    model_context_windows: HashMap<String, u64>,
-    model_reasoning_caps: HashMap<String, ReasoningModelCaps>,
-    default_context_window_tokens: Option<u64>,
-    scroll_offset: usize,
-    selected_tool_index: Option<usize>,
-    selected_backtrack_index: Option<usize>,
-    backtrack_target: Option<BacktrackTarget>,
-    backtrack_pending: Option<BacktrackTarget>,
-    last_escape_at: Option<Instant>,
-    transcript_overlay: Option<PagerOverlay>,
-    transcript_overlay_visible_height: Option<usize>,
-    help_open: bool,
-    usage: Option<UsageSummary>,
-    should_quit: bool,
-    abort_in_flight: bool,
-    last_ctrl_c: Option<Instant>,
-    working_started_at_ms: Option<u64>,
-    working_tick: u64,
-    working_last_tick_at_ms: Option<u64>,
-    working_detail: Option<String>,
-    stream_controller: StreamController,
-    reasoning_stream_active: bool,
-    plan_stream_controller: Option<PlanStreamController>,
-    stream_chunking_policy: AdaptiveChunkingPolicy,
-    history_render_mode: HistoryRenderMode,
-    notifications: NotificationManager,
-    history: HistoryBuffer,
-    resize_reflow: ResizeReflowState,
-    resize_reflow_row_cap: usize,
-    native_scrollback: bool,
-    rendered_message_count: usize,
-    rendered_state_cursor: usize,
-    rendered_state_keys: Vec<String>,
-}
-
 impl App {
-    pub fn composer(&self) -> &str {
-        self.composer.text()
-    }
-
-    pub fn composer_state(&self) -> &ComposerState {
-        &self.composer
-    }
-
-    pub fn composer_history_search(&self) -> Option<HistorySearchView> {
-        self.composer.history_search_view()
-    }
-
-    pub fn keymap(&self) -> &KeymapRegistry {
-        &self.keymap
-    }
-
-    pub fn theme(&self) -> &TuiTheme {
-        &self.theme
-    }
-
-    pub fn vim_enabled(&self) -> bool {
-        self.vim.enabled()
-    }
-
-    pub fn vim_mode(&self) -> VimMode {
-        self.vim.mode()
-    }
-
-    pub fn keymap_help_rows(&self) -> Vec<HelpRow> {
-        self.keymap.help_rows()
-    }
-
     fn apply_tui_config_content(&mut self, content: &str) {
         match KeymapRegistry::from_config_file_content(Some(content)) {
             Ok(keymap) => {
@@ -353,22 +185,6 @@ impl App {
                 self.add_notice(format!("Failed to load TUI notification config: {error}"))
             }
         }
-    }
-
-    pub fn input_queue(&self) -> &InputQueue {
-        &self.input_queue
-    }
-
-    pub fn server_queue_size(&self) -> usize {
-        self.server_queue_size
-    }
-
-    pub fn server_queue_previews(&self) -> &[String] {
-        &self.server_queue_previews
-    }
-
-    pub fn composer_mode(&self) -> ComposerMode {
-        self.composer_mode
     }
 
     fn set_session_state(&mut self, state: SessionState) {
@@ -431,30 +247,6 @@ impl App {
             }
             _ => None,
         })
-    }
-
-    pub fn daemon_online(&self) -> bool {
-        self.daemon_online
-    }
-
-    pub fn daemon_status(&self) -> Option<&DaemonStatus> {
-        self.daemon_status.as_ref()
-    }
-
-    pub fn daemon_base_url(&self) -> Option<&str> {
-        self.daemon_base_url.as_deref()
-    }
-
-    pub fn permission_policy(&self) -> session::PermissionPolicy {
-        self.permission_policy
-    }
-
-    pub fn scroll_offset(&self) -> usize {
-        self.scroll_offset
-    }
-
-    pub fn visible_transcript(&self) -> &[TranscriptItem] {
-        &self.transcript
     }
 
     pub fn pending_history_insertions(&mut self, width: u16) -> Vec<HistoryInsertion> {
@@ -560,18 +352,6 @@ impl App {
                 .any(|item| matches!(item, TranscriptItem::Assistant(_)))
     }
 
-    pub fn history_pending_count(&self) -> usize {
-        self.history.pending_cell_count()
-    }
-
-    pub fn history_inserted_cell_count(&self) -> usize {
-        self.history.inserted_cell_count()
-    }
-
-    pub fn history_render_count(&self) -> usize {
-        self.history.render_count()
-    }
-
     pub fn flush_pending_paste(&mut self) -> bool {
         self.composer.flush_pending_paste(Instant::now())
     }
@@ -601,98 +381,12 @@ impl App {
         self.native_scrollback = enabled;
     }
 
-    pub fn native_scrollback(&self) -> bool {
-        self.native_scrollback
-    }
-
     pub fn begin_frame_render(&mut self) {
         self.rendered_message_count = 0;
     }
 
     pub fn note_rendered_messages(&mut self, count: usize) {
         self.rendered_message_count = self.rendered_message_count.saturating_add(count);
-    }
-
-    pub fn rendered_message_count(&self) -> usize {
-        self.rendered_message_count
-    }
-
-    pub fn transcript_state(&self) -> &TranscriptState {
-        &self.transcript_state
-    }
-
-    pub fn stream_has_committable_lines(&self) -> bool {
-        self.stream_controller.stable_lines_ready()
-            || self
-                .plan_stream_controller
-                .as_ref()
-                .is_some_and(PlanStreamController::stable_lines_ready)
-    }
-
-    pub fn active_stream_committed(&self) -> &str {
-        self.stream_controller.committed()
-    }
-
-    pub fn active_stream_live(&self) -> String {
-        self.stream_controller.live()
-    }
-
-    pub fn project_picker(&self) -> &ProjectPickerState {
-        &self.picker
-    }
-
-    pub fn approval_modal(&self) -> Option<&ApprovalModalState> {
-        self.approval_queue.front()
-    }
-
-    pub fn ask_questions_form(&self) -> Option<&AskQuestionsForm> {
-        self.ask_questions_form.as_ref()
-    }
-
-    #[cfg(test)]
-    pub fn test_set_ask_questions_form(&mut self, form: AskQuestionsForm) {
-        self.ask_questions_form = Some(form);
-        self.set_session_state(SessionState::WaitingUserInput);
-    }
-
-    #[cfg(test)]
-    fn approval_pending_clear_count(&self) -> usize {
-        self.pending_approval_clears.len()
-    }
-
-    pub fn events_pane(&self) -> &EventsPaneState {
-        &self.events_pane
-    }
-
-    pub fn help_open(&self) -> bool {
-        self.help_open
-    }
-
-    pub fn selected_tool_index(&self) -> Option<usize> {
-        self.selected_tool_index
-    }
-
-    pub fn selected_backtrack_index(&self) -> Option<usize> {
-        self.selected_backtrack_index
-    }
-
-    pub fn should_quit(&self) -> bool {
-        self.should_quit
-    }
-
-    pub fn composer_height(&self, width: u16) -> u16 {
-        let text_width = width
-            .saturating_sub(crate::ui_consts::LIVE_PREFIX_COLS + 2)
-            .max(1);
-        self.composer.height(text_width, 8) + 1 + self.queue_preview_height()
-    }
-
-    pub fn queue_preview_height(&self) -> u16 {
-        if self.input_queue.is_empty() && self.server_queue_size == 0 {
-            0
-        } else {
-            1
-        }
     }
 
     fn submit_structured_prompt(&mut self, prompt: &str) -> AppAction {
