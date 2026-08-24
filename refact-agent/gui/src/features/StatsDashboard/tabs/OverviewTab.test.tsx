@@ -76,6 +76,7 @@ describe("OverviewTab provider quotas", () => {
         error: "Credentials missing",
       }),
       quota("available-provider", {
+        base_provider: "available-base-provider",
         error: "Temporary quota warning",
         windows: [
           {
@@ -91,6 +92,7 @@ describe("OverviewTab provider quotas", () => {
     ]);
 
     expect(await screen.findByText("available-provider")).toBeInTheDocument();
+    expect(screen.getByText("available-base-provider")).toBeInTheDocument();
     expect(screen.getByText("Temporary quota warning")).toBeInTheDocument();
     expect(screen.getByText("Daily limit")).toBeInTheDocument();
     expect(screen.getByText("Tier")).toBeInTheDocument();

@@ -195,7 +195,7 @@ const ProviderQuotaSection: React.FC = () => {
     pollingInterval: 5 * 60_000,
   });
   const snapshots = (data?.quotas ?? []).filter(
-    (snapshot) => snapshot.available !== false,
+    (snapshot) => snapshot.available,
   );
 
   return (
