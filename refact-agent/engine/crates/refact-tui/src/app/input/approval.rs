@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::client::request_id;
 
 impl App {
     pub(super) fn handle_approval_key(&mut self, key: KeyEvent) -> AppAction {
@@ -62,21 +63,20 @@ impl App {
         patch: Option<Value>,
         outcome: ToolStatus,
     ) -> AppAction {
-        let rollback = ToolDecisionRollback {
-            approval_queue: self.approval_queue.clone(),
-            pending_approval_clears: self.pending_approval_clears.clone(),
-            transcript: self.transcript.clone(),
-            history: self.history.clone(),
-        };
         let Some(modal) = self.pop_current_approval() else {
             return AppAction::None;
         };
+        let rollback = ToolDecisionRollback {
+            tool_statuses: self.tool_statuses(&modal.tool_call_ids()),
+            approval: modal.clone(),
+        };
         self.set_tool_statuses(modal.tool_call_ids(), outcome);
         self.push_history_item(TranscriptItem::Approval(modal.clone(), Some(outcome)));
-        self.pending_tool_decision_rollback = Some(rollback);
         AppAction::SendToolDecisions {
+            client_request_id: request_id("tool-decisions"),
             decisions: modal.decisions(accepted),
             patch,
+            rollback,
         }
     }
 }

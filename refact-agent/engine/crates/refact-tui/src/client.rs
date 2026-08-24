@@ -1547,15 +1547,14 @@ impl DaemonClient {
         tool_call_id: &str,
         accepted: bool,
     ) -> Result<(), ClientError> {
-        self.send_command(
+        self.send_tool_decisions_with_id(
             project_id,
             chat_id,
-            json!({
-                "client_request_id": client_request_id,
-                "type": "tool_decision",
-                "tool_call_id": tool_call_id,
-                "accepted": accepted,
-            }),
+            client_request_id,
+            vec![ToolDecision {
+                tool_call_id: tool_call_id.to_string(),
+                accepted,
+            }],
         )
         .await
     }
@@ -1566,11 +1565,27 @@ impl DaemonClient {
         chat_id: &str,
         decisions: Vec<ToolDecision>,
     ) -> Result<(), ClientError> {
+        self.send_tool_decisions_with_id(
+            project_id,
+            chat_id,
+            &request_id("tool-decisions"),
+            decisions,
+        )
+        .await
+    }
+
+    pub async fn send_tool_decisions_with_id(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+        decisions: Vec<ToolDecision>,
+    ) -> Result<(), ClientError> {
         self.send_command(
             project_id,
             chat_id,
             json!({
-                "client_request_id": request_id("tool-decisions"),
+                "client_request_id": client_request_id,
                 "type": "tool_decisions",
                 "decisions": decisions,
             }),
@@ -2824,7 +2839,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_decision_serializes_exact_wire_shape() {
+    async fn singular_tool_decision_serializes_plural_wire_shape() {
         let body = capture_command(|client| async move {
             client
                 .send_tool_decision_with_id("project", "chat", "tool-decision", "tool-1", true)
@@ -2835,9 +2850,43 @@ mod tests {
             &body,
             json!({
                 "client_request_id": "tool-decision",
-                "type": "tool_decision",
-                "tool_call_id": "tool-1",
-                "accepted": true,
+                "type": "tool_decisions",
+                "decisions": [{"tool_call_id": "tool-1", "accepted": true}],
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_decisions_serializes_exact_plural_wire_shape() {
+        let body = capture_command(|client| async move {
+            client
+                .send_tool_decisions_with_id(
+                    "project",
+                    "chat",
+                    "tool-decisions",
+                    vec![
+                        ToolDecision {
+                            tool_call_id: "tool-1".to_string(),
+                            accepted: true,
+                        },
+                        ToolDecision {
+                            tool_call_id: "tool-2".to_string(),
+                            accepted: false,
+                        },
+                    ],
+                )
+                .await
+        })
+        .await;
+        assert_command(
+            &body,
+            json!({
+                "client_request_id": "tool-decisions",
+                "type": "tool_decisions",
+                "decisions": [
+                    {"tool_call_id": "tool-1", "accepted": true},
+                    {"tool_call_id": "tool-2", "accepted": false},
+                ],
             }),
         );
     }

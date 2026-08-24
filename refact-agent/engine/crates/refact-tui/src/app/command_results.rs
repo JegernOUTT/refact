@@ -32,8 +32,10 @@ impl App {
                 self.pending_backtrack_rollback = None;
                 AppAction::None
             }
-            CommandContextTag::ToolDecisions { .. } => {
-                self.pending_tool_decision_rollback = None;
+            CommandContextTag::ToolDecisions {
+                client_request_id, ..
+            } => {
+                let _ = client_request_id;
                 AppAction::None
             }
             CommandContextTag::Rename { title } => {
@@ -70,10 +72,12 @@ impl App {
                 self.add_notice(format!("Retry failed: {error}"));
                 AppAction::None
             }
-            CommandContextTag::ToolDecisions { rollback } => {
-                if let Some(rollback) = self.pending_tool_decision_rollback.take().or(rollback) {
-                    self.restore_tool_decision_rollback(rollback);
-                }
+            CommandContextTag::ToolDecisions {
+                client_request_id,
+                rollback,
+            } => {
+                let _ = client_request_id;
+                self.restore_tool_decision_rollback(rollback);
                 self.retry_hint = retry_hint_from_message(&error);
                 self.add_notice(format!("Tool decision failed: {error}"));
                 AppAction::None

@@ -153,7 +153,8 @@ enum CommandContextTag {
         rollback: Option<BacktrackRollback>,
     },
     ToolDecisions {
-        rollback: Option<ToolDecisionRollback>,
+        client_request_id: String,
+        rollback: ToolDecisionRollback,
     },
     Abort,
     Rename {
@@ -970,10 +971,31 @@ impl App {
     }
 
     fn restore_tool_decision_rollback(&mut self, rollback: ToolDecisionRollback) {
-        self.approval_queue = rollback.approval_queue;
-        self.pending_approval_clears = rollback.pending_approval_clears;
-        self.transcript = rollback.transcript;
-        self.history = rollback.history;
+        let scope = rollback.approval.scope().to_string();
+        self.pending_approval_clears
+            .retain(|pending| pending.scope != scope);
+        self.approval_queue.remove_scope(&scope);
+        self.approval_queue.push_front(rollback.approval);
+        for (tool_call_id, status) in rollback.tool_statuses {
+            self.set_tool_statuses(&[tool_call_id], status);
+        }
+        if let Some(index) = self.transcript.iter().rposition(|item| {
+            matches!(item, TranscriptItem::Approval(approval, Some(_)) if approval.scope() == scope)
+        }) {
+            self.transcript.remove(index);
+        }
+    }
+
+    fn tool_statuses(&self, tool_call_ids: &[String]) -> Vec<(String, ToolStatus)> {
+        self.transcript
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Tool(card) if tool_call_ids.iter().any(|id| id == &card.id) => {
+                    Some((card.id.clone(), card.status))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     fn persist_history(&mut self) {
@@ -1253,8 +1275,10 @@ pub enum AppAction {
         draft: String,
     },
     SendToolDecisions {
+        client_request_id: String,
         decisions: Vec<ToolDecision>,
         patch: Option<Value>,
+        rollback: ToolDecisionRollback,
     },
     Abort,
     Quit {
@@ -1513,6 +1537,26 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    fn assert_tool_decision_action(
+        action: &AppAction,
+        decisions: Vec<ToolDecision>,
+        patch: Option<Value>,
+    ) {
+        match action {
+            AppAction::SendToolDecisions {
+                client_request_id,
+                decisions: actual_decisions,
+                patch: actual_patch,
+                ..
+            } => {
+                assert!(!client_request_id.is_empty());
+                assert_eq!(actual_decisions, &decisions);
+                assert_eq!(actual_patch, &patch);
+            }
+            other => panic!("expected tool decision action, got {other:?}"),
+        }
     }
 
     fn chat_event(app: &App, seq: u64, kind: &str, raw: Value) -> ChatEvent {
@@ -5678,15 +5722,13 @@ new-chat = "ctrl-x"
         assert!(app.approval_modal().is_some());
         let action = app.handle_key(key(KeyCode::Char('y')));
         assert!(app.approval_modal().is_none());
-        assert_eq!(
-            action,
-            AppAction::SendToolDecisions {
-                decisions: vec![ToolDecision {
-                    tool_call_id: "call-1".to_string(),
-                    accepted: true,
-                }],
-                patch: None,
-            }
+        assert_tool_decision_action(
+            &action,
+            vec![ToolDecision {
+                tool_call_id: "call-1".to_string(),
+                accepted: true,
+            }],
+            None,
         );
     }
 
@@ -5739,12 +5781,15 @@ new-chat = "ctrl-x"
         let mut app = App::new(project());
         app.handle_chat_event(pause_event(&app, "call-1", "shell"));
         let action = app.handle_key(key(KeyCode::Char('y')));
-        assert!(matches!(action, AppAction::SendToolDecisions { .. }));
+        let AppAction::SendToolDecisions { rollback, .. } = action else {
+            panic!("expected tool decision action");
+        };
         assert!(app.approval_modal().is_none());
 
         app.handle_command_finished(
             CommandContextTag::ToolDecisions {
-                rollback: app.pending_tool_decision_rollback.clone(),
+                client_request_id: "decision-1".to_string(),
+                rollback,
             },
             Err("decision rejected".to_string()),
         );
@@ -5754,6 +5799,137 @@ new-chat = "ctrl-x"
             Some(modal) if modal.tool_call_ids() == ["call-1"]
         ));
         assert_eq!(app.approval_pending_clear_count(), 0);
+    }
+
+    #[test]
+    fn tool_decision_failure_restores_only_its_own_approval_after_newer_success() {
+        let mut app = App::new(project());
+        app.handle_chat_event(pause_event(&app, "call-a", "shell"));
+        app.handle_chat_event(pause_event(&app, "call-b", "cat"));
+
+        let AppAction::SendToolDecisions {
+            client_request_id: first_id,
+            rollback: first_rollback,
+            ..
+        } = app.handle_key(key(KeyCode::Char('y')))
+        else {
+            panic!("expected first tool decision action");
+        };
+        let AppAction::SendToolDecisions {
+            client_request_id: second_id,
+            rollback: second_rollback,
+            ..
+        } = app.handle_key(key(KeyCode::Char('n')))
+        else {
+            panic!("expected second tool decision action");
+        };
+
+        app.handle_command_finished(
+            CommandContextTag::ToolDecisions {
+                client_request_id: second_id,
+                rollback: second_rollback,
+            },
+            Ok(()),
+        );
+        app.handle_command_finished(
+            CommandContextTag::ToolDecisions {
+                client_request_id: first_id,
+                rollback: first_rollback,
+            },
+            Err("first decision rejected".to_string()),
+        );
+
+        assert!(matches!(
+            app.approval_modal(),
+            Some(modal) if modal.tool_call_ids() == ["call-a"]
+        ));
+        assert_eq!(app.approval_pending_clear_count(), 1);
+    }
+
+    #[test]
+    fn newer_tool_decision_failure_preserves_older_success() {
+        let mut app = App::new(project());
+        app.handle_chat_event(pause_event(&app, "call-a", "shell"));
+        app.handle_chat_event(pause_event(&app, "call-b", "cat"));
+
+        let AppAction::SendToolDecisions {
+            client_request_id: first_id,
+            rollback: first_rollback,
+            ..
+        } = app.handle_key(key(KeyCode::Char('y')))
+        else {
+            panic!("expected first tool decision action");
+        };
+        let AppAction::SendToolDecisions {
+            client_request_id: second_id,
+            rollback: second_rollback,
+            ..
+        } = app.handle_key(key(KeyCode::Char('n')))
+        else {
+            panic!("expected second tool decision action");
+        };
+
+        app.handle_command_finished(
+            CommandContextTag::ToolDecisions {
+                client_request_id: second_id,
+                rollback: second_rollback,
+            },
+            Err("second decision rejected".to_string()),
+        );
+        app.handle_command_finished(
+            CommandContextTag::ToolDecisions {
+                client_request_id: first_id,
+                rollback: first_rollback,
+            },
+            Ok(()),
+        );
+
+        assert!(matches!(
+            app.approval_modal(),
+            Some(modal) if modal.tool_call_ids() == ["call-b"]
+        ));
+        assert_eq!(app.approval_pending_clear_count(), 1);
+    }
+
+    #[test]
+    fn stale_tool_decision_failure_preserves_newer_approval() {
+        let mut app = App::new(project());
+        app.handle_chat_event(pause_event(&app, "call-a", "shell"));
+        let AppAction::SendToolDecisions {
+            client_request_id,
+            rollback,
+            ..
+        } = app.handle_key(key(KeyCode::Char('y')))
+        else {
+            panic!("expected tool decision action");
+        };
+        app.handle_chat_event(pause_event(&app, "call-b", "cat"));
+
+        app.handle_command_finished(
+            CommandContextTag::ToolDecisions {
+                client_request_id,
+                rollback,
+            },
+            Err("first decision rejected".to_string()),
+        );
+
+        assert!(matches!(
+            app.approval_modal(),
+            Some(modal) if modal.tool_call_ids() == ["call-a"] && modal.pending_after() == 1
+        ));
+        let action = app.handle_key(key(KeyCode::Char('n')));
+        assert!(matches!(
+            action,
+            AppAction::SendToolDecisions { decisions, .. }
+                if decisions == vec![ToolDecision {
+                    tool_call_id: "call-a".to_string(),
+                    accepted: false,
+                }]
+        ));
+        assert!(matches!(
+            app.approval_modal(),
+            Some(modal) if modal.tool_call_ids() == ["call-b"]
+        ));
     }
 
     #[test]
@@ -5769,21 +5945,19 @@ new-chat = "ctrl-x"
             ]}),
         });
 
-        assert_eq!(
-            app.handle_key(key(KeyCode::Char('n'))),
-            AppAction::SendToolDecisions {
-                decisions: vec![
-                    ToolDecision {
-                        tool_call_id: "call-1".to_string(),
-                        accepted: false,
-                    },
-                    ToolDecision {
-                        tool_call_id: "call-2".to_string(),
-                        accepted: false,
-                    },
-                ],
-                patch: None,
-            }
+        assert_tool_decision_action(
+            &app.handle_key(key(KeyCode::Char('n'))),
+            vec![
+                ToolDecision {
+                    tool_call_id: "call-1".to_string(),
+                    accepted: false,
+                },
+                ToolDecision {
+                    tool_call_id: "call-2".to_string(),
+                    accepted: false,
+                },
+            ],
+            None,
         );
     }
 
@@ -5814,15 +5988,13 @@ new-chat = "ctrl-x"
         assert_eq!(first.pending_after(), 1);
 
         let first_action = app.handle_key(key(KeyCode::Char('y')));
-        assert_eq!(
-            first_action,
-            AppAction::SendToolDecisions {
-                decisions: vec![ToolDecision {
-                    tool_call_id: "call-1".to_string(),
-                    accepted: true,
-                }],
-                patch: None,
-            }
+        assert_tool_decision_action(
+            &first_action,
+            vec![ToolDecision {
+                tool_call_id: "call-1".to_string(),
+                accepted: true,
+            }],
+            None,
         );
         assert_eq!(app.approval_pending_clear_count(), 1);
         let second = app.approval_modal().unwrap();
@@ -5839,15 +6011,13 @@ new-chat = "ctrl-x"
         assert_eq!(app.approval_pending_clear_count(), 0);
 
         let second_action = app.handle_key(key(KeyCode::Char('n')));
-        assert_eq!(
-            second_action,
-            AppAction::SendToolDecisions {
-                decisions: vec![ToolDecision {
-                    tool_call_id: "call-2".to_string(),
-                    accepted: false,
-                }],
-                patch: None,
-            }
+        assert_tool_decision_action(
+            &second_action,
+            vec![ToolDecision {
+                tool_call_id: "call-2".to_string(),
+                accepted: false,
+            }],
+            None,
         );
         assert!(app.approval_modal().is_none());
     }
@@ -5859,15 +6029,13 @@ new-chat = "ctrl-x"
         app.handle_chat_event(pause_event(&app, "call-b", "cat"));
 
         let first_action = app.handle_key(key(KeyCode::Char('y')));
-        assert_eq!(
-            first_action,
-            AppAction::SendToolDecisions {
-                decisions: vec![ToolDecision {
-                    tool_call_id: "call-a".to_string(),
-                    accepted: true,
-                }],
-                patch: None,
-            }
+        assert_tool_decision_action(
+            &first_action,
+            vec![ToolDecision {
+                tool_call_id: "call-a".to_string(),
+                accepted: true,
+            }],
+            None,
         );
         assert_eq!(app.approval_pending_clear_count(), 1);
         assert_eq!(
@@ -5900,15 +6068,13 @@ new-chat = "ctrl-x"
         );
 
         let second_action = app.handle_key(key(KeyCode::Char('n')));
-        assert_eq!(
-            second_action,
-            AppAction::SendToolDecisions {
-                decisions: vec![ToolDecision {
-                    tool_call_id: "call-b".to_string(),
-                    accepted: false,
-                }],
-                patch: None,
-            }
+        assert_tool_decision_action(
+            &second_action,
+            vec![ToolDecision {
+                tool_call_id: "call-b".to_string(),
+                accepted: false,
+            }],
+            None,
         );
         assert!(app.approval_modal().is_none());
     }
@@ -5930,15 +6096,13 @@ new-chat = "ctrl-x"
         assert_eq!(first.pending_after(), 1);
 
         let first_action = app.handle_key(key(KeyCode::Char('y')));
-        assert_eq!(
-            first_action,
-            AppAction::SendToolDecisions {
-                decisions: vec![ToolDecision {
-                    tool_call_id: "call-a".to_string(),
-                    accepted: true,
-                }],
-                patch: None,
-            }
+        assert_tool_decision_action(
+            &first_action,
+            vec![ToolDecision {
+                tool_call_id: "call-a".to_string(),
+                accepted: true,
+            }],
+            None,
         );
         assert_eq!(
             app.approval_modal().unwrap().reasons()[0].tool_call_id,
@@ -6427,15 +6591,13 @@ new-chat = "ctrl-x"
             diff: None,
         }]));
         let action = app.handle_key(key(KeyCode::Char('a')));
-        assert_eq!(
-            action,
-            AppAction::SendToolDecisions {
-                decisions: vec![ToolDecision {
-                    tool_call_id: "call-1".to_string(),
-                    accepted: true,
-                }],
-                patch: Some(json!({"auto_approve_editing_tools": true})),
-            }
+        assert_tool_decision_action(
+            &action,
+            vec![ToolDecision {
+                tool_call_id: "call-1".to_string(),
+                accepted: true,
+            }],
+            Some(json!({"auto_approve_editing_tools": true})),
         );
     }
 

@@ -93,12 +93,10 @@ pub(super) struct BacktrackRollback {
     pub(super) prompt: String,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct ToolDecisionRollback {
-    pub(super) approval_queue: ApprovalQueue,
-    pub(super) pending_approval_clears: VecDeque<PendingApprovalClear>,
-    pub(super) transcript: Vec<TranscriptItem>,
-    pub(super) history: HistoryBuffer,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolDecisionRollback {
+    pub(super) approval: ApprovalModalState,
+    pub(super) tool_statuses: Vec<(String, ToolStatus)>,
 }
 
 impl BacktrackTarget {
@@ -153,7 +151,6 @@ pub struct App {
     pub(super) reasoning_effort: Option<String>,
     pub(super) pending_reasoning_rollback: Option<PendingReasoningRollback>,
     pub(super) pending_backtrack_rollback: Option<BacktrackRollback>,
-    pub(super) pending_tool_decision_rollback: Option<ToolDecisionRollback>,
     pub(super) pending_model: Option<String>,
     pub(super) pending_mode: Option<String>,
     pub(super) in_flight_send: Option<InFlightSend>,
@@ -269,7 +266,6 @@ impl App {
             reasoning_effort: None,
             pending_reasoning_rollback: None,
             pending_backtrack_rollback: None,
-            pending_tool_decision_rollback: None,
             pending_model: None,
             pending_mode: None,
             in_flight_send: None,
@@ -363,7 +359,6 @@ impl App {
             reasoning_effort: None,
             pending_reasoning_rollback: None,
             pending_backtrack_rollback: None,
-            pending_tool_decision_rollback: None,
             pending_model: None,
             pending_mode: None,
             in_flight_send: None,

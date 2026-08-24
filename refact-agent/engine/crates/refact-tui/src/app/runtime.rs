@@ -1080,9 +1080,15 @@ pub(super) async fn run_action(
         }
         AppAction::CopyToClipboard { .. } => {}
         AppAction::OpenExternalEditor { .. } => {}
-        AppAction::SendToolDecisions { decisions, patch } => {
+        AppAction::SendToolDecisions {
+            client_request_id,
+            decisions,
+            patch,
+            rollback,
+        } => {
             let context = CommandContextTag::ToolDecisions {
-                rollback: app.pending_tool_decision_rollback.clone(),
+                client_request_id: client_request_id.clone(),
+                rollback,
             };
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
@@ -1095,7 +1101,12 @@ pub(super) async fn run_action(
                             client.send_set_params(&project_id, &chat_id, patch).await?;
                         }
                         client
-                            .send_tool_decisions(&project_id, &chat_id, decisions)
+                            .send_tool_decisions_with_id(
+                                &project_id,
+                                &chat_id,
+                                &client_request_id,
+                                decisions,
+                            )
                             .await
                     }
                     .await

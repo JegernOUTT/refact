@@ -614,7 +614,6 @@ impl App {
         self.pending_send_retry = None;
         self.pending_reasoning_rollback = None;
         self.pending_backtrack_rollback = None;
-        self.pending_tool_decision_rollback = None;
     }
 
     pub(super) fn save_local_input_handoff(&mut self) {

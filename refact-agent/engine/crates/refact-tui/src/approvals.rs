@@ -320,6 +320,11 @@ impl ApprovalQueue {
         true
     }
 
+    pub fn push_front(&mut self, modal: ApprovalModalState) {
+        self.pending.push_front(modal);
+        self.refresh_pending_counts();
+    }
+
     pub fn pop_front(&mut self) -> Option<ApprovalModalState> {
         let modal = self.pending.pop_front();
         self.refresh_pending_counts();
