@@ -417,6 +417,84 @@ fn persisted_assistant_message_added_dedups_streamed_turn() {
 }
 
 #[test]
+fn message_added_inserts_at_server_index() {
+    let mut app = App::new(State::project());
+    let chat_id = app.chat_id().to_string();
+    app.apply_chat_event(chat_event_from_fixture(
+        json!({"chat_id": chat_id, "seq": "0", "type": "snapshot", "messages": []}),
+        &chat_id,
+    ));
+
+    for raw in [
+        json!({"chat_id": chat_id, "seq": "1", "type": "message_added", "message": {"message_id": "first", "role": "user", "content": "first"}}),
+        json!({"chat_id": chat_id, "seq": "2", "type": "message_added", "message": {"message_id": "third", "role": "user", "content": "third"}}),
+        json!({"chat_id": chat_id, "seq": "3", "type": "message_added", "index": 1, "message": {"message_id": "second", "role": "user", "content": "second"}}),
+    ] {
+        app.apply_chat_event(chat_event_from_fixture(raw, &chat_id));
+    }
+
+    assert_eq!(
+        app.transcript_state()
+            .messages()
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second", "third"]
+    );
+    assert_eq!(transcript_text(&app), "user:first\nuser:second\nuser:third");
+}
+
+#[test]
+fn message_added_without_index_appends() {
+    let mut app = App::new(State::project());
+    let chat_id = app.chat_id().to_string();
+    app.apply_chat_event(chat_event_from_fixture(
+        json!({"chat_id": chat_id, "seq": "0", "type": "snapshot", "messages": []}),
+        &chat_id,
+    ));
+
+    for raw in [
+        json!({"chat_id": chat_id, "seq": "1", "type": "message_added", "message": {"message_id": "first", "role": "user", "content": "first"}}),
+        json!({"chat_id": chat_id, "seq": "2", "type": "message_added", "message": {"message_id": "second", "role": "user", "content": "second"}}),
+    ] {
+        app.apply_chat_event(chat_event_from_fixture(raw, &chat_id));
+    }
+
+    assert_eq!(transcript_text(&app), "user:first\nuser:second");
+}
+
+#[test]
+fn out_of_range_message_added_index_appends_with_notice() {
+    let mut app = App::new(State::project());
+    let chat_id = app.chat_id().to_string();
+    app.apply_chat_event(chat_event_from_fixture(
+        json!({"chat_id": chat_id, "seq": "0", "type": "snapshot", "messages": []}),
+        &chat_id,
+    ));
+
+    app.apply_chat_event(chat_event_from_fixture(
+        json!({"chat_id": chat_id, "seq": "1", "type": "message_added", "message": {"message_id": "first", "role": "user", "content": "first"}}),
+        &chat_id,
+    ));
+    app.apply_chat_event(chat_event_from_fixture(
+        json!({"chat_id": chat_id, "seq": "2", "type": "message_added", "index": 99, "message": {"message_id": "last", "role": "user", "content": "last"}}),
+        &chat_id,
+    ));
+
+    assert_eq!(
+        app.transcript_state()
+            .messages()
+            .iter()
+            .take(2)
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "last"]
+    );
+    assert!(transcript_text(&app)
+        .contains("notice:Server message index 99 exceeds transcript length 1; appended"));
+}
+
+#[test]
 fn subchat_running_card_is_cleaned_at_turn_end() {
     let run = run_fixture("subchat_turn_cleanup.jsonl");
     assert!(run.recovery.is_none());

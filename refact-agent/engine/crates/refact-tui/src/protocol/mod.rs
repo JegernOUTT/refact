@@ -39,6 +39,7 @@ pub enum SseEvent {
     },
     MessageAdded {
         message: Option<Value>,
+        index: Option<usize>,
     },
     MessageUpdated {
         message_id: Option<String>,
@@ -128,6 +129,10 @@ impl SseEvent {
             },
             "message_added" => Self::MessageAdded {
                 message: raw.get("message").or_else(|| raw.get("msg")).cloned(),
+                index: raw
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize),
             },
             "message_updated" => Self::MessageUpdated {
                 message_id: message_id(raw),
@@ -509,6 +514,10 @@ impl TranscriptState {
     }
 
     pub fn add_message(&mut self, raw: &Value) -> bool {
+        self.add_message_at(raw, None)
+    }
+
+    pub fn add_message_at(&mut self, raw: &Value, index: Option<usize>) -> bool {
         let mut message = TranscriptMessage::from_wire(raw);
         if matches!(
             message.role,
@@ -520,7 +529,7 @@ impl TranscriptState {
         {
             message.stream_finished = true;
         }
-        self.add_transcript_message(message)
+        self.add_transcript_message(message, index)
     }
 
     pub fn update_message(&mut self, message_id: Option<&str>, raw: &Value) -> bool {
@@ -549,7 +558,7 @@ impl TranscriptState {
             self.refresh_cached_indexes();
             true
         } else {
-            self.add_transcript_message(message)
+            self.add_transcript_message(message, None)
         }
     }
 
@@ -562,7 +571,7 @@ impl TranscriptState {
         true
     }
 
-    fn add_transcript_message(&mut self, message: TranscriptMessage) -> bool {
+    fn add_transcript_message(&mut self, message: TranscriptMessage, index: Option<usize>) -> bool {
         if let Some(idx) = self.message_index_by_id(message.message_id.as_deref()) {
             if let Some(usage) = message.usage.clone() {
                 self.usage = Some(usage);
@@ -575,16 +584,24 @@ impl TranscriptState {
             self.usage = Some(usage);
         }
         let is_assistant = message.role == TranscriptRole::Assistant;
-        self.messages.push(message);
+        let index = index
+            .unwrap_or(self.messages.len())
+            .min(self.messages.len());
+        if self
+            .active_assistant_index
+            .is_some_and(|active| active >= index)
+        {
+            self.active_assistant_index = self.active_assistant_index.map(|active| active + 1);
+        }
+        self.messages.insert(index, message);
         if is_assistant
             && !self
                 .messages
-                .last()
+                .get(index)
                 .is_some_and(|message| message.stream_finished)
         {
-            let idx = self.messages.len() - 1;
-            self.active_assistant_id = self.messages[idx].message_id.clone();
-            self.active_assistant_index = Some(idx);
+            self.active_assistant_id = self.messages[index].message_id.clone();
+            self.active_assistant_index = Some(index);
         }
         true
     }

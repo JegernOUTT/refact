@@ -246,8 +246,8 @@ impl App {
             SseEvent::PauseRequired => self.handle_pause_required(&raw, event.seq),
             SseEvent::PauseCleared => self.handle_pause_cleared(&raw),
             SseEvent::ThreadUpdated { params } => self.handle_thread_updated(&params),
-            SseEvent::MessageAdded { message } => {
-                self.handle_message_added_payload(message.as_ref())
+            SseEvent::MessageAdded { message, index } => {
+                self.handle_message_added_payload(message.as_ref(), index)
             }
             SseEvent::MessageUpdated {
                 message_id,
@@ -931,7 +931,11 @@ impl App {
 }
 
 impl App {
-    pub(super) fn handle_message_added_payload(&mut self, message: Option<&Value>) {
+    pub(super) fn handle_message_added_payload(
+        &mut self,
+        message: Option<&Value>,
+        index: Option<usize>,
+    ) {
         let Some(raw_message) = message else {
             return;
         };
@@ -959,19 +963,31 @@ impl App {
                 .messages()
                 .iter()
                 .any(|existing| active_assistant_matches_message(existing, &message));
-        let added = self.transcript_state.add_message(raw_message);
+        let message_count = self.transcript_state.messages().len();
+        let insert_before_end = index.is_some_and(|index| index < message_count);
+        let out_of_range_index = index.filter(|index| *index > message_count);
+        let added = self.transcript_state.add_message_at(raw_message, index);
         if !added && !replaces_active_stream {
             self.rebuild_remote_transcript_from_state();
             return;
         }
-        match message.role {
-            TranscriptRole::Tool => self.push_state_tool_result(&message),
-            TranscriptRole::Assistant
-            | TranscriptRole::User
-            | TranscriptRole::Plan
-            | TranscriptRole::Goal
-            | TranscriptRole::Event => self.append_render_message(&message),
-            _ => {}
+        if insert_before_end {
+            self.rebuild_remote_transcript_from_state();
+        } else {
+            match message.role {
+                TranscriptRole::Tool => self.push_state_tool_result(&message),
+                TranscriptRole::Assistant
+                | TranscriptRole::User
+                | TranscriptRole::Plan
+                | TranscriptRole::Goal
+                | TranscriptRole::Event => self.append_render_message(&message),
+                _ => {}
+            }
+        }
+        if let Some(index) = out_of_range_index {
+            self.add_notice(format!(
+                "Server message index {index} exceeds transcript length {message_count}; appended"
+            ));
         }
     }
 
