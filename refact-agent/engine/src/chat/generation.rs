@@ -521,6 +521,25 @@ fn inject_mcp_lazy_hint(session: &mut ChatSession, total: usize) -> bool {
     true
 }
 
+fn enrichment_insertion_index(
+    session: &ChatSession,
+    turn: &EnrichmentTurnIdentity,
+    identity: Option<&str>,
+) -> Option<usize> {
+    let user_index = session
+        .messages
+        .iter()
+        .rposition(|message| message.role == "user")?;
+    let user_message = session.messages.get(user_index)?;
+    (session.trajectory_version == turn.revision
+        && user_index == session.messages.len().saturating_sub(1)
+        && user_message.message_id == turn.latest_user_id
+        && enrichment_query_fingerprint(&user_message.content.content_text_only())
+            == turn.query_fingerprint
+        && identity.is_some_and(|identity| !session.has_enrichment_identity(identity)))
+    .then_some(user_index)
+}
+
 pub async fn prepare_session_preamble_and_knowledge(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
@@ -797,30 +816,14 @@ pub async fn prepare_session_preamble_and_knowledge(
                 let enriched_msg = &messages[local_last_user_idx - 1];
                 if enriched_msg.role == "context_file" {
                     let mut session = session_arc.lock().await;
-                    let session_last_user_idx = session
-                        .messages
-                        .iter()
-                        .rposition(|m| m.role == "user")
-                        .unwrap_or(0);
                     let turn = enrichment_turn
                         .as_ref()
                         .expect("turn checked before enrichment");
                     let identity = enrichment_identity_from_context(enriched_msg);
-                    let insertion_stale = session.trajectory_version != turn.revision
-                        || session_last_user_idx != session.messages.len().saturating_sub(1)
-                        || session
-                            .messages
-                            .get(session_last_user_idx)
-                            .is_none_or(|message| {
-                                message.message_id != turn.latest_user_id
-                                    || enrichment_query_fingerprint(
-                                        &message.content.content_text_only(),
-                                    ) != turn.query_fingerprint
-                            })
-                        || identity
-                            .as_deref()
-                            .is_none_or(|identity| session.has_enrichment_identity(identity));
-                    if !insertion_stale {
+                    let session_last_user_idx =
+                        enrichment_insertion_index(&session, turn, identity.as_deref());
+                    let insertion_stale = session_last_user_idx.is_none();
+                    if let Some(session_last_user_idx) = session_last_user_idx {
                         let identity = identity.expect("identity checked before insertion");
                         if let Some(user_message) = session.messages.get_mut(session_last_user_idx)
                         {
@@ -857,7 +860,7 @@ pub async fn prepare_session_preamble_and_knowledge(
                     if !insertion_stale {
                         info!(
                             "Saved auto knowledge enrichment context_file to session at index {}",
-                            session_last_user_idx
+                            session_last_user_idx.unwrap_or_default()
                         );
                     }
                 }
@@ -4435,14 +4438,22 @@ mod tests {
     }
 
     #[test]
-    fn enrichment_identity_survives_compaction_and_restore_metadata() {
+    fn enrichment_identity_survives_context_removal_and_restore() {
         let mut session = ChatSession::new("enrichment-identity".to_string());
         let identity = "query-fingerprint:result-fingerprint".to_string();
         let query_fingerprint = "query-fingerprint".to_string();
         let mut user = make_user_msg("query");
         record_enrichment_identity_on_user_message(&mut user, &identity, &query_fingerprint);
         session.add_message(user);
+        session.add_message(ChatMessage {
+            role: "context_file".to_string(),
+            tool_call_id: "knowledge_enrichment".to_string(),
+            ..Default::default()
+        });
         session.record_enrichment_identity(identity.clone());
+        session
+            .messages
+            .retain(|message| message.role != "context_file");
 
         let restored = ChatSession::new_with_trajectory(
             "enrichment-identity".to_string(),
@@ -4455,6 +4466,28 @@ mod tests {
         );
 
         assert!(restored.has_enrichment_identity(&identity));
+    }
+
+    #[test]
+    fn enrichment_insertion_rejects_stale_turns_and_reused_identities() {
+        let mut session = ChatSession::new("enrichment-stale".to_string());
+        session.add_message(make_user_msg("current query"));
+        let user = session.messages.last().unwrap();
+        let turn = EnrichmentTurnIdentity {
+            revision: session.trajectory_version,
+            latest_user_id: user.message_id.clone(),
+            query_fingerprint: enrichment_query_fingerprint(&user.content.content_text_only()),
+        };
+
+        assert_eq!(
+            enrichment_insertion_index(&session, &turn, Some("fresh-result")),
+            Some(0)
+        );
+        session.record_enrichment_identity("fresh-result".to_string());
+        assert!(enrichment_insertion_index(&session, &turn, Some("fresh-result")).is_none());
+
+        session.add_message(make_assistant_msg("reply"));
+        assert!(enrichment_insertion_index(&session, &turn, Some("new-result")).is_none());
     }
 
     #[test]

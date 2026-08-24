@@ -14,7 +14,7 @@ use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
 use crate::files_correction::get_project_dirs;
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
 use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
-use crate::memories::{enrichment_current_root_id, enrichment_root_id, memories_search_for_enrichment};
+use crate::memories::{enrichment_current_root_id, memories_search_for_enrichment};
 use crate::subchat::{resolve_subchat_config, run_subchat};
 use crate::yaml_configs::customization_registry::get_subagent_config;
 
@@ -687,36 +687,47 @@ async fn cache_result_from_memories(
     }
     let mut cached = Vec::with_capacity(memories.len());
     let mut bytes = 0usize;
-    let mut cacheable = true;
-    for memo in memories {
+    for mut memo in memories {
+        if memo.kind.as_deref() == Some("trajectory") {
+            return CachedEnrichmentResult {
+                memories: Vec::new(),
+                result_fingerprint: fingerprint_bytes(&[b"uncacheable-enrichment-result"]),
+                bytes: 0,
+                cacheable: false,
+            };
+        }
         let Some(path) = memo.file_path.as_ref() else {
-            cacheable = false;
-            continue;
+            return CachedEnrichmentResult {
+                memories: Vec::new(),
+                result_fingerprint: fingerprint_bytes(&[b"uncacheable-enrichment-result"]),
+                bytes: 0,
+                cacheable: false,
+            };
         };
         let Some(text) = get_file_text_from_memory_or_disk(gcx.clone(), path)
             .await
             .ok()
         else {
-            cacheable = false;
-            continue;
+            return CachedEnrichmentResult {
+                memories: Vec::new(),
+                result_fingerprint: fingerprint_bytes(&[b"uncacheable-enrichment-result"]),
+                bytes: 0,
+                cacheable: false,
+            };
         };
         let Some(source) = source_fingerprint(path, &text).await else {
-            cacheable = false;
-            continue;
+            return CachedEnrichmentResult {
+                memories: Vec::new(),
+                result_fingerprint: fingerprint_bytes(&[b"uncacheable-enrichment-result"]),
+                bytes: 0,
+                cacheable: false,
+            };
         };
         bytes = bytes
-            .saturating_add(memo.content.len())
             .saturating_add(memo.tags.iter().map(String::len).sum::<usize>())
             .saturating_add(path.as_os_str().len());
+        memo.content.clear();
         cached.push(CachedMemo { memo, source });
-    }
-    if cached.is_empty() && !cacheable {
-        return CachedEnrichmentResult {
-            memories: cached,
-            result_fingerprint: fingerprint_bytes(&[b"uncacheable-enrichment-result"]),
-            bytes: 0,
-            cacheable: false,
-        };
     }
     let result_fingerprint = fingerprint_strings(cached.iter().map(|cached| {
         format!(
@@ -730,7 +741,7 @@ async fn cache_result_from_memories(
         memories: cached,
         result_fingerprint,
         bytes,
-        cacheable,
+        cacheable: true,
     }
 }
 
@@ -758,24 +769,21 @@ async fn revalidate_cached_memories(
             return None;
         }
         let mut memo = cached_memo.memo.clone();
-        if memo.kind.as_deref() != Some("trajectory") {
-            let (frontmatter, content_start) = KnowledgeFrontmatter::parse(&text);
-            if frontmatter.is_archived() || frontmatter.is_deprecated() {
-                return None;
-            }
-            if frontmatter.source_chat_id.as_deref() == current_root.as_deref() {
-                return None;
-            }
-            memo.content = text[content_start..].trim().to_string();
-            memo.tags = frontmatter.tags;
-            memo.title = frontmatter.title;
-            memo.created = frontmatter.created;
-            memo.kind = frontmatter.kind;
-        } else if let Some(trajectory_id) = path.file_stem().and_then(|name| name.to_str()) {
-            if Some(enrichment_root_id(gcx.clone(), trajectory_id).await) == current_root {
-                return None;
-            }
+        let (frontmatter, content_start) = KnowledgeFrontmatter::parse(&text);
+        if frontmatter.is_archived() || frontmatter.is_deprecated() {
+            return None;
         }
+        if matches!(
+            (frontmatter.source_chat_id.as_deref(), current_root.as_deref()),
+            (Some(source_root), Some(current_root)) if source_root == current_root
+        ) {
+            return None;
+        }
+        memo.content = text[content_start..].trim().to_string();
+        memo.tags = frontmatter.tags;
+        memo.title = frontmatter.title;
+        memo.created = frontmatter.created;
+        memo.kind = frontmatter.kind;
         memories.push(memo);
     }
     Some(memories)
@@ -1683,9 +1691,16 @@ mod tests {
     async fn enrichment_cache_separates_scope_privacy_and_model_identities() {
         let cache = EnrichmentCache::default();
         let calls = std::sync::atomic::AtomicUsize::new(0);
-        for seed in [1, 2, 3] {
+        let base = cache_key(1);
+        let mut distinct_scope = base;
+        distinct_scope.workspace_scope_fingerprint = [2; 32];
+        let mut distinct_privacy = base;
+        distinct_privacy.privacy_generation = 2;
+        let mut distinct_model = base;
+        distinct_model.embedding_config_fingerprint = [4; 32];
+        for key in [base, distinct_scope, distinct_privacy, distinct_model] {
             cache
-                .get_or_fetch(cache_key(seed), || async {
+                .get_or_fetch(key, || async {
                     calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     Ok(CachedEnrichmentResult::empty())
                 })
@@ -1693,7 +1708,7 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1732,6 +1747,44 @@ mod tests {
         assert_eq!(disposition, EnrichmentCacheDisposition::Miss);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn enrichment_cache_reuses_completed_result_without_refetch() {
+        let cache = EnrichmentCache::default();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let key = cache_key(9);
+        let result = CachedEnrichmentResult {
+            memories: vec![CachedMemo {
+                memo: crate::memories::MemoRecord::default(),
+                source: MemoSourceFingerprint {
+                    path: PathBuf::from("fixture.md"),
+                    size: 0,
+                    modified_ns: 0,
+                    content_fingerprint: [9; 32],
+                },
+            }],
+            result_fingerprint: [9; 32],
+            bytes: 1,
+            cacheable: true,
+        };
+        cache
+            .get_or_fetch(key, || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(result)
+            })
+            .await
+            .unwrap();
+        let (_, disposition) = cache
+            .get_or_fetch(key, || async {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(CachedEnrichmentResult::empty())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(disposition, EnrichmentCacheDisposition::Hit);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn enrichment_cache_evicts_lru_entries_with_bounded_memory() {
         let mut state = EnrichmentCacheState::default();
@@ -1751,6 +1804,7 @@ mod tests {
     async fn cached_memo_revalidation_rejects_changed_deleted_and_archived_sources() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
         let path = dir.path().join("memory.md");
         let frontmatter = crate::memories::create_frontmatter(
             Some("Cached memory"),
@@ -1771,6 +1825,16 @@ mod tests {
             ..Default::default()
         };
         let cached = cache_result_from_memories(gcx.clone(), vec![memo]).await;
+        assert!(cached.cacheable);
+        assert_eq!(cached.memories.len(), 1);
+        let initial_text = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(
+            cached.memories[0].source.content_fingerprint,
+            source_fingerprint(&path, &initial_text)
+                .await
+                .unwrap()
+                .content_fingerprint
+        );
         assert!(revalidate_cached_memories(gcx.clone(), &cached, 0.75, None)
             .await
             .is_some());
@@ -1781,6 +1845,15 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(revalidate_cached_memories(gcx.clone(), &cached, 0.75, None)
+            .await
+            .is_none());
+
+        let mut archived = frontmatter.clone();
+        archived.status = Some("archived".to_string());
+        tokio::fs::write(&path, format!("{}\n\n{}", archived.to_yaml(), body))
+            .await
+            .unwrap();
         assert!(revalidate_cached_memories(gcx.clone(), &cached, 0.75, None)
             .await
             .is_none());
