@@ -11,3 +11,4 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 uuid.workspace = true
 regex.workspace = true
+url = "2.4.1"

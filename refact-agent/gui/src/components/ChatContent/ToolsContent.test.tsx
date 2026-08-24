@@ -9,6 +9,7 @@ import type {
   ChatMessages,
   ExecToolMetadata,
   ToolCall,
+  ToolEnrichment,
   ToolMessage,
 } from "../../services/refact/types";
 import { ToolContent } from "./ToolsContent";
@@ -122,20 +123,31 @@ function makeToolMessage(
   id: string,
   content: string,
   extra?: ExecToolMetadata,
+  enrichment?: ToolEnrichment,
 ): ToolMessage {
   return {
     role: "tool",
     tool_call_id: id,
     content,
     tool_failed: false,
-    extra: extra ? { exec: extra } : undefined,
+    extra:
+      extra ?? enrichment
+        ? {
+            ...(extra ? { exec: extra } : {}),
+            ...(enrichment ? { tool_enrichment: enrichment } : {}),
+          }
+        : undefined,
   };
 }
 
 function renderToolContent(
   name: string,
   content: string,
-  options: { args?: Record<string, unknown>; extra?: ExecToolMetadata } = {},
+  options: {
+    args?: Record<string, unknown>;
+    extra?: ExecToolMetadata;
+    enrichment?: ToolEnrichment;
+  } = {},
 ) {
   const id = `call-${name.replace(/[^a-z0-9]+/gi, "-")}`;
   const chat = createDefaultChatState();
@@ -143,7 +155,7 @@ function renderToolContent(
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   if (!runtime) throw new Error("missing test thread");
   runtime.thread.messages = [
-    makeToolMessage(id, content, options.extra),
+    makeToolMessage(id, content, options.extra, options.enrichment),
   ] as ChatMessages;
 
   return render(
@@ -508,6 +520,66 @@ describe("ToolsContent routing", () => {
     expect(screen.getByTestId("exec-tool-exec")).toBeInTheDocument();
     expect(screen.getByText("Dev server")).toBeInTheDocument();
     expect(screen.getByText("exec_service_dev")).toBeInTheDocument();
+  });
+
+  it("renders valid enrichment on generic tools without changing the raw fallback", () => {
+    renderToolContent("unknown_tool", "raw legacy fallback", {
+      enrichment: {
+        schema_version: 1,
+        references: [
+          {
+            kind: "path",
+            target: "src/lib.rs",
+            label: "lib.rs",
+            provenance: "native",
+            status: "updated",
+          },
+        ],
+      },
+    });
+
+    openToolCard();
+    expect(screen.getByTestId("tool-enrichment")).toBeInTheDocument();
+    expect(screen.getByText("path: lib.rs (updated)")).toBeInTheDocument();
+    expect(screen.getByText("raw legacy fallback")).toBeInTheDocument();
+  });
+
+  it("ignores unknown enrichment versions and kinds safely", () => {
+    renderToolContent("unknown_tool", "raw legacy fallback", {
+      enrichment: {
+        schema_version: 2,
+        references: [
+          {
+            kind: "path",
+            target: "src/lib.rs",
+            provenance: "native",
+          },
+        ],
+      } as unknown as ToolEnrichment,
+    });
+
+    openToolCard();
+    expect(screen.queryByTestId("tool-enrichment")).not.toBeInTheDocument();
+    expect(screen.getByText("raw legacy fallback")).toBeInTheDocument();
+  });
+
+  it("keeps specialized cards ahead of generic enrichment rendering", () => {
+    renderToolContent("process_start", "Process started", {
+      enrichment: {
+        schema_version: 1,
+        references: [
+          {
+            kind: "process",
+            target: "process-1",
+            provenance: "native",
+          },
+        ],
+      },
+    });
+
+    expect(screen.getByTestId("exec-tool-process_start")).toBeInTheDocument();
+    expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("tool-enrichment")).not.toBeInTheDocument();
   });
 
   it("renders tool results from an explicit non-current thread", () => {

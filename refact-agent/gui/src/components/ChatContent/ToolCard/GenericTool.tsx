@@ -1,6 +1,6 @@
 import { Settings } from "lucide-react";
 import React, { useMemo } from "react";
-import { Box } from "@radix-ui/themes";
+import { Badge, Box, Flex } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks/useAppSelector";
@@ -10,7 +10,10 @@ import {
   selectIsWaitingById,
 } from "../../../features/Chat/Thread/selectors";
 import { useThreadId } from "../../../features/Chat/Thread";
-import type { ToolCall } from "../../../services/refact/types";
+import {
+  getToolEnrichment,
+  type ToolCall,
+} from "../../../services/refact/types";
 import { ShikiCodeBlock } from "../../Markdown";
 import { Markdown } from "../../Markdown";
 import { formatToolDisplayName } from "../../../utils/toolNameAliases";
@@ -95,6 +98,7 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
     maybeResult && typeof maybeResult.content === "string"
       ? maybeResult.content
       : null;
+  const enrichment = getToolEnrichment(maybeResult?.extra);
 
   const toolName = toolCall.function.name ?? "tool";
   const argsPreview = truncatePreview(formatArgs(toolCall.function.arguments));
@@ -135,6 +139,26 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
             <ShikiCodeBlock showLineNumbers={false}>{rawArgs}</ShikiCodeBlock>
           </Box>
         </Box>
+
+        {enrichment &&
+          !enrichment.privacy?.restricted &&
+          enrichment.references.length > 0 && (
+            <Box className={styles.section} data-testid="tool-enrichment">
+              <Box className={styles.sectionLabel}>References</Box>
+              <Flex gap="2" wrap="wrap">
+                {enrichment.references.map((reference) => (
+                  <Badge
+                    key={`${reference.kind}:${reference.target}`}
+                    color={reference.status === "failed" ? "red" : "gray"}
+                    variant="soft"
+                  >
+                    {reference.kind}: {reference.label ?? reference.target}
+                    {reference.status ? ` (${reference.status})` : ""}
+                  </Badge>
+                ))}
+              </Flex>
+            </Box>
+          )}
 
         {content && (
           <Box className={styles.section}>

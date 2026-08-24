@@ -9,6 +9,7 @@ pub mod goal_role;
 pub mod internal_roles;
 pub mod notification_event;
 pub mod plan_role;
+pub mod tool_enrichment;
 
 pub use goal_ledger::{
     goal_budget_exhaustion_status, reduce_goal_ledger, seed_transferred_goal_ledger,
@@ -21,6 +22,11 @@ pub use chat_local_types::{
     PendingSkillDeactivation, TrajectorySourceIdentity,
 };
 pub use notification_event::{NotificationEvent, NotificationQuestion};
+pub use tool_enrichment::{
+    attach_tool_enrichment, redact_tool_enrichment, tool_enrichment_from_extra, ToolEnrichment,
+    ToolEnrichmentKind, ToolEnrichmentPrivacy, ToolEnrichmentProvenance, ToolEnrichmentReference,
+    TOOL_ENRICHMENT_EXTRA_KEY, TOOL_ENRICHMENT_SCHEMA_VERSION,
+};
 pub use refact_core::buddy_meta::BuddyThreadMeta;
 pub use refact_core::chat_types::{ChatMessage, ContextFile};
 pub use refact_core::worktree_meta::WorktreeMeta;

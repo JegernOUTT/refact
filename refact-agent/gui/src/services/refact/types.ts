@@ -257,6 +257,115 @@ export function extractExecMetadata(
   return isExecToolMetadata(exec) ? exec : undefined;
 }
 
+export type ToolEnrichmentKind =
+  | "path"
+  | "symbol"
+  | "url"
+  | "citation"
+  | "process"
+  | "query"
+  | "diff"
+  | "artifact"
+  | "diagnostic"
+  | "agent"
+  | "test";
+
+export type ToolEnrichmentProvenance = "native" | "derived" | "heuristic";
+
+export type ToolEnrichmentReference = {
+  kind: ToolEnrichmentKind;
+  target: string;
+  provenance: ToolEnrichmentProvenance;
+  label?: string;
+  summary?: string;
+  confidence?: number;
+  status?: string;
+  truncated?: boolean;
+  redacted?: boolean;
+};
+
+export type ToolEnrichment = {
+  schema_version: 1;
+  references: ToolEnrichmentReference[];
+  truncated?: boolean;
+  privacy?: { redacted?: boolean; restricted?: boolean };
+};
+
+const TOOL_ENRICHMENT_KINDS: readonly ToolEnrichmentKind[] = [
+  "path",
+  "symbol",
+  "url",
+  "citation",
+  "process",
+  "query",
+  "diff",
+  "artifact",
+  "diagnostic",
+  "agent",
+  "test",
+];
+
+const TOOL_ENRICHMENT_PROVENANCE: readonly ToolEnrichmentProvenance[] = [
+  "native",
+  "derived",
+  "heuristic",
+];
+
+function isToolEnrichmentReference(
+  value: unknown,
+): value is ToolEnrichmentReference {
+  if (!isRecord(value)) return false;
+  if (
+    !TOOL_ENRICHMENT_KINDS.includes(value.kind as ToolEnrichmentKind) ||
+    typeof value.target !== "string" ||
+    !TOOL_ENRICHMENT_PROVENANCE.includes(
+      value.provenance as ToolEnrichmentProvenance,
+    )
+  ) {
+    return false;
+  }
+  return (
+    (value.label === undefined || typeof value.label === "string") &&
+    (value.summary === undefined || typeof value.summary === "string") &&
+    (value.status === undefined || typeof value.status === "string") &&
+    (value.confidence === undefined ||
+      (typeof value.confidence === "number" &&
+        Number.isFinite(value.confidence) &&
+        value.confidence >= 0 &&
+        value.confidence <= 1)) &&
+    (value.truncated === undefined || typeof value.truncated === "boolean") &&
+    (value.redacted === undefined || typeof value.redacted === "boolean")
+  );
+}
+
+export function getToolEnrichment(
+  extra: Record<string, unknown> | undefined,
+): ToolEnrichment | null {
+  const value = extra?.tool_enrichment;
+  if (!isRecord(value) || value.schema_version !== 1) return null;
+  if (!Array.isArray(value.references) || value.references.length > 32) {
+    return null;
+  }
+  if (!value.references.every(isToolEnrichmentReference)) return null;
+  if (
+    value.truncated !== undefined &&
+    typeof value.truncated !== "boolean"
+  ) {
+    return null;
+  }
+  if (
+    value.privacy !== undefined &&
+    (!isRecord(value.privacy) ||
+      (value.privacy.redacted !== undefined &&
+        typeof value.privacy.redacted !== "boolean") ||
+      (value.privacy.restricted !== undefined &&
+        typeof value.privacy.restricted !== "boolean"))
+  ) {
+    return null;
+  }
+  return value as ToolEnrichment;
+}
+
 export type MultiModalToolContent = {
   m_type: string;
   m_content: string;
