@@ -2,7 +2,9 @@ import React, { useCallback, useMemo, useState } from "react";
 import classNames from "classnames";
 import { Virtuoso } from "react-virtuoso";
 import { useAppSelector } from "../../../../hooks/useAppSelector";
+import { useLoadMoreHistory } from "../../../../hooks/useLoadMoreHistory";
 import { useDeleteTrajectoryMutation } from "../../../../services/refact/trajectories";
+import { Button } from "../../../../components/ui";
 import type {
   StreamFilter,
   StreamGroup,
@@ -48,6 +50,7 @@ export const StreamSection: React.FC<StreamSectionProps> = ({
   onOpenTask,
 }) => {
   const [deleteTrajectory] = useDeleteTrajectoryMutation();
+  const { loadMore, retry, isLoading, hasMore, error } = useLoadMoreHistory();
   const groups = useAppSelector((state) => selectStreamGroups(state, filter));
 
   const [expandedFamilies, setExpandedFamilies] = useState<Set<string>>(
@@ -56,6 +59,7 @@ export const StreamSection: React.FC<StreamSectionProps> = ({
   const [peekId, setPeekId] = useState<string | null>(null);
 
   const entries = useMemo(() => flatten(groups), [groups]);
+  const canLoadMoreChats = hasMore && filter.kind !== "task";
 
   const handleToggleFamily = useCallback((id: string) => {
     setExpandedFamilies((prev) => {
@@ -69,6 +73,14 @@ export const StreamSection: React.FC<StreamSectionProps> = ({
   const handleTogglePeek = useCallback((id: string) => {
     setPeekId((prev) => (prev === id ? null : id));
   }, []);
+
+  const handleLoadMore = useCallback(() => {
+    if (error) {
+      retry();
+      return;
+    }
+    void loadMore();
+  }, [error, loadMore, retry]);
 
   const handleOpen = useCallback(
     (item: StreamItem) => {
@@ -162,6 +174,23 @@ export const StreamSection: React.FC<StreamSectionProps> = ({
           itemContent={renderEntry}
         />
       )}
+      {canLoadMoreChats ? (
+        <div className={styles.loadMore}>
+          <Button
+            size="sm"
+            variant="soft"
+            onClick={handleLoadMore}
+            disabled={isLoading}
+          >
+            {isLoading
+              ? "Loading older chats…"
+              : error
+                ? "Retry loading older chats"
+                : "Load older chats"}
+          </Button>
+          {error ? <span className={styles.loadMoreError}>{error}</span> : null}
+        </div>
+      ) : null}
     </div>
   );
 };

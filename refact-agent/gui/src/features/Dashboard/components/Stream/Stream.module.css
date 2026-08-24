@@ -91,6 +91,22 @@
   text-align: center;
 }
 
+.loadMore {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--rf-space-2);
+  flex-shrink: 0;
+  padding: var(--rf-space-2) var(--rf-space-3);
+  border-top: var(--rf-hairline) solid var(--rf-border);
+}
+
+.loadMoreError {
+  color: var(--rf-color-danger);
+  font-size: var(--rf-text-1);
+  line-height: var(--rf-line-1);
+}
+
 /* ------------------------------------------------------------ group headers */
 
 .groupHeader {

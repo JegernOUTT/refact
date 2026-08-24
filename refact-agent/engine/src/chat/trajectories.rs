@@ -1657,11 +1657,20 @@ async fn find_normal_trajectory_file(
     chat_id: &str,
 ) -> Option<ValidTrajectoryCandidate> {
     validate_trajectory_id(chat_id).ok()?;
-    first_valid_trajectory_candidate(
-        normal_trajectory_candidate_paths(gcx, chat_id).await,
-        chat_id,
-    )
-    .await
+    let task_roots = get_all_task_roots(gcx.clone()).await;
+    for path in normal_trajectory_candidate_paths(gcx, chat_id).await {
+        let Some(candidate) = read_valid_trajectory_candidate(path, chat_id).await else {
+            continue;
+        };
+        let Ok(source) = TrajectorySourceIdentity::from_json(&candidate.json) else {
+            continue;
+        };
+        let source = effective_trajectory_source_for_path(source, &candidate.path, &task_roots);
+        if trajectory_source_matches_hint(&source, &TrajectorySourceIdentity::Normal) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 async fn find_trajectory_file(
@@ -1726,16 +1735,21 @@ async fn find_validated_trajectory_path_for_source(
     chat_id: &str,
     source: &TrajectorySourceIdentity,
 ) -> Option<PathBuf> {
-    let dirs: Vec<PathBuf> = match source {
-        TrajectorySourceIdentity::Buddy => get_buddy_conversations_dir(gcx.clone())
-            .await
-            .ok()
-            .into_iter()
-            .collect(),
-        TrajectorySourceIdentity::Task { .. } => list_task_trajectory_dirs(&gcx).await,
-        TrajectorySourceIdentity::Normal => get_all_trajectories_dirs(gcx.clone()).await,
-    };
-    find_validated_trajectory_path_in_dirs(chat_id, dirs).await
+    match source {
+        TrajectorySourceIdentity::Normal => find_normal_trajectory_path(gcx, chat_id).await,
+        TrajectorySourceIdentity::Buddy => {
+            let dirs = get_buddy_conversations_dir(gcx)
+                .await
+                .ok()
+                .into_iter()
+                .collect();
+            find_validated_trajectory_path_in_dirs(chat_id, dirs).await
+        }
+        TrajectorySourceIdentity::Task { .. } => {
+            let dirs = list_task_trajectory_dirs(&gcx).await;
+            find_validated_trajectory_path_in_dirs(chat_id, dirs).await
+        }
+    }
 }
 
 pub async fn find_trajectory_path_for_active_chat(
@@ -20131,6 +20145,32 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let returned = payload["path"].as_str().unwrap();
         assert_same_path_str(returned, &path);
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_path_handler_returns_nested_normal_trajectory_path_for_active_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let root_chat_id = "path-normal-nested-root";
+        let chat_id = "path-normal-nested-active";
+        let path = nested_trajectory_path(dir.path(), root_chat_id, chat_id);
+        write_trajectory_file(&path, chat_id, "Normal", "2024-01-01T00:00:00Z").await;
+
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        session_arc.lock().await.thread.root_chat_id = Some(root_chat_id.to_string());
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc);
+
+        let response = handle_v1_trajectory_path(State(app), AxumPath(chat_id.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_same_path_str(payload["path"].as_str().unwrap(), &path);
     }
 
     #[serial]

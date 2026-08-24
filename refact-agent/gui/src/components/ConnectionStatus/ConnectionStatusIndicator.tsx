@@ -13,10 +13,7 @@ import { requestSseRefresh } from "../../features/Chat/Thread/actions";
 import { selectCurrentThreadId } from "../../features/Chat/Thread/selectors";
 import { trajectoriesApi } from "../../services/refact/trajectories";
 import { tasksApi } from "../../services/refact/tasks";
-import {
-  hydrateHistoryFromMeta,
-  setPagination,
-} from "../../features/History/historySlice";
+import { replaceSnapshotHistory } from "../../features/History/historySlice";
 import styles from "./ConnectionStatus.module.css";
 
 function useRefreshWorkspaceData() {
@@ -41,12 +38,14 @@ function useRefreshWorkspaceData() {
       }
       const trajectoriesResult = await trajQuery.unwrap();
       await tasksQuery.unwrap();
-      dispatch(hydrateHistoryFromMeta(trajectoriesResult.items));
       dispatch(
-        setPagination({
-          cursor: trajectoriesResult.next_cursor,
-          hasMore: trajectoriesResult.has_more,
-          totalCount: trajectoriesResult.total_count,
+        replaceSnapshotHistory({
+          items: trajectoriesResult.items,
+          pagination: {
+            cursor: trajectoriesResult.next_cursor,
+            hasMore: trajectoriesResult.has_more,
+            totalCount: trajectoriesResult.total_count,
+          },
         }),
       );
     } finally {

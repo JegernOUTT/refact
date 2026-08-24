@@ -1,5 +1,12 @@
+import { http, HttpResponse } from "msw";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, fireEvent } from "../../../../utils/test-utils";
+import { server } from "../../../../utils/mockServer";
+import {
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+} from "../../../../utils/test-utils";
 import { StreamSection } from "./StreamSection";
 import type { ChatHistoryItem } from "../../../History/historySlice";
 
@@ -37,6 +44,23 @@ function preloadedStateWith(chats: ChatHistoryItem[]) {
         generation: 1,
       },
     },
+  };
+}
+
+function trajectoryMeta(id: string, title: string) {
+  return {
+    id,
+    title,
+    created_at: new Date(NOW).toISOString(),
+    updated_at: new Date(NOW - 60_000).toISOString(),
+    model: "gpt-5",
+    mode: "agent",
+    message_count: 1,
+    total_lines_added: 0,
+    total_lines_removed: 0,
+    tasks_total: 0,
+    tasks_done: 0,
+    tasks_failed: 0,
   };
 }
 
@@ -139,5 +163,115 @@ describe("StreamSection", () => {
     expect(screen.getByText("Destructive action")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.getByTestId("stream-peek-a")).toBeInTheDocument();
+  });
+
+  it("offers pagination when older chats are available", () => {
+    const preloadedState = preloadedStateWith([
+      makeChat({ id: "a", title: "Current" }),
+    ]);
+    render(
+      <StreamSection
+        filter={ALL_FILTER}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+      {
+        preloadedState: {
+          ...preloadedState,
+          history: {
+            ...preloadedState.history,
+            pagination: {
+              cursor: "older-page",
+              hasMore: true,
+              totalCount: 51,
+              generation: 1,
+            },
+          },
+        },
+      },
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Load older chats" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps loading older chats available when the current search is empty", () => {
+    const preloadedState = preloadedStateWith([
+      makeChat({ id: "a", title: "Current" }),
+    ]);
+    render(
+      <StreamSection
+        filter={{ kind: "chat", query: "older" }}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+      {
+        preloadedState: {
+          ...preloadedState,
+          history: {
+            ...preloadedState.history,
+            pagination: {
+              cursor: "older-page",
+              hasMore: true,
+              totalCount: 51,
+              generation: 1,
+            },
+          },
+        },
+      },
+    );
+
+    expect(screen.getByText("Nothing here yet.")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Load older chats" }),
+    ).toBeInTheDocument();
+  });
+
+  it("loads the next history page when requested", async () => {
+    const preloadedState = preloadedStateWith([
+      makeChat({ id: "current", title: "Current" }),
+    ]);
+    let requestedCursor: string | null = null;
+    server.use(
+      http.get("*/v1/trajectories", ({ request }) => {
+        requestedCursor = new URL(request.url).searchParams.get("cursor");
+        return HttpResponse.json({
+          items: [trajectoryMeta("older", "Older flat chat")],
+          next_cursor: null,
+          has_more: false,
+          total_count: 2,
+        });
+      }),
+    );
+
+    render(
+      <StreamSection
+        filter={ALL_FILTER}
+        onOpenChat={vi.fn()}
+        onOpenTask={vi.fn()}
+      />,
+      {
+        preloadedState: {
+          ...preloadedState,
+          history: {
+            ...preloadedState.history,
+            pagination: {
+              cursor: "older-page",
+              hasMore: true,
+              totalCount: 2,
+              generation: 1,
+            },
+          },
+        },
+      },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Load older chats" }));
+
+    await waitFor(() => {
+      expect(requestedCursor).toBe("older-page");
+      expect(screen.getByText("Older flat chat")).toBeInTheDocument();
+    });
   });
 });
