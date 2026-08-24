@@ -1501,8 +1501,7 @@ pub fn content_text(message: &Value) -> Option<String> {
 fn sanitize_content_for_wire_role(role: Option<&str>, content: String) -> String {
     match role {
         Some("user") => sanitize_inbound_user_text(content),
-        Some("assistant" | "tool") => sanitize_tool_text(content),
-        _ => content,
+        _ => sanitize_tool_text(content),
     }
 }
 

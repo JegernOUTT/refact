@@ -430,6 +430,43 @@ fn live_wire_roles_produce_visible_cells() {
 }
 
 #[test]
+fn wire_roles_are_terminal_escape_inert() {
+    let injected = "visible \x1b[31mred\x07bell\u{009b}31mcsi\x1b]8;;https://evil.test\x07link\x1b]8;;\x07 tail";
+    let roles = [
+        "user",
+        "assistant",
+        "tool",
+        "diff",
+        "event",
+        "plan",
+        "goal",
+        "system",
+        "plain_text",
+        "error",
+        "context_file",
+        "cd_instruction",
+        "compression_report",
+        "notice",
+        "future_role",
+    ];
+
+    for role in roles {
+        let mut state = TranscriptState::new();
+        assert!(state.add_message(&json!({"role": role, "content": injected})));
+        let content = &state.messages()[0].content;
+        assert!(content.contains("visible"), "{role}: {content:?}");
+        assert!(content.contains("tail"), "{role}: {content:?}");
+        assert!(!content.contains('\x1b'), "{role}: {content:?}");
+        assert!(!content.contains('\x07'), "{role}: {content:?}");
+        assert!(!content.contains('\u{009b}'), "{role}: {content:?}");
+        assert!(
+            !content.contains("https://evil.test"),
+            "{role}: {content:?}"
+        );
+    }
+}
+
+#[test]
 fn golden_fixtures_drive_app_state_machine_offline() {
     let streaming = run_fixture("assistant_streaming.jsonl");
     assert!(streaming.recovery.is_none());
