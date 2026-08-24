@@ -1,5 +1,6 @@
 use std::path::{PathBuf, Path};
 use std::sync::Arc;
+use std::time::Instant;
 use chrono::{Local, Duration, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,7 @@ fn path_contains_component(path: &Path, component: &str) -> bool {
 }
 
 use crate::at_commands::at_commands::AtCommandsContext;
+use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 use crate::knowledge_index::KnowledgeIndex;
 use crate::chat::find_trajectory_path;
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
@@ -1229,13 +1231,69 @@ pub async fn memories_search(
     top_n_trajectories: usize,
     exclude_trajectory_id: Option<&str>,
 ) -> Result<Vec<MemoRecord>, String> {
+    memories_search_inner(
+        gcx,
+        query,
+        top_n_memories,
+        top_n_trajectories,
+        exclude_trajectory_id,
+        None,
+    )
+    .await
+}
+
+pub async fn memories_search_for_enrichment(
+    gcx: Arc<GlobalContext>,
+    query: &str,
+    top_n_memories: usize,
+    top_n_trajectories: usize,
+    exclude_trajectory_id: Option<&str>,
+    diagnostic_chat_id: Option<&str>,
+) -> Result<Vec<MemoRecord>, String> {
+    memories_search_inner(
+        gcx,
+        query,
+        top_n_memories,
+        top_n_trajectories,
+        exclude_trajectory_id,
+        diagnostic_chat_id,
+    )
+    .await
+}
+
+async fn memories_search_inner(
+    gcx: Arc<GlobalContext>,
+    query: &str,
+    top_n_memories: usize,
+    top_n_trajectories: usize,
+    exclude_trajectory_id: Option<&str>,
+    diagnostic_chat_id: Option<&str>,
+) -> Result<Vec<MemoRecord>, String> {
+    let root_discovery_started = perf_diagnostics::is_enabled().then(Instant::now);
     let knowledge_dirs = get_all_knowledge_dirs(gcx.clone()).await;
+    record_enrichment_metric(
+        diagnostic_chat_id,
+        PerfComponent::EnrichmentRootDiscovery,
+        PerfOutcome::Success,
+        elapsed_us(root_discovery_started),
+        None,
+        Some(knowledge_dirs.len() as u64),
+    );
 
     let mut root_cache: HashMap<String, String> = HashMap::new();
+    let root_resolve_started = perf_diagnostics::is_enabled().then(Instant::now);
     let exclude_root = match exclude_trajectory_id {
         Some(id) => Some(resolve_root_chat_id(gcx.clone(), id, &mut root_cache).await),
         None => None,
     };
+    record_enrichment_metric(
+        diagnostic_chat_id,
+        PerfComponent::EnrichmentCurrentRootResolve,
+        PerfOutcome::Success,
+        elapsed_us(root_resolve_started),
+        None,
+        Some(usize::from(exclude_root.is_some()) as u64),
+    );
 
     // Resolve trajectory dirs before acquiring vec_db lock to avoid holding the
     // mutex across gcx.read() calls (which could deadlock with concurrent gcx.write()).
@@ -1246,15 +1304,34 @@ pub async fn memories_search(
         gcx_read.vec_db.clone()
     };
 
+    let vecdb_lock_started = perf_diagnostics::is_enabled().then(Instant::now);
     let vecdb_guard = vecdb_arc.lock().await;
+    record_enrichment_metric(
+        diagnostic_chat_id,
+        PerfComponent::EnrichmentVecdbLockWait,
+        PerfOutcome::Success,
+        elapsed_us(vecdb_lock_started),
+        None,
+        Some(1),
+    );
+    let vecdb_hold_started = perf_diagnostics::is_enabled().then(Instant::now);
     if vecdb_guard.is_none() {
         drop(vecdb_guard);
+        record_enrichment_metric(
+            diagnostic_chat_id,
+            PerfComponent::EnrichmentVecdbLockHold,
+            PerfOutcome::Success,
+            elapsed_us(vecdb_hold_started),
+            None,
+            Some(0),
+        );
         return memories_search_fallback(
             gcx,
             query,
             top_n_memories,
             &knowledge_dirs,
             exclude_root.as_deref(),
+            diagnostic_chat_id,
         )
         .await;
     }
@@ -1265,12 +1342,28 @@ pub async fn memories_search(
     // - knowledge roots
     // - trajectory roots
     // This avoids code chunks dominating a global top-K.
-    let embedding = vecdb.embed_query(query).await?;
+    let embedding_started = perf_diagnostics::is_enabled().then(Instant::now);
+    let embedding = vecdb.embed_query(query).await;
+    record_enrichment_metric(
+        diagnostic_chat_id,
+        PerfComponent::EnrichmentEmbedding,
+        if embedding.is_ok() {
+            PerfOutcome::Success
+        } else {
+            PerfOutcome::Failure
+        },
+        elapsed_us(embedding_started),
+        None,
+        Some(1),
+    );
+    let embedding = embedding?;
 
     let k_knowledge = ((top_n_memories.max(1) + top_n_trajectories.max(1)) * 50).min(400);
     let k_trajectories = ((top_n_memories.max(1) + top_n_trajectories.max(1)) * 50).min(400);
 
     let mut combined_results: Vec<crate::vecdb::vdb_structs::VecdbRecord> = Vec::new();
+    let scoped_search_started = perf_diagnostics::is_enabled().then(Instant::now);
+    let mut scoped_searches = 0u64;
 
     for kd in &knowledge_dirs {
         let prefix = if kd.to_string_lossy().ends_with(std::path::MAIN_SEPARATOR) {
@@ -1279,6 +1372,7 @@ pub async fn memories_search(
             format!("{}{}", kd.to_string_lossy(), std::path::MAIN_SEPARATOR)
         };
         let filter = format!("(scope LIKE '{}%')", prefix.replace('"', "\\\""));
+        scoped_searches += 1;
         if let Ok(res) = vecdb
             .vecdb_search_with_embedding(&embedding, k_knowledge, Some(filter))
             .await
@@ -1294,6 +1388,7 @@ pub async fn memories_search(
             format!("{}{}", td.to_string_lossy(), std::path::MAIN_SEPARATOR)
         };
         let filter = format!("(scope LIKE '{}%')", prefix.replace('"', "\\\""));
+        scoped_searches += 1;
         if let Ok(res) = vecdb
             .vecdb_search_with_embedding(&embedding, k_trajectories, Some(filter))
             .await
@@ -1301,8 +1396,17 @@ pub async fn memories_search(
             combined_results.extend(res);
         }
     }
+    record_enrichment_metric(
+        diagnostic_chat_id,
+        PerfComponent::EnrichmentScopedSearch,
+        PerfOutcome::Success,
+        elapsed_us(scoped_search_started),
+        None,
+        Some(scoped_searches),
+    );
 
     // De-dup identical segments; keep best usefulness.
+    let merge_dedup_started = perf_diagnostics::is_enabled().then(Instant::now);
     combined_results.sort_by(|a, b| b.usefulness.total_cmp(&a.usefulness));
     let mut deduped = Vec::new();
     let mut seen = std::collections::HashSet::<(PathBuf, u64, u64)>::new();
@@ -1320,7 +1424,23 @@ pub async fn memories_search(
         query_text: query.to_string(),
         results: deduped,
     };
+    record_enrichment_metric(
+        diagnostic_chat_id,
+        PerfComponent::EnrichmentMergeDedup,
+        PerfOutcome::Success,
+        elapsed_us(merge_dedup_started),
+        None,
+        Some(search_result.results.len() as u64),
+    );
     drop(vecdb_guard);
+    record_enrichment_metric(
+        diagnostic_chat_id,
+        PerfComponent::EnrichmentVecdbLockHold,
+        PerfOutcome::Success,
+        elapsed_us(vecdb_hold_started),
+        None,
+        Some(scoped_searches),
+    );
 
     struct KnowledgeMatch {
         best_score: f32,
@@ -1404,9 +1524,16 @@ pub async fn memories_search(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    let reread_started = perf_diagnostics::is_enabled().then(Instant::now);
+    let mut reread_count = 0u64;
+    let mut reread_bytes = 0u64;
     for (file_path, file_match) in sorted_knowledge.into_iter().take(top_n_memories) {
         let text = match get_file_text_from_memory_or_disk(gcx.clone(), &file_path).await {
-            Ok(t) => t,
+            Ok(t) => {
+                reread_count += 1;
+                reread_bytes = reread_bytes.saturating_add(t.len() as u64);
+                t
+            }
             Err(_) => continue,
         };
 
@@ -1457,7 +1584,11 @@ pub async fn memories_search(
 
     for (file_path, traj_match) in sorted_trajectories.into_iter().take(top_n_trajectories) {
         let text = match get_file_text_from_memory_or_disk(gcx.clone(), &file_path).await {
-            Ok(t) => t,
+            Ok(t) => {
+                reread_count += 1;
+                reread_bytes = reread_bytes.saturating_add(t.len() as u64);
+                t
+            }
             Err(_) => continue,
         };
 
@@ -1546,6 +1677,14 @@ pub async fn memories_search(
             .filter(|r| r.kind.as_deref() == Some("trajectory"))
             .count()
     );
+    record_enrichment_metric(
+        diagnostic_chat_id,
+        PerfComponent::EnrichmentFileReread,
+        PerfOutcome::Success,
+        elapsed_us(reread_started),
+        Some(reread_bytes),
+        Some(reread_count),
+    );
 
     if !records.is_empty() {
         return Ok(records);
@@ -1557,6 +1696,7 @@ pub async fn memories_search(
         top_n_memories,
         &knowledge_dirs,
         exclude_root.as_deref(),
+        diagnostic_chat_id,
     )
     .await
 }
@@ -1567,7 +1707,9 @@ async fn memories_search_fallback(
     top_n: usize,
     knowledge_dirs: &[PathBuf],
     exclude_root: Option<&str>,
+    diagnostic_chat_id: Option<&str>,
 ) -> Result<Vec<MemoRecord>, String> {
+    let fallback_started = perf_diagnostics::is_enabled().then(Instant::now);
     let query_lower = query.to_lowercase();
     const FALLBACK_STOP_WORDS: &[&str] = &[
         "the", "and", "for", "with", "that", "this", "from", "into", "about", "what", "where",
@@ -1585,9 +1727,19 @@ async fn memories_search_fallback(
     let mut scored_results: Vec<(usize, MemoRecord)> = Vec::new();
 
     if knowledge_dirs.is_empty() || query_words.is_empty() {
+        record_enrichment_metric(
+            diagnostic_chat_id,
+            PerfComponent::EnrichmentFallback,
+            PerfOutcome::Skipped,
+            elapsed_us(fallback_started),
+            Some(0),
+            Some(0),
+        );
         return Ok(vec![]);
     }
 
+    let mut fallback_files = 0u64;
+    let mut fallback_bytes = 0u64;
     for knowledge_dir in knowledge_dirs {
         if !knowledge_dir.exists() {
             continue;
@@ -1610,7 +1762,11 @@ async fn memories_search_fallback(
 
             let text =
                 match get_file_text_from_memory_or_disk(gcx.clone(), &path.to_path_buf()).await {
-                    Ok(t) => t,
+                    Ok(t) => {
+                        fallback_files += 1;
+                        fallback_bytes = fallback_bytes.saturating_add(t.len() as u64);
+                        t
+                    }
                     Err(_) => continue,
                 };
 
@@ -1670,11 +1826,41 @@ async fn memories_search_fallback(
     }
 
     scored_results.sort_by(|a, b| b.0.cmp(&a.0));
-    Ok(scored_results
+    let records = scored_results
         .into_iter()
         .take(top_n)
         .map(|(_, r)| r)
-        .collect())
+        .collect::<Vec<_>>();
+    record_enrichment_metric(
+        diagnostic_chat_id,
+        PerfComponent::EnrichmentFallback,
+        PerfOutcome::Success,
+        elapsed_us(fallback_started),
+        Some(fallback_bytes),
+        Some(fallback_files),
+    );
+    Ok(records)
+}
+
+fn record_enrichment_metric(
+    diagnostic_chat_id: Option<&str>,
+    component: PerfComponent,
+    outcome: PerfOutcome,
+    elapsed_us: u64,
+    size_bytes: Option<u64>,
+    item_count: Option<u64>,
+) {
+    if let Some(chat_id) = diagnostic_chat_id {
+        perf_diagnostics::record_enrichment(
+            component, chat_id, outcome, elapsed_us, size_bytes, item_count, None,
+        );
+    }
+}
+
+fn elapsed_us(started: Option<Instant>) -> u64 {
+    started
+        .map(|started| started.elapsed().as_micros().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 pub async fn deprecate_document(

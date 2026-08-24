@@ -42,3 +42,11 @@ cd refact-agent/engine && cargo run --release -p refact-lsp --features bench --b
 ```
 
 `--fanout` streams 512 deltas through a 3-active/1-lagging subscriber setup against a 256-message, 1 MiB history. It reports deltas/sec, operations/bytes per delta, emit-lock wait, SSE serialize/broadcast and first-delta latency, large-history snapshot clone/serialization bytes and time, subscriber counts, and verified lag recovery. It fails if an active subscriber lags or recovery sequence monotonicity is broken.
+
+Run the provider-free automatic memory-enrichment benchmark with:
+
+```bash
+cd refact-agent/engine && cargo run --release -p refact-lsp --features bench --bin concurrent_chat_bench -- --auto-enrichment > /tmp/refact-auto-enrichment.json
+```
+
+`--auto-enrichment` exercises the actual automatic enrichment, memory search, scoped VecDB, current-chat exclusion, card construction, and bounded fallback paths with deterministic local backends only. Its fixed matrix covers 1/10/50/100 chats; 1/2/8 knowledge roots; 0/10/1000 knowledge files; repeated and distinct queries; warm/cold/empty/unavailable VecDB modes; histories; and privacy exclusions. The report uses only hashed chat identities and numeric timing/count metrics, provides p50/p95/p99 per stage, reports lock contention and maximum search concurrency, marks every stage exceeding 15% of accounted time, and exposes repeated work. Cache hits/misses and embedding retries are intentionally zero until a cache or retry path exists.

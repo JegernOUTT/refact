@@ -44,10 +44,35 @@ pub enum PerfComponent {
     ToolResultMerge,
     ToolSessionMergeEvents,
     ToolCheckpointScheduling,
+    EnrichmentAttempt,
+    EnrichmentDecisionFirstUser,
+    EnrichmentDecisionForced,
+    EnrichmentDecisionSignaled,
+    EnrichmentSkipNoUser,
+    EnrichmentSkipAlreadyPresent,
+    EnrichmentSkipEmptyQuery,
+    EnrichmentSkipCommand,
+    EnrichmentSkipThreshold,
+    EnrichmentSessionSnapshot,
+    EnrichmentExistingContextScan,
+    EnrichmentQueryNormalize,
+    EnrichmentRootDiscovery,
+    EnrichmentCurrentRootResolve,
+    EnrichmentVecdbLockWait,
+    EnrichmentVecdbLockHold,
+    EnrichmentEmbedding,
+    EnrichmentScopedSearch,
+    EnrichmentMergeDedup,
+    EnrichmentFileReread,
+    EnrichmentFallback,
+    EnrichmentCardBuild,
+    EnrichmentInsertion,
+    EnrichmentInsertionStale,
+    EnrichmentPersistenceScheduling,
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 57] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -80,6 +105,31 @@ impl PerfComponent {
         Self::ToolResultMerge,
         Self::ToolSessionMergeEvents,
         Self::ToolCheckpointScheduling,
+        Self::EnrichmentAttempt,
+        Self::EnrichmentDecisionFirstUser,
+        Self::EnrichmentDecisionForced,
+        Self::EnrichmentDecisionSignaled,
+        Self::EnrichmentSkipNoUser,
+        Self::EnrichmentSkipAlreadyPresent,
+        Self::EnrichmentSkipEmptyQuery,
+        Self::EnrichmentSkipCommand,
+        Self::EnrichmentSkipThreshold,
+        Self::EnrichmentSessionSnapshot,
+        Self::EnrichmentExistingContextScan,
+        Self::EnrichmentQueryNormalize,
+        Self::EnrichmentRootDiscovery,
+        Self::EnrichmentCurrentRootResolve,
+        Self::EnrichmentVecdbLockWait,
+        Self::EnrichmentVecdbLockHold,
+        Self::EnrichmentEmbedding,
+        Self::EnrichmentScopedSearch,
+        Self::EnrichmentMergeDedup,
+        Self::EnrichmentFileReread,
+        Self::EnrichmentFallback,
+        Self::EnrichmentCardBuild,
+        Self::EnrichmentInsertion,
+        Self::EnrichmentInsertionStale,
+        Self::EnrichmentPersistenceScheduling,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -116,6 +166,31 @@ impl PerfComponent {
             Self::ToolResultMerge => "tool.result_merge",
             Self::ToolSessionMergeEvents => "tool.session_merge_events",
             Self::ToolCheckpointScheduling => "tool.checkpoint_scheduling",
+            Self::EnrichmentAttempt => "enrichment.attempt",
+            Self::EnrichmentDecisionFirstUser => "enrichment.decision.first_user",
+            Self::EnrichmentDecisionForced => "enrichment.decision.forced",
+            Self::EnrichmentDecisionSignaled => "enrichment.decision.signaled",
+            Self::EnrichmentSkipNoUser => "enrichment.skip.no_user",
+            Self::EnrichmentSkipAlreadyPresent => "enrichment.skip.already_present",
+            Self::EnrichmentSkipEmptyQuery => "enrichment.skip.empty_query",
+            Self::EnrichmentSkipCommand => "enrichment.skip.command",
+            Self::EnrichmentSkipThreshold => "enrichment.skip.threshold",
+            Self::EnrichmentSessionSnapshot => "enrichment.session_snapshot",
+            Self::EnrichmentExistingContextScan => "enrichment.existing_context_scan",
+            Self::EnrichmentQueryNormalize => "enrichment.query_normalize",
+            Self::EnrichmentRootDiscovery => "enrichment.root_discovery",
+            Self::EnrichmentCurrentRootResolve => "enrichment.current_root_resolve",
+            Self::EnrichmentVecdbLockWait => "enrichment.vecdb_lock_wait",
+            Self::EnrichmentVecdbLockHold => "enrichment.vecdb_lock_hold",
+            Self::EnrichmentEmbedding => "enrichment.embedding",
+            Self::EnrichmentScopedSearch => "enrichment.scoped_search",
+            Self::EnrichmentMergeDedup => "enrichment.merge_dedup",
+            Self::EnrichmentFileReread => "enrichment.file_reread",
+            Self::EnrichmentFallback => "enrichment.fallback",
+            Self::EnrichmentCardBuild => "enrichment.card_build",
+            Self::EnrichmentInsertion => "enrichment.insertion",
+            Self::EnrichmentInsertionStale => "enrichment.insertion_stale",
+            Self::EnrichmentPersistenceScheduling => "enrichment.persistence_scheduling",
         }
     }
 }
@@ -137,6 +212,7 @@ impl ToolExecutionClass {
 pub enum PerfOutcome {
     Success,
     Failure,
+    Skipped,
 }
 
 impl PerfOutcome {
@@ -144,6 +220,7 @@ impl PerfOutcome {
         match self {
             Self::Success => "success",
             Self::Failure => "failure",
+            Self::Skipped => "skipped",
         }
     }
 }
@@ -166,6 +243,8 @@ pub struct PerfEvent {
     pub batch_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_class: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_id_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -218,6 +297,7 @@ impl PerfSink for TracingSink {
             queue_depth = ?event.queue_depth,
             batch_size = ?event.batch_size,
             execution_class = ?event.execution_class,
+            estimated_tokens = ?event.estimated_tokens,
             chat_id_hash = ?event.chat_id_hash,
             path_hash = ?event.path_hash,
             "trajectory_performance"
@@ -368,6 +448,7 @@ impl PerfSpan {
             queue_depth,
             batch_size,
             execution_class,
+            estimated_tokens: None,
             chat_id_hash: active.chat_id_hash,
             path_hash: active.path_hash,
         });
@@ -440,7 +521,37 @@ pub fn record(
         queue_depth,
         batch_size: None,
         execution_class: None,
+        estimated_tokens: None,
         chat_id_hash: chat_id.map(|chat_id| recorder.hash_bytes(chat_id.as_bytes())),
+        path_hash: None,
+    });
+}
+
+pub fn record_enrichment(
+    component: PerfComponent,
+    chat_id: &str,
+    outcome: PerfOutcome,
+    elapsed_us: u64,
+    size_bytes: Option<u64>,
+    item_count: Option<u64>,
+    estimated_tokens: Option<u64>,
+) {
+    let Some(recorder) = active_recorder() else {
+        return;
+    };
+    recorder.sink.record(PerfEvent {
+        schema_version: PERFORMANCE_DIAGNOSTICS_SCHEMA_VERSION,
+        component: component.as_str(),
+        outcome: outcome.as_str(),
+        elapsed_us,
+        size_bytes,
+        item_count,
+        trajectory_version: None,
+        queue_depth: None,
+        batch_size: None,
+        execution_class: None,
+        estimated_tokens,
+        chat_id_hash: Some(recorder.hash_bytes(chat_id.as_bytes())),
         path_hash: None,
     });
 }
@@ -689,8 +800,8 @@ mod tests {
             .iter()
             .map(|component| component.as_str())
             .collect();
-        assert_eq!(labels.len(), 32);
-        assert!(labels.iter().all(|label| label.len() <= 32));
+        assert_eq!(labels.len(), 57);
+        assert!(labels.iter().all(|label| label.len() <= 40));
         assert!(labels.contains(&"command.queue_wait"));
         assert!(labels.contains(&"stream.first_delta"));
         assert!(labels.contains(&"sse.serialize"));
@@ -705,8 +816,47 @@ mod tests {
         assert!(labels.contains(&"tool.execution_lookup"));
         assert!(labels.contains(&"tool.session_merge_events"));
         assert!(labels.contains(&"tool.checkpoint_scheduling"));
+        assert!(labels.contains(&"enrichment.embedding"));
+        assert!(labels.contains(&"enrichment.vecdb_lock_wait"));
+        assert!(labels.contains(&"enrichment.fallback"));
+        assert!(labels.contains(&"enrichment.insertion_stale"));
         assert_eq!(PerfOutcome::Success.as_str(), "success");
         assert_eq!(PerfOutcome::Failure.as_str(), "failure");
+        assert_eq!(PerfOutcome::Skipped.as_str(), "skipped");
+    }
+
+    #[test]
+    fn enrichment_metrics_hash_identity_and_never_store_content() {
+        let _lock = PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let sink = Arc::new(MemoryPerfSink::new());
+        let recorder = Arc::new(PerfRecorder::with_salt(
+            Arc::new(TestClock::new(0)),
+            sink.clone(),
+            [23; 32],
+        ));
+        let _guard = install_test_recorder(recorder);
+        let chat_id = "private-chat-id";
+        let query = "private query secret";
+
+        record_enrichment(
+            PerfComponent::EnrichmentQueryNormalize,
+            chat_id,
+            PerfOutcome::Success,
+            7,
+            Some(query.len() as u64),
+            Some(1),
+            Some(5),
+        );
+
+        let event = sink.events().pop().expect("enrichment event");
+        assert_eq!(event.component, "enrichment.query_normalize");
+        assert_eq!(event.size_bytes, Some(query.len() as u64));
+        assert_eq!(event.estimated_tokens, Some(5));
+        let rendered = serde_json::to_string(&event).unwrap();
+        assert!(!rendered.contains(chat_id));
+        assert!(!rendered.contains(query));
+        assert!(event.chat_id_hash.is_some());
+        assert!(event.path_hash.is_none());
     }
 
     #[test]

@@ -2,12 +2,14 @@ use crate::global_context::GlobalContext;
 use std::collections::HashSet;
 use std::path::{Component, Path as FilePath, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use regex::Regex;
 use serde::Serialize;
 
 use crate::call_validation::{ChatContent, ChatMessage, ContextFile};
+use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
-use crate::memories::memories_search;
+use crate::memories::memories_search_for_enrichment;
 use crate::subchat::{resolve_subchat_config, run_subchat};
 use crate::yaml_configs::customization_registry::get_subagent_config;
 
@@ -97,21 +99,127 @@ pub async fn enrich_messages_with_knowledge(
 ) {
     let last_user_idx = match messages.iter().rposition(|m| m.role == "user") {
         Some(idx) => idx,
-        None => return,
+        None => {
+            record_enrichment(
+                current_chat_id,
+                PerfComponent::EnrichmentSkipNoUser,
+                PerfOutcome::Skipped,
+                0,
+                None,
+                Some(messages.len() as u64),
+                None,
+            );
+            return;
+        }
     };
     let query_raw = messages[last_user_idx].content.content_text_only();
 
     if has_knowledge_enrichment_near(messages, last_user_idx) {
+        record_enrichment(
+            current_chat_id,
+            PerfComponent::EnrichmentSkipAlreadyPresent,
+            PerfOutcome::Skipped,
+            0,
+            None,
+            Some(messages.len() as u64),
+            None,
+        );
         return;
     }
 
+    let normalize_started = perf_diagnostics::is_enabled().then(Instant::now);
     let query_normalized = normalize_query(&query_raw);
+    record_enrichment(
+        current_chat_id,
+        PerfComponent::EnrichmentQueryNormalize,
+        PerfOutcome::Success,
+        elapsed_us(normalize_started),
+        Some(query_normalized.len() as u64),
+        Some(1),
+        Some(estimate_tokens(&query_normalized)),
+    );
 
-    if !should_enrich(messages, &query_raw, &query_normalized, force_enrichment) {
+    let decision = should_enrich(messages, &query_raw, &query_normalized, force_enrichment);
+    match decision {
+        EnrichmentDecision::FirstUser => record_enrichment(
+            current_chat_id,
+            PerfComponent::EnrichmentDecisionFirstUser,
+            PerfOutcome::Success,
+            0,
+            Some(query_normalized.len() as u64),
+            Some(1),
+            Some(estimate_tokens(&query_normalized)),
+        ),
+        EnrichmentDecision::Forced => record_enrichment(
+            current_chat_id,
+            PerfComponent::EnrichmentDecisionForced,
+            PerfOutcome::Success,
+            0,
+            Some(query_normalized.len() as u64),
+            Some(1),
+            Some(estimate_tokens(&query_normalized)),
+        ),
+        EnrichmentDecision::Signaled => record_enrichment(
+            current_chat_id,
+            PerfComponent::EnrichmentDecisionSignaled,
+            PerfOutcome::Success,
+            0,
+            Some(query_normalized.len() as u64),
+            Some(1),
+            Some(estimate_tokens(&query_normalized)),
+        ),
+        EnrichmentDecision::SkipEmpty => record_enrichment(
+            current_chat_id,
+            PerfComponent::EnrichmentSkipEmptyQuery,
+            PerfOutcome::Skipped,
+            0,
+            Some(query_normalized.len() as u64),
+            Some(1),
+            None,
+        ),
+        EnrichmentDecision::SkipCommand => record_enrichment(
+            current_chat_id,
+            PerfComponent::EnrichmentSkipCommand,
+            PerfOutcome::Skipped,
+            0,
+            Some(query_normalized.len() as u64),
+            Some(1),
+            None,
+        ),
+        EnrichmentDecision::SkipThreshold => record_enrichment(
+            current_chat_id,
+            PerfComponent::EnrichmentSkipThreshold,
+            PerfOutcome::Skipped,
+            0,
+            Some(query_normalized.len() as u64),
+            Some(1),
+            Some(estimate_tokens(&query_normalized)),
+        ),
+    }
+    if !decision.should_enrich() {
         return;
     }
 
+    record_enrichment(
+        current_chat_id,
+        PerfComponent::EnrichmentAttempt,
+        PerfOutcome::Success,
+        0,
+        Some(query_normalized.len() as u64),
+        Some(1),
+        Some(estimate_tokens(&query_normalized)),
+    );
+    let context_scan_started = perf_diagnostics::is_enabled().then(Instant::now);
     let existing_paths = get_existing_context_file_paths(messages);
+    record_enrichment(
+        current_chat_id,
+        PerfComponent::EnrichmentExistingContextScan,
+        PerfOutcome::Success,
+        elapsed_us(context_scan_started),
+        None,
+        Some(existing_paths.len() as u64),
+        None,
+    );
 
     let score_threshold = if force_enrichment {
         FORCED_KNOWLEDGE_SCORE_THRESHOLD
@@ -129,11 +237,81 @@ pub async fn enrich_messages_with_knowledge(
     .await
     {
         messages.insert(last_user_idx, knowledge_context);
+        if perf_diagnostics::is_enabled() {
+            let (file_count, char_count, estimated_tokens) =
+                context_message_stats(&messages[last_user_idx]);
+            record_enrichment(
+                current_chat_id,
+                PerfComponent::EnrichmentInsertion,
+                PerfOutcome::Success,
+                0,
+                Some(char_count),
+                Some(file_count),
+                Some(estimated_tokens),
+            );
+        }
         tracing::info!(
             "Injected knowledge context before user message at position {}",
             last_user_idx
         );
+    } else {
+        record_enrichment(
+            current_chat_id,
+            PerfComponent::EnrichmentInsertion,
+            PerfOutcome::Skipped,
+            0,
+            None,
+            Some(0),
+            Some(0),
+        );
     }
+}
+
+fn record_enrichment(
+    current_chat_id: Option<&str>,
+    component: PerfComponent,
+    outcome: PerfOutcome,
+    elapsed_us: u64,
+    size_bytes: Option<u64>,
+    item_count: Option<u64>,
+    estimated_tokens: Option<u64>,
+) {
+    if let Some(chat_id) = current_chat_id {
+        perf_diagnostics::record_enrichment(
+            component,
+            chat_id,
+            outcome,
+            elapsed_us,
+            size_bytes,
+            item_count,
+            estimated_tokens,
+        );
+    }
+}
+
+fn elapsed_us(started: Option<Instant>) -> u64 {
+    started
+        .map(|started| started.elapsed().as_micros().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+fn estimate_tokens(text: &str) -> u64 {
+    (text.len() as u64).saturating_add(3) / 4
+}
+
+fn context_message_stats(message: &ChatMessage) -> (u64, u64, u64) {
+    let ChatContent::ContextFiles(files) = &message.content else {
+        return (0, 0, 0);
+    };
+    let char_count = files
+        .iter()
+        .map(|file| file.file_content.len() as u64)
+        .sum::<u64>();
+    (
+        files.len() as u64,
+        char_count,
+        (char_count.saturating_add(3)) / 4,
+    )
 }
 
 fn normalize_query(query: &str) -> String {
@@ -146,39 +324,55 @@ fn normalize_query(query: &str) -> String {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnrichmentDecision {
+    FirstUser,
+    Forced,
+    Signaled,
+    SkipEmpty,
+    SkipCommand,
+    SkipThreshold,
+}
+
+impl EnrichmentDecision {
+    fn should_enrich(self) -> bool {
+        matches!(self, Self::FirstUser | Self::Forced | Self::Signaled)
+    }
+}
+
 fn should_enrich(
     messages: &[ChatMessage],
     query_raw: &str,
     query_normalized: &str,
     force_enrichment: bool,
-) -> bool {
+) -> EnrichmentDecision {
     let trimmed = query_raw.trim();
     if trimmed.is_empty() {
-        return false;
+        return EnrichmentDecision::SkipEmpty;
     }
     if trimmed.starts_with('@') || trimmed.starts_with('/') {
-        return false;
+        return EnrichmentDecision::SkipCommand;
     }
     if force_enrichment {
         tracing::info!("Knowledge enrichment: explicitly enabled for later turn");
-        return true;
+        return EnrichmentDecision::Forced;
     }
     let user_message_count = messages.iter().filter(|m| m.role == "user").count();
     if user_message_count == 1 {
         tracing::info!("Knowledge enrichment: first user message");
-        return true;
+        return EnrichmentDecision::FirstUser;
     }
     let strong = count_strong_signals(query_raw);
     let weak = count_weak_signals(query_raw, query_normalized);
     if strong >= 1 {
         tracing::info!("Knowledge enrichment: {} strong signal(s)", strong);
-        return true;
+        return EnrichmentDecision::Signaled;
     }
     if weak >= 2 && query_normalized.len() >= 20 {
         tracing::info!("Knowledge enrichment: {} weak signal(s)", weak);
-        return true;
+        return EnrichmentDecision::Signaled;
     }
-    false
+    EnrichmentDecision::SkipThreshold
 }
 
 fn count_strong_signals(query: &str) -> usize {
@@ -279,11 +473,12 @@ async fn create_knowledge_context(
     current_chat_id: Option<&str>,
     score_threshold: f32,
 ) -> Option<ChatMessage> {
-    let memories = memories_search(
+    let memories = memories_search_for_enrichment(
         gcx.clone(),
         query_text,
         KNOWLEDGE_TOP_N,
         TRAJECTORY_TOP_N,
+        current_chat_id,
         current_chat_id,
     )
     .await
@@ -311,6 +506,7 @@ async fn create_knowledge_context(
         score_threshold
     );
 
+    let card_started = perf_diagnostics::is_enabled().then(Instant::now);
     let context_files: Vec<ContextFile> = high_score_memories
         .iter()
         .filter_map(|memo| {
@@ -333,6 +529,22 @@ async fn create_knowledge_context(
 
     if context_files.is_empty() {
         return None;
+    }
+
+    if perf_diagnostics::is_enabled() {
+        let card_chars = context_files
+            .iter()
+            .map(|file| file.file_content.len() as u64)
+            .sum::<u64>();
+        record_enrichment(
+            current_chat_id,
+            PerfComponent::EnrichmentCardBuild,
+            PerfOutcome::Success,
+            elapsed_us(card_started),
+            Some(card_chars),
+            Some(context_files.len() as u64),
+            Some((card_chars.saturating_add(3)) / 4),
+        );
     }
 
     Some(ChatMessage {
@@ -787,6 +999,69 @@ mod tests {
             content: ChatContent::SimpleText(content.to_string()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn enrichment_decision_matrix_preserves_existing_trigger_rules() {
+        let first_turn = vec![ChatMessage::new("user".to_string(), "hello".to_string())];
+        assert_eq!(
+            should_enrich(&first_turn, "hello", "hello", false),
+            EnrichmentDecision::FirstUser
+        );
+        let later_turn = vec![
+            ChatMessage::new("user".to_string(), "hello".to_string()),
+            ChatMessage::new("assistant".to_string(), "reply".to_string()),
+            ChatMessage::new("user".to_string(), "plain followup".to_string()),
+        ];
+        assert_eq!(
+            should_enrich(&later_turn, "plain followup", "plain followup", false),
+            EnrichmentDecision::SkipThreshold
+        );
+        assert_eq!(
+            should_enrich(&later_turn, "", "", false),
+            EnrichmentDecision::SkipEmpty
+        );
+        assert_eq!(
+            should_enrich(&later_turn, "/help", "/help", true),
+            EnrichmentDecision::SkipCommand
+        );
+        assert_eq!(
+            should_enrich(&later_turn, "plain followup", "plain followup", true),
+            EnrichmentDecision::Forced
+        );
+        assert_eq!(
+            should_enrich(
+                &later_turn,
+                "find src/chat/generation.rs error",
+                "find src/chat/generation.rs error",
+                false
+            ),
+            EnrichmentDecision::Signaled
+        );
+    }
+
+    #[test]
+    fn enrichment_context_stats_measure_cards_without_retaining_text() {
+        let message = ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::ContextFiles(vec![ContextFile {
+                file_name: "private-memory.md".to_string(),
+                file_content: "private enrichment content".to_string(),
+                line1: 1,
+                line2: 1,
+                file_rev: None,
+                symbols: Vec::new(),
+                gradient_type: -1,
+                usefulness: 80.0,
+                skip_pp: true,
+            }]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            context_message_stats(&message),
+            (1, "private enrichment content".len() as u64, 7)
+        );
     }
 
     #[test]

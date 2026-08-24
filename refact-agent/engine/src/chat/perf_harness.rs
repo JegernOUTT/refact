@@ -1,6 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -21,11 +21,12 @@ use crate::chat::tools::{
     process_tool_calls_once, resolve_tool_call_aliases_with_catalog, ToolStepOutcome,
 };
 use crate::chat::perf_diagnostics::{
-    self, MemoryPerfSink, PerfClock, PerfComponent, PerfEvent, PerfRecorder,
+    self, MemoryPerfSink, PerfClock, PerfComponent, PerfEvent, PerfOutcome, PerfRecorder,
 };
 use crate::chat::prepare::build_canonical_openai_tools;
 use crate::chat::types::{ChatEvent, ChatSession, DeltaOp, EventEnvelope};
 use crate::chat::generation::batch_stream_delta_ops;
+use crate::knowledge::enrichment::enrich_messages_with_knowledge;
 use crate::chat::trajectories::{
     find_trajectory_path, load_trajectory_for_chat, persist_trajectory_snapshot_with_intent,
     trajectory_snapshot_from_session,
@@ -41,6 +42,7 @@ use crate::tools::tools_description::{
 
 pub const CONCURRENT_CHAT_BENCHMARK_SCHEMA: &str = "refact.concurrent_chat_benchmark.v1";
 pub const FANOUT_BENCHMARK_SCHEMA: &str = "refact.chat_fanout_benchmark.v1";
+pub const AUTO_ENRICHMENT_BENCHMARK_SCHEMA: &str = "refact.auto_enrichment_benchmark.v1";
 const QUICK_HISTORY_BYTES_CAP: usize = 8 * 1024;
 const RAPID_CHECKPOINTS_PER_CHAT: u64 = 4;
 pub const TURN_MEMORY_FLEET_CHAT_COUNTS: [usize; 2] = [10, 100];
@@ -976,6 +978,572 @@ pub fn run_fanout_benchmark() -> Result<FanoutBenchmarkReport, String> {
         .block_on(run_fanout_benchmark_async())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoEnrichmentQueryMode {
+    Repeated,
+    Distinct,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoEnrichmentVecdbMode {
+    Warm,
+    Cold,
+    Empty,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AutoEnrichmentWorkload {
+    pub chat_count: usize,
+    pub root_count: usize,
+    pub knowledge_file_count: usize,
+    pub query_mode: AutoEnrichmentQueryMode,
+    pub vecdb_mode: AutoEnrichmentVecdbMode,
+    pub history_message_count: usize,
+    pub privacy_exclusion_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AutoEnrichmentStageReport {
+    pub stage: String,
+    pub latency: LatencySummary,
+    pub fraction_of_accounted_wall_percent: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct AutoEnrichmentRepeatedWork {
+    pub attempts: u64,
+    pub scoped_searches: u64,
+    pub fallback_files_read: u64,
+    pub embedding_retries: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AutoEnrichmentWorkloadReport {
+    pub workload: AutoEnrichmentWorkload,
+    pub end_to_end_latency: LatencySummary,
+    pub stages: Vec<AutoEnrichmentStageReport>,
+    pub dominant_stages: Vec<String>,
+    pub repeated_work: AutoEnrichmentRepeatedWork,
+    pub inserted_contexts: u64,
+    pub injected_file_count: u64,
+    pub injected_char_count: u64,
+    pub injected_estimated_tokens: u64,
+    pub privacy_exclusion_violations: u64,
+    pub max_concurrent_search: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AutoEnrichmentBenchmarkReport {
+    pub schema: &'static str,
+    pub workloads: Vec<AutoEnrichmentWorkloadReport>,
+}
+
+#[derive(Default)]
+struct AutoEnrichmentVecdb {
+    records: Vec<VecdbRecord>,
+    delay: std::time::Duration,
+    active_searches: AtomicUsize,
+    max_concurrent_searches: AtomicUsize,
+}
+
+impl AutoEnrichmentVecdb {
+    fn enter_search(&self) -> AutoEnrichmentSearchGuard<'_> {
+        let active = self.active_searches.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut observed = self.max_concurrent_searches.load(Ordering::SeqCst);
+        while active > observed {
+            match self.max_concurrent_searches.compare_exchange(
+                observed,
+                active,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(current) => observed = current,
+            }
+        }
+        AutoEnrichmentSearchGuard { vecdb: self }
+    }
+}
+
+struct AutoEnrichmentSearchGuard<'a> {
+    vecdb: &'a AutoEnrichmentVecdb,
+}
+
+impl Drop for AutoEnrichmentSearchGuard<'_> {
+    fn drop(&mut self) {
+        self.vecdb.active_searches.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl VecdbSearch for AutoEnrichmentVecdb {
+    async fn vecdb_search(
+        &self,
+        query: String,
+        _top_n: usize,
+        _filter_mb: Option<String>,
+    ) -> Result<SearchResult, String> {
+        Ok(SearchResult {
+            query_text: query,
+            results: Vec::new(),
+        })
+    }
+
+    async fn get_status(&self) -> Result<VecDbStatus, String> {
+        Ok(VecDbStatus {
+            files_unprocessed: 0,
+            files_total: self.records.len(),
+            requests_made_since_start: 0,
+            vectors_made_since_start: 0,
+            db_size: 0,
+            db_cache_size: 0,
+            state: "local_auto_enrichment_fixture".to_string(),
+            queue_additions: false,
+            vecdb_max_files_hit: false,
+            vecdb_errors: Default::default(),
+        })
+    }
+
+    async fn remove_file(&self, _file_path: &PathBuf) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn vectorizer_enqueue_files(
+        &self,
+        _documents: &[String],
+        _process_immediately: bool,
+        _roots: MemoryPlaneRoots,
+    ) {
+    }
+
+    fn current_constants(&self) -> (EmbeddingModelConfig, usize) {
+        (
+            EmbeddingModelConfig {
+                model_id: "local-auto-enrichment".to_string(),
+                endpoint: String::new(),
+                endpoint_style: String::new(),
+                embedding_endpoint_style: String::new(),
+                api_key: String::new(),
+                model_name: "local-auto-enrichment".to_string(),
+                embedding_size: 3,
+                dimensions: Some(3),
+                query_prefix: String::new(),
+                document_prefix: String::new(),
+                rejection_threshold: 0.0,
+                embedding_batch: 1,
+                n_ctx: 0,
+            },
+            0,
+        )
+    }
+
+    async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, String> {
+        let _guard = self.enter_search();
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        Ok(vec![0.1, 0.2, 0.3])
+    }
+
+    async fn vecdb_search_with_embedding(
+        &self,
+        _embedding: &Vec<f32>,
+        _top_n: usize,
+        _filter_mb: Option<String>,
+    ) -> Result<Vec<VecdbRecord>, String> {
+        let _guard = self.enter_search();
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        Ok(self.records.clone())
+    }
+}
+
+struct AutoEnrichmentFixture {
+    _temp_dir: Arc<tempfile::TempDir>,
+    gcx: SharedGlobalContext,
+    excluded_paths: HashSet<PathBuf>,
+    vecdb: Option<Arc<AutoEnrichmentVecdb>>,
+}
+
+impl AutoEnrichmentFixture {
+    async fn new(workload: &AutoEnrichmentWorkload) -> Result<Self, String> {
+        let temp_dir = Arc::new(
+            tempfile::tempdir()
+                .map_err(|error| format!("failed to create enrichment fixture: {error}"))?,
+        );
+        let cache_dir = temp_dir.path().join("cache");
+        let config_dir = temp_dir.path().join("config");
+        let gcx =
+            crate::global_context::tests::make_test_gcx_with_dirs(cache_dir, config_dir).await;
+        let mut roots = Vec::with_capacity(workload.root_count);
+        for root_index in 0..workload.root_count {
+            let root = temp_dir.path().join(format!("root-{root_index}"));
+            tokio::fs::create_dir_all(root.join(crate::file_filter::KNOWLEDGE_FOLDER_NAME))
+                .await
+                .map_err(|error| format!("failed to create enrichment root: {error}"))?;
+            roots.push(root);
+        }
+        *gcx.documents_state
+            .workspace_folders
+            .lock()
+            .map_err(|_| "enrichment workspace folders lock poisoned".to_string())? = roots.clone();
+
+        let mut records = Vec::with_capacity(workload.knowledge_file_count);
+        let mut excluded_paths = HashSet::new();
+        for file_index in 0..workload.knowledge_file_count {
+            let root = &roots[file_index % roots.len()];
+            let path = root
+                .join(crate::file_filter::KNOWLEDGE_FOLDER_NAME)
+                .join(format!("memory-{file_index}.md"));
+            let tags = vec!["fixture".to_string()];
+            let empty = Vec::new();
+            let mut frontmatter = crate::memories::create_frontmatter(
+                Some("Auto enrichment fixture"),
+                &tags,
+                &empty,
+                &empty,
+                "memory",
+            );
+            if file_index < workload.privacy_exclusion_count {
+                frontmatter.source_chat_id = Some("auto-enrichment-current-chat".to_string());
+                excluded_paths.insert(path.clone());
+            }
+            let content = format!(
+                "{}\n\nEnrichment codegraph fixture result number {file_index}.",
+                frontmatter.to_yaml()
+            );
+            tokio::fs::write(&path, content)
+                .await
+                .map_err(|error| format!("failed to write enrichment memory: {error}"))?;
+            records.push(VecdbRecord {
+                vector: None,
+                file_path: path,
+                start_line: 1,
+                end_line: 1,
+                distance: 0.1,
+                usefulness: 95.0,
+            });
+        }
+
+        let vecdb = match workload.vecdb_mode {
+            AutoEnrichmentVecdbMode::Unavailable => None,
+            AutoEnrichmentVecdbMode::Warm => Some(Arc::new(AutoEnrichmentVecdb {
+                records,
+                delay: std::time::Duration::ZERO,
+                ..Default::default()
+            })),
+            AutoEnrichmentVecdbMode::Cold => Some(Arc::new(AutoEnrichmentVecdb {
+                records,
+                delay: std::time::Duration::from_millis(1),
+                ..Default::default()
+            })),
+            AutoEnrichmentVecdbMode::Empty => Some(Arc::new(AutoEnrichmentVecdb {
+                records: Vec::new(),
+                delay: std::time::Duration::from_millis(1),
+                ..Default::default()
+            })),
+        };
+        *gcx.vec_db.lock().await = vecdb.clone().map(|backend| backend as Arc<dyn VecdbSearch>);
+        Ok(Self {
+            _temp_dir: temp_dir,
+            gcx,
+            excluded_paths,
+            vecdb,
+        })
+    }
+}
+
+pub fn run_auto_enrichment_benchmark() -> Result<AutoEnrichmentBenchmarkReport, String> {
+    benchmark_runtime_builder()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("failed to start enrichment Tokio runtime: {error}"))?
+        .block_on(run_auto_enrichment_benchmark_async())
+}
+
+pub fn run_auto_enrichment_ci_fixture() -> Result<AutoEnrichmentWorkloadReport, String> {
+    benchmark_runtime_builder()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("failed to start enrichment CI Tokio runtime: {error}"))?
+        .block_on(run_auto_enrichment_workload(&AutoEnrichmentWorkload {
+            chat_count: 10,
+            root_count: 2,
+            knowledge_file_count: 10,
+            query_mode: AutoEnrichmentQueryMode::Repeated,
+            vecdb_mode: AutoEnrichmentVecdbMode::Cold,
+            history_message_count: 8,
+            privacy_exclusion_count: 1,
+        }))
+}
+
+async fn run_auto_enrichment_benchmark_async() -> Result<AutoEnrichmentBenchmarkReport, String> {
+    let workloads = vec![
+        AutoEnrichmentWorkload {
+            chat_count: 1,
+            root_count: 1,
+            knowledge_file_count: 0,
+            query_mode: AutoEnrichmentQueryMode::Repeated,
+            vecdb_mode: AutoEnrichmentVecdbMode::Unavailable,
+            history_message_count: 1,
+            privacy_exclusion_count: 0,
+        },
+        AutoEnrichmentWorkload {
+            chat_count: 10,
+            root_count: 1,
+            knowledge_file_count: 10,
+            query_mode: AutoEnrichmentQueryMode::Repeated,
+            vecdb_mode: AutoEnrichmentVecdbMode::Warm,
+            history_message_count: 8,
+            privacy_exclusion_count: 1,
+        },
+        AutoEnrichmentWorkload {
+            chat_count: 10,
+            root_count: 2,
+            knowledge_file_count: 10,
+            query_mode: AutoEnrichmentQueryMode::Distinct,
+            vecdb_mode: AutoEnrichmentVecdbMode::Cold,
+            history_message_count: 16,
+            privacy_exclusion_count: 1,
+        },
+        AutoEnrichmentWorkload {
+            chat_count: 50,
+            root_count: 2,
+            knowledge_file_count: 10,
+            query_mode: AutoEnrichmentQueryMode::Repeated,
+            vecdb_mode: AutoEnrichmentVecdbMode::Cold,
+            history_message_count: 32,
+            privacy_exclusion_count: 1,
+        },
+        AutoEnrichmentWorkload {
+            chat_count: 50,
+            root_count: 8,
+            knowledge_file_count: 1_000,
+            query_mode: AutoEnrichmentQueryMode::Distinct,
+            vecdb_mode: AutoEnrichmentVecdbMode::Unavailable,
+            history_message_count: 64,
+            privacy_exclusion_count: 1,
+        },
+        AutoEnrichmentWorkload {
+            chat_count: 100,
+            root_count: 8,
+            knowledge_file_count: 1_000,
+            query_mode: AutoEnrichmentQueryMode::Repeated,
+            vecdb_mode: AutoEnrichmentVecdbMode::Empty,
+            history_message_count: 64,
+            privacy_exclusion_count: 1,
+        },
+    ];
+    let mut reports = Vec::with_capacity(workloads.len());
+    for workload in workloads {
+        reports.push(run_auto_enrichment_workload(&workload).await?);
+    }
+    Ok(AutoEnrichmentBenchmarkReport {
+        schema: AUTO_ENRICHMENT_BENCHMARK_SCHEMA,
+        workloads: reports,
+    })
+}
+
+async fn run_auto_enrichment_workload(
+    workload: &AutoEnrichmentWorkload,
+) -> Result<AutoEnrichmentWorkloadReport, String> {
+    let _diagnostic_lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK
+        .lock()
+        .map_err(|_| "enrichment performance recorder lock poisoned".to_string())?;
+    let fixture = AutoEnrichmentFixture::new(workload).await?;
+    let sink = Arc::new(MemoryPerfSink::new());
+    let recorder = Arc::new(PerfRecorder::with_salt(
+        Arc::new(BenchmarkClock::default()),
+        sink.clone(),
+        [47; 32],
+    ));
+    let _recorder_guard = perf_diagnostics::install_test_recorder(recorder);
+    let tasks = (0..workload.chat_count)
+        .map(|chat_index| {
+            let gcx = fixture.gcx.clone();
+            let mut session = ChatSession::new("auto-enrichment-current-chat".to_string());
+            session.messages = auto_enrichment_history(workload, chat_index);
+            async move {
+                let snapshot_started = Instant::now();
+                let mut messages = session.messages.clone();
+                let snapshot_bytes = messages
+                    .iter()
+                    .map(|message| {
+                        serde_json::to_vec(message)
+                            .map(|encoded| encoded.len())
+                            .unwrap_or(0)
+                    })
+                    .sum::<usize>();
+                perf_diagnostics::record_enrichment(
+                    PerfComponent::EnrichmentSessionSnapshot,
+                    "auto-enrichment-current-chat",
+                    PerfOutcome::Success,
+                    elapsed_us(snapshot_started),
+                    Some(snapshot_bytes as u64),
+                    Some(messages.len() as u64),
+                    Some((snapshot_bytes as u64).saturating_add(3) / 4),
+                );
+                let started = Instant::now();
+                enrich_messages_with_knowledge(
+                    gcx,
+                    &mut messages,
+                    Some("auto-enrichment-current-chat"),
+                    true,
+                )
+                .await;
+                (elapsed_us(started), messages)
+            }
+        })
+        .collect::<Vec<_>>();
+    let outcomes = futures::future::join_all(tasks).await;
+    let end_to_end_samples = outcomes
+        .iter()
+        .map(|(elapsed, _)| *elapsed)
+        .collect::<Vec<_>>();
+    let inserted_contexts = outcomes
+        .iter()
+        .filter(|(_, messages)| {
+            messages.iter().any(|message| {
+                message.role == "context_file" && message.tool_call_id == "knowledge_enrichment"
+            })
+        })
+        .count() as u64;
+    let privacy_exclusion_violations = outcomes
+        .iter()
+        .flat_map(|(_, messages)| messages)
+        .filter(|message| message.role == "context_file")
+        .filter_map(|message| match &message.content {
+            ChatContent::ContextFiles(files) => Some(files),
+            _ => None,
+        })
+        .flatten()
+        .filter(|file| fixture.excluded_paths.contains(Path::new(&file.file_name)))
+        .count() as u64;
+    if privacy_exclusion_violations != 0 {
+        return Err("enrichment fixture injected a current-chat memory".to_string());
+    }
+    let events = sink.events();
+    let stages = enrichment_stage_reports(&events)?;
+    let dominant_stages = stages
+        .iter()
+        .filter(|stage| stage.fraction_of_accounted_wall_percent > 15.0)
+        .map(|stage| {
+            format!(
+                "{} ({:.1}%)",
+                stage.stage, stage.fraction_of_accounted_wall_percent
+            )
+        })
+        .collect::<Vec<_>>();
+    let repeated_work = AutoEnrichmentRepeatedWork {
+        attempts: event_count(&events, PerfComponent::EnrichmentAttempt),
+        scoped_searches: event_item_count(&events, PerfComponent::EnrichmentScopedSearch),
+        fallback_files_read: event_item_count(&events, PerfComponent::EnrichmentFallback),
+        embedding_retries: 0,
+        cache_hits: 0,
+        cache_misses: 0,
+    };
+    let injected_file_count = events
+        .iter()
+        .filter(|event| event.component == PerfComponent::EnrichmentInsertion.as_str())
+        .filter(|event| event.outcome == PerfOutcome::Success.as_str())
+        .filter_map(|event| event.item_count)
+        .sum();
+    let injected_char_count = events
+        .iter()
+        .filter(|event| event.component == PerfComponent::EnrichmentInsertion.as_str())
+        .filter(|event| event.outcome == PerfOutcome::Success.as_str())
+        .filter_map(|event| event.size_bytes)
+        .sum();
+    let injected_estimated_tokens = events
+        .iter()
+        .filter(|event| event.component == PerfComponent::EnrichmentInsertion.as_str())
+        .filter(|event| event.outcome == PerfOutcome::Success.as_str())
+        .filter_map(|event| event.estimated_tokens)
+        .sum();
+    Ok(AutoEnrichmentWorkloadReport {
+        workload: workload.clone(),
+        end_to_end_latency: LatencySummary::from_samples(&end_to_end_samples)?,
+        stages,
+        dominant_stages,
+        repeated_work,
+        inserted_contexts,
+        injected_file_count,
+        injected_char_count,
+        injected_estimated_tokens,
+        privacy_exclusion_violations,
+        max_concurrent_search: fixture
+            .vecdb
+            .as_ref()
+            .map(|backend| backend.max_concurrent_searches.load(Ordering::SeqCst))
+            .unwrap_or(0),
+    })
+}
+
+fn auto_enrichment_history(
+    workload: &AutoEnrichmentWorkload,
+    chat_index: usize,
+) -> Vec<ChatMessage> {
+    let mut messages = (0..workload.history_message_count.saturating_sub(1))
+        .map(|index| ChatMessage {
+            role: if index % 2 == 0 {
+                "user".to_string()
+            } else {
+                "assistant".to_string()
+            },
+            content: ChatContent::SimpleText("history enrichment codegraph ".repeat(16)),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    let suffix = match workload.query_mode {
+        AutoEnrichmentQueryMode::Repeated => "shared".to_string(),
+        AutoEnrichmentQueryMode::Distinct => format!("chat-{chat_index}"),
+    };
+    messages.push(ChatMessage {
+        role: "user".to_string(),
+        content: ChatContent::SimpleText(format!("find enrichment codegraph {suffix}")),
+        ..Default::default()
+    });
+    messages
+}
+
+fn enrichment_stage_reports(
+    events: &[PerfEvent],
+) -> Result<Vec<AutoEnrichmentStageReport>, String> {
+    let mut samples_by_stage = BTreeMap::<String, Vec<u64>>::new();
+    for event in events
+        .iter()
+        .filter(|event| event.component.starts_with("enrichment."))
+    {
+        samples_by_stage
+            .entry(event.component.to_string())
+            .or_default()
+            .push(event.elapsed_us);
+    }
+    let accounted_us = samples_by_stage
+        .values()
+        .flatten()
+        .copied()
+        .sum::<u64>()
+        .max(1);
+    samples_by_stage
+        .into_iter()
+        .map(|(stage, samples)| {
+            let stage_us = samples.iter().copied().sum::<u64>();
+            Ok(AutoEnrichmentStageReport {
+                stage,
+                latency: LatencySummary::from_samples(&samples)?,
+                fraction_of_accounted_wall_percent: stage_us as f64 * 100.0 / accounted_us as f64,
+            })
+        })
+        .collect()
+}
+
 async fn run_fanout_benchmark_async() -> Result<FanoutBenchmarkReport, String> {
     let _diagnostic_lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK
         .lock()
@@ -1320,6 +1888,66 @@ pub fn render_full_soak_json(report: &FullSoakBenchmarkReport) -> Result<String,
 pub fn render_fanout_json(report: &FanoutBenchmarkReport) -> Result<String, String> {
     serde_json::to_string_pretty(report)
         .map_err(|error| format!("failed to serialize fanout benchmark report: {error}"))
+}
+
+pub fn render_auto_enrichment_json(
+    report: &AutoEnrichmentBenchmarkReport,
+) -> Result<String, String> {
+    serde_json::to_string_pretty(report)
+        .map_err(|error| format!("failed to serialize enrichment benchmark report: {error}"))
+}
+
+pub fn validate_auto_enrichment_report_json(json: &str) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(json)
+        .map_err(|error| format!("invalid enrichment benchmark JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "enrichment benchmark JSON must be an object".to_string())?;
+    if object.get("schema").and_then(serde_json::Value::as_str)
+        != Some(AUTO_ENRICHMENT_BENCHMARK_SCHEMA)
+    {
+        return Err("enrichment benchmark schema is missing or unsupported".to_string());
+    }
+    let workloads = object
+        .get("workloads")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "enrichment benchmark workloads must be an array".to_string())?;
+    let chat_counts = workloads
+        .iter()
+        .filter_map(|workload| workload.get("workload"))
+        .filter_map(|workload| workload.get("chat_count"))
+        .filter_map(serde_json::Value::as_u64)
+        .collect::<BTreeSet<_>>();
+    if !chat_counts.is_superset(&BTreeSet::from([10, 50, 100])) {
+        return Err("enrichment benchmark must quantify 10/50/100 concurrent chats".to_string());
+    }
+    for workload in workloads {
+        for key in [
+            "workload",
+            "end_to_end_latency",
+            "stages",
+            "dominant_stages",
+            "repeated_work",
+            "inserted_contexts",
+            "injected_file_count",
+            "injected_char_count",
+            "injected_estimated_tokens",
+            "privacy_exclusion_violations",
+            "max_concurrent_search",
+        ] {
+            if workload.get(key).is_none() {
+                return Err(format!("enrichment workload is missing {key}"));
+            }
+        }
+        if workload
+            .get("privacy_exclusion_violations")
+            .and_then(serde_json::Value::as_u64)
+            != Some(0)
+        {
+            return Err("enrichment benchmark has a privacy exclusion violation".to_string());
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_report_json(json: &str) -> Result<(), String> {
@@ -3650,6 +4278,70 @@ mod tests {
         assert_eq!(full_soak_variant_order(0), [false, true]);
         assert_eq!(full_soak_variant_order(1), [true, false]);
         assert_eq!(full_soak_variant_order(2), [false, true]);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn auto_enrichment_fixture_measures_real_fanout_lock_contention_and_privacy() {
+        let report = run_auto_enrichment_ci_fixture().expect("auto enrichment fixture runs");
+
+        assert_eq!(report.workload.chat_count, 10);
+        assert_eq!(report.privacy_exclusion_violations, 0);
+        assert_eq!(report.repeated_work.attempts, 10);
+        assert!(report.repeated_work.scoped_searches >= 10);
+        assert!(report.inserted_contexts > 0);
+        assert!(report.injected_file_count > 0);
+        assert!(report.injected_char_count > 0);
+        assert!(report.injected_estimated_tokens > 0);
+        assert!(report.max_concurrent_search >= 1);
+        assert!(report
+            .stages
+            .iter()
+            .any(|stage| stage.stage == "enrichment.vecdb_lock_wait"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn auto_enrichment_fallback_measurement_stays_bounded_and_schema_validates() {
+        let report = benchmark_runtime_builder()
+            .enable_all()
+            .build()
+            .expect("runtime starts")
+            .block_on(run_auto_enrichment_workload(&AutoEnrichmentWorkload {
+                chat_count: 10,
+                root_count: 2,
+                knowledge_file_count: 10,
+                query_mode: AutoEnrichmentQueryMode::Distinct,
+                vecdb_mode: AutoEnrichmentVecdbMode::Unavailable,
+                history_message_count: 4,
+                privacy_exclusion_count: 1,
+            }))
+            .expect("fallback fixture runs");
+        assert!(report.repeated_work.fallback_files_read <= 100);
+        assert_eq!(report.privacy_exclusion_violations, 0);
+
+        let json = render_auto_enrichment_json(&AutoEnrichmentBenchmarkReport {
+            schema: AUTO_ENRICHMENT_BENCHMARK_SCHEMA,
+            workloads: vec![
+                report.clone(),
+                AutoEnrichmentWorkloadReport {
+                    workload: AutoEnrichmentWorkload {
+                        chat_count: 50,
+                        ..report.workload.clone()
+                    },
+                    ..report.clone()
+                },
+                AutoEnrichmentWorkloadReport {
+                    workload: AutoEnrichmentWorkload {
+                        chat_count: 100,
+                        ..report.workload.clone()
+                    },
+                    ..report
+                },
+            ],
+        })
+        .expect("report serializes");
+        validate_auto_enrichment_report_json(&json).expect("report schema validates");
     }
 
     #[test]

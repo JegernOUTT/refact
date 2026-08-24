@@ -23,6 +23,7 @@ use crate::llm::params::CacheControl;
 use crate::scratchpad_abstract::HasTokenizerAndEot;
 use crate::constants::CHAT_TOP_N;
 use crate::knowledge::enrichment::enrich_messages_with_knowledge;
+use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 
 use super::goal_monitor::handle_goal_turn_end;
 use super::types::*;
@@ -705,6 +706,7 @@ pub async fn prepare_session_preamble_and_knowledge(
         has_manual_enrichment_for_turn,
         suppress_flag,
     ) = {
+        let snapshot_started = perf_diagnostics::is_enabled().then(std::time::Instant::now);
         let mut session = session_arc.lock().await;
         let last_user_idx = session
             .messages
@@ -727,6 +729,28 @@ pub async fn prepare_session_preamble_and_knowledge(
         if suppress {
             session.suppress_auto_enrichment_for_next_turn = false;
         }
+        let message_bytes = perf_diagnostics::is_enabled().then(|| {
+            session
+                .messages
+                .iter()
+                .map(|message| {
+                    serde_json::to_vec(message)
+                        .map(|encoded| encoded.len())
+                        .unwrap_or(0)
+                })
+                .sum::<usize>()
+        });
+        perf_diagnostics::record_enrichment(
+            PerfComponent::EnrichmentSessionSnapshot,
+            &chat_id,
+            PerfOutcome::Success,
+            snapshot_started
+                .map(|started| started.elapsed().as_micros().try_into().unwrap_or(u64::MAX))
+                .unwrap_or(0),
+            message_bytes.map(|bytes| bytes as u64),
+            Some(session.messages.len() as u64),
+            message_bytes.map(|bytes| (bytes as u64).saturating_add(3) / 4),
+        );
         (last_user, auto, count, manual, suppress)
     };
     if is_agentic_mode_id(&thread.mode)
@@ -762,7 +786,34 @@ pub async fn prepare_session_preamble_and_knowledge(
                         .iter()
                         .rposition(|m| is_prompt_turn_role(&m.role))
                         .unwrap_or(0);
+                    let insertion_stale = session_last_user_idx
+                        != session.messages.len().saturating_sub(1)
+                        && session
+                            .messages
+                            .get(session_last_user_idx)
+                            .is_none_or(|message| !is_prompt_turn_role(&message.role));
                     session.insert_message(session_last_user_idx, enriched_msg.clone());
+                    if insertion_stale {
+                        perf_diagnostics::record_enrichment(
+                            PerfComponent::EnrichmentInsertionStale,
+                            &chat_id,
+                            PerfOutcome::Skipped,
+                            0,
+                            None,
+                            Some(1),
+                            None,
+                        );
+                    } else {
+                        perf_diagnostics::record_enrichment(
+                            PerfComponent::EnrichmentPersistenceScheduling,
+                            &chat_id,
+                            PerfOutcome::Success,
+                            0,
+                            None,
+                            Some(1),
+                            None,
+                        );
+                    }
                     info!(
                         "Saved auto knowledge enrichment context_file to session at index {}",
                         session_last_user_idx

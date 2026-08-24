@@ -22,8 +22,27 @@ fn main() {
             }
             return;
         }
+        [flag] if flag == "--auto-enrichment" => {
+            let report = match perf_harness::run_auto_enrichment_benchmark() {
+                Ok(report) => report,
+                Err(error) => {
+                    eprintln!("auto-enrichment benchmark failed: {error}");
+                    std::process::exit(1);
+                }
+            };
+            match perf_harness::render_auto_enrichment_json(&report) {
+                Ok(json) => println!("{json}"),
+                Err(error) => {
+                    eprintln!("auto-enrichment benchmark report failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         _ => {
-            eprintln!("usage: concurrent_chat_bench --quick | --soak | --full-soak | --fanout");
+            eprintln!(
+                "usage: concurrent_chat_bench --quick | --soak | --full-soak | --fanout | --auto-enrichment"
+            );
             std::process::exit(2);
         }
     };
