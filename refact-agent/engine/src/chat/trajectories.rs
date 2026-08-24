@@ -132,10 +132,13 @@ pub fn trajectory_writer_rollout_enabled() -> bool {
 }
 
 pub(crate) fn trajectory_writer_rollout_enabled_for(value: Option<&str>) -> bool {
-    !matches!(
-        value.map(str::trim),
-        Some("0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF")
-    )
+    value.is_some_and(|value| {
+        let value = value.trim();
+        value == "1"
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+            || value.eq_ignore_ascii_case("on")
+    })
 }
 
 pub fn trajectory_watcher_self_write_rollout_enabled() -> bool {
@@ -147,10 +150,13 @@ pub fn trajectory_watcher_self_write_rollout_enabled() -> bool {
 }
 
 pub(crate) fn trajectory_watcher_self_write_rollout_enabled_for(value: Option<&str>) -> bool {
-    !matches!(
-        value.map(str::trim),
-        Some("0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF")
-    )
+    value.is_some_and(|value| {
+        let value = value.trim();
+        value == "1"
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+            || value.eq_ignore_ascii_case("on")
+    })
 }
 
 const TRAJECTORY_SELF_WRITE_TTL: Duration = Duration::from_secs(10);
@@ -7783,9 +7789,10 @@ mod tests {
     }
 
     #[test]
-    fn trajectory_writer_rollout_switch_defaults_on_and_accepts_explicit_legacy_values() {
-        assert!(trajectory_writer_rollout_enabled_for(None));
+    fn trajectory_writer_rollout_switch_defaults_off_and_accepts_explicit_enabled_values() {
+        assert!(!trajectory_writer_rollout_enabled_for(None));
         assert!(trajectory_writer_rollout_enabled_for(Some("1")));
+        assert!(trajectory_writer_rollout_enabled_for(Some("true")));
         assert!(!trajectory_writer_rollout_enabled_for(Some("0")));
         assert!(!trajectory_writer_rollout_enabled_for(Some(" false ")));
         assert!(!trajectory_writer_rollout_enabled_for(Some("OFF")));
@@ -19447,8 +19454,8 @@ mod tests {
     }
 
     #[test]
-    fn trajectory_watcher_self_write_rollout_defaults_on_and_accepts_legacy_values() {
-        assert!(trajectory_watcher_self_write_rollout_enabled_for(None));
+    fn trajectory_watcher_self_write_rollout_defaults_off_and_accepts_enabled_values() {
+        assert!(!trajectory_watcher_self_write_rollout_enabled_for(None));
         assert!(trajectory_watcher_self_write_rollout_enabled_for(Some("1")));
         assert!(!trajectory_watcher_self_write_rollout_enabled_for(Some(
             "0"

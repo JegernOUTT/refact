@@ -14,6 +14,8 @@ use refact_runtime_api::{
     ActivitySink, BuddyEventSink, ToolConfirmationCheck, ToolExecutionResult, ToolPolicyInfo,
     ToolCatalogSnapshot, ToolRegistry, ToolRegistryIndex, TurnToolPool,
 };
+
+pub const TOOL_CATALOG_SNAPSHOTS_ENV: &str = "REFACT_TOOL_CATALOG_SNAPSHOTS";
 use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
 
 use crate::agents::registry::BackgroundAgentRegistry;
@@ -464,16 +466,16 @@ impl AppToolRegistry {
     }
 
     fn snapshot_cache_enabled() -> bool {
-        Self::snapshot_cache_enabled_for(
-            env::var("REFACT_TOOL_CATALOG_SNAPSHOTS")
-                .ok()
-                .as_deref()
-                .map(str::trim),
-        )
+        tool_catalog_snapshot_rollout_enabled()
     }
 
     fn snapshot_cache_enabled_for(value: Option<&str>) -> bool {
-        !matches!(value, Some("0") | Some("false") | Some("no") | Some("off"))
+        value.is_some_and(|value| {
+            value == "1"
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("yes")
+                || value.eq_ignore_ascii_case("on")
+        })
     }
 
     async fn catalog_key_with_scope(
@@ -726,6 +728,18 @@ impl AppToolRegistry {
         self.snapshot_for_mode_with_scope(self.gcx.clone(), mode, model_id, execution_scope)
             .await
     }
+}
+
+pub(crate) fn tool_catalog_snapshot_rollout_enabled() -> bool {
+    std::env::var(TOOL_CATALOG_SNAPSHOTS_ENV)
+        .ok()
+        .is_some_and(|value| {
+            let value = value.trim();
+            value == "1"
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("yes")
+                || value.eq_ignore_ascii_case("on")
+        })
 }
 
 #[async_trait]
@@ -1780,10 +1794,10 @@ mod tests {
 
     #[test]
     fn tool_catalog_snapshot_rollout_switch_keeps_the_cold_fallback_available() {
-        for disabled in ["0", "false", "no", "off"] {
-            assert!(!AppToolRegistry::snapshot_cache_enabled_for(Some(disabled)));
+        for disabled in [None, Some("0"), Some("false"), Some("no"), Some("off")] {
+            assert!(!AppToolRegistry::snapshot_cache_enabled_for(disabled));
         }
-        for enabled in [None, Some("1"), Some("true"), Some("yes")] {
+        for enabled in [Some("1"), Some("true"), Some("yes")] {
             assert!(AppToolRegistry::snapshot_cache_enabled_for(enabled));
         }
     }

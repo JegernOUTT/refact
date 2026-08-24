@@ -14,7 +14,7 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::runtime::Builder;
 use tokio::sync::Mutex as AMutex;
 
-use crate::app_state::{AppState, AppToolRegistry, FixtureToolFactory};
+use crate::app_state::{AppState, AppToolRegistry, FixtureToolFactory, TOOL_CATALOG_SNAPSHOTS_ENV};
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ChatToolCall, ChatToolFunction, ContextEnum};
 use crate::chat::tools::{
@@ -353,6 +353,8 @@ pub struct FullSoakRolloutSwitches {
     pub trajectory_writer_enabled: bool,
     pub trajectory_index_coordinator_enabled: bool,
     pub trajectory_watcher_self_write_enabled: bool,
+    pub tool_catalog_snapshots_enabled: bool,
+    pub vecdb_path_coalescing_enabled: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -371,6 +373,8 @@ pub struct FullSoakCounters {
     pub watcher_replays: u64,
     pub vecdb_enqueues: u64,
     pub vecdb_coalesced_paths: u64,
+    pub catalog_builds: u64,
+    pub catalog_pool_builds: u64,
     pub monitor_scans: u64,
     pub cleanup_scans: u64,
     pub exec_registry_entries: u64,
@@ -1715,6 +1719,8 @@ impl FullSoakEnvGuard {
             crate::chat::trajectories::TRAJECTORY_WRITER_ENV,
             crate::chat::trajectory_index::TRAJECTORY_INDEX_COORDINATOR_ENV,
             crate::chat::trajectories::TRAJECTORY_WATCHER_SELF_WRITE_ENV,
+            TOOL_CATALOG_SNAPSHOTS_ENV,
+            refact_vecdb::vdb_thread::VECDB_PATH_COALESCING_ENV,
         ]
         .into_iter()
         .map(|key| (key, std::env::var_os(key)))
@@ -1989,6 +1995,8 @@ async fn run_full_soak_sample(
             .lock()
             .map(|paths| paths.len() as u64)
             .unwrap_or_default(),
+        catalog_builds: event_count(&sink.events(), PerfComponent::ToolCatalogBuild),
+        catalog_pool_builds: event_count(&sink.events(), PerfComponent::ToolMutableVectorBuild),
         monitor_scans: 3,
         cleanup_scans: 1,
         exec_registry_entries: fixture
@@ -2083,6 +2091,8 @@ async fn run_full_soak_sample(
             trajectory_writer_enabled: optimized,
             trajectory_index_coordinator_enabled: optimized,
             trajectory_watcher_self_write_enabled: optimized,
+            tool_catalog_snapshots_enabled: optimized,
+            vecdb_path_coalescing_enabled: optimized,
         },
         subsystems,
         counters,
@@ -2141,6 +2151,8 @@ fn aggregate_full_soak_variant(
             total.watcher_replays += sample.counters.watcher_replays;
             total.vecdb_enqueues += sample.counters.vecdb_enqueues;
             total.vecdb_coalesced_paths += sample.counters.vecdb_coalesced_paths;
+            total.catalog_builds += sample.counters.catalog_builds;
+            total.catalog_pool_builds += sample.counters.catalog_pool_builds;
             total.monitor_scans += sample.counters.monitor_scans;
             total.cleanup_scans += sample.counters.cleanup_scans;
             total.exec_registry_entries += sample.counters.exec_registry_entries;
@@ -3631,6 +3643,8 @@ mod tests {
                 trajectory_writer_enabled: false,
                 trajectory_index_coordinator_enabled: false,
                 trajectory_watcher_self_write_enabled: false,
+                tool_catalog_snapshots_enabled: false,
+                vecdb_path_coalescing_enabled: false,
             },
             subsystems: FullSoakSubsystemFlags {
                 chat_sessions: true,
@@ -3688,6 +3702,8 @@ mod tests {
                 trajectory_writer_enabled: true,
                 trajectory_index_coordinator_enabled: true,
                 trajectory_watcher_self_write_enabled: true,
+                tool_catalog_snapshots_enabled: true,
+                vecdb_path_coalescing_enabled: true,
             },
             subsystems: variant.subsystems.clone(),
             counters: variant.counters.clone(),

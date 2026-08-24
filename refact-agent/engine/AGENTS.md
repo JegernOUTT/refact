@@ -946,6 +946,10 @@ Current worker CLI flags are `--ast`, `--wait-ast`, `--vecdb`, `--vecdb-max-file
 
 SQLite + vec0 extension for memory-plane semantic search. File splitters handle trajectory JSON (4 msgs/chunk), Markdown (heading-aware), and other memory documents. Embedding uses the configured external HTTP API with batching/retry. Search: cosine KNN → reject threshold → normalize usefulness score. Background thread: enqueue → split → cache check → embed → store. Cleanup keeps 10 newest tables and drops tables older than 7 days. Source-code indexing belongs to CodeGraph; `indexing_routing.rs` prevents code paths from being enqueued into VecDB during workspace indexing.
 
+### Temporary concurrent-chat rollout switches
+
+Until the concurrent-chat acceptance gates pass, all five optimizations are default-off and can be enabled independently with a truthy environment value (`1`, `true`, `yes`, or `on`): `REFACT_TRAJECTORY_WRITER`, `REFACT_TRAJECTORY_INDEX_COORDINATOR`, `REFACT_TRAJECTORY_WATCHER_SELF_WRITE`, `REFACT_TOOL_CATALOG_SNAPSHOTS`, and `REFACT_VECDB_PATH_COALESCING`. The last switch affects deferred regular VecDB paths only; immediate enqueue behavior is unchanged. Set a switch to `0` or unset it and restart the engine to recover its legacy behavior. This changes no trajectory JSON or index schema, performs no migration, and deletes no data. Full-soak benchmarks set and restore all five values serially, using all-off `legacy` and all-on `optimized` variants; any production rollout must preserve that restart-safe independence.
+
 ## Providers
 
 15+ providers in `src/providers/`: Anthropic, Claude Code, OpenAI, Codex, DeepSeek, Google Gemini, Groq, LM Studio, Ollama, OpenRouter, vLLM, xAI, custom. Each defines ProviderDefaults (chat/completion/embedding models). OAuth support for Codex/Claude Code. YAML configs in `yaml_configs/default_providers/`.

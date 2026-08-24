@@ -23,6 +23,19 @@ use crate::vdb_trajectory_splitter::TrajectoryFileSplitter;
 
 const DEBUG_WRITE_VECDB_FILES: bool = false;
 const COOLDOWN_SECONDS: u64 = 10;
+pub const VECDB_PATH_COALESCING_ENV: &str = "REFACT_VECDB_PATH_COALESCING";
+
+pub fn vecdb_path_coalescing_rollout_enabled() -> bool {
+    std::env::var(VECDB_PATH_COALESCING_ENV)
+        .ok()
+        .is_some_and(|value| {
+            let value = value.trim();
+            value == "1"
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("yes")
+                || value.eq_ignore_ascii_case("on")
+        })
+}
 
 fn memory_plane_file_kind(
     path: &PathBuf,
@@ -52,31 +65,58 @@ struct PendingRegular {
     generation: u64,
 }
 
-#[derive(Default)]
+struct QueuedRegular {
+    path: String,
+    pending: PendingRegular,
+}
+
 struct LatestPathQueue {
+    coalescing_enabled: bool,
     immediate: VecDeque<String>,
     pending_regular: HashMap<String, PendingRegular>,
+    legacy_regular: VecDeque<QueuedRegular>,
     in_flight_regular: HashMap<String, u64>,
     cancelled_regular: HashSet<String>,
 }
 
 impl LatestPathQueue {
+    fn new(coalescing_enabled: bool) -> Self {
+        Self {
+            coalescing_enabled,
+            immediate: VecDeque::new(),
+            pending_regular: HashMap::new(),
+            legacy_regular: VecDeque::new(),
+            in_flight_regular: HashMap::new(),
+            cancelled_regular: HashSet::new(),
+        }
+    }
+
     fn enqueue_regular(&mut self, path: String, updated_at: SystemTime) {
         self.cancelled_regular.remove(&path);
         let generation = self
             .pending_regular
             .get(&path)
             .map(|pending| pending.generation)
+            .or_else(|| {
+                self.legacy_regular
+                    .iter()
+                    .rev()
+                    .find(|pending| pending.path == path)
+                    .map(|pending| pending.pending.generation)
+            })
             .or_else(|| self.in_flight_regular.get(&path).copied())
             .unwrap_or(0)
             .saturating_add(1);
-        self.pending_regular.insert(
-            path,
-            PendingRegular {
-                updated_at,
-                generation,
-            },
-        );
+        let pending = PendingRegular {
+            updated_at,
+            generation,
+        };
+        if self.coalescing_enabled {
+            self.pending_regular.insert(path, pending);
+        } else {
+            self.legacy_regular
+                .push_back(QueuedRegular { path, pending });
+        }
     }
 
     fn enqueue_immediately(&mut self, path: String) {
@@ -87,17 +127,32 @@ impl LatestPathQueue {
         if let Some(path) = self.immediate.pop_front() {
             return Some(VecdbWork::ImmediatelyRegularDocument(path));
         }
-        let path = self
-            .pending_regular
-            .iter()
-            .find(|(_, pending)| {
-                now.duration_since(pending.updated_at)
-                    .unwrap_or_default()
-                    .as_secs()
-                    > COOLDOWN_SECONDS
-            })
-            .map(|(path, _)| path.clone())?;
-        let pending = self.pending_regular.remove(&path)?;
+        let (path, pending) = if self.coalescing_enabled {
+            let path = self
+                .pending_regular
+                .iter()
+                .find(|(_, pending)| {
+                    now.duration_since(pending.updated_at)
+                        .unwrap_or_default()
+                        .as_secs()
+                        > COOLDOWN_SECONDS
+                })
+                .map(|(path, _)| path.clone())?;
+            let pending = self.pending_regular.remove(&path)?;
+            (path, pending)
+        } else {
+            let pending = self.legacy_regular.front()?;
+            if now
+                .duration_since(pending.pending.updated_at)
+                .unwrap_or_default()
+                .as_secs()
+                <= COOLDOWN_SECONDS
+            {
+                return None;
+            }
+            let pending = self.legacy_regular.pop_front()?;
+            (pending.path, pending.pending)
+        };
         self.in_flight_regular
             .insert(path.clone(), pending.generation);
         Some(VecdbWork::RegularDocument {
@@ -115,6 +170,7 @@ impl LatestPathQueue {
 
     fn cancel_regular(&mut self, path: &str) {
         self.pending_regular.remove(path);
+        self.legacy_regular.retain(|pending| pending.path != path);
         self.cancelled_regular.insert(path.to_string());
     }
 
@@ -122,6 +178,10 @@ impl LatestPathQueue {
         self.pending_regular
             .get(path)
             .is_some_and(|pending| pending.generation > generation)
+            || self
+                .legacy_regular
+                .iter()
+                .any(|pending| pending.path == path && pending.pending.generation > generation)
     }
 
     fn is_cancelled_regular(&self, path: &str, generation: u64) -> bool {
@@ -135,12 +195,16 @@ impl LatestPathQueue {
 
     fn cancel_all_regular(&mut self) {
         self.pending_regular.clear();
+        self.legacy_regular.clear();
         self.in_flight_regular.clear();
         self.cancelled_regular.clear();
     }
 
     fn unprocessed_len(&self) -> usize {
-        self.immediate.len() + self.pending_regular.len() + self.in_flight_regular.len()
+        self.immediate.len()
+            + self.pending_regular.len()
+            + self.legacy_regular.len()
+            + self.in_flight_regular.len()
     }
 
     fn is_idle(&self) -> bool {
@@ -149,12 +213,18 @@ impl LatestPathQueue {
 
     #[cfg(test)]
     fn pending_regular_len(&self) -> usize {
-        self.pending_regular.len()
+        self.pending_regular.len() + self.legacy_regular.len()
     }
 
     #[cfg(test)]
     fn in_flight_regular_len(&self) -> usize {
         self.in_flight_regular.len()
+    }
+}
+
+impl Default for LatestPathQueue {
+    fn default() -> Self {
+        Self::new(vecdb_path_coalescing_rollout_enabled())
     }
 }
 
@@ -780,6 +850,34 @@ pub async fn vectorizer_enqueue_files(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vecdb_path_coalescing_rollout_switch_defaults_off() {
+        assert!(!vecdb_path_coalescing_rollout_enabled());
+        for enabled in ["1", "true", "YES", "on"] {
+            std::env::set_var(VECDB_PATH_COALESCING_ENV, enabled);
+            assert!(vecdb_path_coalescing_rollout_enabled());
+        }
+        std::env::remove_var(VECDB_PATH_COALESCING_ENV);
+    }
+
+    #[test]
+    fn legacy_regular_queue_preserves_fifo_duplicates() {
+        let mut queue = LatestPathQueue::new(false);
+        let path = "/workspace/project/.refact/knowledge/note.md".to_string();
+        let expired = SystemTime::now()
+            .checked_sub(std::time::Duration::from_secs(COOLDOWN_SECONDS + 1))
+            .unwrap();
+        queue.enqueue_regular(path.clone(), expired);
+        queue.enqueue_regular(path.clone(), expired);
+        assert_eq!(queue.pending_regular_len(), 2);
+        assert!(
+            matches!(queue.take_next(SystemTime::now()), Some(VecdbWork::RegularDocument { path: first, .. }) if first == path)
+        );
+        assert!(
+            matches!(queue.take_next(SystemTime::now()), Some(VecdbWork::RegularDocument { path: second, .. }) if second == path)
+        );
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::vdb_emb_aux;
@@ -839,7 +937,7 @@ mod tests {
 
     #[test]
     fn regular_queue_coalesces_repeated_pending_paths() {
-        let mut queue = LatestPathQueue::default();
+        let mut queue = LatestPathQueue::new(true);
         let path = "/workspace/project/.refact/knowledge/note.md".to_string();
         let now = SystemTime::now();
 
@@ -853,7 +951,7 @@ mod tests {
 
     #[test]
     fn regular_queue_schedules_one_follow_up_after_in_flight_update() {
-        let mut queue = LatestPathQueue::default();
+        let mut queue = LatestPathQueue::new(true);
         let path = "/workspace/project/.refact/knowledge/note.md".to_string();
         let expired = SystemTime::now()
             .checked_sub(std::time::Duration::from_secs(COOLDOWN_SECONDS + 1))
@@ -878,7 +976,7 @@ mod tests {
 
     #[test]
     fn regular_queue_cancel_discards_pending_but_not_immediate_requests() {
-        let mut queue = LatestPathQueue::default();
+        let mut queue = LatestPathQueue::new(true);
         let path = "/workspace/project/.refact/knowledge/note.md".to_string();
         let expired = SystemTime::now()
             .checked_sub(std::time::Duration::from_secs(COOLDOWN_SECONDS + 1))
@@ -897,7 +995,7 @@ mod tests {
 
     #[test]
     fn regular_queue_cancel_marks_in_flight_work_stale() {
-        let mut queue = LatestPathQueue::default();
+        let mut queue = LatestPathQueue::new(true);
         let path = "/workspace/project/.refact/knowledge/note.md".to_string();
         let expired = SystemTime::now()
             .checked_sub(std::time::Duration::from_secs(COOLDOWN_SECONDS + 1))
@@ -918,7 +1016,7 @@ mod tests {
 
     #[test]
     fn regular_queue_shutdown_clears_pending_and_in_flight_state() {
-        let mut queue = LatestPathQueue::default();
+        let mut queue = LatestPathQueue::new(true);
         let path = "/workspace/project/.refact/knowledge/note.md".to_string();
         let expired = SystemTime::now()
             .checked_sub(std::time::Duration::from_secs(COOLDOWN_SECONDS + 1))
