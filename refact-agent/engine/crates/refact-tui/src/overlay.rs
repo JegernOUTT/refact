@@ -85,6 +85,12 @@ impl PagerOverlay {
         self.search_input.as_deref()
     }
 
+    pub fn insert_search_text(&mut self, text: &str) {
+        if let Some(input) = self.search_input.as_mut() {
+            input.push_str(text);
+        }
+    }
+
     pub fn match_count(&self) -> usize {
         self.matches.len()
     }

@@ -277,6 +277,13 @@ impl ComposerState {
         self.editor.text()[..self.editor.cursor()].chars().count() as i64
     }
 
+    pub fn starts_token(&self) -> bool {
+        self.editor.text()[..self.editor.cursor()]
+            .chars()
+            .last()
+            .map_or(true, char::is_whitespace)
+    }
+
     pub fn replace_current_token(&mut self, marker: char, replacement: &str) {
         self.history.reset_navigation();
         self.history_search = None;

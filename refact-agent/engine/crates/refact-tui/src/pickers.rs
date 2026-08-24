@@ -174,6 +174,12 @@ impl PickerState {
         self.clamp_selection();
     }
 
+    pub fn push_filter_text(&mut self, text: &str) {
+        self.filter.push_str(text);
+        self.selected = 0;
+        self.clamp_selection();
+    }
+
     pub fn pop_filter(&mut self) {
         self.filter.pop();
         self.clamp_selection();

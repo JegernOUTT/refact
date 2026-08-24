@@ -285,10 +285,14 @@ impl App {
     }
 
     pub(super) fn update_slash_picker_filter(&mut self) {
-        let Some(picker) = self.modal_picker.as_mut() else {
+        let Some(picker) = self.modal_picker.as_ref() else {
             return;
         };
         if picker.kind != PickerKind::SlashCommand {
+            return;
+        }
+        if !self.composer.text().starts_with('/') {
+            self.modal_picker = None;
             return;
         }
         let filter = self
@@ -300,7 +304,9 @@ impl App {
             .next()
             .unwrap_or_default()
             .to_string();
-        picker.set_filter(filter);
+        if let Some(picker) = self.modal_picker.as_mut() {
+            picker.set_filter(filter);
+        }
     }
     pub(super) fn start_file_mention_lookup(&mut self) -> AppAction {
         self.open_file_mention_picker(vec![PickerItem {

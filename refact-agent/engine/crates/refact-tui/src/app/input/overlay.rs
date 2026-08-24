@@ -23,6 +23,12 @@ impl App {
             }
         }
     }
+
+    pub(super) fn handle_transcript_overlay_paste(&mut self, text: &str) {
+        if let Some(overlay) = self.transcript_overlay.as_mut() {
+            overlay.insert_search_text(text);
+        }
+    }
 }
 
 #[cfg(test)]

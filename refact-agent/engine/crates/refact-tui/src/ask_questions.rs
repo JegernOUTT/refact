@@ -317,6 +317,16 @@ impl AskQuestionsForm {
         }
     }
 
+    pub fn insert_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(AskAnswerState::Text { value, answered }) = self.answers.get_mut(self.current) {
+            value.push_str(text);
+            *answered = true;
+        }
+    }
+
     pub fn insert_newline(&mut self) {
         if let Some(AskAnswerState::Text { value, answered }) = self.answers.get_mut(self.current) {
             value.push('\n');

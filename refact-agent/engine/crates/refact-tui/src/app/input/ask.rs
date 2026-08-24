@@ -95,6 +95,12 @@ impl App {
             _ => AppAction::None,
         }
     }
+
+    pub(super) fn handle_ask_questions_paste(&mut self, text: &str) {
+        if let Some(form) = self.ask_questions_form.as_mut() {
+            form.insert_text(text);
+        }
+    }
 }
 
 #[cfg(test)]

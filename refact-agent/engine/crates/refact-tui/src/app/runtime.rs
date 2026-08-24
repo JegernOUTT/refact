@@ -445,7 +445,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                     }
                 }
             }
-            RuntimeEvent::Input(Event::Paste(text)) => app.composer.insert_paste(&text),
+            RuntimeEvent::Input(Event::Paste(text)) => app.handle_paste(&text),
             RuntimeEvent::Input(Event::FocusGained) => app.set_terminal_focus(true),
             RuntimeEvent::Input(Event::FocusLost) => app.set_terminal_focus(false),
             RuntimeEvent::Input(Event::Resize(width, _)) => {

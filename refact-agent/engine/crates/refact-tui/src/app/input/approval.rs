@@ -86,6 +86,8 @@ impl App {
             _ => AppAction::None,
         }
     }
+
+    pub(super) fn handle_approval_paste(&mut self, _text: &str) {}
 }
 
 #[cfg(test)]

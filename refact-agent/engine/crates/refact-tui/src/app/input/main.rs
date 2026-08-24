@@ -27,8 +27,12 @@ impl App {
     ) -> AppAction {
         match dispatch.action {
             Some(KeyAction::ShowHelp) => {
-                self.help_open = true;
-                AppAction::None
+                if self.composer.is_empty() {
+                    self.help_open = true;
+                    AppAction::None
+                } else {
+                    self.insert_dispatch_text(dispatch)
+                }
             }
             Some(KeyAction::ToggleEvents) => {
                 self.events_pane.toggle();
@@ -112,9 +116,13 @@ impl App {
                 }
             }
             Some(KeyAction::OpenFileMention) => {
-                self.input_queue.clear_selection();
-                self.composer.insert_text("@");
-                self.start_file_mention_lookup()
+                if self.composer.starts_token() {
+                    self.input_queue.clear_selection();
+                    self.composer.insert_text("@");
+                    self.start_file_mention_lookup()
+                } else {
+                    self.insert_dispatch_text(dispatch)
+                }
             }
             Some(KeyAction::InsertNewline) => {
                 self.composer.insert_explicit_newline(Instant::now());
@@ -220,6 +228,11 @@ impl App {
         if self.composer.is_empty() && self.toggle_selected_tool() {
             return AppAction::None;
         }
+        if self.composer.text().starts_with('/') {
+            let command = self.composer.text().to_string();
+            self.composer.clear();
+            return self.execute_command_name(&command);
+        }
         match self.composer.enter(Instant::now()) {
             EnterDecision::InsertedNewline => AppAction::None,
             EnterDecision::Submit => self.submit_composer().unwrap_or(AppAction::None),
@@ -324,5 +337,50 @@ mod tests {
             composer_search_text(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty())),
             Some('x'),
         );
+    }
+
+    #[test]
+    fn file_mention_stays_literal_mid_word() {
+        let mut mid_word = App::notice_only("test");
+        for ch in "user".chars() {
+            mid_word.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+        }
+        assert_eq!(
+            mid_word.handle_key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::empty())),
+            AppAction::None
+        );
+        for ch in "host".chars() {
+            mid_word.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+        }
+        assert_eq!(mid_word.composer(), "user@host");
+        assert!(mid_word.modal_picker().is_none());
+    }
+
+    #[test]
+    fn file_mention_opens_at_token_boundaries() {
+        let mut line_start = App::notice_only("test");
+        assert!(matches!(
+            line_start.handle_key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::empty())),
+            AppAction::LoadFileMentions { query, .. } if query == "@"
+        ));
+
+        let mut after_space = App::notice_only("test");
+        after_space.composer.set_text("read ");
+        assert!(matches!(
+            after_space.handle_key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::empty())),
+            AppAction::LoadFileMentions { query, .. } if query == "read @"
+        ));
+    }
+
+    #[test]
+    fn help_binding_stays_literal_when_composer_has_text() {
+        let mut app = App::notice_only("test");
+        app.composer.set_text("why");
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::empty())),
+            AppAction::None
+        );
+        assert_eq!(app.composer(), "why?");
+        assert!(!app.help_open());
     }
 }

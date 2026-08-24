@@ -39,6 +39,12 @@ impl App {
         }
     }
 
+    pub(super) fn handle_project_picker_paste(&mut self, text: &str) {
+        self.picker.filter.push_str(text);
+        self.picker.selected = 0;
+        self.picker.clamp_selection();
+    }
+
     pub(super) fn handle_modal_picker_key(&mut self, key: KeyEvent) -> AppAction {
         let dispatch = self.keymap.dispatch(KeyContext::ModalPicker, key);
         match dispatch.action {
@@ -106,11 +112,7 @@ impl App {
                 AppAction::None
             }
             Some(KeyAction::Backspace) => {
-                if self
-                    .modal_picker
-                    .as_ref()
-                    .is_some_and(|picker| picker.kind == PickerKind::SlashCommand)
-                {
+                if self.slash_picker_tracks_composer() {
                     self.composer.backspace();
                     self.update_slash_picker_filter();
                 } else if let Some(picker) = self.modal_picker.as_mut() {
@@ -121,11 +123,7 @@ impl App {
             }
             None => {
                 if let Some(ch) = dispatch.text {
-                    if self
-                        .modal_picker
-                        .as_ref()
-                        .is_some_and(|picker| picker.kind == PickerKind::SlashCommand)
-                    {
+                    if self.slash_picker_tracks_composer() {
                         self.composer.insert_char(ch, Instant::now());
                         self.update_slash_picker_filter();
                     } else if let Some(picker) = self.modal_picker.as_mut() {
@@ -137,6 +135,22 @@ impl App {
             }
             _ => AppAction::None,
         }
+    }
+
+    pub(super) fn handle_modal_picker_paste(&mut self, text: &str) {
+        if self.slash_picker_tracks_composer() {
+            self.composer.insert_paste(text);
+            self.update_slash_picker_filter();
+        } else if let Some(picker) = self.modal_picker.as_mut() {
+            picker.push_filter_text(text);
+        }
+    }
+
+    fn slash_picker_tracks_composer(&self) -> bool {
+        self.modal_picker
+            .as_ref()
+            .is_some_and(|picker| picker.kind == PickerKind::SlashCommand)
+            && self.composer.text().starts_with('/')
     }
 }
 
@@ -171,5 +185,35 @@ mod tests {
         assert_eq!(app.modal_picker().unwrap().selected, 0);
         app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::empty()));
         assert_eq!(app.modal_picker().unwrap().selected, 10);
+    }
+
+    #[test]
+    fn slash_picker_closes_after_backspacing_past_the_leading_slash() {
+        let mut app = App::notice_only("test");
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::empty()));
+        for ch in "mod".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()));
+        }
+        assert_eq!(app.composer(), "/mod");
+        assert_eq!(
+            app.modal_picker().map(|picker| picker.kind),
+            Some(PickerKind::SlashCommand)
+        );
+
+        for _ in 0..4 {
+            app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty()));
+        }
+        assert_eq!(app.composer(), "");
+        assert!(app.modal_picker().is_none());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
+            AppAction::None
+        );
+
+        app.composer.set_text("/events");
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())),
+            AppAction::RefreshWorkers
+        );
     }
 }
