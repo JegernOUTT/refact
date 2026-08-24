@@ -406,6 +406,7 @@ impl App {
 
     pub(super) fn set_project(&mut self, project: OpenProjectResponse) {
         self.cancel_backtrack();
+        self.abort_in_flight = false;
         self.transcript_overlay = None;
         self.save_local_input_handoff();
         self.history_path = Some(history_path_for_root(&project.root));
@@ -472,6 +473,7 @@ impl App {
         _notice: String,
     ) {
         self.cancel_backtrack();
+        self.abort_in_flight = false;
         self.transcript_overlay = None;
         let history_entries = self.composer.history_entries().to_vec();
         self.save_local_input_handoff();
@@ -508,6 +510,7 @@ impl App {
         _subtitle: Option<String>,
     ) -> AppAction {
         self.cancel_backtrack();
+        self.abort_in_flight = false;
         self.transcript_overlay = None;
         let history_entries = self.composer.history_entries().to_vec();
         self.save_local_input_handoff();
@@ -1096,5 +1099,68 @@ mod tests {
         app.set_project(project());
 
         assert_eq!(app.composer(), "keep this draft");
+    }
+
+    #[test]
+    fn project_switch_clears_abort_in_flight_before_stale_completion() {
+        let mut app = App::new(project());
+        let origin = app.command_origin();
+        app.abort_in_flight = true;
+        app.set_session_state(SessionState::Generating);
+
+        app.set_project(next_project());
+
+        assert_eq!(app.session_state(), SessionState::Idle);
+        assert!(!app.abort_in_flight);
+        let before = app.visible_transcript().len();
+        assert_eq!(
+            app.handle_command_finished(CommandContextTag::Abort { origin }, Ok(())),
+            AppAction::None
+        );
+        assert_eq!(app.session_state(), SessionState::Idle);
+        assert!(!app.abort_in_flight);
+        assert_eq!(app.visible_transcript().len(), before);
+    }
+
+    #[test]
+    fn resume_chat_clears_abort_in_flight_before_stale_completion() {
+        let mut app = App::new(project());
+        let origin = app.command_origin();
+        app.abort_in_flight = true;
+        app.set_session_state(SessionState::Generating);
+
+        app.resume_chat("chat-next".to_string(), "Next chat".to_string(), None);
+
+        assert_eq!(app.session_state(), SessionState::Idle);
+        assert!(!app.abort_in_flight);
+        let before = app.visible_transcript().len();
+        assert_eq!(
+            app.handle_command_finished(CommandContextTag::Abort { origin }, Ok(())),
+            AppAction::None
+        );
+        assert_eq!(app.session_state(), SessionState::Idle);
+        assert!(!app.abort_in_flight);
+        assert_eq!(app.visible_transcript().len(), before);
+    }
+
+    #[test]
+    fn new_chat_clears_abort_in_flight_before_stale_completion() {
+        let mut app = App::new(project());
+        let origin = app.command_origin();
+        app.abort_in_flight = true;
+        app.set_session_state(SessionState::Generating);
+
+        app.new_chat();
+
+        assert_eq!(app.session_state(), SessionState::Idle);
+        assert!(!app.abort_in_flight);
+        let before = app.visible_transcript().len();
+        assert_eq!(
+            app.handle_command_finished(CommandContextTag::Abort { origin }, Ok(())),
+            AppAction::None
+        );
+        assert_eq!(app.session_state(), SessionState::Idle);
+        assert!(!app.abort_in_flight);
+        assert_eq!(app.visible_transcript().len(), before);
     }
 }
