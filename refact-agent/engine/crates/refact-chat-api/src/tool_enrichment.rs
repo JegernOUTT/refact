@@ -29,6 +29,8 @@ pub enum ToolEnrichmentKind {
     Diagnostic,
     Agent,
     Test,
+    Git,
+    Review,
     #[serde(other)]
     Unknown,
 }
@@ -39,7 +41,7 @@ impl ToolEnrichmentKind {
     }
 
     fn requires_workspace_path(self) -> bool {
-        matches!(self, Self::Path | Self::Diff)
+        matches!(self, Self::Path | Self::Diff | Self::Review)
     }
 }
 
@@ -73,6 +75,54 @@ pub struct ToolEnrichmentPrivacy {
     pub restricted: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ToolEnrichmentReferenceDetails {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hunk_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line1: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line2: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_available: Option<bool>,
+}
+
+impl ToolEnrichmentReferenceDetails {
+    fn normalized(mut self, truncated: &mut bool) -> Option<Self> {
+        self.action = normalize_optional_text(self.action, MAX_STATUS_CHARS, truncated);
+        self.rename_to = self
+            .rename_to
+            .and_then(|path| normalize_workspace_relative_path(&path));
+        self.short_sha = self.short_sha.and_then(|sha| normalize_short_sha(&sha));
+        self.scope = normalize_optional_text(self.scope, MAX_STATUS_CHARS, truncated);
+        self.parent_chat_id =
+            normalize_optional_text(self.parent_chat_id, MAX_TARGET_CHARS, truncated);
+        self.child_chat_id =
+            normalize_optional_text(self.child_chat_id, MAX_TARGET_CHARS, truncated);
+        if self.line1.is_some_and(|line| line == 0)
+            || self.line2.is_some_and(|line| line == 0)
+            || matches!((self.line1, self.line2), (Some(start), Some(end)) if end < start)
+        {
+            return None;
+        }
+        Some(self)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolEnrichmentReference {
     pub kind: ToolEnrichmentKind,
@@ -99,6 +149,8 @@ pub struct ToolEnrichmentReference {
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub redacted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<ToolEnrichmentReferenceDetails>,
 }
 
 impl ToolEnrichmentReference {
@@ -117,6 +169,7 @@ impl ToolEnrichmentReference {
             source: None,
             truncated: false,
             redacted: false,
+            details: None,
         }
     }
 
@@ -139,6 +192,9 @@ impl ToolEnrichmentReference {
             self.line2 = None;
         }
         self.count = self.count.filter(|count| *count > 0);
+        self.details = self
+            .details
+            .and_then(|details| details.normalized(&mut self.truncated));
         self.confidence = self
             .confidence
             .filter(|confidence| confidence.is_finite() && (0.0..=1.0).contains(confidence));
@@ -287,6 +343,7 @@ fn merge_reference(existing: &mut ToolEnrichmentReference, incoming: ToolEnrichm
     };
     existing.truncated |= incoming.truncated;
     existing.redacted |= incoming.redacted;
+    existing.details = existing.details.take().or(incoming.details);
 }
 
 fn normalize_target(kind: ToolEnrichmentKind, target: &str) -> Option<String> {
@@ -361,6 +418,15 @@ fn normalize_artifact_target(value: &str) -> Option<String> {
         return Some(format!("artifact:{id}"));
     }
     normalize_workspace_relative_path(value)
+}
+
+fn normalize_short_sha(value: &str) -> Option<String> {
+    let value = value.trim();
+    (7..=12)
+        .contains(&value.len())
+        .then_some(value)
+        .filter(|value| value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(|value| value.to_ascii_lowercase())
 }
 
 fn normalize_optional_text(
@@ -566,5 +632,35 @@ mod tests {
         assert!(enrichment.privacy.redacted);
         assert!(enrichment.privacy.restricted);
         assert_eq!(message.content.content_text_only(), "raw result");
+    }
+
+    #[test]
+    fn thin_metadata_details_remain_bounded_and_path_scoped() {
+        let mut diff_reference = reference(ToolEnrichmentKind::Diff, "src/old.rs");
+        diff_reference.details = Some(ToolEnrichmentReferenceDetails {
+            action: Some("rename".to_string()),
+            rename_to: Some("src/new.rs".to_string()),
+            hunk_count: Some(2),
+            short_sha: Some("ABC1234".to_string()),
+            ..Default::default()
+        });
+
+        let normalized = diff_reference.normalized().unwrap();
+        let details = normalized.details.unwrap();
+        assert_eq!(details.rename_to.as_deref(), Some("src/new.rs"));
+        assert_eq!(details.short_sha.as_deref(), Some("abc1234"));
+
+        let mut unsafe_reference = reference(ToolEnrichmentKind::Review, "src/lib.rs");
+        unsafe_reference.details = Some(ToolEnrichmentReferenceDetails {
+            rename_to: Some("../private.rs".to_string()),
+            ..Default::default()
+        });
+        assert!(unsafe_reference
+            .normalized()
+            .unwrap()
+            .details
+            .unwrap()
+            .rename_to
+            .is_none());
     }
 }

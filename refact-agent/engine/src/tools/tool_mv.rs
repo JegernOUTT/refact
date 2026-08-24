@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::fs;
 use async_trait::async_trait;
 use tokio::sync::Mutex as AMutex;
@@ -386,6 +386,10 @@ impl Tool for ToolMv {
                     ),
                     tool_calls: None,
                     tool_call_id: tool_call_id.clone(),
+                    extra: Map::from_iter([(
+                        "diff_state".to_string(),
+                        Value::String("applied".to_string()),
+                    )]),
                     ..Default::default()
                 }));
             } else {
@@ -394,6 +398,10 @@ impl Tool for ToolMv {
                     content: ChatContent::SimpleText(json!([diff_chunk]).to_string()),
                     tool_calls: None,
                     tool_call_id: tool_call_id.clone(),
+                    extra: Map::from_iter([(
+                        "diff_state".to_string(),
+                        Value::String("applied".to_string()),
+                    )]),
                     ..Default::default()
                 }));
             }

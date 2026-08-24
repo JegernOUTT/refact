@@ -146,7 +146,7 @@ impl Tool for ToolDelegate {
         );
         let req = SpawnRequest {
             kind: BgAgentKind::Delegate,
-            parent_chat_id,
+            parent_chat_id: parent_chat_id.clone(),
             parent_root_chat_id: Some(parent_root_chat_id),
             parent_tool_call_id: Some(tool_call_id.clone()),
             config_name: "delegate_with_editing".to_string(),
@@ -176,6 +176,7 @@ impl Tool for ToolDelegate {
                 false,
                 vec![build_foreground_result_msg(
                     &record,
+                    &parent_chat_id,
                     tool_call_id,
                     overlap.as_deref(),
                 )],
@@ -199,6 +200,7 @@ impl Tool for ToolDelegate {
                 vec![build_background_start_msg(
                     &handle,
                     &args.description,
+                    &parent_chat_id,
                     &args.target_files,
                     overlap.as_deref(),
                     tool_call_id,
@@ -362,6 +364,7 @@ fn build_delegate_prompt(
 fn build_background_start_msg(
     handle: &SpawnHandle,
     description: &str,
+    parent_chat_id: &str,
     target_files: &[String],
     overlap: Option<&str>,
     tool_call_id: &String,
@@ -391,7 +394,10 @@ fn build_background_start_msg(
             &handle.agent_id,
             Some(&handle.child_chat_id),
             "running",
+            Some(parent_chat_id),
             target_files,
+            &[],
+            false,
             overlap,
         ),
     )
@@ -399,6 +405,7 @@ fn build_background_start_msg(
 
 fn build_foreground_result_msg(
     record: &BackgroundAgent,
+    parent_chat_id: &str,
     tool_call_id: &String,
     overlap: Option<&str>,
 ) -> ContextEnum {
@@ -433,7 +440,10 @@ fn build_foreground_result_msg(
             &record.agent_id,
             child_chat_id,
             record.status.as_str(),
+            Some(parent_chat_id),
             &record.target_files,
+            &record.edited_files,
+            record.conflict_summary.is_some(),
             overlap,
         ),
     )
@@ -460,7 +470,10 @@ fn build_extra(
     agent_id: &str,
     child_chat_id: Option<&str>,
     status: &str,
+    parent_chat_id: Option<&str>,
     target_files: &[String],
+    edited_files: &[String],
+    conflict: bool,
     overlap: Option<&str>,
 ) -> serde_json::Map<String, Value> {
     let mut extra = serde_json::Map::new();
@@ -483,9 +496,35 @@ fn build_extra(
         Value::String(status.to_string()),
     );
     extra.insert(
+        "background_agent_parent_chat_id".to_string(),
+        parent_chat_id
+            .map(|value| Value::String(value.to_string()))
+            .unwrap_or(Value::Null),
+    );
+    extra.insert(
+        "background_agent_result_available".to_string(),
+        Value::Bool(matches!(
+            status,
+            "completed" | "failed" | "cancelled" | "interrupted"
+        )),
+    );
+    extra.insert(
+        "background_agent_conflict".to_string(),
+        Value::Bool(conflict),
+    );
+    extra.insert(
         "target_files".to_string(),
         Value::Array(
             target_files
+                .iter()
+                .map(|file| Value::String(file.clone()))
+                .collect(),
+        ),
+    );
+    extra.insert(
+        "edited_files".to_string(),
+        Value::Array(
+            edited_files
                 .iter()
                 .map(|file| Value::String(file.clone()))
                 .collect(),

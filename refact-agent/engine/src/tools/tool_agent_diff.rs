@@ -976,6 +976,8 @@ impl Tool for ToolAgentDiff {
             .ok_or_else(|| format!("Card {} has no agent branch", card.id))?;
         let output = run_git_diff(&worktree, mode, &base).await?;
         let result = render_agent_diff(&card, branch, &base, mode, &output, max_lines);
+        let output_lines = output.lines().count();
+        let truncated = output_lines > max_lines;
 
         Ok((
             false,
@@ -984,6 +986,16 @@ impl Tool for ToolAgentDiff {
                 content: ChatContent::SimpleText(result),
                 tool_calls: None,
                 tool_call_id: tool_call_id.clone(),
+                extra: serde_json::Map::from_iter([(
+                    "git".to_string(),
+                    json!({
+                        "status": "available",
+                        "path": "workspace",
+                        "short_sha": short_sha(&base.refish),
+                        "scope": format!("card:{}:{}", card.id, mode.as_str()),
+                        "truncated": truncated,
+                    }),
+                )]),
                 ..Default::default()
             })],
         ))
@@ -992,6 +1004,23 @@ impl Tool for ToolAgentDiff {
     fn tool_depends_on(&self) -> Vec<String> {
         vec![]
     }
+}
+
+impl AgentDiffMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Stat => "stat",
+            Self::Unified => "unified",
+            Self::NameOnly => "name_only",
+        }
+    }
+}
+
+fn short_sha(value: &str) -> Option<&str> {
+    let value = value.trim();
+    value
+        .get(..12)
+        .filter(|value| value.len() >= 7 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 #[cfg(test)]

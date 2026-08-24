@@ -153,7 +153,7 @@ impl Tool for ToolSubagent {
 
         let req = SpawnRequest {
             kind: BgAgentKind::Subagent,
-            parent_chat_id,
+            parent_chat_id: parent_chat_id.clone(),
             parent_root_chat_id: Some(parent_root_chat_id),
             parent_tool_call_id: Some(tool_call_id.clone()),
             config_name: "subagent".to_string(),
@@ -180,7 +180,11 @@ impl Tool for ToolSubagent {
                 spawn_and_wait(app, req_silent, Some(Duration::from_secs(30 * 60))).await?;
             Ok((
                 false,
-                vec![build_foreground_tool_result(&record, tool_call_id)],
+                vec![build_foreground_tool_result(
+                    &record,
+                    &parent_chat_id,
+                    tool_call_id,
+                )],
             ))
         } else {
             let handle = spawn_background_agent(app, req).await?;
@@ -189,6 +193,7 @@ impl Tool for ToolSubagent {
                 vec![build_background_start_tool_result(
                     &handle,
                     &task,
+                    &parent_chat_id,
                     tool_call_id,
                 )],
             ))
@@ -390,6 +395,7 @@ fn build_subagent_prompt(
 fn build_background_start_tool_result(
     handle: &SpawnHandle,
     task: &str,
+    parent_chat_id: &str,
     tool_call_id: &String,
 ) -> ContextEnum {
     let task_preview = truncate_chars_with_ellipsis(task, 60);
@@ -401,11 +407,22 @@ fn build_background_start_tool_result(
     tool_message(
         content,
         tool_call_id,
-        background_agent_extra(&handle.agent_id, Some(&handle.child_chat_id), "running"),
+        background_agent_extra(
+            &handle.agent_id,
+            Some(&handle.child_chat_id),
+            "running",
+            Some(parent_chat_id),
+            false,
+            &[],
+        ),
     )
 }
 
-fn build_foreground_tool_result(record: &BackgroundAgent, tool_call_id: &String) -> ContextEnum {
+fn build_foreground_tool_result(
+    record: &BackgroundAgent,
+    parent_chat_id: &str,
+    tool_call_id: &String,
+) -> ContextEnum {
     let status = record.status.as_str();
     let child_chat_id = record.child_chat_id.as_deref().unwrap_or_default();
     let result = record
@@ -426,7 +443,14 @@ fn build_foreground_tool_result(record: &BackgroundAgent, tool_call_id: &String)
     tool_message(
         content,
         tool_call_id,
-        background_agent_extra(&record.agent_id, record.child_chat_id.as_deref(), status),
+        background_agent_extra(
+            &record.agent_id,
+            record.child_chat_id.as_deref(),
+            status,
+            Some(parent_chat_id),
+            record.result_summary.is_some() || record.error.is_some(),
+            &record.edited_files,
+        ),
     )
 }
 
@@ -446,12 +470,25 @@ fn background_agent_extra(
     agent_id: &str,
     child_chat_id: Option<&str>,
     status: &str,
+    parent_chat_id: Option<&str>,
+    result_available: bool,
+    edited_files: &[String],
 ) -> Map<String, Value> {
     Map::from_iter([
         ("background_agent_id".to_string(), json!(agent_id)),
         ("background_agent_kind".to_string(), json!("subagent")),
         ("child_chat_id".to_string(), json!(child_chat_id)),
         ("background_agent_status".to_string(), json!(status)),
+        (
+            "background_agent_parent_chat_id".to_string(),
+            json!(parent_chat_id),
+        ),
+        (
+            "background_agent_result_available".to_string(),
+            json!(result_available),
+        ),
+        ("background_agent_conflict".to_string(), json!(false)),
+        ("edited_files".to_string(), json!(edited_files)),
     ])
 }
 

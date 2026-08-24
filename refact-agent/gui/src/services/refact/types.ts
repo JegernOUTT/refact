@@ -286,7 +286,9 @@ export type ToolEnrichmentKind =
   | "artifact"
   | "diagnostic"
   | "agent"
-  | "test";
+  | "test"
+  | "git"
+  | "review";
 
 export type ToolEnrichmentProvenance = "native" | "derived" | "heuristic";
 
@@ -304,6 +306,19 @@ export type ToolEnrichmentReference = {
   source?: string;
   truncated?: boolean;
   redacted?: boolean;
+  details?: {
+    action?: string;
+    rename_to?: string;
+    hunk_count?: number;
+    short_sha?: string;
+    scope?: string;
+    line1?: number;
+    line2?: number;
+    parent_chat_id?: string;
+    child_chat_id?: string;
+    conflict?: boolean;
+    result_available?: boolean;
+  };
 };
 
 export type ToolEnrichment = {
@@ -325,6 +340,8 @@ const TOOL_ENRICHMENT_KINDS: readonly ToolEnrichmentKind[] = [
   "diagnostic",
   "agent",
   "test",
+  "git",
+  "review",
 ];
 
 const TOOL_ENRICHMENT_PROVENANCE: readonly ToolEnrichmentProvenance[] = [
@@ -369,7 +386,31 @@ function isToolEnrichmentReference(
         value.confidence >= 0 &&
         value.confidence <= 1)) &&
     (value.truncated === undefined || typeof value.truncated === "boolean") &&
-    (value.redacted === undefined || typeof value.redacted === "boolean")
+    (value.redacted === undefined || typeof value.redacted === "boolean") &&
+    (value.details === undefined ||
+      (isRecord(value.details) &&
+        (value.details.action === undefined ||
+          typeof value.details.action === "string") &&
+        (value.details.rename_to === undefined ||
+          typeof value.details.rename_to === "string") &&
+        (value.details.hunk_count === undefined ||
+          typeof value.details.hunk_count === "number") &&
+        (value.details.short_sha === undefined ||
+          typeof value.details.short_sha === "string") &&
+        (value.details.scope === undefined ||
+          typeof value.details.scope === "string") &&
+        (value.details.line1 === undefined ||
+          typeof value.details.line1 === "number") &&
+        (value.details.line2 === undefined ||
+          typeof value.details.line2 === "number") &&
+        (value.details.parent_chat_id === undefined ||
+          typeof value.details.parent_chat_id === "string") &&
+        (value.details.child_chat_id === undefined ||
+          typeof value.details.child_chat_id === "string") &&
+        (value.details.conflict === undefined ||
+          typeof value.details.conflict === "boolean") &&
+        (value.details.result_available === undefined ||
+          typeof value.details.result_available === "boolean")))
   );
 }
 

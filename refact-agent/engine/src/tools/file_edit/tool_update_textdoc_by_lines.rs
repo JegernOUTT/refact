@@ -129,6 +129,10 @@ impl Tool for ToolUpdateTextDocByLines {
             content: ChatContent::SimpleText(json!(chunks).to_string()),
             tool_calls: None,
             tool_call_id: tool_call_id.clone(),
+            extra: serde_json::Map::from_iter([(
+                "diff_state".to_string(),
+                Value::String("applied".to_string()),
+            )]),
             ..Default::default()
         })];
 

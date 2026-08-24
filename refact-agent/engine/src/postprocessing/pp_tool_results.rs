@@ -6,9 +6,10 @@ use refact_core::chat_types::{ChatContent, ChatMessage, ContextFile, Postprocess
 use refact_privacy::PrivacyRecord;
 use refact_chat_api::{
     attach_tool_enrichment, redact_tool_enrichment, ToolEnrichment, ToolEnrichmentKind,
-    ToolEnrichmentProvenance, ToolEnrichmentReference,
+    ToolEnrichmentProvenance, ToolEnrichmentReference, ToolEnrichmentReferenceDetails,
 };
 
+use crate::call_validation::DiffChunk;
 use crate::global_context::GlobalContext;
 use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 use super::gcx_pp_context::GcxPPContext;
@@ -54,7 +55,7 @@ pub async fn postprocess_tool_results(
 
 fn enrich_tool_messages(messages: &mut [ChatMessage]) {
     for message in messages {
-        if message.role != "tool" && message.role != "context_file" {
+        if message.role != "tool" && message.role != "context_file" && message.role != "diff" {
             continue;
         }
         if tool_result_is_privacy_restricted(message) {
@@ -65,10 +66,16 @@ fn enrich_tool_messages(messages: &mut [ChatMessage]) {
         if references.is_empty() {
             continue;
         }
+        let truncated = message
+            .extra
+            .get("review_refs_truncated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         attach_tool_enrichment(
             message,
             ToolEnrichment {
                 references,
+                truncated,
                 ..Default::default()
             },
         );
@@ -106,7 +113,7 @@ fn is_safe_mime(value: &str) -> bool {
 }
 
 fn native_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
-    let mut references = Vec::new();
+    let mut references: Vec<ToolEnrichmentReference> = Vec::new();
     if let ChatContent::ContextFiles(files) = &message.content {
         for file in files {
             let mut path = reference(ToolEnrichmentKind::Path, &file.file_name);
@@ -311,15 +318,172 @@ fn native_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
         .get("background_agent_id")
         .and_then(serde_json::Value::as_str)
     {
-        let mut reference = reference(ToolEnrichmentKind::Agent, agent_id);
-        reference.status = message
+        let mut agent_reference = reference(ToolEnrichmentKind::Agent, agent_id);
+        agent_reference.status = message
             .extra
             .get("background_agent_status")
             .and_then(serde_json::Value::as_str)
             .map(ToString::to_string);
-        references.push(reference);
+        agent_reference.details = Some(ToolEnrichmentReferenceDetails {
+            parent_chat_id: message
+                .extra
+                .get("background_agent_parent_chat_id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string),
+            child_chat_id: message
+                .extra
+                .get("child_chat_id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string),
+            result_available: message
+                .extra
+                .get("background_agent_result_available")
+                .and_then(serde_json::Value::as_bool),
+            conflict: message
+                .extra
+                .get("background_agent_conflict")
+                .and_then(serde_json::Value::as_bool),
+            ..Default::default()
+        });
+        references.push(agent_reference);
+        for (key, status) in [("target_files", "target"), ("edited_files", "edited")] {
+            if let Some(paths) = message.extra.get(key).and_then(serde_json::Value::as_array) {
+                references.extend(paths.iter().filter_map(|path| {
+                    let path = path.as_str()?;
+                    let mut reference = reference(ToolEnrichmentKind::Path, path);
+                    reference.label = Some(format!("agent {status}"));
+                    reference.status = Some(status.to_string());
+                    reference.details = Some(ToolEnrichmentReferenceDetails {
+                        action: Some(status.to_string()),
+                        ..Default::default()
+                    });
+                    Some(reference)
+                }));
+            }
+        }
+    }
+    references.extend(diff_references(message));
+    references.extend(git_references(message));
+    references.extend(review_references(message));
+    references
+}
+
+fn diff_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
+    if message.role != "diff" {
+        return Vec::new();
+    }
+    let ChatContent::SimpleText(content) = &message.content else {
+        return Vec::new();
+    };
+    let Ok(chunks) = serde_json::from_str::<Vec<DiffChunk>>(content) else {
+        return Vec::new();
+    };
+    let applied = message
+        .extra
+        .get("diff_state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let mut references: Vec<ToolEnrichmentReference> = Vec::new();
+    for chunk in chunks {
+        if let Some(reference) = references.iter_mut().find(|reference| {
+            reference.kind == ToolEnrichmentKind::Diff && reference.target == chunk.file_name
+        }) {
+            if let Some(details) = reference.details.as_mut() {
+                details.hunk_count = Some(details.hunk_count.unwrap_or(0).saturating_add(1));
+                details.line1 = details.line1.min(u32::try_from(chunk.line1).ok());
+                details.line2 = details.line2.max(u32::try_from(chunk.line2).ok());
+            }
+        } else {
+            let mut reference = reference(ToolEnrichmentKind::Diff, &chunk.file_name);
+            reference.status = Some(applied.to_string());
+            reference.details = Some(ToolEnrichmentReferenceDetails {
+                action: Some(chunk.file_action),
+                rename_to: chunk.file_name_rename,
+                hunk_count: Some(1),
+                line1: u32::try_from(chunk.line1).ok(),
+                line2: u32::try_from(chunk.line2).ok(),
+                ..Default::default()
+            });
+            references.push(reference);
+        }
     }
     references
+}
+
+fn git_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
+    let Some(git) = message.extra.get("git") else {
+        return Vec::new();
+    };
+    let Some(status) = git.get("status").and_then(serde_json::Value::as_str) else {
+        return Vec::new();
+    };
+    let target = git
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("workspace");
+    let mut reference = reference(ToolEnrichmentKind::Git, target);
+    reference.status = Some(status.to_string());
+    reference.details = Some(ToolEnrichmentReferenceDetails {
+        short_sha: git
+            .get("short_sha")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        scope: git
+            .get("scope")
+            .and_then(serde_json::Value::as_str)
+            .map(ToString::to_string),
+        ..Default::default()
+    });
+    reference.truncated = git
+        .get("truncated")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    vec![reference]
+}
+
+fn review_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
+    let Some(references) = message
+        .extra
+        .get("review_refs")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    references
+        .iter()
+        .filter_map(|value| {
+            let path = value.get("path")?.as_str()?;
+            let mut reference = reference(ToolEnrichmentKind::Review, path);
+            reference.label = value
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string);
+            reference.status = value
+                .get("severity")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string);
+            reference.details = Some(ToolEnrichmentReferenceDetails {
+                action: value
+                    .get("evidence_kind")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string),
+                line1: value
+                    .get("line1")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|line| u32::try_from(line).ok()),
+                line2: value
+                    .get("line2")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|line| u32::try_from(line).ok()),
+                scope: value
+                    .get("scope")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string),
+                ..Default::default()
+            });
+            Some(reference)
+        })
+        .collect()
 }
 
 fn reference(kind: ToolEnrichmentKind, target: &str) -> ToolEnrichmentReference {
@@ -592,5 +756,176 @@ mod tests {
         message.extra.remove("tool_enrichment");
         enrich_tool_messages(std::slice::from_mut(&mut message));
         assert!(refact_chat_api::tool_enrichment_from_extra(&message.extra).is_none());
+    }
+
+    #[test]
+    fn native_enrichment_keeps_diff_git_review_and_agent_metadata_thin() {
+        let mut diff = ChatMessage::new(
+            "diff".to_string(),
+            serde_json::json!([
+                {
+                    "file_name": "src/old.rs",
+                    "file_action": "rename",
+                    "line1": 2,
+                    "line2": 5,
+                    "lines_remove": "private old content",
+                    "lines_add": "private new content",
+                    "file_name_rename": "src/new.rs",
+                    "is_file": true,
+                    "application_details": ""
+                },
+                {
+                    "file_name": "src/old.rs",
+                    "file_action": "rename",
+                    "line1": 8,
+                    "line2": 9,
+                    "lines_remove": "more private content",
+                    "lines_add": "more private content",
+                    "file_name_rename": "src/new.rs",
+                    "is_file": true,
+                    "application_details": ""
+                }
+            ])
+            .to_string(),
+        );
+        diff.extra
+            .insert("diff_state".to_string(), serde_json::json!("applied"));
+        let raw = diff.content.content_text_only();
+
+        enrich_tool_messages(std::slice::from_mut(&mut diff));
+
+        let enrichment = refact_chat_api::tool_enrichment_from_extra(&diff.extra).unwrap();
+        assert_eq!(enrichment.references.len(), 1);
+        assert_eq!(enrichment.references[0].kind, ToolEnrichmentKind::Diff);
+        assert_eq!(enrichment.references[0].status.as_deref(), Some("applied"));
+        let details = enrichment.references[0].details.as_ref().unwrap();
+        assert_eq!(details.action.as_deref(), Some("rename"));
+        assert_eq!(details.rename_to.as_deref(), Some("src/new.rs"));
+        assert_eq!(details.hunk_count, Some(2));
+        assert!(!serde_json::to_string(&enrichment)
+            .unwrap()
+            .contains("private old content"));
+        assert_eq!(diff.content.content_text_only(), raw);
+
+        let mut metadata = ChatMessage::new("tool".to_string(), "raw result".to_string());
+        metadata.extra.insert(
+            "git".to_string(),
+            serde_json::json!({
+                "status": "available",
+                "path": "workspace",
+                "short_sha": "ABC1234",
+                "scope": "card:T-54:stat:12",
+                "diff": "must not be copied"
+            }),
+        );
+        metadata.extra.insert(
+            "review_refs".to_string(),
+            serde_json::json!([{
+                "id": "finding-1",
+                "severity": "high",
+                "path": "src/lib.rs",
+                "line1": 3,
+                "line2": 4,
+                "evidence_kind": "excerpt",
+                "scope": "abc1234",
+                "content": "must not be copied"
+            }]),
+        );
+        metadata.extra.insert(
+            "background_agent_id".to_string(),
+            serde_json::json!("bgagent-1"),
+        );
+        metadata.extra.insert(
+            "background_agent_status".to_string(),
+            serde_json::json!("completed"),
+        );
+        metadata.extra.insert(
+            "background_agent_parent_chat_id".to_string(),
+            serde_json::json!("parent-chat"),
+        );
+        metadata.extra.insert(
+            "child_chat_id".to_string(),
+            serde_json::json!("subchat-child"),
+        );
+        metadata.extra.insert(
+            "background_agent_result_available".to_string(),
+            serde_json::json!(true),
+        );
+        metadata.extra.insert(
+            "background_agent_conflict".to_string(),
+            serde_json::json!(false),
+        );
+        metadata.extra.insert(
+            "target_files".to_string(),
+            serde_json::json!(["src/target.rs"]),
+        );
+        metadata.extra.insert(
+            "edited_files".to_string(),
+            serde_json::json!(["src/edited.rs"]),
+        );
+
+        enrich_tool_messages(std::slice::from_mut(&mut metadata));
+
+        let enrichment = refact_chat_api::tool_enrichment_from_extra(&metadata.extra).unwrap();
+        assert_eq!(enrichment.references.len(), 5);
+        assert_eq!(enrichment.references[0].kind, ToolEnrichmentKind::Agent);
+        assert_eq!(enrichment.references[1].status.as_deref(), Some("target"));
+        assert_eq!(enrichment.references[2].status.as_deref(), Some("edited"));
+        assert_eq!(enrichment.references[3].kind, ToolEnrichmentKind::Git);
+        assert_eq!(enrichment.references[4].kind, ToolEnrichmentKind::Review);
+        assert_eq!(
+            enrichment.references[0]
+                .details
+                .as_ref()
+                .unwrap()
+                .parent_chat_id
+                .as_deref(),
+            Some("parent-chat")
+        );
+        assert_eq!(
+            enrichment.references[0]
+                .details
+                .as_ref()
+                .unwrap()
+                .child_chat_id
+                .as_deref(),
+            Some("subchat-child")
+        );
+        assert_eq!(
+            enrichment.references[3]
+                .details
+                .as_ref()
+                .unwrap()
+                .short_sha
+                .as_deref(),
+            Some("abc1234")
+        );
+        assert!(!serde_json::to_string(&enrichment)
+            .unwrap()
+            .contains("must not be copied"));
+    }
+
+    #[test]
+    fn native_enrichment_marks_bounded_review_references_as_truncated() {
+        let mut message = ChatMessage::new("tool".to_string(), "raw result".to_string());
+        message.extra.insert(
+            "review_refs".to_string(),
+            serde_json::json!([{
+                "id": "finding-1",
+                "severity": "high",
+                "path": "src/lib.rs",
+                "line1": 3,
+                "line2": 4,
+                "evidence_kind": "excerpt"
+            }]),
+        );
+        message
+            .extra
+            .insert("review_refs_truncated".to_string(), serde_json::json!(true));
+
+        enrich_tool_messages(std::slice::from_mut(&mut message));
+
+        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
+        assert!(enrichment.truncated);
     }
 }

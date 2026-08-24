@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -545,7 +546,7 @@ impl Tool for ToolCodeReview {
 
         let mut metering = serde_json::Map::new();
         let report = run_review_pipeline(
-            gcx,
+            gcx.clone(),
             ccx.clone(),
             scope,
             cfg.clone(),
@@ -557,6 +558,15 @@ impl Tool for ToolCodeReview {
         .await?;
         let final_message = render_review_markdown(&report)
             .map_err(|error| format!("failed to serialize code review report: {error}"))?;
+        let (review_refs, review_refs_truncated) = review_refs(
+            &report,
+            &crate::files_correction::get_project_dirs(gcx.clone()).await,
+        );
+        metering.insert("review_refs".to_string(), review_refs);
+        metering.insert(
+            "review_refs_truncated".to_string(),
+            Value::Bool(review_refs_truncated),
+        );
 
         Ok((
             false,
@@ -584,6 +594,44 @@ impl Tool for ToolCodeReview {
     fn tool_depends_on(&self) -> Vec<String> {
         vec![]
     }
+}
+
+fn review_refs(report: &ReviewReport, roots: &[std::path::PathBuf]) -> (Value, bool) {
+    let scope = report.scope.diff_base.clone();
+    let mut references = Vec::new();
+    for finding in &report.findings {
+        for evidence in &finding.evidence {
+            if references.len() == 32 {
+                return (Value::Array(references), true);
+            }
+            let path = Path::new(evidence.path.as_deref().unwrap_or(&finding.file));
+            let relative = if path.is_absolute() {
+                roots.iter().find_map(|root| {
+                    path.strip_prefix(root)
+                        .ok()
+                        .map(|path| path.to_string_lossy().replace('\\', "/"))
+                })
+            } else {
+                (!path
+                    .components()
+                    .any(|component| matches!(component, std::path::Component::ParentDir)))
+                .then(|| path.to_string_lossy().replace('\\', "/"))
+            };
+            let Some(relative) = relative else {
+                continue;
+            };
+            references.push(json!({
+                "id": finding.id,
+                "severity": severity_label(&finding.severity),
+                "path": relative,
+                "line1": evidence.line1.unwrap_or(finding.line1),
+                "line2": evidence.line2.unwrap_or(finding.line2),
+                "evidence_kind": evidence.kind,
+                "scope": scope,
+            }));
+        }
+    }
+    (Value::Array(references), false)
 }
 
 #[cfg(test)]

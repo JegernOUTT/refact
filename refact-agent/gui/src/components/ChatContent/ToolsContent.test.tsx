@@ -191,6 +191,26 @@ describe("ToolsContent routing", () => {
     expect(screen.getByTestId(testId)).toBeInTheDocument();
   });
 
+  it("keeps agent diff specialized when native Git metadata is present", () => {
+    renderToolContent("agent_diff", AGENT_DIFF_OUTPUT, {
+      enrichment: {
+        schema_version: 1,
+        references: [
+          {
+            kind: "git",
+            target: "workspace",
+            provenance: "native",
+            status: "available",
+            details: { short_sha: "abc1234", scope: "card:T-54:stat" },
+          },
+        ],
+      },
+    });
+
+    expect(screen.getByTestId("agent-diff-view")).toBeInTheDocument();
+    expect(screen.queryByTestId("generic-tool")).not.toBeInTheDocument();
+  });
+
   it.each([
     "code_health",
     "git_risk",
