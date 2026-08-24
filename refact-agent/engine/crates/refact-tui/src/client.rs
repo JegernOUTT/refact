@@ -1076,8 +1076,35 @@ impl DaemonClient {
         chat_id: &str,
         content: &str,
     ) -> Result<(), ClientError> {
-        self.send_user_message_with_id(project_id, chat_id, &request_id("user-message"), content)
-            .await
+        self.send_user_message_with_ids(
+            project_id,
+            chat_id,
+            &request_id("user-message"),
+            &request_id("client-message"),
+            content,
+        )
+        .await
+    }
+
+    pub async fn send_user_message_with_ids(
+        &self,
+        project_id: &str,
+        chat_id: &str,
+        client_request_id: &str,
+        client_message_id: &str,
+        content: &str,
+    ) -> Result<(), ClientError> {
+        self.send_command(
+            project_id,
+            chat_id,
+            json!({
+                "client_request_id": client_request_id,
+                "client_message_id": client_message_id,
+                "type": "user_message",
+                "content": content,
+            }),
+        )
+        .await
     }
 
     pub async fn send_user_message_with_id(
@@ -1087,14 +1114,12 @@ impl DaemonClient {
         client_request_id: &str,
         content: &str,
     ) -> Result<(), ClientError> {
-        self.send_command(
+        self.send_user_message_with_ids(
             project_id,
             chat_id,
-            json!({
-                "client_request_id": client_request_id,
-                "type": "user_message",
-                "content": content,
-            }),
+            client_request_id,
+            &request_id("client-message"),
+            content,
         )
         .await
     }
@@ -3008,7 +3033,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_user_message_delivery_reuses_request_id() {
+    async fn repeated_user_message_delivery_reuses_correlation_ids() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (requests, received) = mpsc::channel();
@@ -3026,11 +3051,11 @@ mod tests {
         let client = DaemonClient::new(format!("http://{addr}"), None).unwrap();
 
         client
-            .send_user_message_with_id("project", "chat", "request-1", "hello")
+            .send_user_message_with_ids("project", "chat", "request-1", "message-1", "hello")
             .await
             .unwrap();
         client
-            .send_user_message_with_id("project", "chat", "request-1", "hello")
+            .send_user_message_with_ids("project", "chat", "request-1", "message-1", "hello")
             .await
             .unwrap();
 
@@ -3040,6 +3065,8 @@ mod tests {
 
         assert_eq!(first["client_request_id"], "request-1");
         assert_eq!(second["client_request_id"], "request-1");
+        assert_eq!(first["client_message_id"], "message-1");
+        assert_eq!(second["client_message_id"], "message-1");
         assert_eq!(first["content"], "hello");
         assert_eq!(second["content"], "hello");
     }

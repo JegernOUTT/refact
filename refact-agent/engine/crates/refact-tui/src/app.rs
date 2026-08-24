@@ -11,7 +11,7 @@ use crate::ask_questions::{
     AskQuestionType, AskQuestionsForm, AskQuestionsOutcome, AskQuestionsRequest,
 };
 use crate::client::{
-    request_id, ChatEvent, DaemonStatus, CompetitorImportInfoResponse, CompetitorImportRunResponse,
+    ChatEvent, DaemonStatus, CompetitorImportInfoResponse, CompetitorImportRunResponse,
     HooksResponse, KnowledgeGraphResponse, McpViewData, OpenProjectResponse, ProjectEntry,
     ProviderListResponse, ProviderOAuthLogoutResponse, SlashCommandsListResponse, ToolDecision,
     WorkerInfo,
@@ -60,7 +60,7 @@ mod transcript;
 mod workers;
 
 pub use self::session_lifecycle::{ClipboardCopySource, SessionState, SubscriptionStatus, UsageSummary};
-pub use self::state::{App, ComposerMode};
+pub use self::state::{App, ClientMessageCorrelation, ComposerMode};
 pub use surfaces::ProjectPickerState;
 pub use transcript::TranscriptItem;
 use self::session_lifecycle::{resolve_chat_model_id, ReasoningModelCaps};
@@ -140,7 +140,7 @@ enum CommandContextTag {
     SendMessage {
         prompt: String,
         params: Value,
-        client_request_id: String,
+        correlation: ClientMessageCorrelation,
     },
     Reasoning {
         previous: ReasoningStateSnapshot,
@@ -686,12 +686,12 @@ impl App {
         if self.backtrack_pending.is_some() {
             return Some(self.start_backtrack_turn(prompt));
         }
-        let (params, client_request_id) = self.take_submit_params(&prompt);
+        let (params, correlation) = self.take_submit_params(&prompt);
         if self.is_chat_active() && self.session_state != SessionState::WaitingUserInput {
             self.enqueue_input(prompt, params);
             Some(AppAction::None)
         } else {
-            Some(self.start_prompt_turn(prompt, params, client_request_id))
+            Some(self.start_prompt_turn(prompt, params, correlation))
         }
     }
 
@@ -729,16 +729,17 @@ impl App {
         &mut self,
         prompt: String,
         params: Value,
-        client_request_id: Option<String>,
+        correlation: Option<ClientMessageCorrelation>,
     ) -> AppAction {
-        let client_request_id = client_request_id.unwrap_or_else(|| request_id("user-message"));
+        let correlation = correlation.unwrap_or_else(ClientMessageCorrelation::new);
         self.in_flight_send = Some(InFlightSend {
-            client_request_id: client_request_id.clone(),
+            correlation: correlation.clone(),
             accepted: false,
         });
         self.cancel_backtrack();
         self.clear_active_ask_questions();
-        self.transcript_state.push_user_message(prompt.clone());
+        self.transcript_state
+            .push_optimistic_user_message(prompt.clone(), correlation.client_message_id.clone());
         self.transcript_state.start_assistant(None);
         self.rebuild_render_transcript_from_state();
         self.set_session_state(SessionState::Generating);
@@ -748,11 +749,11 @@ impl App {
         AppAction::SendMessage {
             prompt,
             params,
-            client_request_id,
+            correlation,
         }
     }
 
-    fn take_submit_params(&mut self, prompt: &str) -> (Value, Option<String>) {
+    fn take_submit_params(&mut self, prompt: &str) -> (Value, Option<ClientMessageCorrelation>) {
         if self
             .pending_send_retry
             .as_ref()
@@ -761,7 +762,7 @@ impl App {
             return self
                 .pending_send_retry
                 .take()
-                .map(|retry| (retry.params, Some(retry.client_request_id)))
+                .map(|retry| (retry.params, Some(retry.correlation)))
                 .unwrap_or_else(|| (Value::Object(Map::new()), None));
         }
         self.pending_send_retry = None;
@@ -786,8 +787,8 @@ impl App {
     }
 
     fn submit_ask_questions_reply(&mut self, prompt: String) -> AppAction {
-        let (params, client_request_id) = self.take_submit_params(&prompt);
-        self.start_prompt_turn(prompt, params, client_request_id)
+        let (params, correlation) = self.take_submit_params(&prompt);
+        self.start_prompt_turn(prompt, params, correlation)
     }
 
     fn set_params_context(&mut self, patch: &Value) -> CommandContextTag {
@@ -816,10 +817,8 @@ impl App {
 
     fn handle_command_success(&mut self, context: CommandContextTag) -> AppAction {
         match context {
-            CommandContextTag::SendMessage {
-                client_request_id, ..
-            } => {
-                self.clear_in_flight_send(&client_request_id);
+            CommandContextTag::SendMessage { correlation, .. } => {
+                self.clear_in_flight_send(&correlation.client_request_id);
                 AppAction::None
             }
             CommandContextTag::Abort => {
@@ -851,8 +850,8 @@ impl App {
             CommandContextTag::SendMessage {
                 prompt,
                 params,
-                client_request_id,
-            } => self.handle_send_message_failure(prompt, params, client_request_id, error),
+                correlation,
+            } => self.handle_send_message_failure(prompt, params, correlation, error),
             CommandContextTag::Abort => {
                 self.retry_hint = retry_hint_from_message(&error);
                 self.abort_in_flight = false;
@@ -1246,7 +1245,7 @@ pub enum AppAction {
     SendMessage {
         prompt: String,
         params: Value,
-        client_request_id: String,
+        correlation: ClientMessageCorrelation,
     },
     RetryFromIndex {
         index: usize,
@@ -3090,12 +3089,12 @@ new-chat = "ctrl-x"
         let mut app = App::new(project());
         app.composer.set_text("hello");
         let action = app.handle_key(key(KeyCode::Enter));
-        let (prompt, params, client_request_id) = match action {
+        let (prompt, params, correlation) = match action {
             AppAction::SendMessage {
                 prompt,
                 params,
-                client_request_id,
-            } => (prompt, params, client_request_id),
+                correlation,
+            } => (prompt, params, correlation),
             other => panic!("unexpected action: {other:?}"),
         };
         app.composer.set_text("draft");
@@ -3104,7 +3103,7 @@ new-chat = "ctrl-x"
             CommandContextTag::SendMessage {
                 prompt: prompt.clone(),
                 params: params.clone(),
-                client_request_id: client_request_id.clone(),
+                correlation: correlation.clone(),
             },
             Err("request timed out".to_string()),
         );
@@ -3132,11 +3131,11 @@ new-chat = "ctrl-x"
             AppAction::SendMessage {
                 prompt: retry_prompt,
                 params: retry_params,
-                client_request_id: retry_client_request_id,
+                correlation: retry_correlation,
             } => {
                 assert_eq!(retry_prompt, prompt);
                 assert_eq!(retry_params, params);
-                assert_eq!(retry_client_request_id, client_request_id);
+                assert_eq!(retry_correlation, correlation);
             }
             other => panic!("unexpected retry action: {other:?}"),
         }
@@ -3148,12 +3147,12 @@ new-chat = "ctrl-x"
     fn accepted_send_timeout_keeps_one_optimistic_turn() {
         let mut app = App::new(project());
         app.composer.set_text("hello");
-        let (prompt, params, client_request_id) = match app.handle_key(key(KeyCode::Enter)) {
+        let (prompt, params, correlation) = match app.handle_key(key(KeyCode::Enter)) {
             AppAction::SendMessage {
                 prompt,
                 params,
-                client_request_id,
-            } => (prompt, params, client_request_id),
+                correlation,
+            } => (prompt, params, correlation),
             other => panic!("unexpected action: {other:?}"),
         };
 
@@ -3162,7 +3161,7 @@ new-chat = "ctrl-x"
             seq: None,
             kind: "ack".to_string(),
             raw: json!({
-                "client_request_id": client_request_id,
+                "client_request_id": correlation.client_request_id,
                 "accepted": true,
             }),
         });
@@ -3171,7 +3170,7 @@ new-chat = "ctrl-x"
                 CommandContextTag::SendMessage {
                     prompt,
                     params,
-                    client_request_id,
+                    correlation,
                 },
                 Err("request timed out".to_string()),
             ),
@@ -3196,15 +3195,155 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn matching_client_message_id_reconciles_optimistic_user_echo() {
+        let mut app = App::new(project());
+        app.composer.set_text("hello");
+        let client_message_id = match app.handle_key(key(KeyCode::Enter)) {
+            AppAction::SendMessage { correlation, .. } => correlation.client_message_id,
+            other => panic!("unexpected action: {other:?}"),
+        };
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {
+                "message_id": "server-user-1",
+                "role": "user",
+                "content": "hello",
+                "extra": {"client_message_id": client_message_id},
+            }}),
+        });
+
+        let users = app
+            .transcript_state()
+            .messages()
+            .iter()
+            .filter(|message| message.role == TranscriptRole::User)
+            .collect::<Vec<_>>();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].message_id.as_deref(), Some("server-user-1"));
+        assert_eq!(
+            users[0].client_message_id(),
+            Some(client_message_id.as_str())
+        );
+        assert!(app
+            .in_flight_send
+            .as_ref()
+            .is_some_and(|send| send.accepted));
+    }
+
+    #[test]
+    fn identical_user_echoes_with_distinct_client_message_ids_remain_distinct() {
+        let mut app = App::new(project());
+        app.transcript_state
+            .push_optimistic_user_message("same", "client-message-1");
+        app.transcript_state
+            .push_optimistic_user_message("same", "client-message-2");
+        app.rebuild_render_transcript_from_state();
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {
+                "message_id": "server-user-1",
+                "role": "user",
+                "content": "same",
+                "extra": {"client_message_id": "client-message-1"},
+            }}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {
+                "message_id": "server-user-2",
+                "role": "user",
+                "content": "same",
+                "extra": {"client_message_id": "client-message-2"},
+            }}),
+        });
+
+        let users = app
+            .transcript_state()
+            .messages()
+            .iter()
+            .filter(|message| message.role == TranscriptRole::User)
+            .collect::<Vec<_>>();
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0].message_id.as_deref(), Some("server-user-1"));
+        assert_eq!(users[1].message_id.as_deref(), Some("server-user-2"));
+    }
+
+    #[test]
+    fn user_echo_with_unknown_client_message_id_appends_normally() {
+        let mut app = App::new(project());
+        app.transcript_state
+            .push_optimistic_user_message("same", "client-message-known");
+        app.rebuild_render_transcript_from_state();
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {
+                "message_id": "server-user-unknown",
+                "role": "user",
+                "content": "same",
+                "extra": {"client_message_id": "client-message-unknown"},
+            }}),
+        });
+
+        assert_eq!(
+            app.transcript_state()
+                .messages()
+                .iter()
+                .filter(|message| message.role == TranscriptRole::User)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn user_echo_without_client_message_id_does_not_guess_by_content() {
+        let mut app = App::new(project());
+        app.transcript_state
+            .push_optimistic_user_message("same", "client-message-known");
+        app.rebuild_render_transcript_from_state();
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {
+                "message_id": "legacy-server-user",
+                "role": "user",
+                "content": "same",
+            }}),
+        });
+
+        let users = app
+            .transcript_state()
+            .messages()
+            .iter()
+            .filter(|message| message.role == TranscriptRole::User)
+            .collect::<Vec<_>>();
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0].message_id, None);
+        assert_eq!(users[1].message_id.as_deref(), Some("legacy-server-user"));
+    }
+
+    #[test]
     fn unrelated_ack_does_not_complete_current_send() {
         let mut app = App::new(project());
         app.composer.set_text("hello");
-        let (prompt, params, client_request_id) = match app.handle_key(key(KeyCode::Enter)) {
+        let (prompt, params, correlation) = match app.handle_key(key(KeyCode::Enter)) {
             AppAction::SendMessage {
                 prompt,
                 params,
-                client_request_id,
-            } => (prompt, params, client_request_id),
+                correlation,
+            } => (prompt, params, correlation),
             other => panic!("unexpected action: {other:?}"),
         };
 
@@ -3218,7 +3357,7 @@ new-chat = "ctrl-x"
             CommandContextTag::SendMessage {
                 prompt,
                 params,
-                client_request_id,
+                correlation,
             },
             Err("request timed out".to_string()),
         );
@@ -3233,9 +3372,7 @@ new-chat = "ctrl-x"
         let mut app = App::new(project());
         app.composer.set_text("first");
         let first = match app.handle_key(key(KeyCode::Enter)) {
-            AppAction::SendMessage {
-                client_request_id, ..
-            } => client_request_id,
+            AppAction::SendMessage { correlation, .. } => correlation.client_request_id,
             other => panic!("unexpected action: {other:?}"),
         };
         app.handle_chat_event(ChatEvent {
@@ -3246,9 +3383,7 @@ new-chat = "ctrl-x"
         });
         app.composer.set_text("second");
         let second = match app.handle_key(key(KeyCode::Enter)) {
-            AppAction::SendMessage {
-                client_request_id, ..
-            } => client_request_id,
+            AppAction::SendMessage { correlation, .. } => correlation.client_request_id,
             other => panic!("unexpected action: {other:?}"),
         };
 
@@ -4675,7 +4810,10 @@ new-chat = "ctrl-x"
         app.pending_send_retry = Some(PendingSendRetry {
             prompt: "retry".to_string(),
             params: json!({"model": "old"}),
-            client_request_id: "old-request".to_string(),
+            correlation: ClientMessageCorrelation {
+                client_request_id: "old-request".to_string(),
+                client_message_id: "old-message".to_string(),
+            },
         });
 
         app.new_chat();
@@ -4697,7 +4835,10 @@ new-chat = "ctrl-x"
         app.pending_send_retry = Some(PendingSendRetry {
             prompt: "retry".to_string(),
             params: json!({"model": "old"}),
-            client_request_id: "old-request".to_string(),
+            correlation: ClientMessageCorrelation {
+                client_request_id: "old-request".to_string(),
+                client_message_id: "old-message".to_string(),
+            },
         });
         app.set_project(OpenProjectResponse {
             project_id: "p2".to_string(),
@@ -4772,10 +4913,8 @@ new-chat = "ctrl-x"
         let mut app = App::new(project());
         app.composer.set_text("hello");
         let action = app.handle_key(key(KeyCode::Enter));
-        let client_request_id = match &action {
-            AppAction::SendMessage {
-                client_request_id, ..
-            } => client_request_id.clone(),
+        let correlation = match &action {
+            AppAction::SendMessage { correlation, .. } => correlation.clone(),
             other => panic!("unexpected action: {other:?}"),
         };
         let (tx, mut rx) = mpsc::channel(1);
@@ -4795,13 +4934,14 @@ new-chat = "ctrl-x"
         assert!(matches!(
             rx.recv().await,
             Some(RuntimeEvent::CommandFinished {
-                context: CommandContextTag::SendMessage { client_request_id: sent, .. },
+                context: CommandContextTag::SendMessage { correlation: sent, .. },
                 result: Ok(()),
                 ..
-            }) if sent == client_request_id
+            }) if sent == correlation
         ));
         let command = state.find_command("user_message").unwrap();
-        assert_eq!(command["client_request_id"], client_request_id);
+        assert_eq!(command["client_request_id"], correlation.client_request_id);
+        assert_eq!(command["client_message_id"], correlation.client_message_id);
     }
 
     #[tokio::test]

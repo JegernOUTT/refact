@@ -1,5 +1,6 @@
 use super::session_lifecycle::context_window_for_model;
 use super::*;
+use crate::client::request_id;
 use crate::commands::session as command_session;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,13 +26,28 @@ pub(super) struct BacktrackTarget {
 pub(super) struct PendingSendRetry {
     pub(super) prompt: String,
     pub(super) params: Value,
-    pub(super) client_request_id: String,
+    pub(super) correlation: ClientMessageCorrelation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct InFlightSend {
-    pub(super) client_request_id: String,
+    pub(super) correlation: ClientMessageCorrelation,
     pub(super) accepted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientMessageCorrelation {
+    pub client_request_id: String,
+    pub client_message_id: String,
+}
+
+impl ClientMessageCorrelation {
+    pub(crate) fn new() -> Self {
+        Self {
+            client_request_id: request_id("user-message"),
+            client_message_id: request_id("client-message"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

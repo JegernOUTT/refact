@@ -972,6 +972,30 @@ impl App {
             return;
         };
         let message = TranscriptMessage::from_wire(raw_message);
+        if message.role == TranscriptRole::User {
+            let client_message_id = message.client_message_id().map(str::to_string);
+            if self
+                .transcript_state
+                .replace_optimistic_user_message(message.clone())
+            {
+                if let Some(client_message_id) = client_message_id {
+                    if let Some(in_flight) = self.in_flight_send.as_mut().filter(|in_flight| {
+                        in_flight.correlation.client_message_id == client_message_id
+                    }) {
+                        in_flight.accepted = true;
+                    }
+                }
+                self.rebuild_remote_transcript_from_state();
+                return;
+            }
+            if message.client_message_id().is_none()
+                && self.transcript_state.has_optimistic_user_message()
+            {
+                tracing::warn!(
+                    "server user-message echo has no client_message_id; optimistic message cannot be reconciled"
+                );
+            }
+        }
         let state_keys = rendered_state_keys_for_message(&message);
         let replayed = !state_keys.is_empty()
             && state_keys.into_iter().all(|key| {

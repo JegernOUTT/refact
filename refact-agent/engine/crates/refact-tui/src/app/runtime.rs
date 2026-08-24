@@ -853,7 +853,7 @@ pub(super) async fn run_action(
         AppAction::SendMessage {
             prompt,
             params,
-            client_request_id,
+            correlation,
         } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
@@ -863,7 +863,7 @@ pub(super) async fn run_action(
                 let context = CommandContextTag::SendMessage {
                     prompt: prompt.clone(),
                     params: params.clone(),
-                    client_request_id: client_request_id.clone(),
+                    correlation: correlation.clone(),
                 };
                 tokio::spawn(async move {
                     let result = async {
@@ -873,10 +873,11 @@ pub(super) async fn run_action(
                                 .await?;
                         }
                         client
-                            .send_user_message_with_id(
+                            .send_user_message_with_ids(
                                 &project_id,
                                 &chat_id,
-                                &client_request_id,
+                                &correlation.client_request_id,
+                                &correlation.client_message_id,
                                 &prompt,
                             )
                             .await
@@ -1103,13 +1104,13 @@ impl App {
         &mut self,
         prompt: String,
         params: Value,
-        client_request_id: String,
+        correlation: ClientMessageCorrelation,
         error: String,
     ) -> AppAction {
         let Some(in_flight) = self.in_flight_send.as_ref() else {
             return AppAction::None;
         };
-        if in_flight.client_request_id != client_request_id {
+        if in_flight.correlation.client_request_id != correlation.client_request_id {
             return AppAction::None;
         }
         let accepted = in_flight.accepted;
@@ -1118,29 +1119,30 @@ impl App {
             return AppAction::None;
         }
         self.retry_hint = retry_hint_from_message(&error);
-        self.rollback_failed_send_message(prompt, params, client_request_id, &error)
+        self.rollback_failed_send_message(prompt, params, correlation, &error)
     }
 
     fn rollback_failed_send_message(
         &mut self,
         prompt: String,
         params: Value,
-        client_request_id: String,
+        correlation: ClientMessageCorrelation,
         error: &str,
     ) -> AppAction {
         self.set_session_state(SessionState::Idle);
         self.clear_stream_controllers();
-        self.rollback_failed_send_transcript(&prompt);
-        self.restore_failed_prompt(prompt, params, client_request_id);
+        self.rollback_failed_send_transcript(&correlation.client_message_id);
+        self.restore_failed_prompt(prompt, params, correlation);
         self.add_notice(format!("Command failed: {error}"));
         AppAction::None
     }
 
-    fn rollback_failed_send_transcript(&mut self, prompt: &str) {
+    fn rollback_failed_send_transcript(&mut self, client_message_id: &str) {
         let messages = self.transcript_state.messages();
         let truncate_from = if messages.len() >= 2
             && messages[messages.len() - 2].role == TranscriptRole::User
-            && messages[messages.len() - 2].content == prompt
+            && messages[messages.len() - 2].message_id.is_none()
+            && messages[messages.len() - 2].client_message_id() == Some(client_message_id)
             && is_empty_live_assistant(&messages[messages.len() - 1])
         {
             Some(messages.len() - 2)
@@ -1155,7 +1157,12 @@ impl App {
         }
     }
 
-    fn restore_failed_prompt(&mut self, prompt: String, params: Value, client_request_id: String) {
+    fn restore_failed_prompt(
+        &mut self,
+        prompt: String,
+        params: Value,
+        correlation: ClientMessageCorrelation,
+    ) {
         let draft = self.composer.text().to_string();
         if !draft.trim().is_empty() && draft != prompt {
             let draft_params = self.take_pending_params();
@@ -1164,7 +1171,7 @@ impl App {
         self.pending_send_retry = Some(PendingSendRetry {
             prompt: prompt.clone(),
             params,
-            client_request_id,
+            correlation,
         });
         self.composer.set_text(prompt);
     }
@@ -1176,7 +1183,7 @@ impl App {
         if let Some(in_flight) = self
             .in_flight_send
             .as_mut()
-            .filter(|in_flight| in_flight.client_request_id == client_request_id)
+            .filter(|in_flight| in_flight.correlation.client_request_id == client_request_id)
         {
             in_flight.accepted = true;
         }
@@ -1186,7 +1193,7 @@ impl App {
         if self
             .in_flight_send
             .as_ref()
-            .is_some_and(|in_flight| in_flight.client_request_id == client_request_id)
+            .is_some_and(|in_flight| in_flight.correlation.client_request_id == client_request_id)
         {
             self.in_flight_send = None;
             true

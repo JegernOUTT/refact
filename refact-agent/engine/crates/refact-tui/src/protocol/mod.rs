@@ -3,6 +3,8 @@ use serde_json::{Map, Value};
 
 use crate::text_safety::{sanitize_tool_inline, sanitize_tool_text};
 
+const CLIENT_MESSAGE_ID_EXTRA_KEY: &str = "client_message_id";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SseEvent {
     Snapshot {
@@ -367,6 +369,13 @@ impl TranscriptMessage {
         message
     }
 
+    pub fn client_message_id(&self) -> Option<&str> {
+        self.extra
+            .get(CLIENT_MESSAGE_ID_EXTRA_KEY)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    }
+
     pub fn from_wire(raw: &Value) -> Self {
         let role = raw
             .get("role")
@@ -511,6 +520,46 @@ impl TranscriptState {
         self.messages.push(message);
         self.active_assistant_id = None;
         self.active_assistant_index = None;
+    }
+
+    pub fn push_optimistic_user_message(
+        &mut self,
+        content: impl Into<String>,
+        client_message_id: impl Into<String>,
+    ) {
+        let mut message = TranscriptMessage::new(TranscriptRole::User);
+        message.content = content.into();
+        message.extra.insert(
+            CLIENT_MESSAGE_ID_EXTRA_KEY.to_string(),
+            Value::String(client_message_id.into()),
+        );
+        self.messages.push(message);
+        self.active_assistant_id = None;
+        self.active_assistant_index = None;
+    }
+
+    pub fn replace_optimistic_user_message(&mut self, message: TranscriptMessage) -> bool {
+        let Some(client_message_id) = message.client_message_id() else {
+            return false;
+        };
+        let Some(index) = self.messages.iter().position(|existing| {
+            existing.role == TranscriptRole::User
+                && existing.message_id.is_none()
+                && existing.client_message_id() == Some(client_message_id)
+        }) else {
+            return false;
+        };
+        self.messages[index] = message;
+        self.refresh_cached_indexes();
+        true
+    }
+
+    pub fn has_optimistic_user_message(&self) -> bool {
+        self.messages.iter().any(|message| {
+            message.role == TranscriptRole::User
+                && message.message_id.is_none()
+                && message.client_message_id().is_some()
+        })
     }
 
     pub fn add_message(&mut self, raw: &Value) -> bool {
@@ -1214,6 +1263,29 @@ mod tests {
         assert!(!state.add_message(&message));
         assert_eq!(state.messages().len(), 1);
         assert_eq!(state.messages()[0].content, "hello world");
+    }
+
+    #[test]
+    fn optimistic_user_message_reconciles_only_with_matching_client_message_id() {
+        let mut state = TranscriptState::new();
+        state.push_optimistic_user_message("same", "optimistic-1");
+        let matching = TranscriptMessage::from_wire(&json!({
+            "message_id": "server-1",
+            "role": "user",
+            "content": "same",
+            "extra": {"client_message_id": "optimistic-1"},
+        }));
+        let different = TranscriptMessage::from_wire(&json!({
+            "message_id": "server-2",
+            "role": "user",
+            "content": "same",
+            "extra": {"client_message_id": "optimistic-2"},
+        }));
+
+        assert!(state.replace_optimistic_user_message(matching));
+        assert!(!state.replace_optimistic_user_message(different));
+        assert_eq!(state.messages().len(), 1);
+        assert_eq!(state.messages()[0].message_id.as_deref(), Some("server-1"));
     }
 
     #[test]
