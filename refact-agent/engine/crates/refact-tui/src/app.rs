@@ -140,6 +140,18 @@ struct EditorCommand {
 }
 
 #[derive(Debug, Clone)]
+struct CommandOrigin {
+    project_id: String,
+    chat_id: String,
+}
+
+impl CommandOrigin {
+    fn is_current(&self, app: &App) -> bool {
+        app.current_project_id() == Some(self.project_id.as_str()) && app.chat_id() == self.chat_id
+    }
+}
+
+#[derive(Debug, Clone)]
 enum CommandContextTag {
     SendMessage {
         prompt: String,
@@ -156,21 +168,33 @@ enum CommandContextTag {
         client_request_id: String,
         rollback: ToolDecisionRollback,
     },
-    Abort,
+    Abort {
+        origin: CommandOrigin,
+    },
     Rename {
+        origin: CommandOrigin,
         title: String,
     },
     Fork {
+        origin: CommandOrigin,
         target_chat_id: String,
         title: Option<String>,
     },
     Archive {
+        origin: CommandOrigin,
         chat_id: String,
     },
     Other,
 }
 
 impl App {
+    fn command_origin(&self) -> CommandOrigin {
+        CommandOrigin {
+            project_id: self.current_project_id().unwrap_or_default().to_string(),
+            chat_id: self.chat_id().to_string(),
+        }
+    }
+
     fn apply_tui_config_content(&mut self, content: &str) {
         match KeymapRegistry::from_config_file_content(Some(content)) {
             Ok(keymap) => {
@@ -2927,7 +2951,12 @@ new-chat = "ctrl-x"
         assert!(app.abort_in_flight);
 
         assert_eq!(
-            app.handle_command_finished(CommandContextTag::Abort, Ok(())),
+            app.handle_command_finished(
+                CommandContextTag::Abort {
+                    origin: app.command_origin(),
+                },
+                Ok(()),
+            ),
             AppAction::None
         );
         assert_eq!(app.session_state(), SessionState::Idle);
@@ -3642,7 +3671,12 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
         assert_eq!(app.session_state(), SessionState::Generating);
         assert!(app.abort_in_flight);
 
-        let action = app.handle_command_finished(CommandContextTag::Abort, Ok(()));
+        let action = app.handle_command_finished(
+            CommandContextTag::Abort {
+                origin: app.command_origin(),
+            },
+            Ok(()),
+        );
 
         assert!(matches!(
             action,
@@ -3653,7 +3687,12 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
         assert_eq!(app.input_queue().len(), 1);
         assert_eq!(app.input_queue().items()[0].text, "third");
         assert_eq!(
-            app.handle_command_finished(CommandContextTag::Abort, Ok(())),
+            app.handle_command_finished(
+                CommandContextTag::Abort {
+                    origin: app.command_origin(),
+                },
+                Ok(()),
+            ),
             AppAction::None
         );
         assert_eq!(app.input_queue().len(), 1);
@@ -3667,7 +3706,12 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
         assert_eq!(app.session_state(), SessionState::Generating);
         assert!(app.abort_in_flight);
 
-        let action = app.handle_command_finished(CommandContextTag::Abort, Ok(()));
+        let action = app.handle_command_finished(
+            CommandContextTag::Abort {
+                origin: app.command_origin(),
+            },
+            Ok(()),
+        );
 
         assert_eq!(action, AppAction::None);
         assert_eq!(app.session_state(), SessionState::Idle);
@@ -4857,12 +4901,14 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
         subscriptions.generation = 3;
         let old_chat_id = app.chat_id().to_string();
         let stale_title = "stale title".to_string();
+        let origin = app.command_origin();
 
         assert!(subscriptions
             .apply_command_finished(
                 &mut app,
                 2,
                 CommandContextTag::Rename {
+                    origin: origin.clone(),
                     title: stale_title.clone(),
                 },
                 Ok(()),
@@ -4874,7 +4920,10 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
             .apply_command_finished(
                 &mut app,
                 3,
-                CommandContextTag::Rename { title: stale_title },
+                CommandContextTag::Rename {
+                    origin,
+                    title: stale_title,
+                },
                 Ok(()),
             )
             .is_some());
@@ -4943,7 +4992,9 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
 
         assert_eq!(
             app.handle_command_finished(
-                CommandContextTag::Abort,
+                CommandContextTag::Abort {
+                    origin: app.command_origin(),
+                },
                 Err("backend unavailable".to_string()),
             ),
             AppAction::None
@@ -4951,6 +5002,114 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
         assert!(!app.abort_in_flight);
         assert!(app.approval_modal().is_some());
         assert!(app.ask_questions_form().is_some());
+    }
+
+    #[test]
+    fn stale_command_completions_are_silent_and_current_origin_applies() {
+        let mut app = App::new(project());
+        let origin = app.command_origin();
+        app.abort_in_flight = true;
+        app.set_session_state(SessionState::Generating);
+        app.set_project(project_b());
+        app.abort_in_flight = true;
+        app.set_session_state(SessionState::Generating);
+        let before = app.visible_transcript().len();
+
+        assert_eq!(
+            app.handle_command_finished(
+                CommandContextTag::Abort {
+                    origin: origin.clone(),
+                },
+                Ok(()),
+            ),
+            AppAction::None
+        );
+        assert!(app.abort_in_flight);
+        assert_eq!(app.session_state(), SessionState::Generating);
+        assert_eq!(app.visible_transcript().len(), before);
+        assert_eq!(
+            app.handle_command_finished(
+                CommandContextTag::Abort {
+                    origin: origin.clone(),
+                },
+                Err("stale abort".to_string()),
+            ),
+            AppAction::None
+        );
+        assert!(app.abort_in_flight);
+        assert_eq!(app.visible_transcript().len(), before);
+
+        let stale_title = "Stale".to_string();
+        for result in [Ok(()), Err("stale rename".to_string())] {
+            assert_eq!(
+                app.handle_command_finished(
+                    CommandContextTag::Rename {
+                        origin: origin.clone(),
+                        title: stale_title.clone(),
+                    },
+                    result,
+                ),
+                AppAction::None
+            );
+        }
+        assert_eq!(app.session_title(), None);
+
+        let stale_fork = "stale-fork".to_string();
+        for result in [Ok(()), Err("stale fork".to_string())] {
+            assert_eq!(
+                app.handle_command_finished(
+                    CommandContextTag::Fork {
+                        origin: origin.clone(),
+                        target_chat_id: stale_fork.clone(),
+                        title: None,
+                    },
+                    result,
+                ),
+                AppAction::None
+            );
+        }
+        assert_ne!(app.chat_id(), stale_fork);
+
+        let stale_archive = "stale-archive".to_string();
+        for result in [Ok(()), Err("stale archive".to_string())] {
+            assert_eq!(
+                app.handle_command_finished(
+                    CommandContextTag::Archive {
+                        origin: origin.clone(),
+                        chat_id: stale_archive.clone(),
+                    },
+                    result,
+                ),
+                AppAction::None
+            );
+        }
+        assert_ne!(app.chat_id(), stale_archive);
+        assert_eq!(app.visible_transcript().len(), before);
+
+        let current = app.command_origin();
+        assert_eq!(
+            app.handle_command_finished(
+                CommandContextTag::Abort {
+                    origin: current.clone(),
+                },
+                Ok(()),
+            ),
+            AppAction::None
+        );
+        assert_eq!(app.session_state(), SessionState::Idle);
+        assert!(!app.abort_in_flight);
+
+        assert_eq!(
+            app.handle_command_finished(
+                CommandContextTag::Rename {
+                    origin: current,
+                    title: "Current".to_string(),
+                },
+                Ok(()),
+            ),
+            AppAction::None
+        );
+        assert_eq!(app.session_title(), Some("Current"));
     }
 
     #[test]
@@ -4979,6 +5138,7 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
         assert_eq!(
             app.handle_command_finished(
                 CommandContextTag::Fork {
+                    origin: app.command_origin(),
                     target_chat_id: target_chat_id.clone(),
                     title: title.clone(),
                 },
@@ -4991,6 +5151,7 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
         assert_eq!(
             app.handle_command_finished(
                 CommandContextTag::Fork {
+                    origin: app.command_origin(),
                     target_chat_id: target_chat_id.clone(),
                     title,
                 },
@@ -5011,6 +5172,7 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
         assert_eq!(
             app.handle_command_finished(
                 CommandContextTag::Rename {
+                    origin: app.command_origin(),
                     title: "Better title".to_string(),
                 },
                 Err("rename failed".to_string()),
@@ -5028,6 +5190,7 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
         assert_eq!(
             app.handle_command_finished(
                 CommandContextTag::Archive {
+                    origin: app.command_origin(),
                     chat_id: new_chat_id.clone(),
                 },
                 Err("archive failed".to_string()),
@@ -5038,6 +5201,7 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
         assert_eq!(
             app.handle_command_finished(
                 CommandContextTag::Archive {
+                    origin: app.command_origin(),
                     chat_id: new_chat_id.clone(),
                 },
                 Ok(()),
@@ -5584,7 +5748,12 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
         assert_eq!(app.session_state(), SessionState::Generating);
         assert!(app.abort_in_flight);
         assert_eq!(
-            app.handle_command_finished(CommandContextTag::Abort, Ok(())),
+            app.handle_command_finished(
+                CommandContextTag::Abort {
+                    origin: app.command_origin(),
+                },
+                Ok(()),
+            ),
             AppAction::None
         );
         assert_eq!(app.session_state(), SessionState::Idle);
@@ -5638,7 +5807,12 @@ fn queued_input_dispatches_only_for_explicit_idle_runtime_state() {
         assert!(app.last_ctrl_c.is_none());
 
         assert_eq!(
-            app.handle_command_finished(CommandContextTag::Abort, Ok(())),
+            app.handle_command_finished(
+                CommandContextTag::Abort {
+                    origin: app.command_origin(),
+                },
+                Ok(()),
+            ),
             AppAction::None
         );
         assert_eq!(app.session_state(), SessionState::Idle);

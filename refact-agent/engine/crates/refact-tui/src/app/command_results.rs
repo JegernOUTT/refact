@@ -6,6 +6,16 @@ impl App {
         context: CommandContextTag,
         result: Result<(), String>,
     ) -> AppAction {
+        let origin = match &context {
+            CommandContextTag::Abort { origin }
+            | CommandContextTag::Rename { origin, .. }
+            | CommandContextTag::Fork { origin, .. }
+            | CommandContextTag::Archive { origin, .. } => Some(origin),
+            _ => None,
+        };
+        if origin.is_some_and(|origin| !origin.is_current(self)) {
+            return AppAction::None;
+        }
         match result {
             Ok(()) => self.handle_command_success(context),
             Err(error) => self.handle_command_failure(context, error),
@@ -18,7 +28,7 @@ impl App {
                 self.clear_in_flight_send(&correlation.client_request_id);
                 AppAction::None
             }
-            CommandContextTag::Abort => {
+            CommandContextTag::Abort { .. } => {
                 if !self.abort_in_flight {
                     return AppAction::None;
                 }
@@ -38,15 +48,16 @@ impl App {
                 let _ = client_request_id;
                 AppAction::None
             }
-            CommandContextTag::Rename { title } => {
+            CommandContextTag::Rename { title, .. } => {
                 self.apply_renamed_chat(title);
                 AppAction::None
             }
             CommandContextTag::Fork {
                 target_chat_id,
                 title,
+                ..
             } => self.open_forked_chat(target_chat_id, title),
-            CommandContextTag::Archive { chat_id } => self.apply_archived_chat(chat_id),
+            CommandContextTag::Archive { chat_id, .. } => self.apply_archived_chat(chat_id),
             CommandContextTag::Reasoning { .. } | CommandContextTag::Other => AppAction::None,
         }
     }
@@ -58,7 +69,7 @@ impl App {
                 params,
                 correlation,
             } => self.handle_send_message_failure(prompt, params, correlation, error),
-            CommandContextTag::Abort => {
+            CommandContextTag::Abort { .. } => {
                 self.retry_hint = retry_hint_from_message(&error);
                 self.abort_in_flight = false;
                 self.add_notice(format!("Abort failed: {error}"));

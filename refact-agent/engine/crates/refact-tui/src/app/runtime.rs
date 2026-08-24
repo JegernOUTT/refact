@@ -991,11 +991,12 @@ pub(super) async fn run_action(
         AppAction::RenameChat { title } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
+                let origin = app.command_origin();
                 let generation = subscriptions.command_generation();
                 let patch = json!({"title": title, "is_title_generated": false});
                 let client = client.clone();
                 let tx = tx.clone();
-                let context = CommandContextTag::Rename { title };
+                let context = CommandContextTag::Rename { origin, title };
                 tokio::spawn(async move {
                     let result = client
                         .send_set_params(&project_id, &chat_id, patch)
@@ -1018,10 +1019,12 @@ pub(super) async fn run_action(
             title,
         } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let origin = app.command_origin();
                 let generation = subscriptions.command_generation();
                 let client = client.clone();
                 let tx = tx.clone();
                 let context = CommandContextTag::Fork {
+                    origin,
                     target_chat_id: target_chat_id.clone(),
                     title,
                 };
@@ -1050,10 +1053,12 @@ pub(super) async fn run_action(
             new_chat_id,
         } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let origin = app.command_origin();
                 let generation = subscriptions.command_generation();
                 let client = client.clone();
                 let tx = tx.clone();
                 let context = CommandContextTag::Archive {
+                    origin,
                     chat_id: new_chat_id,
                 };
                 tokio::spawn(async move {
@@ -1129,6 +1134,7 @@ pub(super) async fn run_action(
         AppAction::Abort => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();
+                let origin = app.command_origin();
                 let generation = subscriptions.command_generation();
                 let client = client.clone();
                 let tx = tx.clone();
@@ -1146,14 +1152,19 @@ pub(super) async fn run_action(
                     let _ = tx
                         .send(RuntimeEvent::CommandFinished {
                             generation,
-                            context: CommandContextTag::Abort,
+                            context: CommandContextTag::Abort { origin },
                             result,
                         })
                         .await;
                 });
             } else {
                 let _ = app.handle_command_finished(
-                    CommandContextTag::Abort,
+                    CommandContextTag::Abort {
+                        origin: CommandOrigin {
+                            project_id: String::new(),
+                            chat_id: String::new(),
+                        },
+                    },
                     Err("no active project for abort".to_string()),
                 );
             }
