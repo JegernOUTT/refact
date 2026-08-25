@@ -11,6 +11,7 @@ use crate::approvals::{render_modal_lines, ApprovalModalState};
 use crate::render::wrapping::{adaptive_wrap_lines, line_width, RtOptions};
 use crate::render::{color_enabled_from_env, is_unified_diff, render_unified_diff, MarkdownRenderer};
 use crate::text_safety::{compact_tool_preview, sanitize_json_strings, sanitize_tool_text};
+use crate::theme::{ThemeRole, TuiTheme};
 use crate::tools::{ToolCard, ToolStatus};
 use crate::vendored::terminal_hyperlinks::{plain_hyperlink_lines, HyperlinkLine};
 
@@ -82,12 +83,47 @@ pub enum HistoryRenderMode {
 
 pub trait HistoryCell: HistoryCellClone + std::fmt::Debug + Send + Sync {
     fn kind(&self) -> HistoryCellKind;
-    fn render(&self, width: usize) -> Vec<Line<'static>>;
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>>;
+    fn render(&self, width: usize) -> Vec<Line<'static>> {
+        self.render_raw(width)
+    }
+    fn render_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<Line<'static>> {
+        resolve_cell_lines_with_color_enabled(
+            self.render_raw(width),
+            theme,
+            true,
+            color_enabled_from_env(),
+        )
+    }
     fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
-        plain_hyperlink_lines(self.render(width))
+        plain_hyperlink_lines(self.render_raw(width))
+    }
+    fn render_with_links_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<HyperlinkLine> {
+        resolve_hyperlink_lines_with_color_enabled(
+            self.render_with_links(width),
+            theme,
+            true,
+            color_enabled_from_env(),
+        )
     }
     fn display_hyperlink_lines(&self, width: usize) -> Vec<HyperlinkLine> {
         self.render_with_links(width)
+    }
+    fn display_hyperlink_lines_with_theme(
+        &self,
+        width: usize,
+        theme: &TuiTheme,
+    ) -> Vec<HyperlinkLine> {
+        let color_enabled = color_enabled_from_env();
+        if color_enabled && *theme == TuiTheme::default() {
+            return self.display_hyperlink_lines(width);
+        }
+        resolve_hyperlink_lines_with_color_enabled(
+            self.display_hyperlink_lines(width),
+            theme,
+            true,
+            color_enabled,
+        )
     }
     fn desired_height(&self, width: usize) -> usize {
         if width == 0 {
@@ -186,7 +222,7 @@ impl HistoryCell for PrefixedWrappedHistoryCell {
         HistoryCellKind::Info
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         if width == 0 {
             return Vec::new();
         }
@@ -226,7 +262,7 @@ impl HistoryCell for CompositeHistoryCell {
         HistoryCellKind::Info
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         let mut out = Vec::new();
         let mut first = true;
         for part in &self.parts {
@@ -349,12 +385,30 @@ pub fn render_transcript_item_lines(
     cell_from_transcript_item(item, selected).render(width)
 }
 
+pub fn render_transcript_item_lines_with_theme(
+    item: &TranscriptItem,
+    width: usize,
+    selected: bool,
+    theme: &TuiTheme,
+) -> Vec<Line<'static>> {
+    cell_from_transcript_item(item, selected).render_with_theme(width, theme)
+}
+
 pub fn render_transcript_item_hyperlink_lines(
     item: &TranscriptItem,
     width: usize,
     selected: bool,
 ) -> Vec<HyperlinkLine> {
     cell_from_transcript_item(item, selected).render_with_links(width)
+}
+
+pub fn render_transcript_item_hyperlink_lines_with_theme(
+    item: &TranscriptItem,
+    width: usize,
+    selected: bool,
+    theme: &TuiTheme,
+) -> Vec<HyperlinkLine> {
+    cell_from_transcript_item(item, selected).render_with_links_with_theme(width, theme)
 }
 
 pub fn cell_from_tool_card(card: ToolCard, selected: bool) -> Box<dyn HistoryCell> {
@@ -411,16 +465,16 @@ fn revision(value: &impl Hash) -> u64 {
 fn tool_summary_line(card: &ToolCard, title: String, meta: String) -> Line<'static> {
     let marker = if card.expanded { "▾" } else { "▸" };
     let mut spans = vec![
-        Span::styled(marker, Style::default().fg(Color::Cyan)),
+        Span::styled(marker, default_theme_style(ThemeRole::Accent)),
         Span::raw(" "),
         Span::styled(card.status.visual(), status_style(card.status)),
         Span::raw(" "),
-        Span::styled(title, Style::default().fg(Color::White)),
+        Span::styled(title, default_theme_style(ThemeRole::Text)),
     ];
     if !meta.is_empty() {
         spans.push(Span::styled(
             format!(" · {meta}"),
-            Style::default().fg(Color::DarkGray),
+            default_theme_style(ThemeRole::Muted),
         ));
     }
     Line::from(spans)
@@ -428,13 +482,15 @@ fn tool_summary_line(card: &ToolCard, title: String, meta: String) -> Line<'stat
 
 fn status_style(status: ToolStatus) -> Style {
     match status {
-        ToolStatus::Queued => Style::default().fg(Color::DarkGray),
-        ToolStatus::AwaitingApproval => Style::default().fg(Color::Yellow),
-        ToolStatus::ApprovedOnce | ToolStatus::ApprovedForChat => Style::default().fg(Color::Cyan),
-        ToolStatus::Running => Style::default().fg(Color::Yellow),
-        ToolStatus::Succeeded => Style::default().fg(Color::Green),
-        ToolStatus::Failed | ToolStatus::Denied => Style::default().fg(Color::Red),
-        ToolStatus::Cancelled => Style::default().fg(Color::DarkGray),
+        ToolStatus::Queued | ToolStatus::Cancelled => default_theme_style(ThemeRole::Muted),
+        ToolStatus::AwaitingApproval | ToolStatus::Running => {
+            default_theme_style(ThemeRole::Warning)
+        }
+        ToolStatus::ApprovedOnce | ToolStatus::ApprovedForChat => {
+            default_theme_style(ThemeRole::Accent)
+        }
+        ToolStatus::Succeeded => default_theme_style(ThemeRole::Success),
+        ToolStatus::Failed | ToolStatus::Denied => default_theme_style(ThemeRole::Error),
     }
 }
 
@@ -451,27 +507,25 @@ fn bold_span(text: impl Into<String>) -> Span<'static> {
 }
 
 fn cyan_span(text: impl Into<String>) -> Span<'static> {
-    Span::styled(text.into(), Style::default().fg(Color::Cyan))
+    Span::styled(text.into(), default_theme_style(ThemeRole::Highlight))
 }
 
 fn tool_status_bullet(status: ToolStatus) -> Span<'static> {
     match status {
         ToolStatus::Queued | ToolStatus::Cancelled => dim_span(status.icon()),
         ToolStatus::AwaitingApproval | ToolStatus::Running => {
-            Span::styled(status.icon(), Style::default().fg(Color::Yellow))
+            Span::styled(status.icon(), default_theme_style(ThemeRole::Warning))
         }
         ToolStatus::ApprovedOnce | ToolStatus::ApprovedForChat => {
-            Span::styled(status.icon(), Style::default().fg(Color::Cyan))
+            Span::styled(status.icon(), default_theme_style(ThemeRole::Accent))
         }
         ToolStatus::Succeeded => Span::styled(
             status.icon(),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            default_theme_style(ThemeRole::Success).add_modifier(Modifier::BOLD),
         ),
         ToolStatus::Failed | ToolStatus::Denied => Span::styled(
             status.icon(),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            default_theme_style(ThemeRole::Error).add_modifier(Modifier::BOLD),
         ),
     }
 }
@@ -589,7 +643,7 @@ fn output_lines(
     if all_lines.is_empty() {
         return vec![Line::from(Span::styled(
             "(no output)",
-            Style::default().fg(Color::DarkGray),
+            default_theme_style(ThemeRole::Muted),
         ))];
     }
     let shown = all_lines.len().min(max_lines);
@@ -607,7 +661,7 @@ fn output_lines(
         let suffix = if collapsed { " (expand)" } else { "" };
         lines.push(Line::from(Span::styled(
             format!("… {} more lines{suffix}", all_lines.len() - shown),
-            Style::default().fg(Color::DarkGray),
+            default_theme_style(ThemeRole::Muted),
         )));
     }
     lines
@@ -615,18 +669,107 @@ fn output_lines(
 
 fn output_style(line: &str) -> Style {
     if line.starts_with('+') && !line.starts_with("+++") {
-        Style::default().fg(Color::Green)
+        default_theme_style(ThemeRole::Success)
     } else if line.starts_with('-') && !line.starts_with("---") {
-        Style::default().fg(Color::Red)
+        default_theme_style(ThemeRole::Error)
     } else if line.starts_with("@@") {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
+        default_theme_style(ThemeRole::Accent).add_modifier(Modifier::BOLD)
     } else if line.starts_with("stderr") || line.contains("error") || line.contains("failed") {
-        Style::default().fg(Color::Red)
+        default_theme_style(ThemeRole::Error)
     } else {
-        Style::default().fg(Color::White)
+        default_theme_style(ThemeRole::Text)
     }
+}
+
+fn default_theme_style(role: ThemeRole) -> Style {
+    let mut style = Style::default();
+    style.fg = TuiTheme::dark().style(role).fg;
+    style
+}
+
+fn resolve_cell_lines_with_color_enabled(
+    lines: Vec<Line<'static>>,
+    theme: &TuiTheme,
+    resolve_fallback_colors: bool,
+    color_enabled: bool,
+) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|mut line| {
+            line.style =
+                resolve_cell_style(line.style, theme, resolve_fallback_colors, color_enabled);
+            line.spans = line
+                .spans
+                .into_iter()
+                .map(|mut span| {
+                    span.style = resolve_cell_style(
+                        span.style,
+                        theme,
+                        resolve_fallback_colors,
+                        color_enabled,
+                    );
+                    span
+                })
+                .collect();
+            line
+        })
+        .collect()
+}
+
+fn resolve_hyperlink_lines_with_color_enabled(
+    lines: Vec<HyperlinkLine>,
+    theme: &TuiTheme,
+    resolve_fallback_colors: bool,
+    color_enabled: bool,
+) -> Vec<HyperlinkLine> {
+    lines
+        .into_iter()
+        .map(|mut line| {
+            line.line = resolve_cell_lines_with_color_enabled(
+                vec![line.line],
+                theme,
+                resolve_fallback_colors,
+                color_enabled,
+            )
+            .pop()
+            .unwrap_or_default();
+            line
+        })
+        .collect()
+}
+
+fn resolve_cell_style(
+    mut style: Style,
+    theme: &TuiTheme,
+    resolve_fallback_colors: bool,
+    color_enabled: bool,
+) -> Style {
+    if !color_enabled {
+        style.fg = None;
+        return style;
+    }
+
+    if !resolve_fallback_colors {
+        return style;
+    }
+
+    let role = match style.fg {
+        Some(Color::Black | Color::White | Color::Reset) => Some(ThemeRole::Text),
+        Some(Color::Gray | Color::DarkGray) => Some(ThemeRole::Muted),
+        Some(Color::Yellow | Color::LightYellow) => Some(ThemeRole::Warning),
+        Some(Color::Red | Color::LightRed) => Some(ThemeRole::Error),
+        Some(Color::Green | Color::LightGreen) => Some(ThemeRole::Success),
+        Some(Color::Blue | Color::LightBlue | Color::Cyan | Color::LightCyan) => {
+            Some(ThemeRole::Highlight)
+        }
+        Some(Color::Magenta | Color::LightMagenta) => Some(ThemeRole::Accent),
+        Some(_) => None,
+        None => None,
+    };
+    if let Some(role) = role {
+        style.fg = theme.style(role).fg;
+    }
+    style
 }
 
 fn compact_preview(value: &str, max_chars: usize) -> String {
@@ -810,5 +953,71 @@ mod tests {
     #[test]
     fn raw_lines_from_source_omits_trailing_empty_line() {
         assert_eq!(raw_lines_from_source("one\ntwo\n").len(), 2);
+    }
+
+    #[test]
+    fn themes_change_transcript_colours_but_dark_preserves_them() {
+        let item = TranscriptItem::Tool(test_support::tool_card(
+            "shell",
+            serde_json::json!({"command": "echo hi"}),
+            "stdout: hi",
+        ));
+        let cell = cell_from_transcript_item(&item, false);
+        let dark = resolve_cell_lines_with_color_enabled(
+            cell.render_raw(80),
+            &TuiTheme::dark(),
+            true,
+            true,
+        );
+        let light = resolve_cell_lines_with_color_enabled(
+            cell.render_raw(80),
+            &TuiTheme::light(),
+            true,
+            true,
+        );
+
+        let dark_colours = dark
+            .iter()
+            .flat_map(|line| {
+                line.style
+                    .fg
+                    .into_iter()
+                    .chain(line.spans.iter().filter_map(|span| span.style.fg))
+            })
+            .collect::<Vec<_>>();
+        let light_colours = light
+            .iter()
+            .flat_map(|line| {
+                line.style
+                    .fg
+                    .into_iter()
+                    .chain(line.spans.iter().filter_map(|span| span.style.fg))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(dark_colours.contains(&TuiTheme::dark().style(ThemeRole::Highlight).fg.unwrap()));
+        assert!(dark_colours.contains(&TuiTheme::dark().style(ThemeRole::Text).fg.unwrap()));
+        assert!(light_colours.contains(&TuiTheme::light().style(ThemeRole::Highlight).fg.unwrap()));
+        assert!(light_colours.contains(&TuiTheme::light().style(ThemeRole::Text).fg.unwrap()));
+        assert_ne!(dark_colours, light_colours);
+    }
+
+    #[test]
+    fn no_color_strips_transcript_cell_colours() {
+        let item = TranscriptItem::Tool(test_support::tool_card(
+            "shell",
+            serde_json::json!({"command": "echo hi"}),
+            "stderr: failed",
+        ));
+        let lines = resolve_cell_lines_with_color_enabled(
+            cell_from_transcript_item(&item, false).render(80),
+            &TuiTheme::dark(),
+            true,
+            false,
+        );
+
+        assert!(lines.iter().all(|line| {
+            line.style.fg.is_none() && line.spans.iter().all(|span| span.style.fg.is_none())
+        }));
     }
 }

@@ -22,12 +22,10 @@ impl HistoryCell for DiffCell {
         HistoryCellKind::Diff
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines = vec![role_line(
             "diff",
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
+            default_theme_style(ThemeRole::Highlight).add_modifier(Modifier::BOLD),
         )];
         lines.extend(diff_summary_header_lines(&self.text, width));
         lines.extend(render_unified_diff(
@@ -60,7 +58,7 @@ impl HistoryCell for DiffToolCell {
         HistoryCellKind::Diff
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         let source = diff_source(&self.card);
         let stats = diff_file_stats(&source);
         let mut lines = vec![role_line(
@@ -69,9 +67,7 @@ impl HistoryCell for DiffToolCell {
             } else {
                 "diff"
             },
-            Style::default()
-                .fg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
+            default_theme_style(ThemeRole::Highlight).add_modifier(Modifier::BOLD),
         )];
         lines.push(tool_summary_line(
             &self.card,
@@ -85,15 +81,15 @@ impl HistoryCell for DiffToolCell {
         lines.extend(diff_summary_header_lines(&source, width));
         for stat in &stats {
             lines.push(Line::from(vec![
-                Span::styled("Δ ", Style::default().fg(Color::Blue)),
+                Span::styled("Δ ", default_theme_style(ThemeRole::Highlight)),
                 Span::raw(stat.path.clone()),
                 Span::styled(
                     format!(" +{}", stat.added),
-                    Style::default().fg(Color::Green),
+                    default_theme_style(ThemeRole::Success),
                 ),
                 Span::styled(
                     format!(" -{}", stat.deleted),
-                    Style::default().fg(Color::Red),
+                    default_theme_style(ThemeRole::Error),
                 ),
             ]));
         }

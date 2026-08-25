@@ -232,6 +232,7 @@ impl App {
     pub(super) fn set_theme(&mut self, theme: TuiTheme) {
         let syntax_name = theme.syntax_theme_name().to_string();
         let warning = highlight::set_theme_override(Some(syntax_name), self.tui_theme_home());
+        self.history.set_theme(theme.clone());
         self.theme = theme;
         if let Some(warning) = warning {
             self.add_notice(warning);
@@ -765,9 +766,14 @@ impl App {
         let mut lines = Vec::new();
         for item in self.overlay_transcript_items() {
             lines.extend(
-                crate::history::render_transcript_item_lines(&item, width, false)
-                    .iter()
-                    .map(line_to_plain_string),
+                crate::history::render_transcript_item_lines_with_theme(
+                    &item,
+                    width,
+                    false,
+                    &self.theme,
+                )
+                .iter()
+                .map(line_to_plain_string),
             );
         }
         lines

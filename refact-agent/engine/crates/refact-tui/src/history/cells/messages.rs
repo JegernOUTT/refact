@@ -40,7 +40,7 @@ impl HistoryCell for UserCell {
         HistoryCellKind::User
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         let style = user_message_style();
         let mut lines = vec![Line::from("").style(style)];
         lines.extend(prefix_lines(
@@ -91,7 +91,7 @@ impl HistoryCell for AssistantCell {
         HistoryCellKind::Assistant
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         visible_lines(self.render_with_links(width))
     }
 
@@ -101,6 +101,15 @@ impl HistoryCell for AssistantCell {
             renderer.render_with_links(&self.text),
             Span::styled("• ", Style::default().add_modifier(Modifier::DIM)),
             Span::raw("  "),
+        )
+    }
+
+    fn render_with_links_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<HyperlinkLine> {
+        resolve_hyperlink_lines_with_color_enabled(
+            self.render_with_links(width),
+            theme,
+            true,
+            color_enabled_from_env(),
         )
     }
 
@@ -141,7 +150,7 @@ impl HistoryCell for AssistantStreamCell {
         HistoryCellKind::Assistant
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         visible_lines(self.render_with_links(width))
     }
 
@@ -160,6 +169,15 @@ impl HistoryCell for AssistantStreamCell {
             ));
         }
         out
+    }
+
+    fn render_with_links_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<HyperlinkLine> {
+        resolve_hyperlink_lines_with_color_enabled(
+            self.render_with_links(width),
+            theme,
+            true,
+            color_enabled_from_env(),
+        )
     }
 
     fn is_stream_continuation(&self) -> bool {
@@ -218,7 +236,7 @@ impl HistoryCell for ReasoningCell {
         HistoryCellKind::Reasoning
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         visible_lines(self.render_with_links(width))
     }
 
@@ -233,6 +251,15 @@ impl HistoryCell for ReasoningCell {
             lines,
             Span::styled("• ", Style::default().add_modifier(Modifier::DIM)),
             Span::raw("  "),
+        )
+    }
+
+    fn render_with_links_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<HyperlinkLine> {
+        resolve_hyperlink_lines_with_color_enabled(
+            self.render_with_links(width),
+            theme,
+            true,
+            color_enabled_from_env(),
         )
     }
 
@@ -270,7 +297,7 @@ impl HistoryCell for ContentBlockCell {
         HistoryCellKind::ContentBlock
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         visible_lines(self.render_with_links(width))
     }
 
@@ -291,6 +318,15 @@ impl HistoryCell for ContentBlockCell {
             lines,
             Span::styled("• ", Style::default().add_modifier(Modifier::DIM)),
             Span::raw("  "),
+        )
+    }
+
+    fn render_with_links_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<HyperlinkLine> {
+        resolve_hyperlink_lines_with_color_enabled(
+            self.render_with_links(width),
+            theme,
+            true,
+            color_enabled_from_env(),
         )
     }
 
@@ -326,7 +362,7 @@ fn user_line_with_mentions(line: &str, style: Style) -> Line<'static> {
             .unwrap_or(line.len());
         spans.push(Span::styled(
             line[start..end].to_string(),
-            style.patch(Style::default().fg(Color::Cyan)),
+            style.patch(default_theme_style(ThemeRole::Highlight)),
         ));
         cursor = end;
     }
@@ -341,9 +377,7 @@ fn user_line_with_mentions(line: &str, style: Style) -> Line<'static> {
 }
 
 fn reasoning_style() -> Style {
-    Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM | Modifier::ITALIC)
+    default_theme_style(ThemeRole::Muted).add_modifier(Modifier::DIM | Modifier::ITALIC)
 }
 
 fn reasoning_line(text: &str) -> Line<'static> {

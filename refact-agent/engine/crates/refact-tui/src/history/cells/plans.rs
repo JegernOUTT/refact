@@ -111,7 +111,7 @@ impl HistoryCell for PlanCell {
         HistoryCellKind::Plan
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         self.render_with_links(width)
             .into_iter()
             .map(|line| line.line)
@@ -123,9 +123,7 @@ impl HistoryCell for PlanCell {
         let mut card = vec![HyperlinkLine::new(Line::from(" "))];
         card.push(HyperlinkLine::new(Line::from(Span::styled(
             self.metadata(),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            default_theme_style(ThemeRole::Muted).add_modifier(Modifier::DIM),
         ))));
         card.push(HyperlinkLine::new(Line::from(" ")));
 
@@ -140,6 +138,15 @@ impl HistoryCell for PlanCell {
         let plan_style = proposed_plan_style();
         lines.extend(card.into_iter().map(|line| line.style(plan_style)));
         finish_links(lines)
+    }
+
+    fn render_with_links_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<HyperlinkLine> {
+        resolve_hyperlink_lines_with_color_enabled(
+            self.render_with_links(width),
+            theme,
+            true,
+            color_enabled_from_env(),
+        )
     }
 
     fn revision(&self) -> u64 {
@@ -152,7 +159,7 @@ impl HistoryCell for GoalCell {
         HistoryCellKind::Goal
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         self.render_with_links(width)
             .into_iter()
             .map(|line| line.line)
@@ -164,9 +171,7 @@ impl HistoryCell for GoalCell {
         let mut card = vec![HyperlinkLine::new(Line::from(" "))];
         card.push(HyperlinkLine::new(Line::from(Span::styled(
             self.metadata(),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            default_theme_style(ThemeRole::Muted).add_modifier(Modifier::DIM),
         ))));
         card.push(HyperlinkLine::new(Line::from(" ")));
 
@@ -183,6 +188,15 @@ impl HistoryCell for GoalCell {
         finish_links(lines)
     }
 
+    fn render_with_links_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<HyperlinkLine> {
+        resolve_hyperlink_lines_with_color_enabled(
+            self.render_with_links(width),
+            theme,
+            true,
+            color_enabled_from_env(),
+        )
+    }
+
     fn revision(&self) -> u64 {
         revision(&(self.kind(), &self.data))
     }
@@ -193,7 +207,7 @@ impl HistoryCell for PlanStreamCell {
         HistoryCellKind::Plan
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         self.render_with_links(width)
             .into_iter()
             .map(|line| line.line)
@@ -202,6 +216,15 @@ impl HistoryCell for PlanStreamCell {
 
     fn render_with_links(&self, _width: usize) -> Vec<HyperlinkLine> {
         self.lines.clone()
+    }
+
+    fn render_with_links_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<HyperlinkLine> {
+        resolve_hyperlink_lines_with_color_enabled(
+            self.render_with_links(width),
+            theme,
+            true,
+            color_enabled_from_env(),
+        )
     }
 
     fn is_stream_continuation(&self) -> bool {

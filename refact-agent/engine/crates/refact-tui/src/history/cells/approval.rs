@@ -22,12 +22,12 @@ impl HistoryCell for ApprovalCell {
         HistoryCellKind::Approval
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines = render_modal_lines(&self.state, width);
         if let Some(status) = self.status {
             lines.push(Line::from(Span::styled(
                 format!("approval {}", status.visual()),
-                Style::default().fg(Color::DarkGray),
+                default_theme_style(ThemeRole::Muted),
             )));
         }
         finish(lines)

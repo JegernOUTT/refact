@@ -26,7 +26,7 @@ impl HistoryCell for ToolCallCell {
         HistoryCellKind::Tool
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         let label = if self.selected {
             "tool selected"
         } else {
@@ -34,10 +34,10 @@ impl HistoryCell for ToolCallCell {
         };
         let mut lines = vec![role_line(
             label,
-            Style::default().fg(if self.selected {
-                Color::Cyan
+            default_theme_style(if self.selected {
+                ThemeRole::Accent
             } else {
-                Color::Yellow
+                ThemeRole::Warning
             }),
         )];
         lines.extend(self.card.render_lines(width));
@@ -73,7 +73,7 @@ impl HistoryCell for SubchatCell {
         HistoryCellKind::Subchat
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         finish(self.render_inline(width))
     }
 
@@ -103,14 +103,14 @@ impl HistoryCell for ExecToolCell {
         HistoryCellKind::Exec
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines = vec![role_line(
             if self.selected {
                 "exec selected"
             } else {
                 "exec"
             },
-            Style::default().fg(Color::Cyan),
+            default_theme_style(ThemeRole::Accent),
         )];
         let mut meta = Vec::new();
         if let Some(exit_code) = exit_code_from_result(&self.card.result) {
@@ -294,9 +294,7 @@ fn render_tail_lines(
         lines.push(tree_line(
             true,
             format!("… +{omitted} lines"),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            default_theme_style(ThemeRole::Muted).add_modifier(Modifier::DIM),
             width,
         ));
     }
@@ -321,9 +319,7 @@ fn render_head_tail_lines(
         return vec![tree_line(
             true,
             "(no output)".to_string(),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            default_theme_style(ThemeRole::Muted).add_modifier(Modifier::DIM),
             width,
         )];
     }
@@ -345,9 +341,7 @@ fn render_head_tail_lines(
         lines.push(tree_line(
             false,
             format!("… +{omitted} lines"),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            default_theme_style(ThemeRole::Muted).add_modifier(Modifier::DIM),
             width,
         ));
         for line in source.iter().skip(total - max_lines) {
@@ -378,17 +372,19 @@ fn tree_line(first: bool, text: String, style: Style, width: usize) -> Line<'sta
     Line::from(vec![
         Span::styled(
             prefix,
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            default_theme_style(ThemeRole::Muted).add_modifier(Modifier::DIM),
         ),
         Span::styled(truncate_text(&text, text_width), style),
     ])
 }
 
 fn output_line_style(stderr: bool) -> Style {
-    let color = if stderr { Color::Red } else { Color::DarkGray };
-    Style::default().fg(color).add_modifier(Modifier::DIM)
+    default_theme_style(if stderr {
+        ThemeRole::Error
+    } else {
+        ThemeRole::Muted
+    })
+    .add_modifier(Modifier::DIM)
 }
 
 #[cfg(test)]

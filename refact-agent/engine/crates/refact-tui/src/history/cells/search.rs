@@ -17,7 +17,7 @@ impl HistoryCell for SearchToolCell {
         HistoryCellKind::Search
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines = search_header_lines(&self.card, width);
         lines.push(tool_summary_line(
             &self.card,

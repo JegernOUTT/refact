@@ -17,7 +17,7 @@ impl HistoryCell for RequestInputToolCell {
         HistoryCellKind::RequestInput
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines = vec![Line::from(vec![
             dim_span("•"),
             Span::raw(" "),
@@ -54,7 +54,7 @@ impl HistoryCell for RequestInputToolCell {
                         width,
                         dim_span("    answer: "),
                         dim_span("            "),
-                        Style::default().fg(Color::Cyan),
+                        default_theme_style(ThemeRole::Highlight),
                     ));
                 }
             }

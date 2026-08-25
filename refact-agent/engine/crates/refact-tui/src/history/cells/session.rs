@@ -21,7 +21,7 @@ impl HistoryCell for SessionCell {
         HistoryCellKind::Session
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         let width = width.max(1);
         let mut lines = vec![clipped_line(session_title_spans(), width), Line::from("")];
         lines.extend(session_detail_lines(self.subtitle.as_deref(), width));
@@ -57,7 +57,7 @@ fn session_detail_line(text: &str, width: usize) -> Line<'static> {
         return clipped_line(
             vec![
                 Span::styled(before.to_string(), dim),
-                Span::styled("/model", Style::default().fg(Color::Cyan)),
+                Span::styled("/model", default_theme_style(ThemeRole::Highlight)),
                 Span::styled(after.to_string(), dim),
             ],
             width,

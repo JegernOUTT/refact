@@ -16,6 +16,7 @@ use ratatui::Terminal;
 
 use crate::app::TranscriptItem;
 use crate::render::{color_enabled_from_env, RenderCache, RenderCacheKey};
+use crate::theme::TuiTheme;
 
 pub mod cells;
 
@@ -207,6 +208,7 @@ pub struct HistoryBuffer {
     inserted_cell_count: usize,
     emitted_history_lines: bool,
     emitted_history_trailing_blank: bool,
+    theme: TuiTheme,
 }
 
 impl HistoryBuffer {
@@ -221,6 +223,14 @@ impl HistoryBuffer {
         self.cache_keys.clear();
         self.emitted_history_lines = false;
         self.emitted_history_trailing_blank = false;
+    }
+
+    pub fn set_theme(&mut self, theme: TuiTheme) {
+        if self.theme != theme {
+            self.theme = theme;
+            self.render_cache.clear();
+            self.cache_keys.clear();
+        }
     }
 
     pub fn enqueue(&mut self, item: TranscriptItem) -> u64 {
@@ -604,13 +614,19 @@ impl HistoryBuffer {
         content_width: usize,
     ) -> Vec<HyperlinkLine> {
         let key = self.cache_key(cell, content_width);
-        self.render_cache
-            .render(key, || cell.display_hyperlink_lines(content_width))
+        let theme = self.theme.clone();
+        self.render_cache.render(key, || {
+            cell.display_hyperlink_lines_with_theme(content_width, &theme)
+        })
     }
 
     fn cache_key(&self, cell: &dyn cells::HistoryCell, content_width: usize) -> RenderCacheKey {
         RenderCacheKey::new(
-            (cell.kind(), format!("{cell:?}")),
+            (
+                cell.kind(),
+                format!("{cell:?}"),
+                format!("{:?}", self.theme),
+            ),
             content_width,
             color_enabled_from_env(),
         )
@@ -768,12 +784,30 @@ pub fn render_transcript_item_lines(
     cells::render_transcript_item_lines(item, width, selected)
 }
 
+pub fn render_transcript_item_lines_with_theme(
+    item: &TranscriptItem,
+    width: usize,
+    selected: bool,
+    theme: &TuiTheme,
+) -> Vec<Line<'static>> {
+    cells::render_transcript_item_lines_with_theme(item, width, selected, theme)
+}
+
 pub fn render_transcript_item_hyperlink_lines(
     item: &TranscriptItem,
     width: usize,
     selected: bool,
 ) -> Vec<HyperlinkLine> {
     cells::render_transcript_item_hyperlink_lines(item, width, selected)
+}
+
+pub fn render_transcript_item_hyperlink_lines_with_theme(
+    item: &TranscriptItem,
+    width: usize,
+    selected: bool,
+    theme: &TuiTheme,
+) -> Vec<HyperlinkLine> {
+    cells::render_transcript_item_hyperlink_lines_with_theme(item, width, selected, theme)
 }
 
 #[cfg(test)]
@@ -829,7 +863,7 @@ mod tests {
             cells::HistoryCellKind::Info
         }
 
-        fn render(&self, _width: usize) -> Vec<Line<'static>> {
+        fn render_raw(&self, _width: usize) -> Vec<Line<'static>> {
             self.lines.iter().copied().map(Line::from).collect()
         }
 
@@ -843,7 +877,7 @@ mod tests {
             cells::HistoryCellKind::Info
         }
 
-        fn render(&self, _width: usize) -> Vec<Line<'static>> {
+        fn render_raw(&self, _width: usize) -> Vec<Line<'static>> {
             (0..self.line_count)
                 .map(|index| Line::from(format!("line {index}")))
                 .collect()
@@ -859,7 +893,7 @@ mod tests {
             cells::HistoryCellKind::Info
         }
 
-        fn render(&self, _width: usize) -> Vec<Line<'static>> {
+        fn render_raw(&self, _width: usize) -> Vec<Line<'static>> {
             vec![Line::from(self.text.clone())]
         }
 
@@ -880,7 +914,7 @@ mod tests {
             cells::HistoryCellKind::Info
         }
 
-        fn render(&self, _width: usize) -> Vec<Line<'static>> {
+        fn render_raw(&self, _width: usize) -> Vec<Line<'static>> {
             Vec::new()
         }
 

@@ -16,7 +16,7 @@ impl HistoryCell for NoticeCell {
         HistoryCellKind::Notice
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         finish(match notice_kind(&self.text) {
             NoticeKind::Info => vec![info_line(&self.text)],
             NoticeKind::Warning => warning_lines(&self.text, width),
@@ -45,14 +45,14 @@ impl HistoryCell for InfoCell {
         HistoryCellKind::Info
     }
 
-    fn render(&self, _width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, _width: usize) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         if let Some((first, rest)) = self.lines.split_first() {
             lines.push(info_line(first));
             lines.extend(rest.iter().map(|text| {
                 Line::from(Span::styled(
                     text.clone(),
-                    Style::default().fg(Color::DarkGray),
+                    default_theme_style(ThemeRole::Muted),
                 ))
             }));
         }
@@ -101,7 +101,7 @@ impl HistoryCell for EventCell {
         HistoryCellKind::Event
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         let renderer = MarkdownRenderer::new(Some(width));
         let mut lines = vec![event_header_line(&self.data)];
         lines.extend(renderer.render(&self.data.content));
@@ -153,7 +153,7 @@ fn dim_style() -> Style {
 }
 
 fn warning_style() -> Style {
-    Style::default().fg(Color::Yellow)
+    default_theme_style(ThemeRole::Warning)
 }
 
 fn info_line(text: &str) -> Line<'static> {
@@ -175,7 +175,7 @@ fn warning_lines(text: &str, width: usize) -> Vec<Line<'static>> {
 fn error_line(text: &str) -> Line<'static> {
     Line::from(Span::styled(
         format!("■ {text}"),
-        Style::default().fg(Color::Red),
+        default_theme_style(ThemeRole::Error),
     ))
 }
 
@@ -184,7 +184,7 @@ fn event_header_line(data: &EventCellData) -> Line<'static> {
         Span::styled("• ", dim_style()),
         Span::styled(
             format!("event · {} · {}", data.subkind, data.source),
-            Style::default().fg(Color::DarkGray),
+            default_theme_style(ThemeRole::Muted),
         ),
     ])
 }
@@ -259,7 +259,7 @@ impl HistoryCell for StatusCell {
         HistoryCellKind::Info
     }
 
-    fn render(&self, width: usize) -> Vec<Line<'static>> {
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
         finish(crate::ui::status_card::render_lines(
             width,
             &self.snapshot,
