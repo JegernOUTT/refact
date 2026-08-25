@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 use super::transcript::{
-    citation_item, finalized_assistant_content_part, render_message_key,
+    citation_item, finalized_assistant_content_part, is_plan_delta_message, render_message_key,
     rendered_state_keys_for_message, server_content_block_item, session_header_key,
     state_key_has_stable_identity,
 };
@@ -1127,7 +1127,10 @@ impl App {
             }
             return;
         }
-        if insert_before_end {
+        if insert_before_end
+            || message.role == TranscriptRole::Plan
+            || is_plan_delta_message(&message)
+        {
             self.rebuild_remote_transcript_from_state();
         } else {
             match &message.role {

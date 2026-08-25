@@ -3610,6 +3610,121 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn authoritative_insertions_rebuild_native_and_alternate_history_in_server_order() {
+        for native_scrollback in [false, true] {
+            let mut app = App::new(project());
+            app.set_native_scrollback(native_scrollback);
+            if native_scrollback {
+                app.pending_history_insertions(80);
+            }
+            app.handle_chat_event(snapshot_event(
+                &app,
+                vec![
+                    json!({"message_id": "a1", "role": "assistant", "content": "one", "stream_finished": true}),
+                    json!({"message_id": "a3", "role": "assistant", "content": "three", "stream_finished": true}),
+                ],
+            ));
+            if native_scrollback {
+                app.pending_history_insertions(80);
+                app.resize_reflow.clear_pending_reflow();
+            }
+
+            for (index, message_id, content) in
+                [(1, "a2", "middle"), (0, "a0", "start"), (4, "a4", "end")]
+            {
+                app.handle_chat_event(ChatEvent {
+                    chat_id: Some(app.chat_id().to_string()),
+                    seq: None,
+                    kind: "message_added".to_string(),
+                    raw: json!({"index": index, "message": {
+                        "message_id": message_id,
+                        "role": "assistant",
+                        "content": content,
+                        "stream_finished": true,
+                    }}),
+                });
+            }
+
+            assert_eq!(
+                app.transcript_state()
+                    .messages()
+                    .iter()
+                    .map(|message| message.message_id.as_deref())
+                    .collect::<Vec<_>>(),
+                [Some("a0"), Some("a1"), Some("a2"), Some("a3"), Some("a4")],
+            );
+            if native_scrollback {
+                assert!(app.resize_reflow_is_due());
+                let text = app
+                    .resize_reflow_insertions(80)
+                    .into_iter()
+                    .flat_map(|insertion| insertion.lines)
+                    .map(|line| line_to_plain_string(&line.line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                for content in ["start", "one", "middle", "three", "end"] {
+                    assert_eq!(text.matches(content).count(), 1, "{content}: {text}");
+                }
+            } else {
+                assert_eq!(assistant_cell_count(&app), 5);
+                assert_eq!(assistant_text(&app), "startonemiddlethreeend");
+            }
+        }
+    }
+
+    #[test]
+    fn authoritative_correction_rebuilds_drained_native_and_alternate_history_once() {
+        for native_scrollback in [false, true] {
+            let mut app = App::new(project());
+            app.set_native_scrollback(native_scrollback);
+            if native_scrollback {
+                app.pending_history_insertions(80);
+            }
+            app.handle_chat_event(snapshot_event(
+                &app,
+                vec![json!({
+                    "message_id": "a1",
+                    "role": "assistant",
+                    "content": "stale",
+                    "stream_finished": true,
+                })],
+            ));
+            if native_scrollback {
+                app.pending_history_insertions(80);
+                app.resize_reflow.clear_pending_reflow();
+            }
+
+            app.handle_chat_event(ChatEvent {
+                chat_id: Some(app.chat_id().to_string()),
+                seq: None,
+                kind: "message_updated".to_string(),
+                raw: json!({"message_id": "a1", "message": {
+                    "message_id": "a1",
+                    "role": "assistant",
+                    "content": "corrected",
+                    "stream_finished": true,
+                }}),
+            });
+
+            if native_scrollback {
+                assert!(app.resize_reflow_is_due());
+                let text = app
+                    .resize_reflow_insertions(80)
+                    .into_iter()
+                    .flat_map(|insertion| insertion.lines)
+                    .map(|line| line_to_plain_string(&line.line))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert_eq!(text.matches("corrected").count(), 1);
+                assert!(!text.contains("stale"));
+            } else {
+                assert_eq!(assistant_cell_count(&app), 1);
+                assert_eq!(assistant_text(&app), "corrected");
+            }
+        }
+    }
+
+    #[test]
     fn identical_user_echoes_with_distinct_client_message_ids_remain_distinct() {
         let mut app = App::new(project());
         app.transcript_state
@@ -6800,10 +6915,139 @@ new-chat = "ctrl-x"
         });
 
         assert!(plan_stream_text(&app).is_empty());
+        assert!(app.resize_reflow_is_due());
+        app.resize_reflow_insertions(80);
         assert_eq!(app.history_pending_count(), 0);
         assert!(app.visible_transcript().iter().any(|item| {
             matches!(item, TranscriptItem::Plan(data) if data.content.contains("- eight"))
         }));
+    }
+
+    #[test]
+    fn authoritative_mutation_rebuilds_active_plan_stream_once_and_continues() {
+        for native_scrollback in [false, true] {
+            let mut app = App::new(project());
+            app.set_native_scrollback(native_scrollback);
+            if native_scrollback {
+                app.pending_history_insertions(80);
+            }
+            app.handle_chat_event(ChatEvent {
+                chat_id: Some(app.chat_id().to_string()),
+                seq: None,
+                kind: "message_added".to_string(),
+                raw: json!({"message": {
+                    "message_id": "p1",
+                    "role": "plan",
+                    "content": "## Plan\n- base\n",
+                    "stream_finished": false,
+                    "extra": {"plan": {"mode": "agent", "version": 1}},
+                }}),
+            });
+            app.handle_chat_event(ChatEvent {
+                chat_id: Some(app.chat_id().to_string()),
+                seq: None,
+                kind: "message_added".to_string(),
+                raw: json!({"message": {
+                    "message_id": "d1",
+                    "role": "event",
+                    "content": "- first delta\n",
+                    "stream_finished": false,
+                    "extra": {"event": {"subkind": "plan_delta", "payload": {"seq": 1}}},
+                }}),
+            });
+            if native_scrollback {
+                app.apply_stream_commit_tick();
+                app.pending_history_insertions(80);
+            }
+
+            app.handle_chat_event(ChatEvent {
+                chat_id: Some(app.chat_id().to_string()),
+                seq: None,
+                kind: "message_added".to_string(),
+                raw: json!({"index": 0, "message": {
+                    "message_id": "u1",
+                    "role": "user",
+                    "content": "inserted",
+                }}),
+            });
+
+            let rebuilt = plan_stream_text(&app);
+            for content in ["## Plan", "- base", "- first delta"] {
+                assert_eq!(rebuilt.matches(content).count(), 1, "{content}: {rebuilt}");
+            }
+            assert_eq!(
+                app.visible_transcript()
+                    .iter()
+                    .filter(|item| matches!(item, TranscriptItem::PlanStream(_)))
+                    .count(),
+                1
+            );
+
+            app.handle_chat_event(ChatEvent {
+                chat_id: Some(app.chat_id().to_string()),
+                seq: None,
+                kind: "message_updated".to_string(),
+                raw: json!({"message_id": "d1", "message": {
+                    "message_id": "d1",
+                    "role": "event",
+                    "content": "- first delta\n- continued\n",
+                    "stream_finished": false,
+                    "extra": {"event": {"subkind": "plan_delta", "payload": {"seq": 1}}},
+                }}),
+            });
+            let continued = plan_stream_text(&app);
+            for content in ["- base", "- first delta", "- continued"] {
+                assert_eq!(
+                    continued.matches(content).count(),
+                    1,
+                    "{content}: {continued}"
+                );
+            }
+
+            app.handle_chat_event(ChatEvent {
+                chat_id: Some(app.chat_id().to_string()),
+                seq: None,
+                kind: "message_updated".to_string(),
+                raw: json!({"message_id": "p1", "message": {
+                    "message_id": "p1",
+                    "role": "plan",
+                    "content": "## Plan\n- base\n",
+                    "stream_finished": true,
+                    "extra": {"plan": {"mode": "agent", "version": 1}},
+                }}),
+            });
+            app.handle_chat_event(ChatEvent {
+                chat_id: Some(app.chat_id().to_string()),
+                seq: None,
+                kind: "message_updated".to_string(),
+                raw: json!({"message_id": "d1", "message": {
+                    "message_id": "d1",
+                    "role": "event",
+                    "content": "- first delta\n- continued\n",
+                    "stream_finished": true,
+                    "extra": {"event": {"subkind": "plan_delta", "payload": {"seq": 1}}},
+                }}),
+            });
+
+            assert!(plan_stream_text(&app).is_empty());
+            let plans = app
+                .visible_transcript()
+                .iter()
+                .filter_map(|item| match item {
+                    TranscriptItem::Plan(data) => Some(data),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(plans.len(), 1);
+            for content in ["- base", "- first delta", "- continued"] {
+                assert_eq!(
+                    plans[0].content.matches(content).count(),
+                    1,
+                    "{content}: {}",
+                    plans[0].content
+                );
+            }
+        }
     }
 
     #[test]

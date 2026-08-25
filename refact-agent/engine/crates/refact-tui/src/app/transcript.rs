@@ -852,13 +852,13 @@ impl App {
                 self.push_state_unknown_message(message, role, raw);
             }
             TranscriptRole::Plan => {
-                if message.stream_finished {
-                    self.upsert_current_plan_item(render_message_key(message, "plan", 0));
-                } else {
+                if self.plan_stream_active() {
                     self.append_plan_stream(
                         render_message_key(message, "plan", 0),
                         &message.content,
                     );
+                } else {
+                    self.upsert_current_plan_item(render_message_key(message, "plan", 0));
                 }
             }
             TranscriptRole::Goal => {
@@ -866,13 +866,13 @@ impl App {
             }
             TranscriptRole::Event => {
                 if is_plan_delta_message(message) {
-                    if message.stream_finished {
-                        self.upsert_current_plan_item(render_message_key(message, "plan_delta", 0));
-                    } else {
+                    if self.plan_stream_active() {
                         self.append_plan_stream(
                             render_message_key(message, "plan_delta", 0),
                             &message.content,
                         );
+                    } else {
+                        self.upsert_current_plan_item(render_message_key(message, "plan_delta", 0));
                     }
                 } else if is_goal_delta_message(message) {
                     self.upsert_current_goal_item(render_message_key(message, "goal_delta", 0));
@@ -881,6 +881,13 @@ impl App {
                 }
             }
         }
+    }
+
+    fn plan_stream_active(&self) -> bool {
+        self.transcript_state.messages().iter().any(|message| {
+            (message.role == TranscriptRole::Plan || is_plan_delta_message(message))
+                && !message.stream_finished
+        })
     }
 
     pub(super) fn push_state_info_message(&mut self, message: &TranscriptMessage, label: &str) {
@@ -1034,10 +1041,14 @@ impl App {
 
     pub(super) fn rebuild_remote_transcript_from_state(&mut self) {
         let include_header = self.show_session_header || self.session_title.is_some();
-        if self.native_scrollback && self.plan_stream_controller.is_none() {
+        if self.native_scrollback {
             self.rendered_state_keys.clear();
         }
+        self.plan_stream_controller = None;
         self.rebuild_render_transcript_from_state();
+        if self.native_scrollback && self.history.inserted_cell_count() > 0 {
+            self.resize_reflow.schedule_immediate();
+        }
         if include_header && !self.native_scrollback {
             self.transcript.insert(0, self.session_header_item());
         }
