@@ -9,3 +9,25 @@
 {"chat_id":"chat-fixture","seq":"1","type":"messages_truncated"}
 {"chat_id":"chat-fixture","seq":"1","type":"messages_truncated","from_index":-1}
 {"chat_id":"chat-fixture","seq":"1","type":"messages_truncated","from_index":"0"}
+{"chat_id":"chat-fixture","seq":"1","type":"message_added"}
+{"chat_id":"chat-fixture","seq":"1","type":"message_added","message":null}
+{"chat_id":"chat-fixture","seq":"1","type":"message_added","message":"not an object"}
+{"chat_id":"chat-fixture","seq":"1","type":"message_added","message":{"message_id":"u2","role":"user","content":"next"},"index":null}
+{"chat_id":"chat-fixture","seq":"1","type":"message_added","message":{"message_id":"u2","role":"user","content":"next"},"index":"0"}
+{"chat_id":"chat-fixture","seq":"1","type":"message_added","message":{"message_id":"u2","role":"user","content":"next"},"index":-1}
+{"chat_id":"chat-fixture","seq":"1","type":"message_added","message":{"message_id":"u2","role":"user","content":"next"},"index":{}}
+{"chat_id":"chat-fixture","seq":"1","type":"message_updated","message":{"message_id":"u1","role":"user","content":"changed"}}
+{"chat_id":"chat-fixture","seq":"1","type":"message_updated","message_id":null,"message":{"message_id":"u1","role":"user","content":"changed"}}
+{"chat_id":"chat-fixture","seq":"1","type":"message_updated","message_id":"","message":{"message_id":"u1","role":"user","content":"changed"}}
+{"chat_id":"chat-fixture","seq":"1","type":"message_updated","message_id":" ","message":{"message_id":"u1","role":"user","content":"changed"}}
+{"chat_id":"chat-fixture","seq":"1","type":"message_updated","message_id":1,"message":{"message_id":"u1","role":"user","content":"changed"}}
+{"chat_id":"chat-fixture","seq":"1","type":"message_updated","message_id":{},"message":{"message_id":"u1","role":"user","content":"changed"}}
+{"chat_id":"chat-fixture","seq":"1","type":"message_updated","message_id":"u1"}
+{"chat_id":"chat-fixture","seq":"1","type":"message_updated","message_id":"u1","message":null}
+{"chat_id":"chat-fixture","seq":"1","type":"message_updated","message_id":"u1","message":"not an object"}
+{"chat_id":"chat-fixture","seq":"1","type":"message_removed"}
+{"chat_id":"chat-fixture","seq":"1","type":"message_removed","message_id":null}
+{"chat_id":"chat-fixture","seq":"1","type":"message_removed","message_id":""}
+{"chat_id":"chat-fixture","seq":"1","type":"message_removed","message_id":" "}
+{"chat_id":"chat-fixture","seq":"1","type":"message_removed","message_id":1}
+{"chat_id":"chat-fixture","seq":"1","type":"message_removed","message_id":{}}

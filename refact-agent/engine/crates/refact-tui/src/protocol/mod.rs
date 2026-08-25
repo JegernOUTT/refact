@@ -747,19 +747,49 @@ impl SseEvent {
             "thread_updated" => Self::ThreadUpdated {
                 params: raw.clone(),
             },
-            "message_added" => Self::MessageAdded {
-                message: raw.get("message").or_else(|| raw.get("msg")).cloned(),
-                index: raw
-                    .get("index")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as usize),
+            "message_added" => match message_payload(raw).filter(|message| message.is_object()) {
+                Some(message) => match raw.get("index") {
+                    Some(index) => {
+                        match index.as_u64().and_then(|index| usize::try_from(index).ok()) {
+                            Some(index) => Self::MessageAdded {
+                                message: Some(message.clone()),
+                                index: Some(index),
+                            },
+                            None => malformed_authoritative_event(
+                                kind,
+                                raw,
+                                "missing or invalid non-negative integer index",
+                            ),
+                        }
+                    }
+                    None => Self::MessageAdded {
+                        message: Some(message.clone()),
+                        index: None,
+                    },
+                },
+                None => malformed_authoritative_event(kind, raw, "missing or non-object message"),
             },
-            "message_updated" => Self::MessageUpdated {
-                message_id: message_id(raw),
-                message: raw.get("message").or_else(|| raw.get("msg")).cloned(),
+            "message_updated" => match non_empty_message_id(raw) {
+                Some(message_id) => {
+                    match message_payload(raw).filter(|message| message.is_object()) {
+                        Some(message) => Self::MessageUpdated {
+                            message_id: Some(message_id),
+                            message: Some(message.clone()),
+                        },
+                        None => malformed_authoritative_event(
+                            kind,
+                            raw,
+                            "missing or non-object message",
+                        ),
+                    }
+                }
+                None => malformed_authoritative_event(kind, raw, "missing or empty message_id"),
             },
-            "message_removed" => Self::MessageRemoved {
-                message_id: message_id(raw),
+            "message_removed" => match non_empty_message_id(raw) {
+                Some(message_id) => Self::MessageRemoved {
+                    message_id: Some(message_id),
+                },
+                None => malformed_authoritative_event(kind, raw, "missing or empty message_id"),
             },
             "messages_truncated" => match raw.get("from_index").and_then(Value::as_u64) {
                 Some(from_index) => Self::MessagesTruncated {
@@ -837,6 +867,17 @@ fn malformed_authoritative_event(kind: &str, raw: &Value, reason: &str) -> SseEv
             malformed_reason: Some(reason.to_string()),
         },
     }
+}
+
+fn message_payload(raw: &Value) -> Option<&Value> {
+    raw.get("message").or_else(|| raw.get("msg"))
+}
+
+fn non_empty_message_id(raw: &Value) -> Option<String> {
+    raw.get("message_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1942,6 +1983,141 @@ mod tests {
                 assert_eq!(result, Some(json!({"queued": true})));
             }
             other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_mutation_envelopes_require_valid_authoritative_fields() {
+        let message = json!({"message_id": "u1", "role": "user", "content": "hello"});
+
+        assert!(matches!(
+            SseEvent::from_raw(&json!({"type": "message_added", "message": message})),
+            SseEvent::MessageAdded {
+                message: Some(_),
+                index: None,
+            }
+        ));
+        assert!(matches!(
+            SseEvent::from_raw(&json!({"type": "message_added", "message": message, "index": 2})),
+            SseEvent::MessageAdded {
+                message: Some(_),
+                index: Some(2),
+            }
+        ));
+        assert!(matches!(
+            SseEvent::from_raw(&json!({
+                "type": "message_updated",
+                "message_id": "u1",
+                "message": message,
+            })),
+            SseEvent::MessageUpdated {
+                message_id: Some(message_id),
+                message: Some(_),
+            } if message_id == "u1"
+        ));
+        assert!(matches!(
+            SseEvent::from_raw(&json!({"type": "message_removed", "message_id": "u1"})),
+            SseEvent::MessageRemoved {
+                message_id: Some(message_id),
+            } if message_id == "u1"
+        ));
+
+        for (raw, expected_reason) in [
+            (
+                json!({"type": "message_added"}),
+                "missing or non-object message",
+            ),
+            (
+                json!({"type": "message_added", "message": null}),
+                "missing or non-object message",
+            ),
+            (
+                json!({"type": "message_added", "message": "not an object"}),
+                "missing or non-object message",
+            ),
+            (
+                json!({"type": "message_added", "message": message, "index": null}),
+                "missing or invalid non-negative integer index",
+            ),
+            (
+                json!({"type": "message_added", "message": message, "index": "0"}),
+                "missing or invalid non-negative integer index",
+            ),
+            (
+                json!({"type": "message_added", "message": message, "index": -1}),
+                "missing or invalid non-negative integer index",
+            ),
+            (
+                json!({"type": "message_added", "message": message, "index": {}}),
+                "missing or invalid non-negative integer index",
+            ),
+            (
+                json!({"type": "message_updated", "message": message}),
+                "missing or empty message_id",
+            ),
+            (
+                json!({"type": "message_updated", "message_id": null, "message": message}),
+                "missing or empty message_id",
+            ),
+            (
+                json!({"type": "message_updated", "message_id": "", "message": message}),
+                "missing or empty message_id",
+            ),
+            (
+                json!({"type": "message_updated", "message_id": " ", "message": message}),
+                "missing or empty message_id",
+            ),
+            (
+                json!({"type": "message_updated", "message_id": 1, "message": message}),
+                "missing or empty message_id",
+            ),
+            (
+                json!({"type": "message_updated", "message_id": {}, "message": message}),
+                "missing or empty message_id",
+            ),
+            (
+                json!({"type": "message_updated", "message_id": "u1"}),
+                "missing or non-object message",
+            ),
+            (
+                json!({"type": "message_updated", "message_id": "u1", "message": null}),
+                "missing or non-object message",
+            ),
+            (
+                json!({"type": "message_updated", "message_id": "u1", "message": "not an object"}),
+                "missing or non-object message",
+            ),
+            (
+                json!({"type": "message_removed"}),
+                "missing or empty message_id",
+            ),
+            (
+                json!({"type": "message_removed", "message_id": null}),
+                "missing or empty message_id",
+            ),
+            (
+                json!({"type": "message_removed", "message_id": ""}),
+                "missing or empty message_id",
+            ),
+            (
+                json!({"type": "message_removed", "message_id": " "}),
+                "missing or empty message_id",
+            ),
+            (
+                json!({"type": "message_removed", "message_id": 1}),
+                "missing or empty message_id",
+            ),
+            (
+                json!({"type": "message_removed", "message_id": {}}),
+                "missing or empty message_id",
+            ),
+        ] {
+            match SseEvent::from_raw(&raw) {
+                SseEvent::Unknown { event } => {
+                    assert_eq!(event.malformed_reason.as_deref(), Some(expected_reason));
+                }
+                other => panic!("expected malformed event, got {other:?}"),
+            }
         }
     }
 

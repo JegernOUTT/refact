@@ -1131,7 +1131,7 @@ fn malformed_authoritative_envelopes_request_resubscribe_without_mutating_state(
     assert_eq!(tracker.observe(&snapshot), ChatSeqDecision::Apply);
     app.apply_chat_event(snapshot);
 
-    for (raw, expected) in fixture.into_iter().skip(1).zip([
+    let expected_reasons = [
         "missing or non-array messages",
         "missing or non-array messages",
         "missing or non-array messages",
@@ -1142,7 +1142,32 @@ fn malformed_authoritative_envelopes_request_resubscribe_without_mutating_state(
         "missing or invalid non-negative integer from_index",
         "missing or invalid non-negative integer from_index",
         "missing or invalid non-negative integer from_index",
-    ]) {
+        "missing or non-object message",
+        "missing or non-object message",
+        "missing or non-object message",
+        "missing or invalid non-negative integer index",
+        "missing or invalid non-negative integer index",
+        "missing or invalid non-negative integer index",
+        "missing or invalid non-negative integer index",
+        "missing or empty message_id",
+        "missing or empty message_id",
+        "missing or empty message_id",
+        "missing or empty message_id",
+        "missing or empty message_id",
+        "missing or empty message_id",
+        "missing or non-object message",
+        "missing or non-object message",
+        "missing or non-object message",
+        "missing or empty message_id",
+        "missing or empty message_id",
+        "missing or empty message_id",
+        "missing or empty message_id",
+        "missing or empty message_id",
+        "missing or empty message_id",
+    ];
+    assert_eq!(fixture.len(), expected_reasons.len() + 1);
+
+    for (raw, expected) in fixture.into_iter().skip(1).zip(expected_reasons) {
         let event = chat_event_from_fixture(raw, &chat_id);
         assert!(matches!(
             tracker.observe(&event),
