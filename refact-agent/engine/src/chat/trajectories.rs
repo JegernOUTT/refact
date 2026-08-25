@@ -1,4 +1,3 @@
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::sync::atomic::Ordering;
@@ -7,6 +6,7 @@ use axum::extract::Path as AxumPath;
 use axum::http::{Response, StatusCode};
 use axum::extract::State;
 use hyper::Body;
+use serde::de::{Deserializer as _, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{Mutex as AMutex, Notify, broadcast};
@@ -802,8 +802,136 @@ pub async fn get_global_trajectories_dir(gcx: Arc<GlobalContext>) -> PathBuf {
 pub const INTERNAL_TRACE_LINK_PREFIX: &str = "internal:";
 pub const UNATTRIBUTED_TRACES_DIR: &str = "internal";
 const INTERNAL_TRACES_KEEP_PER_FOLDER: usize = 200;
-const INTERNAL_TRACE_METADATA_PREFIX_BYTES: u64 = 64 * 1024;
 const INTERNAL_TRACE_PRUNE_INTERVAL_SECS: u64 = 3600;
+const PRUNE_THROTTLE_MAX_ENTRIES: usize = 256;
+
+#[derive(Default)]
+struct PruneThrottle {
+    entries: std::collections::HashMap<PathBuf, PruneThrottleEntry>,
+    next_access: u64,
+}
+
+struct PruneThrottleEntry {
+    last_pruned_unix_secs: u64,
+    last_access: u64,
+}
+
+impl PruneThrottle {
+    fn claim(&mut self, dir: &Path, now: u64, interval_secs: u64) -> bool {
+        self.next_access = self.next_access.saturating_add(1);
+        if let Some(entry) = self.entries.get_mut(dir) {
+            if now.saturating_sub(entry.last_pruned_unix_secs) < interval_secs {
+                entry.last_access = self.next_access;
+                return false;
+            }
+            entry.last_pruned_unix_secs = now;
+            entry.last_access = self.next_access;
+            return true;
+        }
+        if self.entries.len() >= PRUNE_THROTTLE_MAX_ENTRIES {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_access)
+                .map(|(path, _)| path.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(
+            dir.to_path_buf(),
+            PruneThrottleEntry {
+                last_pruned_unix_secs: now,
+                last_access: self.next_access,
+            },
+        );
+        true
+    }
+
+    fn release(&mut self, dir: &Path, claimed_at_unix_secs: u64) {
+        if self
+            .entries
+            .get(dir)
+            .is_some_and(|entry| entry.last_pruned_unix_secs == claimed_at_unix_secs)
+        {
+            self.entries.remove(dir);
+        }
+    }
+}
+
+fn claim_prune_throttle(
+    throttle: &StdMutex<PruneThrottle>,
+    dir: &Path,
+    now: u64,
+    interval_secs: u64,
+    label: &str,
+) -> Result<bool, String> {
+    let mut throttle = throttle
+        .lock()
+        .map_err(|_| format!("{label} prune throttle lock poisoned"))?;
+    Ok(throttle.claim(dir, now, interval_secs))
+}
+
+fn release_prune_throttle(
+    throttle: &StdMutex<PruneThrottle>,
+    dir: &Path,
+    claimed_at_unix_secs: u64,
+) {
+    if let Ok(mut throttle) = throttle.lock() {
+        throttle.release(dir, claimed_at_unix_secs);
+    }
+}
+
+fn internal_trace_prune_throttle() -> &'static StdMutex<PruneThrottle> {
+    static LAST_PRUNE_BY_DIR: OnceLock<StdMutex<PruneThrottle>> = OnceLock::new();
+    LAST_PRUNE_BY_DIR.get_or_init(|| StdMutex::new(PruneThrottle::default()))
+}
+
+struct TopLevelInternalTraceVisitor;
+
+impl<'de> Visitor<'de> for TopLevelInternalTraceVisitor {
+    type Value = bool;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a trajectory JSON object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut link_type = None;
+        let mut link_type_seen = false;
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "link_type" {
+                if link_type_seen {
+                    return Err(serde::de::Error::custom("duplicate top-level link_type"));
+                }
+                link_type_seen = true;
+                link_type = map.next_value::<Option<String>>()?;
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(is_internal_trace_link_type(link_type.as_deref()))
+    }
+}
+
+fn parsed_top_level_link_type_is_internal(path: PathBuf) -> bool {
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+        _ => return false,
+    }
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let mut deserializer = serde_json::Deserializer::from_reader(file);
+    (&mut deserializer)
+        .deserialize_map(TopLevelInternalTraceVisitor)
+        .and_then(|is_internal| deserializer.end().map(|_| is_internal))
+        .unwrap_or(false)
+}
 
 pub fn is_internal_trace_link_type(link_type: Option<&str>) -> bool {
     link_type.is_some_and(|value| value.starts_with(INTERNAL_TRACE_LINK_PREFIX))
@@ -839,28 +967,10 @@ async fn prune_internal_traces_in_folder(dir: &Path, keep: usize) -> Result<usiz
             _ => continue,
         };
         let path_for_read = path.clone();
-        let file_len = metadata.len();
         let is_internal = tokio::task::spawn_blocking(move || {
-            let mut file = std::fs::File::open(path_for_read).ok()?;
-            let mut prefix = Vec::new();
-            (&mut file)
-                .take(INTERNAL_TRACE_METADATA_PREFIX_BYTES)
-                .read_to_end(&mut prefix)
-                .ok()?;
-            let tail_start = file_len.saturating_sub(INTERNAL_TRACE_METADATA_PREFIX_BYTES);
-            file.seek(SeekFrom::Start(tail_start)).ok()?;
-            let mut tail = Vec::new();
-            file.read_to_end(&mut tail).ok()?;
-            let prefix = String::from_utf8_lossy(&prefix);
-            let tail = String::from_utf8_lossy(&tail);
-            Some([prefix.as_ref(), tail.as_ref()].iter().any(|window| {
-                window.contains("\"link_type\": \"internal:")
-                    || window.contains("\"link_type\":\"internal:")
-            }))
+            parsed_top_level_link_type_is_internal(path_for_read)
         })
         .await
-        .ok()
-        .flatten()
         .unwrap_or(false);
         if !is_internal {
             continue;
@@ -869,8 +979,10 @@ async fn prune_internal_traces_in_folder(dir: &Path, keep: usize) -> Result<usiz
             .modified()
             .ok()
             .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis())
-            .unwrap_or(0);
+            .map(|duration| duration.as_millis());
+        let Some(modified) = modified else {
+            continue;
+        };
         traces.push((modified, path));
     }
     if traces.len() <= keep {
@@ -878,7 +990,27 @@ async fn prune_internal_traces_in_folder(dir: &Path, keep: usize) -> Result<usiz
     }
     traces.sort_by(|left, right| right.0.cmp(&left.0));
     let mut removed = 0;
-    for (_, path) in traces.into_iter().skip(keep) {
+    for (scanned_modified, path) in traces.into_iter().skip(keep) {
+        let current_modified = match fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata
+                .modified()
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis()),
+            _ => None,
+        };
+        if current_modified != Some(scanned_modified) {
+            continue;
+        }
+        let path_for_read = path.clone();
+        if !tokio::task::spawn_blocking(move || {
+            parsed_top_level_link_type_is_internal(path_for_read)
+        })
+        .await
+        .unwrap_or(false)
+        {
+            continue;
+        }
         if fs::remove_file(&path).await.is_ok() {
             removed += 1;
         }
@@ -887,25 +1019,24 @@ async fn prune_internal_traces_in_folder(dir: &Path, keep: usize) -> Result<usiz
 }
 
 async fn prune_internal_traces_throttled(dir: &Path) -> Result<usize, String> {
-    use std::sync::{Mutex, OnceLock};
-    static LAST_PRUNE_BY_DIR: OnceLock<Mutex<std::collections::HashMap<PathBuf, u64>>> =
-        OnceLock::new();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    {
-        let mut last_prune = LAST_PRUNE_BY_DIR
-            .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-            .lock()
-            .map_err(|_| "internal trace prune throttle lock poisoned".to_string())?;
-        let previous = last_prune.get(dir).copied().unwrap_or(0);
-        if now.saturating_sub(previous) < INTERNAL_TRACE_PRUNE_INTERVAL_SECS {
-            return Ok(0);
-        }
-        last_prune.insert(dir.to_path_buf(), now);
+    if !claim_prune_throttle(
+        internal_trace_prune_throttle(),
+        dir,
+        now,
+        INTERNAL_TRACE_PRUNE_INTERVAL_SECS,
+        "internal trace",
+    )? {
+        return Ok(0);
     }
-    prune_internal_traces_in_folder(dir, INTERNAL_TRACES_KEEP_PER_FOLDER).await
+    let result = prune_internal_traces_in_folder(dir, INTERNAL_TRACES_KEEP_PER_FOLDER).await;
+    if result.is_err() {
+        release_prune_throttle(internal_trace_prune_throttle(), dir, now);
+    }
+    result
 }
 
 pub(crate) async fn index_dir_for_trajectory_file(
@@ -1094,28 +1225,32 @@ pub(crate) const BUDDY_CONVERSATIONS_KEEP: usize = 500;
 const BUDDY_CONVERSATIONS_PRUNE_INTERVAL_SECS: u64 = 3600;
 const BUDDY_CONVERSATIONS_PRUNE_MIN_AGE_SECS: u64 = 86_400;
 
+fn buddy_conversation_prune_throttle() -> &'static StdMutex<PruneThrottle> {
+    static LAST_PRUNE_BY_DIR: OnceLock<StdMutex<PruneThrottle>> = OnceLock::new();
+    LAST_PRUNE_BY_DIR.get_or_init(|| StdMutex::new(PruneThrottle::default()))
+}
+
 async fn prune_buddy_conversations_throttled(gcx: Arc<GlobalContext>) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static LAST_PRUNE_UNIX_SECS: AtomicU64 = AtomicU64::new(0);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0);
-    let last = LAST_PRUNE_UNIX_SECS.load(Ordering::Relaxed);
-    if now.saturating_sub(last) < BUDDY_CONVERSATIONS_PRUNE_INTERVAL_SECS {
-        return;
-    }
-    if LAST_PRUNE_UNIX_SECS
-        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-        .is_err()
+    let dir = match get_buddy_conversations_dir(gcx.clone()).await {
+        Ok(dir) => dir,
+        Err(_) => return,
+    };
+    if !claim_prune_throttle(
+        buddy_conversation_prune_throttle(),
+        &dir,
+        now,
+        BUDDY_CONVERSATIONS_PRUNE_INTERVAL_SECS,
+        "buddy conversation",
+    )
+    .unwrap_or(false)
     {
         return;
     }
     let app = AppState::from_gcx(gcx.clone()).await;
-    let dir = match get_buddy_conversations_dir(gcx).await {
-        Ok(dir) => dir,
-        Err(_) => return,
-    };
     match prune_buddy_conversations_in_dir_with_coordinator(
         &dir,
         BUDDY_CONVERSATIONS_KEEP,
@@ -1127,12 +1262,7 @@ async fn prune_buddy_conversations_throttled(gcx: Arc<GlobalContext>) {
         Ok(removed) => info!("pruned {} old buddy conversations from {:?}", removed, dir),
         Err(e) => {
             warn!("buddy conversations prune failed: {}", e);
-            let _ = LAST_PRUNE_UNIX_SECS.compare_exchange(
-                now,
-                last,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            );
+            release_prune_throttle(buddy_conversation_prune_throttle(), &dir, now);
         }
     }
 }
@@ -1179,13 +1309,11 @@ async fn prune_buddy_conversations_in_dir_with_coordinator(
         else {
             continue;
         };
-        let metadata = match entry.metadata().await {
-            Ok(metadata) => metadata,
+        let metadata = match fs::symlink_metadata(&path).await {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
             Err(_) => continue,
+            _ => continue,
         };
-        if !metadata.is_file() {
-            continue;
-        }
         let modified_ms = metadata
             .modified()
             .ok()
@@ -1209,13 +1337,14 @@ async fn prune_buddy_conversations_in_dir_with_coordinator(
             continue;
         }
         let current_modified_ms = match fs::symlink_metadata(&path).await {
-            Ok(metadata) => metadata
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata
                 .modified()
                 .ok()
                 .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
                 .map(|elapsed| elapsed.as_millis() as i64)
                 .unwrap_or(i64::MAX),
             Err(_) => continue,
+            _ => continue,
         };
         if current_modified_ms != scanned_modified_ms {
             continue;
@@ -8112,6 +8241,25 @@ mod tests {
         assert_eq!(missing, 0);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prune_buddy_conversations_skips_symlinked_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("conversations");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let real = write_conversation_file(&dir, "real", 3 * 86_400).await;
+        let outside_file = write_conversation_file(outside.path(), "outside", 3 * 86_400).await;
+        std::os::unix::fs::symlink(&outside_file, dir.join("linked.json")).unwrap();
+
+        let removed = prune_buddy_conversations_in_dir(&dir, 0).await.unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!real.exists());
+        assert!(outside_file.exists());
+        assert!(dir.join("linked.json").exists());
+    }
+
     fn run_git(cwd: &Path, args: &[&str]) {
         let output = Command::new("git")
             .args(args)
@@ -8824,7 +8972,7 @@ mod tests {
             let payload = if index == 0 {
                 format!(
                     "{{\"id\":\"internal-0\",\"messages\":[{{\"role\":\"user\",\"content\":\"{}\"}}],\"link_type\":\"internal:title_generation\"}}",
-                    "x".repeat((INTERNAL_TRACE_METADATA_PREFIX_BYTES as usize) + 1024)
+                    "x".repeat((64 * 1024) + 1024)
                 )
             } else {
                 serde_json::json!({
@@ -8852,6 +9000,121 @@ mod tests {
         assert!(!dir.join("internal-1.json").exists());
         assert!(dir.join("internal-2.json").exists());
         assert!(dir.join("internal-3.json").exists());
+    }
+
+    #[tokio::test]
+    async fn internal_trace_pruning_ignores_message_content_and_invalid_json() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let user_trajectory = dir.join("user.json");
+        let corrupt = dir.join("corrupt.json");
+        let truncated = dir.join("truncated.json");
+        let old_trace = dir.join("old-trace.json");
+        let new_trace = dir.join("new-trace.json");
+
+        tokio::fs::write(
+            &user_trajectory,
+            serde_json::json!({
+                "id": "user",
+                "messages": [{"role": "user", "content": "\"link_type\": \"internal:spoof\""}]
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(&corrupt, "{\"link_type\":\"internal:broken\"")
+            .await
+            .unwrap();
+        tokio::fs::write(&truncated, "{\"messages\":[")
+            .await
+            .unwrap();
+        for (path, id, modified_secs) in
+            [(&old_trace, "old-trace", 1), (&new_trace, "new-trace", 2)]
+        {
+            tokio::fs::write(
+                path,
+                serde_json::json!({
+                    "id": id,
+                    "link_type": "internal:title_generation",
+                    "messages": []
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(modified_secs))
+                .unwrap();
+        }
+
+        let removed = prune_internal_traces_in_folder(dir, 1).await.unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(user_trajectory.exists());
+        assert!(corrupt.exists());
+        assert!(truncated.exists());
+        assert!(!old_trace.exists());
+        assert!(new_trace.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn internal_trace_pruning_skips_symlinked_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let outside_trace = outside.path().join("outside.json");
+        let real_trace = dir.join("real.json");
+        tokio::fs::write(
+            &outside_trace,
+            serde_json::json!({"id": "outside", "link_type": "internal:test"}).to_string(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &real_trace,
+            serde_json::json!({"id": "real", "link_type": "internal:test"}).to_string(),
+        )
+        .await
+        .unwrap();
+        std::os::unix::fs::symlink(&outside_trace, dir.join("linked.json")).unwrap();
+
+        let removed = prune_internal_traces_in_folder(dir, 0).await.unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!real_trace.exists());
+        assert!(outside_trace.exists());
+        assert!(dir.join("linked.json").exists());
+    }
+
+    fn assert_prune_throttle_is_bounded_and_isolates_directories() {
+        let mut throttle = PruneThrottle::default();
+        let left = PathBuf::from("/tmp/left");
+        let right = PathBuf::from("/tmp/right");
+
+        assert!(throttle.claim(&left, 1, 3600));
+        assert!(throttle.claim(&right, 1, 3600));
+        assert!(!throttle.claim(&left, 1, 3600));
+
+        for index in 0..PRUNE_THROTTLE_MAX_ENTRIES {
+            assert!(throttle.claim(&PathBuf::from(format!("/tmp/prune-{index}")), 1, 3600));
+        }
+
+        assert!(throttle.entries.len() <= PRUNE_THROTTLE_MAX_ENTRIES);
+        assert!(throttle.claim(&right, 3601, 3600));
+    }
+
+    #[test]
+    fn internal_trace_prune_throttle_is_bounded_and_isolates_directories() {
+        assert_prune_throttle_is_bounded_and_isolates_directories();
+    }
+
+    #[test]
+    fn buddy_conversations_prune_throttle_is_bounded_and_isolates_directories() {
+        assert_prune_throttle_is_bounded_and_isolates_directories();
     }
 
     #[test]
