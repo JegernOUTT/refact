@@ -273,7 +273,9 @@ pub async fn handle_llm_compress_preview(
         req.requested_model(),
     )
     .await;
-    preview.trajectory_version = Some(trajectory_version);
+    if preview.eligible {
+        preview.trajectory_version = Some(trajectory_version);
+    }
     json_response(&preview)
 }
 

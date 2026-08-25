@@ -2444,6 +2444,30 @@ fn manual_unavailable_preview(reason: impl Into<String>) -> ManualCompressionPre
     }
 }
 
+async fn preview_manual_segment_summarization_with_version(
+    gcx: Arc<GlobalContext>,
+    session_state: SessionState,
+    compression_active: bool,
+    trajectory_version: u64,
+    messages: &[ChatMessage],
+    thread: &crate::chat::types::ThreadParams,
+    requested_model: Option<&str>,
+) -> ManualCompressionPreview {
+    let mut preview = preview_manual_segment_summarization(
+        gcx,
+        session_state,
+        compression_active,
+        messages,
+        thread,
+        requested_model,
+    )
+    .await;
+    if preview.eligible {
+        preview.trajectory_version = Some(trajectory_version);
+    }
+    preview
+}
+
 pub async fn preview_manual_segment_summarization(
     gcx: Arc<GlobalContext>,
     session_state: SessionState,
@@ -2682,17 +2706,12 @@ fn append_compression_outcome_event(session: &mut ChatSession, reason: Compressi
     );
     let index = session.messages.len();
     session.messages.push(outcome_event);
-    let message = session.messages[index].clone();
-    session.emit(ChatEvent::MessageAdded { message, index });
     session.increment_version();
     session.touch();
+    let message = session.messages[index].clone();
+    session.emit(ChatEvent::MessageAdded { message, index });
 }
 
-/// Best-effort cleanup for a reserved compression attempt. Every normal exit of
-/// `run_reserved_segment_summarization` writes a terminal phase first (which
-/// clears the attempt), so this guard only fires on panics or future
-/// cancellation mid-await. If the session lock is contended at drop time the
-/// 15-minute staleness window (`COMPRESSION_ATTEMPT_STALE_MS`) self-heals.
 struct CompressionAttemptGuard {
     session_arc: Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
     attempt: u64,
@@ -2700,10 +2719,15 @@ struct CompressionAttemptGuard {
 
 impl Drop for CompressionAttemptGuard {
     fn drop(&mut self) {
-        if let Ok(mut session) = self.session_arc.try_lock() {
-            if owns_compression_attempt(&session, self.attempt) {
-                emit_compression_failed(&mut session, CompressionReason::TransientFailure);
-            }
+        let session_arc = self.session_arc.clone();
+        let attempt = self.attempt;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let mut session = session_arc.lock().await;
+                if owns_compression_attempt(&session, attempt) {
+                    emit_compression_failed(&mut session, CompressionReason::TransientFailure);
+                }
+            });
         }
     }
 }
@@ -2912,10 +2936,10 @@ fn append_compression_failure_event(session: &mut ChatSession, failure: &Segment
     );
     let index = session.messages.len();
     session.messages.push(fail_event);
-    let message = session.messages[index].clone();
-    session.emit(ChatEvent::MessageAdded { message, index });
     session.increment_version();
     session.touch();
+    let message = session.messages[index].clone();
+    session.emit(ChatEvent::MessageAdded { message, index });
 }
 
 fn finish_compression_failure_if_owned(
@@ -3096,10 +3120,11 @@ pub async fn apply_manual_segment_summarization(
             ),
         };
     }
-    let preview = preview_manual_segment_summarization(
+    let preview = preview_manual_segment_summarization_with_version(
         gcx.clone(),
         session_state,
         compression_active,
+        trajectory_version,
         &messages,
         &thread,
         requested_model,
@@ -3496,15 +3521,17 @@ async fn run_reserved_segment_summarization(
         session.touch();
     }
     let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-    if !matches!(
-        crate::chat::trajectories::try_save_trajectory_with_intent(
-            app,
-            session_arc.clone(),
-            crate::chat::types::TrajectoryCommitIntent::Required,
-        )
-        .await,
-        Ok(true)
-    ) {
+    let retry_state_save = crate::chat::trajectories::try_save_trajectory_with_intent(
+        app,
+        session_arc.clone(),
+        crate::chat::types::TrajectoryCommitIntent::Required,
+    )
+    .await;
+    if matches!(retry_state_save, Ok(false)) {
+        info!("Segment summarization retry-state save became stale; continuing");
+    }
+    if let Err(error) = retry_state_save {
+        warn!("Segment summarization retry-state save failed: {}", error);
         let mut session = session_arc.lock().await;
         if emit_compression_skipped_if_owned(
             &mut session,
@@ -3626,6 +3653,14 @@ async fn run_reserved_segment_summarization(
         summary,
         current_benefit,
     );
+    session.tier1_compact_attempts += 1;
+    session.compression_retry_after_ms.remove(&source_hash);
+    session.tier1_compaction_disabled = false;
+    session.thread.previous_response_id = None;
+    session.cache_guard_force_next = true;
+    session.provider_usage_stale = true;
+    session.increment_version();
+    session.touch();
     if superseded_removed > 0 {
         let snapshot = session.snapshot();
         session.emit(snapshot);
@@ -3635,14 +3670,6 @@ async fn run_reserved_segment_summarization(
             session.emit(ChatEvent::MessageAdded { message, index });
         }
     }
-    session.tier1_compact_attempts += 1;
-    session.compression_retry_after_ms.remove(&source_hash);
-    session.tier1_compaction_disabled = false;
-    session.thread.previous_response_id = None;
-    session.cache_guard_force_next = true;
-    session.provider_usage_stale = true;
-    session.increment_version();
-    session.touch();
     if !finalize_applied_if_owned(&mut session, attempt) {
         return CompactionOutcome::NothingToCompact;
     }
@@ -7482,6 +7509,45 @@ mod tests {
         assert_eq!(session.compression_phase, Some(CompressionPhase::Applied));
     }
 
+    #[tokio::test]
+    async fn dropped_attempt_guard_clears_owned_attempt_after_lock_contention() {
+        let session_arc = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
+            "compression-drop-cleanup".to_string(),
+        )));
+        let attempt = {
+            let mut session = session_arc.lock().await;
+            reserve_compression_attempt(&mut session, None)
+        };
+
+        let held_lock = session_arc.lock().await;
+        let guard = CompressionAttemptGuard {
+            session_arc: session_arc.clone(),
+            attempt,
+        };
+        drop(guard);
+        tokio::task::yield_now().await;
+        assert!(owns_compression_attempt(&held_lock, attempt));
+        drop(held_lock);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let session = session_arc.lock().await;
+                if !compression_attempt_active(&session) {
+                    assert_eq!(session.compression_phase, Some(CompressionPhase::Failed));
+                    assert_eq!(
+                        session.compression_reason,
+                        Some(CompressionReason::TransientFailure)
+                    );
+                    break;
+                }
+                drop(session);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped attempt must clean up without waiting for stale timeout");
+    }
+
     fn summary_apply_fixture() -> (ChatSession, String, ChatMessage) {
         let mut session = ChatSession::new("compression-apply-fixture".to_string());
         session.messages = vec![user("first"), assistant("old answer"), user("second")];
@@ -7926,6 +7992,59 @@ mod tests {
     }
 
     #[test]
+    fn compression_message_added_events_follow_version_increment() {
+        let mut session = ChatSession::new("compression-event-version".to_string());
+        let mut rx = session.subscribe();
+
+        append_compression_outcome_event(&mut session, CompressionReason::NoEligibleSegment);
+
+        assert_eq!(session.trajectory_version, 1);
+        let json = rx.try_recv().unwrap();
+        let envelope: crate::chat::types::EventEnvelope = serde_json::from_str(&json).unwrap();
+        assert!(matches!(envelope.event, ChatEvent::MessageAdded { .. }));
+        assert_eq!(session.trajectory_version, 1);
+    }
+
+    #[test]
+    fn compressed_summary_events_follow_version_increment() {
+        let mut session = ChatSession::new("compression-summary-event-version".to_string());
+        session.messages = vec![user("first"), assistant("source answer"), user("second")];
+        let attempt = reserve_compression_attempt(&mut session, None);
+        assert!(emit_compression_running_if_owned(&mut session, attempt));
+        let segment = first_eligible_segment(&session.messages).unwrap();
+        ensure_source_message_ids(&mut session.messages, segment);
+        let source = session.messages[segment.start..=segment.end].to_vec();
+        let source_ids = source
+            .iter()
+            .map(|message| message.message_id.clone())
+            .collect::<HashSet<_>>();
+        let summary = make_segment_summary_message("compact".to_string(), &source, "test-model");
+        let benefit = effective_compression_benefit(&source, &summary, &[]);
+        let mut rx = session.subscribe();
+
+        let report_idx = insert_report_and_summary_after_sources(
+            &mut session.messages,
+            &source_ids,
+            &source,
+            summary,
+            benefit,
+        );
+        session.increment_version();
+        let version_before_events = session.trajectory_version;
+        for index in report_idx..report_idx + 2 {
+            let message = session.messages[index].clone();
+            session.emit(ChatEvent::MessageAdded { message, index });
+        }
+
+        for _ in 0..2 {
+            let json = rx.try_recv().unwrap();
+            let envelope: crate::chat::types::EventEnvelope = serde_json::from_str(&json).unwrap();
+            assert!(matches!(envelope.event, ChatEvent::MessageAdded { .. }));
+            assert_eq!(session.trajectory_version, version_before_events);
+        }
+    }
+
+    #[test]
     fn append_compression_failure_event_redacts_transient_failure() {
         let mut session = ChatSession::new("compression-failure-redacted".to_string());
         let failure = SegmentSummaryFailure::Transient(
@@ -8211,10 +8330,11 @@ mod tests {
         ];
         let original = messages.clone();
 
-        let preview = preview_manual_segment_summarization(
+        let preview = preview_manual_segment_summarization_with_version(
             gcx,
             SessionState::Idle,
             false,
+            17,
             &messages,
             &thread,
             None,
@@ -8222,6 +8342,7 @@ mod tests {
         .await;
 
         assert!(preview.eligible);
+        assert_eq!(preview.trajectory_version, Some(17));
         assert_eq!(preview.resolved_model.as_deref(), Some(model));
         assert_eq!(preview.source_messages, 1);
         assert!(preview.approximate_source_tokens >= MIN_SOURCE_TOKENS_FOR_COMPRESSION);
@@ -8234,6 +8355,67 @@ mod tests {
                 .iter()
                 .map(|message| (&message.role, message.content.content_text_only()))
                 .collect::<Vec<_>>(),
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_preview_version_is_accepted_and_stale_version_is_rejected() {
+        let gcx = make_test_gcx().await;
+        let model = "manual-version-model";
+        let mut caps = CodeAssistantCaps::default();
+        caps.chat_models
+            .insert(model.to_string(), chat_model_record(model, 32_768));
+        install_caps(gcx.clone(), caps).await;
+
+        let mut session = ChatSession::new("manual-version".to_string());
+        session.thread.model = model.to_string();
+        session.messages = vec![
+            user("first"),
+            assistant(&"compressible output ".repeat(600)),
+            user("second"),
+        ];
+        let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+        let (state, active, messages, thread, version) = {
+            let session = session_arc.lock().await;
+            (
+                session.runtime.state,
+                compression_attempt_active(&session),
+                session.messages.clone(),
+                session.thread.clone(),
+                session.trajectory_version,
+            )
+        };
+        let preview = preview_manual_segment_summarization_with_version(
+            gcx.clone(),
+            state,
+            active,
+            version,
+            &messages,
+            &thread,
+            None,
+        )
+        .await;
+        assert!(preview.eligible);
+        assert_eq!(preview.trajectory_version, Some(version));
+
+        let matching = apply_manual_segment_summarization(
+            gcx.clone(),
+            &session_arc,
+            None,
+            preview.trajectory_version,
+        )
+        .await;
+        assert_ne!(
+            matching.reason.as_deref(),
+            Some("Chat changed since preview; preview again before compressing")
+        );
+
+        let stale =
+            apply_manual_segment_summarization(gcx, &session_arc, None, Some(version)).await;
+        assert!(!stale.applied);
+        assert_eq!(
+            stale.reason.as_deref(),
+            Some("Chat changed since preview; preview again before compressing")
         );
     }
 
