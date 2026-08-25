@@ -167,18 +167,6 @@ impl ComposerState {
         self.record_edit(before, UndoKind::Other, None);
     }
 
-    pub fn flush_pending_paste(&mut self, _now: Instant) -> bool {
-        false
-    }
-
-    pub fn pending_paste_delay(&self, _now: Instant) -> Option<Duration> {
-        None
-    }
-
-    pub fn flush_pending_paste_force(&mut self) -> bool {
-        false
-    }
-
     pub fn submit_text(&mut self) -> Option<String> {
         self.prune_pending_large_pastes();
         let prompt = self.expand_pending_large_pastes(self.editor.text().to_string());
@@ -1038,11 +1026,7 @@ impl TextEditor {
             .unwrap_or(self.text.len());
         let insert_at = end;
         if insert_at == self.text.len() {
-            if self.text.is_empty() {
-                self.text.push('\n');
-            } else {
-                self.text.push('\n');
-            }
+            self.text.push('\n');
             self.cursor = self.text.len();
         } else {
             self.text.insert(insert_at, '\n');
@@ -1627,15 +1611,13 @@ mod tests {
         composer.insert_char('a', t(0));
         composer.insert_explicit_newline(t(100));
         composer.insert_char('b', t(200));
-        composer.flush_pending_paste_force();
         assert_eq!(composer.text(), "a\nb");
     }
 
     #[test]
-    fn enter_submits_after_pending_paste_flush() {
+    fn enter_submits_composer_text() {
         let mut composer = ComposerState::new(Vec::new());
         composer.insert_char('h', t(0));
-        composer.flush_pending_paste(t(100));
         assert_eq!(composer.enter(t(120)), EnterDecision::Submit);
         assert_eq!(composer.submit_text().as_deref(), Some("h"));
         assert_eq!(composer.text(), "");
@@ -2122,7 +2104,6 @@ mod tests {
         composer.insert_char('a', t(0));
         composer.insert_char('b', t(10));
         composer.insert_char('c', t(20));
-        composer.flush_pending_paste_force();
         assert_eq!(composer.text(), "abc");
         assert!(composer.undo());
         assert_eq!(composer.text(), "");

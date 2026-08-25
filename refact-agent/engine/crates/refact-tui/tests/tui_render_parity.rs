@@ -855,7 +855,7 @@ fn transcript_cells_golden_snapshot() {
 
   model: gpt-demo · /model to change
   directory: /tmp/fixture
-  Tips: type /help for shortcuts; Ctrl-C twice exits
+  Tips: type /help for shortcuts; Ctrl-Q exits cleanly
 
   • Proposed Plan
 

@@ -1432,7 +1432,7 @@ pub(super) fn state_key_has_stable_identity(key: &str) -> bool {
     )
 }
 
-const SESSION_HEADER_TIPS: &str = "Tips: type /help for shortcuts; Ctrl-C twice exits";
+const SESSION_HEADER_TIPS: &str = "Tips: type /help for shortcuts; Ctrl-Q exits cleanly";
 
 pub(super) fn session_header_subtitle(model: Option<&str>, project_root: Option<&Path>) -> String {
     let model = model

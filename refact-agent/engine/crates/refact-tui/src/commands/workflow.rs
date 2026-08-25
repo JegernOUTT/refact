@@ -79,6 +79,15 @@ pub const COMPACT_COMMAND: CommandDef = CommandDef {
     },
 };
 
+pub const WORKFLOW_COMMANDS: &[CommandDef] = &[
+    REVIEW_COMMAND,
+    PLAN_COMMAND,
+    GOAL_COMMAND,
+    AGENT_COMMAND,
+    DIFF_COMMAND,
+    COMPACT_COMMAND,
+];
+
 pub fn review_prompt() -> &'static str {
     "Review the current project changes. Inspect the git diff and relevant files, then report correctness, regression, safety, and test coverage findings by severity. Do not edit files unless I explicitly ask."
 }

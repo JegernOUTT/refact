@@ -373,11 +373,16 @@ impl Drop for SubscriptionManager {
     }
 }
 
+fn daemon_base_url_for(
+    launcher_daemon_url: Option<String>,
+    environment_daemon_url: Option<String>,
+) -> Option<String> {
+    environment_daemon_url.or(launcher_daemon_url)
+}
+
 pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
     let endpoint = match crate::client::resolve_daemon_endpoint_with_auth(
-        options
-            .daemon_url
-            .or_else(|| std::env::var("REFACT_DAEMON_URL").ok()),
+        daemon_base_url_for(options.daemon_url, std::env::var("REFACT_DAEMON_URL").ok()),
         std::env::var("REFACT_DAEMON_TOKEN").ok(),
     ) {
         Ok(endpoint) => endpoint,
@@ -491,7 +496,6 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             }
             RuntimeEvent::Frame => {
                 app.run_stream_commit_tick();
-                app.flush_pending_paste();
             }
             RuntimeEvent::Input(_) => {}
             RuntimeEvent::Chat { generation, event } => {
@@ -1776,9 +1780,6 @@ fn schedule_next_frame(app: &App, frame_requester: &FrameRequester) {
     if app.session_state().shows_working_indicator() {
         delay = Some(min_frame_delay(delay, WORKING_ANIMATION_INTERVAL));
     }
-    if let Some(paste_delay) = app.pending_paste_delay() {
-        delay = Some(min_frame_delay(delay, paste_delay));
-    }
     if let Some(resize_delay) = app.resize_reflow_delay() {
         delay = Some(min_frame_delay(delay, resize_delay));
     }
@@ -1896,6 +1897,17 @@ mod tests {
 
         assert_eq!(app.model(), None);
         assert!(app.modal_picker().is_none());
+    }
+
+    #[test]
+    fn daemon_url_environment_override_takes_precedence() {
+        assert_eq!(
+            daemon_base_url_for(
+                Some("http://127.0.0.1:8000".to_string()),
+                Some("http://127.0.0.1:9000/".to_string()),
+            ),
+            Some("http://127.0.0.1:9000/".to_string())
+        );
     }
 }
 

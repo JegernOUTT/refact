@@ -1398,6 +1398,10 @@ newline = "enter"
             Some(KeyAction::OpenExternalEditor)
         );
         assert_eq!(
+            registry.binding_label(KeyContext::Main, KeyAction::Quit),
+            Some("Ctrl-Q".to_string())
+        );
+        assert_eq!(
             registry.action_for(
                 KeyContext::Main,
                 key(KeyCode::Char('t'), KeyModifiers::CONTROL)

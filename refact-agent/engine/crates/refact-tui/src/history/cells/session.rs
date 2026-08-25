@@ -89,7 +89,7 @@ mod tests {
     use crate::history::cells::test_support::text;
 
     fn subtitle() -> String {
-        "model: gpt-demo · /model to change\ndirectory: /tmp/demo\nTips: type /help for shortcuts"
+        "model: gpt-demo · /model to change\ndirectory: /tmp/demo\nTips: type /help for shortcuts; Ctrl-Q exits cleanly"
             .to_string()
     }
 
@@ -99,7 +99,7 @@ mod tests {
         assert_eq!(
             text(&cell.render(80)),
             format!(
-                ">_ refact (v{})\n\nmodel: gpt-demo · /model to change\ndirectory: /tmp/demo\nTips: type /help for shortcuts\n",
+                ">_ refact (v{})\n\nmodel: gpt-demo · /model to change\ndirectory: /tmp/demo\nTips: type /help for shortcuts; Ctrl-Q exits cleanly\n",
                 env!("CARGO_PKG_VERSION")
             )
         );

@@ -379,14 +379,6 @@ impl App {
                 .any(|item| matches!(item, TranscriptItem::Assistant(_)))
     }
 
-    pub fn flush_pending_paste(&mut self) -> bool {
-        self.composer.flush_pending_paste(Instant::now())
-    }
-
-    fn pending_paste_delay(&self) -> Option<Duration> {
-        self.composer.pending_paste_delay(Instant::now())
-    }
-
     pub fn set_native_scrollback(&mut self, enabled: bool) {
         if enabled && !self.native_scrollback {
             let old_selected = self.selected_tool_index;

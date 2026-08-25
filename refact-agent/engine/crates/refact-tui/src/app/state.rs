@@ -362,30 +362,69 @@ impl App {
             .map(load_history)
             .unwrap_or_default();
         let chat_id = uuid::Uuid::new_v4().to_string();
-        let input_queue_owner = Some(LocalInputOwner {
+        let input_queue_owner = LocalInputOwner {
             project_id: project.project_id.clone(),
             chat_id: chat_id.clone(),
-        });
+        };
+        let notice = format!(
+            "Opened project {} at {}",
+            project.slug,
+            project.root.display()
+        );
+        Self::base(
+            vec![TranscriptItem::Notice(notice.clone())],
+            notice_transcript_state(notice),
+            ComposerState::new(history_entries),
+            Some(input_queue_owner),
+            history_path,
+            Some(project),
+            chat_id,
+            SessionState::Idle,
+            SubscriptionStatus::Online,
+            true,
+        )
+    }
+
+    pub(super) fn notice_only(notice: impl Into<String>) -> Self {
+        let notice = notice.into();
+        Self::base(
+            vec![TranscriptItem::Notice(notice.clone())],
+            notice_transcript_state(notice),
+            ComposerState::new(Vec::new()),
+            None,
+            None,
+            None,
+            uuid::Uuid::new_v4().to_string(),
+            SessionState::Error,
+            SubscriptionStatus::Offline,
+            false,
+        )
+    }
+
+    fn base(
+        transcript: Vec<TranscriptItem>,
+        transcript_state: TranscriptState,
+        composer: ComposerState,
+        input_queue_owner: Option<LocalInputOwner>,
+        history_path: Option<PathBuf>,
+        current_project: Option<OpenProjectResponse>,
+        chat_id: String,
+        session_state: SessionState,
+        subscription_status: SubscriptionStatus,
+        daemon_online: bool,
+    ) -> Self {
         let keymap = KeymapRegistry::default();
         let vim = VimState::new(keymap.vim_mode_enabled());
         let tui_config_path = default_tui_config_path();
         let theme = TuiTheme::default();
         initialize_syntax_theme(&theme, tui_config_path.as_deref());
         Self {
-            transcript: vec![TranscriptItem::Notice(format!(
-                "Opened project {} at {}",
-                project.slug,
-                project.root.display()
-            ))],
-            transcript_state: notice_transcript_state(format!(
-                "Opened project {} at {}",
-                project.slug,
-                project.root.display()
-            )),
+            transcript,
+            transcript_state,
             inbound_event_state: InboundEventState::default(),
             browser_state: BrowserState::default(),
             runtime_snapshot: None,
-            composer: ComposerState::new(history_entries),
+            composer,
             keymap,
             vim,
             theme,
@@ -410,7 +449,7 @@ impl App {
             handled_ask_questions_tool_ids: HashSet::new(),
             pending_approval_clears: VecDeque::new(),
             events_pane: EventsPaneState::new(),
-            current_project: Some(project),
+            current_project,
             chat_id,
             worktree_meta: None,
             pending_worktree_merge: None,
@@ -428,115 +467,9 @@ impl App {
             pending_mode: None,
             in_flight_send: None,
             pending_send_retry: None,
-            session_state: SessionState::Idle,
-            subscription_status: SubscriptionStatus::Online,
-            daemon_online: true,
-            daemon_status: None,
-            daemon_base_url: None,
-            permission_policy: command_session::PermissionPolicy::default(),
-            retry_hint: None,
-            model_context_windows: HashMap::new(),
-            model_reasoning_caps: HashMap::new(),
-            model_settings_caps: HashMap::new(),
-            default_context_window_tokens: None,
-            thread_params: Value::Object(Map::new()),
-            settings_surface: None,
-            scroll_offset: 0,
-            selected_tool_index: None,
-            selected_backtrack_index: None,
-            backtrack_target: None,
-            backtrack_pending: None,
-            last_escape_at: None,
-            transcript_overlay: None,
-            board_surface: None,
-            browser_surface: None,
-            transcript_overlay_visible_height: None,
-            activity_surface: None,
-            task_id: None,
-            history_surface: None,
-            goal_overlay_open: false,
-            help_open: false,
-            usage: None,
-            should_quit: false,
-            abort_in_flight: false,
-            last_ctrl_c: None,
-            working_started_at_ms: None,
-            working_tick: 0,
-            working_last_tick_at_ms: None,
-            working_detail: None,
-            stream_controller: StreamController::new(None, std::path::Path::new(".")),
-            reasoning_stream_active: false,
-            plan_stream_controller: None,
-            stream_chunking_policy: AdaptiveChunkingPolicy::default(),
-            history_render_mode: HistoryRenderMode::Rich,
-            notifications: NotificationManager::default(),
-            history: HistoryBuffer::new(),
-            resize_reflow: ResizeReflowState::default(),
-            resize_reflow_row_cap: resize_reflow_row_cap_from_env(),
-            native_scrollback: false,
-            rendered_message_count: 0,
-            rendered_state_cursor: 0,
-            rendered_state_keys: Vec::new(),
-        }
-    }
-
-    pub(super) fn notice_only(notice: impl Into<String>) -> Self {
-        let notice = notice.into();
-        let tui_config_path = default_tui_config_path();
-        let theme = TuiTheme::default();
-        initialize_syntax_theme(&theme, tui_config_path.as_deref());
-        Self {
-            transcript: vec![TranscriptItem::Notice(notice.clone())],
-            transcript_state: notice_transcript_state(notice),
-            inbound_event_state: InboundEventState::default(),
-            browser_state: BrowserState::default(),
-            runtime_snapshot: None,
-            composer: ComposerState::new(Vec::new()),
-            keymap: KeymapRegistry::default(),
-            vim: VimState::new(false),
-            theme,
-            input_queue: InputQueue::new(),
-            input_queue_owner: None,
-            local_input_handoffs: HashMap::new(),
-            last_chat_by_project: HashMap::new(),
-            server_queue_size: 0,
-            server_queue_previews: Vec::new(),
-            history_path: None,
-            pending_history_save: None,
-            history_save_in_flight: false,
-            history_failure_notified: false,
-            tui_config_path,
-            composer_mode: ComposerMode::Chat,
-            picker: surfaces::ProjectPickerState::new(Vec::new()),
-            modal_picker: None,
-            theme_picker_snapshot: None,
-            approval_queue: ApprovalQueue::new(),
-            ask_questions_form: None,
-            pending_manual_ask_questions: None,
-            handled_ask_questions_tool_ids: HashSet::new(),
-            pending_approval_clears: VecDeque::new(),
-            events_pane: EventsPaneState::new(),
-            current_project: None,
-            chat_id: uuid::Uuid::new_v4().to_string(),
-            worktree_meta: None,
-            pending_worktree_merge: None,
-            session_title: None,
-            recent_sessions: Vec::new(),
-            mode_records: Vec::new(),
-            show_session_header: false,
-            model: None,
-            mode: None,
-            boost_reasoning: false,
-            reasoning_effort: None,
-            pending_reasoning_rollback: None,
-            pending_backtrack_rollback: None,
-            pending_model: None,
-            pending_mode: None,
-            in_flight_send: None,
-            pending_send_retry: None,
-            session_state: SessionState::Error,
-            subscription_status: SubscriptionStatus::Offline,
-            daemon_online: false,
+            session_state,
+            subscription_status,
+            daemon_online,
             daemon_status: None,
             daemon_base_url: None,
             permission_policy: command_session::PermissionPolicy::default(),
@@ -944,6 +877,28 @@ mod tests {
             app.visible_transcript(),
             [TranscriptItem::Notice(text)] if text == "startup failed"
         ));
+    }
+
+    #[test]
+    fn project_and_notice_constructors_share_base_defaults() {
+        let project = OpenProjectResponse {
+            project_id: "project".to_string(),
+            slug: "demo".to_string(),
+            root: PathBuf::from("/tmp/demo"),
+            pinned: None,
+            worker: None,
+            cron_pending: None,
+        };
+        let project_app = App::new(project);
+        let notice_app = App::notice_only("startup failed");
+
+        assert_eq!(
+            project_app.keymap().warnings(),
+            notice_app.keymap().warnings()
+        );
+        assert_eq!(project_app.vim_enabled(), notice_app.vim_enabled());
+        assert_eq!(project_app.theme().name(), notice_app.theme().name());
+        assert_eq!(project_app.composer_mode(), notice_app.composer_mode());
     }
 
     #[test]

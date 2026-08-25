@@ -59,6 +59,34 @@ pub struct CommandContext {
     pub active_turn: bool,
 }
 
+const MENTION_COMMAND: CommandDef = CommandDef {
+    name: "mention",
+    aliases: &["file", "files"],
+    description: "picker reuse: insert a file mention",
+    args_hint: "[path]",
+    availability: CommandAvailability::Always,
+    action: CommandAction::OpenPicker {
+        picker: CommandPicker::FileMention,
+    },
+};
+
+const STOP_COMMAND: CommandDef = CommandDef {
+    name: "stop",
+    aliases: &["cancel", "clean"],
+    description: "backend command: stop the active generation",
+    args_hint: "",
+    availability: CommandAvailability::ActiveTurnOnly,
+    action: CommandAction::BackendCommand { command: "stop" },
+};
+
+const COMMAND_GROUPS: &[&[CommandDef]] = &[
+    &session::SESSION_COMMANDS,
+    misc::MISC_COMMANDS,
+    &[MENTION_COMMAND, STOP_COMMAND],
+    workflow::WORKFLOW_COMMANDS,
+    misc::UNAVAILABLE_COMMANDS,
+];
+
 impl CommandDef {
     pub fn available(self, context: CommandContext) -> bool {
         match self.availability {
@@ -92,7 +120,14 @@ impl CommandDef {
 }
 
 pub fn command_registry() -> &'static [CommandDef] {
-    command_registry_vec().as_slice()
+    static COMMANDS: OnceLock<Vec<CommandDef>> = OnceLock::new();
+    COMMANDS.get_or_init(|| {
+        COMMAND_GROUPS
+            .iter()
+            .flat_map(|group| group.iter())
+            .copied()
+            .collect()
+    })
 }
 
 pub fn command_by_name(name: &str) -> Option<&'static CommandDef> {
@@ -107,72 +142,6 @@ pub fn command_picker_items(context: CommandContext) -> Vec<PickerItem> {
         .filter(|command| command.available(context))
         .map(|command| command.picker_item())
         .collect()
-}
-
-fn command_registry_vec() -> &'static Vec<CommandDef> {
-    static COMMANDS: OnceLock<Vec<CommandDef>> = OnceLock::new();
-    COMMANDS.get_or_init(|| {
-        let mut commands = vec![
-            session::NEW_COMMAND,
-            session::RESUME_COMMAND,
-            session::FORK_COMMAND,
-            session::RENAME_COMMAND,
-            session::ARCHIVE_COMMAND,
-            session::MODEL_COMMAND,
-            session::MODE_COMMAND,
-            session::REASONING_COMMAND,
-            session::PERMISSIONS_COMMAND,
-            session::STATUS_COMMAND,
-            session::INIT_COMMAND,
-            misc::CLEAR_COMMAND,
-            misc::QUIT_COMMAND,
-            misc::EVENTS_COMMAND,
-            CommandDef {
-                name: "mention",
-                aliases: &["file", "files"],
-                description: "picker reuse: insert a file mention",
-                args_hint: "[path]",
-                availability: CommandAvailability::Always,
-                action: CommandAction::OpenPicker {
-                    picker: CommandPicker::FileMention,
-                },
-            },
-            misc::HELP_COMMAND,
-            misc::KEYMAP_COMMAND,
-            misc::THEME_COMMAND,
-            misc::VIM_COMMAND,
-            misc::DEBUG_CONFIG_COMMAND,
-            misc::COPY_COMMAND,
-            misc::RAW_COMMAND,
-            misc::SUBAGENTS_COMMAND,
-            misc::MCP_COMMAND,
-            misc::SKILLS_COMMAND,
-            misc::MEMORIES_COMMAND,
-            misc::HOOKS_COMMAND,
-            misc::LOGOUT_COMMAND,
-            misc::IMPORT_COMMAND,
-            misc::SETTINGS_COMMAND,
-            misc::BROWSER_COMMAND,
-            misc::BOARD_COMMAND,
-            misc::WORKTREES_COMMAND,
-            CommandDef {
-                name: "stop",
-                aliases: &["cancel", "clean"],
-                description: "backend command: stop the active generation",
-                args_hint: "",
-                availability: CommandAvailability::ActiveTurnOnly,
-                action: CommandAction::BackendCommand { command: "stop" },
-            },
-            workflow::REVIEW_COMMAND,
-            workflow::PLAN_COMMAND,
-            workflow::GOAL_COMMAND,
-            workflow::AGENT_COMMAND,
-            workflow::DIFF_COMMAND,
-            workflow::COMPACT_COMMAND,
-        ];
-        commands.extend_from_slice(misc::UNAVAILABLE_COMMANDS);
-        commands
-    })
 }
 
 #[cfg(test)]

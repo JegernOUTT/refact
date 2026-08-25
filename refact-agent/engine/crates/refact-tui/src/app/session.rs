@@ -508,11 +508,7 @@ impl App {
     }
 
     pub(super) fn new_chat(&mut self) {
-        self.open_chat_shell(
-            uuid::Uuid::new_v4().to_string(),
-            None,
-            "New chat started".to_string(),
-        );
+        self.open_chat_shell(uuid::Uuid::new_v4().to_string(), None);
     }
 
     pub(super) fn start_new_chat(&mut self) -> AppAction {
@@ -520,12 +516,7 @@ impl App {
         AppAction::SubscribeCurrent
     }
 
-    pub(super) fn open_chat_shell(
-        &mut self,
-        chat_id: String,
-        title: Option<String>,
-        _notice: String,
-    ) {
+    pub(super) fn open_chat_shell(&mut self, chat_id: String, title: Option<String>) {
         self.cancel_backtrack();
         self.abort_in_flight = false;
         self.transcript_overlay = None;
@@ -646,7 +637,7 @@ impl App {
         target_chat_id: String,
         title: Option<String>,
     ) -> AppAction {
-        self.open_chat_shell(target_chat_id, title, "Forked chat started".to_string());
+        self.open_chat_shell(target_chat_id, title);
         AppAction::SubscribeCurrent
     }
 
@@ -681,7 +672,7 @@ impl App {
     }
 
     pub(super) fn apply_archived_chat(&mut self, new_chat_id: String) -> AppAction {
-        self.open_chat_shell(new_chat_id, None, "New chat started".to_string());
+        self.open_chat_shell(new_chat_id, None);
         AppAction::SubscribeCurrent
     }
 
