@@ -356,13 +356,15 @@ async fn load_image(
             f_type = "image/png".to_string();
             let tree = {
                 let mut opt = usvg::Options::default();
-                opt.resources_dir = std::fs::canonicalize(&path)
+                opt.resources_dir = tokio::fs::canonicalize(&path)
+                    .await
                     .ok()
                     .and_then(|p| p.parent().map(|p| p.to_path_buf()));
                 opt.fontdb_mut().load_system_fonts();
 
-                let svg_data =
-                    std::fs::read(&path).map_err(|e| format!("{} svg read failed: {}", path, e))?;
+                let svg_data = tokio::fs::read(&path)
+                    .await
+                    .map_err(|e| format!("{} svg read failed: {}", path, e))?;
                 usvg::Tree::from_data(&svg_data, &opt)
                     .map_err(|e| format!("{} svg parse failed: {}", path, e))?
             };

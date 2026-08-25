@@ -1445,6 +1445,12 @@ pub async fn enqueue_all_files_from_workspace_folders(
 ) -> i32 {
     let folders = crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await;
 
+    crate::file_index::spawn_build(
+        gcx.file_index.clone(),
+        folders.clone(),
+        gcx.shutdown_flag.clone(),
+    );
+
     info!(
         "enqueue_all_files_from_workspace_folders started files search with {} folders",
         folders.len()
@@ -1557,6 +1563,7 @@ pub async fn on_did_open(
     if path_is_refact_internal(cpath) {
         return;
     }
+    gcx.file_index.refresh(cpath);
     let normalized_path = normalize_path_for_workspace_state(&gcx, cpath);
     let mut doc = Document::new(&normalized_path);
     doc.update_text(text);
@@ -1593,6 +1600,7 @@ pub async fn on_did_change(gcx: Arc<GlobalContext>, path: &PathBuf, text: &Strin
     if path_is_refact_internal(path) {
         return;
     }
+    gcx.file_index.refresh(path);
     let t0 = Instant::now();
     let normalized_path = normalize_path_for_workspace_state(&gcx, path);
     let (doc_arc, dirty_arc, mark_dirty) = {
@@ -1648,6 +1656,7 @@ pub async fn on_did_delete(gcx: Arc<GlobalContext>, path: &PathBuf) {
     if path_is_refact_internal(path) {
         return;
     }
+    gcx.file_index.remove(path);
     info!(
         "on_did_delete {}",
         crate::nicer_logs::last_n_chars(&path.to_string_lossy().to_string(), 30)

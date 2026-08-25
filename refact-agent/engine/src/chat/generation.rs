@@ -3128,20 +3128,24 @@ async fn maybe_record_goal_pursuit_progress(session_arc: Arc<AMutex<ChatSession>
 }
 
 fn maybe_downgrade_bogus_tool_calls_finish_reason(result: &mut ChoiceFinal, stage: &str) {
-    if result.finish_reason.as_deref() != Some("tool_calls") || !result.tool_calls_raw.is_empty() {
+    let original = match result.finish_reason.as_deref() {
+        Some(reason @ ("tool_calls" | "tool_use")) => reason.to_string(),
+        _ => return,
+    };
+    if !result.tool_calls_raw.is_empty() {
         return;
     }
 
     warn!(
-        "tool_call_guard: finish_reason='tool_calls' without tool calls at stage '{}', downgrading to 'stop'",
-        stage
+        "tool_call_guard: finish_reason='{}' without tool calls at stage '{}', downgrading to 'stop'",
+        original, stage
     );
     result.extra.insert(
         "_tool_call_guard".to_string(),
         json!({
             "kind": "tool_calls_finish_without_calls",
             "stage": stage,
-            "original_finish_reason": "tool_calls",
+            "original_finish_reason": original,
             "adjusted_finish_reason": "stop",
         }),
     );
@@ -4297,6 +4301,40 @@ mod tests {
         maybe_downgrade_bogus_tool_calls_finish_reason(&mut result, "test");
 
         assert_eq!(result.finish_reason.as_deref(), Some("tool_calls"));
+        assert!(!result.extra.contains_key("_tool_call_guard"));
+    }
+
+    #[test]
+    fn test_downgrade_bogus_tool_use_finish_reason() {
+        let mut result = ChoiceFinal {
+            finish_reason: Some("tool_use".to_string()),
+            ..Default::default()
+        };
+
+        maybe_downgrade_bogus_tool_calls_finish_reason(&mut result, "test");
+
+        assert_eq!(result.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(
+            result.extra["_tool_call_guard"]["original_finish_reason"],
+            "tool_use"
+        );
+    }
+
+    #[test]
+    fn test_does_not_downgrade_tool_use_finish_reason_when_tool_calls_exist() {
+        let mut result = ChoiceFinal {
+            finish_reason: Some("tool_use".to_string()),
+            tool_calls_raw: vec![json!({
+                "type": "function",
+                "id": "call_123",
+                "function": { "name": "shell", "arguments": "{}" }
+            })],
+            ..Default::default()
+        };
+
+        maybe_downgrade_bogus_tool_calls_finish_reason(&mut result, "test");
+
+        assert_eq!(result.finish_reason.as_deref(), Some("tool_use"));
         assert!(!result.extra.contains_key("_tool_call_guard"));
     }
 

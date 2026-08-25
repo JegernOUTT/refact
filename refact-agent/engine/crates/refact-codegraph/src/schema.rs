@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 pub const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
@@ -43,6 +43,11 @@ CREATE INDEX IF NOT EXISTS idx_symbols_reverse_symbol_path ON symbols(reverse_sy
 CREATE INDEX IF NOT EXISTS idx_symbols_friendly_path ON symbols(friendly_path, double_colon_path);
 CREATE INDEX IF NOT EXISTS idx_symbols_node_id ON symbols(node_id);
 
+CREATE VIRTUAL TABLE IF NOT EXISTS node_name_search USING fts5(
+    name,
+    tokenize='trigram'
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS symbol_search USING fts5(
     double_colon_path,
     friendly_path,
@@ -53,11 +58,13 @@ CREATE TABLE IF NOT EXISTS pending_refs (
     id           INTEGER PRIMARY KEY,
     from_node_id INTEGER NOT NULL,
     name         TEXT NOT NULL,
+    reverse_name TEXT NOT NULL DEFAULT '',
     kind         TEXT NOT NULL,
     line         INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_pending_from ON pending_refs(from_node_id);
 CREATE INDEX IF NOT EXISTS idx_pending_name ON pending_refs(name);
+CREATE INDEX IF NOT EXISTS idx_pending_reverse_name ON pending_refs(reverse_name);
 
 CREATE TABLE IF NOT EXISTS dirty_paths (
     path TEXT PRIMARY KEY

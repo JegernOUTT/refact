@@ -20,6 +20,14 @@ pub use refact_privacy::{PolicyLoad, PrivacyPolicy};
 
 const PRIVACY_TOO_OLD: Duration = Duration::from_secs(3);
 
+#[derive(Default)]
+pub struct PrivacyMatchCounts {
+    pub counts: std::collections::BTreeMap<String, usize>,
+    pub fingerprint: u64,
+    pub computed_at: Option<std::time::Instant>,
+    pub computing: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PrivacyObservationRuntimeState {
     pub runtime_available: bool,

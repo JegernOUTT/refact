@@ -103,6 +103,24 @@ pub async fn handle_v1_codegraph_status(
         .unwrap())
 }
 
+pub async fn handle_v1_file_index_status(
+    State(app): State<AppState>,
+) -> Result<Response<Body>, ScratchError> {
+    let status = app.gcx.file_index.status();
+
+    let json_string = serde_json::to_string_pretty(&status).map_err(|e| {
+        ScratchError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("JSON serialization problem: {}", e),
+        )
+    })?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(json_string))
+        .unwrap())
+}
+
 pub async fn handle_v1_rag_status(
     State(app): State<AppState>,
 ) -> Result<Response<Body>, ScratchError> {

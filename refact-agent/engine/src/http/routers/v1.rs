@@ -45,7 +45,9 @@ use crate::http::routers::v1::lsp_like_handlers::{
     handle_v1_lsp_did_change, handle_v1_lsp_add_folder, handle_v1_lsp_initialize,
     handle_v1_lsp_remove_folder, handle_v1_set_active_document, handle_v1_git_branch_changed,
 };
-use crate::http::routers::v1::status::{handle_v1_codegraph_status, handle_v1_rag_status};
+use crate::http::routers::v1::status::{
+    handle_v1_codegraph_status, handle_v1_file_index_status, handle_v1_rag_status,
+};
 use crate::http::routers::v1::customization::handle_v1_customization;
 use crate::http::routers::v1::customization::handle_v1_config_path;
 use crate::http::routers::v1::gui_help_handlers::handle_v1_fullpath;
@@ -503,6 +505,7 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/vdb-status", get(handle_v1_vecdb_status))
         .route("/codegraph-search", post(handle_v1_codegraph_search))
         .route("/codegraph-status", get(handle_v1_codegraph_status))
+        .route("/file-index-status", get(handle_v1_file_index_status))
         .route("/code-intel/overview", get(handle_v1_code_intel_overview))
         .route("/code-intel/graph", get(handle_v1_code_intel_graph))
         .route(

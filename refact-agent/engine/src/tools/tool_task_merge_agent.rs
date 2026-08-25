@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+#[cfg(test)]
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -933,6 +934,21 @@ impl ToolTaskMergeAgent {
     }
 }
 
+async fn run_git_in(cwd: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
 #[async_trait]
 impl Tool for ToolTaskMergeAgent {
     fn tool_description(&self) -> ToolDesc {
@@ -994,10 +1010,11 @@ impl Tool for ToolTaskMergeAgent {
         let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
         let workspace_root = project_dirs.first().ok_or("No workspace folder found")?;
 
-        let is_git_repo = Command::new("git")
+        let is_git_repo = tokio::process::Command::new("git")
             .args(["rev-parse", "--is-inside-work-tree"])
             .current_dir(workspace_root)
             .output()
+            .await
             .map(|o| o.status.success())
             .unwrap_or(false);
         if !is_git_repo {
@@ -1051,25 +1068,18 @@ impl Tool for ToolTaskMergeAgent {
             .as_ref()
             .ok_or(format!("Card {} has no agent worktree", card_id))?;
 
-        let run_git = |args: &[&str]| -> Result<String, String> {
-            let output = Command::new("git")
-                .args(args)
-                .current_dir(workspace_root)
-                .output()
-                .map_err(|e| format!("Failed to run git: {}", e))?;
-
-            if output.status.success() {
-                Ok(String::from_utf8_lossy(&output.stdout).to_string())
-            } else {
-                Err(String::from_utf8_lossy(&output.stderr).to_string())
-            }
-        };
-
         ensure_legacy_agent_worktree_checkout(workspace_root, agent_worktree, agent_branch)?;
 
-        let merge_in_progress = run_git(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok();
+        let merge_in_progress = run_git_in(
+            workspace_root,
+            &["rev-parse", "-q", "--verify", "MERGE_HEAD"],
+        )
+        .await
+        .is_ok();
         if merge_in_progress {
-            let status = run_git(&["status", "--porcelain"]).unwrap_or_default();
+            let status = run_git_in(workspace_root, &["status", "--porcelain"])
+                .await
+                .unwrap_or_default();
             let conflict_files: Vec<String> = status
                 .lines()
                 .filter(|l| {
@@ -1126,7 +1136,9 @@ Then call `merge_agent` again."#,
             ));
         }
 
-        let main_status = run_git(&["status", "--porcelain"]).unwrap_or_default();
+        let main_status = run_git_in(workspace_root, &["status", "--porcelain"])
+            .await
+            .unwrap_or_default();
         if !main_status.trim().is_empty() {
             return Err(
                 "Main workspace has uncommitted changes. Please commit or stash before merging."
@@ -1145,11 +1157,15 @@ Then call `merge_agent` again."#,
             agent_branch,
         );
 
-        let commits_ahead_result = run_git(&[
-            "rev-list",
-            "--count",
-            &format!("{}..{}", comparison_base, agent_branch),
-        ]);
+        let commits_ahead_result = run_git_in(
+            workspace_root,
+            &[
+                "rev-list",
+                "--count",
+                &format!("{}..{}", comparison_base, agent_branch),
+            ],
+        )
+        .await;
         let commits_ahead = match commits_ahead_result {
             Ok(output) => output
                 .trim()
@@ -1166,10 +1182,11 @@ Then call `merge_agent` again."#,
 
         if commits_ahead == 0 {
             let worktree_status = if let Some(wt) = card.agent_worktree.as_ref() {
-                Command::new("git")
+                tokio::process::Command::new("git")
                     .args(["status", "--porcelain"])
                     .current_dir(wt)
                     .output()
+                    .await
                     .ok()
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                     .unwrap_or_default()
@@ -1177,7 +1194,9 @@ Then call `merge_agent` again."#,
                 String::new()
             };
 
-            let main_status = run_git(&["status", "--porcelain"]).unwrap_or_default();
+            let main_status = run_git_in(workspace_root, &["status", "--porcelain"])
+                .await
+                .unwrap_or_default();
             let main_dirty = !main_status.trim().is_empty();
             let worktree_dirty = !worktree_status.is_empty();
 
@@ -1198,9 +1217,15 @@ Then call `merge_agent` again."#,
                 );
             } else if agent_branch != base_branch {
                 let _guard = git_merge_lock().lock().await;
-                worktree_removed =
-                    run_git(&["worktree", "remove", agent_worktree, "--force"]).is_ok();
-                branch_deleted = run_git(&["branch", "-D", agent_branch]).is_ok();
+                worktree_removed = run_git_in(
+                    workspace_root,
+                    &["worktree", "remove", agent_worktree, "--force"],
+                )
+                .await
+                .is_ok();
+                branch_deleted = run_git_in(workspace_root, &["branch", "-D", agent_branch])
+                    .await
+                    .is_ok();
                 drop(_guard);
 
                 if worktree_removed {
@@ -1275,8 +1300,12 @@ Then call `merge_agent` again."#,
 
         // Generate commit message before acquiring the lock: git diff base...agent is read-only
         // and produces the same content as git diff --cached after a squash merge.
-        let diff = run_git(&["diff", &format!("{}...{}", comparison_base, agent_branch)])
-            .unwrap_or_default();
+        let diff = run_git_in(
+            workspace_root,
+            &["diff", &format!("{}...{}", comparison_base, agent_branch)],
+        )
+        .await
+        .unwrap_or_default();
         let commit_msg =
             match crate::agentic::generate_commit_message::generate_commit_message_by_diff(
                 gcx.clone(),
@@ -1298,11 +1327,12 @@ Then call `merge_agent` again."#,
 
         let _guard = git_merge_lock().lock().await;
 
-        run_git(&["checkout", base_branch])
+        run_git_in(workspace_root, &["checkout", base_branch])
+            .await
             .map_err(|e| format!("Failed to checkout base branch: {}", e))?;
 
         let merge_result = if strategy == "squash" {
-            run_git(&["merge", "--squash", agent_branch])
+            run_git_in(workspace_root, &["merge", "--squash", agent_branch]).await
         } else {
             crate::worktrees::git::run_git_with_refact_author(
                 workspace_root,
@@ -1318,7 +1348,9 @@ Then call `merge_agent` again."#,
         };
 
         if let Err(e) = merge_result {
-            let status = run_git(&["status", "--porcelain"]).unwrap_or_default();
+            let status = run_git_in(workspace_root, &["status", "--porcelain"])
+                .await
+                .unwrap_or_default();
             let is_conflict_line = |l: &str| {
                 let bytes = l.as_bytes();
                 bytes.len() >= 2
@@ -1414,17 +1446,19 @@ Use `cat <file>` to see conflict markers in each file."#,
         let merge_commit = if squash_nothing_to_commit {
             None
         } else {
-            run_git(&["rev-parse", "HEAD"])
+            run_git_in(workspace_root, &["rev-parse", "HEAD"])
+                .await
                 .map(|head| head.trim().to_string())
                 .ok()
                 .filter(|head| !head.is_empty())
         };
 
         let agent_worktree_dirty = if agent_branch != base_branch {
-            match Command::new("git")
+            match tokio::process::Command::new("git")
                 .args(["status", "--porcelain"])
                 .current_dir(agent_worktree)
                 .output()
+                .await
             {
                 Ok(output) if output.status.success() => {
                     !String::from_utf8_lossy(&output.stdout).trim().is_empty()
@@ -1437,8 +1471,15 @@ Use `cat <file>` to see conflict markers in each file."#,
 
         let (worktree_removed, branch_deleted) =
             if agent_branch != base_branch && !agent_worktree_dirty {
-                let wr = run_git(&["worktree", "remove", agent_worktree, "--force"]).is_ok();
-                let bd = run_git(&["branch", "-D", agent_branch]).is_ok();
+                let wr = run_git_in(
+                    workspace_root,
+                    &["worktree", "remove", agent_worktree, "--force"],
+                )
+                .await
+                .is_ok();
+                let bd = run_git_in(workspace_root, &["branch", "-D", agent_branch])
+                    .await
+                    .is_ok();
                 (wr, bd)
             } else {
                 (false, false)

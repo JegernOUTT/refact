@@ -182,6 +182,9 @@ fn record_path_candidates(
 ) -> Vec<PathBuf> {
     let mut candidates = registered_alias_paths(path, mappings);
     candidates.push(path.to_path_buf());
+    if let Some(facts) = gcx.file_index.get(path) {
+        candidates.extend(gcx.file_index.aliases_of(&facts, path));
+    }
     let workspaces = gcx
         .documents_state
         .workspace_folders

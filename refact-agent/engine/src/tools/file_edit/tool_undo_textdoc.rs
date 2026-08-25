@@ -16,7 +16,6 @@ use crate::tools::tools_description::{
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 use crate::worktrees::scope::ExecutionScope;
 use std::sync::Arc;
@@ -87,13 +86,17 @@ pub async fn tool_undo_text_doc_exec(
     let target_idx = entries.len() - a.steps;
     let target_content = &entries[target_idx].content;
 
-    let current_content = fs::read_to_string(&a.path)
+    let current_content = tokio::fs::read_to_string(&a.path)
+        .await
         .map_err(|e| format!("⚠️ Failed to read {:?}: {}", a.path, e))?;
 
     if target_content.is_empty() {
-        fs::remove_file(&a.path).map_err(|e| format!("⚠️ Failed to delete {:?}: {}", a.path, e))?;
+        tokio::fs::remove_file(&a.path)
+            .await
+            .map_err(|e| format!("⚠️ Failed to delete {:?}: {}", a.path, e))?;
     } else {
-        fs::write(&a.path, target_content)
+        tokio::fs::write(&a.path, target_content)
+            .await
             .map_err(|e| format!("⚠️ Failed to write {:?}: {}", a.path, e))?;
     }
 

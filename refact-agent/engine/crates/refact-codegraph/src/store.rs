@@ -133,6 +133,37 @@ fn pattern_has_path_separator(pattern: &str) -> bool {
     pattern.contains("::") || pattern.contains('/') || pattern.contains('\\')
 }
 
+fn reverse_string(term: &str) -> String {
+    term.chars().rev().collect()
+}
+
+fn glob_escape(term: &str) -> String {
+    let mut out = String::with_capacity(term.len());
+    for ch in term.chars() {
+        match ch {
+            '*' => out.push_str("[*]"),
+            '?' => out.push_str("[?]"),
+            '[' => out.push_str("[[]"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+const TRIGRAM_MIN_CHARS: usize = 3;
+const SQL_PARAM_CHUNK: usize = 900;
+
+fn fts_phrase(term: &str) -> String {
+    format!("\"{}\"", term.replace('"', "\"\""))
+}
+
+fn placeholders(count: usize) -> String {
+    std::iter::repeat("?")
+        .take(count)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn escape_like(term: &str) -> String {
     let mut out = String::with_capacity(term.len());
     for ch in term.chars() {
@@ -442,7 +473,9 @@ impl Store {
             params![kind, path, name, lang, line1, line2],
         )
         .map_err(|e| format!("codegraph insert_node: {e}"))?;
-        Ok(conn.last_insert_rowid())
+        let node_id = conn.last_insert_rowid();
+        Self::index_node_name_on(conn, node_id, name)?;
+        Ok(node_id)
     }
 
     pub fn insert_node_with_data(
@@ -474,7 +507,9 @@ impl Store {
             params![kind, path, name, lang, line1, line2, data],
         )
         .map_err(|e| format!("codegraph insert_node_with_data: {e}"))?;
-        Ok(conn.last_insert_rowid())
+        let node_id = conn.last_insert_rowid();
+        Self::index_node_name_on(conn, node_id, name)?;
+        Ok(node_id)
     }
 
     pub fn symbol_data_for_path(&self, path: &str) -> Result<Vec<SymbolData>, String> {
@@ -735,8 +770,9 @@ impl Store {
         line: i64,
     ) -> Result<(), String> {
         conn.execute(
-            "INSERT INTO pending_refs(from_node_id, name, kind, line) VALUES(?1, ?2, ?3, ?4)",
-            params![from_node_id, name, kind, line],
+            "INSERT INTO pending_refs(from_node_id, name, reverse_name, kind, line) \
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![from_node_id, name, reverse_string(name), kind, line],
         )
         .map_err(|e| format!("codegraph add_pending_ref: {e}"))?;
         Ok(())
@@ -1027,19 +1063,33 @@ impl Store {
         conn: &Connection,
         keys: &HashSet<String>,
     ) -> Result<(), String> {
-        for key in keys {
-            let escaped_key = escape_like(key);
-            let colon_suffix = format!("%::{escaped_key}");
-            let dot_suffix = format!("%.{escaped_key}");
-            let slash_suffix = format!("%/{escaped_key}");
-            conn.execute(
+        let mut exact = conn
+            .prepare(
                 "INSERT OR IGNORE INTO dirty_paths(path) \
                  SELECT DISTINCT n.path FROM pending_refs p JOIN nodes n ON n.id = p.from_node_id \
-                 WHERE p.name = ?1 OR p.name LIKE ?2 ESCAPE '\\' OR p.name LIKE ?3 ESCAPE '\\' \
-                 OR p.name LIKE ?4 ESCAPE '\\'",
-                params![key, colon_suffix, dot_suffix, slash_suffix],
+                 WHERE p.name = ?1",
             )
             .map_err(|e| format!("codegraph mark referencing paths dirty: {e}"))?;
+        let mut suffix = conn
+            .prepare(
+                "INSERT OR IGNORE INTO dirty_paths(path) \
+                 SELECT DISTINCT n.path FROM pending_refs p JOIN nodes n ON n.id = p.from_node_id \
+                 WHERE p.reverse_name GLOB ?1",
+            )
+            .map_err(|e| format!("codegraph mark referencing paths dirty: {e}"))?;
+        for key in keys {
+            exact
+                .execute(params![key])
+                .map_err(|e| format!("codegraph mark referencing paths dirty: {e}"))?;
+            for separator in ["::", ".", "/"] {
+                let pattern = format!(
+                    "{}*",
+                    glob_escape(&reverse_string(&format!("{separator}{key}")))
+                );
+                suffix
+                    .execute(params![pattern])
+                    .map_err(|e| format!("codegraph mark referencing paths dirty: {e}"))?;
+            }
         }
         Ok(())
     }
@@ -1107,6 +1157,12 @@ impl Store {
             params![path],
         )
         .map_err(|e| format!("codegraph remove symbols: {e}"))?;
+        conn.execute(
+            "DELETE FROM node_name_search \
+             WHERE rowid IN (SELECT id FROM nodes WHERE path = ?1)",
+            params![path],
+        )
+        .map_err(|e| format!("codegraph remove node_name_search: {e}"))?;
         conn.execute("DELETE FROM nodes WHERE path = ?1", params![path])
             .map_err(|e| format!("codegraph remove nodes: {e}"))?;
         conn.execute("DELETE FROM fts_code WHERE path = ?1", params![path])
@@ -1563,12 +1619,67 @@ impl Store {
         Ok(out)
     }
 
+    fn index_node_name_on(conn: &Connection, node_id: i64, name: &str) -> Result<(), String> {
+        if name.is_empty() {
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO node_name_search(rowid, name) VALUES(?1, ?2)",
+            params![node_id, name],
+        )
+        .map_err(|e| format!("codegraph index_node_name: {e}"))?;
+        Ok(())
+    }
+
     pub fn symbol_name_ranked(
         &self,
         like_term: &str,
         limit: i64,
     ) -> Result<Vec<(String, String, i64, i64)>, String> {
-        let pattern = format!("%{}%", escape_like(&like_term.to_lowercase()));
+        let term = like_term.to_lowercase();
+        if term.chars().count() >= TRIGRAM_MIN_CHARS {
+            return self.symbol_name_ranked_fts(&term, limit);
+        }
+        self.symbol_name_ranked_like(&term, limit)
+    }
+
+    fn symbol_name_ranked_fts(
+        &self,
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, String, i64, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT n.path, n.name, n.line1, n.line2 \
+                 FROM node_name_search s JOIN nodes n ON n.id = s.rowid \
+                 WHERE node_name_search MATCH ?1 AND n.data IS NOT NULL \
+                 ORDER BY n.id LIMIT ?2",
+            )
+            .map_err(|e| format!("codegraph symbol_name_ranked prepare: {e}"))?;
+        let rows = stmt
+            .query_map(params![fts_phrase(term), limit], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(|e| format!("codegraph symbol_name_ranked: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("codegraph symbol_name_ranked row: {e}"))?);
+        }
+        Ok(out)
+    }
+
+    fn symbol_name_ranked_like(
+        &self,
+        like_term: &str,
+        limit: i64,
+    ) -> Result<Vec<(String, String, i64, i64)>, String> {
+        let pattern = format!("%{}%", escape_like(like_term));
         let mut stmt = self
             .conn
             .prepare(
@@ -1604,6 +1715,74 @@ impl Store {
             .optional()
             .map_err(|e| format!("codegraph file_span: {e}"))?;
         Ok(span.map(|(line1, line2)| (line1.max(1) as usize, line2.max(1) as usize)))
+    }
+
+    pub fn file_spans(&self, paths: &[String]) -> Result<HashMap<String, (usize, usize)>, String> {
+        let mut out = HashMap::new();
+        for chunk in paths.chunks(SQL_PARAM_CHUNK) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let sql = format!(
+                "SELECT path, line1, line2 FROM nodes \
+                 WHERE kind = 'file' AND path IN ({})",
+                placeholders(chunk.len())
+            );
+            let mut stmt = self
+                .conn
+                .prepare(&sql)
+                .map_err(|e| format!("codegraph file_spans prepare: {e}"))?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .map_err(|e| format!("codegraph file_spans: {e}"))?;
+            for r in rows {
+                let (path, line1, line2) =
+                    r.map_err(|e| format!("codegraph file_spans row: {e}"))?;
+                out.insert(path, (line1.max(1) as usize, line2.max(1) as usize));
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn neighbor_paths_batch(
+        &self,
+        seeds: &[String],
+    ) -> Result<HashMap<String, Vec<String>>, String> {
+        let mut out: HashMap<String, Vec<String>> = HashMap::new();
+        for chunk in seeds.chunks(SQL_PARAM_CHUNK) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let sql = format!(
+                "SELECT DISTINCT sn.path, dn.path FROM edges e \
+                 JOIN nodes sn ON sn.id = e.src \
+                 JOIN nodes dn ON dn.id = e.dst \
+                 WHERE e.kind != 'defined_in' AND dn.path != sn.path \
+                 AND sn.path IN ({})",
+                placeholders(chunk.len())
+            );
+            let mut stmt = self
+                .conn
+                .prepare(&sql)
+                .map_err(|e| format!("codegraph neighbor_paths_batch prepare: {e}"))?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| format!("codegraph neighbor_paths_batch: {e}"))?;
+            for r in rows {
+                let (seed, neighbor) =
+                    r.map_err(|e| format!("codegraph neighbor_paths_batch row: {e}"))?;
+                out.entry(seed).or_default().push(neighbor);
+            }
+        }
+        Ok(out)
     }
 
     pub fn neighbor_paths(&self, path: &str) -> Result<Vec<String>, String> {
@@ -1912,6 +2091,84 @@ mod tests {
         assert_eq!(exact.len(), 1);
         assert_eq!(exact[0].double_colon_path, "src/a/m.rs::helper");
         assert_eq!(fuzzy, vec!["src/a/m.rs::helper".to_string()]);
+    }
+
+    #[test]
+    fn symbol_name_ranked_short_terms_fall_back_to_like() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_node_with_data("function", "src/a.rs", "ab_thing", "rust", 1, 1, "{}")
+            .unwrap();
+
+        let names: Vec<String> = store
+            .symbol_name_ranked("ab", 10)
+            .unwrap()
+            .into_iter()
+            .map(|(_, name, _, _)| name)
+            .collect();
+
+        assert_eq!(names, vec!["ab_thing".to_string()]);
+    }
+
+    #[test]
+    fn symbol_name_ranked_is_case_insensitive_via_fts() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_node_with_data("function", "src/a.rs", "MyHandler", "rust", 1, 1, "{}")
+            .unwrap();
+
+        let names: Vec<String> = store
+            .symbol_name_ranked("handler", 10)
+            .unwrap()
+            .into_iter()
+            .map(|(_, name, _, _)| name)
+            .collect();
+
+        assert_eq!(names, vec!["MyHandler".to_string()]);
+    }
+
+    #[test]
+    fn removing_a_path_drops_its_node_names_from_the_index() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_node_with_data("function", "src/gone.rs", "vanishing", "rust", 1, 1, "{}")
+            .unwrap();
+        assert_eq!(store.symbol_name_ranked("vanishing", 10).unwrap().len(), 1);
+
+        store.remove_path("src/gone.rs").unwrap();
+
+        assert!(store
+            .symbol_name_ranked("vanishing", 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn file_spans_batches_and_matches_single_lookup() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .insert_node("file", "src/a.rs", "a.rs", "rust", 1, 40)
+            .unwrap();
+        store
+            .insert_node("file", "src/b.rs", "b.rs", "rust", 1, 7)
+            .unwrap();
+
+        let paths = vec![
+            "src/a.rs".to_string(),
+            "src/b.rs".to_string(),
+            "src/missing.rs".to_string(),
+        ];
+        let batched = store.file_spans(&paths).unwrap();
+
+        assert_eq!(
+            batched.get("src/a.rs"),
+            store.file_span("src/a.rs").unwrap().as_ref()
+        );
+        assert_eq!(
+            batched.get("src/b.rs"),
+            store.file_span("src/b.rs").unwrap().as_ref()
+        );
+        assert!(batched.get("src/missing.rs").is_none());
     }
 
     #[test]

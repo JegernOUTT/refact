@@ -353,6 +353,8 @@ pub struct GlobalContext {
     pub at_commands_preview_cache: Arc<AMutex<AtCommandsPreviewCache>>,
     pub privacy_settings: Arc<StdRwLock<Arc<PrivacySettings>>>,
     pub privacy_policy_load: Arc<StdRwLock<refact_privacy::PolicyLoad>>,
+    pub file_index: Arc<crate::file_index::FileIndex>,
+    pub privacy_match_counts: Arc<StdRwLock<crate::privacy::PrivacyMatchCounts>>,
     pub privacy_observation_runtime: Arc<StdRwLock<PrivacyObservationRuntimeState>>,
     pub indexing_everywhere: Arc<StdRwLock<Arc<crate::files_blocklist::IndexingEverywhere>>>,
     pub integration_sessions:
@@ -854,6 +856,8 @@ pub async fn create_global_context(
         at_commands_preview_cache: Arc::new(AMutex::new(AtCommandsPreviewCache::new())),
         privacy_settings: Arc::new(StdRwLock::new(Arc::new(PrivacySettings::default()))),
         privacy_policy_load: Arc::new(StdRwLock::new(refact_privacy::PolicyLoad::default())),
+        file_index: Arc::new(crate::file_index::FileIndex::default()),
+        privacy_match_counts: Arc::new(StdRwLock::new(Default::default())),
         privacy_observation_runtime: Arc::new(StdRwLock::new(
             PrivacyObservationRuntimeState::default(),
         )),
@@ -1145,6 +1149,8 @@ pub mod tests {
             at_commands_preview_cache: Arc::new(AMutex::new(AtCommandsPreviewCache::new())),
             privacy_settings: Arc::new(StdRwLock::new(Arc::new(PrivacySettings::default()))),
             privacy_policy_load: Arc::new(StdRwLock::new(refact_privacy::PolicyLoad::default())),
+            file_index: Arc::new(crate::file_index::FileIndex::default()),
+            privacy_match_counts: Arc::new(StdRwLock::new(Default::default())),
             privacy_observation_runtime: Arc::new(StdRwLock::new(
                 PrivacyObservationRuntimeState::default(),
             )),

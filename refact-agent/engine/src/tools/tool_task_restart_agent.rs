@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -66,16 +65,18 @@ async fn cleanup_old_worktree(
     let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
     if let Some(workspace_root) = project_dirs.first() {
         if let Some(wt) = agent_worktree {
-            let _ = Command::new("git")
+            let _ = tokio::process::Command::new("git")
                 .args(["worktree", "remove", wt, "--force"])
                 .current_dir(workspace_root)
-                .output();
+                .output()
+                .await;
         }
         if let Some(branch) = agent_branch {
-            let _ = Command::new("git")
+            let _ = tokio::process::Command::new("git")
                 .args(["branch", "-D", branch])
                 .current_dir(workspace_root)
-                .output();
+                .output()
+                .await;
         }
     }
 }

@@ -1,8 +1,6 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::{collections::HashMap, sync::RwLock};
 
 use glob::Pattern;
 use unicode_normalization::UnicodeNormalization;
@@ -35,20 +33,9 @@ struct CompiledZone {
     patterns: Vec<Pattern>,
 }
 
-#[cfg(unix)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct FileIdentity {
-    device: u64,
-    inode: u64,
-}
-
 pub struct CompiledPolicy {
     zones: Vec<CompiledZone>,
     normal_index: usize,
-    #[cfg(unix)]
-    secret_identities: RwLock<HashMap<FileIdentity, usize>>,
-    #[cfg(unix)]
-    guarded_aliases: RwLock<HashMap<Vec<PathBuf>, HashMap<FileIdentity, Vec<PathBuf>>>>,
 }
 
 pub fn compile_patterns(patterns: &[String]) -> Result<Vec<Pattern>, PolicyError> {
@@ -149,10 +136,6 @@ impl PrivacyPolicy {
         Ok(CompiledPolicy {
             zones,
             normal_index,
-            #[cfg(unix)]
-            secret_identities: RwLock::new(HashMap::new()),
-            #[cfg(unix)]
-            guarded_aliases: RwLock::new(HashMap::new()),
         })
     }
 }
@@ -184,35 +167,22 @@ impl CompiledPolicy {
             .into_iter()
             .map(|root| absolute_path(root.as_ref()))
             .collect::<Vec<_>>();
+        let canonical_roots = canonical_roots_of(&roots);
+        self.zone_for_path_prepared(path, &roots, &canonical_roots)
+    }
+
+    fn zone_for_path_prepared(
+        &self,
+        path: &Path,
+        roots: &[PathBuf],
+        canonical_roots: &[PathBuf],
+    ) -> &Zone {
         let canonical_path = canonicalize_or_original(&absolute_path(path));
 
         let mut candidate_paths = vec![path.to_path_buf(), absolute_path(path), canonical_path];
-        append_relative_candidates(&mut candidate_paths, &roots);
-
-        #[cfg(unix)]
-        if let Some(identity) = hard_linked_file_identity(path) {
-            self.extend_with_guarded_aliases(&mut candidate_paths, identity, &roots);
-            append_relative_candidates(&mut candidate_paths, &roots);
-        }
+        append_relative_candidates(&mut candidate_paths, roots, canonical_roots);
 
         let candidates = normalized_candidates(&candidate_paths);
-        #[cfg(unix)]
-        if let Some(index) = self.cached_secret_zone(path) {
-            if let Some((earlier, _)) =
-                self.zones[..=index]
-                    .iter()
-                    .enumerate()
-                    .find(|(_, compiled)| {
-                        compiled.patterns.iter().any(|pattern| {
-                            candidates
-                                .iter()
-                                .any(|candidate| pattern.matches(candidate))
-                        })
-                    })
-            {
-                return &self.zones[earlier].zone;
-            }
-        }
         if let Some((index, _)) = self.zones.iter().enumerate().find(|(_, compiled)| {
             compiled.patterns.iter().any(|pattern| {
                 candidates
@@ -220,10 +190,6 @@ impl CompiledPolicy {
                     .any(|candidate| pattern.matches(candidate))
             })
         }) {
-            #[cfg(unix)]
-            if self.zones[index].zone.name == "secrets" {
-                self.remember_secret_identity(path, index);
-            }
             return &self.zones[index].zone;
         }
 
@@ -247,12 +213,13 @@ impl CompiledPolicy {
     {
         let roots = roots
             .into_iter()
-            .map(|root| root.as_ref().to_path_buf())
+            .map(|root| absolute_path(root.as_ref()))
             .collect::<Vec<_>>();
+        let canonical_roots = canonical_roots_of(&roots);
         let zones = paths
             .into_iter()
             .map(|path| {
-                let zone = self.zone_for_path_with_roots(path.as_ref(), &roots);
+                let zone = self.zone_for_path_prepared(path.as_ref(), &roots, &canonical_roots);
                 let index = self
                     .zone_index_named(&zone.name)
                     .expect("matched zones should belong to the compiled policy");
@@ -260,126 +227,6 @@ impl CompiledPolicy {
             })
             .collect::<Vec<_>>();
         effective_zone(&zones).unwrap_or_else(|| self.zones[self.normal_index].zone.clone())
-    }
-
-    #[cfg(unix)]
-    fn cached_secret_zone(&self, path: &Path) -> Option<usize> {
-        let identity = file_identity(path)?;
-        match self.secret_identities.read() {
-            Ok(cache) => cache.get(&identity).copied(),
-            Err(poisoned) => {
-                drop(poisoned.into_inner());
-                let mut cache = self
-                    .secret_identities
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                cache.clear();
-                self.secret_identities.clear_poison();
-                None
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    fn extend_with_guarded_aliases(
-        &self,
-        paths: &mut Vec<PathBuf>,
-        identity: FileIdentity,
-        roots: &[PathBuf],
-    ) {
-        let key = roots.to_vec();
-        if let Some(aliases) = self
-            .guarded_aliases
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&key)
-            .map(|index| index.get(&identity).cloned().unwrap_or_default())
-        {
-            paths.extend(aliases);
-            return;
-        }
-        let index = self.build_guarded_alias_index(roots);
-        if let Some(aliases) = index.get(&identity) {
-            paths.extend(aliases.iter().cloned());
-        }
-        self.guarded_aliases
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(key, index);
-    }
-
-    #[cfg(unix)]
-    fn build_guarded_alias_index(&self, roots: &[PathBuf]) -> HashMap<FileIdentity, Vec<PathBuf>> {
-        use std::os::unix::fs::MetadataExt;
-        let mut index: HashMap<FileIdentity, Vec<PathBuf>> = HashMap::new();
-        let mut pending = roots
-            .iter()
-            .map(|root| canonicalize_or_original(root))
-            .collect::<Vec<_>>();
-        let mut visited = 0usize;
-        while let Some(path) = pending.pop() {
-            if visited >= MAX_GUARDED_INDEX_ENTRIES {
-                break;
-            }
-            visited += 1;
-            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if metadata.file_type().is_symlink() {
-                continue;
-            }
-            if metadata.is_dir() {
-                let Ok(entries) = std::fs::read_dir(&path) else {
-                    continue;
-                };
-                pending.extend(entries.filter_map(Result::ok).map(|entry| entry.path()));
-                continue;
-            }
-            if !metadata.is_file() || metadata.nlink() <= 1 {
-                continue;
-            }
-            if !self.path_matches_guarded_zone(&path, roots) {
-                continue;
-            }
-            let identity = FileIdentity {
-                device: metadata.dev(),
-                inode: metadata.ino(),
-            };
-            index.entry(identity).or_default().push(path);
-        }
-        index
-    }
-
-    #[cfg(unix)]
-    fn path_matches_guarded_zone(&self, path: &Path, roots: &[PathBuf]) -> bool {
-        let mut candidate_paths = vec![path.to_path_buf(), absolute_path(path)];
-        append_relative_candidates(&mut candidate_paths, roots);
-        let candidates = normalized_candidates(&candidate_paths);
-        self.zones.iter().enumerate().any(|(index, compiled)| {
-            index != self.normal_index
-                && compiled
-                    .patterns
-                    .iter()
-                    .any(|pattern| candidates.iter().any(|c| pattern.matches(c)))
-        })
-    }
-
-    #[cfg(unix)]
-    fn remember_secret_identity(&self, path: &Path, zone_index: usize) {
-        let Some(identity) = file_identity(path) else {
-            return;
-        };
-        match self.secret_identities.write() {
-            Ok(mut cache) => {
-                cache.insert(identity, zone_index);
-            }
-            Err(poisoned) => {
-                let mut cache = poisoned.into_inner();
-                cache.clear();
-                cache.insert(identity, zone_index);
-                self.secret_identities.clear_poison();
-            }
-        }
     }
 }
 
@@ -487,16 +334,26 @@ fn absolute_path(path: &Path) -> PathBuf {
     }
 }
 
+fn canonical_roots_of(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .map(|root| canonicalize_or_original(root))
+        .collect()
+}
+
 fn canonicalize_or_original(path: &Path) -> PathBuf {
     dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn append_relative_candidates(candidate_paths: &mut Vec<PathBuf>, roots: &[PathBuf]) {
+fn append_relative_candidates(
+    candidate_paths: &mut Vec<PathBuf>,
+    roots: &[PathBuf],
+    canonical_roots: &[PathBuf],
+) {
     let paths = candidate_paths.clone();
-    for root in roots {
-        let canonical_root = canonicalize_or_original(root);
+    for (root, canonical_root) in roots.iter().zip(canonical_roots.iter()) {
         for path in &paths {
-            for candidate_root in [root, &canonical_root] {
+            for candidate_root in [root, canonical_root] {
                 if let Ok(relative) = path.strip_prefix(candidate_root) {
                     candidate_paths.push(relative.to_path_buf());
                 }
@@ -521,34 +378,6 @@ fn normalized_candidates(paths: &[PathBuf]) -> BTreeSet<String> {
     }
     candidates
 }
-
-#[cfg(unix)]
-fn file_identity(path: &Path) -> Option<FileIdentity> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = std::fs::metadata(path).ok()?;
-    Some(FileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
-}
-
-#[cfg(unix)]
-fn hard_linked_file_identity(path: &Path) -> Option<FileIdentity> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = std::fs::metadata(path).ok()?;
-    if !metadata.is_file() || metadata.nlink() <= 1 {
-        return None;
-    }
-    Some(FileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
-}
-
-#[cfg(unix)]
-const MAX_GUARDED_INDEX_ENTRIES: usize = 200_000;
 
 #[cfg(test)]
 mod tests {
@@ -996,25 +825,9 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn directories_are_not_treated_as_hard_linked_files() {
-        use std::os::unix::fs::MetadataExt;
-
-        let temp = tempfile::tempdir().expect("tempdir should be created");
-        std::fs::create_dir(temp.path().join("nested")).expect("nested dir should be created");
-        assert!(std::fs::metadata(temp.path()).unwrap().nlink() > 1);
-        assert_eq!(hard_linked_file_identity(temp.path()), None);
-
-        let file = temp.path().join("file.txt");
-        let alias = temp.path().join("alias.txt");
-        std::fs::write(&file, "content").expect("file should be written");
-        std::fs::hard_link(&file, &alias).expect("hard link should be created");
-        assert_eq!(hard_linked_file_identity(&file), file_identity(&file));
-    }
-
     #[cfg(unix)]
     #[test]
-    fn hardlink_into_secrets_is_classified_when_queried_first() {
+    fn engine_supplied_alias_candidate_wins_the_strict_zone() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let secret_dir = temp.path().join("secrets");
         std::fs::create_dir(&secret_dir).expect("secret dir should be created");
@@ -1032,45 +845,19 @@ mod tests {
             compiled
                 .zone_for_path_with_roots(&alias, [temp.path()])
                 .name,
-            "secrets"
+            "normal",
+            "the matching library must not touch the filesystem on its own"
+        );
+        assert_eq!(
+            compiled
+                .strictest_zone_for_paths_with_roots([&alias, &secret], [temp.path()])
+                .name,
+            "secrets",
+            "when the engine supplies the hard-link alias, the strict zone wins"
         );
     }
 
     #[cfg(unix)]
-    #[test]
-    fn guarded_alias_index_records_only_restrictive_matches() {
-        let temp = tempfile::tempdir().expect("tempdir should be created");
-        let secret_dir = temp.path().join("secrets");
-        std::fs::create_dir(&secret_dir).expect("secret dir should be created");
-        let secret = secret_dir.join("secret.txt");
-        std::fs::write(&secret, "secret").expect("secret should be written");
-        std::fs::hard_link(&secret, temp.path().join("alias.txt"))
-            .expect("secret hard link should be created");
-        let plain = temp.path().join("plain.txt");
-        std::fs::write(&plain, "plain").expect("plain should be written");
-        std::fs::hard_link(&plain, temp.path().join("plain-alias.txt"))
-            .expect("plain hard link should be created");
-        let compiled = policy(vec![
-            zone("secrets", &["secrets/*"], &[]),
-            zone("normal", &["*"], &["*"]),
-        ])
-        .compile()
-        .expect("policy should compile");
-
-        let index = compiled.build_guarded_alias_index(&[temp.path().to_path_buf()]);
-
-        let secret_identity = file_identity(&secret).expect("secret identity");
-        let plain_identity = file_identity(&plain).expect("plain identity");
-        assert!(
-            index.contains_key(&secret_identity),
-            "restrictive-zone file must be indexed"
-        );
-        assert!(
-            !index.contains_key(&plain_identity),
-            "non-restrictive hard-linked files must not be indexed"
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn symlink_into_secrets_is_classified_when_queried_first() {
@@ -1092,84 +879,6 @@ mod tests {
                 .zone_for_path_with_roots(&alias, [temp.path()])
                 .name,
             "secrets"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn secret_identity_cache_does_not_override_an_earlier_zone() {
-        let temp = tempfile::tempdir().expect("tempdir should be created");
-        let secret_dir = temp.path().join("secrets");
-        std::fs::create_dir(&secret_dir).expect("secret dir should be created");
-        let secret = secret_dir.join("secret.txt");
-        let alias = temp.path().join("public.txt");
-        std::fs::write(&secret, "secret").expect("secret should be written");
-        std::fs::hard_link(&secret, &alias).expect("hard link should be created");
-        let policy = policy(vec![
-            zone("public", &["public.txt"], &["*"]),
-            zone("secrets", &["secrets/*"], &[]),
-            zone("normal", &["*"], &["*"]),
-        ]);
-        let compiled = policy.compile().expect("policy should compile");
-
-        assert_eq!(
-            compiled
-                .zone_for_path_with_roots(&secret, [temp.path()])
-                .name,
-            "public"
-        );
-        assert_eq!(
-            compiled
-                .zone_for_path_with_roots(&alias, [temp.path()])
-                .name,
-            "public"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn poisoned_secret_identity_cache_is_cleared_before_classification() {
-        let temp = tempfile::tempdir().expect("tempdir should be created");
-        let secret_dir = temp.path().join("secrets");
-        std::fs::create_dir(&secret_dir).expect("secret dir should be created");
-        let secret = secret_dir.join("secret.txt");
-        let alias = temp.path().join("alias.txt");
-        std::fs::write(&secret, "secret").expect("secret should be written");
-        std::fs::hard_link(&secret, &alias).expect("hard link should be created");
-        let compiled = std::sync::Arc::new(
-            policy(vec![
-                zone("secrets", &["secrets/*"], &[]),
-                zone("normal", &["*"], &["*"]),
-            ])
-            .compile()
-            .expect("policy should compile"),
-        );
-        let identity = file_identity(&secret).expect("secret identity should be available");
-        let poison = compiled.clone();
-        let _ = std::thread::spawn(move || {
-            let mut cache = poison
-                .secret_identities
-                .write()
-                .expect("cache should lock before poisoning");
-            cache.insert(identity, 1);
-            panic!("poison secret cache");
-        })
-        .join();
-
-        assert_eq!(
-            compiled
-                .zone_for_path_with_roots(&alias, [temp.path()])
-                .name,
-            "secrets"
-        );
-        assert!(!compiled.secret_identities.is_poisoned());
-        assert_eq!(
-            compiled
-                .secret_identities
-                .read()
-                .expect("cache should be usable after recovery")
-                .get(&identity),
-            Some(&0)
         );
     }
 }

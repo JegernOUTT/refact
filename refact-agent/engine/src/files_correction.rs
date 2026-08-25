@@ -54,7 +54,38 @@ pub struct RegisteredWorktreePathMapping {
     pub source_root: PathBuf,
 }
 
+const WORKTREE_MAPPINGS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+static WORKTREE_MAPPINGS_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<
+        std::collections::HashMap<PathBuf, (Instant, Vec<RegisteredWorktreePathMapping>)>,
+    >,
+> = std::sync::OnceLock::new();
+
 pub fn registered_worktree_path_mappings(cache_dir: &Path) -> Vec<RegisteredWorktreePathMapping> {
+    let cache = WORKTREE_MAPPINGS_CACHE
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    {
+        let guard = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((stamped_at, mappings)) = guard.get(cache_dir) {
+            if stamped_at.elapsed() < WORKTREE_MAPPINGS_TTL {
+                return mappings.clone();
+            }
+        }
+    }
+    let mappings = registered_worktree_path_mappings_uncached(cache_dir);
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(cache_dir.to_path_buf(), (Instant::now(), mappings.clone()));
+    mappings
+}
+
+fn registered_worktree_path_mappings_uncached(
+    cache_dir: &Path,
+) -> Vec<RegisteredWorktreePathMapping> {
     let worktrees_root = canonicalize_normalized_path(cache_dir.join("worktrees"));
     let Ok(project_dirs) = std::fs::read_dir(&worktrees_root) else {
         return Vec::new();

@@ -43,9 +43,11 @@ pub fn search_hybrid(store: &Store, query: &str, limit: usize) -> Result<Vec<Cod
     let mut best_span: HashMap<String, (usize, usize, Option<String>)> = HashMap::new();
 
     let fts = store.fts_ranked(&fts_match_query(&terms), fetch)?;
+    let fts_paths: Vec<String> = fts.iter().map(|(path, _)| path.clone()).collect();
+    let spans = store.file_spans(&fts_paths)?;
     for (rank, (path, _bm25)) in fts.iter().enumerate() {
         *scores.entry(path.clone()).or_insert(0.0) += 1.0 / (RRF_K + rank as f32);
-        let span = store.file_span(path)?.unwrap_or((0, 0));
+        let span = spans.get(path).copied().unwrap_or((0, 0));
         best_span
             .entry(path.clone())
             .or_insert((span.0, span.1, None));
@@ -68,9 +70,10 @@ pub fn search_hybrid(store: &Store, query: &str, limit: usize) -> Result<Vec<Cod
 
     let mut seeds: Vec<String> = scores.keys().cloned().collect();
     seeds.sort();
+    let neighbor_map = store.neighbor_paths_batch(&seeds)?;
     for seed in seeds {
         let seed_score = *scores.get(&seed).unwrap_or(&0.0);
-        let mut neighbors = store.neighbor_paths(&seed)?;
+        let mut neighbors = neighbor_map.get(&seed).cloned().unwrap_or_default();
         neighbors.sort();
         for neighbor in neighbors {
             *scores.entry(neighbor).or_insert(0.0) += seed_score * NEIGHBOR_DISCOUNT;

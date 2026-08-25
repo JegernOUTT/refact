@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 use std::sync::Arc;
 
@@ -549,21 +550,23 @@ async fn cleanup_agent_worktree(target: CleanupTarget) -> CleanupResult {
             branch,
         } => {
             let worktree_arg = worktree.to_string_lossy().to_string();
-            let removed = Command::new("git")
+            let removed = tokio::process::Command::new("git")
                 .args(["worktree", "remove", &worktree_arg, "--force"])
                 .current_dir(&workspace_root)
                 .output()
+                .await
                 .map(|output| output.status.success())
                 .unwrap_or(false);
             result.worktree_removed = removed || !worktree.exists();
-            if worktree.exists() && std::fs::remove_dir_all(&worktree).is_ok() {
+            if worktree.exists() && tokio::fs::remove_dir_all(&worktree).await.is_ok() {
                 result.worktree_removed = true;
             }
             if let Some(branch) = branch.as_deref() {
-                let deleted = Command::new("git")
+                let deleted = tokio::process::Command::new("git")
                     .args(["branch", "-D", branch])
                     .current_dir(&workspace_root)
                     .output()
+                    .await
                     .map(|output| output.status.success())
                     .unwrap_or(false);
                 result.branch_deleted = deleted;

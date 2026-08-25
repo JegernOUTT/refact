@@ -299,31 +299,99 @@ async fn collect_destinations(app: &AppState, policy: &PrivacyPolicy) -> Vec<Des
     destinations
 }
 
+const MATCH_COUNTS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn policy_fingerprint(policy: &PrivacyPolicy) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(policy)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
 fn live_match_counts(
     app: &AppState,
     policy: &PrivacyPolicy,
 ) -> Result<BTreeMap<String, usize>, ScratchError> {
-    let compiled = policy.compile().map_err(|error| {
-        ScratchError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Loaded privacy policy does not compile: {error}"),
+    let fingerprint = policy_fingerprint(policy);
+    let (cached, cold, needs_refresh) = {
+        let cache = app
+            .gcx
+            .privacy_match_counts
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fresh = cache.fingerprint == fingerprint
+            && cache
+                .computed_at
+                .is_some_and(|at| at.elapsed() < MATCH_COUNTS_MAX_AGE);
+        (
+            cache.counts.clone(),
+            cache.computed_at.is_none(),
+            !fresh && !cache.computing,
         )
-    })?;
-    let mappings = registered_worktree_path_mappings(app.gcx.cache_dir.as_path());
-    let workspace_roots = app
-        .gcx
+    };
+    if cold {
+        let counts = compute_match_counts(&app.gcx, policy).unwrap_or_default();
+        let mut cache = app
+            .gcx
+            .privacy_match_counts
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.counts = counts.clone();
+        cache.fingerprint = fingerprint;
+        cache.computed_at = Some(std::time::Instant::now());
+        return Ok(counts);
+    }
+    if needs_refresh {
+        spawn_match_counts_refresh(app.gcx.clone(), policy.clone(), fingerprint);
+    }
+    Ok(cached)
+}
+
+fn spawn_match_counts_refresh(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    policy: PrivacyPolicy,
+    fingerprint: u64,
+) {
+    {
+        let mut cache = gcx
+            .privacy_match_counts
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.computing {
+            return;
+        }
+        cache.computing = true;
+    }
+    tokio::task::spawn_blocking(move || {
+        let computed = compute_match_counts(&gcx, &policy);
+        let mut cache = gcx
+            .privacy_match_counts
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.computing = false;
+        if let Some(counts) = computed {
+            cache.counts = counts;
+            cache.fingerprint = fingerprint;
+            cache.computed_at = Some(std::time::Instant::now());
+        }
+    });
+}
+
+fn compute_match_counts(
+    gcx: &Arc<crate::global_context::GlobalContext>,
+    policy: &PrivacyPolicy,
+) -> Option<BTreeMap<String, usize>> {
+    let compiled = policy.compile().ok()?;
+    let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
+    let workspace_roots = gcx
         .documents_state
         .workspace_folders
         .lock()
         .unwrap()
         .clone();
-    let files = app
-        .gcx
-        .documents_state
-        .workspace_files
-        .lock()
-        .unwrap()
-        .clone();
+    let files = gcx.documents_state.workspace_files.lock().unwrap().clone();
     let mut counts = policy
         .zones
         .iter()
@@ -334,7 +402,7 @@ fn live_match_counts(
         let zone = strictest_zone_for_path(&compiled, &path, &workspace_roots, &mappings);
         *counts.entry(zone.name.clone()).or_default() += 1;
     }
-    Ok(counts)
+    Some(counts)
 }
 
 fn provider_id(model_id: &str) -> String {
