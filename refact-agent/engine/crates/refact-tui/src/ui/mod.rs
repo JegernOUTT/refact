@@ -9,6 +9,7 @@ mod ask;
 mod composer;
 pub mod events;
 pub mod footer;
+pub(crate) mod goal_dock;
 mod header;
 mod help;
 mod history;
@@ -39,6 +40,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
     let session_tabs_height = session_tabs::height(app);
     let status_height = status_indicator::height(app, area.width);
+    let goal_dock_height = goal_dock::height(app);
     let footer_height = footer::desired_height(area.width);
     let composer_height = app
         .ask_questions_form()
@@ -51,6 +53,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             area.height,
             session_tabs_height,
             status_height,
+            goal_dock_height,
             composer_height,
             footer_height,
         )
@@ -61,6 +64,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             Constraint::Percentage(62),
             Constraint::Percentage(38),
             Constraint::Length(status_height),
+            Constraint::Length(goal_dock_height),
             Constraint::Length(composer_height),
             Constraint::Length(footer_height),
         ]
@@ -70,6 +74,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
             Constraint::Length(session_tabs_height),
             Constraint::Min(1),
             Constraint::Length(status_height),
+            Constraint::Length(goal_dock_height),
             Constraint::Length(composer_height),
             Constraint::Length(footer_height),
         ]
@@ -84,16 +89,18 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         session_tabs::render(frame, app, chunks[1]);
     }
     transcript::render_transcript(frame, app, chunks[2]);
-    let composer_area = if events_open { chunks[5] } else { chunks[4] };
+    let composer_area = if events_open { chunks[6] } else { chunks[5] };
     if events_open {
         events::render_events_pane(frame, app, chunks[3]);
         status_indicator::render(frame, app, chunks[4]);
-        render_composer_region(frame, app, composer_area);
-        footer::render(frame, app, chunks[6]);
+        goal_dock::render(frame, app, chunks[5]);
+        render_composer_region(frame, app, chunks[6]);
+        footer::render(frame, app, chunks[7]);
     } else {
         status_indicator::render(frame, app, chunks[3]);
-        render_composer_region(frame, app, composer_area);
-        footer::render(frame, app, chunks[5]);
+        goal_dock::render(frame, app, chunks[4]);
+        render_composer_region(frame, app, chunks[5]);
+        footer::render(frame, app, chunks[6]);
     }
     if compact {
         render_compact_truncation_indicator(frame, chunks[2]);
@@ -115,6 +122,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
     if let Some(board) = app.task_board_surface() {
         crate::app::surfaces::board::render_task_board(frame, board, area);
+        return;
+    }
+    if app.goal_overlay_open() {
+        goal_dock::render_overlay(frame, app, area);
     }
     if let Some(modal) = app.approval_modal() {
         approval::render_approval_modal(frame, modal, area);
@@ -130,10 +141,12 @@ fn compact_constraints(
     height: u16,
     session_tabs_height: u16,
     requested_status_height: u16,
+    goal_dock_height: u16,
     requested_composer_height: u16,
     footer_height: u16,
 ) -> Vec<Constraint> {
-    let body_height = height.saturating_sub(1 + session_tabs_height + footer_height);
+    let body_height =
+        height.saturating_sub(1 + session_tabs_height + footer_height + goal_dock_height);
     let composer_height =
         requested_composer_height.min(body_height.saturating_sub(COMPACT_MIN_TRANSCRIPT_HEIGHT));
     let status_height = requested_status_height
@@ -144,6 +157,7 @@ fn compact_constraints(
         Constraint::Length(session_tabs_height),
         Constraint::Length(remaining_height),
         Constraint::Length(status_height),
+        Constraint::Length(goal_dock_height),
         Constraint::Length(composer_height),
         Constraint::Length(footer_height),
     ]
@@ -373,14 +387,6 @@ help = "f1"
         for context in crate::keymap::KeyContext::ALL {
             assert!(text.contains(context.label()), "{}", context.label());
         }
-        for context in [
-            crate::keymap::KeyContext::Activity,
-            crate::keymap::KeyContext::Board,
-            crate::keymap::KeyContext::Goal,
-            crate::keymap::KeyContext::Settings,
-        ] {
-            assert!(text.contains("not yet bound"), "{}", context.label());
-        }
     }
 
     #[test]
@@ -431,6 +437,56 @@ help = "f1"
             .position(|row| row.contains("Ask Refact"))
             .unwrap();
         assert!(status_row < composer_row);
+    }
+
+    #[test]
+    fn goal_dock_is_gated_and_absent_without_a_goal() {
+        let _surface_lock = goal_dock::test_surface_lock();
+        let mut app = App::new(project());
+        app.set_native_scrollback(false);
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!text.contains("Goal ACTIVE"));
+
+        std::env::set_var("REFACT_TUI_SURFACES", "1");
+        app.apply_chat_event(crate::client::ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: serde_json::json!({
+                "runtime": {"state": "idle"},
+                "messages": [{
+                    "role": "goal",
+                    "content": "Ship it",
+                    "extra": {"goal": {
+                        "version": 1,
+                        "status": "active",
+                        "active": true,
+                        "progress": {"turns_used": 2, "tokens_used": 1200}
+                    }}
+                }]
+            }),
+        });
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Goal ACTIVE"));
+        assert!(text.contains("2 turns"));
+        std::env::remove_var("REFACT_TUI_SURFACES");
     }
 
     #[test]

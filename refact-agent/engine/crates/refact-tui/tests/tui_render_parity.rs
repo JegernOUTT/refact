@@ -779,7 +779,7 @@ fn keymap_help_golden_snapshot() {
     │     history Backspace             delete left or remove queued item                      │
     │    activity Esc                   cancel, close, or abort active work                    │
     │       board Esc, q                cancel, close, or abort active work                    │
-    │        goal —                   not yet bound                                            │
+    │        goal Esc, q                cancel, close, or abort active work                    │
     │   worktrees Esc                   cancel, close, or abort active work                    │
     │    settings Backspace             delete left or remove queued item                      │
     │    ask form Backspace             delete left or remove queued item                      │

@@ -1059,6 +1059,99 @@ pub(super) async fn run_action(
                 });
             }
         }
+        AppAction::GoalCommand {
+            kind,
+            content,
+            budget,
+        } => {
+            let context = CommandContextTag::Other;
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let chat_id = app.chat_id().to_string();
+                let generation = subscriptions.command_generation();
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = match kind {
+                        GoalCommandKind::Set => {
+                            client
+                                .send_set_goal(
+                                    &project_id,
+                                    &chat_id,
+                                    content.as_deref().unwrap_or_default(),
+                                    budget,
+                                )
+                                .await
+                        }
+                        GoalCommandKind::SetBudget => {
+                            client
+                                .send_set_goal_budget(
+                                    &project_id,
+                                    &chat_id,
+                                    budget.unwrap_or_default(),
+                                )
+                                .await
+                        }
+                        GoalCommandKind::Update => {
+                            client
+                                .send_update_goal(
+                                    &project_id,
+                                    &chat_id,
+                                    content.as_deref().unwrap_or_default(),
+                                )
+                                .await
+                        }
+                    }
+                    .map_err(|error| error.to_string());
+                    let _ = tx
+                        .send(RuntimeEvent::CommandFinished {
+                            generation,
+                            context,
+                            result,
+                        })
+                        .await;
+                });
+            } else {
+                let _ = app.handle_command_finished(
+                    context,
+                    Err("no active project for goal command".to_string()),
+                );
+            }
+        }
+        AppAction::GoalControl { action } => {
+            let context = CommandContextTag::Other;
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let chat_id = app.chat_id().to_string();
+                let generation = subscriptions.command_generation();
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .send_goal_control(
+                            &project_id,
+                            &chat_id,
+                            match action {
+                                crate::client::GoalControlAction::Pause => "pause",
+                                crate::client::GoalControlAction::Resume => "resume",
+                                crate::client::GoalControlAction::Stop => "stop",
+                            },
+                        )
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx
+                        .send(RuntimeEvent::CommandFinished {
+                            generation,
+                            context,
+                            result,
+                        })
+                        .await;
+                });
+            } else {
+                let _ = app.handle_command_finished(
+                    context,
+                    Err("no active project for goal control".to_string()),
+                );
+            }
+        }
         AppAction::RenameChat { title } => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();

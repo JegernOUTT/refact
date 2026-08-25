@@ -32,6 +32,7 @@ impl App {
             KeyContext::History if self.history_surface.is_some() => {
                 return self.handle_history_surface_key(key);
             }
+            KeyContext::Goal => return self.handle_goal_overlay_key(key),
             KeyContext::Overlay | KeyContext::OverlaySearch => {
                 return self.handle_transcript_overlay_key(key);
             }
@@ -110,6 +111,9 @@ impl App {
             } else {
                 KeyContext::Overlay
             };
+        }
+        if self.goal_overlay_open() {
+            return KeyContext::Goal;
         }
         if self.approval_modal().is_some() {
             return KeyContext::Approval;

@@ -2989,7 +2989,7 @@ impl TryFrom<&str> for GoalControlAction {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct GoalBudget {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,

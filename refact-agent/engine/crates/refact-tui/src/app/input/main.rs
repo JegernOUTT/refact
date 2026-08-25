@@ -345,6 +345,7 @@ impl App {
         self.help_open = false;
         self.history_surface = None;
         self.transcript_overlay = None;
+        self.goal_overlay_open = false;
         self.cancel_modal_picker();
         self.composer_mode = ComposerMode::Chat;
     }

@@ -56,6 +56,7 @@ pub struct GoalCellData {
     pub content: String,
     pub version: u32,
     pub delta_count: usize,
+    pub detail_lines: Vec<String>,
 }
 
 impl GoalCellData {
@@ -64,7 +65,13 @@ impl GoalCellData {
             content: content.into(),
             version,
             delta_count,
+            detail_lines: Vec::new(),
         }
+    }
+
+    pub fn with_details(mut self, detail_lines: Vec<String>) -> Self {
+        self.detail_lines = detail_lines;
+        self
     }
 }
 
@@ -181,6 +188,15 @@ impl HistoryCell for GoalCell {
             Span::raw("  "),
             Span::raw("  "),
         ));
+        if !self.data.detail_lines.is_empty() {
+            card.push(HyperlinkLine::new(Line::from(" ")));
+            card.extend(self.data.detail_lines.iter().cloned().map(|detail| {
+                HyperlinkLine::new(Line::from(Span::styled(
+                    format!("  {detail}"),
+                    default_theme_style(ThemeRole::Muted),
+                )))
+            }));
+        }
         card.push(HyperlinkLine::new(Line::from(" ")));
 
         let plan_style = proposed_plan_style();
@@ -324,6 +340,20 @@ mod tests {
                 "• Current Goal\n \ngoal · v2 · 2 updates\n \n  ## Goal\n  \n  - base\n  \n  {}\n  \n  ## Goal updates\n  \n  first update\n  \n  second update\n \n",
                 "—".repeat(78)
             )
+        );
+    }
+
+    #[test]
+    fn goal_cell_renders_goal_details() {
+        let cell = GoalCell::new(GoalCellData::new("Ship the dock", 1, 0).with_details(vec![
+            "Status: ACTIVE".to_string(),
+            "Progress: 2 turns · 1.2K tok".to_string(),
+            "Latest verifier: UNMET".to_string(),
+        ]));
+
+        assert_eq!(
+            text(&cell.render(80)),
+            "• Current Goal\n \ngoal · v1 · 0 updates\n \n  Ship the dock\n \n  Status: ACTIVE\n  Progress: 2 turns · 1.2K tok\n  Latest verifier: UNMET\n \n"
         );
     }
 }

@@ -140,6 +140,9 @@ pub enum KeyAction {
     OverlayYank,
     OverlayNextMatch,
     OverlayPreviousMatch,
+    GoalPause,
+    GoalResume,
+    GoalStop,
     VimEnterInsert,
     VimAppend,
     VimOpenBelow,
@@ -208,6 +211,10 @@ impl KeyAction {
             Self::OverlayYank => "overlay-yank",
             Self::OverlayNextMatch => "overlay-next-match",
             Self::OverlayPreviousMatch => "overlay-previous-match",
+            Self::GoalPause => "goal-pause",
+            Self::GoalResume => "goal-resume",
+            Self::GoalStop => "goal-stop",
+
             Self::VimEnterInsert => "vim-insert",
             Self::VimAppend => "vim-append",
             Self::VimOpenBelow => "vim-open-below",
@@ -276,6 +283,10 @@ impl KeyAction {
             Self::OverlayYank => "copy visible raw overlay text to terminal clipboard",
             Self::OverlayNextMatch => "jump to next search match",
             Self::OverlayPreviousMatch => "jump to previous search match",
+            Self::GoalPause => "pause active goal pursuit",
+            Self::GoalResume => "resume paused or stopped goal pursuit",
+            Self::GoalStop => "stop active goal pursuit",
+
             Self::VimEnterInsert => "enter vim insert mode",
             Self::VimAppend => "append after cursor and insert",
             Self::VimOpenBelow => "open a new line below and insert",
@@ -352,6 +363,9 @@ const ALL_ACTIONS: &[KeyAction] = &[
     KeyAction::OverlayYank,
     KeyAction::OverlayNextMatch,
     KeyAction::OverlayPreviousMatch,
+    KeyAction::GoalPause,
+    KeyAction::GoalResume,
+    KeyAction::GoalStop,
     KeyAction::VimEnterInsert,
     KeyAction::VimAppend,
     KeyAction::VimOpenBelow,
@@ -1082,6 +1096,10 @@ fn default_entries() -> Vec<KeymapEntry> {
             &["pagedown"],
         ),
         entry(KeyContext::History, KeyAction::Backspace, &["backspace"]),
+        entry(KeyContext::Goal, KeyAction::GoalPause, &["p"]),
+        entry(KeyContext::Goal, KeyAction::GoalResume, &["r"]),
+        entry(KeyContext::Goal, KeyAction::GoalStop, &["s"]),
+        entry(KeyContext::Goal, KeyAction::Cancel, &["esc", "q"]),
         entry(KeyContext::VimNormal, KeyAction::VimEnterInsert, &["i"]),
         entry(KeyContext::VimNormal, KeyAction::VimAppend, &["a"]),
         entry(KeyContext::VimNormal, KeyAction::VimOpenBelow, &["o"]),
@@ -1446,30 +1464,8 @@ newline = "enter"
     }
 
     #[test]
-    fn reserved_contexts_are_unbound_but_remain_in_help() {
+    fn every_surface_context_is_bound_and_present_in_help() {
         let registry = KeymapRegistry::default();
-
-        for context in [KeyContext::Goal] {
-            assert!(!registry
-                .entries
-                .iter()
-                .any(|entry| entry.context == context));
-            for code in [
-                KeyCode::Esc,
-                KeyCode::Enter,
-                KeyCode::Up,
-                KeyCode::Down,
-                KeyCode::Home,
-                KeyCode::End,
-                KeyCode::PageUp,
-                KeyCode::PageDown,
-            ] {
-                assert_eq!(
-                    registry.action_for(context, key(code, KeyModifiers::empty())),
-                    None
-                );
-            }
-        }
 
         for context in [
             KeyContext::History,
@@ -1477,12 +1473,35 @@ newline = "enter"
             KeyContext::Board,
             KeyContext::Worktree,
             KeyContext::Settings,
+            KeyContext::Goal,
         ] {
             assert!(registry
                 .entries
                 .iter()
                 .any(|entry| entry.context == context));
         }
+
+        assert_eq!(
+            registry.action_for(
+                KeyContext::Goal,
+                key(KeyCode::Char('p'), KeyModifiers::empty())
+            ),
+            Some(KeyAction::GoalPause)
+        );
+        assert_eq!(
+            registry.action_for(
+                KeyContext::Goal,
+                key(KeyCode::Char('r'), KeyModifiers::empty())
+            ),
+            Some(KeyAction::GoalResume)
+        );
+        assert_eq!(
+            registry.action_for(
+                KeyContext::Goal,
+                key(KeyCode::Char('s'), KeyModifiers::empty())
+            ),
+            Some(KeyAction::GoalStop)
+        );
 
         for code in [
             KeyCode::Esc,
@@ -1498,20 +1517,17 @@ newline = "enter"
         }
 
         let rows = registry.help_rows();
-        for context in [KeyContext::Goal] {
-            assert!(rows.iter().any(|row| {
-                row.context == context
-                    && row.action.is_none()
-                    && row.bindings == "—"
-                    && row.description == "not yet bound"
-            }));
-        }
         for context in [KeyContext::Settings, KeyContext::History] {
             assert!(rows.iter().any(|row| {
                 row.context == context
                     && row.action == Some(KeyAction::Accept)
                     && row.bindings.contains("Enter")
             }));
+        }
+        for context in [KeyContext::Goal, KeyContext::Board, KeyContext::Worktree] {
+            assert!(rows
+                .iter()
+                .any(|row| row.context == context && row.bindings.contains("Esc")));
         }
     }
 

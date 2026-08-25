@@ -12,9 +12,10 @@ use crate::ask_questions::{
 };
 use crate::client::{
     BrowserContextDecision, ChatEvent, DaemonStatus, CompetitorImportInfoResponse,
-    CompetitorImportRunResponse, HooksResponse, KnowledgeGraphResponse, McpViewData,
-    OpenProjectResponse, ProjectEntry, ProviderListResponse, ProviderOAuthLogoutResponse,
-    SlashCommandsListResponse, TaskBoardViewData, ToolDecision, WorkerInfo,
+    CompetitorImportRunResponse, GoalBudget, GoalControlAction, HooksResponse,
+    KnowledgeGraphResponse, McpViewData, OpenProjectResponse, ProjectEntry, ProviderListResponse,
+    ProviderOAuthLogoutResponse, SlashCommandsListResponse, TaskBoardViewData, ToolDecision,
+    WorkerInfo,
 };
 use crate::commands::{command_by_name, misc, session, workflow, CommandAction, InfoTopic, LocalToggle};
 use crate::composer::queue::{InputQueue, QueuedInput, INPUT_QUEUE_CAPACITY};
@@ -53,6 +54,7 @@ use crate::tools::{
 
 mod chat_events;
 mod command_results;
+mod goal;
 mod input;
 mod runtime;
 #[path = "app/session.rs"]
@@ -62,6 +64,7 @@ pub(crate) mod surfaces;
 mod transcript;
 mod workers;
 use self::command_results::CommandOrigin;
+pub use self::goal::GoalCommandKind;
 pub use self::session_lifecycle::{ClipboardCopySource, SessionState, SubscriptionStatus, UsageSummary};
 pub use self::state::{
     App, BrowserContextDecisionOptions, BrowserContextPromptState, BrowserState,
@@ -424,15 +427,6 @@ impl App {
         AppAction::None
     }
 
-    fn show_current_goal(&mut self) -> AppAction {
-        self.composer.clear();
-        match current_goal_cell_data(self.transcript_state.messages()) {
-            Some(goal) => self.push_history_item(TranscriptItem::Goal(goal)),
-            None => self.add_notice("No current goal is installed for this chat"),
-        }
-        AppAction::None
-    }
-
     fn switch_to_agent_mode(&mut self) -> AppAction {
         self.composer.clear();
         self.mode = Some("agent".to_string());
@@ -471,7 +465,13 @@ impl App {
                 AppAction::None
             }
             CommandAction::Session { command } => self.execute_session_command(command, args),
-            CommandAction::Workflow { command } => self.execute_workflow_command(command),
+            CommandAction::Workflow { command } => {
+                if command == workflow::WorkflowCommand::ShowGoal {
+                    self.execute_goal_command(args, self.goal_presentation().is_none())
+                } else {
+                    self.execute_workflow_command(command)
+                }
+            }
             CommandAction::Misc { command } => self.execute_misc_command(command, args),
             CommandAction::Unavailable { reason } => {
                 self.composer.clear();
@@ -484,7 +484,9 @@ impl App {
     fn execute_workflow_command(&mut self, command: workflow::WorkflowCommand) -> AppAction {
         match command {
             workflow::WorkflowCommand::ShowPlan => self.show_current_plan(),
-            workflow::WorkflowCommand::ShowGoal => self.show_current_goal(),
+            workflow::WorkflowCommand::ShowGoal => {
+                self.execute_goal_command("", self.goal_presentation().is_none())
+            }
             workflow::WorkflowCommand::AgentMode => self.switch_to_agent_mode(),
             workflow::WorkflowCommand::GitDiff => {
                 self.composer.clear();
@@ -1220,6 +1222,10 @@ impl App {
         self.mode = mode;
     }
 
+    pub fn test_goal_overlay_open(&self) -> bool {
+        self.goal_overlay_open
+    }
+
     pub fn submit_browser_context_decision(
         &mut self,
         options: BrowserContextDecisionOptions,
@@ -1273,6 +1279,14 @@ pub enum AppAction {
     },
     SetParams {
         patch: Value,
+    },
+    GoalCommand {
+        kind: GoalCommandKind,
+        content: Option<String>,
+        budget: Option<GoalBudget>,
+    },
+    GoalControl {
+        action: GoalControlAction,
     },
     RenameChat {
         title: String,
@@ -1544,6 +1558,7 @@ fn is_plain_space_key(key: KeyEvent) -> bool {
 mod tests {
     use super::*;
     use crate::approvals::PauseReason;
+    use crate::ui::goal_dock;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Condvar, Mutex};
@@ -4969,6 +4984,181 @@ new-chat = "ctrl-x"
         assert!(app.visible_transcript().iter().any(|item| {
             matches!(item, TranscriptItem::Goal(data) if data.content.contains("base goal") && data.content.contains("delta one"))
         }));
+    }
+
+    #[test]
+    fn goal_commands_dispatch_all_four_wrappers_and_controls_respect_status() {
+        let _surface_lock = goal_dock::test_surface_lock();
+        std::env::set_var("REFACT_TUI_SURFACES", "1");
+        let mut app = App::new(project());
+        assert!(matches!(
+            app.execute_command_name("goal set Ship it"),
+            AppAction::GoalCommand {
+                kind: GoalCommandKind::Set,
+                content: Some(content),
+                budget: None,
+            } if content == "Ship it"
+        ));
+        assert!(matches!(
+            app.execute_command_name("goal update Tests added"),
+            AppAction::GoalCommand {
+                kind: GoalCommandKind::Update,
+                content: Some(content),
+                budget: None,
+            } if content == "Tests added"
+        ));
+        assert!(matches!(
+            app.execute_command_name("goal budget 3 5 1000 42 2"),
+            AppAction::GoalCommand {
+                kind: GoalCommandKind::SetBudget,
+                budget: Some(budget),
+                ..
+            } if budget.max_turns == Some(3) && budget.max_tokens == Some(1000)
+        ));
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({
+                "runtime": {"state": "idle"},
+                "messages": [{
+                    "role": "goal",
+                    "content": "Ship it",
+                    "extra": {"goal": {"status": "active", "active": true}}
+                }]
+            }),
+        });
+        assert_eq!(
+            app.execute_command_name("goal pause"),
+            AppAction::GoalControl {
+                action: GoalControlAction::Pause
+            }
+        );
+        assert_eq!(
+            app.execute_command_name("goal stop"),
+            AppAction::GoalControl {
+                action: GoalControlAction::Stop
+            }
+        );
+        assert_eq!(app.execute_command_name("goal resume"), AppAction::None);
+
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "runtime_updated".to_string(),
+            raw: json!({"state": "idle", "goal_status": "paused", "goal_active": false}),
+        });
+        assert_eq!(
+            app.execute_command_name("goal resume"),
+            AppAction::GoalControl {
+                action: GoalControlAction::Resume
+            }
+        );
+        std::env::remove_var("REFACT_TUI_SURFACES");
+    }
+
+    #[test]
+    fn goal_overlay_uses_goal_key_context_and_dispatches_controls() {
+        let _surface_lock = goal_dock::test_surface_lock();
+        std::env::set_var("REFACT_TUI_SURFACES", "1");
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({
+                "runtime": {"state": "idle"},
+                "messages": [{
+                    "role": "goal",
+                    "content": "Ship it",
+                    "extra": {"goal": {"status": "active", "active": true}}
+                }]
+            }),
+        });
+        assert_eq!(app.execute_command_name("goal"), AppAction::None);
+        assert!(app.test_goal_overlay_open());
+        assert_eq!(app.focused_key_context(), KeyContext::Goal);
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('p'))),
+            AppAction::GoalControl {
+                action: GoalControlAction::Pause
+            }
+        );
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::None);
+        assert!(!app.test_goal_overlay_open());
+        std::env::remove_var("REFACT_TUI_SURFACES");
+    }
+
+    #[tokio::test]
+    async fn goal_commands_post_all_four_goal_wire_commands() {
+        let _surface_lock = goal_dock::test_surface_lock();
+        std::env::set_var("REFACT_TUI_SURFACES", "1");
+        let state = CommandState::default();
+        let base_url = spawn_command_server(state.clone());
+        let client = DaemonClient::new(base_url, None).unwrap();
+        let mut app = App::new(project());
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut subscriptions = SubscriptionManager::new();
+        let mut daemon_events = DaemonEventSubscription::new();
+
+        for action in [
+            app.execute_command_name("goal set Ship it"),
+            app.execute_command_name("goal update Add tests"),
+            app.execute_command_name("goal budget"),
+        ] {
+            run_action(
+                &mut app,
+                action,
+                &client,
+                &tx,
+                &mut subscriptions,
+                &mut daemon_events,
+            )
+            .await;
+            assert!(matches!(
+                rx.recv().await,
+                Some(RuntimeEvent::CommandFinished { result: Ok(()), .. })
+            ));
+        }
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({
+                "runtime": {"state": "idle"},
+                "messages": [{
+                    "role": "goal",
+                    "content": "Ship it",
+                    "extra": {"goal": {"status": "active", "active": true}}
+                }]
+            }),
+        });
+        let pause_action = app.execute_command_name("goal pause");
+        run_action(
+            &mut app,
+            pause_action,
+            &client,
+            &tx,
+            &mut subscriptions,
+            &mut daemon_events,
+        )
+        .await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(RuntimeEvent::CommandFinished { result: Ok(()), .. })
+        ));
+
+        assert!(state.find_command("set_goal").is_some());
+        assert!(state.find_command("update_goal").is_some());
+        assert!(state.find_command("set_goal_budget").is_some());
+        assert_eq!(
+            state
+                .find_command("goal_control")
+                .and_then(|command| command.get("action").cloned()),
+            Some(json!("pause"))
+        );
+        std::env::remove_var("REFACT_TUI_SURFACES");
     }
 
     #[test]

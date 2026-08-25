@@ -27,8 +27,8 @@ pub const PLAN_COMMAND: CommandDef = CommandDef {
 pub const GOAL_COMMAND: CommandDef = CommandDef {
     name: "goal",
     aliases: &[],
-    description: "local goal cell: show the current hidden goal",
-    args_hint: "",
+    description: "goal controls: show, set, update, budget, pause, resume, or stop",
+    args_hint: "[set|update|budget|pause|resume|stop]",
     availability: CommandAvailability::Always,
     action: CommandAction::Workflow {
         command: WorkflowCommand::ShowGoal,
