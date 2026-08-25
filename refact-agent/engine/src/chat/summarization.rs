@@ -284,6 +284,14 @@ fn is_segment_boundary(message: &ChatMessage) -> bool {
 }
 
 pub fn closed_non_user_segments(messages: &[ChatMessage]) -> Vec<SummarySegment> {
+    let covered = summarized_source_id_union(messages);
+    closed_non_user_segments_with_covered(messages, &covered)
+}
+
+fn closed_non_user_segments_with_covered(
+    messages: &[ChatMessage],
+    covered: &HashSet<String>,
+) -> Vec<SummarySegment> {
     let boundary_indices: Vec<usize> = messages
         .iter()
         .enumerate()
@@ -293,10 +301,9 @@ pub fn closed_non_user_segments(messages: &[ChatMessage]) -> Vec<SummarySegment>
         return Vec::new();
     }
 
-    let covered = summarized_source_id_union(messages);
     let excluded = |idx: usize| {
         is_excluded_from_segment(&messages[idx])
-            || is_covered_by_active_summary(&covered, &messages[idx])
+            || is_covered_by_active_summary(covered, &messages[idx])
     };
     let mut segments = Vec::new();
     for pair in boundary_indices.windows(2) {
@@ -373,6 +380,8 @@ fn source_preserving_summary_metadata(message: &ChatMessage) -> Option<&Value> {
 /// source messages in place, so content hashes cannot be used to decide
 /// whether a segment was already summarized.
 fn summarized_source_id_union(messages: &[ChatMessage]) -> HashSet<String> {
+    #[cfg(test)]
+    SUMMARIZED_SOURCE_ID_INDEX_BUILDS.with(|count| count.set(count.get().saturating_add(1)));
     let mut union = HashSet::new();
     for message in messages {
         let Some(metadata) = source_preserving_summary_metadata(message) else {
@@ -386,15 +395,33 @@ fn summarized_source_id_union(messages: &[ChatMessage]) -> HashSet<String> {
     union
 }
 
-fn ranges_already_summarized(messages: &[ChatMessage], ranges: &[SummarySegment]) -> bool {
-    let union = summarized_source_id_union(messages);
-    if union.is_empty() {
+#[cfg(test)]
+thread_local! {
+    static SUMMARIZED_SOURCE_ID_INDEX_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_summarized_source_id_index_builds() {
+    SUMMARIZED_SOURCE_ID_INDEX_BUILDS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+fn summarized_source_id_index_builds() -> usize {
+    SUMMARIZED_SOURCE_ID_INDEX_BUILDS.with(|count| count.get())
+}
+
+fn ranges_already_summarized(
+    covered: &HashSet<String>,
+    messages: &[ChatMessage],
+    ranges: &[SummarySegment],
+) -> bool {
+    if covered.is_empty() {
         return false;
     }
     let mut any_message = false;
     for range in ranges {
         for message in &messages[range.start..=range.end] {
-            if message.message_id.is_empty() || !union.contains(&message.message_id) {
+            if message.message_id.is_empty() || !covered.contains(&message.message_id) {
                 return false;
             }
             any_message = true;
@@ -403,8 +430,12 @@ fn ranges_already_summarized(messages: &[ChatMessage], ranges: &[SummarySegment]
     any_message
 }
 
-fn segment_already_summarized(messages: &[ChatMessage], segment: SummarySegment) -> bool {
-    ranges_already_summarized(messages, std::slice::from_ref(&segment))
+fn segment_already_summarized(
+    covered: &HashSet<String>,
+    messages: &[ChatMessage],
+    segment: SummarySegment,
+) -> bool {
+    ranges_already_summarized(covered, messages, std::slice::from_ref(&segment))
 }
 
 fn assistant_finish_reason_requests_tools(message: &ChatMessage) -> bool {
@@ -633,17 +664,19 @@ fn trimmed_tail_candidate(
     (start <= end).then_some(SummarySegment { start, end })
 }
 
-fn tail_non_user_segment_candidates(messages: &[ChatMessage]) -> Vec<SummarySegment> {
+fn tail_non_user_segment_candidates_with_covered(
+    messages: &[ChatMessage],
+    covered: &HashSet<String>,
+) -> Vec<SummarySegment> {
     let Some(last_boundary) = messages.iter().rposition(is_segment_boundary) else {
         return Vec::new();
     };
-    let covered = summarized_source_id_union(messages);
     let mut candidates = Vec::new();
     let mut run_start = None;
 
     for idx in last_boundary + 1..messages.len() {
         let is_separator = is_excluded_from_segment(&messages[idx])
-            || is_covered_by_active_summary(&covered, &messages[idx])
+            || is_covered_by_active_summary(covered, &messages[idx])
             || message_has_unresolved_tool_calls_within(messages, idx, messages.len() - 1);
         if is_separator {
             if let Some(start) = run_start.take() {
@@ -665,14 +698,18 @@ fn tail_non_user_segment_candidates(messages: &[ChatMessage]) -> Vec<SummarySegm
     candidates
 }
 
-fn tail_candidate_is_eligible(messages: &[ChatMessage], segment: SummarySegment) -> bool {
+fn tail_candidate_is_eligible(
+    messages: &[ChatMessage],
+    segment: SummarySegment,
+    covered: &HashSet<String>,
+) -> bool {
     let tail = &messages[segment.start..=segment.end];
     !tail.iter().any(is_excluded_from_segment)
         && has_tail_summarizable_output(tail)
         && !tail_has_pending_tool_calls(tail)
         && !segment_contains_external_tool_completion(messages, segment)
         && !segment_is_existing_summary(messages, segment)
-        && !segment_already_summarized(messages, segment)
+        && !segment_already_summarized(covered, messages, segment)
 }
 
 fn segment_contains_external_tool_completion(
@@ -737,12 +774,17 @@ pub fn eligible_tail_non_user_segment(messages: &[ChatMessage]) -> Option<Summar
     if current_tail_has_active_pending_tool_calls(messages) {
         return None;
     }
-    tail_non_user_segment_candidates(messages)
+    let covered = summarized_source_id_union(messages);
+    tail_non_user_segment_candidates_with_covered(messages, &covered)
         .into_iter()
-        .find(|segment| tail_candidate_is_eligible(messages, *segment))
+        .find(|segment| tail_candidate_is_eligible(messages, *segment, &covered))
 }
 
-fn segment_is_eligible(messages: &[ChatMessage], segment: SummarySegment) -> bool {
+fn segment_is_eligible(
+    messages: &[ChatMessage],
+    segment: SummarySegment,
+    covered: &HashSet<String>,
+) -> bool {
     if segment.start > segment.end || segment.end >= messages.len() {
         return false;
     }
@@ -752,7 +794,7 @@ fn segment_is_eligible(messages: &[ChatMessage], segment: SummarySegment) -> boo
         && !tail_has_pending_tool_calls(candidate)
         && !segment_contains_external_tool_completion(messages, segment)
         && !segment_is_existing_summary(messages, segment)
-        && !segment_already_summarized(messages, segment)
+        && !segment_already_summarized(covered, messages, segment)
 }
 
 fn source_messages_for_ranges(
@@ -921,12 +963,13 @@ fn make_compression_candidate(
     messages: &[ChatMessage],
     ranges: Vec<SummarySegment>,
     reason: CandidateReason,
+    covered: &HashSet<String>,
 ) -> Option<CompressionCandidate> {
     if ranges.is_empty()
         || ranges
             .iter()
-            .any(|segment| !segment_is_eligible(messages, *segment))
-        || ranges_already_summarized(messages, &ranges)
+            .any(|segment| !segment_is_eligible(messages, *segment, covered))
+        || ranges_already_summarized(covered, messages, &ranges)
     {
         return None;
     }
@@ -943,9 +986,14 @@ fn make_compression_candidate(
     })
 }
 
-fn completed_non_user_segments(messages: &[ChatMessage]) -> Vec<SummarySegment> {
-    let mut segments = closed_non_user_segments(messages);
-    segments.extend(tail_non_user_segment_candidates(messages));
+fn completed_non_user_segments(
+    messages: &[ChatMessage],
+    covered: &HashSet<String>,
+) -> Vec<SummarySegment> {
+    let mut segments = closed_non_user_segments_with_covered(messages, covered);
+    segments.extend(tail_non_user_segment_candidates_with_covered(
+        messages, covered,
+    ));
     segments
 }
 
@@ -955,51 +1003,71 @@ fn segment_contains_role(messages: &[ChatMessage], segment: SummarySegment, role
         .any(|message| message.role == role)
 }
 
-fn batch_old_non_user_run_candidates(messages: &[ChatMessage]) -> Vec<Vec<SummarySegment>> {
-    let runs: Vec<SummarySegment> = closed_non_user_segments(messages)
+fn batchable_old_non_user_run_groups(
+    messages: &[ChatMessage],
+    covered: &HashSet<String>,
+) -> Vec<Vec<SummarySegment>> {
+    let runs: Vec<SummarySegment> = closed_non_user_segments_with_covered(messages, covered)
         .into_iter()
-        .filter(|segment| segment_is_eligible(messages, *segment))
+        .filter(|segment| segment_is_eligible(messages, *segment, covered))
         .collect();
-    if runs.len() < 2 {
-        return Vec::new();
+    let mut groups = Vec::new();
+    let mut group = Vec::new();
+    for run in runs {
+        if group.last().is_some_and(|previous: &SummarySegment| {
+            messages[previous.end + 1..run.start]
+                .iter()
+                .any(|message| message.role == "user")
+        }) {
+            if group.len() > 1 {
+                groups.push(std::mem::take(&mut group));
+            } else {
+                group.clear();
+            }
+        }
+        group.push(run);
     }
-    vec![runs]
+    if group.len() > 1 {
+        groups.push(group);
+    }
+    groups
 }
 
 fn largest_budget_fitting_old_run_batch(
     messages: &[ChatMessage],
     budget_tokens: usize,
 ) -> Option<CompressionCandidate> {
-    let runs: Vec<SummarySegment> = closed_non_user_segments(messages)
-        .into_iter()
-        .filter(|segment| segment_is_eligible(messages, *segment))
-        .collect();
-    if runs.is_empty() {
-        return None;
-    }
-    let weights: Vec<usize> = runs
-        .iter()
-        .map(|segment| estimated_tokens_for_ranges(messages, std::slice::from_ref(segment)))
-        .collect();
     let mut best = None;
-    let mut start = 0usize;
-    let mut total = 0usize;
-    for end in 0..runs.len() {
-        total = total.saturating_add(weights[end]);
-        while start <= end && total > budget_tokens {
-            total = total.saturating_sub(weights[start]);
-            start += 1;
-        }
-        if start <= end
-            && best
-                .as_ref()
-                .is_none_or(|(_, best_tokens)| total > *best_tokens)
-        {
-            best = Some((runs[start..=end].to_vec(), total));
+    let covered = summarized_source_id_union(messages);
+    for runs in batchable_old_non_user_run_groups(messages, &covered) {
+        let weights: Vec<usize> = runs
+            .iter()
+            .map(|segment| estimated_tokens_for_ranges(messages, std::slice::from_ref(segment)))
+            .collect();
+        let mut start = 0usize;
+        let mut total = 0usize;
+        for end in 0..runs.len() {
+            total = total.saturating_add(weights[end]);
+            while start <= end && total > budget_tokens {
+                total = total.saturating_sub(weights[start]);
+                start += 1;
+            }
+            if start <= end
+                && best
+                    .as_ref()
+                    .is_none_or(|(_, best_tokens)| total > *best_tokens)
+            {
+                best = Some((runs[start..=end].to_vec(), total));
+            }
         }
     }
     let (ranges, _) = best?;
-    make_compression_candidate(messages, ranges, CandidateReason::BatchOldNonUserRuns)
+    make_compression_candidate(
+        messages,
+        ranges,
+        CandidateReason::BatchOldNonUserRuns,
+        &covered,
+    )
 }
 
 pub fn compression_candidates(messages: &[ChatMessage]) -> Vec<CompressionCandidate> {
@@ -1008,21 +1076,25 @@ pub fn compression_candidates(messages: &[ChatMessage]) -> Vec<CompressionCandid
     }
 
     let mut candidates = Vec::new();
-    for segment in closed_non_user_segments(messages) {
+    let covered = summarized_source_id_union(messages);
+    for segment in closed_non_user_segments_with_covered(messages, &covered) {
+        if let Some(candidate) = make_compression_candidate(
+            messages,
+            vec![segment],
+            CandidateReason::ClosedTurn,
+            &covered,
+        ) {
+            candidates.push(candidate);
+        }
+    }
+    for segment in tail_non_user_segment_candidates_with_covered(messages, &covered) {
         if let Some(candidate) =
-            make_compression_candidate(messages, vec![segment], CandidateReason::ClosedTurn)
+            make_compression_candidate(messages, vec![segment], CandidateReason::TailTurn, &covered)
         {
             candidates.push(candidate);
         }
     }
-    for segment in tail_non_user_segment_candidates(messages) {
-        if let Some(candidate) =
-            make_compression_candidate(messages, vec![segment], CandidateReason::TailTurn)
-        {
-            candidates.push(candidate);
-        }
-    }
-    for segment in completed_non_user_segments(messages) {
+    for segment in completed_non_user_segments(messages, &covered) {
         if segment_contains_role(messages, segment, "tool")
             || segment_contains_role(messages, segment, "diff")
         {
@@ -1030,6 +1102,7 @@ pub fn compression_candidates(messages: &[ChatMessage]) -> Vec<CompressionCandid
                 messages,
                 vec![segment],
                 CandidateReason::LargeToolOutput,
+                &covered,
             ) {
                 candidates.push(candidate);
             }
@@ -1039,15 +1112,19 @@ pub fn compression_candidates(messages: &[ChatMessage]) -> Vec<CompressionCandid
                 messages,
                 vec![segment],
                 CandidateReason::LargeContextFile,
+                &covered,
             ) {
                 candidates.push(candidate);
             }
         }
     }
-    for ranges in batch_old_non_user_run_candidates(messages) {
-        if let Some(candidate) =
-            make_compression_candidate(messages, ranges, CandidateReason::BatchOldNonUserRuns)
-        {
+    for ranges in batchable_old_non_user_run_groups(messages, &covered) {
+        if let Some(candidate) = make_compression_candidate(
+            messages,
+            ranges,
+            CandidateReason::BatchOldNonUserRuns,
+            &covered,
+        ) {
             candidates.push(candidate);
         }
     }
@@ -1079,7 +1156,8 @@ fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
     if current_tail_has_active_pending_tool_calls(messages) {
         return None;
     }
-    closed_non_user_segments(messages)
+    let covered = summarized_source_id_union(messages);
+    closed_non_user_segments_with_covered(messages, &covered)
         .into_iter()
         .find(|segment| {
             let candidate = &messages[segment.start..=segment.end];
@@ -1087,7 +1165,7 @@ fn first_eligible_segment(messages: &[ChatMessage]) -> Option<SummarySegment> {
                 && has_tail_summarizable_output(candidate)
                 && !tail_has_pending_tool_calls(candidate)
                 && !segment_contains_external_tool_completion(messages, *segment)
-                && !segment_already_summarized(messages, *segment)
+                && !segment_already_summarized(&covered, messages, *segment)
         })
         .or_else(|| eligible_tail_non_user_segment(messages))
 }
@@ -4846,59 +4924,30 @@ mod tests {
         }
 
         #[test]
-        fn compression_one_shot_selects_largest_candidate_and_covers_all_old_runs() {
+        fn compression_one_shot_does_not_batch_across_user_turns() {
             let mut messages = vec![user("start")];
             for idx in 0..5 {
                 messages.push(long_assistant(&format!("large {idx}"), 1_500));
                 messages.push(user(&format!("next {idx}")));
             }
-            let candidate = compression_candidates(&messages)
-                .into_iter()
-                .next()
-                .unwrap();
-            assert_eq!(candidate.reason, CandidateReason::BatchOldNonUserRuns);
-            assert_eq!(candidate.ranges.len(), 5);
-            ensure_candidate_source_message_ids(&mut messages, &candidate);
-            let source = source_messages_for_candidate(&messages, &candidate);
-            let summary = make_segment_summary_message(
-                short_summary_text().to_string(),
-                &source,
-                "test-model",
-            );
-            let benefit = effective_compression_benefit(&source, &summary, &[]);
-            assert!(compression_benefit_is_sufficient(benefit));
-            assert!(benefit.reduction_percent >= 90);
-            let source_id_set: HashSet<String> = source
-                .iter()
-                .filter(|message| !message.message_id.is_empty())
-                .map(|message| message.message_id.clone())
-                .collect();
-            insert_report_and_summary_after_sources(
-                &mut messages,
-                &source_id_set,
-                &source,
-                summary,
-                benefit,
-            );
+            let candidates = compression_candidates(&messages);
 
-            assert!(compression_candidates(&messages).is_empty());
-            assert_eq!(
-                messages
-                    .iter()
-                    .filter(|message| message.role == COMPRESSION_REPORT_ROLE)
-                    .count(),
-                1
-            );
+            assert!(candidates
+                .iter()
+                .all(|candidate| candidate.reason != CandidateReason::BatchOldNonUserRuns));
+            assert!(candidates
+                .iter()
+                .all(|candidate| candidate.ranges.len() == 1));
         }
 
         #[test]
-        fn compression_one_shot_packs_largest_contiguous_batch_within_budget() {
+        fn compression_one_shot_packs_runs_from_one_user_turn_within_budget() {
             let messages = vec![
                 user("start"),
                 long_assistant("first", 1_000),
-                user("next"),
+                event("separator"),
                 long_assistant("second", 1_000),
-                user("next"),
+                event("another separator"),
                 long_assistant("third", 1_000),
                 user("next"),
             ];
@@ -6123,7 +6172,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_planner_can_batch_small_non_user_runs_across_user_messages() {
+    fn candidate_planner_does_not_batch_non_user_runs_across_user_messages() {
         let mut messages = vec![
             user("first"),
             assistant("small one ".repeat(20).as_str()),
@@ -6137,18 +6186,31 @@ mod tests {
 
         let candidates = compression_candidates(&messages);
 
-        assert_eq!(candidates[0].reason, CandidateReason::BatchOldNonUserRuns);
-        assert_eq!(
-            candidates[0].ranges,
-            vec![
-                SummarySegment { start: 1, end: 1 },
-                SummarySegment { start: 3, end: 3 },
-            ]
-        );
-        assert_eq!(
-            candidates[0].source_message_ids,
-            vec!["assistant-one".to_string(), "assistant-two".to_string()]
-        );
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.reason != CandidateReason::BatchOldNonUserRuns));
+        assert!(candidates.iter().all(|candidate| candidate
+            .ranges
+            .iter()
+            .all(|range| range.start == 1 || range.start == 3)));
+    }
+
+    #[test]
+    fn candidate_planner_builds_summary_coverage_index_once() {
+        let mut messages = Vec::new();
+        for idx in 0..100 {
+            messages.push(user(&format!("question {idx}")));
+            messages.push(with_message_id(
+                assistant(&format!("answer {idx}")),
+                &format!("assistant-{idx}"),
+            ));
+        }
+
+        reset_summarized_source_id_index_builds();
+        let candidates = compression_candidates(&messages);
+
+        assert_eq!(candidates.len(), 100);
+        assert_eq!(summarized_source_id_index_builds(), 1);
     }
 
     #[test]

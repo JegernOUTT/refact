@@ -41,31 +41,25 @@ fn is_source_preserving_summary(msg: &ChatMessage) -> bool {
 
 fn source_preserving_summary_id_sets(
     messages: &[ChatMessage],
-) -> (HashSet<String>, HashSet<String>) {
-    let mut suppressed = HashSet::new();
-    let mut preserved = HashSet::new();
-    for message in messages
+) -> Vec<(HashSet<String>, HashSet<String>)> {
+    messages
         .iter()
         .filter(|message| is_source_preserving_summary(message))
-    {
-        let Some(compression) = message.extra.get("compression") else {
-            continue;
-        };
-        // Suppression is membership-based on message ids. Engine-side compaction
-        // (tool-output truncation, context-file dedup, history repair) legitimately
-        // mutates source messages in place after summarization, so the stored
-        // `source_hash` is diagnostic metadata and must never gate suppression:
-        // a hash gate silently disables compression exactly when the context is
-        // under pressure, which explodes the request and forces duplicate
-        // re-summarization of the same segment.
-        collect_compression_ids(
-            compression,
-            "summarized_source_message_ids",
-            &mut suppressed,
-        );
-        collect_compression_ids(compression, "preserved_source_message_ids", &mut preserved);
-    }
-    (suppressed, preserved)
+        .filter_map(|message| {
+            let Some(compression) = message.extra.get("compression") else {
+                return None;
+            };
+            let mut suppressed = HashSet::new();
+            let mut preserved = HashSet::new();
+            collect_compression_ids(
+                compression,
+                "summarized_source_message_ids",
+                &mut suppressed,
+            );
+            collect_compression_ids(compression, "preserved_source_message_ids", &mut preserved);
+            Some((suppressed, preserved))
+        })
+        .collect()
 }
 
 fn collect_compression_ids(
@@ -85,12 +79,9 @@ fn collect_compression_ids(
 
 fn can_suppress_source_preserving_source(
     msg: &ChatMessage,
-    suppressed: &HashSet<String>,
-    preserved: &HashSet<String>,
+    summary_id_sets: &[(HashSet<String>, HashSet<String>)],
 ) -> bool {
     if msg.message_id.is_empty()
-        || !suppressed.contains(&msg.message_id)
-        || preserved.contains(&msg.message_id)
         || matches!(msg.role.as_str(), "user" | "system" | "plan" | "goal")
         || is_authoritative_summary(msg)
         || exemption_for(msg) == CompressionExemption::Never
@@ -105,7 +96,9 @@ fn can_suppress_source_preserving_source(
     if msg.role == "event" && exemption_for(msg) != CompressionExemption::DropOnAge {
         return false;
     }
-    true
+    summary_id_sets.iter().any(|(suppressed, preserved)| {
+        suppressed.contains(&msg.message_id) && !preserved.contains(&msg.message_id)
+    })
 }
 
 fn is_visual_compression_report(msg: &ChatMessage) -> bool {
@@ -162,18 +155,13 @@ fn legacy_summary_ranges(messages: &[ChatMessage]) -> Vec<(usize, usize, String)
 
 pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let summaries = legacy_summary_ranges(&messages);
-    let (source_preserving_suppressed_ids, source_preserving_preserved_ids) =
-        source_preserving_summary_id_sets(&messages);
+    let source_preserving_summary_ids = source_preserving_summary_id_sets(&messages);
     if summaries.is_empty() {
         let mut result: Vec<ChatMessage> = messages
             .into_iter()
             .filter(|message| !is_linearization_only_message(message))
             .filter(|message| {
-                !can_suppress_source_preserving_source(
-                    message,
-                    &source_preserving_suppressed_ids,
-                    &source_preserving_preserved_ids,
-                )
+                !can_suppress_source_preserving_source(message, &source_preserving_summary_ids)
             })
             .collect();
         detach_orphaned_context_files(&mut result);
@@ -231,11 +219,7 @@ pub fn apply_summarization_linearize(messages: Vec<ChatMessage>) -> Vec<ChatMess
         }
         if is_linearization_only_message(msg)
             || suppressed.contains(&i)
-            || can_suppress_source_preserving_source(
-                msg,
-                &source_preserving_suppressed_ids,
-                &source_preserving_preserved_ids,
-            )
+            || can_suppress_source_preserving_source(msg, &source_preserving_summary_ids)
         {
             continue;
         }
@@ -471,6 +455,36 @@ mod tests {
             .collect();
         assert!(!ids.contains(&"src-1"));
         assert!(ids.contains(&"summary-1"));
+    }
+
+    #[test]
+    fn newer_summary_suppresses_source_preserved_by_older_summary() {
+        let source = with_id(assistant("shared source"), "src-1");
+        let older_summary = with_id(
+            source_preserving_summary("older summary", &["src-1"], &["src-1"]),
+            "summary-old",
+        );
+        let newer_summary = with_id(
+            source_preserving_summary("newer summary", &["src-1"], &[]),
+            "summary-new",
+        );
+        let messages = vec![
+            with_id(user("question"), "u-1"),
+            source,
+            older_summary,
+            newer_summary,
+            with_id(user("next"), "u-2"),
+        ];
+
+        let result = apply_summarization_linearize(messages);
+        let ids: Vec<&str> = result
+            .iter()
+            .map(|message| message.message_id.as_str())
+            .collect();
+
+        assert!(!ids.contains(&"src-1"));
+        assert!(ids.contains(&"summary-old"));
+        assert!(ids.contains(&"summary-new"));
     }
 
     #[test]
