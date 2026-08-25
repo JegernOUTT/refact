@@ -2531,12 +2531,7 @@ mod tests {
         });
         assert_eq!(tool_cards(&app).len(), 1);
 
-        app.complete_tool(
-            "call-1",
-            "tool",
-            "done".to_string(),
-            ToolStatus::Succeeded,
-        );
+        app.complete_tool("call-1", "tool", "done".to_string(), ToolStatus::Succeeded);
 
         assert_eq!(tool_cards(&app).len(), 1);
         assert_eq!(tool_cards(&app)[0].status, ToolStatus::Succeeded);
@@ -6619,12 +6614,7 @@ new-chat = "ctrl-x"
         let mut app = App::new(project());
         app.set_native_scrollback(true);
         app.handle_chat_event(tool_call_delta_event(&app, "call-1"));
-        app.complete_tool(
-            "call-1",
-            "tool",
-            "done".to_string(),
-            ToolStatus::Succeeded,
-        );
+        app.complete_tool("call-1", "tool", "done".to_string(), ToolStatus::Succeeded);
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),
             seq: None,
@@ -6666,12 +6656,7 @@ new-chat = "ctrl-x"
         let mut app = App::new(project());
         app.set_native_scrollback(true);
         app.handle_chat_event(tool_call_delta_event(&app, "call-1"));
-        app.complete_tool(
-            "call-1",
-            "tool",
-            "done".to_string(),
-            ToolStatus::Succeeded,
-        );
+        app.complete_tool("call-1", "tool", "done".to_string(), ToolStatus::Succeeded);
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),
             seq: None,
@@ -7392,12 +7377,7 @@ new-chat = "ctrl-x"
             raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{"id": "call-1", "function": {"name": "shell", "arguments": "{\"cmd\":\"echo 1\"}"}}]}]}),
         });
         assert_eq!(tool_cards(&app).len(), 1);
-        app.complete_tool(
-            "call-1",
-            "tool",
-            "done".to_string(),
-            ToolStatus::Succeeded,
-        );
+        app.complete_tool("call-1", "tool", "done".to_string(), ToolStatus::Succeeded);
         if let [card] = tool_cards(&app).as_slice() {
             assert_eq!(card.status, ToolStatus::Succeeded);
             assert_eq!(card.result, "done");
