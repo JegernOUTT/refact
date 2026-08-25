@@ -573,6 +573,7 @@ impl App {
     ) -> AppAction {
         self.cancel_backtrack();
         self.abort_in_flight = false;
+        self.history_surface = None;
         self.transcript_overlay = None;
         self.activity_surface = None;
         self.board_surface = None;

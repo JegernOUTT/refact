@@ -15,6 +15,7 @@ use refact_tui::commands::{command_by_name, workflow, CommandAction};
 use refact_tui::commands::session::{PermissionPolicy, StatusSnapshot, StatusUsage};
 use refact_tui::pickers::{PickerKind, PickerItem, PickerState};
 use refact_tui::protocol::TranscriptMessage;
+use refact_tui::sessions::TrajectoryMeta;
 use refact_tui::theme::TuiTheme;
 use refact_tui::ui::{footer, status_card, status_indicator};
 use serde_json::{json, Value};
@@ -404,6 +405,19 @@ fn mode_transition_scenario(app: &mut App) {
     ));
 }
 
+fn history_surface_scenario(app: &mut App) {
+    let trajectories = (0..51)
+        .map(|index| TrajectoryMeta {
+            id: format!("history-{index}"),
+            title: format!("History surface {index}"),
+            updated_at: format!("2026-08-25T10:{index:02}:00Z"),
+            total_cost_usd: (index == 0).then_some(0.042),
+            ..Default::default()
+        })
+        .collect();
+    app.open_history_surface(trajectories);
+}
+
 fn history_events_scenario(app: &mut App) {
     app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::empty()));
     app.apply_chat_event(chat_event(
@@ -630,6 +644,12 @@ fn render_scenarios() -> Vec<RenderScenario> {
             render_before_resize: false,
         },
         RenderScenario {
+            name: "history surface",
+            marker: Some("History"),
+            setup: history_surface_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
             name: "history events",
             marker: Some("Proces"),
             setup: history_events_scenario,
@@ -756,7 +776,7 @@ fn keymap_help_golden_snapshot() {
     │overlay search Backspace             delete left or remove queued item                    │
     │  vim normal a                     append after cursor and insert                         │
     │  vim insert Esc                   return to vim normal mode                              │
-    │     history —                   not yet bound                                            │
+    │     history Backspace             delete left or remove queued item                      │
     │    activity Esc                   cancel, close, or abort active work                    │
     │       board Esc, q                cancel, close, or abort active work                    │
     │        goal —                   not yet bound                                            │

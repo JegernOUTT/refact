@@ -319,6 +319,7 @@ pub struct App {
     pub(super) transcript_overlay_visible_height: Option<usize>,
     pub(super) activity_surface: Option<ActivitySurfaceState>,
     pub(super) task_id: Option<String>,
+    pub(super) history_surface: Option<surfaces::HistorySurface>,
     pub(super) help_open: bool,
     pub(super) usage: Option<UsageSummary>,
     pub(super) should_quit: bool,
@@ -443,6 +444,7 @@ impl App {
             transcript_overlay_visible_height: None,
             activity_surface: None,
             task_id: None,
+            history_surface: None,
             help_open: false,
             usage: None,
             should_quit: false,
@@ -545,6 +547,7 @@ impl App {
             transcript_overlay_visible_height: None,
             activity_surface: None,
             task_id: None,
+            history_surface: None,
             help_open: false,
             usage: None,
             should_quit: false,
@@ -732,6 +735,11 @@ impl App {
     }
 
     #[cfg(test)]
+    pub fn test_open_history_surface(&mut self, trajectories: Vec<TrajectoryMeta>) {
+        self.open_history_surface(trajectories);
+    }
+
+    #[cfg(test)]
     pub(super) fn approval_pending_clear_count(&self) -> usize {
         self.pending_approval_clears.len()
     }
@@ -897,6 +905,10 @@ impl App {
     pub(crate) fn task_board_discoverable(&self) -> bool {
         surfaces::board::task_board_enabled()
             && matches!(self.mode.as_deref(), Some("task_planner" | "task_agent"))
+    }
+
+    pub fn history_surface(&self) -> Option<&surfaces::HistorySurface> {
+        self.history_surface.as_ref()
     }
 }
 

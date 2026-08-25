@@ -343,6 +343,7 @@ impl App {
 
     pub(super) fn dismiss_interrupt_surfaces(&mut self) {
         self.help_open = false;
+        self.history_surface = None;
         self.transcript_overlay = None;
         self.cancel_modal_picker();
         self.composer_mode = ComposerMode::Chat;

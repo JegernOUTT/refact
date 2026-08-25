@@ -11,6 +11,7 @@ pub mod events;
 pub mod footer;
 mod header;
 mod help;
+mod history;
 pub(crate) mod menu;
 mod overlay;
 pub mod picker;
@@ -31,6 +32,11 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     crate::vendored::terminal_hyperlinks::clear_buffer_hyperlinks();
     app.begin_frame_render();
     let area = frame.area();
+    if app.history_surface().is_some() {
+        history::render_history_surface(frame, app, area);
+        degrade_frames(frame, area);
+        return;
+    }
     let session_tabs_height = session_tabs::height(app);
     let status_height = status_indicator::height(app, area.width);
     let footer_height = footer::desired_height(area.width);
@@ -368,7 +374,6 @@ help = "f1"
             assert!(text.contains(context.label()), "{}", context.label());
         }
         for context in [
-            crate::keymap::KeyContext::History,
             crate::keymap::KeyContext::Activity,
             crate::keymap::KeyContext::Board,
             crate::keymap::KeyContext::Goal,

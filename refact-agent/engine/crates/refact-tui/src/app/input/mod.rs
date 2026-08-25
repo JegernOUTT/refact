@@ -3,6 +3,7 @@ use super::*;
 mod approval;
 mod ask;
 mod board;
+mod history;
 mod main;
 mod overlay;
 mod picker;
@@ -28,6 +29,9 @@ impl App {
         }
         match self.focused_key_context() {
             KeyContext::Board => return self.handle_task_board_key(key),
+            KeyContext::History if self.history_surface.is_some() => {
+                return self.handle_history_surface_key(key);
+            }
             KeyContext::Overlay | KeyContext::OverlaySearch => {
                 return self.handle_transcript_overlay_key(key);
             }
@@ -72,6 +76,15 @@ impl App {
             KeyContext::ModalPicker => self.handle_modal_picker_paste(text),
             KeyContext::ProjectPicker => self.handle_project_picker_paste(text),
             KeyContext::Settings => self.handle_settings_paste(text),
+            KeyContext::History if self.history_surface.is_some() => {
+                if let Some(history) = self.history_surface.as_mut() {
+                    if history.filter_active() {
+                        for ch in text.chars() {
+                            history.push_filter(ch);
+                        }
+                    }
+                }
+            }
             KeyContext::History => {
                 for ch in text.chars() {
                     self.composer.history_search_insert_char(ch);
@@ -87,6 +100,9 @@ impl App {
         }
         if self.board_surface.is_some() {
             return KeyContext::Board;
+        }
+        if self.history_surface.is_some() {
+            return KeyContext::History;
         }
         if let Some(overlay) = self.transcript_overlay.as_ref() {
             return if overlay.search_input().is_some() {

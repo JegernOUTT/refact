@@ -1069,6 +1069,19 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(KeyContext::Board, KeyAction::MoveUp, &["up"]),
         entry(KeyContext::Board, KeyAction::MoveDown, &["down"]),
         entry(KeyContext::Board, KeyAction::ToggleSelectedTool, &["space"]),
+        entry(KeyContext::History, KeyAction::Cancel, &["esc", "q"]),
+        entry(KeyContext::History, KeyAction::Accept, &["enter"]),
+        entry(KeyContext::History, KeyAction::MoveUp, &["up"]),
+        entry(KeyContext::History, KeyAction::MoveDown, &["down"]),
+        entry(KeyContext::History, KeyAction::MoveHome, &["home"]),
+        entry(KeyContext::History, KeyAction::MoveEnd, &["end"]),
+        entry(KeyContext::History, KeyAction::ScrollPageUp, &["pageup"]),
+        entry(
+            KeyContext::History,
+            KeyAction::ScrollPageDown,
+            &["pagedown"],
+        ),
+        entry(KeyContext::History, KeyAction::Backspace, &["backspace"]),
         entry(KeyContext::VimNormal, KeyAction::VimEnterInsert, &["i"]),
         entry(KeyContext::VimNormal, KeyAction::VimAppend, &["a"]),
         entry(KeyContext::VimNormal, KeyAction::VimOpenBelow, &["o"]),
@@ -1436,7 +1449,7 @@ newline = "enter"
     fn reserved_contexts_are_unbound_but_remain_in_help() {
         let registry = KeymapRegistry::default();
 
-        for context in [KeyContext::History, KeyContext::Goal] {
+        for context in [KeyContext::Goal] {
             assert!(!registry
                 .entries
                 .iter()
@@ -1458,10 +1471,19 @@ newline = "enter"
             }
         }
 
-        assert!(registry
-            .entries
-            .iter()
-            .any(|entry| entry.context == KeyContext::Settings));
+        for context in [
+            KeyContext::History,
+            KeyContext::Activity,
+            KeyContext::Board,
+            KeyContext::Worktree,
+            KeyContext::Settings,
+        ] {
+            assert!(registry
+                .entries
+                .iter()
+                .any(|entry| entry.context == context));
+        }
+
         for code in [
             KeyCode::Esc,
             KeyCode::Enter,
@@ -1476,7 +1498,7 @@ newline = "enter"
         }
 
         let rows = registry.help_rows();
-        for context in [KeyContext::History, KeyContext::Goal] {
+        for context in [KeyContext::Goal] {
             assert!(rows.iter().any(|row| {
                 row.context == context
                     && row.action.is_none()
@@ -1484,24 +1506,13 @@ newline = "enter"
                     && row.description == "not yet bound"
             }));
         }
-        assert!(rows.iter().any(|row| {
-            row.context == KeyContext::Settings
-                && row.action == Some(KeyAction::Accept)
-                && row.bindings.contains("Enter")
-        }));
-
-        assert!(registry
-            .entries
-            .iter()
-            .any(|entry| entry.context == KeyContext::Board));
-        assert!(registry
-            .entries
-            .iter()
-            .any(|entry| entry.context == KeyContext::Activity));
-        assert!(registry
-            .entries
-            .iter()
-            .any(|entry| entry.context == KeyContext::Worktree));
+        for context in [KeyContext::Settings, KeyContext::History] {
+            assert!(rows.iter().any(|row| {
+                row.context == context
+                    && row.action == Some(KeyAction::Accept)
+                    && row.bindings.contains("Enter")
+            }));
+        }
     }
 
     #[test]

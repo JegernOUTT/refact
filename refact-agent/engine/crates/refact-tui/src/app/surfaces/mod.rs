@@ -24,6 +24,8 @@ use crate::render::highlight;
 use crate::sessions::{session_items_from_trajectories, TrajectoryMeta};
 use crate::theme::TuiTheme;
 
+mod history;
+
 use super::transcript::{
     citation_item, collapsed_unknown_payload, line_to_plain_string, server_content_block_item,
     thinking_block_items, value_to_compact_string, visible_message_content,
@@ -94,6 +96,8 @@ pub(super) struct ThemePickerSnapshot {
     theme: TuiTheme,
     syntax_theme: syntect::highlighting::Theme,
 }
+
+pub use history::{HistoryAction, HistorySurface};
 
 impl App {
     pub(crate) fn settings_surface_enabled() -> bool {
@@ -246,12 +250,24 @@ impl App {
         }
     }
 
+    pub fn open_history_surface(&mut self, trajectories: Vec<TrajectoryMeta>) {
+        self.history_surface = Some(HistorySurface::new(trajectories));
+        self.modal_picker = None;
+        self.composer_mode = ComposerMode::Chat;
+    }
+
     pub(super) fn open_session_picker_from_trajectories(
         &mut self,
         trajectories: Vec<TrajectoryMeta>,
     ) {
-        let items = session_items_from_trajectories(trajectories, chrono::Utc::now());
-        self.open_session_picker(items);
+        if history::surfaces_enabled_from_env() {
+            self.history_surface = Some(HistorySurface::new(trajectories));
+            self.modal_picker = None;
+            self.composer_mode = ComposerMode::Chat;
+        } else {
+            let items = session_items_from_trajectories(trajectories, chrono::Utc::now());
+            self.open_session_picker(items);
+        }
     }
 
     pub(super) fn refresh_recent_sessions_from_trajectories(
