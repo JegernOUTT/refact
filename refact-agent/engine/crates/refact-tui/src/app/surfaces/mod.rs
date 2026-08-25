@@ -356,12 +356,28 @@ impl App {
     }
 
     pub(super) fn open_permissions_picker(&mut self) {
-        self.modal_picker = Some(PickerState::multi_with_selected(
+        if !Self::settings_surface_enabled() {
+            self.add_notice("/permissions requires REFACT_TUI_SURFACES=1");
+            return;
+        }
+        self.open_permissions_picker_state();
+    }
+
+    fn open_permissions_picker_state(&mut self) {
+        let mut picker = PickerState::multi_with_selected_editable(
             PickerKind::Permissions,
             session::permission_picker_items(),
             session::selected_permission_ids(self.permission_policy),
-        ));
+            session::permission_picker_editable_ids(),
+        );
+        picker.select_item_id("editing_tools");
+        self.modal_picker = Some(picker);
         self.composer_mode = ComposerMode::Chat;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_permissions_picker(&mut self) {
+        self.open_permissions_picker_state();
     }
 
     pub(super) fn open_reasoning_picker(&mut self) {
@@ -1288,6 +1304,18 @@ mod tests {
         assert!(matches!(
             app.visible_transcript().last(),
             Some(TranscriptItem::Notice(text)) if text == "/mode requires REFACT_TUI_SURFACES=1"
+        ));
+    }
+
+    #[test]
+    fn permissions_picker_uses_the_surfaces_gate() {
+        let mut app = App::notice_only("test");
+        app.open_permissions_picker();
+
+        assert!(app.modal_picker().is_none());
+        assert!(matches!(
+            app.visible_transcript().last(),
+            Some(TranscriptItem::Notice(text)) if text == "/permissions requires REFACT_TUI_SURFACES=1"
         ));
     }
 

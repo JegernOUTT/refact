@@ -317,15 +317,62 @@ fn reasoning_level_description(level: ReasoningLevel) -> &'static str {
 pub fn permission_picker_items() -> Vec<PickerItem> {
     vec![
         PickerItem {
+            id: "mode_tool_confirm".to_string(),
+            title: "1. Mode tool_confirm.rules".to_string(),
+            description: "Read-only here; configure .refact/modes/<id>.yaml or ~/.config/refact/modes/<id>.yaml. See /mode for the active mode.".to_string(),
+        },
+        PickerItem {
+            id: "autonomous_workflows".to_string(),
+            title: "2. Autonomous workflow allowlist".to_string(),
+            description: "Read-only here; configure autonomous_no_confirm in .refact/subagents/*.yaml and allowed-tools in command or skill frontmatter.".to_string(),
+        },
+        PickerItem {
             id: "editing_tools".to_string(),
-            title: "Allow editing tools for this chat".to_string(),
-            description: "Server flag auto_approve_editing_tools; equivalent to Allow Chat for file edits".to_string(),
+            title: "3. Auto-approve editing tools".to_string(),
+            description: "Editable here: per-chat auto_approve_editing_tools. Mode defaults are shown in /mode.".to_string(),
         },
         PickerItem {
             id: "dangerous_commands".to_string(),
-            title: "Allow dangerous commands for this chat".to_string(),
-            description: "Server flag auto_approve_dangerous_commands; shell/destructive tools still require explicit policy".to_string(),
+            title: "3. Auto-approve dangerous commands".to_string(),
+            description: "Editable here: per-chat auto_approve_dangerous_commands; shell and destructive tools still use their own policies.".to_string(),
         },
+        PickerItem {
+            id: "sandbox_escalation".to_string(),
+            title: "4. Sandbox escalation".to_string(),
+            description: "Read-only here; shell/process escalate requests and terminal_security are configured in ~/.config/refact/privacy.yaml.".to_string(),
+        },
+        PickerItem {
+            id: "tool_confirmation_policy".to_string(),
+            title: "5. Per-tool confirmation policy".to_string(),
+            description: "Read-only here; each tool evaluates match_against_confirm_deny. For `ls`, shell_gate is Balanced and below the Medium ask threshold, so it passes. Configure shell policy in .refact/shell_policy.yaml.".to_string(),
+        },
+        PickerItem {
+            id: "edit_tool_confirmation".to_string(),
+            title: "6. Edit-tool confirmation".to_string(),
+            description: "Read-only here; file-edit tools return built-in CONFIRMATION. Change requires the tool implementation.".to_string(),
+        },
+        PickerItem {
+            id: "always_ask_tools".to_string(),
+            title: "7. ALWAYS_ASK_TOOLS".to_string(),
+            description: "Read-only here; ctx_probe and ctx_apply always ask through built-in policy.".to_string(),
+        },
+        PickerItem {
+            id: "switch_mode".to_string(),
+            title: "8. switch_mode".to_string(),
+            description: "Read-only here; switch_mode (handoff_to_mode) is always auto-approved by built-in policy.".to_string(),
+        },
+        PickerItem {
+            id: "shell_privacy".to_string(),
+            title: "9. Privacy-based shell approval".to_string(),
+            description: "Read-only here; guarded shell reads can ask after execution. Configure global ~/.config/refact/privacy.yaml or project .refact/privacy.yaml.".to_string(),
+        },
+    ]
+}
+
+pub fn permission_picker_editable_ids() -> Vec<String> {
+    vec![
+        "editing_tools".to_string(),
+        "dangerous_commands".to_string(),
     ]
 }
 
@@ -537,6 +584,73 @@ mod tests {
             json!({"auto_approve_editing_tools": true, "auto_approve_dangerous_commands": false})
         );
         assert_eq!(selected_permission_ids(policy), vec!["editing_tools"]);
+    }
+
+    #[test]
+    fn permission_picker_lists_nine_gates_with_only_auto_approval_editable() {
+        let items = permission_picker_items();
+        let ids = items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>();
+        let gate_numbers = items
+            .iter()
+            .filter_map(|item| item.title.split_once('.').map(|(number, _)| number))
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(items.len(), 10);
+        assert_eq!(gate_numbers.len(), 9);
+        assert_eq!(
+            permission_picker_editable_ids(),
+            ["editing_tools", "dangerous_commands"]
+        );
+        assert!(items
+            .iter()
+            .filter(|item| !permission_picker_editable_ids().contains(&item.id))
+            .all(|item| item.description.starts_with("Read-only here;")));
+        for (id, location) in [
+            ("mode_tool_confirm", ".refact/modes/<id>.yaml"),
+            ("autonomous_workflows", ".refact/subagents/*.yaml"),
+            ("sandbox_escalation", "~/.config/refact/privacy.yaml"),
+            ("tool_confirmation_policy", ".refact/shell_policy.yaml"),
+            ("shell_privacy", ".refact/privacy.yaml"),
+        ] {
+            assert!(
+                items
+                    .iter()
+                    .find(|item| item.id == id)
+                    .unwrap()
+                    .description
+                    .contains(location),
+                "{id} should name {location}"
+            );
+        }
+        assert!(ids.contains(&"mode_tool_confirm"));
+        assert!(ids.contains(&"autonomous_workflows"));
+        assert!(ids.contains(&"editing_tools"));
+        assert!(ids.contains(&"dangerous_commands"));
+        assert!(ids.contains(&"sandbox_escalation"));
+        assert!(ids.contains(&"tool_confirmation_policy"));
+        assert!(ids.contains(&"edit_tool_confirmation"));
+        assert!(ids.contains(&"always_ask_tools"));
+        assert!(ids.contains(&"switch_mode"));
+        assert!(ids.contains(&"shell_privacy"));
+    }
+
+    #[test]
+    fn permission_picker_explains_plain_ls_through_shell_gate() {
+        let shell_gate = permission_picker_items()
+            .into_iter()
+            .find(|item| item.id == "tool_confirmation_policy")
+            .unwrap();
+
+        assert!(shell_gate.description.contains("`ls`"));
+        assert!(shell_gate.description.contains("shell_gate"));
+        assert!(shell_gate.description.contains("Balanced"));
+        assert!(shell_gate
+            .description
+            .contains("below the Medium ask threshold"));
+        assert!(shell_gate.description.contains(".refact/shell_policy.yaml"));
     }
 
     #[test]

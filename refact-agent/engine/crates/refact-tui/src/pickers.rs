@@ -111,6 +111,7 @@ pub struct PickerState {
     pub selected: usize,
     selection_mode: PickerSelectionMode,
     selected_ids: Vec<String>,
+    editable_ids: Option<Vec<String>>,
 }
 
 const PAGE_STEP: usize = 10;
@@ -131,6 +132,17 @@ impl PickerState {
     ) -> Self {
         let mut picker = Self::with_selection_mode(kind, items, PickerSelectionMode::Multi);
         picker.selected_ids = selected_ids;
+        picker
+    }
+
+    pub fn multi_with_selected_editable(
+        kind: PickerKind,
+        items: Vec<PickerItem>,
+        selected_ids: Vec<String>,
+        editable_ids: Vec<String>,
+    ) -> Self {
+        let mut picker = Self::multi_with_selected(kind, items, selected_ids);
+        picker.editable_ids = Some(editable_ids);
         picker
     }
 
@@ -161,6 +173,7 @@ impl PickerState {
             selected: 0,
             selection_mode,
             selected_ids: Vec::new(),
+            editable_ids: None,
         }
     }
 
@@ -260,6 +273,12 @@ impl PickerState {
         self.selected_ids.iter().any(|selected| selected == id)
     }
 
+    pub fn is_item_editable(&self, id: &str) -> bool {
+        self.editable_ids
+            .as_ref()
+            .is_none_or(|editable_ids| editable_ids.iter().any(|editable| editable == id))
+    }
+
     pub fn clamp_selection(&mut self) {
         let len = self.filtered_items().len();
         if len == 0 {
@@ -319,6 +338,9 @@ impl PickerState {
         let Some(item) = self.selected_item() else {
             return;
         };
+        if !self.is_item_editable(&item.id) {
+            return;
+        }
         if let Some(index) = self.selected_ids.iter().position(|id| id == &item.id) {
             self.selected_ids.remove(index);
         } else {

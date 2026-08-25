@@ -4645,7 +4645,7 @@ new-chat = "ctrl-x"
     #[test]
     fn permissions_command_uses_multi_select_picker() {
         let mut app = App::new(project());
-        app.execute_command_name("permissions");
+        app.test_open_permissions_picker();
         let picker = app.modal_picker().unwrap();
         assert!(picker.is_multi());
         assert_eq!(picker.kind, PickerKind::Permissions);
@@ -4678,9 +4678,10 @@ new-chat = "ctrl-x"
         assert_eq!(app.execute_command_name("model"), AppAction::LoadModels);
         assert_eq!(app.execute_command_name("mode"), AppAction::LoadModes);
         assert_eq!(app.execute_command_name("permissions"), AppAction::None);
-        assert!(app
-            .modal_picker()
-            .is_some_and(|picker| picker.kind == PickerKind::Permissions));
+        assert!(matches!(
+            app.visible_transcript().last(),
+            Some(TranscriptItem::Notice(text)) if text == "/permissions requires REFACT_TUI_SURFACES=1"
+        ));
 
         let mut app = App::new(project());
         app.apply_caps(&json!({
@@ -7932,7 +7933,7 @@ new-chat = "ctrl-x"
     fn modal_picker_space_still_toggles_multi_select() {
         let mut app = App::new(project());
 
-        app.open_permissions_picker();
+        app.test_open_permissions_picker();
         assert_eq!(app.modal_picker().unwrap().selected_count(), 0);
         assert_eq!(app.handle_key(key(KeyCode::Char(' '))), AppAction::None);
 

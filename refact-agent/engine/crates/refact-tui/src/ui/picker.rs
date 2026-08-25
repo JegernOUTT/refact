@@ -98,12 +98,16 @@ pub fn render_modal_picker(
         .enumerate()
         .map(|(idx, item)| {
             let name = if picker.is_multi() {
-                let checkbox = if picker.is_selected(&item.id) {
-                    "☑"
+                if picker.is_item_editable(&item.id) {
+                    let checkbox = if picker.is_selected(&item.id) {
+                        "☑"
+                    } else {
+                        "☐"
+                    };
+                    format!("{checkbox} {}", item.title)
                 } else {
-                    "☐"
-                };
-                format!("{checkbox} {}", item.title)
+                    format!("[read-only] {}", item.title)
+                }
             } else {
                 item.title.clone()
             };
@@ -131,7 +135,11 @@ pub fn render_modal_picker(
         format!("{}: {}", picker.title(), picker.filter)
     };
     let footer = if picker.is_multi() {
-        multi_picker_hint_line()
+        if picker.kind == PickerKind::Permissions {
+            permissions_picker_hint_line()
+        } else {
+            multi_picker_hint_line()
+        }
     } else {
         menu::standard_popup_hint_line()
     };
@@ -575,6 +583,18 @@ fn multi_picker_hint_line() -> Line<'static> {
     ])
 }
 
+fn permissions_picker_hint_line() -> Line<'static> {
+    Line::from(vec![
+        "Only ".into(),
+        key_hint::plain("☐"),
+        " rows are editable · ".into(),
+        key_hint::plain("Space"),
+        " to toggle · ".into(),
+        key_hint::plain("Enter"),
+        " to confirm".into(),
+    ])
+}
+
 fn mode_picker_hint_line() -> Line<'static> {
     Line::from(vec![
         "● current · ! auto-approval · ".into(),
@@ -790,7 +810,44 @@ mod tests {
 
         assert!(text.contains("permissions: 1 selected"));
         assert!(text.contains("☑ Beta"));
-        assert!(text.contains("Press Space to toggle; Enter to confirm"));
+        assert!(text.contains("Only ☐ rows are editable"));
+    }
+
+    #[test]
+    fn permissions_picker_marks_read_only_items_and_skips_them_when_toggling() {
+        let mut picker = PickerState::multi_with_selected_editable(
+            PickerKind::Permissions,
+            vec![
+                item("read_only", "Mode rules", "configured elsewhere"),
+                item("editable", "Allow edits", "per chat"),
+            ],
+            Vec::new(),
+            vec!["editable".to_string()],
+        );
+        picker.toggle_selected();
+        picker.select_next();
+        picker.toggle_selected();
+
+        let backend = TestBackend::new(90, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_modal_picker(frame, &picker, frame.area(), Rect::new(0, 18, 90, 2));
+            })
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert_eq!(picker.selected_items().len(), 1);
+        assert!(picker.is_selected("editable"));
+        assert!(text.contains("[read-only] Mode rules"));
+        assert!(text.contains("☑ Allow edits"));
+        assert!(text.contains("Only ☐ rows are editable"));
     }
 
     #[test]
