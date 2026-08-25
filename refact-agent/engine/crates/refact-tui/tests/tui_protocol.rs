@@ -1423,7 +1423,7 @@ fn streaming_final_output_matches_fixture_source_after_ticks() {
 fn render_snapshot_for_assistant_streaming_fixture() {
     let run = run_fixture("assistant_streaming.jsonl");
     let snapshot = rendered_snapshot(&run.app, 72, 16);
-    let expected = r#"refact fixture | Ctrl-N new · Ctrl-P projects · Alt-M model · Ctrl-O mod
+    let expected = r#"refact fixture | Ctrl-N new · Ctrl-P projects · Alt-M model · Ctrl-O mo…
 
   › render a table
 
