@@ -5,6 +5,47 @@ use ratatui::layout::Position;
 
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_millis(100);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ImageProtocol {
+    Kitty,
+    Sixel,
+    Iterm2,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ImageEnvProbe<'a> {
+    pub no_color: bool,
+    pub term: Option<&'a str>,
+    pub term_program: Option<&'a str>,
+    pub kitty_window_id: bool,
+    pub sixel: bool,
+    pub term_sixel: bool,
+}
+
+pub fn image_protocol_from_env() -> Option<ImageProtocol> {
+    image_protocol_from_probe(ImageEnvProbe {
+        no_color: std::env::var_os("NO_COLOR").is_some(),
+        term: std::env::var("TERM").ok().as_deref(),
+        term_program: std::env::var("TERM_PROGRAM").ok().as_deref(),
+        kitty_window_id: std::env::var_os("KITTY_WINDOW_ID").is_some(),
+        sixel: std::env::var_os("REFACT_TUI_SIXEL").is_some(),
+        term_sixel: std::env::var("TERM").is_ok_and(|term| term.contains("sixel")),
+    })
+}
+
+pub fn image_protocol_from_probe(probe: ImageEnvProbe<'_>) -> Option<ImageProtocol> {
+    if probe.no_color {
+        return None;
+    }
+    if probe.kitty_window_id || probe.term.is_some_and(|term| term.contains("xterm-kitty")) {
+        return Some(ImageProtocol::Kitty);
+    }
+    if probe.term_program == Some("iTerm.app") {
+        return Some(ImageProtocol::Iterm2);
+    }
+    (probe.sixel || probe.term_sixel).then_some(ImageProtocol::Sixel)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DefaultColors {
     pub(crate) fg: (u8, u8, u8),
@@ -363,5 +404,48 @@ mod tests {
     fn skips_osc_queries_when_stdout_is_not_a_terminal() {
         assert!(should_probe_default_colors(true));
         assert!(!should_probe_default_colors(false));
+    }
+
+    #[test]
+    fn image_protocol_detection_is_environment_only_and_fail_closed() {
+        let image_probe = |term, term_program, kitty_window_id, sixel| ImageEnvProbe {
+            no_color: false,
+            term,
+            term_program,
+            kitty_window_id,
+            sixel,
+            term_sixel: false,
+        };
+        assert_eq!(
+            image_protocol_from_probe(image_probe(Some("xterm-kitty"), None, false, false)),
+            Some(ImageProtocol::Kitty)
+        );
+        assert_eq!(
+            image_protocol_from_probe(image_probe(None, Some("iTerm.app"), false, false)),
+            Some(ImageProtocol::Iterm2)
+        );
+        assert_eq!(
+            image_protocol_from_probe(image_probe(Some("xterm"), None, false, true)),
+            Some(ImageProtocol::Sixel)
+        );
+        assert_eq!(
+            image_protocol_from_probe(image_probe(Some("xterm-256color"), None, false, false)),
+            None
+        );
+    }
+
+    #[test]
+    fn no_color_disables_detected_image_protocols() {
+        assert_eq!(
+            image_protocol_from_probe(ImageEnvProbe {
+                no_color: true,
+                term: Some("xterm-kitty"),
+                term_program: Some("iTerm.app"),
+                kitty_window_id: true,
+                sixel: true,
+                term_sixel: true,
+            }),
+            None
+        );
     }
 }

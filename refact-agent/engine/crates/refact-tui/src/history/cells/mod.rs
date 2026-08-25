@@ -36,7 +36,9 @@ mod tool_family;
 pub use approval::ApprovalCell;
 pub use code_intel::CodeIntelToolCell;
 pub use exec::{ExecToolCell, SubchatCell, ToolCallCell};
-pub use messages::{AssistantCell, AssistantStreamCell, ContentBlockCell, ReasoningCell, UserCell};
+pub use messages::{
+    AssistantCell, AssistantStreamCell, ContentBlockCell, ImageCell, ReasoningCell, UserCell,
+};
 pub use notices::{EventCell, EventCellData, InfoCell, NoticeCell, StatusCell};
 pub use patches::{DiffCell, DiffToolCell};
 pub use plans::{plan_header_line, GoalCell, GoalCellData, PlanCell, PlanCellData, PlanStreamCell};
@@ -52,6 +54,7 @@ pub enum HistoryCellKind {
     Assistant,
     Reasoning,
     ContentBlock,
+    Image,
     Notice,
     Info,
     Tool,
@@ -360,6 +363,7 @@ pub fn cell_from_transcript_item(item: &TranscriptItem, selected: bool) -> Box<d
             *collapsed,
             *expandable,
         )),
+        TranscriptItem::Image { placeholder, .. } => Box::new(ImageCell::new(placeholder.clone())),
         TranscriptItem::Tool(card) => cell_from_tool_card(card.clone(), selected),
         TranscriptItem::Plan(data) => Box::new(PlanCell::new(data.clone())),
         TranscriptItem::Goal(data) => Box::new(GoalCell::new(data.clone())),

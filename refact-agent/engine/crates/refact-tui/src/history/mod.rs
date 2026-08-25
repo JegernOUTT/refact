@@ -583,6 +583,18 @@ impl HistoryBuffer {
         self.inserted_cell_count
     }
 
+    pub fn latest_image_data(&self) -> Option<(Vec<u8>, String)> {
+        self.history
+            .iter()
+            .rev()
+            .find_map(|entry| match entry.item.as_ref() {
+                Some(TranscriptItem::Image { data, mime, .. }) => {
+                    Some((data.clone(), mime.clone()))
+                }
+                _ => None,
+            })
+    }
+
     pub fn cache_entry_count(&self) -> usize {
         self.render_cache.entry_count()
     }
@@ -1276,6 +1288,36 @@ mod tests {
             .collect::<String>();
         assert!(!raw.contains('\x1b'));
         assert!(raw.contains("Read docs (https://example.com/docs) now"));
+    }
+
+    #[test]
+    fn image_fallback_reflows_in_native_scrollback_without_escape_bytes() {
+        let mut history = HistoryBuffer::new();
+        history.enqueue(TranscriptItem::Image {
+            placeholder: "[image: image/png, 4 bytes]".to_string(),
+            data: b"ABCD".to_vec(),
+            mime: "image/png".to_string(),
+        });
+
+        let insertions = history.drain_pending(18);
+        let lines = insertions
+            .iter()
+            .flat_map(|insertion| insertion.lines.iter())
+            .map(|line| line_to_plain(&line.line))
+            .collect::<Vec<_>>();
+        let raw = lines.join("\n");
+
+        assert!(raw.contains("[image:"));
+        assert!(!raw.contains('\x1b'));
+        let reflowed = history.reflow_insertions(12, 100);
+        let reflowed_text = reflowed
+            .iter()
+            .flat_map(|insertion| insertion.lines.iter())
+            .map(|line| line_to_plain(&line.line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(reflowed_text.contains("[image:"));
+        assert!(!reflowed_text.contains('\x1b'));
     }
 
     #[test]

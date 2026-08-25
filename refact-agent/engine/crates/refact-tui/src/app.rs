@@ -1300,6 +1300,9 @@ pub enum AppAction {
     OpenExternalEditor {
         draft: String,
     },
+    OpenImageExternally {
+        image: crate::terminal_image::InlineImage,
+    },
     SendToolDecisions {
         client_request_id: String,
         decisions: Vec<ToolDecision>,
@@ -1360,6 +1363,7 @@ fn is_empty_live_assistant(message: &TranscriptMessage) -> bool {
     message.role == TranscriptRole::Assistant
         && !message.stream_finished
         && message.content.is_empty()
+        && message.images.is_empty()
         && message.reasoning.is_empty()
         && message.tool_calls.is_empty()
         && message.citations.is_empty()
@@ -1477,9 +1481,21 @@ fn render_frame(terminal: &mut TerminalSession, app: &mut App) -> Result<(), Tui
             }
         }
     }
-    terminal
+    let completed_frame = terminal
         .terminal_mut()
         .draw(|frame| crate::ui::render(frame, app))?;
+    if !app.native_scrollback() {
+        let positions = crate::terminal_image::image_positions(
+            completed_frame.buffer,
+            app.visible_transcript(),
+        );
+        let images = crate::app::transcript::inline_images_for_visible_transcript(
+            app.visible_transcript(),
+            crate::terminal_probe::image_protocol_from_env(),
+            &positions,
+        );
+        terminal.write_inline_images(&images)?;
+    }
     Ok(())
 }
 

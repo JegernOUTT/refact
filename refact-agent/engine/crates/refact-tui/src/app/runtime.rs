@@ -444,6 +444,26 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                         }
                         input_task = spawn_input_task(tx.clone());
                     }
+                    AppAction::OpenImageExternally { image } => {
+                        input_task.abort();
+                        let result = tokio::task::spawn_blocking(move || {
+                            crate::terminal_image::save_and_open_image(&image)
+                        })
+                        .await
+                        .map_err(|error| error.to_string())
+                        .and_then(|result| result.map_err(|error| error.to_string()));
+                        match result {
+                            Ok((path, Ok(()))) => {
+                                app.add_notice(format!("Opened image at {}", path.display()))
+                            }
+                            Ok((path, Err(error))) => app.add_notice(format!(
+                                "Saved image to {}; unable to open it: {error}",
+                                path.display()
+                            )),
+                            Err(error) => app.add_notice(format!("Could not save image: {error}")),
+                        }
+                        input_task = spawn_input_task(tx.clone());
+                    }
                     AppAction::CopyToClipboard { text, source } => {
                         let result = terminal.write_clipboard(&text);
                         app.record_clipboard_result(source, result);
@@ -1240,6 +1260,7 @@ pub(super) async fn run_action(
         }
         AppAction::CopyToClipboard { .. } => {}
         AppAction::OpenExternalEditor { .. } => {}
+        AppAction::OpenImageExternally { .. } => {}
         AppAction::SendToolDecisions {
             client_request_id,
             decisions,

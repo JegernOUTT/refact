@@ -94,6 +94,7 @@ impl App {
                 self.cycle_tool_selection();
                 AppAction::None
             }
+            Some(KeyAction::OpenLatestImage) => self.open_latest_image_action(),
             Some(KeyAction::ToggleSelectedTool) => {
                 if self.composer.is_empty() {
                     self.toggle_selected_tool();
@@ -403,5 +404,22 @@ mod tests {
         );
         assert_eq!(app.composer(), "why?");
         assert!(!app.help_open());
+    }
+
+    #[test]
+    fn image_fallback_key_targets_the_latest_image() {
+        let mut app = App::notice_only("test");
+        app.test_set_history_items(vec![TranscriptItem::Image {
+            placeholder: "[image: image/png, 3 bytes]".to_string(),
+            data: b"png".to_vec(),
+            mime: "image/png".to_string(),
+        }]);
+
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT));
+
+        assert!(matches!(
+            action,
+            AppAction::OpenImageExternally { image } if image.data == b"png"
+        ));
     }
 }

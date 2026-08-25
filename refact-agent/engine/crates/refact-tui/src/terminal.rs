@@ -449,6 +449,18 @@ impl TerminalSession {
         Write::flush(writer)
     }
 
+    pub fn write_inline_images(
+        &mut self,
+        images: &[crate::terminal_image::InlineImage],
+    ) -> io::Result<()> {
+        let restore_position = self.terminal.get_cursor_position()?;
+        crate::terminal_image::render_inline_images(
+            self.terminal.backend_mut(),
+            images,
+            restore_position,
+        )
+    }
+
     pub fn mode(&self) -> TerminalMode {
         self.guard.mode
     }
@@ -1236,6 +1248,37 @@ mod tests {
         assert!(output.contains("\x1b]8;;https://example.com\x1b\\"));
         assert!(output.contains("\x1b]8;;\x1b\\"));
         assert!(output.contains("link"));
+    }
+
+    #[test]
+    fn inline_image_protocols_are_written_without_cell_symbols() {
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut backend = StdoutBackend::with_writer(TestWriter(output.clone()), Position::ORIGIN);
+        let image = crate::terminal_image::InlineImage::new(
+            crate::terminal_probe::ImageProtocol::Kitty,
+            one_pixel_png(),
+            "image/png".to_string(),
+            Position::ORIGIN,
+        );
+
+        crate::terminal_image::render_inline_images(&mut backend, &[image], Position::ORIGIN)
+            .unwrap();
+
+        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("\x1b_G"));
+        assert!(!output.contains("[image:"));
+    }
+
+    fn one_pixel_png() -> Vec<u8> {
+        let image = image::DynamicImage::new_rgba8(1, 1);
+        let mut bytes = Vec::new();
+        image
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
     }
 
     struct TestWriter(Arc<Mutex<Vec<u8>>>);

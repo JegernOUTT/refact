@@ -216,6 +216,7 @@ fn transcript_text(app: &App) -> String {
             TranscriptItem::ContentBlock { summary, body, .. } => {
                 format!("content_block:{summary}:{body}")
             }
+            TranscriptItem::Image { placeholder, .. } => format!("image:{placeholder}"),
             TranscriptItem::Tool(card) => format!("tool:{}:{}:{}", card.id, card.name, card.result),
             TranscriptItem::Plan(plan) => {
                 format!("plan:{}:{}:{}", plan.mode, plan.version, plan.content)

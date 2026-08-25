@@ -1063,6 +1063,7 @@ pub struct TranscriptMessage {
     pub message_id: Option<String>,
     pub role: TranscriptRole,
     pub content: String,
+    pub images: Vec<TranscriptImage>,
     pub reasoning: String,
     pub tool_calls: Vec<Value>,
     pub tool_call_id: Option<String>,
@@ -1076,12 +1077,19 @@ pub struct TranscriptMessage {
     pub stream_finished: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TranscriptImage {
+    pub mime: String,
+    pub data: String,
+}
+
 impl TranscriptMessage {
     pub fn new(role: TranscriptRole) -> Self {
         Self {
             message_id: None,
             role,
             content: String::new(),
+            images: Vec::new(),
             reasoning: String::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -1126,6 +1134,7 @@ impl TranscriptMessage {
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         message.content = content_text(raw).unwrap_or_default();
+        message.images = content_images(raw);
         message.reasoning = sanitize_model_text_for_role(
             &message.role,
             raw.get("reasoning_content")
@@ -1604,6 +1613,33 @@ pub fn content_text(message: &Value) -> Option<String> {
     ))
 }
 
+fn content_images(message: &Value) -> Vec<TranscriptImage> {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(content_part_image)
+        .collect()
+}
+
+fn content_part_image(part: &Value) -> Option<TranscriptImage> {
+    if !content_part_is_image(part) {
+        return None;
+    }
+    let data = image_data(part)?;
+    let mime = part
+        .get("mime_type")
+        .or_else(|| part.get("media_type"))
+        .and_then(Value::as_str)
+        .or_else(|| image_url(part).and_then(mime_from_data_url))
+        .unwrap_or("image/png");
+    Some(TranscriptImage {
+        mime: sanitize_tool_inline(mime),
+        data: data.to_string(),
+    })
+}
+
 fn sanitize_content_for_wire_role(role: Option<&str>, content: String) -> String {
     match role {
         Some("user") => sanitize_inbound_user_text(content),
@@ -1828,6 +1864,18 @@ fn image_url(part: &Value) -> Option<&str> {
         Value::Object(map) => map.get("url").and_then(Value::as_str),
         _ => None,
     })
+}
+
+fn image_data(part: &Value) -> Option<&str> {
+    image_url(part)
+        .and_then(data_url_payload)
+        .or_else(|| part.get("m_content").and_then(Value::as_str))
+        .or_else(|| part.get("data").and_then(Value::as_str))
+        .or_else(|| {
+            part.get("source")
+                .and_then(|source| source.get("data"))
+                .and_then(Value::as_str)
+        })
 }
 
 fn image_bytes(part: &Value) -> Option<usize> {

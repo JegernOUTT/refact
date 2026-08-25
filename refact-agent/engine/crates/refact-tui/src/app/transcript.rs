@@ -4,10 +4,13 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
+use base64::Engine;
+
 use crate::history::cells::{
     synthesize_goal_content, synthesize_plan_content, GoalCellData, HistoryCellKind, PlanCellData,
 };
 use crate::tools::{ToolCard, ToolStatus};
+use crate::terminal_image::InlineImage;
 
 use super::*;
 
@@ -21,6 +24,11 @@ pub enum TranscriptItem {
         body: String,
         collapsed: bool,
         expandable: bool,
+    },
+    Image {
+        placeholder: String,
+        data: Vec<u8>,
+        mime: String,
     },
     Tool(ToolCard),
     Plan(PlanCellData),
@@ -50,6 +58,97 @@ impl TranscriptItem {
     pub(super) fn can_enter_history(&self) -> bool {
         !matches!(self, Self::Assistant(text) if text.is_empty())
     }
+}
+
+pub(super) fn image_items(message: &TranscriptMessage) -> Vec<TranscriptItem> {
+    message
+        .images
+        .iter()
+        .filter_map(|image| {
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(&image.data)
+                .ok()?;
+            let placeholder = format!("[image: {}, {} bytes]", image.mime, data.len());
+            Some(TranscriptItem::Image {
+                placeholder,
+                data,
+                mime: image.mime.clone(),
+            })
+        })
+        .collect()
+}
+
+fn assistant_content_without_images(content: &str, images: &[TranscriptItem]) -> String {
+    let placeholders = images
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::Image { placeholder, .. } => Some(placeholder.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    content
+        .lines()
+        .filter(|line| !placeholders.contains(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(super) fn inline_images_for_visible_transcript(
+    items: &[TranscriptItem],
+    protocol: Option<crate::terminal_probe::ImageProtocol>,
+    positions: &[ratatui::layout::Position],
+) -> Vec<InlineImage> {
+    let Some(protocol) = protocol else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::Image { data, mime, .. } => Some((data, mime)),
+            _ => None,
+        })
+        .zip(positions.iter().copied())
+        .map(|((data, mime), position)| {
+            InlineImage::new(protocol, data.clone(), mime.clone(), position)
+        })
+        .collect()
+}
+
+impl App {
+    pub(super) fn open_latest_image_action(&mut self) -> AppAction {
+        let image = image_items_for_transcript(&self.transcript)
+            .last()
+            .cloned()
+            .or_else(|| {
+                self.history.latest_image_data().map(|(data, mime)| {
+                    InlineImage::new(
+                        crate::terminal_probe::ImageProtocol::Kitty,
+                        data,
+                        mime,
+                        ratatui::layout::Position::ORIGIN,
+                    )
+                })
+            });
+        let Some(image) = image else {
+            return AppAction::None;
+        };
+        AppAction::OpenImageExternally { image }
+    }
+}
+
+fn image_items_for_transcript(items: &[TranscriptItem]) -> Vec<InlineImage> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            TranscriptItem::Image { data, mime, .. } => Some(InlineImage::new(
+                crate::terminal_probe::ImageProtocol::Kitty,
+                data.clone(),
+                mime.clone(),
+                ratatui::layout::Position::ORIGIN,
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(super) fn thinking_block_items(message: &TranscriptMessage) -> Vec<TranscriptItem> {
@@ -776,6 +875,8 @@ impl App {
             }
             TranscriptRole::Assistant => {
                 let mut part = 0usize;
+                let images = image_items(message);
+                let content = assistant_content_without_images(&message.content, &images);
                 if !message.reasoning.is_empty() {
                     if message.stream_finished {
                         self.push_state_reasoning_item(
@@ -800,20 +901,22 @@ impl App {
                     );
                     part += 1;
                 }
-                if !message.content.is_empty() {
+                if !content.is_empty() {
                     if message.stream_finished {
                         self.push_state_history_item(
                             render_message_key(message, "assistant", part),
-                            TranscriptItem::Assistant(message.content.clone()),
+                            TranscriptItem::Assistant(content.clone()),
                         );
                     } else {
-                        self.stream_controller
-                            .replace_sanitized_committed(&message.content);
-                        self.transcript
-                            .push(TranscriptItem::Assistant(message.content.clone()));
+                        self.stream_controller.replace_sanitized_committed(&content);
+                        self.transcript.push(TranscriptItem::Assistant(content));
                     }
                 }
                 part += 1;
+                for item in images {
+                    self.push_state_history_item(render_message_key(message, "image", part), item);
+                    part += 1;
+                }
                 for citation in &message.citations {
                     self.push_state_history_item(
                         render_message_key(message, "citation", part),
@@ -1276,6 +1379,14 @@ pub(super) fn render_message_revision(
             message.tool_failed,
             message.stream_finished,
         )),
+        "image" => stable_revision(&(
+            message.role.as_str(),
+            part,
+            message
+                .images
+                .get(index.saturating_sub(render_message_side_part_base(message)))
+                .map(|image| (&image.mime, &image.data)),
+        )),
         "citation" => stable_revision(&(
             message.role.as_str(),
             part,
@@ -1340,6 +1451,8 @@ pub(super) fn rendered_state_keys_for_message(message: &TranscriptMessage) -> Ve
         TranscriptRole::Assistant => {
             let mut part = 0usize;
             let mut keys = Vec::new();
+            let images = image_items(message);
+            let content = assistant_content_without_images(&message.content, &images);
             if !message.reasoning.is_empty() && message.stream_finished {
                 keys.push(render_message_key(message, "reasoning", part));
             }
@@ -1350,10 +1463,14 @@ pub(super) fn rendered_state_keys_for_message(message: &TranscriptMessage) -> Ve
                 keys.push(render_message_key(message, "thinking", part));
                 part += 1;
             }
-            if message.stream_finished && !message.content.is_empty() {
+            if message.stream_finished && !content.is_empty() {
                 keys.push(render_message_key(message, "assistant", part));
             }
             part += 1;
+            for _ in images {
+                keys.push(render_message_key(message, "image", part));
+                part += 1;
+            }
             for _ in &message.citations {
                 keys.push(render_message_key(message, "citation", part));
                 part += 1;
@@ -1415,6 +1532,119 @@ mod tests {
 
         assert_eq!(keys.len(), 4);
         assert!(keys.iter().all(|key| key.starts_with("assistant-1:")));
+    }
+
+    #[test]
+    fn inline_images_leave_textual_fallback_in_the_ratatui_cell() {
+        let message = TranscriptMessage::from_wire(&json!({
+            "role": "assistant",
+            "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJDRA=="}}],
+            "stream_finished": true,
+        }));
+        let images = image_items(&message);
+        let lines = crate::history::render_transcript_item_lines(&images[0], 80, false);
+        let raw = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(raw.contains("[image: image/png, 4 bytes]"));
+        assert!(!raw.contains('\x1b'));
+        assert!(inline_images_for_visible_transcript(&images, None, &[]).is_empty());
+    }
+
+    #[test]
+    fn inline_images_keep_one_terminal_write_record_per_image() {
+        let item = TranscriptItem::Image {
+            placeholder: "[image: image/png, 4 bytes]".to_string(),
+            data: b"ABCD".to_vec(),
+            mime: "image/png".to_string(),
+        };
+        let images = inline_images_for_visible_transcript(
+            &[item],
+            Some(crate::terminal_probe::ImageProtocol::Kitty),
+            &[ratatui::layout::Position { x: 4, y: 2 }],
+        );
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].data, b"ABCD");
+        assert_eq!(images[0].position, ratatui::layout::Position { x: 4, y: 2 });
+    }
+
+    #[test]
+    fn image_render_keys_follow_content_before_citations() {
+        let message = TranscriptMessage::from_wire(&json!({
+            "message_id": "assistant-1",
+            "role": "assistant",
+            "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJDRA=="}}],
+            "citations": [{"url": "https://example.com"}],
+            "stream_finished": true,
+        }));
+
+        let keys = rendered_state_keys_for_message(&message);
+
+        assert_eq!(keys.len(), 2);
+        assert!(keys[0].contains(":image:"));
+        assert!(keys[1].contains(":citation:"));
+    }
+
+    #[test]
+    fn image_placeholder_moves_to_its_own_cell_without_duplication() {
+        let message = TranscriptMessage::from_wire(&json!({
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "before"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJDRA=="}},
+                {"type": "text", "text": "after"}
+            ],
+            "stream_finished": true,
+        }));
+        let images = image_items(&message);
+
+        assert_eq!(
+            assistant_content_without_images(&message.content, &images),
+            "before\nafter"
+        );
+    }
+
+    #[test]
+    fn fallback_action_targets_the_latest_transcript_image() {
+        let mut app = App::notice_only("test");
+        app.test_set_history_items(vec![
+            TranscriptItem::Image {
+                placeholder: "[image: image/png, 3 bytes]".to_string(),
+                data: b"one".to_vec(),
+                mime: "image/png".to_string(),
+            },
+            TranscriptItem::Image {
+                placeholder: "[image: image/jpeg, 3 bytes]".to_string(),
+                data: b"two".to_vec(),
+                mime: "image/jpeg".to_string(),
+            },
+        ]);
+
+        let AppAction::OpenImageExternally { image } = app.open_latest_image_action() else {
+            panic!("latest image action was not produced");
+        };
+        assert_eq!(image.data, b"two");
+        assert_eq!(image.mime, "image/jpeg");
+    }
+
+    #[test]
+    fn fallback_action_reaches_images_in_native_scrollback() {
+        let mut app = App::notice_only("test");
+        app.set_native_scrollback(true);
+        app.test_push_history_item(TranscriptItem::Image {
+            placeholder: "[image: image/png, 3 bytes]".to_string(),
+            data: b"png".to_vec(),
+            mime: "image/png".to_string(),
+        });
+
+        let AppAction::OpenImageExternally { image } = app.open_latest_image_action() else {
+            panic!("native scrollback image action was not produced");
+        };
+        assert_eq!(image.data, b"png");
     }
 
     #[test]

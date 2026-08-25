@@ -118,6 +118,41 @@ impl HistoryCell for AssistantCell {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ImageCell {
+    placeholder: String,
+}
+
+impl ImageCell {
+    pub fn new(placeholder: impl Into<String>) -> Self {
+        Self {
+            placeholder: placeholder.into(),
+        }
+    }
+}
+
+impl HistoryCell for ImageCell {
+    fn kind(&self) -> HistoryCellKind {
+        HistoryCellKind::Image
+    }
+
+    fn render_raw(&self, width: usize) -> Vec<Line<'static>> {
+        AssistantCell::new(self.placeholder.clone()).render_raw(width)
+    }
+
+    fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
+        AssistantCell::new(self.placeholder.clone()).render_with_links(width)
+    }
+
+    fn render_with_links_with_theme(&self, width: usize, theme: &TuiTheme) -> Vec<HyperlinkLine> {
+        AssistantCell::new(self.placeholder.clone()).render_with_links_with_theme(width, theme)
+    }
+
+    fn revision(&self) -> u64 {
+        revision(&(self.kind(), &self.placeholder))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssistantStreamCell {
     lines: Vec<HyperlinkLine>,

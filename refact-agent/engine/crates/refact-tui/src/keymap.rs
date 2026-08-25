@@ -114,6 +114,7 @@ pub enum KeyAction {
     Cancel,
     CycleToolSelection,
     ToggleSelectedTool,
+    OpenLatestImage,
     OpenCommandPalette,
     OpenSlashCommands,
     OpenFileMention,
@@ -181,6 +182,7 @@ impl KeyAction {
             Self::Cancel => "cancel",
             Self::CycleToolSelection => "cycle-tool-selection",
             Self::ToggleSelectedTool => "toggle-selected-tool",
+            Self::OpenLatestImage => "open-latest-image",
             Self::OpenCommandPalette => "command-palette",
             Self::OpenSlashCommands => "slash-commands",
             Self::OpenFileMention => "file-mention",
@@ -248,6 +250,7 @@ impl KeyAction {
             Self::Cancel => "cancel, close, or abort active work",
             Self::CycleToolSelection => "select next tool card",
             Self::ToggleSelectedTool => "expand selected tool card",
+            Self::OpenLatestImage => "save and open the latest image externally",
             Self::OpenCommandPalette => "open command palette",
             Self::OpenSlashCommands => "open slash command picker",
             Self::OpenFileMention => "open file mention picker",
@@ -323,6 +326,7 @@ const ALL_ACTIONS: &[KeyAction] = &[
     KeyAction::Cancel,
     KeyAction::CycleToolSelection,
     KeyAction::ToggleSelectedTool,
+    KeyAction::OpenLatestImage,
     KeyAction::OpenCommandPalette,
     KeyAction::OpenSlashCommands,
     KeyAction::OpenFileMention,
@@ -937,6 +941,7 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(KeyContext::Main, KeyAction::CtrlC, &["ctrl-c"]),
         entry(KeyContext::Main, KeyAction::Cancel, &["esc"]),
         entry(KeyContext::Main, KeyAction::CycleToolSelection, &["tab"]),
+        entry(KeyContext::Main, KeyAction::OpenLatestImage, &["alt-o"]),
         entry(KeyContext::Main, KeyAction::OpenCommandPalette, &["ctrl-k"]),
         entry(KeyContext::Main, KeyAction::OpenSlashCommands, &["/"]),
         entry(KeyContext::Main, KeyAction::OpenFileMention, &["@"]),
@@ -1415,6 +1420,16 @@ newline = "enter"
         assert!(rows
             .iter()
             .any(|row| row.action == Some(KeyAction::NextSession) && row.bindings.contains("F7")));
+    }
+
+    #[test]
+    fn default_keymap_binds_latest_image_fallback() {
+        let keymap = KeymapRegistry::default();
+
+        assert_eq!(
+            keymap.binding_label(KeyContext::Main, KeyAction::OpenLatestImage),
+            Some("Alt-O".to_string())
+        );
     }
 
     #[test]
