@@ -6,7 +6,6 @@ use ratatui::widgets::{Clear, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, TranscriptItem};
-use crate::history::cells::cell_from_transcript_item;
 use crate::render::renderable::{ColumnRenderable, InsetRenderable, Renderable};
 use crate::render::Insets;
 use crate::vendored::terminal_hyperlinks::{
@@ -50,14 +49,19 @@ fn render_transcript_view(frame: &mut Frame<'_>, app: &mut App, area: Rect, empt
     render_prepared_children(frame.buffer_mut(), area, children, app.scroll_offset());
 }
 
-fn prepare_transcript_children(app: &App, width: u16, empty_hint: &str) -> Vec<PreparedRenderable> {
+fn prepare_transcript_children(
+    app: &mut App,
+    width: u16,
+    empty_hint: &str,
+) -> Vec<PreparedRenderable> {
     if app.visible_transcript().is_empty() {
         return vec![prepare_hint(width, empty_hint)];
     }
     let mut children = Vec::new();
     let content_width = width.saturating_sub(TRANSCRIPT_GUTTER).max(1) as usize;
     let mut last_child_trailing_blank = None::<bool>;
-    for (index, item) in app.visible_transcript().iter().enumerate() {
+    let items = app.visible_transcript().to_vec();
+    for (index, item) in items.iter().enumerate() {
         if let Some(child) = prepare_item_child(
             item,
             index,
@@ -80,17 +84,19 @@ fn prepare_transcript_children(app: &App, width: u16, empty_hint: &str) -> Vec<P
 fn prepare_item_child(
     item: &TranscriptItem,
     index: usize,
-    app: &App,
+    app: &mut App,
     width: u16,
     content_width: usize,
     last_child_trailing_blank: Option<bool>,
 ) -> Option<PreparedRenderable> {
-    let cell = cell_from_transcript_item(item, app.transcript_item_selected(index, item));
-    let lines = cell.display_hyperlink_lines(content_width);
+    let selected = app.transcript_item_selected(index, item);
+    let lines = app.render_transcript_item(item, selected, content_width);
     if lines.is_empty() {
         return None;
     }
-    let top = if cell.is_stream_continuation()
+    let continuation =
+        crate::history::cells::cell_from_transcript_item(item, selected).is_stream_continuation();
+    let top = if continuation
         || last_child_trailing_blank.is_none()
         || last_child_trailing_blank.unwrap_or(false)
         || hyperlink_line_is_blank(&lines[0])
@@ -407,6 +413,27 @@ mod tests {
         assert_eq!(buffer[(2, first as u16)].bg, expected_bg);
         assert_eq!(buffer[(47, first as u16)].bg, expected_bg);
         assert_eq!(buffer[(2, answer as u16)].bg, Color::Reset);
+    }
+
+    #[test]
+    fn unchanged_interactive_redraw_reuses_rendered_cells() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(false);
+        app.test_push_history_item(TranscriptItem::Assistant(
+            "# Heading\n\nA cached **answer**".to_string(),
+        ));
+        let backend = TestBackend::new(48, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_full_transcript(frame, &mut app, frame.area()))
+            .unwrap();
+        let renders = app.history_render_count();
+        terminal
+            .draw(|frame| render_full_transcript(frame, &mut app, frame.area()))
+            .unwrap();
+
+        assert_eq!(app.history_render_count(), renders);
     }
 
     #[test]

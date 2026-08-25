@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -19,6 +21,9 @@ const ADD_BG_RGB: (u8, u8, u8) = (33, 58, 43);
 const DEL_BG_RGB: (u8, u8, u8) = (74, 34, 29);
 const ADD_BG_256: u8 = 22;
 const DEL_BG_256: u8 = 52;
+
+#[cfg(test)]
+static WORD_DIFF_COMPUTE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffLineType {
@@ -723,6 +728,8 @@ fn push_token(
 }
 
 fn unchanged_word_indices(removed: &[String], added: &[String]) -> (Vec<bool>, Vec<bool>) {
+    #[cfg(test)]
+    WORD_DIFF_COMPUTE_COUNT.fetch_add(1, Ordering::Relaxed);
     let mut dp = vec![vec![0usize; added.len() + 1]; removed.len() + 1];
     for i in (0..removed.len()).rev() {
         for j in (0..added.len()).rev() {
@@ -1257,6 +1264,32 @@ mod tests {
             .style
             .add_modifier
             .contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn cached_diff_cell_computes_word_diff_once_per_render_key() {
+        WORD_DIFF_COMPUTE_COUNT.store(0, Ordering::Relaxed);
+        let mut cache = crate::render::RenderCache::default();
+        let source =
+            "--- a/x.rs\n+++ b/x.rs\n@@ -1 +1 @@\n-let status = \"slow\";\n+let status = \"fast\";";
+        let key = crate::render::RenderCacheKey::new(source, 80, true);
+        cache.render(key, || {
+            crate::vendored::terminal_hyperlinks::plain_hyperlink_lines(render_unified_diff(
+                source,
+                Some(80),
+                true,
+            ))
+        });
+        let computed_after_first_frame = WORD_DIFF_COMPUTE_COUNT.load(Ordering::Relaxed);
+        cache.render(key, || {
+            unreachable!("render cache must serve the second frame")
+        });
+
+        assert!(computed_after_first_frame > 0);
+        assert_eq!(
+            WORD_DIFF_COMPUTE_COUNT.load(Ordering::Relaxed),
+            computed_after_first_frame
+        );
     }
 
     #[test]

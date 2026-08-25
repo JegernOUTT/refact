@@ -216,10 +216,10 @@ struct LinkState {
     has_label: bool,
 }
 
-struct Writer {
+struct Writer<'a> {
     options: RenderOptions,
     out: Vec<HyperlinkLine>,
-    source: String,
+    source: &'a str,
     styles: MarkdownStyles,
     inline_styles: Vec<Style>,
     indent_stack: Vec<IndentContext>,
@@ -242,12 +242,12 @@ struct Writer {
     cwd: Option<PathBuf>,
 }
 
-impl Writer {
-    fn new(options: RenderOptions, cwd: Option<PathBuf>, source: &str) -> Self {
+impl<'a> Writer<'a> {
+    fn new(options: RenderOptions, cwd: Option<PathBuf>, source: &'a str) -> Self {
         Self {
             options,
             out: Vec::new(),
-            source: source.to_string(),
+            source,
             styles: MarkdownStyles::new(options.color_enabled),
             inline_styles: Vec::new(),
             indent_stack: Vec::new(),

@@ -15,11 +15,11 @@ use crate::vendored::terminal_hyperlinks::{
 use ratatui::Terminal;
 
 use crate::app::TranscriptItem;
+use crate::render::{color_enabled_from_env, RenderCache, RenderCacheKey};
 
 pub mod cells;
 
 const MAX_INSERTION_LINES: usize = 2048;
-const MAX_CACHE_ENTRIES: usize = 256;
 const HISTORY_RETENTION_CELL_CAP: usize = 1_000;
 const HISTORY_CELL_GUTTER: u16 = 2;
 pub const RESIZE_REFLOW_PENDING_CELL_CAP: usize = 1_000;
@@ -202,8 +202,8 @@ pub struct HistoryBuffer {
     next_id: u64,
     history: VecDeque<HistoryEntry>,
     pending: VecDeque<HistoryEntry>,
-    cache: HashMap<(u64, u16, u64), Vec<HyperlinkLine>>,
-    render_count: usize,
+    render_cache: RenderCache,
+    cache_keys: HashMap<u64, Vec<RenderCacheKey>>,
     inserted_cell_count: usize,
     emitted_history_lines: bool,
     emitted_history_trailing_blank: bool,
@@ -217,7 +217,8 @@ impl HistoryBuffer {
     pub fn clear_pending(&mut self) {
         self.history.clear();
         self.pending.clear();
-        self.cache.clear();
+        self.render_cache.clear();
+        self.cache_keys.clear();
         self.emitted_history_lines = false;
         self.emitted_history_trailing_blank = false;
     }
@@ -466,7 +467,7 @@ impl HistoryBuffer {
         self.emitted_history_trailing_blank = lines.last().is_some_and(hyperlink_line_is_blank);
         let insertions = split_history_insertion(cell_ids, lines);
         let insertions = self.drain_insertions(insertions);
-        self.cache.clear();
+        self.evict_cache_entries(&[]);
 
         insertions
     }
@@ -565,7 +566,7 @@ impl HistoryBuffer {
     }
 
     pub fn render_count(&self) -> usize {
-        self.render_count
+        self.render_cache.render_count()
     }
 
     pub fn inserted_cell_count(&self) -> usize {
@@ -573,29 +574,67 @@ impl HistoryBuffer {
     }
 
     pub fn cache_entry_count(&self) -> usize {
-        self.cache.len()
+        self.render_cache.entry_count()
     }
 
     fn render_entry(&mut self, entry: &HistoryEntry, width: u16) -> Vec<HyperlinkLine> {
-        let key = (entry.id, width, entry.cell.revision());
-        if let Some(lines) = self.cache.get(&key) {
-            return lines.clone();
-        }
         let content_width = width.saturating_sub(HISTORY_CELL_GUTTER).max(1) as usize;
-        let lines = prefix_hyperlink_lines(
-            entry.cell.display_hyperlink_lines(content_width),
+        self.note_cache_key(entry.id, &*entry.cell, content_width);
+        let lines = self.render_cell(&*entry.cell, content_width);
+        prefix_hyperlink_lines(
+            lines,
             Span::raw(" ".repeat(HISTORY_CELL_GUTTER as usize)),
             Span::raw(" ".repeat(HISTORY_CELL_GUTTER as usize)),
-        );
-        self.cache.insert(key, lines.clone());
-        self.enforce_cache_bound();
-        self.render_count += 1;
-        lines
+        )
+    }
+
+    pub fn render_transcript_item(
+        &mut self,
+        item: &TranscriptItem,
+        selected: bool,
+        content_width: usize,
+    ) -> Vec<HyperlinkLine> {
+        let cell = cells::cell_from_transcript_item(item, selected);
+        self.render_cell(&*cell, content_width)
+    }
+
+    fn render_cell(
+        &mut self,
+        cell: &dyn cells::HistoryCell,
+        content_width: usize,
+    ) -> Vec<HyperlinkLine> {
+        let key = self.cache_key(cell, content_width);
+        self.render_cache
+            .render(key, || cell.display_hyperlink_lines(content_width))
+    }
+
+    fn cache_key(&self, cell: &dyn cells::HistoryCell, content_width: usize) -> RenderCacheKey {
+        RenderCacheKey::new(
+            (cell.kind(), format!("{cell:?}")),
+            content_width,
+            color_enabled_from_env(),
+        )
+    }
+
+    fn note_cache_key(&mut self, id: u64, cell: &dyn cells::HistoryCell, content_width: usize) {
+        let key = self.cache_key(cell, content_width);
+        let keys = self.cache_keys.entry(id).or_default();
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
     }
 
     fn evict_cache_entries(&mut self, cell_ids: &[u64]) {
-        self.cache
-            .retain(|(id, _, _), _| !cell_ids.iter().any(|cell_id| cell_id == id));
+        let keys = cell_ids
+            .iter()
+            .filter_map(|id| self.cache_keys.remove(id))
+            .flatten()
+            .collect::<Vec<_>>();
+        for key in keys {
+            if !self.cache_keys.values().any(|keys| keys.contains(&key)) {
+                self.render_cache.remove(&key);
+            }
+        }
     }
 
     fn next_available_id(&mut self) -> u64 {
@@ -632,18 +671,6 @@ impl HistoryBuffer {
         self.evict_cache_entries(&evicted_ids);
     }
 
-    fn enforce_cache_bound(&mut self) {
-        if self.cache.len() <= MAX_CACHE_ENTRIES {
-            return;
-        }
-        let mut keys = self.cache.keys().copied().collect::<Vec<_>>();
-        keys.sort_unstable();
-        let remove_count = self.cache.len().saturating_sub(MAX_CACHE_ENTRIES);
-        for key in keys.into_iter().take(remove_count) {
-            self.cache.remove(&key);
-        }
-    }
-
     #[cfg(test)]
     fn replace_pending_cell(&mut self, id: u64, cell: Box<dyn cells::HistoryCell>) {
         if let Some(entry) = self.pending.iter_mut().find(|entry| entry.id == id) {
@@ -652,6 +679,7 @@ impl HistoryBuffer {
         if let Some(entry) = self.history.iter_mut().find(|entry| entry.id == id) {
             entry.cell = cell;
         }
+        self.evict_cache_entries(&[id]);
     }
 }
 
@@ -1653,7 +1681,7 @@ mod tests {
             history.enqueue(TranscriptItem::Notice(format!("cell {idx}")));
         }
         history.pending_insertions(40);
-        assert!(history.cache_entry_count() <= MAX_CACHE_ENTRIES);
+        assert!(history.cache_entry_count() <= 256);
         history.drain_pending(40);
         assert_eq!(history.cache_entry_count(), 0);
     }

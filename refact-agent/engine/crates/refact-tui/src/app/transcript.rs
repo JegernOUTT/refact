@@ -275,7 +275,7 @@ impl App {
     }
 
     pub(super) fn sync_plan_stream_item(&mut self) {
-        let Some(controller) = self.plan_stream_controller.as_ref() else {
+        let Some(controller) = self.plan_stream_controller.as_mut() else {
             return;
         };
         let lines = controller.visible_display_lines();
@@ -283,7 +283,7 @@ impl App {
     }
 
     pub(super) fn sync_plan_stream_tail_item(&mut self) {
-        let Some(controller) = self.plan_stream_controller.as_ref() else {
+        let Some(controller) = self.plan_stream_controller.as_mut() else {
             return;
         };
         let lines = controller.current_tail_display_lines();

@@ -1,4 +1,10 @@
+use std::collections::{HashMap, VecDeque};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use ratatui::layout::Rect;
+
+use crate::vendored::terminal_hyperlinks::HyperlinkLine;
 
 pub mod diff;
 pub mod highlight;
@@ -14,6 +20,89 @@ pub use diff::{
     render_unified_diff, DiffLineType,
 };
 pub use markdown::{render_markdown, render_markdown_with_options, MarkdownRenderer, RenderOptions};
+
+const MAX_RENDER_CACHE_ENTRIES: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RenderCacheKey {
+    content_hash: u64,
+    width: usize,
+    color_enabled: bool,
+}
+
+impl RenderCacheKey {
+    pub fn new(content: impl Hash, width: usize, color_enabled: bool) -> Self {
+        let mut hasher = DefaultHasher::new();
+        content.hash(&mut hasher);
+        Self {
+            content_hash: hasher.finish(),
+            width,
+            color_enabled,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct RenderCache {
+    entries: HashMap<RenderCacheKey, Vec<HyperlinkLine>>,
+    order: VecDeque<RenderCacheKey>,
+    render_count: usize,
+}
+
+impl RenderCache {
+    pub fn render<F>(&mut self, key: RenderCacheKey, render: F) -> Vec<HyperlinkLine>
+    where
+        F: FnOnce() -> Vec<HyperlinkLine>,
+    {
+        if let Some(lines) = self.entries.get(&key) {
+            return lines.clone();
+        }
+        let lines = render();
+        self.entries.insert(key, lines.clone());
+        self.order.push_back(key);
+        self.render_count += 1;
+        while self.entries.len() > MAX_RENDER_CACHE_ENTRIES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+        lines
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    pub fn remove(&mut self, key: &RenderCacheKey) {
+        self.entries.remove(key);
+        self.order.retain(|candidate| candidate != key);
+    }
+
+    pub fn render_count(&self) -> usize {
+        self.render_count
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+pub fn cache_markdown_render(
+    cache: &mut RenderCache,
+    source: &str,
+    width: Option<usize>,
+    color_enabled: bool,
+) -> Vec<HyperlinkLine> {
+    let key = RenderCacheKey::new((source, width), width.unwrap_or(usize::MAX), color_enabled);
+    cache.render(key, || {
+        MarkdownRenderer::new(width)
+            .render_with_links(source)
+            .into_iter()
+            .collect()
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Insets {

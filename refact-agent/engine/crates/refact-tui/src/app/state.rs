@@ -629,6 +629,16 @@ impl App {
         self.history.render_count()
     }
 
+    pub(crate) fn render_transcript_item(
+        &mut self,
+        item: &TranscriptItem,
+        selected: bool,
+        content_width: usize,
+    ) -> Vec<crate::vendored::terminal_hyperlinks::HyperlinkLine> {
+        self.history
+            .render_transcript_item(item, selected, content_width)
+    }
+
     pub fn native_scrollback(&self) -> bool {
         self.native_scrollback
     }

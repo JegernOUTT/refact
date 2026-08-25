@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use crate::history::cells::{
     raw_lines_from_source, AssistantStreamCell, HistoryCell, HistoryRenderMode, PlanStreamCell,
 };
-use crate::render::MarkdownRenderer;
+use crate::render::{color_enabled_from_env, RenderCache, RenderCacheKey};
 use crate::style::proposed_plan_style;
 use crate::table_detect::{is_table_delimiter_line, is_table_header_line};
 use crate::text_safety::sanitize_tool_text;
@@ -30,25 +30,16 @@ struct QueuedLine {
 }
 
 #[derive(Debug, Clone)]
-struct StablePrefixLenCache {
-    source_start: usize,
-    width: Option<usize>,
-    stable_prefix_len: usize,
-}
-
-#[derive(Debug, Clone)]
 pub struct StreamController {
     collector: MarkdownStreamCollector,
     committed: String,
     raw_source: String,
-    rendered_lines: Vec<HyperlinkLine>,
-    enqueued_stable_len: usize,
-    emitted_stable_len: usize,
+    emitted_stable_source_len: usize,
     enqueued_source_len: usize,
     queue: VecDeque<QueuedLine>,
     table_scanner: TableHoldbackScanner,
     policy: AdaptiveChunkingPolicy,
-    stable_prefix_len_cache: Option<StablePrefixLenCache>,
+    render_cache: RenderCache,
     width: Option<usize>,
     render_mode: HistoryRenderMode,
 }
@@ -59,14 +50,12 @@ impl StreamController {
             collector: MarkdownStreamCollector::new(width, cwd),
             committed: String::new(),
             raw_source: String::new(),
-            rendered_lines: Vec::new(),
-            enqueued_stable_len: 0,
-            emitted_stable_len: 0,
+            emitted_stable_source_len: 0,
             enqueued_source_len: 0,
             queue: VecDeque::new(),
             table_scanner: TableHoldbackScanner::default(),
             policy: AdaptiveChunkingPolicy::default(),
-            stable_prefix_len_cache: None,
+            render_cache: RenderCache::default(),
             width,
             render_mode: HistoryRenderMode::Rich,
         }
@@ -76,14 +65,12 @@ impl StreamController {
         self.collector.clear();
         self.committed.clear();
         self.raw_source.clear();
-        self.rendered_lines.clear();
-        self.enqueued_stable_len = 0;
-        self.emitted_stable_len = 0;
+        self.emitted_stable_source_len = 0;
         self.enqueued_source_len = 0;
         self.queue.clear();
         self.table_scanner.reset();
         self.policy.reset();
-        self.stable_prefix_len_cache = None;
+        self.render_cache.clear();
     }
 
     pub fn replace_committed(&mut self, content: &str) {
@@ -97,9 +84,7 @@ impl StreamController {
         self.raw_source.push_str(content);
         self.enqueued_source_len = self.raw_source.len();
         self.table_scanner.replace_prefix(content);
-        self.recompute_streaming_render();
-        self.enqueued_stable_len = self.rendered_lines.len();
-        self.emitted_stable_len = self.rendered_lines.len();
+        self.emitted_stable_source_len = self.raw_source.len();
         self.assert_holdback_boundary();
     }
 
@@ -114,18 +99,19 @@ impl StreamController {
         if self.raw_source.is_empty() {
             return;
         }
-        self.recompute_streaming_render();
-        self.emitted_stable_len = self.emitted_stable_len.min(self.rendered_lines.len());
-        self.stable_prefix_len_cache = None;
+        self.emitted_stable_source_len = self.emitted_stable_source_len.min(self.raw_source.len());
+        self.render_cache.clear();
         if had_pending_queue
-            && self.emitted_stable_len == self.rendered_lines.len()
-            && self.emitted_stable_len > 0
+            && self.emitted_stable_source_len == self.raw_source.len()
+            && self.emitted_stable_source_len > 0
         {
-            self.emitted_stable_len -= 1;
+            self.emitted_stable_source_len = previous_char_boundary(
+                &self.raw_source,
+                self.emitted_stable_source_len.saturating_sub(1),
+            );
         }
         self.queue.clear();
-        if self.emitted_stable_len > 0 && !had_pending_queue && !had_live_tail {
-            self.enqueued_stable_len = self.rendered_lines.len();
+        if self.emitted_stable_source_len > 0 && !had_pending_queue && !had_live_tail {
             self.enqueued_source_len = self.raw_source.len();
             return;
         }
@@ -142,12 +128,10 @@ impl StreamController {
         if self.raw_source.is_empty() {
             return;
         }
-        self.recompute_streaming_render();
-        self.emitted_stable_len = self.emitted_stable_len.min(self.rendered_lines.len());
-        self.stable_prefix_len_cache = None;
+        self.emitted_stable_source_len = self.emitted_stable_source_len.min(self.raw_source.len());
+        self.render_cache.clear();
         self.queue.clear();
-        if self.emitted_stable_len > 0 && !had_pending_queue && !had_live_tail {
-            self.enqueued_stable_len = self.rendered_lines.len();
+        if self.emitted_stable_source_len > 0 && !had_pending_queue && !had_live_tail {
             self.enqueued_source_len = self.raw_source.len();
             return;
         }
@@ -163,8 +147,6 @@ impl StreamController {
         self.collector.push_delta(delta);
         if let Some(source) = self.collector.commit_complete_source() {
             self.ingest_complete_source(&source);
-        } else {
-            self.recompute_streaming_render();
         }
     }
 
@@ -188,17 +170,23 @@ impl StreamController {
         visible
     }
 
-    pub fn current_tail_lines(&self) -> Vec<HyperlinkLine> {
-        let start = self.enqueued_stable_len.min(self.rendered_lines.len());
-        self.rendered_lines[start..].to_vec()
+    pub fn current_tail_lines(&mut self) -> Vec<HyperlinkLine> {
+        let source = self.live();
+        self.render_source(&source)
     }
 
-    pub fn current_tail_lines_reflowed(&self) -> Vec<HyperlinkLine> {
-        self.render_source(&self.live())
+    pub fn current_tail_lines_reflowed(&mut self) -> Vec<HyperlinkLine> {
+        let source = self.live();
+        self.render_source(&source)
     }
 
     pub fn has_live_tail(&self) -> bool {
         self.has_tail()
+    }
+
+    #[cfg(test)]
+    fn render_count(&self) -> usize {
+        self.render_cache.render_count()
     }
 
     pub fn queued_lines(&self) -> usize {
@@ -265,28 +253,32 @@ impl StreamController {
     fn ingest_complete_source(&mut self, source: &str) {
         self.raw_source.push_str(source);
         self.table_scanner.push_source_chunk(source);
-        self.recompute_streaming_render();
         self.sync_stable_queue();
     }
 
-    fn render_source(&self, source: &str) -> Vec<HyperlinkLine> {
+    fn render_source(&mut self, source: &str) -> Vec<HyperlinkLine> {
         if source.is_empty() {
             return Vec::new();
         }
-        match self.render_mode {
-            HistoryRenderMode::Rich => MarkdownRenderer::new(self.width).render_with_links(source),
+        let color_enabled = color_enabled_from_env();
+        let key = RenderCacheKey::new(
+            (source, self.render_mode),
+            self.width.unwrap_or(usize::MAX),
+            color_enabled,
+        );
+        let width = self.width;
+        let render_mode = self.render_mode;
+        self.render_cache.render(key, || match render_mode {
+            HistoryRenderMode::Rich => {
+                crate::render::MarkdownRenderer::new(width).render_with_links(source)
+            }
             HistoryRenderMode::Raw => plain_hyperlink_lines(raw_lines_from_source(source)),
-        }
-    }
-
-    fn recompute_streaming_render(&mut self) {
-        let mut source = self.raw_source.clone();
-        source.push_str(self.collector.pending_source());
-        self.rendered_lines = self.render_source(&source);
+        })
     }
 
     fn has_tail(&self) -> bool {
-        self.enqueued_stable_len < self.rendered_lines.len()
+        self.enqueued_source_len < self.raw_source.len()
+            || !self.collector.pending_source().is_empty()
     }
 
     fn target_stable_source_len(&self) -> usize {
@@ -304,43 +296,31 @@ impl StreamController {
         previous_char_boundary(&self.raw_source, target.min(source_len))
     }
 
-    fn compute_target_stable_len(&mut self) -> usize {
-        let target_source_len = self.target_stable_source_len();
-        self.stable_prefix_len_for_source_start(target_source_len)
-            .max(self.emitted_stable_len)
-    }
-
     fn sync_stable_queue(&mut self) -> bool {
         let target_source_len = self.target_stable_source_len();
-        let target_stable_len = self.compute_target_stable_len();
         if target_source_len < self.enqueued_source_len {
             self.queue.clear();
             if self.committed.len() < target_source_len {
                 self.enqueue_source_range(self.committed.len(), target_source_len);
             }
             self.enqueued_source_len = target_source_len;
-            self.enqueued_stable_len = target_stable_len;
             return !self.queue.is_empty();
         }
         if target_source_len == self.enqueued_source_len {
-            self.enqueued_stable_len = target_stable_len;
             return false;
         }
         self.enqueue_source_range(self.enqueued_source_len, target_source_len);
         self.enqueued_source_len = target_source_len;
-        self.enqueued_stable_len = target_stable_len;
         true
     }
 
     fn rebuild_stable_queue_from_render(&mut self) {
         let target_source_len = self.target_stable_source_len();
-        let target_stable_len = self.compute_target_stable_len();
         self.queue.clear();
         if self.committed.len() < target_source_len {
             self.enqueue_source_range(self.committed.len(), target_source_len);
         }
         self.enqueued_source_len = target_source_len;
-        self.enqueued_stable_len = target_stable_len;
     }
 
     fn enqueue_source_range(&mut self, start: usize, end: usize) {
@@ -364,21 +344,6 @@ impl StreamController {
                 line_count,
             });
         }
-    }
-
-    fn stable_prefix_len_for_source_start(&mut self, source_start: usize) -> usize {
-        if let Some(cache) = &self.stable_prefix_len_cache {
-            if cache.source_start == source_start && cache.width == self.width {
-                return cache.stable_prefix_len;
-            }
-        }
-        let stable_prefix_len = self.render_source(&self.raw_source[..source_start]).len();
-        self.stable_prefix_len_cache = Some(StablePrefixLenCache {
-            source_start,
-            width: self.width,
-            stable_prefix_len,
-        });
-        stable_prefix_len
     }
 
     fn assert_holdback_boundary(&self) {
@@ -418,7 +383,7 @@ impl StreamController {
             drained.push_str(&line.text);
         }
         if !drained.is_empty() {
-            self.emitted_stable_len = self.render_source(&self.committed).len();
+            self.emitted_stable_source_len = self.committed.len();
             self.assert_holdback_boundary();
         }
         (!drained.is_empty()).then_some(drained)
@@ -479,7 +444,7 @@ impl PlanStreamController {
         self.stream.oldest_queued_age(now)
     }
 
-    pub fn current_tail_display_lines(&self) -> Vec<HyperlinkLine> {
+    pub fn current_tail_display_lines(&mut self) -> Vec<HyperlinkLine> {
         let lines = self.stream.current_tail_lines_reflowed();
         if lines.is_empty() {
             return Vec::new();
@@ -487,17 +452,13 @@ impl PlanStreamController {
         self.render_display_lines(lines, false)
     }
 
-    pub fn visible_display_lines(&self) -> Vec<HyperlinkLine> {
+    pub fn visible_display_lines(&mut self) -> Vec<HyperlinkLine> {
         let source = self.stream.visible();
         if source.is_empty() {
             return Vec::new();
         }
-        self.render_display_lines_with_state(
-            self.stream.render_source(&source),
-            false,
-            false,
-            false,
-        )
+        let lines = self.stream.render_source(&source);
+        self.render_display_lines_with_state(lines, false, false, false)
     }
 
     pub fn finalize(&mut self) -> Option<String> {
@@ -671,7 +632,7 @@ mod tests {
             .join("\n")
     }
 
-    fn current_tail_text(stream: &StreamController) -> Vec<String> {
+    fn current_tail_text(stream: &mut StreamController) -> Vec<String> {
         stream
             .current_tail_lines_reflowed()
             .iter()
@@ -865,7 +826,32 @@ mod tests {
         let mut stream = StreamController::new(Some(12), std::path::Path::new("."));
         stream.push_delta("alpha beta gamma\ndelta epsilon zeta");
 
-        assert_eq!(current_tail_text(&stream), vec!["delta", "epsilon zeta"]);
+        assert_eq!(
+            current_tail_text(&mut stream),
+            vec!["delta", "epsilon zeta"]
+        );
+    }
+
+    #[test]
+    fn streaming_parse_work_grows_linearly_with_complete_deltas() {
+        let mut stream = controller();
+        let deltas = 32usize;
+        for index in 0..deltas {
+            stream.push_delta(&format!("line {index}\n"));
+        }
+        assert!(stream.render_count() <= deltas * 2);
+    }
+
+    #[test]
+    fn render_cache_keeps_alternating_stream_inputs() {
+        let mut stream = controller();
+        let first = stream.render_source("first\n");
+        let second = stream.render_source("second\n");
+        let renders_after_first_pass = stream.render_count();
+
+        assert_eq!(stream.render_source("first\n"), first);
+        assert_eq!(stream.render_source("second\n"), second);
+        assert_eq!(stream.render_count(), renders_after_first_pass);
     }
 
     #[test]

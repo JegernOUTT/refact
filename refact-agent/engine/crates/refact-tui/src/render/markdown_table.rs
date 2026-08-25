@@ -214,14 +214,14 @@ pub(crate) fn render_table(
 
     let mut spillover_rows = Vec::new();
     let mut rows = Vec::with_capacity(table.rows.len());
-    for (idx, row) in table.rows.iter().enumerate() {
-        let next_row = table.rows.get(idx + 1);
-        if column_count > 1 && is_spillover_row(row, next_row) {
-            if let Some(cell) = row.cells.first().cloned() {
+    let mut body_rows = std::mem::take(&mut table.rows).into_iter().peekable();
+    while let Some(row) = body_rows.next() {
+        if column_count > 1 && is_spillover_row(&row, body_rows.peek()) {
+            if let Some(cell) = row.cells.into_iter().next() {
                 spillover_rows.push(cell);
             }
         } else {
-            rows.push(row.cells.clone());
+            rows.push(row.cells);
         }
     }
 

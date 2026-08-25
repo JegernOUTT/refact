@@ -1643,7 +1643,8 @@ mod tests {
     }
 
     fn stream_tail_plain_lines(app: &App) -> Vec<String> {
-        app.stream_controller
+        let mut stream = app.stream_controller.clone();
+        stream
             .current_tail_lines()
             .iter()
             .map(|line| line_to_plain_string(&line.line))
