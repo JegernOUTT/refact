@@ -635,12 +635,40 @@ pub async fn create_auth_manager_from_tokens(
 }
 
 const REFRESH_BEFORE_EXPIRY_MS: i64 = 5 * 60 * 1000;
+const REFRESH_RETRY_BASE_SECS: u64 = 60;
+const REFRESH_RETRY_MAX_SECS: u64 = REFRESH_BEFORE_EXPIRY_MS as u64 / 1000;
+
+pub(crate) fn is_permanent_oauth_error(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    [
+        "invalid_grant",
+        "invalid_client",
+        "unauthorized_client",
+        "unsupported_grant_type",
+        "invalid_scope",
+        "invalid_token",
+        "revoked",
+    ]
+    .iter()
+    .any(|code| lower.contains(code))
+}
 
 pub(crate) fn needs_refresh_at(expires_at_ms: i64, now_ms: i64) -> bool {
     if expires_at_ms <= 0 {
         return false;
     }
     expires_at_ms - now_ms < REFRESH_BEFORE_EXPIRY_MS
+}
+
+pub(crate) fn is_token_expired(tokens: &MCPOAuthTokens) -> bool {
+    if tokens.expires_at <= 0 {
+        return false;
+    }
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    tokens.expires_at <= now_ms
 }
 
 pub fn needs_refresh(tokens: &MCPOAuthTokens) -> bool {
@@ -700,8 +728,9 @@ pub async fn mcp_oauth_refresh_task(
 ) {
     use super::session_mcp::{SessionMCP, MCPAuthStatus};
 
+    let mut retry_delay_secs = REFRESH_RETRY_BASE_SECS;
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay_secs)).await;
 
         let auth_manager_arc = {
             let mut session_locked = session_arc.lock().await;
@@ -721,6 +750,7 @@ pub async fn mcp_oauth_refresh_task(
         let tokens = match load_tokens_from_config(&config_path).await {
             Some(t) if !t.access_token.is_empty() => t,
             _ => {
+                retry_delay_secs = REFRESH_RETRY_BASE_SECS;
                 warn!("OAuth refresh task: no tokens in config {}", config_path);
                 let mut session_locked = session_arc.lock().await;
                 if let Some(mcp_session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>()
@@ -737,6 +767,18 @@ pub async fn mcp_oauth_refresh_task(
             continue;
         }
 
+        if tokens.refresh_token.is_empty() {
+            warn!(
+                "OAuth refresh task: no refresh token for {}; full re-authentication is required",
+                config_path
+            );
+            let mut session_locked = session_arc.lock().await;
+            if let Some(mcp_session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                mcp_session.auth_status = MCPAuthStatus::NeedsReauth;
+            }
+            return;
+        }
+
         {
             let mut session_locked = session_arc.lock().await;
             if let Some(mcp_session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
@@ -751,6 +793,7 @@ pub async fn mcp_oauth_refresh_task(
 
         match refresh_result {
             Ok(token_response) => {
+                retry_delay_secs = REFRESH_RETRY_BASE_SECS;
                 let new_tokens = tokens_from_response(
                     tokens.client_id.clone(),
                     &tokens.refresh_token,
@@ -771,15 +814,34 @@ pub async fn mcp_oauth_refresh_task(
                 }
             }
             Err(e) => {
-                warn!("MCP OAuth refresh failed for {}: {}", config_path, e);
-                let mut session_locked = session_arc.lock().await;
-                if let Some(mcp_session) = session_locked.as_any_mut().downcast_mut::<SessionMCP>()
-                {
-                    mcp_session.auth_status = MCPAuthStatus::NeedsReauth;
+                let permanent = is_permanent_oauth_error(&e.to_string());
+                if permanent {
+                    warn!(
+                        "MCP OAuth refresh failed permanently for {}; re-authentication is required: {}",
+                        config_path, e
+                    );
+                } else {
+                    warn!("MCP OAuth refresh failed for {}: {}", config_path, e);
                 }
-                // Keep looping — this may be a transient network error; next cycle will retry.
-                // If the refresh token itself is invalid the server will keep returning errors,
-                // but auth_status=NeedsReauth surfaces the problem to the user.
+                let next_status = if permanent {
+                    MCPAuthStatus::NeedsReauth
+                } else if !is_token_expired(&tokens) {
+                    MCPAuthStatus::Authenticated
+                } else {
+                    MCPAuthStatus::Error(e.to_string())
+                };
+                {
+                    let mut session_locked = session_arc.lock().await;
+                    if let Some(mcp_session) =
+                        session_locked.as_any_mut().downcast_mut::<SessionMCP>()
+                    {
+                        mcp_session.auth_status = next_status;
+                    }
+                }
+                if permanent {
+                    return;
+                }
+                retry_delay_secs = (retry_delay_secs * 2).min(REFRESH_RETRY_MAX_SECS);
             }
         }
     }
@@ -1385,6 +1447,82 @@ mod tests {
 
         let response = reconstruct_token_response(&loaded).unwrap();
         assert_eq!(response.access_token().secret(), "test_access");
+    }
+
+    #[test]
+    fn test_permanent_oauth_errors_detected() {
+        for message in [
+            "Server returned Invalid_Grant",
+            "OAuth error: invalid_client",
+            "unauthorized_client rejected",
+        ] {
+            assert!(is_permanent_oauth_error(message));
+        }
+    }
+
+    #[test]
+    fn test_transient_oauth_errors_not_permanent() {
+        for message in [
+            "connection reset by peer",
+            "request timed out",
+            "HTTP 503 Service Unavailable",
+        ] {
+            assert!(!is_permanent_oauth_error(message));
+        }
+    }
+
+    #[test]
+    fn test_revoked_and_invalid_token_are_permanent() {
+        for message in [
+            "the refresh token has been revoked",
+            "OAuth error: invalid_token",
+        ] {
+            assert!(is_permanent_oauth_error(message));
+        }
+    }
+
+    #[test]
+    fn test_retry_cadence_never_outruns_refresh_window() {
+        assert!(
+            REFRESH_RETRY_MAX_SECS * 1000 <= REFRESH_BEFORE_EXPIRY_MS as u64,
+            "backoff must not delay the expiry check past the refresh window"
+        );
+    }
+
+    #[test]
+    fn test_is_token_expired() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let mut tokens = MCPOAuthTokens {
+            access_token: "tok".to_string(),
+            refresh_token: "ref".to_string(),
+            expires_at: 0,
+            client_id: "client".to_string(),
+            client_secret: None,
+            scopes: vec![],
+            bound_url: None,
+        };
+        assert!(!is_token_expired(&tokens), "no expiry never expires");
+
+        tokens.expires_at = now_ms + 60_000;
+        assert!(!is_token_expired(&tokens));
+
+        tokens.expires_at = now_ms - 1;
+        assert!(is_token_expired(&tokens));
+    }
+
+    #[test]
+    fn test_refresh_retry_backoff_saturates() {
+        let mut delay = REFRESH_RETRY_BASE_SECS;
+        for _ in 0..10 {
+            delay = (delay * 2).min(REFRESH_RETRY_MAX_SECS);
+        }
+        assert_eq!(delay, REFRESH_RETRY_MAX_SECS);
+
+        delay = (delay * 2).min(REFRESH_RETRY_MAX_SECS);
+        assert_eq!(delay, REFRESH_RETRY_MAX_SECS);
     }
 
     #[test]

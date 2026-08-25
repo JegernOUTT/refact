@@ -802,11 +802,15 @@ fn should_skip_mcp_session_setup(session: &SessionMCP, new_cfg_value: &Value) ->
     }
 
     session.mcp_client.is_some()
-        || session
-            .startup_task_handles
-            .as_ref()
-            .map_or(false, |handles| !handles.1.is_finished())
+        || startup_task_in_flight(session)
         || matches!(session.connection_status, MCPConnectionStatus::NeedsAuth)
+}
+
+pub(crate) fn startup_task_in_flight(session: &SessionMCP) -> bool {
+    session
+        .startup_task_handles
+        .as_ref()
+        .map_or(false, |handles| !handles.1.is_finished())
 }
 
 fn prepare_mcp_session_for_start(
@@ -819,6 +823,11 @@ fn prepare_mcp_session_for_start(
     session.last_logged_status = None;
     if config_changed {
         session.oauth_probe = None;
+        session.auth_manager = None;
+        session.auth_status = MCPAuthStatus::NotApplicable;
+        if let Some(refresh_task) = session.oauth_refresh_task_handle.take() {
+            refresh_task.abort();
+        }
     }
     session.sampling_session_approved = false;
 }
@@ -900,6 +909,18 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
             return;
         }
 
+        if let Some((_, abort_handle)) = session_downcasted.startup_task_handles.take() {
+            abort_handle.abort();
+        }
+        if let Some(health_task) = session_downcasted.health_task_handle.take() {
+            health_task.abort();
+        }
+        if let Some(index_task) = session_downcasted.resource_index_task.take() {
+            index_task.abort();
+        }
+
+        prepare_mcp_session_for_start(session_downcasted, new_cfg_value.clone(), config_changed);
+
         let peer_arc: Arc<AMutex<Option<Peer<RoleClient>>>> = Arc::new(AMutex::new(None));
         let peer_arc_clone = peer_arc.clone();
 
@@ -914,7 +935,6 @@ pub async fn mcp_session_setup<T: MCPTransportInitializer + Clone + Send + Sync 
                     }
                 };
                 mcp_session.stderr_cursor = Arc::new(AMutex::new(0));
-                prepare_mcp_session_for_start(mcp_session, new_cfg_value.clone(), config_changed);
                 (
                     std::mem::take(&mut mcp_session.mcp_client),
                     mcp_session.logs.clone(),
@@ -1332,19 +1352,27 @@ async fn mcp_health_monitor<T: MCPTransportInitializer + Clone>(
             .await;
 
             if !reconnected {
-                let mut session_locked = session_arc.lock().await;
-                let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
-                    Some(s) => s,
-                    None => return,
+                let give_up_msg = {
+                    let mut session_locked = session_arc.lock().await;
+                    let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>()
+                    {
+                        Some(s) => s,
+                        None => return,
+                    };
+                    if matches!(
+                        mcp_session.auth_status,
+                        MCPAuthStatus::NeedsReauth | MCPAuthStatus::NeedsLogin
+                    ) {
+                        mcp_session.connection_status = MCPConnectionStatus::NeedsAuth;
+                        "Health monitor: re-authentication required, giving up".to_string()
+                    } else {
+                        mcp_session.connection_status = MCPConnectionStatus::Failed {
+                            message: "Max reconnect attempts reached".to_string(),
+                        };
+                        "Health monitor: max reconnect attempts reached, giving up".to_string()
+                    }
                 };
-                mcp_session.connection_status = MCPConnectionStatus::Failed {
-                    message: "Max reconnect attempts reached".to_string(),
-                };
-                add_log_entry(
-                    logs.clone(),
-                    "Health monitor: max reconnect attempts reached, giving up".to_string(),
-                )
-                .await;
+                add_log_entry(logs.clone(), give_up_msg).await;
                 return;
             }
         }
@@ -1375,6 +1403,27 @@ async fn reconnect_with_backoff<T: MCPTransportInitializer>(
                 "MCP reconnect: shutdown detected, aborting reconnect for {}",
                 debug_name
             );
+            return false;
+        }
+
+        let reauthentication_required = {
+            let mut session_locked = session_arc.lock().await;
+            let mcp_session = match session_locked.as_any_mut().downcast_mut::<SessionMCP>() {
+                Some(s) => s,
+                None => continue,
+            };
+            matches!(
+                mcp_session.auth_status,
+                MCPAuthStatus::NeedsReauth | MCPAuthStatus::NeedsLogin
+            )
+        };
+        if reauthentication_required {
+            let msg = format!(
+                "MCP reconnect: re-authentication is required, stopping reconnect for {}",
+                debug_name
+            );
+            tracing::info!("{}", msg);
+            add_log_entry(logs.clone(), msg).await;
             return false;
         }
 
@@ -1618,6 +1667,114 @@ mod tests {
             session,
             &serde_json::json!({"url": "https://other.example.com"})
         ));
+    }
+
+    #[tokio::test]
+    async fn test_unchanged_config_with_startup_task_in_flight_skips_relaunch() {
+        let session_arc = make_session_arc(MCPConnectionStatus::Connecting);
+        let config = serde_json::json!({"url": "https://mcp.example.com"});
+        let startup_task = tokio::spawn(async { std::future::pending::<()>().await });
+        let abort_handle = startup_task.abort_handle();
+        let mut session_locked = session_arc.lock().await;
+        let session = session_locked
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap();
+        session.launched_cfg = config.clone();
+        session.startup_task_handles = Some((
+            Arc::new(AMutex::new(Some(startup_task))),
+            abort_handle.clone(),
+        ));
+
+        assert!(should_skip_mcp_session_setup(session, &config));
+        abort_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_changed_config_with_startup_task_in_flight_does_not_skip_relaunch() {
+        let session_arc = make_session_arc(MCPConnectionStatus::Connecting);
+        let old_config = serde_json::json!({"url": "https://old.example.com"});
+        let new_config = serde_json::json!({"url": "https://new.example.com"});
+        let startup_task = tokio::spawn(async { std::future::pending::<()>().await });
+        let abort_handle = startup_task.abort_handle();
+        let mut session_locked = session_arc.lock().await;
+        let session = session_locked
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap();
+        session.launched_cfg = old_config;
+        session.startup_task_handles = Some((
+            Arc::new(AMutex::new(Some(startup_task))),
+            abort_handle.clone(),
+        ));
+
+        assert!(!should_skip_mcp_session_setup(session, &new_config));
+        abort_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_finished_startup_task_does_not_skip_relaunch() {
+        let session_arc = make_session_arc(MCPConnectionStatus::Failed {
+            message: "startup failed".to_string(),
+        });
+        let config = serde_json::json!({"url": "https://mcp.example.com"});
+        let startup_task = tokio::spawn(async {});
+        let abort_handle = startup_task.abort_handle();
+        while !abort_handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let mut session_locked = session_arc.lock().await;
+        let session = session_locked
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap();
+        session.launched_cfg = config.clone();
+        session.startup_task_handles =
+            Some((Arc::new(AMutex::new(Some(startup_task))), abort_handle));
+
+        assert!(!should_skip_mcp_session_setup(session, &config));
+    }
+
+    #[tokio::test]
+    async fn test_config_change_clears_stale_auth_state() {
+        let session_arc = make_session_arc(MCPConnectionStatus::NeedsAuth);
+        let mut session_locked = session_arc.lock().await;
+        let session = session_locked
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap();
+        session.launched_cfg = serde_json::json!({"url": "https://oauth.example.com"});
+        session.auth_status = MCPAuthStatus::NeedsReauth;
+
+        prepare_mcp_session_for_start(
+            session,
+            serde_json::json!({"command": "npx", "args": ["something"]}),
+            true,
+        );
+
+        assert!(
+            matches!(session.auth_status, MCPAuthStatus::NotApplicable),
+            "stale NeedsReauth must not survive a config change, got {:?}",
+            session.auth_status
+        );
+        assert!(session.auth_manager.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_same_config_retry_keeps_auth_state() {
+        let session_arc = make_session_arc(MCPConnectionStatus::Connected);
+        let config = serde_json::json!({"url": "https://oauth.example.com"});
+        let mut session_locked = session_arc.lock().await;
+        let session = session_locked
+            .as_any_mut()
+            .downcast_mut::<SessionMCP>()
+            .unwrap();
+        session.launched_cfg = config.clone();
+        session.auth_status = MCPAuthStatus::Authenticated;
+
+        prepare_mcp_session_for_start(session, config, false);
+
+        assert!(matches!(session.auth_status, MCPAuthStatus::Authenticated));
     }
 
     #[tokio::test]

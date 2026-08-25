@@ -291,11 +291,14 @@ pub async fn handle_v1_mcp_server_reconnect(
                 "session is not an MCP session".to_string(),
             ))?;
 
-        let reconnecting = matches!(
-            &mcp_session.connection_status,
-            MCPConnectionStatus::Reconnecting { .. } | MCPConnectionStatus::Connecting
-        );
-        if reconnecting {
+        let busy = match &mcp_session.connection_status {
+            MCPConnectionStatus::Reconnecting { .. } => true,
+            MCPConnectionStatus::Connecting => {
+                crate::integrations::mcp::integr_mcp_common::startup_task_in_flight(mcp_session)
+            }
+            _ => false,
+        };
+        if busy {
             return Err(ScratchError::new(
                 StatusCode::CONFLICT,
                 "MCP server is already connecting or reconnecting".to_string(),
