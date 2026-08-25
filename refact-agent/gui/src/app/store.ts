@@ -35,6 +35,7 @@ import {
   browserApi,
   worktreesApi,
   indexingSettingsApi,
+  performanceApi,
   skillsSettingsApi,
 } from "../services/refact";
 import { daemonApi } from "../services/refact/daemon";
@@ -164,6 +165,7 @@ const rootReducer = combineSlices(
     [privacyApi.reducerPath]: privacyApi.reducer,
     [shellPolicyApi.reducerPath]: shellPolicyApi.reducer,
     [indexingSettingsApi.reducerPath]: indexingSettingsApi.reducer,
+    [performanceApi.reducerPath]: performanceApi.reducer,
     [skillsSettingsApi.reducerPath]: skillsSettingsApi.reducer,
   },
   historySlice,
@@ -307,6 +309,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           privacyApi.middleware,
           shellPolicyApi.middleware,
           indexingSettingsApi.middleware,
+          performanceApi.middleware,
           skillsSettingsApi.middleware,
         )
         .prepend(historyMiddleware.middleware)

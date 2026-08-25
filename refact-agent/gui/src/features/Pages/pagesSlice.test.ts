@@ -22,4 +22,10 @@ describe("pagesSlice", () => {
 
     expect(state.at(-1)).toEqual({ name: "code intel" });
   });
+
+  it("registers performance page entries", () => {
+    const state = pagesSlice.reducer(undefined, push({ name: "performance" }));
+
+    expect(state.at(-1)).toEqual({ name: "performance" });
+  });
 });

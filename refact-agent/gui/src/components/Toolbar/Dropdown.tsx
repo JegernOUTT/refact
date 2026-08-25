@@ -18,6 +18,7 @@ import styles from "./Toolbar.module.css";
 
 export type DropdownNavigationOptions =
   | "stats"
+  | "performance"
   | "settings"
   | "knowledge graph"
   | "code intel"
@@ -87,6 +88,9 @@ export const Dropdown: React.FC<DropdownProps> = ({
         </Menu.Item>
         <Menu.Item onSelect={() => handleNavigation("stats")}>
           <Icon icon={BarChart3} size="sm" /> Usage Dashboard
+        </Menu.Item>
+        <Menu.Item onSelect={() => handleNavigation("performance")}>
+          <Icon icon={Gauge} size="sm" /> Performance
         </Menu.Item>
       </Menu.Content>
     </Menu>

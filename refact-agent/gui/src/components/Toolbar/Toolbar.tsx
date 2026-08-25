@@ -243,6 +243,8 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
         dispatch(push({ name: "general settings" }));
       } else if (to === "stats") {
         dispatch(push({ name: "stats dashboard" }));
+      } else if (to === "performance") {
+        dispatch(push({ name: "performance" }));
       } else if (to === "knowledge graph") {
         dispatch(push({ name: "knowledge graph" }));
       } else if (to === "code intel") {

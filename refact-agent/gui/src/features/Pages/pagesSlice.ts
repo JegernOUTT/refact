@@ -61,6 +61,10 @@ export interface StatsDashboardPage {
   name: "stats dashboard";
 }
 
+export interface PerformancePage {
+  name: "performance";
+}
+
 export interface RefactDaemonPage {
   name: "refact daemon";
 }
@@ -142,6 +146,7 @@ export type Page =
   | CustomizationPage
   | DefaultModelsPage
   | StatsDashboardPage
+  | PerformancePage
   | RefactDaemonPage
   | BugReportPage
   | ExtensionsPage

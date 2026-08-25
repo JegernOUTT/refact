@@ -151,6 +151,18 @@ describe("Dropdown navigation", () => {
     expect(store.getState().pages.at(-1)?.name).toBe("general settings");
   });
 
+  it("clicking Performance opens the performance page", async () => {
+    useToolbarHandlers();
+    const { store } = renderToolbar({ type: "dashboard" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Menu" }));
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: "Performance" }),
+    );
+
+    expect(store.getState().pages.at(-1)?.name).toBe("performance");
+  });
+
   it("clicking Extension Settings sends openSettings postMessage on an IDE host", async () => {
     useToolbarHandlers();
     const postMessageSpy = vi.spyOn(window, "postMessage");

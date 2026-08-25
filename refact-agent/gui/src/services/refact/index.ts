@@ -36,3 +36,4 @@ export * from "./files";
 export * from "./shellPolicy";
 export * from "./indexingSettings";
 export * from "./skillsSettings";
+export * from "./performance";

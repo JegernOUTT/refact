@@ -52,6 +52,7 @@ import { KnowledgeWorkspace } from "./Knowledge";
 import { CodeIntelWorkspace } from "./CodeIntel";
 
 import { StatsDashboard } from "./StatsDashboard";
+import { PerformancePage } from "./Performance";
 import { RefactDaemonPage } from "./RefactDaemon";
 import { BugReportPage, installWebuiConsoleCapture } from "./BugReport";
 import { Dashboard } from "./Dashboard";
@@ -451,6 +452,7 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
     if (
       desiredPage.name === "knowledge graph" ||
       desiredPage.name === "code intel" ||
+      desiredPage.name === "performance" ||
       desiredPage.name === "refact daemon" ||
       desiredPage.name === "bug report"
     ) {
@@ -633,6 +635,10 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
                 tabbed={config.tabbed}
                 host={config.host}
               />
+            )}
+
+            {!pageSwitching && renderedPage.name === "performance" && (
+              <PerformancePage onBack={goBack} />
             )}
 
             {!pageSwitching && renderedPage.name === "refact daemon" && (
