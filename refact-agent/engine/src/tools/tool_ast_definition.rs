@@ -1,8 +1,15 @@
 use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::LazyLock;
+use std::time::Duration;
 use async_trait::async_trait;
 use refact_core::ast_types::{AstDefinition, SymbolType};
+use refact_chat_api::{
+    attach_tool_enrichment, ToolEnrichment, ToolEnrichmentKind, ToolEnrichmentProvenance,
+    ToolEnrichmentReference,
+};
 use serde_json::Value;
 use tokio::sync::Mutex as AMutex;
 
@@ -14,8 +21,8 @@ use crate::tools::tools_description::{
     Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
 };
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum, ContextFile};
+use crate::knowledge_index::{KnowledgeCard, KnowledgeIndex};
 use crate::postprocessing::pp_command_output::OutputFilter;
-use crate::knowledge_index::format_related_memories_section;
 use crate::tools::native_enrichment::{workspace_roots, NativeReferences};
 use crate::worktrees::scope::ExecutionScope;
 use regex::Regex;
@@ -23,6 +30,10 @@ use regex::Regex;
 const MAX_SYMBOLS: usize = 16;
 const DEFS_LIMIT: usize = 20;
 const HIERARCHY_LIMIT: usize = 8;
+const RELATED_MEMORIES_LIMIT: usize = 8;
+
+static IDENTIFIER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_:]{1,100}$").unwrap());
 
 pub struct ToolAstDefinition {
     pub config_path: String,
@@ -66,49 +77,176 @@ async fn type_hierarchy_sections(
     Ok(sections)
 }
 
-pub async fn compute_related_memories_section(
+fn related_memory_entities(symbols_str: &str) -> Vec<String> {
+    let mut entities = Vec::new();
+    for raw in symbols_str.split(',') {
+        let symbol = raw.trim();
+        if symbol.is_empty() {
+            continue;
+        }
+        let symbol = symbol.replace('.', "::");
+        if let Some(last) = symbol.split("::").last() {
+            if !last.is_empty() {
+                entities.push(last.to_string());
+            }
+        }
+        entities.push(symbol);
+    }
+    entities.sort();
+    entities.dedup();
+    entities.retain(|entity| IDENTIFIER_RE.is_match(entity));
+    entities
+}
+
+async fn compute_related_memories(
     gcx: Arc<crate::global_context::GlobalContext>,
     mut files: Vec<String>,
     symbols_str: &str,
-) -> String {
-    let idx_arc = gcx.knowledge_index.clone();
-    let idx_guard = idx_arc.lock().await;
+    abort_flag: &Arc<AtomicBool>,
+) -> Vec<KnowledgeCard> {
     files.sort();
     files.dedup();
-    let mut cards = idx_guard.related_for_files(&files, 8);
+    let index = gcx.knowledge_index.clone();
+    let Some(mut cards) = knowledge_index_lookup(&index, abort_flag, |index| {
+        index.related_for_files(&files, RELATED_MEMORIES_LIMIT)
+    })
+    .await
+    else {
+        return Vec::new();
+    };
     if cards.is_empty() {
-        cards = idx_guard.related_for_related_files(&files, 8);
+        let Some(found) = knowledge_index_lookup(&index, abort_flag, |index| {
+            index.related_for_related_files(&files, RELATED_MEMORIES_LIMIT)
+        })
+        .await
+        else {
+            return Vec::new();
+        };
+        cards = found;
     }
-
     if cards.is_empty() {
-        let mut ents: Vec<String> = Vec::new();
-        for raw in symbols_str.split(',') {
-            let s = raw.trim();
-            if s.is_empty() {
-                continue;
+        let entities = related_memory_entities(symbols_str);
+        if !entities.is_empty() {
+            let Some(found) = knowledge_index_lookup(&index, abort_flag, |index| {
+                index.related_for_entities(&entities, RELATED_MEMORIES_LIMIT)
+            })
+            .await
+            else {
+                return Vec::new();
+            };
+            cards = found;
+            if cards.is_empty() {
+                let Some(found) = knowledge_index_lookup(&index, abort_flag, |index| {
+                    index.related_for_related_entities(&entities, RELATED_MEMORIES_LIMIT)
+                })
+                .await
+                else {
+                    return Vec::new();
+                };
+                cards = found;
             }
-            let s = s.replace('.', "::");
-            if let Some(last) = s.split("::").last() {
-                if !last.is_empty() {
-                    ents.push(last.to_string());
+        }
+    }
+    cards
+}
+
+async fn knowledge_index_lookup<T>(
+    index: &AMutex<KnowledgeIndex>,
+    abort_flag: &AtomicBool,
+    lookup: impl FnOnce(&KnowledgeIndex) -> T,
+) -> Option<T> {
+    if abort_flag.load(Ordering::SeqCst) {
+        return None;
+    }
+    let lock = index.lock();
+    tokio::pin!(lock);
+    loop {
+        tokio::select! {
+            guard = &mut lock => {
+                if abort_flag.load(Ordering::SeqCst) {
+                    return None;
+                }
+                return Some(lookup(&guard));
+            }
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                if abort_flag.load(Ordering::SeqCst) {
+                    return None;
                 }
             }
-            ents.push(s);
-        }
-        ents.sort();
-        ents.dedup();
-
-        let id_re = Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_:]{1,100}$").unwrap();
-        ents.retain(|e| id_re.is_match(e));
-
-        if !ents.is_empty() {
-            cards = idx_guard.related_for_entities(&ents, 8);
-            if cards.is_empty() {
-                cards = idx_guard.related_for_related_entities(&ents, 8);
-            }
         }
     }
-    format_related_memories_section(&cards, None)
+}
+
+fn workspace_relative_path(path: &Path, roots: &[PathBuf]) -> Option<String> {
+    let relative = roots.iter().find_map(|root| path.strip_prefix(root).ok())?;
+    if relative.as_os_str().is_empty()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    let relative = relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => part.to_str(),
+            std::path::Component::CurDir => None,
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    (!relative.is_empty()).then_some(relative)
+}
+
+async fn related_memory_references(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    cards: Vec<KnowledgeCard>,
+    roots: &[PathBuf],
+    execution_scope: Option<&ExecutionScope>,
+    abort_flag: &Arc<AtomicBool>,
+) -> Vec<ToolEnrichmentReference> {
+    let mut references = Vec::new();
+    for card in cards.into_iter().take(RELATED_MEMORIES_LIMIT) {
+        if abort_flag.load(Ordering::SeqCst) {
+            break;
+        }
+        let context_file = ContextFile {
+            file_name: card.file_path.to_string_lossy().to_string(),
+            file_content: String::new(),
+            line1: 0,
+            line2: 0,
+            file_rev: None,
+            symbols: vec![],
+            gradient_type: 0,
+            usefulness: 0.0,
+            skip_pp: true,
+        };
+        let Ok(Some((context_file, _))) = remap_context_file_for_execution_scope_for_model_context(
+            gcx.clone(),
+            execution_scope,
+            context_file,
+        )
+        .await
+        else {
+            continue;
+        };
+        let Some(target) = workspace_relative_path(Path::new(&context_file.file_name), roots)
+        else {
+            continue;
+        };
+        let mut reference = ToolEnrichmentReference::new(ToolEnrichmentKind::Path, target);
+        reference.provenance = ToolEnrichmentProvenance::Native;
+        reference.label = Some(card.title);
+        reference.status = Some("related_memory".to_string());
+        reference.source = Some("search_symbol_definition".to_string());
+        references.push(reference);
+    }
+    references
 }
 
 async fn symbol_def_via_codegraph(
@@ -251,22 +389,42 @@ async fn symbol_def_via_codegraph(
             _ => None,
         })
         .collect();
-    let related_section = compute_related_memories_section(gcx.clone(), files, symbols_str).await;
+    let related_memories = if abort_flag.load(Ordering::SeqCst) {
+        Vec::new()
+    } else {
+        compute_related_memories(gcx.clone(), files, symbols_str, &abort_flag).await
+    };
+    let related_references = if abort_flag.load(Ordering::SeqCst) {
+        Vec::new()
+    } else {
+        related_memory_references(
+            gcx.clone(),
+            related_memories,
+            &roots,
+            execution_scope,
+            &abort_flag,
+        )
+        .await
+    };
 
     let notices_section = format_scope_notices(&all_notices);
     let mut tool_message = ChatMessage {
         role: "tool".to_string(),
-        content: ChatContent::SimpleText(format!(
-            "{}{}{}",
-            all_messages.join("\n"),
-            notices_section,
-            related_section
-        )),
+        content: ChatContent::SimpleText(format!("{}{}", all_messages.join("\n"), notices_section)),
         tool_calls: None,
         tool_call_id: tool_call_id.clone(),
         output_filter: Some(OutputFilter::no_limits()),
         ..Default::default()
     };
+    if !related_references.is_empty() {
+        attach_tool_enrichment(
+            &mut tool_message,
+            ToolEnrichment {
+                references: related_references,
+                ..Default::default()
+            },
+        );
+    }
     references.attach(&mut tool_message);
     all_context_files.push(ContextEnum::ChatMessage(tool_message));
 
@@ -364,6 +522,7 @@ mod tests {
     use refact_core::worktree_meta::WorktreeMeta;
     use std::fs;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     fn no_abort() -> Arc<AtomicBool> {
         Arc::new(AtomicBool::new(false))
@@ -464,6 +623,37 @@ mod tests {
             });
         }
         gcx
+    }
+
+    fn related_memory(path: PathBuf, filename: &str, entity: &str) -> KnowledgeCard {
+        KnowledgeCard {
+            id: path.to_string_lossy().to_string(),
+            title: "Related memory".to_string(),
+            summary: Some("Related memory summary".to_string()),
+            description: None,
+            tags: vec![],
+            filenames: vec![filename.to_string()],
+            entities: vec![entity.to_string()],
+            related_files: vec![],
+            related_entities: vec![],
+            kind: Some("memory".to_string()),
+            created: None,
+            created_at: None,
+            updated: None,
+            file_path: path,
+        }
+    }
+
+    async fn add_related_memory(
+        gcx: Arc<crate::global_context::GlobalContext>,
+        path: PathBuf,
+        filename: &str,
+        entity: &str,
+    ) {
+        gcx.knowledge_index
+            .lock()
+            .await
+            .add_card(related_memory(path, filename, entity));
     }
 
     fn context_file_names(results: &[ContextEnum]) -> Vec<String> {
@@ -700,5 +890,148 @@ mod tests {
             "aborted call should not attach defs: {names:?}"
         );
         assert!(text.contains("Aborted"), "should note the abort: {text}");
+    }
+
+    #[tokio::test]
+    async fn symbol_def_related_memory_stays_in_sidecar_enrichment() {
+        let fixture = make_scope_fixture();
+        let gcx = scope_gcx(vec![]).await;
+        let scope = ExecutionScope::from_worktree(&fixture.worktree);
+        let service = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        let worktree_lib = fixture.root.join("src").join("lib.rs");
+        index_absolute(&service, &worktree_lib, "pub fn shared() {}\n").await;
+        service.connect_usages().await.unwrap();
+        let (_corrections, baseline_results) = symbol_def_via_codegraph(
+            gcx.clone(),
+            service.clone(),
+            &["shared".to_string()],
+            "shared",
+            &"call".to_string(),
+            Some(&scope),
+            no_abort(),
+        )
+        .await
+        .unwrap();
+        let baseline_text = tool_text(&baseline_results);
+        let memory_path = fixture
+            .root
+            .join(".refact")
+            .join("knowledge")
+            .join("shared.md");
+        fs::create_dir_all(memory_path.parent().unwrap()).unwrap();
+        fs::write(&memory_path, "related\n").unwrap();
+        add_related_memory(
+            gcx.clone(),
+            memory_path.clone(),
+            &worktree_lib.to_string_lossy(),
+            "shared",
+        )
+        .await;
+
+        let (_corrections, results) = symbol_def_via_codegraph(
+            gcx,
+            service,
+            &["shared".to_string()],
+            "shared",
+            &"call".to_string(),
+            Some(&scope),
+            no_abort(),
+        )
+        .await
+        .unwrap();
+
+        let text = tool_text(&results);
+        assert_eq!(text, baseline_text);
+        let enrichment = results
+            .iter()
+            .find_map(|result| match result {
+                ContextEnum::ChatMessage(message) if message.role == "tool" => {
+                    refact_chat_api::tool_enrichment_from_extra(&message.extra)
+                }
+                _ => None,
+            })
+            .expect("definition enrichment");
+        assert!(enrichment.references.iter().any(|reference| {
+            reference.target == ".refact/knowledge/shared.md"
+                && reference.status.as_deref() == Some("related_memory")
+        }));
+    }
+
+    #[tokio::test]
+    async fn related_memory_lookup_releases_global_index_before_local_lookups() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        add_related_memory(
+            gcx.clone(),
+            PathBuf::from("/knowledge/shared.md"),
+            "src/lib.rs",
+            "shared",
+        )
+        .await;
+        let lock = gcx.knowledge_index.lock().await;
+        let abort_flag = no_abort();
+        let lookup = compute_related_memories(
+            gcx.clone(),
+            vec!["src/lib.rs".to_string()],
+            "shared",
+            &abort_flag,
+        );
+        tokio::pin!(lookup);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut lookup)
+                .await
+                .is_err(),
+            "related-memory lookup should wait only for the shared index lock"
+        );
+        drop(lock);
+        assert_eq!(lookup.await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn aborted_symbol_def_skips_related_memory_lookup() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let service = Arc::new(refact_codegraph::CodeGraphService::open_in_memory().unwrap());
+        service
+            .index_file("src/lib.rs", "pub fn shared() {}\n", "rust")
+            .await
+            .unwrap();
+        service.connect_usages().await.unwrap();
+        let abort_flag = Arc::new(AtomicBool::new(true));
+        let index_lock = gcx.knowledge_index.clone();
+        let lock = index_lock.try_lock().expect("test owns index mutex");
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            symbol_def_via_codegraph(
+                gcx,
+                service,
+                &["shared".to_string()],
+                "shared",
+                &"call".to_string(),
+                None,
+                abort_flag,
+            ),
+        )
+        .await
+        .expect("aborted symbol lookup must not attempt a related-memory index lock")
+        .unwrap();
+        drop(lock);
+
+        assert!(tool_text(&result.1).contains("Aborted"));
+    }
+
+    #[test]
+    fn related_memory_identifier_regex_is_static_and_filters_invalid_entities() {
+        let first = std::ptr::addr_of!(*IDENTIFIER_RE);
+        let second = std::ptr::addr_of!(*IDENTIFIER_RE);
+        assert_eq!(first, second);
+        assert_eq!(
+            related_memory_entities("crate.shared, valid::Thing, invalid-name"),
+            vec![
+                "Thing".to_string(),
+                "crate::shared".to_string(),
+                "shared".to_string(),
+                "valid::Thing".to_string(),
+            ]
+        );
     }
 }
