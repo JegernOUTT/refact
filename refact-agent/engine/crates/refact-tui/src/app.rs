@@ -2536,7 +2536,6 @@ mod tests {
             "tool",
             "done".to_string(),
             ToolStatus::Succeeded,
-            now_ms(),
         );
 
         assert_eq!(tool_cards(&app).len(), 1);
@@ -6625,7 +6624,6 @@ new-chat = "ctrl-x"
             "tool",
             "done".to_string(),
             ToolStatus::Succeeded,
-            now_ms(),
         );
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),
@@ -6673,7 +6671,6 @@ new-chat = "ctrl-x"
             "tool",
             "done".to_string(),
             ToolStatus::Succeeded,
-            now_ms(),
         );
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),
@@ -6718,7 +6715,6 @@ new-chat = "ctrl-x"
                 "tool",
                 "done".to_string(),
                 ToolStatus::Succeeded,
-                now_ms(),
             );
         }
         app.handle_chat_event(ChatEvent {
@@ -7401,7 +7397,6 @@ new-chat = "ctrl-x"
             "tool",
             "done".to_string(),
             ToolStatus::Succeeded,
-            now_ms(),
         );
         if let [card] = tool_cards(&app).as_slice() {
             assert_eq!(card.status, ToolStatus::Succeeded);

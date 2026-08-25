@@ -103,7 +103,8 @@ pub struct ToolCard {
     pub status: ToolStatus,
     pub duration_ms: Option<u64>,
     exit_code: Option<Option<i32>>,
-    pub started_at_ms: u64,
+    pub started_at_ms: Option<u64>,
+    pub completed_at_ms: Option<u64>,
     pub expanded: bool,
     pub subchat_log: Vec<String>,
     pub attached_files: Vec<String>,
@@ -149,13 +150,12 @@ impl ToolCard {
             args_preview: compact_preview(&raw_args, 96),
             result: String::new(),
             status: tool_status_from_value(value),
-            duration_ms: structured_duration_ms(value).flatten().or_else(|| {
-                completed_at_ms
-                    .zip(started_at_ms)
-                    .and_then(|(end, start)| end.checked_sub(start))
-            }),
+            duration_ms: structured_duration_ms(value)
+                .flatten()
+                .or_else(|| duration_from_timestamps(started_at_ms, completed_at_ms)),
             exit_code: structured_exit_code(value),
-            started_at_ms: started_at_ms.unwrap_or_else(now_ms),
+            started_at_ms,
+            completed_at_ms,
             expanded: false,
             subchat_log: subchat_log_from_value(value),
             attached_files,
@@ -192,8 +192,16 @@ impl ToolCard {
     }
 
     pub fn apply_result_metadata(&mut self, extra: &serde_json::Map<String, Value>) {
+        if let Some(started_at_ms) = timestamp_field_from_extra(extra, "started_at_ms") {
+            self.started_at_ms = Some(started_at_ms);
+        }
+        if let Some(completed_at_ms) = timestamp_field_from_extra(extra, "completed_at_ms") {
+            self.completed_at_ms = Some(completed_at_ms);
+        }
         if let Some(duration_ms) = structured_duration_ms_from_extra(extra) {
             self.duration_ms = duration_ms;
+        } else if self.duration_ms.is_none() {
+            self.duration_ms = duration_from_timestamps(self.started_at_ms, self.completed_at_ms);
         }
         if let Some(exit_code) = structured_exit_code_from_extra(extra) {
             self.exit_code = Some(exit_code);
@@ -204,12 +212,22 @@ impl ToolCard {
         self.exit_code
     }
 
+    pub fn reported_duration_ms(&self) -> Option<u64> {
+        self.duration_ms.filter(|duration_ms| *duration_ms > 0)
+    }
+
     pub fn update_from_tool_call(&mut self, update: ToolCard) {
         self.name = update.name;
         self.args = update.args;
         self.args_preview = update.args_preview;
         if update.duration_ms.is_some() {
             self.duration_ms = update.duration_ms;
+        }
+        if update.started_at_ms.is_some() {
+            self.started_at_ms = update.started_at_ms;
+        }
+        if update.completed_at_ms.is_some() {
+            self.completed_at_ms = update.completed_at_ms;
         }
         if update.exit_code.is_some() {
             self.exit_code = update.exit_code;
@@ -237,10 +255,9 @@ impl ToolCard {
 
     pub fn summary(&self) -> String {
         let duration = self
-            .duration_ms
-            .filter(|duration_ms| *duration_ms > 0)
+            .reported_duration_ms()
             .map(format_duration)
-            .unwrap_or_else(|| "".to_string());
+            .unwrap_or_default();
         let mut parts = vec![format!(
             "{} {}",
             self.status.visual(),
@@ -461,7 +478,20 @@ fn tool_status_from_value(value: &Value) -> ToolStatus {
 }
 
 fn timestamp_field(value: &Value, key: &str) -> Option<u64> {
-    value.get(key).and_then(Value::as_u64)
+    structured_field(value, &[key]).and_then(Value::as_u64)
+}
+
+fn timestamp_field_from_extra(extra: &serde_json::Map<String, Value>, key: &str) -> Option<u64> {
+    structured_field_from_extra(extra, &[key]).and_then(Value::as_u64)
+}
+
+fn duration_from_timestamps(
+    started_at_ms: Option<u64>,
+    completed_at_ms: Option<u64>,
+) -> Option<u64> {
+    completed_at_ms
+        .zip(started_at_ms)
+        .and_then(|(end, start)| end.checked_sub(start))
 }
 
 fn structured_duration_ms(value: &Value) -> Option<Option<u64>> {
@@ -1014,6 +1044,21 @@ mod tests {
             "started_at_ms": 10_000,
             "completed_at_ms": 18_000,
         }));
+
+        assert_eq!(card.duration_ms, Some(8_000));
+        assert!(card.summary().contains("8.0s"));
+    }
+
+    #[test]
+    fn result_timestamps_produce_real_duration() {
+        let mut card = ToolCard::from_tool_call(&json!({
+            "name": "shell",
+            "started_at_ms": 10_000,
+        }));
+        card.apply_result_metadata(&serde_json::Map::from_iter([(
+            "exec".to_string(),
+            json!({"completed_at_ms": 18_000}),
+        )]));
 
         assert_eq!(card.duration_ms, Some(8_000));
         assert!(card.summary().contains("8.0s"));

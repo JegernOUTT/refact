@@ -841,7 +841,6 @@ impl App {
         name: &str,
         result: String,
         status: ToolStatus,
-        completed_at_ms: u64,
     ) {
         let active_ask_tool_id = self
             .ask_questions_form
@@ -853,11 +852,6 @@ impl App {
                     card.set_result(&result);
                     card.status = status;
                     card.subchat_active = false;
-                    if card.duration_ms.is_none() {
-                        card.duration_ms = completed_at_ms
-                            .checked_sub(card.started_at_ms)
-                            .filter(|duration_ms| *duration_ms > 0);
-                    }
                     if active_ask_tool_id.as_deref() == Some(card.id.as_str()) {
                         card.expanded = false;
                     }
@@ -884,7 +878,6 @@ impl App {
     }
 
     pub(super) fn finalize_tool_cards_for_turn(&mut self) {
-        let completed_at_ms = now_ms();
         for item in &mut self.transcript {
             let TranscriptItem::Tool(card) = item else {
                 continue;
@@ -893,9 +886,6 @@ impl App {
                 card.subchat_active = false;
                 if card.status.is_active() {
                     card.status = ToolStatus::Succeeded;
-                    card.duration_ms = completed_at_ms
-                        .checked_sub(card.started_at_ms)
-                        .filter(|duration_ms| *duration_ms > 0);
                 }
             }
         }
@@ -1245,7 +1235,6 @@ impl App {
             } else {
                 ToolStatus::Succeeded
             },
-            now_ms(),
         );
         if let Some(TranscriptItem::Tool(card)) = self
             .transcript

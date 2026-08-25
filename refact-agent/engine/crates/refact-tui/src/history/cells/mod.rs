@@ -657,8 +657,7 @@ fn parse_exit_code(value: &str) -> Option<i32> {
 }
 
 fn rendered_duration(card: &ToolCard) -> String {
-    card.duration_ms
-        .filter(|duration_ms| *duration_ms > 0)
+    card.reported_duration_ms()
         .map(format_duration)
         .unwrap_or_default()
 }

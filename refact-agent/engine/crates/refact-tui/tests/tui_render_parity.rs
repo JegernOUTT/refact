@@ -44,13 +44,17 @@ fn chat_event(app: &App, kind: &str, raw: Value) -> ChatEvent {
 }
 
 fn render_app_snapshot(app: &mut App, width: u16, height: u16) -> String {
+    normalize_dynamic_durations(render_app_snapshot_raw(app, width, height))
+}
+
+fn render_app_snapshot_raw(app: &mut App, width: u16, height: u16) -> String {
     app.set_native_scrollback(false);
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|frame| refact_tui::ui::render(frame, app))
         .unwrap();
-    terminal_snapshot(&terminal, width, height)
+    terminal_snapshot_raw(&terminal, width, height)
 }
 
 fn render_widget_snapshot<F>(width: u16, height: u16, draw: F) -> String
@@ -64,8 +68,12 @@ where
 }
 
 fn terminal_snapshot(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> String {
+    normalize_dynamic_durations(terminal_snapshot_raw(terminal, width, height))
+}
+
+fn terminal_snapshot_raw(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> String {
     let cells = terminal.backend().buffer().content();
-    let snapshot = (0..height as usize)
+    (0..height as usize)
         .map(|row| {
             let start = row * width as usize;
             let end = start + width as usize;
@@ -77,8 +85,7 @@ fn terminal_snapshot(terminal: &Terminal<TestBackend>, width: u16, height: u16) 
                 .to_string()
         })
         .collect::<Vec<_>>()
-        .join("\n");
-    normalize_dynamic_durations(snapshot)
+        .join("\n")
 }
 fn normalize_dynamic_durations(snapshot: String) -> String {
     let duration_re = regex_lite::Regex::new(r" · [0-9]+ms").unwrap();
@@ -258,11 +265,11 @@ fn transcript_cells_golden_snapshot() {
      ok      yes
 
   exec selected
-  ▸ ✅  succeeded $ cargo test -p refact-tui · exit 0 · <ms>
+  ▸ ✅  succeeded $ cargo test -p refact-tui · exit 0
     └ ok
 
   diff
-  ▸ ✅  succeeded 1 file · +1 -1 · <ms>
+  ▸ ✅  succeeded 1 file · +1 -1
   • Edited src/lib.rs (+1 -1)
   Δ src/lib.rs +1 -1
 
@@ -431,12 +438,17 @@ fn ask_form_bottom_pane_golden_snapshot() {
         }),
     ));
 
-    let actual = render_app_snapshot(&mut app, 90, 24);
+    let first = render_app_snapshot_raw(&mut app, 90, 24);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let second = render_app_snapshot_raw(&mut app, 90, 24);
+    assert_eq!(first, second);
+
+    let actual = normalize_dynamic_durations(first);
     assert_snapshot(
         actual,
         r#"refact fixture | Ctrl-N new · Ctrl-P projects · Alt-M model · Ctrl-O mode · ? help
   • Questions
-  ▸ ✅  succeeded ask_questions({}) · <ms>
+  ▸ ✅  succeeded ask_questions({})
 
 
 
