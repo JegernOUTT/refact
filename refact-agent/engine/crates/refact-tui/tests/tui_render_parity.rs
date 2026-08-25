@@ -198,7 +198,7 @@ fn render_matrix_snapshot(
     height: u16,
 ) -> String {
     let _environment = color.apply();
-    let _surfaces = (scenario.name == "activity")
+    let _surfaces = (scenario.name == "activity" || scenario.name == "browser")
         .then(|| EnvironmentGuard::set(&[("REFACT_TUI_SURFACES", Some("1"))]));
     let mut app = App::new(project());
     (scenario.setup)(&mut app);
@@ -567,6 +567,39 @@ fn task_board_scenario(app: &mut App) {
     });
 }
 
+fn browser_scenario(app: &mut App) {
+    app.apply_chat_event(chat_event(
+        app,
+        "browser_status",
+        json!({
+            "type": "browser_status",
+            "runtime_id": "browser-matrix",
+            "connected": true,
+            "active_tab": "tab-1",
+            "url": "https://example.test/browser",
+            "title": "Browser matrix",
+            "tabs": [{"tab_id": "tab-1", "url": "https://example.test/browser", "title": "Browser matrix"}]
+        }),
+    ));
+    app.apply_chat_event(chat_event(
+        app,
+        "browser_frame",
+        json!({
+            "type": "browser_frame",
+            "tab_id": "tab-1",
+            "mime": "image/png",
+            "data": "QUJDRA==",
+            "changed_text": "Browser frame updated"
+        }),
+    ));
+    app.apply_chat_event(chat_event(
+        app,
+        "browser_timeline",
+        json!({"type": "browser_timeline", "events": [{"type": "click", "summary": "Clicked"}]}),
+    ));
+    app.execute_command_name("browser");
+}
+
 fn worktree_identity_scenario(app: &mut App) {
     app.apply_chat_event(chat_event(
         app,
@@ -692,6 +725,12 @@ fn render_scenarios() -> Vec<RenderScenario> {
             render_before_resize: false,
         },
         RenderScenario {
+            name: "browser",
+            marker: Some("Browser"),
+            setup: browser_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
             name: "worktree identity",
             marker: Some("wt-matrix"),
             setup: worktree_identity_scenario,
@@ -779,13 +818,13 @@ fn keymap_help_golden_snapshot() {
     │     history Backspace             delete left or remove queued item                      │
     │    activity Esc                   cancel, close, or abort active work                    │
     │       board Esc, q                cancel, close, or abort active work                    │
+    │     browser Esc, q                cancel, close, or abort active work                    │
     │        goal Esc, q                cancel, close, or abort active work                    │
     │   worktrees Esc                   cancel, close, or abort active work                    │
     │    settings Backspace             delete left or remove queued item                      │
     │    ask form Backspace             delete left or remove queued item                      │
     │transcript cell t                     expand selected tool card                           │
     └──────────────────────────────────────────────────────────────────────────────────────────┘
-
 
 │› Ask Refact…
 │  Enter send   Ctrl-J newline

@@ -19,6 +19,7 @@ pub enum MiscCommand {
     Logout,
     Import,
     Settings,
+    Browser,
     Board,
     Worktrees,
 }
@@ -229,6 +230,17 @@ pub const BOARD_COMMAND: CommandDef = CommandDef {
     availability: CommandAvailability::Always,
     action: CommandAction::Misc {
         command: MiscCommand::Board,
+    },
+};
+
+pub const BROWSER_COMMAND: CommandDef = CommandDef {
+    name: "browser",
+    aliases: &[],
+    description: "surface: observe agent browser status, frames, timeline, and context selection",
+    args_hint: "",
+    availability: CommandAvailability::Always,
+    action: CommandAction::Misc {
+        command: MiscCommand::Browser,
     },
 };
 

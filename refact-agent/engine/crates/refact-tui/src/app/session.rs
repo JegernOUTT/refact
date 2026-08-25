@@ -453,6 +453,7 @@ impl App {
         self.transcript_overlay = None;
         self.activity_surface = None;
         self.board_surface = None;
+        self.browser_surface = None;
         self.task_id = None;
         self.save_local_input_handoff();
         self.history_path = Some(history_path_for_root(&project.root));
@@ -530,6 +531,7 @@ impl App {
         self.transcript_overlay = None;
         self.activity_surface = None;
         self.board_surface = None;
+        self.browser_surface = None;
         self.task_id = None;
         let history_entries = self.composer.history_entries().to_vec();
         self.save_local_input_handoff();
@@ -577,6 +579,7 @@ impl App {
         self.transcript_overlay = None;
         self.activity_surface = None;
         self.board_surface = None;
+        self.browser_surface = None;
         self.task_id = None;
         let history_entries = self.composer.history_entries().to_vec();
         self.save_local_input_handoff();

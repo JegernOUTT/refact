@@ -98,6 +98,10 @@ pub fn image_positions(buffer: &Buffer, items: &[TranscriptItem]) -> Vec<Positio
         .collect()
 }
 
+pub(crate) fn text_position(buffer: &Buffer, needle: &str) -> Option<Position> {
+    find_text_position(buffer, needle)
+}
+
 fn find_text_position(buffer: &Buffer, needle: &str) -> Option<Position> {
     for y in buffer.area.top()..buffer.area.bottom() {
         let mut line = String::new();

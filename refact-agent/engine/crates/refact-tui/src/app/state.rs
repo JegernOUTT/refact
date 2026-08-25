@@ -78,6 +78,7 @@ pub struct BrowserState {
     pub current_title: Option<String>,
     pub tabs: Vec<crate::protocol::BrowserTab>,
     pub latest_frame: Option<BrowserFrameEvent>,
+    pub frame_version: u64,
     pub timeline: Vec<Value>,
     pub last_toolbar_action: Option<String>,
     pub last_closed: Option<BrowserClosedEvent>,
@@ -86,7 +87,9 @@ pub struct BrowserState {
 
 impl BrowserState {
     pub(super) fn apply_snapshot(&mut self, snapshot: Option<BrowserSnapshot>) {
+        let frame_version = self.frame_version.wrapping_add(1);
         *self = Self::default();
+        self.frame_version = frame_version;
         if let Some(snapshot) = snapshot {
             self.apply_status(snapshot);
         }
@@ -105,6 +108,7 @@ impl BrowserState {
 
     pub(super) fn apply_frame(&mut self, frame: BrowserFrameEvent) {
         self.latest_frame = Some(frame);
+        self.frame_version = self.frame_version.wrapping_add(1);
     }
 
     pub(super) fn apply_closed(&mut self, event: BrowserClosedEvent) {
@@ -317,6 +321,7 @@ pub struct App {
     pub(super) last_escape_at: Option<Instant>,
     pub(super) transcript_overlay: Option<PagerOverlay>,
     pub(super) board_surface: Option<surfaces::board::BoardSurface>,
+    pub(super) browser_surface: Option<surfaces::browser::BrowserSurface>,
     pub(super) transcript_overlay_visible_height: Option<usize>,
     pub(super) activity_surface: Option<ActivitySurfaceState>,
     pub(super) task_id: Option<String>,
@@ -444,6 +449,7 @@ impl App {
             last_escape_at: None,
             transcript_overlay: None,
             board_surface: None,
+            browser_surface: None,
             transcript_overlay_visible_height: None,
             activity_surface: None,
             task_id: None,
@@ -549,6 +555,7 @@ impl App {
             last_escape_at: None,
             transcript_overlay: None,
             board_surface: None,
+            browser_surface: None,
             transcript_overlay_visible_height: None,
             activity_surface: None,
             task_id: None,
@@ -906,6 +913,10 @@ impl App {
 
     pub(crate) fn task_board_surface(&self) -> Option<&surfaces::board::BoardSurface> {
         self.board_surface.as_ref()
+    }
+
+    pub(crate) fn browser_surface(&self) -> Option<&surfaces::browser::BrowserSurface> {
+        self.browser_surface.as_ref()
     }
 
     pub(crate) fn task_board_discoverable(&self) -> bool {

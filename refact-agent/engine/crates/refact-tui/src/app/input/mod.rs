@@ -3,6 +3,7 @@ use super::*;
 mod approval;
 mod ask;
 mod board;
+mod browser;
 mod history;
 mod main;
 mod overlay;
@@ -29,6 +30,7 @@ impl App {
         }
         match self.focused_key_context() {
             KeyContext::Board => return self.handle_task_board_key(key),
+            KeyContext::Browser => return self.handle_browser_key(key),
             KeyContext::History if self.history_surface.is_some() => {
                 return self.handle_history_surface_key(key);
             }
@@ -72,6 +74,7 @@ impl App {
                 self.handle_transcript_overlay_paste(text)
             }
             KeyContext::Board => {}
+            KeyContext::Browser => {}
             KeyContext::Approval => self.handle_approval_paste(text),
             KeyContext::AskForm => self.handle_ask_questions_paste(text),
             KeyContext::ModalPicker => self.handle_modal_picker_paste(text),
@@ -101,6 +104,9 @@ impl App {
         }
         if self.board_surface.is_some() {
             return KeyContext::Board;
+        }
+        if self.browser_surface.is_some() {
+            return KeyContext::Browser;
         }
         if self.history_surface.is_some() {
             return KeyContext::History;

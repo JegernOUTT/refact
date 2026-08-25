@@ -54,6 +54,7 @@ use crate::tools::{
     MAX_SUBCHAT_PROGRESS_CHARS,
 };
 
+mod browser;
 mod chat_events;
 mod command_results;
 mod goal;
@@ -1452,11 +1453,12 @@ fn render_frame(terminal: &mut TerminalSession, app: &mut App) -> Result<(), Tui
             completed_frame.buffer,
             app.visible_transcript(),
         );
-        let images = crate::app::transcript::inline_images_for_visible_transcript(
+        let mut images = crate::app::transcript::inline_images_for_visible_transcript(
             app.visible_transcript(),
             crate::terminal_probe::image_protocol_from_env(),
             &positions,
         );
+        browser::append_inline_image(app, completed_frame.buffer, &mut images);
         terminal.write_inline_images(&images)?;
     }
     Ok(())

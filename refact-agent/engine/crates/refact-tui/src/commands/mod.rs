@@ -152,6 +152,7 @@ fn command_registry_vec() -> &'static Vec<CommandDef> {
             misc::LOGOUT_COMMAND,
             misc::IMPORT_COMMAND,
             misc::SETTINGS_COMMAND,
+            misc::BROWSER_COMMAND,
             misc::BOARD_COMMAND,
             misc::WORKTREES_COMMAND,
             CommandDef {
@@ -264,6 +265,7 @@ mod tests {
             "/hooks",
             "/logout",
             "/import",
+            "/browser",
             "/worktrees",
         ] {
             assert!(

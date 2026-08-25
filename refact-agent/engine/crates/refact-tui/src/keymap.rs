@@ -18,6 +18,7 @@ pub enum KeyContext {
     History,
     Activity,
     Board,
+    Browser,
     Goal,
     Worktree,
     Settings,
@@ -26,7 +27,7 @@ pub enum KeyContext {
 }
 
 impl KeyContext {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::Main,
         Self::ProjectPicker,
         Self::ModalPicker,
@@ -38,6 +39,7 @@ impl KeyContext {
         Self::History,
         Self::Activity,
         Self::Board,
+        Self::Browser,
         Self::Goal,
         Self::Worktree,
         Self::Settings,
@@ -58,6 +60,7 @@ impl KeyContext {
             Self::History => "history",
             Self::Activity => "activity",
             Self::Board => "board",
+            Self::Browser => "browser",
             Self::Goal => "goal",
             Self::Worktree => "worktrees",
             Self::Settings => "settings",
@@ -79,11 +82,12 @@ impl KeyContext {
             Self::History => 8,
             Self::Activity => 9,
             Self::Board => 10,
-            Self::Goal => 11,
-            Self::Worktree => 12,
-            Self::Settings => 13,
-            Self::AskForm => 14,
-            Self::TranscriptCell => 15,
+            Self::Browser => 11,
+            Self::Goal => 12,
+            Self::Worktree => 13,
+            Self::Settings => 14,
+            Self::AskForm => 15,
+            Self::TranscriptCell => 16,
         }
     }
 }
@@ -1083,6 +1087,15 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(KeyContext::Board, KeyAction::MoveUp, &["up"]),
         entry(KeyContext::Board, KeyAction::MoveDown, &["down"]),
         entry(KeyContext::Board, KeyAction::ToggleSelectedTool, &["space"]),
+        entry(KeyContext::Browser, KeyAction::Cancel, &["esc", "q"]),
+        entry(KeyContext::Browser, KeyAction::Accept, &["enter"]),
+        entry(KeyContext::Browser, KeyAction::MoveUp, &["up"]),
+        entry(KeyContext::Browser, KeyAction::MoveDown, &["down"]),
+        entry(
+            KeyContext::Browser,
+            KeyAction::ToggleSelectedTool,
+            &["space"],
+        ),
         entry(KeyContext::History, KeyAction::Cancel, &["esc", "q"]),
         entry(KeyContext::History, KeyAction::Accept, &["enter"]),
         entry(KeyContext::History, KeyAction::MoveUp, &["up"]),

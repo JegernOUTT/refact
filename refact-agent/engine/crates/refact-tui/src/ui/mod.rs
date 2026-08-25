@@ -128,6 +128,16 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         }
         return;
     }
+    if app.browser_surface().is_some() {
+        let state = app.browser_state().clone();
+        let browser = app.browser_surface().expect("browser surface is open");
+        crate::app::surfaces::browser::render_browser_surface(frame, &state, browser, area);
+        degrade_frames(frame, area);
+        if compact {
+            render_compact_truncation_indicator(frame, area);
+        }
+        return;
+    }
     if app.goal_overlay_open() {
         goal_dock::render_overlay(frame, app, area);
     }

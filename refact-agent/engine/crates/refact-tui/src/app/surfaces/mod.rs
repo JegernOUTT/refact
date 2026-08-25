@@ -1,4 +1,5 @@
 pub(crate) mod board;
+pub(crate) mod browser;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -152,6 +153,10 @@ impl App {
                 self.open_settings_surface();
                 AppAction::None
             }
+            misc::MiscCommand::Browser => {
+                self.open_browser_command();
+                AppAction::None
+            }
             misc::MiscCommand::Board => self.open_task_board(),
             misc::MiscCommand::Worktrees => self.start_worktree_command(args),
         }
@@ -170,6 +175,15 @@ impl App {
             &self.thread_params,
             settings_caps_for_model(&self.model_settings_caps, self.model.as_deref()),
         ));
+    }
+
+    pub(super) fn open_browser_surface(&mut self) {
+        if !Self::settings_surface_enabled() {
+            self.add_notice("/browser requires REFACT_TUI_SURFACES=1");
+            return;
+        }
+        self.composer.clear();
+        self.browser_surface = Some(browser::BrowserSurface::new());
     }
 
     pub(crate) fn refresh_settings_surface(&mut self) {
