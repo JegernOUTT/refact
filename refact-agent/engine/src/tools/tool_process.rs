@@ -272,7 +272,7 @@ impl Tool for ToolProcessStart {
         ));
         append_sandbox_denial_hint(&mut content, &result.snapshot.status, sandbox_active);
         let mut extra = exec_extra(&result.snapshot, Some(&read), None, Some(tty));
-        attach_path_enrichment(
+        attach_exec_path_references(
             &mut extra,
             gcx.clone(),
             &destination,
@@ -531,7 +531,7 @@ impl Tool for ToolProcessRead {
             content.push_str(&format_read_sections(&read, stream, &output_filter));
         }
         let mut extra = exec_extra(&snapshot, Some(&read), Some(stream_label(stream)), None);
-        attach_path_enrichment(
+        attach_exec_path_references(
             &mut extra,
             gcx.clone(),
             &destination,
@@ -728,7 +728,7 @@ impl Tool for ToolProcessWait {
         if let Some(exec) = extra.get_mut("exec").and_then(Value::as_object_mut) {
             exec.insert("wait_timed_out".to_string(), Value::Bool(timed_out));
         }
-        attach_path_enrichment(
+        attach_exec_path_references(
             &mut extra,
             gcx.clone(),
             &destination,
@@ -1645,7 +1645,7 @@ fn exec_extra(
     extra
 }
 
-async fn attach_path_enrichment(
+async fn attach_exec_path_references(
     extra: &mut serde_json::Map<String, Value>,
     gcx: Arc<GlobalContext>,
     destination: &refact_privacy::Destination,
@@ -1691,9 +1691,9 @@ async fn attach_path_enrichment(
         collected,
     )
     .await;
-    extra.insert(
-        "path_enrichment".to_string(),
-        serde_json::to_value(enrichment).unwrap_or(Value::Null),
+    refact_chat_api::attach_tool_enrichment_to_extra(
+        extra,
+        crate::privacy::records::tool_enrichment_from_path_references(enrichment),
     );
 }
 
@@ -2667,6 +2667,58 @@ mod tests {
         assert_eq!(exec(&message)["transcript"]["since_seq"], 1);
         assert_eq!(exec(&message)["transcript"]["next_seq"], 3);
         assert_eq!(exec(&message)["stream"], "stderr");
+    }
+
+    #[tokio::test]
+    async fn process_read_path_references_use_the_unified_enrichment_envelope() {
+        let workspace = tempfile::tempdir().unwrap();
+        let file = workspace.path().join("src/lib.rs");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "pub fn visible() {}\n").unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        {
+            *gcx.documents_state.workspace_folders.lock().unwrap() =
+                vec![workspace.path().to_path_buf()];
+        }
+        let ccx = test_ccx_for_workspace(gcx.clone(), workspace.path().to_path_buf()).await;
+        let snapshot = gcx
+            .exec_registry
+            .register(
+                ExecProcessMeta::new(ExecMode::Background, "cat src/lib.rs".to_string())
+                    .with_chat_id("chat")
+                    .with_workspace(workspace.path().to_path_buf())
+                    .with_short_description("Read visible source".to_string()),
+                PROCESS_TRANSCRIPT_MAX_BYTES,
+            )
+            .await;
+        let process_id = snapshot.meta.process_id;
+        gcx.exec_registry.mark_started(&process_id).await.unwrap();
+        gcx.exec_registry
+            .append_output(
+                &process_id,
+                ExecOutputStream::Stdout,
+                "src/lib.rs:1:1\n".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let mut read = ToolProcessRead {
+            config_path: String::new(),
+        };
+        let message = run_tool(
+            &mut read,
+            ccx,
+            make_args_map(vec![("process_id", json!(process_id.as_str()))]),
+        )
+        .await
+        .unwrap();
+        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
+
+        assert!(message.extra.get("path_enrichment").is_none());
+        assert!(enrichment.references.iter().any(|reference| {
+            reference.kind == refact_chat_api::ToolEnrichmentKind::Path
+                && reference.target == "src/lib.rs"
+        }));
     }
 
     #[tokio::test]

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getToolEnrichment } from "./types";
+import { getToolEnrichment, getToolEnrichmentPathReferences } from "./types";
 
 describe("getToolEnrichment", () => {
   it("accepts the supported v1 envelope", () => {
@@ -51,7 +51,9 @@ describe("getToolEnrichment", () => {
               target: "src/lib.rs",
               provenance: "native",
               status: "high",
-              details: { action: "excerpt", line1: 10, line2: 12 },
+              line1: 10,
+              line2: 12,
+              details: { action: "excerpt" },
             },
             {
               kind: "agent",
@@ -97,5 +99,53 @@ describe("getToolEnrichment", () => {
         },
       }),
     ).toBeNull();
+  });
+
+  it("reads only safe legacy exec path enrichment during migration", () => {
+    expect(
+      getToolEnrichmentPathReferences({
+        path_enrichment: {
+          schema_version: 1,
+          references: [
+            { path: "src/lib.rs", line1: 3, line2: 5 },
+            { path: "../secret.rs", line1: 1 },
+          ],
+        },
+      }),
+    ).toEqual([
+      {
+        kind: "path",
+        target: "src/lib.rs",
+        provenance: "heuristic",
+        line1: 3,
+        line2: 5,
+        source: undefined,
+      },
+    ]);
+  });
+
+  it("rejects unsafe unified paths and hides restricted envelopes", () => {
+    expect(
+      getToolEnrichmentPathReferences({
+        tool_enrichment: {
+          schema_version: 1,
+          references: [
+            { kind: "path", target: "../secret.rs", provenance: "native" },
+            { kind: "path", target: "src/lib.rs", provenance: "native" },
+          ],
+        },
+      }),
+    ).toEqual([{ kind: "path", target: "src/lib.rs", provenance: "native" }]);
+    expect(
+      getToolEnrichmentPathReferences({
+        tool_enrichment: {
+          schema_version: 1,
+          references: [
+            { kind: "path", target: "src/lib.rs", provenance: "native" },
+          ],
+          privacy: { redacted: true, restricted: true },
+        },
+      }),
+    ).toEqual([]);
   });
 });

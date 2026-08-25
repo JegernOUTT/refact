@@ -551,9 +551,9 @@ impl Tool for ToolCmdline {
         )
         .await;
         let mut extra = exec_extra(&snapshot, duration);
-        extra.insert(
-            "path_enrichment".to_string(),
-            serde_json::to_value(enrichment).unwrap_or(Value::Null),
+        refact_chat_api::attach_tool_enrichment_to_extra(
+            &mut extra,
+            crate::privacy::records::tool_enrichment_from_path_references(enrichment),
         );
 
         let result = vec![ContextEnum::ChatMessage(ChatMessage {

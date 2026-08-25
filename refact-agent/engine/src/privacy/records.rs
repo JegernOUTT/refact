@@ -8,6 +8,9 @@ use refact_privacy::{
     ShellBehavior,
 };
 use refact_exec::ObservationStatus;
+use refact_chat_api::{
+    ToolEnrichment, ToolEnrichmentKind, ToolEnrichmentProvenance, ToolEnrichmentReference,
+};
 
 use crate::call_validation::ChatMessage;
 use crate::exec::path_enrichment::{CollectedPathEnrichment, PathEnrichment};
@@ -78,7 +81,7 @@ pub fn shell_observation_needed_for_session(
     })
 }
 
-pub async fn filter_path_enrichment_for_model_context(
+pub(crate) async fn filter_path_enrichment_for_model_context(
     gcx: Arc<GlobalContext>,
     destination: &Destination,
     derived_zones: &DerivedPrivacyZones,
@@ -114,6 +117,34 @@ pub async fn filter_path_enrichment_for_model_context(
     }
     metadata.references = references;
     metadata
+}
+
+pub(crate) fn tool_enrichment_from_path_references(enrichment: PathEnrichment) -> ToolEnrichment {
+    let references = enrichment
+        .references
+        .into_iter()
+        .map(|path| {
+            let mut reference = ToolEnrichmentReference::new(ToolEnrichmentKind::Path, path.path);
+            reference.provenance = ToolEnrichmentProvenance::Heuristic;
+            reference.line1 = path.line1.map(|line| line as usize);
+            reference.line2 = path.line2.map(|line| line as usize);
+            reference.source = Some(path.source);
+            reference.confidence = match path.confidence.as_str() {
+                "high" => Some(0.9),
+                "medium" => Some(0.6),
+                "low" => Some(0.3),
+                _ => None,
+            };
+            reference
+        })
+        .collect();
+    ToolEnrichment {
+        references,
+        truncated: enrichment.truncated
+            || enrichment.omitted_count > 0
+            || enrichment.withheld_count > 0,
+        ..Default::default()
+    }
 }
 
 fn path_allowed_for_destination(
@@ -850,6 +881,16 @@ mod tests {
         assert_eq!(enrichment.references.len(), 1);
         assert_eq!(enrichment.references[0].path, "public.rs");
         assert_eq!(enrichment.withheld_count, 1);
+        let envelope = tool_enrichment_from_path_references(enrichment);
+        assert_eq!(envelope.references.len(), 1);
+        assert_eq!(envelope.references[0].kind, ToolEnrichmentKind::Path);
+        assert_eq!(envelope.references[0].target, "public.rs");
+        assert_eq!(
+            envelope.references[0].provenance,
+            ToolEnrichmentProvenance::Heuristic
+        );
+        assert_eq!(envelope.references[0].confidence, Some(0.9));
+        assert!(envelope.truncated);
     }
 
     #[test]

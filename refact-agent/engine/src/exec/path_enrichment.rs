@@ -2,45 +2,43 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 use regex::Regex;
-use serde::Serialize;
 
 const MAX_SCAN_BYTES: usize = 128 * 1024;
 const MAX_SCAN_LINES: usize = 2_000;
 const MAX_REFERENCES: usize = 50;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PathReference {
-    pub path: String,
-    pub line1: Option<u32>,
-    pub line2: Option<u32>,
-    pub column1: Option<u32>,
-    pub column2: Option<u32>,
-    pub source: String,
-    pub confidence: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PathReference {
+    pub(crate) path: String,
+    pub(crate) line1: Option<u32>,
+    pub(crate) line2: Option<u32>,
+    pub(crate) column1: Option<u32>,
+    pub(crate) column2: Option<u32>,
+    pub(crate) source: String,
+    pub(crate) confidence: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PathEnrichment {
-    pub schema_version: u8,
-    pub references: Vec<PathReference>,
-    pub truncated: bool,
-    pub omitted_count: usize,
-    pub withheld_count: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct PathEnrichmentCandidate {
-    pub reference: PathReference,
-    pub canonical_path: PathBuf,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PathEnrichment {
+    pub(crate) references: Vec<PathReference>,
+    pub(crate) truncated: bool,
+    pub(crate) omitted_count: usize,
+    pub(crate) withheld_count: usize,
 }
 
 #[derive(Debug, Clone)]
-pub struct CollectedPathEnrichment {
-    pub metadata: PathEnrichment,
-    pub candidates: Vec<PathEnrichmentCandidate>,
+pub(crate) struct PathEnrichmentCandidate {
+    pub(crate) reference: PathReference,
+    pub(crate) canonical_path: PathBuf,
 }
 
-pub fn collect(
+#[derive(Debug, Clone)]
+pub(crate) struct CollectedPathEnrichment {
+    pub(crate) metadata: PathEnrichment,
+    pub(crate) candidates: Vec<PathEnrichmentCandidate>,
+}
+
+pub(crate) fn collect(
     command: &str,
     cwd: &Path,
     workspace: &Path,
@@ -81,7 +79,6 @@ impl Collector {
             workspace,
             cwd,
             metadata: PathEnrichment {
-                schema_version: 1,
                 references: Vec::new(),
                 truncated: false,
                 omitted_count: 0,

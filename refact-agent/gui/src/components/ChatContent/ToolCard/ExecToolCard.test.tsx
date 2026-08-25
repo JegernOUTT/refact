@@ -20,8 +20,8 @@ import {
 } from "../../../features/Config/configSlice";
 import type {
   ExecToolMetadata,
-  PathEnrichmentMetadata,
   ToolCall,
+  ToolEnrichment,
   ToolMessage,
 } from "../../../services/refact/types";
 import {
@@ -35,7 +35,7 @@ type RenderExecToolOptions = {
   args?: Record<string, unknown>;
   content?: string;
   extra?: ExecToolMetadata;
-  pathEnrichment?: PathEnrichmentMetadata;
+  toolEnrichment?: ToolEnrichment;
   failed?: boolean;
   host?: Config["host"];
   subchatLog?: string[];
@@ -96,18 +96,20 @@ function renderExecTool(options: RenderExecToolOptions = {}) {
     subchat_log: options.subchatLog,
   };
   const message: ToolMessage | undefined =
-    options.content !== undefined || options.extra !== undefined
+    options.content !== undefined ||
+    options.extra !== undefined ||
+    options.toolEnrichment !== undefined
       ? {
           role: "tool",
           tool_call_id: id,
           content: options.content ?? "",
           tool_failed: options.failed,
           extra:
-            options.extra ?? options.pathEnrichment
+            options.extra ?? options.toolEnrichment
               ? {
                   ...(options.extra ? { exec: options.extra } : {}),
-                  ...(options.pathEnrichment
-                    ? { path_enrichment: options.pathEnrichment }
+                  ...(options.toolEnrichment
+                    ? { tool_enrichment: options.toolEnrichment }
                     : {}),
                 }
               : undefined,
@@ -172,7 +174,7 @@ describe("ExecToolCard", () => {
     expect(screen.getByText("0")).toBeInTheDocument();
   });
 
-  test("renders validated path references and opens a relative IDE file payload", () => {
+  test("renders unified path references and opens a relative IDE file payload", () => {
     const postMessageSpy = vi
       .spyOn(window, "postMessage")
       .mockImplementation(() => undefined);
@@ -184,22 +186,19 @@ describe("ExecToolCard", () => {
           status: "exited",
           short_description: "Run path diagnostics",
         },
-        pathEnrichment: {
+        toolEnrichment: {
           schema_version: 1,
           references: [
             {
-              path: "src/main.rs",
+              kind: "path",
+              target: "src/main.rs",
+              provenance: "heuristic",
               line1: 7,
               line2: 7,
-              column1: 3,
-              column2: 3,
               source: "diagnostic",
-              confidence: "high",
+              confidence: 0.9,
             },
           ],
-          truncated: false,
-          omitted_count: 0,
-          withheld_count: 0,
         },
       });
 
@@ -216,6 +215,32 @@ describe("ExecToolCard", () => {
     } finally {
       postMessageSpy.mockRestore();
     }
+  });
+
+  test("hides path references from a restricted unified envelope", () => {
+    renderExecTool({
+      extra: {
+        process_id: "exec_paths_restricted",
+        status: "exited",
+        short_description: "Run restricted diagnostics",
+      },
+      toolEnrichment: {
+        schema_version: 1,
+        references: [
+          {
+            kind: "path",
+            target: "src/main.rs",
+            provenance: "heuristic",
+          },
+        ],
+        privacy: { redacted: true, restricted: true },
+      },
+    });
+
+    fireEvent.click(screen.getByText("Run restricted diagnostics"));
+    expect(
+      screen.queryByTestId("exec-path-references"),
+    ).not.toBeInTheDocument();
   });
 
   test("collapses with delayed unmount and persists reopened state by tool-call id", () => {

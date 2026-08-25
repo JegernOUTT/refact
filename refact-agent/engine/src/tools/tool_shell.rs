@@ -238,7 +238,7 @@ impl Tool for ToolShell {
                 extra: exec_extra(&result.snapshot, &read, duration, None, tty),
                 ..Default::default()
             };
-            attach_path_enrichment(
+            attach_exec_path_references(
                 &mut message.extra,
                 gcx.clone(),
                 &destination,
@@ -314,7 +314,7 @@ impl Tool for ToolShell {
             extra: exec_extra(&result.snapshot, &read, duration, Some(timeout), tty),
             ..Default::default()
         };
-        attach_path_enrichment(
+        attach_exec_path_references(
             &mut message.extra,
             gcx.clone(),
             &destination,
@@ -735,7 +735,7 @@ fn exec_extra(
     extra
 }
 
-async fn attach_path_enrichment(
+async fn attach_exec_path_references(
     extra: &mut serde_json::Map<String, Value>,
     gcx: Arc<GlobalContext>,
     destination: &refact_privacy::Destination,
@@ -758,9 +758,9 @@ async fn attach_path_enrichment(
         crate::exec::path_enrichment::collect(command, cwd, workspace, output),
     )
     .await;
-    extra.insert(
-        "path_enrichment".to_string(),
-        serde_json::to_value(enrichment).unwrap_or(Value::Null),
+    refact_chat_api::attach_tool_enrichment_to_extra(
+        extra,
+        crate::privacy::records::tool_enrichment_from_path_references(enrichment),
     );
 }
 
@@ -1285,6 +1285,52 @@ mod tests {
         assert_eq!(exec["tty"], false);
         assert!(exec["process_id"].as_str().unwrap().starts_with("exec_"));
         assert!(message.tool_failed.is_none());
+    }
+
+    #[tokio::test]
+    async fn shell_path_references_use_the_unified_enrichment_envelope() {
+        let workspace = tempfile::tempdir().unwrap();
+        let file = workspace.path().join("src/lib.rs");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "pub fn visible() {}\n").unwrap();
+        let (_gcx, ccx) = ccx_with_workspace(workspace.path()).await;
+        let mut shell = ToolShell::default();
+        let (_, messages) = shell
+            .tool_execute(
+                ccx,
+                &"shell".to_string(),
+                &args(vec![
+                    ("command", json!("cat src/lib.rs")),
+                    ("description", json!("Read visible source")),
+                ]),
+            )
+            .await
+            .unwrap();
+        let message = only_chat_message(messages);
+        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
+
+        assert!(message.extra.get("path_enrichment").is_none());
+        assert_eq!(enrichment.references.len(), 1);
+        assert_eq!(
+            enrichment.references[0].kind,
+            refact_chat_api::ToolEnrichmentKind::Path
+        );
+        assert_eq!(enrichment.references[0].target, "src/lib.rs");
+        assert_eq!(
+            enrichment.references[0].provenance,
+            refact_chat_api::ToolEnrichmentProvenance::Heuristic
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_without_path_references_omits_enrichment() {
+        let message = run_shell(args(vec![
+            ("command", json!(success_command())),
+            ("description", json!("Run hello")),
+        ]))
+        .await;
+
+        assert!(message.extra.get("tool_enrichment").is_none());
     }
 
     #[tokio::test]

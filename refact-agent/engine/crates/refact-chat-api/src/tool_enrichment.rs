@@ -88,10 +88,6 @@ pub struct ToolEnrichmentReferenceDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub line1: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub line2: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_chat_id: Option<String>,
@@ -113,12 +109,6 @@ impl ToolEnrichmentReferenceDetails {
             normalize_optional_text(self.parent_chat_id, MAX_TARGET_CHARS, truncated);
         self.child_chat_id =
             normalize_optional_text(self.child_chat_id, MAX_TARGET_CHARS, truncated);
-        if self.line1.is_some_and(|line| line == 0)
-            || self.line2.is_some_and(|line| line == 0)
-            || matches!((self.line1, self.line2), (Some(start), Some(end)) if end < start)
-        {
-            return None;
-        }
         Some(self)
     }
 }
@@ -209,7 +199,7 @@ impl ToolEnrichmentReference {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolEnrichment {
     pub schema_version: u8,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub references: Vec<ToolEnrichmentReference>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
@@ -250,6 +240,10 @@ impl ToolEnrichment {
             }
         }
         self.references = deduped;
+        if self.privacy.redacted || self.privacy.restricted {
+            self.references.clear();
+            self.truncated = true;
+        }
         Some(self)
     }
 }
@@ -261,52 +255,57 @@ pub fn tool_enrichment_from_extra(extra: &Map<String, Value>) -> Option<ToolEnri
 }
 
 pub fn attach_tool_enrichment(message: &mut ChatMessage, enrichment: ToolEnrichment) -> bool {
+    attach_tool_enrichment_to_extra(&mut message.extra, enrichment)
+}
+
+pub fn attach_tool_enrichment_to_extra(
+    extra: &mut Map<String, Value>,
+    enrichment: ToolEnrichment,
+) -> bool {
     let Some(mut enrichment) = enrichment.normalized() else {
         return false;
     };
-    if let Some(existing_value) = message.extra.get(TOOL_ENRICHMENT_EXTRA_KEY) {
-        let Ok(existing) = serde_json::from_value::<ToolEnrichment>(existing_value.clone()) else {
-            return false;
-        };
-        let Some(existing) = existing.normalized() else {
-            return false;
-        };
+    if enrichment.references.is_empty()
+        && !enrichment.privacy.redacted
+        && !enrichment.privacy.restricted
+    {
+        return false;
+    }
+    if let Some(existing) = extra
+        .get(TOOL_ENRICHMENT_EXTRA_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ToolEnrichment>(value).ok())
+        .and_then(ToolEnrichment::normalized)
+    {
+        if existing.privacy.redacted || existing.privacy.restricted {
+            return replace_tool_enrichment(extra, existing);
+        }
         enrichment = merge_tool_enrichment(existing, enrichment);
     }
-    message.extra.insert(
-        TOOL_ENRICHMENT_EXTRA_KEY.to_string(),
-        serde_json::to_value(enrichment).expect("tool enrichment should serialize"),
-    );
-    true
+    replace_tool_enrichment(extra, enrichment)
 }
 
 pub fn redact_tool_enrichment(message: &mut ChatMessage) -> bool {
-    let Some(value) = message.extra.get(TOOL_ENRICHMENT_EXTRA_KEY).cloned() else {
-        return false;
-    };
-    let Ok(enrichment) = serde_json::from_value::<ToolEnrichment>(value) else {
-        message.extra.remove(TOOL_ENRICHMENT_EXTRA_KEY);
-        return true;
-    };
-    let Some(mut enrichment) = enrichment.normalized() else {
-        message.extra.remove(TOOL_ENRICHMENT_EXTRA_KEY);
-        return true;
-    };
-    enrichment.references.clear();
-    enrichment.truncated = true;
+    let mut enrichment = message
+        .extra
+        .get(TOOL_ENRICHMENT_EXTRA_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ToolEnrichment>(value).ok())
+        .and_then(ToolEnrichment::normalized)
+        .unwrap_or_default();
     enrichment.privacy.redacted = true;
     enrichment.privacy.restricted = true;
-    message.extra.insert(
-        TOOL_ENRICHMENT_EXTRA_KEY.to_string(),
-        serde_json::to_value(enrichment).expect("tool enrichment should serialize"),
-    );
-    true
+    attach_tool_enrichment(message, enrichment)
 }
 
 fn merge_tool_enrichment(mut existing: ToolEnrichment, incoming: ToolEnrichment) -> ToolEnrichment {
+    if existing.privacy.redacted || existing.privacy.restricted {
+        return existing;
+    }
+    if incoming.privacy.redacted || incoming.privacy.restricted {
+        return incoming;
+    }
     existing.truncated |= incoming.truncated;
-    existing.privacy.redacted |= incoming.privacy.redacted;
-    existing.privacy.restricted |= incoming.privacy.restricted;
     for reference in incoming.references {
         if let Some(existing_reference) = existing
             .references
@@ -324,13 +323,22 @@ fn merge_tool_enrichment(mut existing: ToolEnrichment, incoming: ToolEnrichment)
 }
 
 fn merge_reference(existing: &mut ToolEnrichmentReference, incoming: ToolEnrichmentReference) {
-    if incoming.provenance.priority() > existing.provenance.priority() {
+    let incoming_has_higher_provenance =
+        incoming.provenance.priority() > existing.provenance.priority();
+    if incoming_has_higher_provenance {
         existing.provenance = incoming.provenance;
+        existing.label = incoming.label;
+        existing.summary = incoming.summary;
+        existing.status = incoming.status;
+        existing.source = incoming.source;
+        existing.details = incoming.details;
+    } else {
+        existing.label = existing.label.take().or(incoming.label);
+        existing.summary = existing.summary.take().or(incoming.summary);
+        existing.status = existing.status.take().or(incoming.status);
+        existing.source = existing.source.take().or(incoming.source);
+        existing.details = existing.details.take().or(incoming.details);
     }
-    existing.label = existing.label.take().or(incoming.label);
-    existing.summary = existing.summary.take().or(incoming.summary);
-    existing.status = existing.status.take().or(incoming.status);
-    existing.source = existing.source.take().or(incoming.source);
     existing.count = match (existing.count, incoming.count) {
         (Some(left), Some(right)) => Some(left.max(right)),
         (left @ Some(_), None) => left,
@@ -343,7 +351,14 @@ fn merge_reference(existing: &mut ToolEnrichmentReference, incoming: ToolEnrichm
     };
     existing.truncated |= incoming.truncated;
     existing.redacted |= incoming.redacted;
-    existing.details = existing.details.take().or(incoming.details);
+}
+
+fn replace_tool_enrichment(extra: &mut Map<String, Value>, enrichment: ToolEnrichment) -> bool {
+    let Ok(value) = serde_json::to_value(enrichment) else {
+        return false;
+    };
+    extra.insert(TOOL_ENRICHMENT_EXTRA_KEY.to_string(), value);
+    true
 }
 
 fn normalize_target(kind: ToolEnrichmentKind, target: &str) -> Option<String> {
@@ -584,10 +599,25 @@ mod tests {
         let mut heuristic = reference(ToolEnrichmentKind::Symbol, "crate::thing");
         heuristic.provenance = ToolEnrichmentProvenance::Heuristic;
         heuristic.confidence = Some(0.2);
+        heuristic.label = Some("stale label".to_string());
+        heuristic.summary = Some("stale summary".to_string());
+        heuristic.status = Some("stale status".to_string());
+        heuristic.source = Some("stale source".to_string());
+        heuristic.details = Some(ToolEnrichmentReferenceDetails {
+            action: Some("stale action".to_string()),
+            ..Default::default()
+        });
         let mut native = reference(ToolEnrichmentKind::Symbol, "crate::thing");
         native.provenance = ToolEnrichmentProvenance::Native;
         native.confidence = Some(0.9);
+        native.label = Some("native label".to_string());
+        native.summary = Some("native summary".to_string());
         native.status = Some("found".to_string());
+        native.source = Some("native source".to_string());
+        native.details = Some(ToolEnrichmentReferenceDetails {
+            action: Some("native action".to_string()),
+            ..Default::default()
+        });
 
         assert!(attach_tool_enrichment(
             &mut message,
@@ -611,8 +641,39 @@ mod tests {
             ToolEnrichmentProvenance::Native
         );
         assert_eq!(enrichment.references[0].confidence, Some(0.9));
+        assert_eq!(enrichment.references[0].count, None);
+        assert_eq!(
+            enrichment.references[0].label.as_deref(),
+            Some("native label")
+        );
+        assert_eq!(
+            enrichment.references[0].summary.as_deref(),
+            Some("native summary")
+        );
         assert_eq!(enrichment.references[0].status.as_deref(), Some("found"));
+        assert_eq!(
+            enrichment.references[0].source.as_deref(),
+            Some("native source")
+        );
+        assert_eq!(
+            enrichment.references[0]
+                .details
+                .as_ref()
+                .and_then(|details| details.action.as_deref()),
+            Some("native action")
+        );
         assert_eq!(message.content.content_text_only(), "raw result");
+    }
+
+    #[test]
+    fn empty_enrichment_does_not_create_a_key() {
+        let mut message = ChatMessage::new("tool".to_string(), "raw result".to_string());
+
+        assert!(!attach_tool_enrichment(
+            &mut message,
+            ToolEnrichment::default(),
+        ));
+        assert!(!message.extra.contains_key(TOOL_ENRICHMENT_EXTRA_KEY));
     }
 
     #[test]
@@ -632,6 +693,74 @@ mod tests {
         assert!(enrichment.privacy.redacted);
         assert!(enrichment.privacy.restricted);
         assert_eq!(message.content.content_text_only(), "raw result");
+    }
+
+    #[test]
+    fn redacted_enrichment_remains_terminal_after_later_attachment() {
+        let mut message = ChatMessage::new("tool".to_string(), "raw result".to_string());
+        assert!(attach_tool_enrichment(
+            &mut message,
+            ToolEnrichment {
+                references: vec![reference(ToolEnrichmentKind::Path, "src/lib.rs")],
+                ..Default::default()
+            },
+        ));
+        assert!(redact_tool_enrichment(&mut message));
+
+        assert!(attach_tool_enrichment(
+            &mut message,
+            ToolEnrichment {
+                references: vec![reference(ToolEnrichmentKind::Path, "src/readded.rs")],
+                ..Default::default()
+            },
+        ));
+
+        let enrichment = tool_enrichment_from_extra(&message.extra).unwrap();
+        assert!(enrichment.references.is_empty());
+        assert!(enrichment.privacy.redacted);
+        assert!(enrichment.privacy.restricted);
+    }
+
+    #[test]
+    fn redaction_installs_a_terminal_envelope_without_existing_metadata() {
+        let mut message = ChatMessage::new("tool".to_string(), "raw result".to_string());
+
+        assert!(redact_tool_enrichment(&mut message));
+        assert!(attach_tool_enrichment(
+            &mut message,
+            ToolEnrichment {
+                references: vec![reference(ToolEnrichmentKind::Path, "src/readded.rs")],
+                ..Default::default()
+            },
+        ));
+
+        let enrichment = tool_enrichment_from_extra(&message.extra).unwrap();
+        assert!(enrichment.references.is_empty());
+        assert!(enrichment.privacy.redacted);
+        assert!(enrichment.privacy.restricted);
+        assert_eq!(
+            message.extra[TOOL_ENRICHMENT_EXTRA_KEY]["references"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn malformed_existing_value_is_replaced_by_valid_enrichment() {
+        let mut message = ChatMessage::new("tool".to_string(), "raw result".to_string());
+        message
+            .extra
+            .insert(TOOL_ENRICHMENT_EXTRA_KEY.to_string(), json!(null));
+
+        assert!(attach_tool_enrichment(
+            &mut message,
+            ToolEnrichment {
+                references: vec![reference(ToolEnrichmentKind::Path, "src/lib.rs")],
+                ..Default::default()
+            },
+        ));
+        let enrichment = tool_enrichment_from_extra(&message.extra).unwrap();
+        assert_eq!(enrichment.references[0].target, "src/lib.rs");
+        assert_ne!(message.extra[TOOL_ENRICHMENT_EXTRA_KEY], Value::Null);
     }
 
     #[test]

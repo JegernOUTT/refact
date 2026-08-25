@@ -167,24 +167,6 @@ export type ExecTranscriptMetadata = {
   is_truncated?: boolean;
 };
 
-export type PathEnrichmentReference = {
-  path: string;
-  line1: number | null;
-  line2: number | null;
-  column1: number | null;
-  column2: number | null;
-  source: "argv" | "diagnostic";
-  confidence: "high" | "medium" | "low";
-};
-
-export type PathEnrichmentMetadata = {
-  schema_version: 1;
-  references: PathEnrichmentReference[];
-  truncated: boolean;
-  omitted_count: number;
-  withheld_count: number;
-};
-
 export type ExecProcessMetadata = {
   process_id?: string;
   status?: ExecProcessStatus;
@@ -312,8 +294,6 @@ export type ToolEnrichmentReference = {
     hunk_count?: number;
     short_sha?: string;
     scope?: string;
-    line1?: number;
-    line2?: number;
     parent_chat_id?: string;
     child_chat_id?: string;
     conflict?: boolean;
@@ -399,10 +379,6 @@ function isToolEnrichmentReference(
           typeof value.details.short_sha === "string") &&
         (value.details.scope === undefined ||
           typeof value.details.scope === "string") &&
-        (value.details.line1 === undefined ||
-          typeof value.details.line1 === "number") &&
-        (value.details.line2 === undefined ||
-          typeof value.details.line2 === "number") &&
         (value.details.parent_chat_id === undefined ||
           typeof value.details.parent_chat_id === "string") &&
         (value.details.child_chat_id === undefined ||
@@ -439,43 +415,81 @@ export function getToolEnrichment(
   return value as ToolEnrichment;
 }
 
-export function extractPathEnrichmentMetadata(
+export function getToolEnrichmentPathReferences(
   extra: Record<string, unknown> | undefined,
-): PathEnrichmentMetadata | undefined {
-  const enrichment = extra?.path_enrichment;
-  if (!isRecord(enrichment) || enrichment.schema_version !== 1)
-    return undefined;
-  if (!Array.isArray(enrichment.references)) return undefined;
+): ToolEnrichmentReference[] {
+  const enrichment = getToolEnrichment(extra);
   if (
-    typeof enrichment.truncated !== "boolean" ||
-    typeof enrichment.omitted_count !== "number" ||
-    typeof enrichment.withheld_count !== "number"
+    enrichment?.privacy?.redacted === true ||
+    enrichment?.privacy?.restricted === true
   ) {
-    return undefined;
+    return [];
   }
-  const references = enrichment.references.filter(
-    (reference): reference is PathEnrichmentReference =>
-      isRecord(reference) &&
-      typeof reference.path === "string" &&
-      !reference.path.startsWith("/") &&
-      !reference.path.includes("..") &&
-      (reference.line1 === null || typeof reference.line1 === "number") &&
-      (reference.line2 === null || typeof reference.line2 === "number") &&
-      (reference.column1 === null || typeof reference.column1 === "number") &&
-      (reference.column2 === null || typeof reference.column2 === "number") &&
-      (reference.source === "argv" || reference.source === "diagnostic") &&
-      (reference.confidence === "high" ||
-        reference.confidence === "medium" ||
-        reference.confidence === "low"),
+  return (
+    enrichment?.references.filter(
+      (reference) =>
+        reference.kind === "path" &&
+        reference.redacted !== true &&
+        isSafeWorkspacePath(reference.target),
+    ) ?? getLegacyPathEnrichmentReferences(extra)
   );
-  if (references.length !== enrichment.references.length) return undefined;
-  return {
-    schema_version: 1,
-    references,
-    truncated: enrichment.truncated,
-    omitted_count: enrichment.omitted_count,
-    withheld_count: enrichment.withheld_count,
-  };
+}
+
+function isSafeWorkspacePath(value: string): boolean {
+  return (
+    value.length > 0 &&
+    !value.startsWith("/") &&
+    !value.includes("\\") &&
+    value.split("/").every((component) => component !== "..")
+  );
+}
+
+/** @deprecated Remove after all persisted tool results use `tool_enrichment`. */
+function getLegacyPathEnrichmentReferences(
+  extra: Record<string, unknown> | undefined,
+): ToolEnrichmentReference[] {
+  const legacy = extra?.path_enrichment;
+  if (
+    !isRecord(legacy) ||
+    legacy.schema_version !== 1 ||
+    !Array.isArray(legacy.references)
+  ) {
+    return [];
+  }
+  return legacy.references.flatMap((reference) => {
+    if (
+      !isRecord(reference) ||
+      typeof reference.path !== "string" ||
+      !isSafeWorkspacePath(reference.path)
+    ) {
+      return [];
+    }
+    const line1 = positiveInteger(reference.line1);
+    const line2 = positiveInteger(reference.line2);
+    if (
+      (reference.line1 !== null && reference.line1 !== undefined && !line1) ||
+      (reference.line2 !== null && reference.line2 !== undefined && !line2)
+    ) {
+      return [];
+    }
+    return [
+      {
+        kind: "path",
+        target: reference.path,
+        provenance: "heuristic",
+        line1,
+        line2,
+        source:
+          typeof reference.source === "string" ? reference.source : undefined,
+      },
+    ];
+  });
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? value
+    : undefined;
 }
 
 export type MultiModalToolContent = {

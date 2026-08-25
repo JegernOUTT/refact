@@ -23,10 +23,10 @@ pub use chat_local_types::{
 };
 pub use notification_event::{NotificationEvent, NotificationQuestion};
 pub use tool_enrichment::{
-    attach_tool_enrichment, redact_tool_enrichment, sanitize_http_url, tool_enrichment_from_extra,
-    ToolEnrichment, ToolEnrichmentKind, ToolEnrichmentPrivacy, ToolEnrichmentProvenance,
+    attach_tool_enrichment, attach_tool_enrichment_to_extra, redact_tool_enrichment,
+    sanitize_http_url, tool_enrichment_from_extra, ToolEnrichment, ToolEnrichmentKind,
+    ToolEnrichmentPrivacy, ToolEnrichmentProvenance, ToolEnrichmentReference,
     ToolEnrichmentReferenceDetails, TOOL_ENRICHMENT_EXTRA_KEY, TOOL_ENRICHMENT_SCHEMA_VERSION,
-    ToolEnrichmentReference,
 };
 pub use refact_core::buddy_meta::BuddyThreadMeta;
 pub use refact_core::chat_types::{ChatMessage, ContextFile};

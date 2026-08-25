@@ -13,12 +13,12 @@ import type {
   ExecProcessMetadata,
   ExecProcessStatus,
   ExecToolMetadata,
-  PathEnrichmentReference,
   ToolCall,
+  ToolEnrichmentReference,
 } from "../../../services/refact/types";
 import {
   extractExecMetadata,
-  extractPathEnrichmentMetadata,
+  getToolEnrichmentPathReferences,
   isExecProcessStatus,
 } from "../../../services/refact/types";
 import { ideOpenFile } from "../../../hooks/useEventBusForIDE";
@@ -349,10 +349,10 @@ function copyableOutputText(content: string | null): string | undefined {
   return content;
 }
 
-function pathReferenceLabel(reference: PathEnrichmentReference): string {
+function pathReferenceLabel(reference: ToolEnrichmentReference): string {
   return reference.line1
-    ? `${reference.path}:${reference.line1}`
-    : reference.path;
+    ? `${reference.target}:${reference.line1}`
+    : reference.target;
 }
 
 function useRunningNowMs(isBusy: boolean): number {
@@ -384,7 +384,7 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
       ? maybeResult.content
       : null;
   const metadata = getExecMetadata(maybeResult?.extra);
-  const pathEnrichment = extractPathEnrichmentMetadata(maybeResult?.extra);
+  const pathReferences = getToolEnrichmentPathReferences(maybeResult?.extra);
   const args = useMemo(
     () => parseArgs(toolCall.function.arguments),
     [toolCall.function.arguments],
@@ -443,12 +443,12 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
   const handleOpenPath = useCallback(
     (
       event: React.MouseEvent<HTMLButtonElement>,
-      reference: PathEnrichmentReference,
+      reference: ToolEnrichmentReference,
     ) => {
       event.stopPropagation();
       postMessage(
         ideOpenFile({
-          file_path: reference.path,
+          file_path: reference.target,
           line: reference.line1 ?? undefined,
         }),
       );
@@ -542,17 +542,17 @@ export const ExecToolCard: React.FC<ExecToolCardProps> = ({
             processId={process.processId}
           />
 
-          {pathEnrichment && pathEnrichment.references.length > 0 && (
+          {pathReferences.length > 0 && (
             <Flex
               gap="1"
               wrap="wrap"
               className={styles.pathReferences}
               data-testid="exec-path-references"
             >
-              {pathEnrichment.references.map((reference) => (
+              {pathReferences.map((reference) => (
                 <Button
-                  key={`${reference.path}:${reference.line1 ?? ""}:${
-                    reference.column1 ?? ""
+                  key={`${reference.target}:${reference.line1 ?? ""}:${
+                    reference.line2 ?? ""
                   }`}
                   type="button"
                   size="sm"

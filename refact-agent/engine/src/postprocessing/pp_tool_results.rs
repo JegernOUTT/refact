@@ -128,30 +128,6 @@ fn native_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
             }));
         }
     }
-    if let Some(path_enrichment) = message.extra.get("path_enrichment") {
-        if let Some(paths) = path_enrichment
-            .get("references")
-            .and_then(serde_json::Value::as_array)
-        {
-            references.extend(paths.iter().filter_map(|path| {
-                let target = path.get("path")?.as_str()?;
-                let mut reference = reference(ToolEnrichmentKind::Path, target);
-                reference.line1 = path
-                    .get("line1")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|line| usize::try_from(line).ok());
-                reference.line2 = path
-                    .get("line2")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|line| usize::try_from(line).ok());
-                reference.source = path
-                    .get("source")
-                    .and_then(serde_json::Value::as_str)
-                    .map(ToString::to_string);
-                Some(reference)
-            }));
-        }
-    }
     if let Some(results) = message
         .extra
         .get("search_results")
@@ -390,9 +366,9 @@ fn diff_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
         }) {
             if let Some(details) = reference.details.as_mut() {
                 details.hunk_count = Some(details.hunk_count.unwrap_or(0).saturating_add(1));
-                details.line1 = details.line1.min(u32::try_from(chunk.line1).ok());
-                details.line2 = details.line2.max(u32::try_from(chunk.line2).ok());
             }
+            reference.line1 = reference.line1.min(Some(chunk.line1));
+            reference.line2 = reference.line2.max(Some(chunk.line2));
         } else {
             let mut reference = reference(ToolEnrichmentKind::Diff, &chunk.file_name);
             reference.status = Some(applied.to_string());
@@ -400,10 +376,10 @@ fn diff_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
                 action: Some(chunk.file_action),
                 rename_to: chunk.file_name_rename,
                 hunk_count: Some(1),
-                line1: u32::try_from(chunk.line1).ok(),
-                line2: u32::try_from(chunk.line2).ok(),
                 ..Default::default()
             });
+            reference.line1 = Some(chunk.line1);
+            reference.line2 = Some(chunk.line2);
             references.push(reference);
         }
     }
@@ -467,20 +443,20 @@ fn review_references(message: &ChatMessage) -> Vec<ToolEnrichmentReference> {
                     .get("evidence_kind")
                     .and_then(serde_json::Value::as_str)
                     .map(ToString::to_string),
-                line1: value
-                    .get("line1")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|line| u32::try_from(line).ok()),
-                line2: value
-                    .get("line2")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|line| u32::try_from(line).ok()),
                 scope: value
                     .get("scope")
                     .and_then(serde_json::Value::as_str)
                     .map(ToString::to_string),
                 ..Default::default()
             });
+            reference.line1 = value
+                .get("line1")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|line| usize::try_from(line).ok());
+            reference.line2 = value
+                .get("line2")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|line| usize::try_from(line).ok());
             Some(reference)
         })
         .collect()
@@ -569,32 +545,6 @@ mod tests {
         assert!(!serde_json::to_string(&enrichment)
             .unwrap()
             .contains("large canonical payload"));
-    }
-
-    #[test]
-    fn native_enrichment_preserves_structured_process_path_ranges() {
-        let mut message = ChatMessage::new("tool".to_string(), "raw result".to_string());
-        message.extra.insert(
-            "path_enrichment".to_string(),
-            serde_json::json!({
-                "references": [{
-                    "path": "src/lib.rs",
-                    "line1": 4,
-                    "line2": 8,
-                    "source": "argv"
-                }]
-            }),
-        );
-
-        enrich_tool_messages(std::slice::from_mut(&mut message));
-
-        let enrichment = refact_chat_api::tool_enrichment_from_extra(&message.extra).unwrap();
-        assert_eq!(enrichment.references.len(), 1);
-        assert_eq!(enrichment.references[0].target, "src/lib.rs");
-        assert_eq!(enrichment.references[0].line1, Some(4));
-        assert_eq!(enrichment.references[0].line2, Some(8));
-        assert_eq!(enrichment.references[0].source.as_deref(), Some("argv"));
-        assert_eq!(message.content.content_text_only(), "raw result");
     }
 
     #[test]
