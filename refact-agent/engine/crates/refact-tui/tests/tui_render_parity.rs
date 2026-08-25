@@ -226,7 +226,7 @@ fn transcript_cells_golden_snapshot() {
     - keep refact data
 
 
-    ———
+    ————————————————————————————————————————————————————————————————————————————————————————————————
 
 
     ## Plan updates

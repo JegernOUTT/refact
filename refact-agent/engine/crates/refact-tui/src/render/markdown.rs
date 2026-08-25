@@ -2,7 +2,9 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    Alignment, CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd,
+};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use regex_lite::Regex;
@@ -105,6 +107,8 @@ pub fn render_markdown_hyperlink_lines_with_options(
     let mut parser_options = Options::empty();
     parser_options.insert(Options::ENABLE_TABLES);
     parser_options.insert(Options::ENABLE_STRIKETHROUGH);
+    parser_options.insert(Options::ENABLE_FOOTNOTES);
+    parser_options.insert(Options::ENABLE_TASKLISTS);
     let parser = Parser::new_ext(source, parser_options).into_offset_iter();
     let cwd = std::env::current_dir().ok();
     let mut writer = Writer::new(options, cwd, source);
@@ -205,8 +209,11 @@ impl IndentContext {
 #[derive(Clone, Debug)]
 struct LinkState {
     destination: String,
+    title: String,
     show_destination: bool,
     local_target_display: Option<String>,
+    is_image: bool,
+    has_label: bool,
 }
 
 struct Writer {
@@ -230,6 +237,8 @@ struct Writer {
     current_line_style: Style,
     line_ends_with_local_link_target: bool,
     pending_local_link_soft_break: bool,
+    html_block_active: bool,
+    footnote_definition_active: bool,
     cwd: Option<PathBuf>,
 }
 
@@ -256,6 +265,8 @@ impl Writer {
             current_line_style: Style::default(),
             line_ends_with_local_link_target: false,
             pending_local_link_soft_break: false,
+            html_block_active: false,
+            footnote_definition_active: false,
             cwd,
         }
     }
@@ -286,7 +297,8 @@ impl Writer {
             Event::HardBreak => self.hard_break(),
             Event::Rule => self.rule(),
             Event::Html(html) | Event::InlineHtml(html) => self.html(html.as_ref()),
-            _ => {}
+            Event::FootnoteReference(name) => self.footnote_reference(name.as_ref()),
+            Event::TaskListMarker(checked) => self.task_list_marker(checked),
         }
     }
 
@@ -328,9 +340,24 @@ impl Writer {
             Tag::Strikethrough => self.push_inline_style(self.styles.strikethrough),
             Tag::CodeBlock(kind) => self.start_code_block(kind),
             Tag::BlockQuote => self.start_blockquote(),
+            Tag::HtmlBlock => self.start_html_block(),
             Tag::List(start) => self.start_list(start),
             Tag::Item => self.start_item(),
-            Tag::Link { dest_url, .. } => self.push_link(dest_url.to_string()),
+            Tag::FootnoteDefinition(name) => self.start_footnote_definition(name.to_string()),
+            Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                ..
+            } => self.push_link(
+                dest_url.to_string(),
+                title.to_string(),
+                false,
+                !matches!(link_type, LinkType::Autolink | LinkType::Email),
+            ),
+            Tag::Image {
+                dest_url, title, ..
+            } => self.push_link(dest_url.to_string(), title.to_string(), true, true),
             Tag::Table(alignments) => self.start_table(alignments),
             Tag::TableHead => {
                 if let Some(table) = &mut self.table {
@@ -358,9 +385,12 @@ impl Writer {
             TagEnd::Heading(_) => self.end_heading(),
             TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => self.pop_inline_style(),
             TagEnd::Link => self.pop_link(),
+            TagEnd::Image => self.pop_link(),
             TagEnd::BlockQuote => self.end_blockquote(),
+            TagEnd::HtmlBlock => self.end_html_block(),
             TagEnd::List(_) => self.end_list(),
             TagEnd::Item => self.end_item(),
+            TagEnd::FootnoteDefinition => self.end_footnote_definition(),
             TagEnd::TableCell => {
                 if let Some(table) = &mut self.table {
                     table.end_cell();
@@ -382,7 +412,7 @@ impl Writer {
     }
 
     fn start_paragraph(&mut self) {
-        if self.in_table_cell() {
+        if self.in_table_cell() || self.footnote_definition_active {
             return;
         }
         if self.needs_newline {
@@ -393,7 +423,7 @@ impl Writer {
     }
 
     fn end_paragraph(&mut self) {
-        if self.in_table_cell() {
+        if self.in_table_cell() || self.footnote_definition_active {
             return;
         }
         self.flush_current_line();
@@ -431,8 +461,9 @@ impl Writer {
         if self.in_table_cell() {
             return;
         }
+        let nested = self.is_blockquote_active();
         self.flush_current_line();
-        if self.needs_newline && !self.out.is_empty() {
+        if self.needs_newline && !self.out.is_empty() && !nested {
             self.push_blank_line();
         }
         self.indent_stack.push(IndentContext::new(
@@ -449,6 +480,40 @@ impl Writer {
         }
         self.flush_current_line();
         self.indent_stack.pop();
+        self.needs_newline = true;
+    }
+
+    fn start_html_block(&mut self) {
+        self.flush_current_line();
+        if self.needs_newline && !self.out.is_empty() {
+            self.push_blank_line();
+        }
+        self.html_block_active = true;
+        self.needs_newline = false;
+    }
+
+    fn end_html_block(&mut self) {
+        self.flush_current_line();
+        self.html_block_active = false;
+        self.needs_newline = true;
+    }
+
+    fn start_footnote_definition(&mut self, name: String) {
+        self.flush_current_line();
+        if self.needs_newline && !self.out.is_empty() {
+            self.push_blank_line();
+        }
+        self.push_line(Line::from(Span::styled(
+            format!("[^{name}]: "),
+            self.styles.muted,
+        )));
+        self.footnote_definition_active = true;
+        self.needs_newline = false;
+    }
+
+    fn end_footnote_definition(&mut self) {
+        self.flush_current_line();
+        self.footnote_definition_active = false;
         self.needs_newline = true;
     }
 
@@ -526,7 +591,8 @@ impl Writer {
             self.push_blank_line();
         }
         self.code_block = Some(CodeBlockState {
-            lang: code_block_lang(kind),
+            lang: code_block_lang(&kind),
+            is_indented: matches!(kind, CodeBlockKind::Indented),
             source: String::new(),
         });
         self.needs_newline = false;
@@ -545,6 +611,7 @@ impl Writer {
         if self.suppressing_local_link_label() {
             return;
         }
+        self.mark_link_label(text);
         self.line_ends_with_local_link_target = false;
         if self.in_table_cell() {
             self.push_text_to_table_cell(text);
@@ -568,6 +635,7 @@ impl Writer {
         if self.suppressing_local_link_label() {
             return;
         }
+        self.mark_link_label(&code);
         self.line_ends_with_local_link_target = false;
         let span = Span::styled(code, self.current_inline_style().patch(self.styles.code));
         if self.in_table_cell() {
@@ -585,8 +653,20 @@ impl Writer {
         if self.suppressing_local_link_label() {
             return;
         }
+        self.mark_link_label(html);
         self.line_ends_with_local_link_target = false;
         let style = self.current_inline_style().patch(self.styles.muted);
+        if self.html_block_active {
+            for line in html.split_terminator('\n') {
+                let line = line.strip_suffix('\r').unwrap_or(line);
+                if line.is_empty() {
+                    self.push_blank_line();
+                } else {
+                    self.push_line(Line::from(Span::styled(line.to_string(), style)));
+                }
+            }
+            return;
+        }
         for (idx, line) in html.lines().enumerate() {
             if idx > 0 {
                 self.push_line(Line::default());
@@ -601,6 +681,9 @@ impl Writer {
 
     fn soft_break(&mut self) {
         if self.suppressing_local_link_label() {
+            return;
+        }
+        if self.html_block_active {
             return;
         }
         if self.in_table_cell() {
@@ -633,8 +716,16 @@ impl Writer {
         if self.needs_newline && !self.out.is_empty() {
             self.push_blank_line();
         }
+        let available_width = self.options.width.map(|width| {
+            let prefix_width = self
+                .prefix_spans(false)
+                .iter()
+                .map(|span| span.content.as_ref().width())
+                .sum::<usize>();
+            width.saturating_sub(prefix_width).max(1)
+        });
         self.push_prewrapped_line(HyperlinkLine::new(Line::from(Span::styled(
-            "———",
+            "—".repeat(available_width.unwrap_or(3)),
             self.styles.muted,
         ))));
         self.needs_newline = true;
@@ -650,7 +741,10 @@ impl Writer {
             plain_code_lines(&code_block.source)
         };
         let mut pending_marker_line = self.pending_marker_line;
-        for line in code_lines {
+        for mut line in code_lines {
+            if code_block.is_indented {
+                line.spans.insert(0, Span::raw("    "));
+            }
             self.push_code_line(HyperlinkLine::new(line), pending_marker_line);
             pending_marker_line = false;
         }
@@ -692,21 +786,38 @@ impl Writer {
         self.needs_newline = true;
     }
 
-    fn push_link(&mut self, destination: String) {
+    fn push_link(
+        &mut self,
+        destination: String,
+        title: String,
+        is_image: bool,
+        show_destination: bool,
+    ) {
         self.push_inline_style(self.styles.link);
         self.link = Some(LinkState {
-            show_destination: should_render_link_destination(&destination),
-            local_target_display: if is_local_path_like_link(&destination) {
+            show_destination: is_image
+                || show_destination && should_render_link_destination(&destination),
+            local_target_display: if !is_image && is_local_path_like_link(&destination) {
                 render_local_link_target(&destination, self.cwd.as_deref())
             } else {
                 None
             },
             destination,
+            title,
+            is_image,
+            has_label: false,
         });
     }
 
     fn pop_link(&mut self) {
         self.pop_inline_style();
+        if self
+            .link
+            .as_ref()
+            .is_some_and(|link| link.is_image && !link.has_label)
+        {
+            self.push_text_spans("image", self.current_inline_style().patch(self.styles.link));
+        }
         let Some(link) = self.link.take() else {
             return;
         };
@@ -719,6 +830,11 @@ impl Writer {
                     web_destination(&link.destination).as_deref(),
                 );
                 self.push_annotated_to_table_cell(destination);
+                if !link.title.is_empty() {
+                    self.push_span_to_table_cell(Span::raw(" \""));
+                    self.push_span_to_table_cell(Span::styled(link.title, self.styles.muted));
+                    self.push_span_to_table_cell(Span::raw("\""));
+                }
                 self.push_span_to_table_cell(Span::raw(")"));
             } else {
                 self.push_span(Span::raw(" ("));
@@ -728,6 +844,11 @@ impl Writer {
                     web_destination(&link.destination).as_deref(),
                 );
                 self.push_annotated(destination);
+                if !link.title.is_empty() {
+                    self.push_span(Span::raw(" \""));
+                    self.push_span(Span::styled(link.title, self.styles.muted));
+                    self.push_span(Span::raw("\""));
+                }
                 self.push_span(Span::raw(")"));
             }
         } else if let Some(local_target_display) = link.local_target_display {
@@ -740,6 +861,11 @@ impl Writer {
                     self.push_line(Line::default());
                 }
                 self.push_span(span);
+                if !link.title.is_empty() {
+                    self.push_span(Span::raw(" \""));
+                    self.push_span(Span::styled(link.title, self.styles.muted));
+                    self.push_span(Span::raw("\""));
+                }
                 self.line_ends_with_local_link_target = true;
             }
         }
@@ -750,6 +876,41 @@ impl Writer {
             .as_ref()
             .and_then(|link| link.local_target_display.as_ref())
             .is_some()
+    }
+
+    fn mark_link_label(&mut self, text: &str) {
+        if !text.is_empty() {
+            if let Some(link) = &mut self.link {
+                link.has_label = true;
+            }
+        }
+    }
+
+    fn footnote_reference(&mut self, name: &str) {
+        let span = Span::styled(format!("[^{name}]"), self.styles.muted);
+        if self.in_table_cell() {
+            self.push_span_to_table_cell(span);
+        } else {
+            if self.pending_marker_line {
+                self.push_line(Line::default());
+            }
+            self.push_span(span);
+        }
+    }
+
+    fn task_list_marker(&mut self, checked: bool) {
+        if self.pending_marker_line {
+            self.push_line(Line::default());
+        }
+        let span = Span::styled(
+            if checked { "[x] " } else { "[ ] " },
+            self.current_inline_style().patch(self.styles.code),
+        );
+        if self.in_table_cell() {
+            self.push_span_to_table_cell(span);
+        } else {
+            self.push_span(span);
+        }
     }
 
     fn push_inline_style(&mut self, style: Style) {
@@ -1051,6 +1212,7 @@ impl Writer {
 
 struct CodeBlockState {
     lang: String,
+    is_indented: bool,
     source: String,
 }
 
@@ -1258,7 +1420,7 @@ fn plain_code_lines(code: &str) -> Vec<Line<'static>> {
     lines
 }
 
-fn code_block_lang(kind: CodeBlockKind<'_>) -> String {
+fn code_block_lang(kind: &CodeBlockKind<'_>) -> String {
     match kind {
         CodeBlockKind::Fenced(lang) => lang
             .split(|ch: char| ch.is_whitespace() || ch == ',')
@@ -1371,6 +1533,34 @@ mod tests {
     }
 
     #[test]
+    fn nested_blockquotes_do_not_insert_blank_lines() {
+        let lines =
+            render_markdown_with_options("> outer\n> > inner", RenderOptions::plain(Some(80)));
+        assert_eq!(text(&lines), vec!["> outer", "> > inner"]);
+    }
+
+    #[test]
+    fn multiline_html_blocks_preserve_each_line() {
+        let lines = render_markdown_with_options(
+            "<div>\nfirst\nsecond\n</div>",
+            RenderOptions::plain(Some(80)),
+        );
+        assert_eq!(text(&lines), vec!["<div>", "first", "second", "</div>"]);
+    }
+
+    #[test]
+    fn images_render_alt_text_destination_and_title() {
+        let lines = render_markdown_with_options(
+            "![diagram](https://example.com/diagram.svg \"Architecture\") and ![](https://example.com/empty.svg)",
+            RenderOptions::plain(Some(120)),
+        );
+        assert_eq!(
+            text(&lines),
+            vec!["diagram (https://example.com/diagram.svg \"Architecture\") and image (https://example.com/empty.svg)"]
+        );
+    }
+
+    #[test]
     fn markdown_link_renders_label_destination_and_osc8_ranges() {
         let lines = render_markdown_hyperlink_lines_with_options(
             "Read [docs](https://example.com/docs) today",
@@ -1399,14 +1589,66 @@ mod tests {
     }
 
     #[test]
+    fn link_titles_render_after_destinations() {
+        let lines = render_markdown_with_options(
+            "Read [docs](https://example.com/docs \"Documentation\") today",
+            RenderOptions::plain(Some(80)),
+        );
+        assert_eq!(
+            text(&lines),
+            vec!["Read docs (https://example.com/docs \"Documentation\") today"]
+        );
+    }
+
+    #[test]
+    fn autolinks_do_not_repeat_their_destinations() {
+        let lines = render_markdown_with_options(
+            "<https://example.com/docs>",
+            RenderOptions::plain(Some(80)),
+        );
+        assert_eq!(text(&lines), vec!["https://example.com/docs"]);
+    }
+
+    #[test]
+    fn footnotes_render_references_and_definitions() {
+        let lines = render_markdown_with_options(
+            "Read this[^note].\n\n[^note]: A note",
+            RenderOptions::plain(Some(80)),
+        );
+        assert_eq!(
+            text(&lines),
+            vec!["Read this[^note].", "", "[^note]: A note"]
+        );
+    }
+
+    #[test]
+    fn task_list_markers_render_as_styled_checkboxes() {
+        let lines = render_markdown_with_options(
+            "- [ ] waiting\n- [x] done",
+            RenderOptions {
+                width: Some(80),
+                color_enabled: true,
+            },
+        );
+        assert_eq!(text(&lines), vec!["- [ ] waiting", "- [x] done"]);
+        assert!(lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .any(|span| { span.content == "[ ] " && span.style.fg == Some(Color::Cyan) }));
+    }
+
+    #[test]
     fn local_file_links_render_target_with_normalized_suffix() {
         let cwd = std::env::current_dir().unwrap();
         let target = cwd.join("src/render/markdown.rs");
-        let markdown = format!("Open [ignored]({}#L12C3-L14C9).", target.display());
+        let markdown = format!(
+            "Open [ignored]({}#L12C3-L14C9 \"Renderer\").",
+            target.display()
+        );
         let lines = render_markdown_with_options(&markdown, RenderOptions::plain(Some(120)));
         assert_eq!(
             text(&lines),
-            vec!["Open src/render/markdown.rs:12:3-14:9.".to_string()]
+            vec!["Open src/render/markdown.rs:12:3-14:9 \"Renderer\".".to_string()]
         );
     }
 
@@ -1435,6 +1677,26 @@ mod tests {
             .find(|line| line_to_plain(line).contains("hello"))
             .unwrap();
         assert!(plain_line.spans.iter().all(|span| span.style.fg.is_none()));
+    }
+
+    #[test]
+    fn indented_code_remains_distinguishable_from_unlabelled_fences() {
+        let indented = render_markdown_with_options(
+            "    let indented = true;",
+            RenderOptions::plain(Some(80)),
+        );
+        let fenced = render_markdown_with_options(
+            "```\nlet fenced = true;\n```",
+            RenderOptions::plain(Some(80)),
+        );
+        assert_eq!(text(&indented), vec!["    let indented = true;"]);
+        assert_eq!(text(&fenced), vec!["let fenced = true;"]);
+    }
+
+    #[test]
+    fn thematic_breaks_fill_the_available_width() {
+        let lines = render_markdown_with_options("---", RenderOptions::plain(Some(8)));
+        assert_eq!(text(&lines), vec!["————————"]);
     }
 
     #[test]

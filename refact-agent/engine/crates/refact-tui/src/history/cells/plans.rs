@@ -280,7 +280,10 @@ mod tests {
 
         assert_eq!(
             text(&cell.render(80)),
-            "• Proposed Plan\n \nplan · agent · v2 · 2 updates\n \n  ## Plan\n  \n  - base\n  \n  ———\n  \n  ## Plan updates\n  \n  first update\n  \n  second update\n \n"
+            format!(
+                "• Proposed Plan\n \nplan · agent · v2 · 2 updates\n \n  ## Plan\n  \n  - base\n  \n  {}\n  \n  ## Plan updates\n  \n  first update\n  \n  second update\n \n",
+                "—".repeat(78)
+            )
         );
     }
 
@@ -294,7 +297,10 @@ mod tests {
 
         assert_eq!(
             text(&cell.render(80)),
-            "• Current Goal\n \ngoal · v2 · 2 updates\n \n  ## Goal\n  \n  - base\n  \n  ———\n  \n  ## Goal updates\n  \n  first update\n  \n  second update\n \n"
+            format!(
+                "• Current Goal\n \ngoal · v2 · 2 updates\n \n  ## Goal\n  \n  - base\n  \n  {}\n  \n  ## Goal updates\n  \n  first update\n  \n  second update\n \n",
+                "—".repeat(78)
+            )
         );
     }
 }

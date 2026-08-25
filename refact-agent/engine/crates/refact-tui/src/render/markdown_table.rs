@@ -326,7 +326,12 @@ fn available_table_width(column_count: usize, available_width: Option<usize>) ->
 }
 
 fn normalize_row(row: &mut Vec<TableCell>, column_count: usize) {
-    row.truncate(column_count);
+    if row.len() > column_count {
+        row.truncate(column_count);
+        if let Some(cell) = row.last_mut() {
+            cell.push_span(Span::raw(" …"));
+        }
+    }
     row.resize_with(column_count, TableCell::default);
 }
 
@@ -1199,6 +1204,15 @@ mod tests {
             text,
             vec![" Name     Count", "━━━━━━━  ━━━━━━━", " frogs       12"]
         );
+    }
+
+    #[test]
+    fn uneven_rows_mark_truncated_cells_visibly() {
+        let mut row = vec![make_cell("first"), make_cell("second"), make_cell("third")];
+        normalize_row(&mut row, 2);
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0].plain_text(), "first");
+        assert_eq!(row[1].plain_text(), "second …");
     }
 
     #[test]
