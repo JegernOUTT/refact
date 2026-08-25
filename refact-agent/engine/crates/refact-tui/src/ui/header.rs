@@ -7,8 +7,14 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::keymap::{KeyAction, KeyContext};
 use crate::theme::ThemeRole;
+use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
 
 pub(crate) fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let line = truncate_line_with_ellipsis_if_overflow(header_line(app), area.width as usize);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn header_line(app: &App) -> Line<'static> {
     let project = app
         .current_project()
         .map(|project| project.slug.as_str())
@@ -58,8 +64,7 @@ pub(crate) fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if !vim.is_empty() {
         spans.push(Span::styled(vim, muted));
     }
-    let line = Line::from(spans);
-    frame.render_widget(Paragraph::new(line), area);
+    Line::from(spans)
 }
 
 fn append_header_action(
@@ -130,5 +135,24 @@ mod tests {
             buffer[(11, 0)].style().fg,
             app.theme().style(ThemeRole::Muted).fg
         );
+    }
+
+    #[test]
+    fn header_uses_the_footer_ellipsis_convention() {
+        let app = App::new(project());
+        let width = 24;
+        let header = truncate_line_with_ellipsis_if_overflow(header_line(&app), width);
+        let footer = crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow(
+            crate::ui::footer::footer_line(&crate::ui::footer::FooterData::from_app(&app)),
+            width,
+        );
+
+        for line in [&header, &footer] {
+            assert!(crate::vendored::line_truncation::line_width(line) <= width);
+            assert_eq!(
+                line.spans.last().map(|span| span.content.as_ref()),
+                Some("…")
+            );
+        }
     }
 }

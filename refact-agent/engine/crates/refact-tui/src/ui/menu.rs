@@ -315,10 +315,14 @@ fn render_rows_inner(
             Some(idx) == state.selected_idx && !row.is_disabled,
             row.is_disabled,
         );
-        for line in wrapped {
-            if y >= bottom {
-                break;
-            }
+        let available_lines = bottom.saturating_sub(y) as usize;
+        let truncated = wrapped.len() > available_lines;
+        for (line_idx, line) in wrapped.into_iter().take(available_lines).enumerate() {
+            let line = if truncated && line_idx + 1 == available_lines {
+                line_with_continuation_ellipsis(line, area.width as usize)
+            } else {
+                truncate_line_with_ellipsis_if_overflow(line, area.width as usize)
+            };
             line.render(
                 Rect {
                     x: area.x,
@@ -340,13 +344,18 @@ fn render_empty_message(area: Rect, buf: &mut Buffer, empty_message: &str) {
     if area.height == 0 {
         return;
     }
-    Line::from(Span::styled(
+    let line = Line::from(Span::styled(
         empty_message.to_string(),
         Style::default()
             .add_modifier(Modifier::DIM)
             .add_modifier(Modifier::ITALIC),
-    ))
-    .render(area, buf);
+    ));
+    truncate_line_with_ellipsis_if_overflow(line, area.width as usize).render(area, buf);
+}
+
+fn line_with_continuation_ellipsis(mut line: Line<'static>, width: usize) -> Line<'static> {
+    line.spans.push(Span::raw("…"));
+    truncate_line_with_ellipsis_if_overflow(line, width)
 }
 
 fn window_start(len: usize, state: &ScrollState, visible_items: usize) -> usize {
@@ -803,5 +812,36 @@ mod tests {
 
         assert_eq!(rendered, 1);
         assert_eq!(desc_col, 9);
+    }
+
+    #[test]
+    fn long_slug_keeps_its_character_order_when_clipped_to_the_row_window() {
+        let slug = "project-with-an-extremely-long-unbroken-slug-猫-東京";
+        let rows = vec![
+            GenericDisplayRow {
+                name: slug.to_string(),
+                ..Default::default()
+            },
+            GenericDisplayRow {
+                name: "second-row".to_string(),
+                ..Default::default()
+            },
+        ];
+        let state = ScrollState {
+            selected_idx: Some(0),
+            scroll_top: 0,
+        };
+        let area = Rect::new(0, 0, 12, 1);
+        let mut buffer = Buffer::empty(area);
+
+        render_rows(area, &mut buffer, &rows, &state, 1, "no rows");
+
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert_eq!(rendered.trim_end(), "project-…");
+        assert!(!rendered.contains("second-row"));
     }
 }

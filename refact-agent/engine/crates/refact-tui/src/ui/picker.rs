@@ -12,6 +12,7 @@ use crate::style::accent_style;
 use crate::ui::menu::{
     self, ColumnWidthConfig, ColumnWidthMode, GenericDisplayRow, ScrollState, MAX_POPUP_ROWS,
 };
+use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
 
 pub(crate) fn render_project_picker(
     frame: &mut Frame<'_>,
@@ -25,7 +26,7 @@ pub(crate) fn render_project_picker(
         .enumerate()
         .map(|(idx, project)| project_row(idx, selected_idx, project))
         .collect::<Vec<_>>();
-    let width = area.width.saturating_sub(8).min(80).max(1);
+    let width = popup_width(area, 80);
     let height = popup_height_for_rows(&rows, selected_idx, width, area.height);
     let popup = super::centered(area, width, height);
     frame.render_widget(Clear, popup);
@@ -47,6 +48,14 @@ fn clamped_selected_idx(len: usize, selected: usize) -> usize {
     } else {
         selected.min(len - 1)
     }
+}
+
+fn popup_width(area: Rect, max_width: u16) -> u16 {
+    area.width
+        .saturating_sub(8)
+        .max(1)
+        .min(max_width)
+        .min(area.width)
 }
 
 fn project_row(idx: usize, selected: usize, project: &ProjectEntry) -> GenericDisplayRow {
@@ -101,7 +110,7 @@ pub fn render_modal_picker(
             }
         })
         .collect::<Vec<_>>();
-    let width = area.width.saturating_sub(8).min(86).max(1);
+    let width = popup_width(area, 86);
     let height = popup_height_for_rows(&rows, selected_idx, width, area.height);
     let popup = super::popup_anchored_above(area, composer.y, width, height);
     frame.render_widget(Clear, popup);
@@ -135,7 +144,7 @@ pub fn render_modal_picker(
 fn render_composer_popup(frame: &mut Frame<'_>, picker: &PickerState, area: Rect, composer: Rect) {
     let rows = composer_rows(picker);
     let visible_rows = rows.len().max(1).min(MAX_POPUP_ROWS);
-    let width = area.width.saturating_sub(8).min(86).max(1);
+    let width = popup_width(area, 86);
     let height = visible_rows
         .saturating_add(2)
         .min(area.height.saturating_sub(2).max(1) as usize) as u16;
@@ -317,7 +326,8 @@ fn render_picker_content(
         width: area.width,
         height: 1,
     };
-    title.bold().render(title_area, frame.buffer_mut());
+    truncate_line_with_ellipsis_if_overflow(title.bold(), area.width as usize)
+        .render(title_area, frame.buffer_mut());
 
     let footer_height = u16::from(area.height > 1);
     let rows_area = Rect {
@@ -349,7 +359,8 @@ fn render_picker_content(
             width: area.width,
             height: 1,
         };
-        footer.dim().render(footer_area, frame.buffer_mut());
+        truncate_line_with_ellipsis_if_overflow(footer.dim(), area.width as usize)
+            .render(footer_area, frame.buffer_mut());
     }
 }
 
@@ -373,6 +384,7 @@ mod tests {
     use ratatui::backend::{Backend, TestBackend};
     use ratatui::layout::Position;
     use ratatui::style::{Color, Style};
+    use ratatui::widgets::Paragraph;
     use ratatui::{Terminal, TerminalOptions, Viewport};
 
     fn item(id: &str, title: &str, description: &str) -> PickerItem {
@@ -710,6 +722,47 @@ mod tests {
             let area = Rect::new(0, 1, 40, 3);
             let buffer = draw_picker_in_inline_area(&picker, 40, 1, 3, 2);
             assert_no_drawn_cells_outside(&buffer, area);
+        }
+    }
+
+    #[test]
+    fn picker_popups_cover_truncated_content_at_supported_widths() {
+        let mut picker = PickerState::new(PickerKind::Model, Vec::new());
+        picker.filter = "x".repeat(200);
+
+        for width in [120, 60, 40, 30] {
+            let area = Rect::new(0, 0, width, 12);
+            let composer = Rect::new(0, 10, width, 2);
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(Paragraph::new("BACKGROUND ".repeat(width as usize)), area);
+                    render_modal_picker(frame, &picker, area, composer);
+                })
+                .unwrap();
+
+            let buffer = terminal.backend().buffer();
+            let ellipsis = find_symbol(buffer, "…").expect("overflow is marked with an ellipsis");
+            assert!(ellipsis.0 < width);
+            assert!(ellipsis.1 < 12);
+            let popup_width = popup_width(area, 86);
+            let popup_height = popup_height_for_rows(&[], 0, popup_width, area.height);
+            let popup = Rect::new(
+                area.x + area.width.saturating_sub(popup_width) / 2,
+                composer
+                    .y
+                    .saturating_sub(popup_height)
+                    .min(area.height.saturating_sub(popup_height)),
+                popup_width,
+                popup_height,
+            );
+            assert_eq!(buffer[(popup.left(), popup.top())].symbol(), "┌");
+            assert_eq!(buffer[(popup.right() - 1, popup.top())].symbol(), "┐");
+            let surface = (popup.top()..popup.bottom())
+                .flat_map(|y| (popup.left()..popup.right()).map(move |x| buffer[(x, y)].symbol()))
+                .collect::<String>();
+            assert!(!surface.contains("BACKGROUND"));
         }
     }
 
