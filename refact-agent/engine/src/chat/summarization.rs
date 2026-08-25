@@ -2587,6 +2587,7 @@ pub async fn summarize_oldest_segment_with_resolved_model(
     Ok(true)
 }
 
+/// Forced recovery and manual compaction bypass the automatic-compaction setting.
 fn should_attempt_segment_summarization(
     thread: &crate::chat::types::ThreadParams,
     force: bool,
@@ -2652,7 +2653,7 @@ fn compression_reason_outcome_text(reason: CompressionReason) -> &'static str {
             "compaction is structurally disabled for this session"
         }
         CompressionReason::MaxAttemptsReached => {
-            "the automatic compaction attempt limit was reached"
+            "automatic compaction is waiting for its retry cooldown"
         }
         CompressionReason::PendingToolCalls => "tool calls are still awaiting results",
         CompressionReason::NoEligibleSegment => {
@@ -2851,6 +2852,23 @@ fn record_compression_retry_cooldown(session: &mut ChatSession, source_hash: Str
         now_ms.saturating_add(COMPRESSION_RETRY_COOLDOWN_MS),
     );
     prune_compression_retry_cooldowns(session, now_ms);
+}
+
+fn source_hash_cooldowns(session: &ChatSession) -> HashSet<String> {
+    session
+        .compression_retry_after_ms
+        .keys()
+        .filter(|key| key.as_str() != COMPRESSION_EPISODE_COOLDOWN_KEY)
+        .cloned()
+        .collect()
+}
+
+fn episode_cooldown_skip_reason(session: &ChatSession, force: bool) -> Option<CompressionReason> {
+    (!force
+        && session
+            .compression_retry_after_ms
+            .contains_key(COMPRESSION_EPISODE_COOLDOWN_KEY))
+    .then_some(CompressionReason::MaxAttemptsReached)
 }
 
 fn compression_failure_reason(failure: &SegmentSummaryFailure) -> CompressionReason {
@@ -3328,18 +3346,8 @@ async fn run_reserved_segment_summarization(
         let attempt = reserve_compression_attempt(&mut session, reason);
         let now_ms = epoch_ms_now();
         prune_compression_retry_cooldowns(&mut session, now_ms);
-        if session
-            .compression_retry_after_ms
-            .contains_key(COMPRESSION_EPISODE_COOLDOWN_KEY)
-        {
-            if emit_compression_skipped_if_owned(
-                &mut session,
-                attempt,
-                CompressionReason::TransientFailure,
-            ) && forced_context_limit
-            {
-                append_compression_outcome_event(&mut session, CompressionReason::TransientFailure);
-            }
+        if let Some(skip_reason) = episode_cooldown_skip_reason(&session, force) {
+            emit_compression_skipped_if_owned(&mut session, attempt, skip_reason);
             return CompactionOutcome::NothingToCompact;
         }
         let assigned_id_indexes = ensure_all_candidate_source_message_ids(&mut session.messages);
@@ -3383,11 +3391,7 @@ async fn run_reserved_segment_summarization(
                 .expect("reserved compression attempt must own an abort flag"),
             session.messages.clone(),
             session.compression_insufficient_hashes.clone(),
-            session
-                .compression_retry_after_ms
-                .keys()
-                .cloned()
-                .collect::<HashSet<_>>(),
+            source_hash_cooldowns(&session),
         )
     };
     let _attempt_guard = CompressionAttemptGuard {
@@ -7270,7 +7274,7 @@ mod tests {
     }
 
     #[test]
-    fn forced_context_limit_summarization_bypasses_auto_compact_disabled_gate() {
+    fn disabled_auto_compaction_allows_forced_but_not_automatic_summarization() {
         let mut thread = crate::chat::types::ThreadParams::default();
         let (changed, _) = crate::chat::queue::apply_setparams_patch(
             &mut thread,
@@ -7280,6 +7284,43 @@ mod tests {
         assert!(changed);
         assert!(!should_attempt_segment_summarization(&thread, false));
         assert!(should_attempt_segment_summarization(&thread, true));
+    }
+
+    #[test]
+    fn episode_cooldown_blocks_only_automatic_summarization_with_accurate_reason() {
+        let mut session = ChatSession::new("compression-episode-gate".to_string());
+        record_compression_retry_cooldown(
+            &mut session,
+            COMPRESSION_EPISODE_COOLDOWN_KEY.to_string(),
+            epoch_ms_now(),
+        );
+
+        assert_eq!(
+            episode_cooldown_skip_reason(&session, false),
+            Some(CompressionReason::MaxAttemptsReached)
+        );
+        assert_eq!(episode_cooldown_skip_reason(&session, true), None);
+        assert_eq!(
+            compression_reason_outcome_text(CompressionReason::MaxAttemptsReached),
+            "automatic compaction is waiting for its retry cooldown"
+        );
+    }
+
+    #[test]
+    fn forced_and_manual_paths_keep_source_hash_cooldowns() {
+        let mut session = ChatSession::new("compression-source-hash-gate".to_string());
+        record_compression_retry_cooldown(&mut session, "source-hash".to_string(), epoch_ms_now());
+        record_compression_retry_cooldown(
+            &mut session,
+            COMPRESSION_EPISODE_COOLDOWN_KEY.to_string(),
+            epoch_ms_now(),
+        );
+
+        let blocked = source_hash_cooldowns(&session);
+
+        assert_eq!(episode_cooldown_skip_reason(&session, true), None);
+        assert!(blocked.contains("source-hash"));
+        assert!(!blocked.contains(COMPRESSION_EPISODE_COOLDOWN_KEY));
     }
 
     #[test]
