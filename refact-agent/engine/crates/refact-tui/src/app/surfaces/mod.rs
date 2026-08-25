@@ -1,3 +1,5 @@
+pub(crate) mod board;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -551,6 +553,27 @@ impl App {
         self.composer.clear();
         self.open_view_overlay(view.loading_overlay());
         AppAction::LoadReadOnlyView { view }
+    }
+
+    pub(super) fn open_task_board(&mut self) -> AppAction {
+        if !board::task_board_enabled() {
+            self.add_notice("Task board is disabled; set REFACT_TUI_SURFACES=1 to enable /board");
+            return AppAction::None;
+        }
+        self.composer.clear();
+        self.board_surface = Some(board::BoardSurface::loading());
+        AppAction::LoadTaskBoard {
+            task_id: self.task_id.clone(),
+        }
+    }
+
+    pub(super) fn show_task_board(&mut self, data: crate::client::TaskBoardViewData) {
+        self.task_id = Some(data.task.id.clone());
+        self.board_surface = Some(board::BoardSurface::loaded(data));
+    }
+
+    pub(super) fn show_task_board_error(&mut self, error: String) {
+        self.board_surface = Some(board::BoardSurface::failed(error));
     }
 
     pub(super) fn open_view_overlay(&mut self, overlay: ViewOverlay) {

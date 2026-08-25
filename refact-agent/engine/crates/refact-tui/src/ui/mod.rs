@@ -106,6 +106,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     if let Some(overlay) = app.transcript_overlay() {
         overlay::render_transcript_overlay(frame, overlay, area);
     }
+    if let Some(board) = app.task_board_surface() {
+        crate::app::surfaces::board::render_task_board(frame, board, area);
+    }
     if let Some(modal) = app.approval_modal() {
         approval::render_approval_modal(frame, modal, area);
     }

@@ -2,6 +2,7 @@ use super::*;
 
 mod approval;
 mod ask;
+mod board;
 mod main;
 mod overlay;
 mod picker;
@@ -25,6 +26,7 @@ impl App {
             return self.handle_activity_key(key);
         }
         match self.focused_key_context() {
+            KeyContext::Board => return self.handle_task_board_key(key),
             KeyContext::Overlay | KeyContext::OverlaySearch => {
                 return self.handle_transcript_overlay_key(key);
             }
@@ -62,6 +64,7 @@ impl App {
             KeyContext::Overlay | KeyContext::OverlaySearch => {
                 self.handle_transcript_overlay_paste(text)
             }
+            KeyContext::Board => {}
             KeyContext::Approval => self.handle_approval_paste(text),
             KeyContext::AskForm => self.handle_ask_questions_paste(text),
             KeyContext::ModalPicker => self.handle_modal_picker_paste(text),
@@ -79,6 +82,9 @@ impl App {
     pub(super) fn focused_key_context(&self) -> KeyContext {
         if self.activity_surface.is_some() {
             return KeyContext::Activity;
+        }
+        if self.board_surface.is_some() {
+            return KeyContext::Board;
         }
         if let Some(overlay) = self.transcript_overlay.as_ref() {
             return if overlay.search_input().is_some() {

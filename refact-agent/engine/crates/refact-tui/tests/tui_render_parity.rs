@@ -7,7 +7,10 @@ use ratatui::layout::Rect;
 use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Terminal;
 use refact_tui::app::{App, SessionState, UsageSummary};
-use refact_tui::client::{ChatEvent, OpenProjectResponse, WorkerInfo};
+use refact_tui::client::{
+    ChatEvent, OpenProjectResponse, TaskBoardCard, TaskBoardReadyCards, TaskBoardResponse,
+    TaskBoardTask, TaskBoardViewData, WorkerInfo,
+};
 use refact_tui::commands::{command_by_name, workflow, CommandAction};
 use refact_tui::commands::session::{PermissionPolicy, StatusSnapshot, StatusUsage};
 use refact_tui::pickers::{PickerKind, PickerItem, PickerState};
@@ -505,6 +508,51 @@ fn activity_scenario(app: &mut App) {
     app.execute_command_name("subagents");
 }
 
+fn task_board_scenario(app: &mut App) {
+    app.test_show_task_board(TaskBoardViewData {
+        task: TaskBoardTask {
+            id: "task-1".to_string(),
+            name: "Task board matrix".to_string(),
+            status: "active".to_string(),
+        },
+        board: TaskBoardResponse {
+            rev: 2,
+            cards: vec![
+                TaskBoardCard {
+                    id: "T-1".to_string(),
+                    title: "Completed dependency".to_string(),
+                    column: "done".to_string(),
+                    priority: "P1".to_string(),
+                    ..TaskBoardCard::default()
+                },
+                TaskBoardCard {
+                    id: "T-2".to_string(),
+                    title: "Ready board surface".to_string(),
+                    column: "planned".to_string(),
+                    priority: "P1".to_string(),
+                    depends_on: vec!["T-1".to_string()],
+                    ..TaskBoardCard::default()
+                },
+                TaskBoardCard {
+                    id: "T-3".to_string(),
+                    title: "Blocked follow-up".to_string(),
+                    column: "planned".to_string(),
+                    priority: "P2".to_string(),
+                    depends_on: vec!["T-4".to_string()],
+                    ..TaskBoardCard::default()
+                },
+            ],
+            ..TaskBoardResponse::default()
+        },
+        ready: TaskBoardReadyCards {
+            ready: vec!["T-2".to_string()],
+            blocked: vec!["T-3".to_string()],
+            completed: vec!["T-1".to_string()],
+            ..TaskBoardReadyCards::default()
+        },
+    });
+}
+
 fn render_scenarios() -> Vec<RenderScenario> {
     vec![
         RenderScenario {
@@ -597,6 +645,12 @@ fn render_scenarios() -> Vec<RenderScenario> {
             setup: image_fallback_scenario,
             render_before_resize: false,
         },
+        RenderScenario {
+            name: "task board",
+            marker: Some("Task board"),
+            setup: task_board_scenario,
+            render_before_resize: false,
+        },
     ]
 }
 
@@ -678,7 +732,7 @@ fn keymap_help_golden_snapshot() {
     │  vim insert Esc                   return to vim normal mode                              │
     │     history —                   not yet bound                                            │
     │    activity Esc                   cancel, close, or abort active work                    │
-    │       board —                   not yet bound                                            │
+    │       board Esc, q                cancel, close, or abort active work                    │
     │        goal —                   not yet bound                                            │
     │   worktrees —                   not yet bound                                            │
     │    settings Backspace             delete left or remove queued item                      │

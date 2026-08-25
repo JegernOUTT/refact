@@ -14,7 +14,7 @@ use crate::client::{
     BrowserContextDecision, ChatEvent, DaemonStatus, CompetitorImportInfoResponse,
     CompetitorImportRunResponse, HooksResponse, KnowledgeGraphResponse, McpViewData,
     OpenProjectResponse, ProjectEntry, ProviderListResponse, ProviderOAuthLogoutResponse,
-    SlashCommandsListResponse, ToolDecision, WorkerInfo,
+    SlashCommandsListResponse, TaskBoardViewData, ToolDecision, WorkerInfo,
 };
 use crate::commands::{command_by_name, misc, session, workflow, CommandAction, InfoTopic, LocalToggle};
 use crate::composer::queue::{InputQueue, QueuedInput, INPUT_QUEUE_CAPACITY};
@@ -58,7 +58,7 @@ mod runtime;
 #[path = "app/session.rs"]
 mod session_lifecycle;
 mod state;
-mod surfaces;
+pub(crate) mod surfaces;
 mod transcript;
 mod workers;
 use self::command_results::CommandOrigin;
@@ -553,6 +553,7 @@ impl App {
                 self.open_settings_surface();
                 AppAction::None
             }
+            misc::MiscCommand::Board => self.open_task_board(),
         }
     }
 
@@ -1209,6 +1210,15 @@ impl App {
         self.thread_params = params;
     }
 
+    pub fn test_show_task_board(&mut self, data: TaskBoardViewData) {
+        self.show_task_board(data);
+    }
+
+    pub fn test_set_task_context(&mut self, task_id: Option<String>, mode: Option<String>) {
+        self.task_id = task_id;
+        self.mode = mode;
+    }
+
     pub fn submit_browser_context_decision(
         &mut self,
         options: BrowserContextDecisionOptions,
@@ -1232,6 +1242,9 @@ pub enum AppAction {
     },
     LoadReadOnlyView {
         view: ReadOnlyView,
+    },
+    LoadTaskBoard {
+        task_id: Option<String>,
     },
     LoadProviderLogoutChoices,
     ProviderOAuthLogout {
@@ -4354,6 +4367,27 @@ new-chat = "ctrl-x"
         assert!(app.transcript_overlay().is_some_and(|overlay| {
             overlay.title() == "Import" && overlay.lines().join("\n").contains("Loading /import")
         }));
+    }
+
+    #[test]
+    fn board_command_is_feature_gated_and_uses_current_task() {
+        let previous = std::env::var_os("REFACT_TUI_SURFACES");
+        std::env::remove_var("REFACT_TUI_SURFACES");
+        let mut app = App::new(project());
+        app.test_set_task_context(Some("task-1".to_string()), Some("task_planner".to_string()));
+        assert_eq!(app.execute_command_name("board"), AppAction::None);
+
+        std::env::set_var("REFACT_TUI_SURFACES", "1");
+        assert_eq!(
+            app.execute_command_name("tasks"),
+            AppAction::LoadTaskBoard {
+                task_id: Some("task-1".to_string())
+            }
+        );
+        match previous {
+            Some(value) => std::env::set_var("REFACT_TUI_SURFACES", value),
+            None => std::env::remove_var("REFACT_TUI_SURFACES"),
+        }
     }
 
     #[test]

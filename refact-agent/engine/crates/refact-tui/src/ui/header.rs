@@ -61,6 +61,12 @@ fn header_line(app: &App) -> Line<'static> {
     append_header_action(&mut spans, &mode, "mode", accent, muted);
     spans.push(Span::styled(" · ", muted));
     append_header_action(&mut spans, &help, "help", accent, muted);
+    if app.task_board_discoverable() {
+        spans.push(Span::styled(" · ", muted));
+        spans.push(Span::styled("/board", accent));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled("tasks", muted));
+    }
     if !vim.is_empty() {
         spans.push(Span::styled(vim, muted));
     }
@@ -153,6 +159,25 @@ mod tests {
                 line.spans.last().map(|span| span.content.as_ref()),
                 Some("…")
             );
+        }
+    }
+
+    #[test]
+    fn task_modes_advertise_the_board_when_surfaces_are_enabled() {
+        let previous = std::env::var_os("REFACT_TUI_SURFACES");
+        std::env::set_var("REFACT_TUI_SURFACES", "1");
+        let mut app = App::new(project());
+        app.test_set_task_context(Some("task-1".to_string()), Some("task_planner".to_string()));
+
+        let text = header_line(&app)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("/board tasks"));
+        match previous {
+            Some(value) => std::env::set_var("REFACT_TUI_SURFACES", value),
+            None => std::env::remove_var("REFACT_TUI_SURFACES"),
         }
     }
 }

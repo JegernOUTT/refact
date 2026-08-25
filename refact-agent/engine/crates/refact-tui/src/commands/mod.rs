@@ -152,6 +152,7 @@ fn command_registry_vec() -> &'static Vec<CommandDef> {
             misc::LOGOUT_COMMAND,
             misc::IMPORT_COMMAND,
             misc::SETTINGS_COMMAND,
+            misc::BOARD_COMMAND,
             CommandDef {
                 name: "stop",
                 aliases: &["cancel", "clean"],
@@ -180,6 +181,14 @@ mod tests {
     fn command_registry_resolves_aliases() {
         let command = command_by_name("/exit").unwrap();
         assert_eq!(command.name, "quit");
+    }
+
+    #[test]
+    fn board_command_is_available_with_tasks_alias() {
+        let board = command_by_name("board").expect("board command");
+        let tasks = command_by_name("tasks").expect("tasks alias");
+        assert_eq!(board.name, "board");
+        assert_eq!(tasks.name, "board");
     }
 
     #[test]

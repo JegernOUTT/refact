@@ -582,6 +582,87 @@ pub struct KnowledgeStats {
     pub trajectory_count: Option<usize>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskBoardTask {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub id: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub name: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskBoardColumn {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub id: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TaskBoardCard {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub id: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub title: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub column: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub priority: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub depends_on: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub instructions: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub assignee: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub agent_chat_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub final_report: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub final_report_structured: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub verifier_report: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TaskBoardResponse {
+    #[serde(default)]
+    pub rev: u64,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub columns: Vec<TaskBoardColumn>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub cards: Vec<TaskBoardCard>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskBoardReadyCards {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub ready: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub blocked: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub in_progress: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub completed: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub failed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct TaskBoardReadyResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    ready: TaskBoardReadyCards,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TaskBoardViewData {
+    pub task: TaskBoardTask,
+    pub board: TaskBoardResponse,
+    pub ready: TaskBoardReadyCards,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatEvent {
     pub chat_id: Option<String>,
@@ -948,6 +1029,39 @@ impl DaemonClient {
     pub async fn hooks(&self, project_id: &str) -> Result<HooksResponse, ClientError> {
         let path = hooks_path(project_id);
         self.get_json(&path).await
+    }
+
+    pub async fn task_board_view(
+        &self,
+        project_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<TaskBoardViewData, ClientError> {
+        let tasks: Vec<TaskBoardTask> = self.get_json(&tasks_path(project_id)).await?;
+        let task = match task_id.filter(|task_id| !task_id.trim().is_empty()) {
+            Some(task_id) => tasks
+                .into_iter()
+                .find(|task| task.id == task_id)
+                .ok_or_else(|| {
+                    ClientError::Json(format!("task board is unavailable for task {task_id}"))
+                })?,
+            None => tasks
+                .iter()
+                .find(|task| task.status == "active")
+                .cloned()
+                .or_else(|| tasks.into_iter().next())
+                .ok_or_else(|| ClientError::Json("no task boards are available".to_string()))?,
+        };
+        let board = self
+            .get_json(&task_board_path(project_id, &task.id))
+            .await?;
+        let ready: TaskBoardReadyResponse = self
+            .get_json(&task_board_ready_path(project_id, &task.id))
+            .await?;
+        Ok(TaskBoardViewData {
+            task,
+            board,
+            ready: ready.ready,
+        })
     }
 
     pub async fn competitor_import_info(
@@ -2251,6 +2365,26 @@ fn provider_oauth_logout_path(project_id: &str, provider: &str) -> String {
 
 fn hooks_path(project_id: &str) -> String {
     format!("/p/{}/v1/ext/hooks", encode_path_segment(project_id))
+}
+
+fn tasks_path(project_id: &str) -> String {
+    format!("/p/{}/v1/tasks", encode_path_segment(project_id))
+}
+
+fn task_board_path(project_id: &str, task_id: &str) -> String {
+    format!(
+        "/p/{}/v1/tasks/{}/board",
+        encode_path_segment(project_id),
+        encode_path_segment(task_id)
+    )
+}
+
+fn task_board_ready_path(project_id: &str, task_id: &str) -> String {
+    format!(
+        "/p/{}/v1/tasks/{}/board/ready",
+        encode_path_segment(project_id),
+        encode_path_segment(task_id)
+    )
 }
 
 fn competitor_import_path(project_id: &str) -> String {
@@ -4033,6 +4167,15 @@ mod tests {
     #[test]
     fn hooks_and_competitor_import_client_paths_use_project_proxy() {
         assert_eq!(hooks_path("p1"), "/p/p1/v1/ext/hooks");
+        assert_eq!(tasks_path("p1"), "/p/p1/v1/tasks");
+        assert_eq!(
+            task_board_path("p1", "task/a"),
+            "/p/p1/v1/tasks/task%2Fa/board"
+        );
+        assert_eq!(
+            task_board_ready_path("p1", "task/a"),
+            "/p/p1/v1/tasks/task%2Fa/board/ready"
+        );
         assert_eq!(
             competitor_import_path("p1"),
             "/p/p1/v1/ext/competitor-import"

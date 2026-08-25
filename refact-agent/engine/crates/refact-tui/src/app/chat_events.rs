@@ -416,6 +416,9 @@ impl App {
                 self.mode = Some(mode.to_string());
             }
         }
+        if let Some(task_id) = task_id_from_thread(params) {
+            self.task_id = Some(task_id);
+        }
         if let Some(value) = params.get("boost_reasoning").and_then(Value::as_bool) {
             self.boost_reasoning = value;
         }
@@ -998,6 +1001,7 @@ impl App {
                     self.mode = Some(mode.to_string());
                 }
             }
+            self.task_id = task_id_from_thread(thread);
             self.boost_reasoning = thread
                 .get("boost_reasoning")
                 .and_then(Value::as_bool)
@@ -1057,6 +1061,15 @@ impl App {
         }
         AppAction::None
     }
+}
+
+fn task_id_from_thread(thread: &Value) -> Option<String> {
+    thread
+        .get("task_meta")
+        .and_then(|meta| meta.get("task_id"))
+        .and_then(Value::as_str)
+        .filter(|task_id| !task_id.is_empty())
+        .map(str::to_string)
 }
 
 impl App {

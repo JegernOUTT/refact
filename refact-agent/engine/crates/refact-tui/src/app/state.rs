@@ -313,8 +313,10 @@ pub struct App {
     pub(super) backtrack_pending: Option<BacktrackTarget>,
     pub(super) last_escape_at: Option<Instant>,
     pub(super) transcript_overlay: Option<PagerOverlay>,
+    pub(super) board_surface: Option<surfaces::board::BoardSurface>,
     pub(super) transcript_overlay_visible_height: Option<usize>,
     pub(super) activity_surface: Option<ActivitySurfaceState>,
+    pub(super) task_id: Option<String>,
     pub(super) help_open: bool,
     pub(super) usage: Option<UsageSummary>,
     pub(super) should_quit: bool,
@@ -433,8 +435,10 @@ impl App {
             backtrack_pending: None,
             last_escape_at: None,
             transcript_overlay: None,
+            board_surface: None,
             transcript_overlay_visible_height: None,
             activity_surface: None,
+            task_id: None,
             help_open: false,
             usage: None,
             should_quit: false,
@@ -531,8 +535,10 @@ impl App {
             backtrack_pending: None,
             last_escape_at: None,
             transcript_overlay: None,
+            board_surface: None,
             transcript_overlay_visible_height: None,
             activity_surface: None,
+            task_id: None,
             help_open: false,
             usage: None,
             should_quit: false,
@@ -868,6 +874,15 @@ impl App {
     pub fn transcript_overlay(&self) -> Option<&PagerOverlay> {
         self.transcript_overlay.as_ref()
     }
+
+    pub(crate) fn task_board_surface(&self) -> Option<&surfaces::board::BoardSurface> {
+        self.board_surface.as_ref()
+    }
+
+    pub(crate) fn task_board_discoverable(&self) -> bool {
+        surfaces::board::task_board_enabled()
+            && matches!(self.mode.as_deref(), Some("task_planner" | "task_agent"))
+    }
 }
 
 #[cfg(test)]
@@ -885,5 +900,22 @@ mod tests {
             app.visible_transcript(),
             [TranscriptItem::Notice(text)] if text == "startup failed"
         ));
+    }
+
+    #[test]
+    fn task_modes_are_board_discoverable_when_surfaces_are_enabled() {
+        let previous = std::env::var_os("REFACT_TUI_SURFACES");
+        std::env::set_var("REFACT_TUI_SURFACES", "1");
+        let mut app = App::notice_only("test");
+        app.mode = Some("task_planner".to_string());
+        assert!(app.task_board_discoverable());
+        app.mode = Some("task_agent".to_string());
+        assert!(app.task_board_discoverable());
+        app.mode = Some("agent".to_string());
+        assert!(!app.task_board_discoverable());
+        match previous {
+            Some(value) => std::env::set_var("REFACT_TUI_SURFACES", value),
+            None => std::env::remove_var("REFACT_TUI_SURFACES"),
+        }
     }
 }

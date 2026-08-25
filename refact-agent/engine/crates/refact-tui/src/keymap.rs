@@ -1059,6 +1059,11 @@ fn default_entries() -> Vec<KeymapEntry> {
             KeyAction::Backspace,
             &["backspace"],
         ),
+        entry(KeyContext::Board, KeyAction::Cancel, &["esc", "q"]),
+        entry(KeyContext::Board, KeyAction::Accept, &["enter"]),
+        entry(KeyContext::Board, KeyAction::MoveUp, &["up"]),
+        entry(KeyContext::Board, KeyAction::MoveDown, &["down"]),
+        entry(KeyContext::Board, KeyAction::ToggleSelectedTool, &["space"]),
         entry(KeyContext::VimNormal, KeyAction::VimEnterInsert, &["i"]),
         entry(KeyContext::VimNormal, KeyAction::VimAppend, &["a"]),
         entry(KeyContext::VimNormal, KeyAction::VimOpenBelow, &["o"]),
@@ -1405,15 +1410,10 @@ newline = "enter"
     }
 
     #[test]
-    fn future_contexts_are_unbound_but_remain_in_help() {
+    fn reserved_contexts_are_unbound_but_remain_in_help() {
         let registry = KeymapRegistry::default();
 
-        for context in [
-            KeyContext::History,
-            KeyContext::Board,
-            KeyContext::Goal,
-            KeyContext::Worktree,
-        ] {
+        for context in [KeyContext::History, KeyContext::Goal, KeyContext::Worktree] {
             assert!(!registry
                 .entries
                 .iter()
@@ -1453,12 +1453,7 @@ newline = "enter"
         }
 
         let rows = registry.help_rows();
-        for context in [
-            KeyContext::History,
-            KeyContext::Board,
-            KeyContext::Goal,
-            KeyContext::Worktree,
-        ] {
+        for context in [KeyContext::History, KeyContext::Goal, KeyContext::Worktree] {
             assert!(rows.iter().any(|row| {
                 row.context == context
                     && row.action.is_none()
@@ -1471,6 +1466,15 @@ newline = "enter"
                 && row.action == Some(KeyAction::Accept)
                 && row.bindings.contains("Enter")
         }));
+
+        assert!(registry
+            .entries
+            .iter()
+            .any(|entry| entry.context == KeyContext::Board));
+        assert!(registry
+            .entries
+            .iter()
+            .any(|entry| entry.context == KeyContext::Activity));
     }
 
     #[test]

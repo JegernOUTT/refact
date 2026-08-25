@@ -123,6 +123,7 @@ pub(super) enum RuntimeEvent {
     SkillsViewLoaded(Result<SlashCommandsListResponse, String>),
     MemoriesViewLoaded(Result<KnowledgeGraphResponse, String>),
     HooksViewLoaded(Result<HooksResponse, String>),
+    TaskBoardLoaded(Result<TaskBoardViewData, String>),
     ProviderLogoutChoicesLoaded(Result<ProviderListResponse, String>),
     ProviderLogoutFinished {
         provider: String,
@@ -565,6 +566,8 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::SkillsViewLoaded(result) => app.handle_skills_view_loaded(result),
             RuntimeEvent::MemoriesViewLoaded(result) => app.handle_memories_view_loaded(result),
             RuntimeEvent::HooksViewLoaded(result) => app.handle_hooks_view_loaded(result),
+            RuntimeEvent::TaskBoardLoaded(Ok(data)) => app.show_task_board(data),
+            RuntimeEvent::TaskBoardLoaded(Err(error)) => app.show_task_board_error(error),
             RuntimeEvent::ProviderLogoutChoicesLoaded(result) => {
                 app.handle_provider_logout_choices_loaded(result)
             }
@@ -776,6 +779,21 @@ pub(super) async fn run_action(
                 });
             } else {
                 app.add_notice(format!("No active project for /{}", view.command_name()));
+            }
+        }
+        AppAction::LoadTaskBoard { task_id } => {
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .task_board_view(&project_id, task_id.as_deref())
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx.send(RuntimeEvent::TaskBoardLoaded(result)).await;
+                });
+            } else {
+                app.show_task_board_error("No active project for /board".to_string());
             }
         }
         AppAction::LoadProviderLogoutChoices => {

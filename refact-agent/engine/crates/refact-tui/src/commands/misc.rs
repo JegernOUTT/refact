@@ -19,6 +19,7 @@ pub enum MiscCommand {
     Logout,
     Import,
     Settings,
+    Board,
 }
 
 pub const CLEAR_COMMAND: CommandDef = CommandDef {
@@ -216,6 +217,17 @@ pub const SETTINGS_COMMAND: CommandDef = CommandDef {
     availability: CommandAvailability::Always,
     action: CommandAction::Misc {
         command: MiscCommand::Settings,
+    },
+};
+
+pub const BOARD_COMMAND: CommandDef = CommandDef {
+    name: "board",
+    aliases: &["tasks"],
+    description: "read-only surface: show task cards, dependencies, reports, and agent chats",
+    args_hint: "",
+    availability: CommandAvailability::Always,
+    action: CommandAction::Misc {
+        command: MiscCommand::Board,
     },
 };
 
