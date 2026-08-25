@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +29,73 @@ pub struct PickerItem {
     pub description: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModeThreadDefaults {
+    pub include_project_info: Option<bool>,
+    pub checkpoints_enabled: Option<bool>,
+    pub auto_approve_editing_tools: Option<bool>,
+    pub auto_approve_dangerous_commands: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModePickerItem {
+    pub item: PickerItem,
+    pub group: String,
+    pub tags: Vec<String>,
+    pub order: i32,
+    pub is_overlay: bool,
+    pub is_current: bool,
+    pub tools_count: Option<usize>,
+    pub thread_defaults: ModeThreadDefaults,
+}
+
+impl ModePickerItem {
+    pub fn auto_approval_badge(&self) -> Option<&'static str> {
+        match (
+            self.thread_defaults.auto_approve_editing_tools,
+            self.thread_defaults.auto_approve_dangerous_commands,
+        ) {
+            (_, Some(true)) => Some("! edits + dangerous commands auto-approved"),
+            (Some(true), _) => Some("! edits auto-approved"),
+            _ => None,
+        }
+    }
+
+    pub fn picker_description(&self) -> String {
+        let mut details = Vec::new();
+        if !self.item.description.trim().is_empty() {
+            details.push(self.item.description.clone());
+        }
+        let tools = self
+            .tools_count
+            .map(|count| format!("{count} tools"))
+            .unwrap_or_else(|| "tool count unknown".to_string());
+        let defaults = [
+            default_label("project info", self.thread_defaults.include_project_info),
+            default_label("checkpoints", self.thread_defaults.checkpoints_enabled),
+            default_label(
+                "file edits auto-approved",
+                self.thread_defaults.auto_approve_editing_tools,
+            ),
+            default_label(
+                "dangerous commands auto-approved",
+                self.thread_defaults.auto_approve_dangerous_commands,
+            ),
+        ]
+        .join(", ");
+        details.push(format!("{tools} · defaults: {defaults}"));
+        details.join(" · ")
+    }
+}
+
+fn default_label(label: &str, value: Option<bool>) -> String {
+    match value {
+        Some(true) => format!("{label} on"),
+        Some(false) => format!("{label} off"),
+        None => format!("{label} unknown"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerAccept {
     Single(Option<PickerItem>),
@@ -37,6 +106,7 @@ pub enum PickerAccept {
 pub struct PickerState {
     pub kind: PickerKind,
     items: Vec<PickerItem>,
+    mode_items: Vec<ModePickerItem>,
     pub filter: String,
     pub selected: usize,
     selection_mode: PickerSelectionMode,
@@ -64,6 +134,20 @@ impl PickerState {
         picker
     }
 
+    pub fn modes(mut items: Vec<ModePickerItem>, current_id: Option<&str>) -> Self {
+        for item in &mut items {
+            item.is_current = current_id.is_some_and(|current| current == item.item.id);
+        }
+        let picker_items = items.iter().map(|item| item.item.clone()).collect();
+        let mut picker =
+            Self::with_selection_mode(PickerKind::Mode, picker_items, PickerSelectionMode::Single);
+        picker.mode_items = items;
+        if let Some(current_id) = current_id {
+            picker.select_item_id(current_id);
+        }
+        picker
+    }
+
     fn with_selection_mode(
         kind: PickerKind,
         items: Vec<PickerItem>,
@@ -72,6 +156,7 @@ impl PickerState {
         Self {
             kind,
             items,
+            mode_items: Vec::new(),
             filter: String::new(),
             selected: 0,
             selection_mode,
@@ -81,6 +166,22 @@ impl PickerState {
 
     pub fn items(&self) -> &[PickerItem] {
         &self.items
+    }
+
+    pub fn has_mode_items(&self) -> bool {
+        !self.mode_items.is_empty()
+    }
+
+    pub fn filtered_mode_items(&self) -> Vec<ModePickerItem> {
+        self.filtered_items()
+            .into_iter()
+            .filter_map(|item| {
+                self.mode_items
+                    .iter()
+                    .find(|mode| mode.item.id == item.id)
+                    .cloned()
+            })
+            .collect()
     }
 
     pub fn selection_mode(&self) -> PickerSelectionMode {
@@ -423,7 +524,7 @@ fn format_token_count(tokens: u64) -> String {
     }
 }
 
-pub fn mode_items_from_response(response: &Value) -> Vec<PickerItem> {
+pub fn mode_items_from_response(response: &Value) -> Vec<ModePickerItem> {
     let mut out = response
         .get("modes")
         .and_then(Value::as_array)
@@ -441,15 +542,105 @@ pub fn mode_items_from_response(response: &Value) -> Vec<PickerItem> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            Some(PickerItem {
-                id,
-                title,
-                description,
+            let tags = mode
+                .get("ui")
+                .and_then(|ui| ui.get("tags"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|tag| !tag.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let is_overlay = mode
+                .get("is_overlay")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || mode.get("kind").and_then(Value::as_str) == Some("overlay")
+                || mode.get("base").and_then(Value::as_str) == Some("agent")
+                || tags.iter().any(|tag| {
+                    matches!(
+                        tag.to_ascii_lowercase().as_str(),
+                        "overlay" | "model-compat" | "model-compatibility"
+                    )
+                });
+            let group = if is_overlay {
+                "Model compatibility overlays".to_string()
+            } else {
+                tags.first()
+                    .map(|tag| title_case_tag(tag))
+                    .unwrap_or_else(|| "Other modes".to_string())
+            };
+            Some(ModePickerItem {
+                item: PickerItem {
+                    id,
+                    title,
+                    description,
+                },
+                group,
+                tags,
+                order: mode
+                    .get("ui")
+                    .and_then(|ui| ui.get("order"))
+                    .and_then(Value::as_i64)
+                    .and_then(|order| i32::try_from(order).ok())
+                    .unwrap_or(i32::MAX),
+                is_overlay,
+                is_current: false,
+                tools_count: mode
+                    .get("tools_count")
+                    .and_then(Value::as_u64)
+                    .and_then(|count| usize::try_from(count).ok()),
+                thread_defaults: mode_thread_defaults(mode),
             })
         })
         .collect::<Vec<_>>();
-    out.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.id.cmp(&b.id)));
+    let group_orders = out
+        .iter()
+        .fold(HashMap::<String, i32>::new(), |mut orders, item| {
+            orders
+                .entry(item.group.clone())
+                .and_modify(|order| *order = (*order).min(item.order))
+                .or_insert(item.order);
+            orders
+        });
+    out.sort_by(|left, right| {
+        left.is_overlay
+            .cmp(&right.is_overlay)
+            .then_with(|| group_orders[&left.group].cmp(&group_orders[&right.group]))
+            .then_with(|| left.group.cmp(&right.group))
+            .then_with(|| left.order.cmp(&right.order))
+            .then_with(|| left.item.title.cmp(&right.item.title))
+            .then_with(|| left.item.id.cmp(&right.item.id))
+    });
     out
+}
+
+fn mode_thread_defaults(mode: &Value) -> ModeThreadDefaults {
+    let defaults = mode.get("thread_defaults");
+    ModeThreadDefaults {
+        include_project_info: defaults
+            .and_then(|defaults| defaults.get("include_project_info"))
+            .and_then(Value::as_bool),
+        checkpoints_enabled: defaults
+            .and_then(|defaults| defaults.get("checkpoints_enabled"))
+            .and_then(Value::as_bool),
+        auto_approve_editing_tools: defaults
+            .and_then(|defaults| defaults.get("auto_approve_editing_tools"))
+            .and_then(Value::as_bool),
+        auto_approve_dangerous_commands: defaults
+            .and_then(|defaults| defaults.get("auto_approve_dangerous_commands"))
+            .and_then(Value::as_bool),
+    }
+}
+
+fn title_case_tag(tag: &str) -> String {
+    let mut chars = tag.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    format!("{}{}", first.to_uppercase(), chars.as_str())
 }
 
 pub fn file_mention_items_from_completions(completions: Vec<String>) -> Vec<PickerItem> {
@@ -643,5 +834,109 @@ mod tests {
         assert!(priced.description.contains("$3 in / $15 out per 1M"));
         let unknown = items.iter().find(|item| item.id == "unknown").unwrap();
         assert!(unknown.description.contains("pricing unknown"));
+    }
+
+    #[test]
+    fn mode_items_group_by_tags_order_and_separate_overlays() {
+        let modes = serde_json::json!({"modes": [
+            {
+                "id": "review", "title": "Review", "description": "Inspect changes",
+                "tools_count": 4,
+                "thread_defaults": {"auto_approve_editing_tools": false},
+                "ui": {"order": 30, "tags": ["analysis"]}
+            },
+            {
+                "id": "ask", "title": "Ask", "description": "Answer questions",
+                "tools_count": 1,
+                "thread_defaults": {"auto_approve_editing_tools": false},
+                "ui": {"order": 5, "tags": ["chat"]}
+            },
+            {
+                "id": "compat", "title": "Compatibility", "description": "Patch Agent",
+                "base": "agent", "tools_count": 8,
+                "thread_defaults": {"auto_approve_editing_tools": true},
+                "ui": {"order": 1, "tags": []}
+            }
+        ]});
+
+        let items = mode_items_from_response(&modes);
+
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.item.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ask", "review", "compat"]
+        );
+        assert_eq!(items[0].group, "Chat");
+        assert_eq!(items[1].group, "Analysis");
+        assert_eq!(items[2].group, "Model compatibility overlays");
+        assert!(items[2].is_overlay);
+    }
+
+    #[test]
+    fn mode_items_badge_only_resolved_auto_approval_defaults() {
+        let modes = serde_json::json!({"modes": [
+            {
+                "id": "safe", "title": "Safe", "thread_defaults": {
+                    "auto_approve_editing_tools": false,
+                    "auto_approve_dangerous_commands": false
+                }, "ui": {"order": 1, "tags": []}
+            },
+            {
+                "id": "edit", "title": "Edit", "thread_defaults": {
+                    "auto_approve_editing_tools": true,
+                    "auto_approve_dangerous_commands": false
+                }, "ui": {"order": 2, "tags": []}
+            },
+            {
+                "id": "danger", "title": "Danger", "thread_defaults": {
+                    "auto_approve_editing_tools": true,
+                    "auto_approve_dangerous_commands": true
+                }, "ui": {"order": 3, "tags": []}
+            }
+        ]});
+
+        let items = mode_items_from_response(&modes);
+        let badged = items
+            .iter()
+            .filter(|item| item.auto_approval_badge().is_some())
+            .count();
+        let resolved_auto_approving = items
+            .iter()
+            .filter(|item| {
+                item.thread_defaults.auto_approve_editing_tools == Some(true)
+                    || item.thread_defaults.auto_approve_dangerous_commands == Some(true)
+            })
+            .count();
+
+        assert_eq!(badged, resolved_auto_approving);
+        assert_eq!(badged, 2);
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.item.id == "danger")
+                .unwrap()
+                .auto_approval_badge(),
+            Some("! edits + dangerous commands auto-approved")
+        );
+    }
+
+    #[test]
+    fn mode_picker_marks_the_current_mode() {
+        let modes = serde_json::json!({"modes": [
+            {"id": "ask", "title": "Ask", "ui": {"order": 1, "tags": []}},
+            {"id": "agent", "title": "Agent", "ui": {"order": 2, "tags": []}}
+        ]});
+        let picker = PickerState::modes(mode_items_from_response(&modes), Some("agent"));
+
+        let current = picker
+            .filtered_mode_items()
+            .into_iter()
+            .filter(|item| item.is_current)
+            .collect::<Vec<_>>();
+
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].item.id, "agent");
     }
 }

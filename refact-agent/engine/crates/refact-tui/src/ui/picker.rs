@@ -7,7 +7,7 @@ use ratatui::Frame;
 use crate::app::ProjectPickerState;
 use crate::client::ProjectEntry;
 use crate::key_hint;
-use crate::pickers::{PickerKind, PickerState};
+use crate::pickers::{ModePickerItem, PickerKind, PickerState};
 use crate::style::accent_style;
 use crate::ui::menu::{
     self, ColumnWidthConfig, ColumnWidthMode, GenericDisplayRow, ScrollState, MAX_POPUP_ROWS,
@@ -86,6 +86,11 @@ pub fn render_modal_picker(
         return;
     }
 
+    if picker.kind == PickerKind::Mode && picker.has_mode_items() {
+        render_mode_picker(frame, picker, area, composer);
+        return;
+    }
+
     let filtered = picker.filtered_items();
     let selected_idx = clamped_selected_idx(filtered.len(), picker.selected);
     let rows = filtered
@@ -139,6 +144,200 @@ pub fn render_modal_picker(
         footer,
         "No entries match",
     );
+}
+
+fn render_mode_picker(frame: &mut Frame<'_>, picker: &PickerState, area: Rect, _composer: Rect) {
+    let modes = picker.filtered_mode_items();
+    let selected_idx = clamped_selected_idx(modes.len(), picker.selected);
+    let width = popup_width(area, 96);
+    let height = mode_popup_height(&modes, selected_idx, width, area.height);
+    let popup = super::centered(area, width, height);
+    frame.render_widget(Clear, popup);
+    let inner = menu::render_menu_surface(popup, frame.buffer_mut());
+    render_mode_picker_content(
+        frame,
+        inner,
+        Line::from(format!("modes: {}", picker.filter)),
+        modes,
+        selected_idx,
+        mode_picker_hint_line(),
+    );
+}
+
+fn mode_row(idx: usize, selected: usize, mode: &ModePickerItem) -> GenericDisplayRow {
+    let mut prefix = vec![Span::raw(cursor_prefix(idx, selected))];
+    if mode.is_current {
+        prefix.push(Span::styled("● ", accent_style()));
+    } else {
+        prefix.push(Span::raw("  "));
+    }
+    let mut name = mode.item.title.clone();
+    if let Some(badge) = mode.auto_approval_badge() {
+        name.push_str("  ");
+        name.push_str(badge);
+    }
+    GenericDisplayRow {
+        name,
+        name_prefix_spans: prefix,
+        description: Some(mode.picker_description()),
+        category_tag: Some(mode.group.clone()),
+        ..Default::default()
+    }
+}
+
+fn mode_popup_height(
+    modes: &[ModePickerItem],
+    selected: usize,
+    width: u16,
+    available_height: u16,
+) -> u16 {
+    let rows = modes
+        .iter()
+        .enumerate()
+        .map(|(idx, mode)| mode_row(idx, selected, mode))
+        .collect::<Vec<_>>();
+    let group_count = modes
+        .iter()
+        .map(|mode| mode.group.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    popup_height_for_rows(&rows, selected, width, available_height)
+        .saturating_add(group_count as u16)
+        .min(available_height.saturating_sub(2).max(1))
+}
+
+fn render_mode_picker_content(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: Line<'static>,
+    modes: Vec<ModePickerItem>,
+    selected: usize,
+    footer: Line<'static>,
+) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let title_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: 1,
+    };
+    truncate_line_with_ellipsis_if_overflow(title.bold(), area.width as usize)
+        .render(title_area, frame.buffer_mut());
+    let footer_height = u16::from(area.height > 1);
+    let rows_area = Rect {
+        x: area.x,
+        y: area.y.saturating_add(1),
+        width: area.width,
+        height: area.height.saturating_sub(1 + footer_height),
+    };
+    let selected_id = modes.get(selected).map(|mode| mode.item.id.as_str());
+    let start = mode_group_window_start(&modes, selected_id, rows_area.height as usize);
+    let mut y = rows_area.y;
+    let mut previous_group = None;
+    for (index, mode) in modes.iter().enumerate().skip(start) {
+        if y >= rows_area.bottom() {
+            break;
+        }
+        if previous_group != Some(mode.group.as_str()) {
+            truncate_line_with_ellipsis_if_overflow(
+                Line::from(Span::styled(
+                    mode.group.clone(),
+                    Style::default().add_modifier(Modifier::BOLD | Modifier::DIM),
+                )),
+                rows_area.width as usize,
+            )
+            .render(
+                Rect {
+                    x: rows_area.x,
+                    y,
+                    width: rows_area.width,
+                    height: 1,
+                },
+                frame.buffer_mut(),
+            );
+            y = y.saturating_add(1);
+            previous_group = Some(mode.group.as_str());
+            if y >= rows_area.bottom() {
+                break;
+            }
+        }
+        let row = mode_row(index, selected, mode);
+        let name = Line::from({
+            let mut spans = row.name_prefix_spans;
+            spans.push(Span::styled(
+                row.name,
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            spans
+        });
+        truncate_line_with_ellipsis_if_overflow(name, rows_area.width as usize).render(
+            Rect {
+                x: rows_area.x,
+                y,
+                width: rows_area.width,
+                height: 1,
+            },
+            frame.buffer_mut(),
+        );
+        y = y.saturating_add(1);
+        if y >= rows_area.bottom() {
+            break;
+        }
+        truncate_line_with_ellipsis_if_overflow(
+            Line::from(Span::styled(
+                mode.picker_description(),
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+            rows_area.width as usize,
+        )
+        .render(
+            Rect {
+                x: rows_area.x.saturating_add(2),
+                y,
+                width: rows_area.width.saturating_sub(2),
+                height: 1,
+            },
+            frame.buffer_mut(),
+        );
+        y = y.saturating_add(1);
+    }
+    if footer_height > 0 {
+        let footer_area = Rect {
+            x: area.x,
+            y: area.y.saturating_add(area.height.saturating_sub(1)),
+            width: area.width,
+            height: 1,
+        };
+        truncate_line_with_ellipsis_if_overflow(footer.dim(), area.width as usize)
+            .render(footer_area, frame.buffer_mut());
+    }
+}
+
+fn mode_group_window_start(
+    modes: &[ModePickerItem],
+    selected_id: Option<&str>,
+    visible_height: usize,
+) -> usize {
+    let Some(selected_id) = selected_id else {
+        return 0;
+    };
+    let Some(selected) = modes.iter().position(|mode| mode.item.id == selected_id) else {
+        return 0;
+    };
+    let selected_group = modes[selected].group.as_str();
+    let group_start = modes[..selected]
+        .iter()
+        .rposition(|mode| mode.group.as_str() != selected_group)
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let rows_before_selected = modes[group_start..selected].len() * 2 + 1;
+    if rows_before_selected < visible_height {
+        group_start
+    } else {
+        selected
+    }
 }
 
 fn render_composer_popup(frame: &mut Frame<'_>, picker: &PickerState, area: Rect, composer: Rect) {
@@ -376,11 +575,21 @@ fn multi_picker_hint_line() -> Line<'static> {
     ])
 }
 
+fn mode_picker_hint_line() -> Line<'static> {
+    Line::from(vec![
+        "● current · ! auto-approval · ".into(),
+        key_hint::plain("Enter"),
+        " to select or ".into(),
+        key_hint::plain("Esc"),
+        " to go back".into(),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::client::ProjectEntry;
-    use crate::pickers::{PickerItem, PickerKind};
+    use crate::pickers::{ModePickerItem, PickerItem, PickerKind};
     use ratatui::backend::{Backend, TestBackend};
     use ratatui::layout::Position;
     use ratatui::style::{Color, Style};
@@ -582,6 +791,75 @@ mod tests {
         assert!(text.contains("permissions: 1 selected"));
         assert!(text.contains("☑ Beta"));
         assert!(text.contains("Press Space to toggle; Enter to confirm"));
+    }
+
+    #[test]
+    fn mode_picker_renders_groups_current_mode_and_auto_approval_badge() {
+        let picker = PickerState::modes(
+            vec![
+                ModePickerItem {
+                    item: item("ask", "Ask", "answer questions"),
+                    group: "Chat".to_string(),
+                    tags: vec!["chat".to_string()],
+                    order: 1,
+                    is_overlay: false,
+                    is_current: false,
+                    tools_count: Some(1),
+                    thread_defaults: Default::default(),
+                },
+                ModePickerItem {
+                    item: item("agent", "Agent", "work with tools"),
+                    group: "Tools".to_string(),
+                    tags: vec!["tools".to_string()],
+                    order: 2,
+                    is_overlay: false,
+                    is_current: false,
+                    tools_count: Some(8),
+                    thread_defaults: crate::pickers::ModeThreadDefaults {
+                        auto_approve_editing_tools: Some(true),
+                        ..Default::default()
+                    },
+                },
+                ModePickerItem {
+                    item: item("compat", "Compatibility", "agent patch"),
+                    group: "Model compatibility overlays".to_string(),
+                    tags: Vec::new(),
+                    order: 3,
+                    is_overlay: true,
+                    is_current: false,
+                    tools_count: Some(8),
+                    thread_defaults: Default::default(),
+                },
+            ],
+            Some("ask"),
+        );
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                render_modal_picker(frame, &picker, frame.area(), Rect::new(0, 0, 120, 3));
+            })
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(text.contains("Chat"), "{text}");
+        assert!(text.contains("Tools"), "{text}");
+        assert!(text.contains("●"), "{text}");
+        assert!(text.contains("! edits auto-approved"), "{text}");
+        assert_eq!(
+            picker
+                .filtered_mode_items()
+                .last()
+                .map(|mode| mode.group.as_str()),
+            Some("Model compatibility overlays")
+        );
     }
 
     #[test]

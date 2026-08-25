@@ -1096,6 +1096,12 @@ impl App {
             return;
         }
         let (subkind, source, payload) = event_metadata(message);
+        if subkind == "mode_switch" && Self::settings_surface_enabled() {
+            self.push_history_item(TranscriptItem::Info(mode_transition_banner(
+                &payload,
+                &self.mode_records,
+            )));
+        }
         self.events_pane.push_event(DaemonEventRecord {
             ts_ms: Some(now_ms()),
             kind: format!("chat.{subkind}"),
@@ -1267,6 +1273,109 @@ pub(super) fn event_subkind(message: &TranscriptMessage) -> Option<&str> {
         .get("event")
         .and_then(|event| event.get("subkind"))
         .and_then(Value::as_str)
+}
+
+pub(super) fn mode_transition_banner(
+    payload: &Value,
+    mode_records: &[crate::pickers::ModePickerItem],
+) -> Vec<String> {
+    let from = payload
+        .get("from")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let to = payload
+        .get("to")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let reason = payload
+        .get("reason")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.trim().is_empty())
+        .map(sanitize_tool_inline);
+    let from_record = mode_records.iter().find(|record| record.item.id == from);
+    let to_record = mode_records.iter().find(|record| record.item.id == to);
+    let from_title = from_record
+        .map(|record| record.item.title.as_str())
+        .unwrap_or(from);
+    let to_title = to_record
+        .map(|record| record.item.title.as_str())
+        .unwrap_or(to);
+    let mut lines = vec![match reason {
+        Some(reason) => format!("Mode transition: {from_title} → {to_title} ({reason})"),
+        None => format!("Mode transition: {from_title} → {to_title}"),
+    }];
+    let known = match (from_record, to_record) {
+        (Some(from), Some(to)) => resolved_mode_delta(from, to),
+        _ => Vec::new(),
+    };
+    if known.is_empty() {
+        lines.push("Resolved picker records do not show a field-level delta.".to_string());
+    } else {
+        lines.push(format!("Resolved picker records: {}.", known.join("; ")));
+    }
+    lines.push(
+        "Mode changes may alter the tool allow-list, system prompt, integration/MCP/subagent access, confirmation rules, thread defaults, and goal ownership. This event has no field-level diff, so unreported fields are unknown."
+            .to_string(),
+    );
+    lines
+}
+
+fn resolved_mode_delta(
+    from: &crate::pickers::ModePickerItem,
+    to: &crate::pickers::ModePickerItem,
+) -> Vec<String> {
+    let mut delta = Vec::new();
+    if let (Some(from), Some(to)) = (from.tools_count, to.tools_count) {
+        if from != to {
+            delta.push(format!("tool count {from} → {to}"));
+        }
+    }
+    append_default_delta(
+        &mut delta,
+        "project info",
+        from.thread_defaults.include_project_info,
+        to.thread_defaults.include_project_info,
+    );
+    append_default_delta(
+        &mut delta,
+        "checkpoints",
+        from.thread_defaults.checkpoints_enabled,
+        to.thread_defaults.checkpoints_enabled,
+    );
+    append_default_delta(
+        &mut delta,
+        "file edits auto-approved",
+        from.thread_defaults.auto_approve_editing_tools,
+        to.thread_defaults.auto_approve_editing_tools,
+    );
+    append_default_delta(
+        &mut delta,
+        "dangerous commands auto-approved",
+        from.thread_defaults.auto_approve_dangerous_commands,
+        to.thread_defaults.auto_approve_dangerous_commands,
+    );
+    delta
+}
+
+fn append_default_delta(
+    delta: &mut Vec<String>,
+    label: &str,
+    from: Option<bool>,
+    to: Option<bool>,
+) {
+    if let (Some(from), Some(to)) = (from, to) {
+        if from != to {
+            delta.push(format!("{label} {} → {}", on_off(from), on_off(to)));
+        }
+    }
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value {
+        "on"
+    } else {
+        "off"
+    }
 }
 pub(super) fn value_to_compact_string(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
@@ -1690,5 +1799,69 @@ mod tests {
             Some(TranscriptItem::SystemFact(lines))
                 if lines == &["System".to_string(), "Server-maintained fact".to_string()]
         ));
+    }
+
+    #[test]
+    fn mode_transition_banner_states_unknown_fields_without_a_diff() {
+        let banner = mode_transition_banner(&json!({"from": "ask", "to": "agent"}), &[]);
+
+        assert_eq!(banner[0], "Mode transition: ask → agent");
+        assert_eq!(
+            banner[1],
+            "Resolved picker records do not show a field-level delta."
+        );
+        assert!(banner[2].contains("has no field-level diff"));
+        assert!(banner[2].contains("unknown"));
+        assert!(!banner[2].contains("changed"));
+    }
+
+    #[test]
+    fn mode_transition_banner_reports_only_resolved_picker_deltas() {
+        let records = vec![
+            crate::pickers::ModePickerItem {
+                item: crate::pickers::PickerItem {
+                    id: "ask".to_string(),
+                    title: "Ask".to_string(),
+                    description: String::new(),
+                },
+                group: "Chat".to_string(),
+                tags: vec!["chat".to_string()],
+                order: 1,
+                is_overlay: false,
+                is_current: false,
+                tools_count: Some(1),
+                thread_defaults: crate::pickers::ModeThreadDefaults {
+                    auto_approve_editing_tools: Some(false),
+                    ..Default::default()
+                },
+            },
+            crate::pickers::ModePickerItem {
+                item: crate::pickers::PickerItem {
+                    id: "agent".to_string(),
+                    title: "Agent".to_string(),
+                    description: String::new(),
+                },
+                group: "Tools".to_string(),
+                tags: vec!["tools".to_string()],
+                order: 2,
+                is_overlay: false,
+                is_current: false,
+                tools_count: Some(8),
+                thread_defaults: crate::pickers::ModeThreadDefaults {
+                    auto_approve_editing_tools: Some(true),
+                    ..Default::default()
+                },
+            },
+        ];
+
+        let banner = mode_transition_banner(
+            &json!({"from": "ask", "to": "agent", "reason": "handoff"}),
+            &records,
+        );
+
+        assert_eq!(banner[0], "Mode transition: Ask → Agent (handoff)");
+        assert!(banner[1].contains("tool count 1 → 8"));
+        assert!(banner[1].contains("file edits auto-approved off → on"));
+        assert!(banner[2].contains("has no field-level diff"));
     }
 }

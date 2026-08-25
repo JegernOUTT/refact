@@ -196,20 +196,40 @@ impl App {
     }
 
     pub(super) fn open_mode_picker(&mut self, modes: Value) {
+        if !Self::settings_surface_enabled() {
+            self.add_notice("/mode requires REFACT_TUI_SURFACES=1");
+            return;
+        }
         let items = mode_items_from_response(&modes);
         if items.is_empty() {
             self.add_notice("No modes returned by worker");
         } else {
-            let mut picker = PickerState::new(PickerKind::Mode, items);
+            self.mode_records = items.clone();
             let current = self
                 .mode
                 .as_deref()
                 .filter(|mode| !mode.trim().is_empty())
                 .unwrap_or("agent");
-            picker.select_item_id(current);
+            let picker = PickerState::modes(items, Some(current));
             self.modal_picker = Some(picker);
             self.composer_mode = ComposerMode::Chat;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_mode_picker(&mut self, modes: Value) {
+        let items = mode_items_from_response(&modes);
+        if items.is_empty() {
+            return;
+        }
+        self.mode_records = items.clone();
+        let current = self
+            .mode
+            .as_deref()
+            .filter(|mode| !mode.trim().is_empty())
+            .unwrap_or("agent");
+        self.modal_picker = Some(PickerState::modes(items, Some(current)));
+        self.composer_mode = ComposerMode::Chat;
     }
 
     pub(super) fn open_slash_command_picker(&mut self) {
@@ -439,9 +459,13 @@ impl App {
                 AppAction::None
             }
             (PickerKind::Mode, PickerAccept::Single(Some(item))) => {
+                let previous = self.mode.clone().unwrap_or_else(|| "agent".to_string());
                 self.pending_mode = Some(item.id.clone());
                 self.mode = Some(item.id.clone());
-                self.add_notice(format!("Mode selected for next message: {}", item.title));
+                self.add_notice(format!(
+                    "Mode selected for next message: {previous} → {}. The server will report the resolved transition details.",
+                    item.title
+                ));
                 AppAction::None
             }
             (PickerKind::SlashCommand, PickerAccept::Single(Some(item))) => {
@@ -1196,6 +1220,42 @@ mod tests {
         assert!(settings_surface_enabled_from_value(Some("true")));
         assert!(!settings_surface_enabled_from_value(None));
         assert!(!settings_surface_enabled_from_value(Some("0")));
+    }
+
+    #[test]
+    fn mode_picker_uses_the_surfaces_gate() {
+        let mut app = App::notice_only("test");
+        app.open_mode_picker(serde_json::json!({"modes": [{"id": "agent", "title": "Agent"}]}));
+
+        assert!(app.modal_picker().is_none());
+        assert!(matches!(
+            app.visible_transcript().last(),
+            Some(TranscriptItem::Notice(text)) if text == "/mode requires REFACT_TUI_SURFACES=1"
+        ));
+    }
+
+    #[test]
+    fn mode_picker_marks_current_mode_and_resolved_auto_approval() {
+        let mut app = App::notice_only("test");
+        app.mode = Some("agent".to_string());
+        app.test_open_mode_picker(serde_json::json!({"modes": [
+            {
+                "id": "ask", "title": "Ask", "tools_count": 1,
+                "thread_defaults": {"auto_approve_editing_tools": false},
+                "ui": {"order": 1, "tags": ["chat"]}
+            },
+            {
+                "id": "agent", "title": "Agent", "tools_count": 8,
+                "thread_defaults": {"auto_approve_editing_tools": true},
+                "ui": {"order": 2, "tags": ["tools"]}
+            }
+        ]}));
+
+        let modes = app.modal_picker().unwrap().filtered_mode_items();
+        let agent = modes.iter().find(|item| item.item.id == "agent").unwrap();
+
+        assert!(agent.is_current);
+        assert_eq!(agent.auto_approval_badge(), Some("! edits auto-approved"));
     }
 
     #[test]

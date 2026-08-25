@@ -31,7 +31,9 @@ use crate::keymap::{
 };
 use crate::notifications::{NotificationConfig, NotificationKind, NotificationManager};
 use crate::overlay::{PagerAction, PagerOverlay};
-use crate::pickers::{file_mention_items_from_completions, PickerItem, PickerKind, PickerState};
+use crate::pickers::{
+    file_mention_items_from_completions, ModePickerItem, PickerItem, PickerKind, PickerState,
+};
 use crate::protocol::{
     DeltaOp, InboundEventState, SseEvent, TranscriptMessage, TranscriptRole, TranscriptState,
 };
@@ -4839,7 +4841,7 @@ new-chat = "ctrl-x"
             "openai/gpt-small"
         );
 
-        app.open_mode_picker(json!({"modes": [
+        app.test_open_mode_picker(json!({"modes": [
             {"id": "agent", "title": "Agent"},
             {"id": "task_agent", "title": "Task Agent"}
         ]}));
