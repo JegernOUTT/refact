@@ -1669,20 +1669,29 @@ async fn attach_exec_path_references(
         latest_seq,
         hasher.finish(),
     );
-    let collected = {
+    let cached = PATH_ENRICHMENT_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+        .cloned();
+    let collected = if let Some(collected) = cached {
+        collected
+    } else {
+        let collected = crate::exec::path_enrichment::collect_async(
+            command,
+            cwd,
+            &[workspace.to_path_buf()],
+            output,
+        )
+        .await;
         let mut cache = PATH_ENRICHMENT_CACHE
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(collected) = cache.get(&key) {
-            collected.clone()
-        } else {
-            if cache.len() >= 128 {
-                cache.clear();
-            }
-            let collected = crate::exec::path_enrichment::collect(command, cwd, workspace, output);
-            cache.insert(key, collected.clone());
-            collected
+        if cache.len() >= 128 {
+            cache.clear();
         }
+        cache.insert(key, collected.clone());
+        collected
     };
     let enrichment = crate::privacy::records::filter_path_enrichment_for_model_context(
         gcx,

@@ -128,6 +128,8 @@ pub(crate) fn tool_enrichment_from_path_references(enrichment: PathEnrichment) -
             reference.provenance = ToolEnrichmentProvenance::Heuristic;
             reference.line1 = path.line1.map(|line| line as usize);
             reference.line2 = path.line2.map(|line| line as usize);
+            reference.column1 = path.column1.map(|column| column as usize);
+            reference.column2 = path.column2.map(|column| column as usize);
             reference.source = Some(path.source);
             reference.confidence = match path.confidence.as_str() {
                 "high" => Some(0.9),

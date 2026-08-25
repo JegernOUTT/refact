@@ -372,7 +372,7 @@ pub async fn execute_blocking_command(
     owner: ExecOwnerMeta,
     abort_flag: Arc<AtomicBool>,
     short_description: String,
-) -> Result<(String, String, ExecProcessSnapshot, Duration), String> {
+) -> Result<(String, String, bool, ExecProcessSnapshot, Duration), String> {
     info!("EXEC workdir {:?}:\n{:?}", command_workdir, command);
 
     let timeout_secs = cfg.timeout.parse::<u64>().unwrap_or(10);
@@ -410,7 +410,8 @@ pub async fn execute_blocking_command(
         .read_raw_capture(&result.snapshot.meta.process_id)
         .await;
     let (stdout, stderr) = collect_foreground_output(&read, raw_output.as_ref());
-    let diagnostic_output = format!("{stdout}\n{stderr}");
+    let diagnostic_output =
+        crate::exec::path_enrichment::bounded_diagnostic_output(&stdout, &stderr);
 
     let stdout = output_mini_postprocessing(&cfg.output_filter, &stdout);
     let stderr = output_mini_postprocessing(&cfg.output_filter, &stderr);
@@ -436,7 +437,13 @@ pub async fn execute_blocking_command(
         }
     }
     append_status_line(&mut out, &result.snapshot.status, duration, timeout_secs);
-    Ok((out, diagnostic_output, result.snapshot, duration))
+    Ok((
+        out,
+        diagnostic_output.0,
+        diagnostic_output.1,
+        result.snapshot,
+        duration,
+    ))
 }
 
 fn _parse_command_args(
@@ -513,6 +520,7 @@ impl Tool for ToolCmdline {
             )
             .await;
         let project_dirs = crate::files_correction::get_project_dirs(gcx.clone()).await;
+        let enrichment_roots = project_dirs.clone();
 
         let owner = ExecOwnerMeta {
             chat_id: Some(chat_id),
@@ -522,19 +530,20 @@ impl Tool for ToolCmdline {
         };
         let short_description =
             cmdline_short_description(&self.name, &self.cfg.description, &command);
-        let (tool_output, diagnostic_output, snapshot, duration) = execute_blocking_command(
-            gcx.clone(),
-            &command,
-            &self.cfg,
-            &workdir,
-            &env_variables,
-            project_dirs,
-            &exec_registry,
-            owner,
-            abort_flag,
-            short_description,
-        )
-        .await?;
+        let (tool_output, diagnostic_output, diagnostic_truncated, snapshot, duration) =
+            execute_blocking_command(
+                gcx.clone(),
+                &command,
+                &self.cfg,
+                &workdir,
+                &env_variables,
+                project_dirs,
+                &exec_registry,
+                owner,
+                abort_flag,
+                short_description,
+            )
+            .await?;
 
         let cwd = snapshot
             .meta
@@ -542,12 +551,29 @@ impl Tool for ToolCmdline {
             .as_deref()
             .or(snapshot.meta.owner.workspace.as_deref())
             .unwrap_or_else(|| std::path::Path::new("."));
-        let workspace = snapshot.meta.owner.workspace.as_deref().unwrap_or(cwd);
+        let workspace_roots = if enrichment_roots.is_empty() {
+            vec![snapshot
+                .meta
+                .owner
+                .workspace
+                .clone()
+                .unwrap_or_else(|| cwd.to_path_buf())]
+        } else {
+            enrichment_roots
+        };
+        let collected = crate::exec::path_enrichment::collect_async_with_truncation(
+            &command,
+            cwd,
+            &workspace_roots,
+            diagnostic_output,
+            diagnostic_truncated,
+        )
+        .await;
         let enrichment = crate::privacy::records::filter_path_enrichment_for_model_context(
             gcx,
             &destination,
             &derived_privacy_zones,
-            crate::exec::path_enrichment::collect(&command, cwd, workspace, &diagnostic_output),
+            collected,
         )
         .await;
         let mut extra = exec_extra(&snapshot, duration);

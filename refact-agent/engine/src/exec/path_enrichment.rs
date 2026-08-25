@@ -1,5 +1,5 @@
-use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
@@ -38,78 +38,205 @@ pub(crate) struct CollectedPathEnrichment {
     pub(crate) candidates: Vec<PathEnrichmentCandidate>,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedPath {
+    canonical_path: PathBuf,
+    path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ReferenceKey {
+    canonical_path: PathBuf,
+    line1: Option<u32>,
+    line2: Option<u32>,
+    column1: Option<u32>,
+    column2: Option<u32>,
+}
+
+#[cfg(test)]
 pub(crate) fn collect(
     command: &str,
     cwd: &Path,
     workspace: &Path,
     output: &str,
 ) -> CollectedPathEnrichment {
-    let workspace = canonical_workspace(workspace);
-    let cwd = canonical_cwd(cwd, &workspace);
-    let mut collector = Collector::new(workspace, cwd);
-    collector.collect_argv(command);
+    collect_in_roots(command, cwd, &[workspace.to_path_buf()], output)
+}
+
+#[cfg(test)]
+pub(crate) fn collect_in_roots(
+    command: &str,
+    cwd: &Path,
+    workspace_roots: &[PathBuf],
+    output: &str,
+) -> CollectedPathEnrichment {
+    let (output, output_truncated) = bounded_output(output);
+    collect_with_truncation(
+        command,
+        cwd,
+        workspace_roots,
+        &output,
+        output_truncated,
+        None,
+    )
+}
+
+pub(crate) async fn collect_async(
+    command: &str,
+    cwd: &Path,
+    workspace_roots: &[PathBuf],
+    output: &str,
+) -> CollectedPathEnrichment {
+    let (output, output_truncated) = bounded_output(output);
+    collect_async_with_truncation(command, cwd, workspace_roots, output, output_truncated).await
+}
+
+pub(crate) async fn collect_async_with_truncation(
+    command: &str,
+    cwd: &Path,
+    workspace_roots: &[PathBuf],
+    output: String,
+    output_truncated: bool,
+) -> CollectedPathEnrichment {
+    let command = command.to_string();
+    let cwd = cwd.to_path_buf();
+    let workspace_roots = workspace_roots.to_vec();
+    tokio::task::spawn_blocking(move || {
+        collect_with_truncation(
+            &command,
+            &cwd,
+            &workspace_roots,
+            &output,
+            output_truncated,
+            None,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| empty_collected(output_truncated))
+}
+
+fn empty_collected(truncated: bool) -> CollectedPathEnrichment {
+    CollectedPathEnrichment {
+        metadata: PathEnrichment {
+            references: Vec::new(),
+            truncated,
+            omitted_count: 0,
+            withheld_count: 0,
+        },
+        candidates: Vec::new(),
+    }
+}
+
+fn collect_with_truncation(
+    command: &str,
+    cwd: &Path,
+    workspace_roots: &[PathBuf],
+    output: &str,
+    output_truncated: bool,
+    argv: Option<&[String]>,
+) -> CollectedPathEnrichment {
+    let workspace_roots = canonical_workspace_roots(workspace_roots);
+    let cwd = canonical_cwd(cwd, &workspace_roots);
+    let mut collector = Collector::new(workspace_roots, cwd, output_truncated);
+    collector.collect_argv(command, argv);
     collector.collect_diagnostics(output);
     collector.finish()
 }
 
-fn canonical_workspace(workspace: &Path) -> Option<PathBuf> {
-    std::fs::canonicalize(workspace)
-        .ok()
-        .filter(|path| path.is_dir())
+fn canonical_workspace_roots(workspace_roots: &[PathBuf]) -> Vec<PathBuf> {
+    workspace_roots
+        .iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .filter(|root| root.is_dir())
+        .collect()
 }
 
-fn canonical_cwd(cwd: &Path, workspace: &Option<PathBuf>) -> PathBuf {
+fn canonical_cwd(cwd: &Path, workspace_roots: &[PathBuf]) -> PathBuf {
     std::fs::canonicalize(cwd)
         .ok()
-        .or_else(|| workspace.clone())
+        .or_else(|| workspace_roots.first().cloned())
         .unwrap_or_else(|| cwd.to_path_buf())
 }
 
+fn bounded_output(output: &str) -> (String, bool) {
+    let prefix = refact_core::string_utils::safe_truncate(output, MAX_SCAN_BYTES);
+    (prefix.to_string(), prefix.len() < output.len())
+}
+
+pub(crate) fn bounded_diagnostic_output(stdout: &str, stderr: &str) -> (String, bool) {
+    let total_len = stdout.len().saturating_add(1).saturating_add(stderr.len());
+    let mut output = String::with_capacity(total_len.min(MAX_SCAN_BYTES));
+    output.push_str(refact_core::string_utils::safe_truncate(
+        stdout,
+        MAX_SCAN_BYTES,
+    ));
+    if output.len() < MAX_SCAN_BYTES {
+        output.push('\n');
+        let remaining = MAX_SCAN_BYTES.saturating_sub(output.len());
+        output.push_str(refact_core::string_utils::safe_truncate(stderr, remaining));
+    }
+    (output, total_len > MAX_SCAN_BYTES)
+}
+
 struct Collector {
-    workspace: Option<PathBuf>,
+    workspace_roots: Vec<PathBuf>,
     cwd: PathBuf,
     metadata: PathEnrichment,
     candidates: Vec<PathEnrichmentCandidate>,
-    seen: HashSet<PathBuf>,
+    seen: HashMap<ReferenceKey, usize>,
+    resolution_cache: HashMap<String, Option<ResolvedPath>>,
+    resolution_attempts: usize,
 }
 
 impl Collector {
-    fn new(workspace: Option<PathBuf>, cwd: PathBuf) -> Self {
+    fn new(workspace_roots: Vec<PathBuf>, cwd: PathBuf, output_truncated: bool) -> Self {
         Self {
-            workspace,
+            workspace_roots,
             cwd,
             metadata: PathEnrichment {
                 references: Vec::new(),
-                truncated: false,
+                truncated: output_truncated,
                 omitted_count: 0,
                 withheld_count: 0,
             },
             candidates: Vec::new(),
-            seen: HashSet::new(),
+            seen: HashMap::new(),
+            resolution_cache: HashMap::new(),
+            resolution_attempts: 0,
         }
     }
 
-    fn collect_argv(&mut self, command: &str) {
+    fn collect_argv(&mut self, command: &str, argv: Option<&[String]>) {
+        if let Some(argv) = argv {
+            self.collect_argv_operands(argv.iter().map(String::as_str), "high");
+            return;
+        }
+        if looks_like_windows_command(command) {
+            let argv = split_windows_command(command);
+            self.collect_argv_operands(argv.iter().map(String::as_str), "low");
+            return;
+        }
         let Ok(argv) = shell_words::split(command) else {
             self.metadata.omitted_count += 1;
             return;
         };
-        for operand in argv.into_iter().skip(1) {
-            if operand.starts_with('-') || is_shell_expansion(&operand) {
+        self.collect_argv_operands(argv.iter().map(String::as_str), "high");
+    }
+
+    fn collect_argv_operands<'a>(
+        &mut self,
+        operands: impl IntoIterator<Item = &'a str>,
+        confidence: &str,
+    ) {
+        for operand in operands.into_iter().skip(1) {
+            if operand.starts_with('-') || is_shell_expansion(operand) {
                 continue;
             }
-            self.push_candidate(&operand, None, None, None, None, "argv", "high");
+            self.push_candidate(operand, None, None, None, None, "argv", confidence);
         }
     }
 
     fn collect_diagnostics(&mut self, output: &str) {
-        let bytes = output.as_bytes();
-        let (output, byte_truncated) = if bytes.len() > MAX_SCAN_BYTES {
-            (&output[..valid_char_boundary(output, MAX_SCAN_BYTES)], true)
-        } else {
-            (output, false)
-        };
-        self.metadata.truncated |= byte_truncated;
         for (index, line) in output.lines().enumerate() {
             if index >= MAX_SCAN_LINES {
                 self.metadata.truncated = true;
@@ -151,20 +278,19 @@ impl Collector {
         source: &str,
         confidence: &str,
     ) {
-        let Some((canonical_path, path)) = self.resolve(raw_path) else {
+        let Some(resolved) = self.resolve(raw_path) else {
             self.metadata.omitted_count += 1;
             return;
         };
-        if !self.seen.insert(canonical_path.clone()) {
-            return;
-        }
-        if self.candidates.len() >= MAX_REFERENCES {
-            self.metadata.truncated = true;
-            self.metadata.omitted_count += 1;
-            return;
-        }
+        let key = ReferenceKey {
+            canonical_path: resolved.canonical_path.clone(),
+            line1,
+            line2,
+            column1,
+            column2,
+        };
         let reference = PathReference {
-            path,
+            path: resolved.path,
             line1,
             line2,
             column1,
@@ -172,14 +298,36 @@ impl Collector {
             source: source.to_string(),
             confidence: confidence.to_string(),
         };
+        if let Some(index) = self.seen.get(&key).copied() {
+            merge_reference(&mut self.metadata.references[index], &reference);
+            merge_reference(&mut self.candidates[index].reference, &reference);
+            return;
+        }
+        if self.candidates.len() >= MAX_REFERENCES {
+            self.metadata.truncated = true;
+            self.metadata.omitted_count += 1;
+            return;
+        }
+        self.seen.insert(key, self.candidates.len());
         self.metadata.references.push(reference.clone());
         self.candidates.push(PathEnrichmentCandidate {
             reference,
-            canonical_path,
+            canonical_path: resolved.canonical_path,
         });
     }
 
-    fn resolve(&self, raw_path: &str) -> Option<(PathBuf, String)> {
+    fn resolve(&mut self, raw_path: &str) -> Option<ResolvedPath> {
+        let cache_key = raw_path.to_string();
+        if let Some(resolved) = self.resolution_cache.get(&cache_key) {
+            return resolved.clone();
+        }
+        self.resolution_attempts += 1;
+        let resolved = self.resolve_uncached(raw_path);
+        self.resolution_cache.insert(cache_key, resolved.clone());
+        resolved
+    }
+
+    fn resolve_uncached(&self, raw_path: &str) -> Option<ResolvedPath> {
         let raw_path = raw_path.trim().trim_matches(['\'', '"']);
         if raw_path.is_empty()
             || raw_path.contains("://")
@@ -189,26 +337,30 @@ impl Collector {
         {
             return None;
         }
-        let path = Path::new(raw_path);
-        if path
-            .components()
-            .any(|component| component == Component::ParentDir)
-        {
+        let raw_path = raw_path.replace('\\', "/");
+        if raw_path.starts_with("//") || has_windows_drive_prefix(&raw_path) {
             return None;
         }
-        let candidate = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.cwd.join(path)
-        };
+        let path = Path::new(&raw_path);
+        if path.is_absolute() {
+            return None;
+        }
+        let candidate = self.cwd.join(path);
         let canonical_path = std::fs::canonicalize(candidate).ok()?;
         if !canonical_path.is_file() {
             return None;
         }
-        let workspace = self.workspace.as_ref()?;
+        let workspace = self
+            .workspace_roots
+            .iter()
+            .filter(|root| canonical_path.starts_with(root))
+            .max_by_key(|root| root.components().count())?;
         let relative = canonical_path.strip_prefix(workspace).ok()?;
         let relative = relative.to_string_lossy().replace('\\', "/");
-        (!relative.is_empty()).then_some((canonical_path, relative))
+        (!relative.is_empty()).then_some(ResolvedPath {
+            canonical_path,
+            path: relative,
+        })
     }
 
     fn finish(self) -> CollectedPathEnrichment {
@@ -219,6 +371,78 @@ impl Collector {
     }
 }
 
+fn merge_reference(existing: &mut PathReference, incoming: &PathReference) {
+    if incoming.source == "diagnostic" && existing.source != "diagnostic" {
+        *existing = incoming.clone();
+    }
+}
+
+fn has_windows_drive_prefix(value: &str) -> bool {
+    value
+        .as_bytes()
+        .get(1)
+        .is_some_and(|character| *character == b':')
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+}
+
+fn looks_like_windows_command(command: &str) -> bool {
+    if cfg!(target_os = "windows") {
+        return true;
+    }
+    let program = command
+        .trim_start_matches(|character: char| matches!(character, '&' | ' '))
+        .split_ascii_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches(['\'', '"'])
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        program.as_str(),
+        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" | "cmd" | "cmd.exe"
+    ) || matches!(
+        program.as_str(),
+        "get-childitem" | "get-content" | "set-location" | "test-path" | "select-string"
+    )
+}
+
+fn split_windows_command(command: &str) -> Vec<String> {
+    let mut argv = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut chars = command.chars();
+    while let Some(character) = chars.next() {
+        if let Some(active_quote) = quote {
+            if character == active_quote {
+                quote = None;
+            } else if character == '`' {
+                if let Some(escaped) = chars.next() {
+                    current.push(escaped);
+                }
+            } else {
+                current.push(character);
+            }
+        } else if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character.is_ascii_whitespace() {
+            if !current.is_empty() {
+                argv.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(character);
+        }
+    }
+    if !current.is_empty() {
+        argv.push(current);
+    }
+    argv
+}
+
 fn is_shell_expansion(value: &str) -> bool {
     value.contains('$')
         || value.contains('`')
@@ -227,14 +451,6 @@ fn is_shell_expansion(value: &str) -> bool {
         || value.contains('[')
         || value.contains('{')
         || value.starts_with('~')
-}
-
-fn valid_char_boundary(value: &str, limit: usize) -> usize {
-    let mut index = limit.min(value.len());
-    while index > 0 && !value.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
 }
 
 fn strip_ansi(value: &str) -> String {
@@ -257,12 +473,22 @@ fn strip_ansi(value: &str) -> String {
 
 fn diagnostic_patterns() -> &'static [Regex] {
     static PATTERNS: std::sync::LazyLock<Vec<Regex>> = std::sync::LazyLock::new(|| {
+        let path = r#"(?:[^\s:()]+(?:\.[[:alnum:]_+-]+)|(?:[^\s:()]+[\\/])?(?:Makefile|Dockerfile|Justfile))"#;
         vec![
-            Regex::new(r#"(?:^|\s|-->)\s*(?P<path>[^\s:()]+(?:\.[[:alnum:]_+-]+)):(?P<line>[0-9]+):(?P<column>[0-9]+)(?:\s|:|$)"#).unwrap(),
-            Regex::new(r#"(?:^|\s)(?P<path>[^\s:()]+(?:\.[[:alnum:]_+-]+)):(?P<line>[0-9]+):(?:\s|$)"#).unwrap(),
-            Regex::new(r#"(?P<path>[^\s()]+(?:\.[[:alnum:]_+-]+))\((?P<line>[0-9]+),(?P<column>[0-9]+)\)"#).unwrap(),
+            Regex::new(&format!(
+                r#"(?:^|\s|-->)\s*(?P<path>{path}):(?P<line>[0-9]+):(?P<column>[0-9]+)(?:\s|:|$)"#
+            ))
+            .unwrap(),
+            Regex::new(&format!(
+                r#"(?:^|\s)(?P<path>{path}):(?P<line>[0-9]+):(?:\s|$)"#
+            ))
+            .unwrap(),
+            Regex::new(&format!(
+                r#"(?P<path>{path})\((?P<line>[0-9]+),(?P<column>[0-9]+)\)"#
+            ))
+            .unwrap(),
             Regex::new(r#"File \"(?P<path>[^\"]+)\", line (?P<line>[0-9]+)"#).unwrap(),
-            Regex::new(r#"\((?P<path>[^()\s]+(?:\.[[:alnum:]_+-]+)):(?P<line>[0-9]+)\)"#).unwrap(),
+            Regex::new(&format!(r#"\((?P<path>{path}):(?P<line>[0-9]+)\)"#)).unwrap(),
         ]
     });
     PATTERNS.as_slice()
@@ -291,8 +517,11 @@ mod tests {
 
         let result = collect("cat 'src/main.rs'", temp.path(), temp.path(), output);
 
-        assert_eq!(reference_paths(&result), vec!["src/main.rs"]);
+        assert_eq!(reference_paths(&result), vec!["src/main.rs", "src/main.rs"]);
         assert_eq!(result.metadata.references[0].source, "argv");
+        assert_eq!(result.metadata.references[1].source, "diagnostic");
+        assert_eq!(result.metadata.references[1].line1, Some(7));
+        assert_eq!(result.metadata.references[1].column1, Some(3));
         assert_eq!(output, "\u{1b}[31m--> src/main.rs:7:3\u{1b}[0m\n");
     }
 
@@ -315,6 +544,89 @@ mod tests {
         assert_eq!(result.metadata.references[0].column1, Some(4));
     }
 
+    #[test]
+    fn normalizes_windows_separators_and_extensionless_diagnostics() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("src/lib.rs");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "pub fn visible() {}\n").unwrap();
+        for name in ["Makefile", "Dockerfile", "Justfile"] {
+            std::fs::write(temp.path().join(name), "all:\n").unwrap();
+        }
+        let nested = temp.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let result = collect(
+            "true",
+            &nested,
+            temp.path(),
+            "..\\src\\lib.rs:2:3\n../src/lib.rs:3:5\n../Makefile:1:1\n../Dockerfile:1:1\n../Justfile:1:1\n",
+        );
+
+        assert_eq!(
+            reference_paths(&result),
+            vec![
+                "src/lib.rs",
+                "src/lib.rs",
+                "Makefile",
+                "Dockerfile",
+                "Justfile"
+            ]
+        );
+        assert_eq!(result.metadata.references[0].column1, Some(3));
+        assert_eq!(result.metadata.references[1].column1, Some(5));
+    }
+
+    #[test]
+    fn resolves_each_raw_candidate_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("src/lib.rs");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "x\n").unwrap();
+        let roots = canonical_workspace_roots(&[temp.path().to_path_buf()]);
+        let cwd = canonical_cwd(temp.path(), &roots);
+        let mut collector = Collector::new(roots, cwd, false);
+
+        collector.collect_diagnostics("src/lib.rs:1:1\nsrc/lib.rs:2:1\n");
+
+        assert_eq!(collector.resolution_attempts, 1);
+        assert_eq!(collector.metadata.references.len(), 2);
+    }
+
+    #[test]
+    fn windows_command_parsing_preserves_quoted_operands_at_low_confidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("src/space name.rs");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "x\n").unwrap();
+        let command = "powershell Get-Content 'src\\space name.rs'";
+
+        let result = collect(command, temp.path(), temp.path(), "");
+
+        assert_eq!(reference_paths(&result), vec!["src/space name.rs"]);
+        assert_eq!(result.metadata.references[0].confidence, "low");
+    }
+
+    #[test]
+    fn enriches_secondary_workspace_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        let file = second.join("src/lib.rs");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::write(file, "x\n").unwrap();
+
+        let result = collect_in_roots(
+            "cat ../second/src/lib.rs",
+            &first,
+            &[first.clone(), second],
+            "",
+        );
+
+        assert_eq!(reference_paths(&result), vec!["src/lib.rs"]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn rejects_traversal_symlink_escape_and_out_of_scope_paths() {
@@ -331,7 +643,7 @@ mod tests {
             "cat ../outside.txt escape.txt",
             &workspace,
             &workspace,
-            "../outside.txt:1:1\nescape.txt:1:1\n",
+            "../outside.txt:1:1\nescape.txt:1:1\nC:\\outside.txt:1:1\n\\\\host\\share\\file.rs:1:1\nhttps://example.test/file.rs:1:1\n",
         );
 
         assert!(result.metadata.references.is_empty());
@@ -343,12 +655,23 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("src/lib.rs");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(file, "x\n").unwrap();
+        std::fs::write(&file, "x\n").unwrap();
         let output = "src/lib.rs:1:1\n".repeat(MAX_SCAN_LINES + 10);
 
         let result = collect("true", temp.path(), temp.path(), &output);
 
         assert_eq!(result.metadata.references.len(), 1);
+        assert!(result.metadata.truncated);
+    }
+
+    #[test]
+    fn bounds_huge_lines_without_copying_the_full_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = format!("{}src/lib.rs:1:1", "x".repeat(MAX_SCAN_BYTES * 2));
+
+        let result = collect("true", temp.path(), temp.path(), &output);
+
+        assert!(result.metadata.references.is_empty());
         assert!(result.metadata.truncated);
     }
 }

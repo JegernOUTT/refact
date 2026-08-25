@@ -751,11 +751,18 @@ async fn attach_exec_path_references(
         .or(snapshot.meta.owner.workspace.as_deref())
         .unwrap_or_else(|| Path::new("."));
     let workspace = snapshot.meta.owner.workspace.as_deref().unwrap_or(cwd);
+    let collected = crate::exec::path_enrichment::collect_async(
+        command,
+        cwd,
+        &[workspace.to_path_buf()],
+        output,
+    )
+    .await;
     let enrichment = crate::privacy::records::filter_path_enrichment_for_model_context(
         gcx,
         destination,
         derived_privacy_zones,
-        crate::exec::path_enrichment::collect(command, cwd, workspace, output),
+        collected,
     )
     .await;
     refact_chat_api::attach_tool_enrichment_to_extra(

@@ -132,6 +132,10 @@ pub struct ToolEnrichmentReference {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line2: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column1: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column2: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -155,6 +159,8 @@ impl ToolEnrichmentReference {
             status: None,
             line1: None,
             line2: None,
+            column1: None,
+            column2: None,
             count: None,
             source: None,
             truncated: false,
@@ -181,6 +187,14 @@ impl ToolEnrichmentReference {
         {
             self.line2 = None;
         }
+        self.column1 = self.column1.filter(|column| *column > 0);
+        self.column2 = self.column2.filter(|column| *column > 0);
+        if self
+            .column2
+            .is_some_and(|column2| self.column1.is_none_or(|column1| column2 < column1))
+        {
+            self.column2 = None;
+        }
         self.count = self.count.filter(|count| *count > 0);
         self.details = self
             .details
@@ -191,8 +205,24 @@ impl ToolEnrichmentReference {
         Some(self)
     }
 
-    fn dedup_key(&self) -> (ToolEnrichmentKind, String, Option<usize>, Option<usize>) {
-        (self.kind, self.target.clone(), self.line1, self.line2)
+    fn dedup_key(
+        &self,
+    ) -> (
+        ToolEnrichmentKind,
+        String,
+        Option<usize>,
+        Option<usize>,
+        Option<usize>,
+        Option<usize>,
+    ) {
+        (
+            self.kind,
+            self.target.clone(),
+            self.line1,
+            self.line2,
+            self.column1,
+            self.column2,
+        )
     }
 }
 
@@ -392,11 +422,11 @@ fn normalize_http_url(value: &str) -> Option<String> {
 }
 
 fn normalize_workspace_relative_path(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() || value.contains('\\') {
+    let value = value.trim().replace('\\', "/");
+    if value.is_empty() || value.starts_with("//") || has_windows_drive_prefix(&value) {
         return None;
     }
-    let path = Path::new(value);
+    let path = Path::new(&value);
     if path.is_absolute()
         || path.components().any(|component| {
             matches!(
@@ -417,6 +447,17 @@ fn normalize_workspace_relative_path(value: &str) -> Option<String> {
         .collect::<Vec<_>>()
         .join("/");
     normalize_safe_text(&normalized, MAX_TARGET_CHARS).map(|(text, _)| text)
+}
+
+fn has_windows_drive_prefix(value: &str) -> bool {
+    value
+        .as_bytes()
+        .get(1)
+        .is_some_and(|character| *character == b':')
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
 }
 
 fn normalize_artifact_target(value: &str) -> Option<String> {
@@ -791,5 +832,24 @@ mod tests {
             .unwrap()
             .rename_to
             .is_none());
+    }
+
+    #[test]
+    fn windows_style_workspace_paths_are_normalized() {
+        assert_eq!(
+            reference(ToolEnrichmentKind::Path, "src\\nested\\lib.rs")
+                .normalized()
+                .unwrap()
+                .target,
+            "src/nested/lib.rs"
+        );
+        assert!(reference(ToolEnrichmentKind::Path, "C:\\private\\lib.rs")
+            .normalized()
+            .is_none());
+        assert!(
+            reference(ToolEnrichmentKind::Path, "\\\\host\\share\\lib.rs")
+                .normalized()
+                .is_none()
+        );
     }
 }
