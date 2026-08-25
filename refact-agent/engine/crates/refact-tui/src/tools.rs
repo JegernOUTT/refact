@@ -1,8 +1,9 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
+use unicode_segmentation::UnicodeSegmentation;
 
-use crate::render::{color_enabled_from_env, is_unified_diff, render_unified_diff};
+use crate::render::MarkdownRenderer;
 use crate::text_safety::{
     compact_tool_preview, sanitize_json_strings, sanitize_tool_inline, sanitize_tool_text,
 };
@@ -211,22 +212,18 @@ impl ToolCard {
             .duration_ms
             .map(format_duration)
             .unwrap_or_else(|| "".to_string());
-        if duration.is_empty() {
-            format!(
-                "{} {}({})",
-                self.status.visual(),
-                self.name,
-                self.args_preview
-            )
-        } else {
-            format!(
-                "{} {}({}) · {}",
-                self.status.visual(),
-                self.name,
-                self.args_preview,
-                duration
-            )
+        let mut parts = vec![format!(
+            "{} {}",
+            self.status.visual(),
+            tool_display_name(&self.name)
+        )];
+        if let Some(summary) = tool_argument_summary(&self.args, 72) {
+            parts.push(summary);
         }
+        if !duration.is_empty() {
+            parts.push(duration);
+        }
+        parts.join(" · ")
     }
 
     pub fn render_lines(&self, width: usize) -> Vec<Line<'static>> {
@@ -238,7 +235,18 @@ impl ToolCard {
         ])];
         lines.extend(self.render_subchat_lines(width));
         if self.expanded {
+            lines.push(tool_section_label("Arguments"));
+            lines.extend(render_tool_arguments(&self.args, width));
+            lines.push(tool_section_label("Result"));
             lines.extend(render_tool_result(&self.result, width));
+        } else if !self.result.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("  └ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    tool_result_summary(&self.result, width.saturating_sub(4).max(8)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
         }
         lines
     }
@@ -290,6 +298,15 @@ impl ToolCard {
         lines.extend(prefix_subchat_body(body));
         lines
     }
+}
+
+fn tool_section_label(label: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        label.to_string(),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 fn subchat_output_lines(text: &str, width: usize, max_lines: usize) -> Vec<Line<'static>> {
@@ -430,30 +447,17 @@ fn string_array_field(value: &Value, field: &str) -> Vec<String> {
 }
 
 pub fn render_tool_result(result: &str, width: usize) -> Vec<Line<'static>> {
-    let result = sanitize_tool_text(result);
-    if is_unified_diff(&result) {
-        return render_unified_diff(
-            &result,
-            Some(width.saturating_sub(2).max(8)),
-            color_enabled_from_env(),
-        )
-        .into_iter()
-        .take(MAX_RESULT_LINES + 1)
-        .collect();
-    }
-
-    let mut lines = Vec::new();
-    let all_lines = result.lines().collect::<Vec<_>>();
-    let shown = all_lines.len().min(MAX_RESULT_LINES);
-    for line in all_lines.iter().take(shown) {
+    let source = format_tool_payload(result);
+    let mut lines = if source.is_empty() {
+        Vec::new()
+    } else {
+        MarkdownRenderer::new(Some(width.max(8))).render(&source)
+    };
+    let omitted = lines.len().saturating_sub(MAX_RESULT_LINES);
+    lines.truncate(MAX_RESULT_LINES);
+    if omitted > 0 {
         lines.push(Line::from(Span::styled(
-            compact_preview(line, width.saturating_sub(4).max(8)),
-            style_for_result_line(line),
-        )));
-    }
-    if all_lines.len() > MAX_RESULT_LINES {
-        lines.push(Line::from(Span::styled(
-            format!("… {} more", all_lines.len() - MAX_RESULT_LINES),
+            format!("… {omitted} more"),
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -464,6 +468,147 @@ pub fn render_tool_result(result: &str, width: usize) -> Vec<Line<'static>> {
         )));
     }
     lines
+}
+
+pub fn render_tool_arguments(args: &str, width: usize) -> Vec<Line<'static>> {
+    let source = format_tool_payload(args);
+    if source.is_empty() {
+        return vec![Line::from(Span::styled(
+            "(no arguments)",
+            Style::default().fg(Color::DarkGray),
+        ))];
+    }
+    MarkdownRenderer::new(Some(width.max(8))).render(&source)
+}
+
+pub fn tool_display_name(name: &str) -> String {
+    sanitize_tool_inline(name.strip_prefix("t_").unwrap_or(name))
+}
+
+pub fn tool_argument_summary(args: &str, max_graphemes: usize) -> Option<String> {
+    let value = serde_json::from_str::<Value>(args).ok();
+    let summary = match value {
+        Some(Value::Object(values)) => {
+            const SALIENT_KEYS: &[&str] = &[
+                "description",
+                "summary",
+                "title",
+                "command",
+                "cmd",
+                "query",
+                "search_key",
+                "pattern",
+                "path",
+                "url",
+                "message",
+                "prompt",
+                "question",
+                "name",
+                "id",
+            ];
+            SALIENT_KEYS
+                .iter()
+                .find_map(|key| {
+                    values
+                        .get(*key)
+                        .map(|value| format!("{key}: {}", summary_value(value)))
+                })
+                .or_else(|| {
+                    values.iter().find_map(|(key, value)| {
+                        let value = summary_value(value);
+                        (!value.is_empty()).then(|| format!("{key}: {value}"))
+                    })
+                })
+                .or_else(|| (!values.is_empty()).then(|| format!("{} arguments", values.len())))
+        }
+        Some(value) => Some(summary_value(&value)),
+        None => {
+            let args = sanitize_tool_inline(args);
+            if args.starts_with('{') || args.starts_with('[') {
+                Some("arguments unavailable".to_string())
+            } else {
+                (!args.is_empty()).then_some(args)
+            }
+        }
+    }?;
+    Some(truncate_summary_at_boundary(&summary, max_graphemes))
+}
+
+pub fn tool_result_summary(result: &str, max_graphemes: usize) -> String {
+    let source = sanitize_tool_text(result);
+    let summary = serde_json::from_str::<Value>(&source)
+        .ok()
+        .and_then(|value| match value {
+            Value::Object(values) => ["summary", "message", "detail", "output"]
+                .iter()
+                .find_map(|key| values.get(*key).map(summary_value))
+                .or_else(|| (!values.is_empty()).then(|| "Result available".to_string())),
+            Value::String(value) => Some(sanitize_tool_inline(value)),
+            value => Some(summary_value(&value)),
+        })
+        .or_else(|| {
+            source
+                .lines()
+                .map(sanitize_tool_inline)
+                .find(|line| !line.is_empty())
+        })
+        .unwrap_or_else(|| "(no output)".to_string());
+    truncate_summary_at_boundary(&summary, max_graphemes)
+}
+
+fn format_tool_payload(text: &str) -> String {
+    let text = sanitize_tool_text(text);
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .map(|value| sanitize_json_strings(&value))
+        .and_then(|value| {
+            serde_json::to_string_pretty(&value)
+                .ok()
+                .map(|value| format!("```json\n{value}\n```"))
+        })
+        .unwrap_or(text)
+}
+
+fn summary_value(value: &Value) -> String {
+    match sanitize_json_strings(value) {
+        Value::String(value) => sanitize_tool_inline(value),
+        Value::Array(values) => format!("{} items", values.len()),
+        Value::Object(values) => format!("{} fields", values.len()),
+        Value::Null => "null".to_string(),
+        value => value.to_string(),
+    }
+}
+
+fn truncate_summary_at_boundary(text: &str, max_graphemes: usize) -> String {
+    let text = sanitize_tool_inline(text);
+    if text.graphemes(true).count() <= max_graphemes {
+        return text;
+    }
+    if max_graphemes == 0 {
+        return String::new();
+    }
+
+    let limit = max_graphemes.saturating_sub(1);
+    let mut summary = String::new();
+    for word in text.split_whitespace() {
+        let separator = (!summary.is_empty()).then_some(" ").unwrap_or_default();
+        if summary
+            .graphemes(true)
+            .count()
+            .saturating_add(separator.graphemes(true).count())
+            .saturating_add(word.graphemes(true).count())
+            > limit
+        {
+            break;
+        }
+        summary.push_str(separator);
+        summary.push_str(word);
+    }
+    if !summary.is_empty() {
+        summary.push(' ');
+    }
+    summary.push('…');
+    summary
 }
 
 pub fn style_for_result_line(line: &str) -> Style {
@@ -538,7 +683,7 @@ mod tests {
             "function": {"name": "shell", "arguments": "{\"cmd\":\"echo hi\"}"}
         }))
         .with_result("+ok\n-no", ToolStatus::Succeeded);
-        assert_eq!(card.render_lines(80).len(), 1);
+        assert_eq!(card.render_lines(80).len(), 2);
         card.toggle();
         let lines = card.render_lines(80);
         assert!(lines.len() > 1);
@@ -681,6 +826,70 @@ mod tests {
         let lines = render_tool_result(&result, 80);
         assert_eq!(lines.len(), 201);
         assert!(format!("{:?}", lines.last().unwrap()).contains("5 more"));
+    }
+
+    #[test]
+    fn unknown_tool_header_uses_clean_boundary_truncated_argument_summary() {
+        let args = r#"{"description":"replace the old handler with a reliable implementation","payload":"abcdefghijklmnopqrstuvwxyz"}"#;
+        let card = ToolCard::from_tool_call(&json!({
+            "function": {"name": "t_future_tool", "arguments": args}
+        }));
+        let header = plain_text(&card.render_lines(120));
+
+        assert_eq!(
+            tool_argument_summary(args, 30).as_deref(),
+            Some("description: replace the old …")
+        );
+        assert!(header.contains("future_tool · description:"));
+        assert!(!header.contains("t_future_tool"));
+        assert!(!header.contains("{\"description\""));
+    }
+
+    #[test]
+    fn malformed_json_arguments_do_not_leak_into_tool_headers() {
+        let card = ToolCard::from_tool_call(&json!({
+            "function": {"name": "t_future_tool", "arguments": "{\"description\": \"partial"}
+        }));
+
+        assert!(card.summary().contains("arguments unavailable"));
+        assert!(!card.summary().contains("{\"description\""));
+    }
+
+    #[test]
+    fn collapsed_result_prefers_json_summary_and_expanded_payloads_are_pretty() {
+        let mut card = ToolCard::from_tool_call(&json!({
+            "function": {
+                "name": "t_future_tool",
+                "arguments": r#"{"command":"echo hi","path":"src/main.rs"}"#
+            }
+        }))
+        .with_result(
+            r#"{"summary":"Indexed 12 files","details":{"updated":true}}"#,
+            ToolStatus::Succeeded,
+        );
+
+        let collapsed = plain_text(&card.render_lines(120));
+        assert!(collapsed.contains("  └ Indexed 12 files"));
+        assert!(!collapsed.contains("details"));
+
+        card.toggle();
+        let expanded = plain_text(&card.render_lines(120));
+        assert!(expanded.contains("Arguments\n{"));
+        assert!(expanded.contains("  \"command\": \"echo hi\","));
+        assert!(expanded.contains("Result\n{"));
+        assert!(expanded.contains("  \"summary\": \"Indexed 12 files\","));
+    }
+
+    #[test]
+    fn tool_result_markdown_table_uses_markdown_renderer() {
+        let rendered = plain_text(&render_tool_result(
+            "| Name | Count |\n| --- | ---: |\n| files | 12 |",
+            80,
+        ));
+
+        assert!(rendered.contains('━'));
+        assert!(rendered.contains(" Name"));
+        assert!(!rendered.contains("| Name | Count |"));
     }
 
     #[test]
