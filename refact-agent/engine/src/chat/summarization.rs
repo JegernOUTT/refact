@@ -3024,7 +3024,7 @@ fn apply_resolved_segment_summary(
     session.tier1_compact_attempts += 1;
     session.tier1_compaction_disabled = false;
     session.thread.previous_response_id = None;
-    session.cache_guard_force_next = true;
+    session.reset_cache_guard_snapshot();
     session.provider_usage_stale = true;
     emit_compression_applied(session);
     session.increment_version();
@@ -3657,7 +3657,7 @@ async fn run_reserved_segment_summarization(
     session.compression_retry_after_ms.remove(&source_hash);
     session.tier1_compaction_disabled = false;
     session.thread.previous_response_id = None;
-    session.cache_guard_force_next = true;
+    session.reset_cache_guard_snapshot();
     session.provider_usage_stale = true;
     session.increment_version();
     session.touch();
@@ -3749,7 +3749,7 @@ pub async fn apply_deterministic_compaction_for_recovery(
     };
     session.messages = messages;
     session.thread.previous_response_id = None;
-    session.cache_guard_force_next = true;
+    session.reset_cache_guard_snapshot();
     session.provider_usage_stale = true;
     session.tier1_compact_attempts = 0;
     session.compression_insufficient_hashes.clear();

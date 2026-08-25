@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use regex::Regex;
 use serde_json::{Map, Value};
@@ -49,10 +49,37 @@ const TOP_LEVEL_IGNORED_KEYS: &[&str] = &[
     "n",
 ];
 
+static CACHE_GUARD_REDACTION_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+    vec![
+        (
+            Regex::new(r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+")
+                .expect("cache guard bearer redaction regex must compile"),
+            "Bearer [REDACTED]",
+        ),
+        (
+            Regex::new(r"sk-[A-Za-z0-9_-]{6,}")
+                .expect("cache guard secret redaction regex must compile"),
+            "[REDACTED_SECRET]",
+        ),
+        (
+            Regex::new(r#"(?i)([A-Za-z0-9_-]*api[_-]?key\s*[:=]\s*["']?)[^\s&"'`]+"#)
+                .expect("cache guard API key redaction regex must compile"),
+            "${1}[REDACTED]",
+        ),
+    ]
+});
+
 pub enum CacheGuardOutcome {
-    Pass(Option<serde_json::Value>),
+    Pass(Option<CacheGuardSnapshot>),
     Paused { reason: String },
     Error(String),
+}
+
+#[derive(Clone)]
+pub struct CacheGuardSnapshot {
+    pub(crate) body: Value,
+    request_generation: u64,
+    reset_generation: u64,
 }
 
 pub fn is_cache_guard_pause_id(tool_call_id: &str) -> bool {
@@ -135,15 +162,21 @@ fn chat_model_supports_cache_guard(record: &ChatModelRecord) -> bool {
 }
 
 pub fn sanitize_body_for_cache_guard(value: &Value) -> Value {
-    sanitize_value(value, true)
+    sanitize_value_with_parent(value, true, None)
 }
 
+#[cfg(test)]
 fn body_for_cache_guard(value: &Value) -> Value {
-    let sanitized = sanitize_body_for_cache_guard(value);
-    if has_anthropic_explicit_cache_markers(value) {
-        truncate_body_to_anthropic_cache_prefix(value, sanitized)
-    } else {
-        sanitized
+    body_for_cache_guard_with_boundary(value, anthropic_cache_prefix_boundary(value))
+}
+
+fn body_for_cache_guard_with_boundary(
+    value: &Value,
+    boundary: Option<AnthropicCachePrefixBoundary>,
+) -> Value {
+    match boundary {
+        Some(boundary) => sanitize_anthropic_cache_prefix(value, boundary),
+        None => sanitize_body_for_cache_guard(value),
     }
 }
 
@@ -177,62 +210,140 @@ fn count_cache_control_markers(value: Option<&Value>) -> usize {
     }
 }
 
-fn truncate_body_to_anthropic_cache_prefix(raw: &Value, mut sanitized: Value) -> Value {
-    if let Some((message_index, content_index)) = raw
+#[derive(Clone, Copy)]
+enum AnthropicCachePrefixBoundary {
+    Messages {
+        message_index: usize,
+        content_index: usize,
+    },
+    System(usize),
+    Tools(usize),
+}
+
+fn anthropic_cache_prefix_boundary(value: &Value) -> Option<AnthropicCachePrefixBoundary> {
+    if let Some((message_index, content_index)) = value
         .get("messages")
         .and_then(Value::as_array)
         .and_then(|messages| last_message_cache_marker_index(messages))
     {
-        truncate_messages_at(&mut sanitized, message_index, content_index);
-        return sanitized;
+        return Some(AnthropicCachePrefixBoundary::Messages {
+            message_index,
+            content_index,
+        });
     }
 
-    if let Some(index) = raw
+    if let Some(index) = value
         .get("system")
         .and_then(Value::as_array)
         .and_then(|values| last_direct_cache_marker_index(values))
     {
-        truncate_top_level_array_at(&mut sanitized, "system", index);
-        remove_top_level_key(&mut sanitized, "messages");
-        return sanitized;
+        return Some(AnthropicCachePrefixBoundary::System(index));
     }
 
-    if let Some(index) = raw
+    value
         .get("tools")
         .and_then(Value::as_array)
         .and_then(|values| last_direct_cache_marker_index(values))
-    {
-        truncate_top_level_array_at(&mut sanitized, "tools", index);
-        remove_top_level_key(&mut sanitized, "system");
-        remove_top_level_key(&mut sanitized, "messages");
-    }
-
-    sanitized
+        .map(AnthropicCachePrefixBoundary::Tools)
 }
 
-fn truncate_top_level_array_at(sanitized: &mut Value, key: &str, index: usize) {
-    if let Some(values) = sanitized.get_mut(key).and_then(Value::as_array_mut) {
-        values.truncate(index + 1);
-    }
-}
+fn sanitize_anthropic_cache_prefix(value: &Value, boundary: AnthropicCachePrefixBoundary) -> Value {
+    let Some(object) = value.as_object() else {
+        return sanitize_body_for_cache_guard(value);
+    };
 
-fn truncate_messages_at(sanitized: &mut Value, message_index: usize, content_index: usize) {
-    if let Some(messages) = sanitized.get_mut("messages").and_then(Value::as_array_mut) {
-        messages.truncate(message_index + 1);
-        if let Some(content) = messages
-            .get_mut(message_index)
-            .and_then(|message| message.get_mut("content"))
-            .and_then(Value::as_array_mut)
-        {
-            content.truncate(content_index + 1);
+    let mut out = Map::new();
+    for (key, value) in object {
+        if is_ignored_key(key, true, None) {
+            continue;
+        }
+        let sanitized = match boundary {
+            AnthropicCachePrefixBoundary::Messages {
+                message_index,
+                content_index,
+            } => {
+                if key == "messages" {
+                    Some(sanitize_messages_through_cache_marker(
+                        value,
+                        message_index,
+                        content_index,
+                    ))
+                } else {
+                    Some(sanitize_value_with_parent(value, false, Some(key)))
+                }
+            }
+            AnthropicCachePrefixBoundary::System(index) => match key.as_str() {
+                "messages" => None,
+                "system" => Some(sanitize_array_through_cache_marker(value, index, "system")),
+                _ => Some(sanitize_value_with_parent(value, false, Some(key))),
+            },
+            AnthropicCachePrefixBoundary::Tools(index) => match key.as_str() {
+                "messages" | "system" => None,
+                "tools" => Some(sanitize_array_through_cache_marker(value, index, "tools")),
+                _ => Some(sanitize_value_with_parent(value, false, Some(key))),
+            },
+        };
+        if let Some(sanitized) = sanitized {
+            out.insert(key.clone(), sanitized);
         }
     }
+    Value::Object(out)
 }
 
-fn remove_top_level_key(sanitized: &mut Value, key: &str) {
-    if let Some(object) = sanitized.as_object_mut() {
-        object.remove(key);
+fn sanitize_array_through_cache_marker(value: &Value, index: usize, parent_key: &str) -> Value {
+    let Some(values) = value.as_array() else {
+        return sanitize_value_with_parent(value, false, Some(parent_key));
+    };
+    Value::Array(
+        values
+            .iter()
+            .take(index + 1)
+            .map(|value| sanitize_value_with_parent(value, false, Some(parent_key)))
+            .collect(),
+    )
+}
+
+fn sanitize_messages_through_cache_marker(
+    value: &Value,
+    message_index: usize,
+    content_index: usize,
+) -> Value {
+    let Some(messages) = value.as_array() else {
+        return sanitize_value_with_parent(value, false, Some("messages"));
+    };
+    Value::Array(
+        messages
+            .iter()
+            .enumerate()
+            .take(message_index + 1)
+            .map(|(index, message)| {
+                if index == message_index {
+                    sanitize_message_through_cache_marker(message, content_index)
+                } else {
+                    sanitize_value_with_parent(message, false, Some("messages"))
+                }
+            })
+            .collect(),
+    )
+}
+
+fn sanitize_message_through_cache_marker(value: &Value, content_index: usize) -> Value {
+    let Some(message) = value.as_object() else {
+        return sanitize_value_with_parent(value, false, Some("messages"));
+    };
+    let mut out = Map::new();
+    for (key, value) in message {
+        if is_ignored_key(key, false, None) {
+            continue;
+        }
+        let sanitized = if key == "content" {
+            sanitize_array_through_cache_marker(value, content_index, "content")
+        } else {
+            sanitize_value_with_parent(value, false, Some(key))
+        };
+        out.insert(key.clone(), sanitized);
     }
+    Value::Object(out)
 }
 
 fn last_direct_cache_marker_index(values: &[Value]) -> Option<usize> {
@@ -278,17 +389,17 @@ fn is_append_only_prefix_inner(
         (Value::Object(a), Value::Object(b)) => {
             let a_keys = a
                 .keys()
-                .filter(|key| !is_ignored_key(key, top_level))
+                .filter(|key| !is_ignored_key(key, top_level, parent_key))
                 .count();
             let b_keys = b
                 .keys()
-                .filter(|key| !is_ignored_key(key, top_level))
+                .filter(|key| !is_ignored_key(key, top_level, parent_key))
                 .count();
             if a_keys != b_keys {
                 return false;
             }
             a.iter()
-                .filter(|(key, _)| !is_ignored_key(key, top_level))
+                .filter(|(key, _)| !is_ignored_key(key, top_level, parent_key))
                 .all(|(key, old_v)| {
                     b.get(key)
                         .map(|new_v| is_append_only_prefix_inner(old_v, new_v, Some(key), false))
@@ -327,17 +438,17 @@ fn is_anthropic_cache_prefix_inner(
         (Value::Object(a), Value::Object(b)) => {
             let a_keys = a
                 .keys()
-                .filter(|key| !is_ignored_key(key, top_level))
+                .filter(|key| !is_ignored_key(key, top_level, parent_key))
                 .count();
             let b_keys = b
                 .keys()
-                .filter(|key| !is_ignored_key(key, top_level))
+                .filter(|key| !is_ignored_key(key, top_level, parent_key))
                 .count();
             if a_keys != b_keys {
                 return false;
             }
             a.iter()
-                .filter(|(key, _)| !is_ignored_key(key, top_level))
+                .filter(|(key, _)| !is_ignored_key(key, top_level, parent_key))
                 .all(|(key, old_v)| {
                     let allow_content_append = key == "content" && a.get("role") == b.get("role");
                     b.get(key)
@@ -485,19 +596,9 @@ fn fingerprint_cache_guard_payload(text: &str) -> String {
 }
 
 fn redact_common_secret_patterns(text: &str) -> String {
-    let patterns = [
-        (r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]"),
-        (r"sk-[A-Za-z0-9_-]{6,}", "[REDACTED_SECRET]"),
-        (
-            r#"(?i)([A-Za-z0-9_-]*api[_-]?key\s*[:=]\s*["']?)[^\s&"'`]+"#,
-            "${1}[REDACTED]",
-        ),
-    ];
     let mut redacted = text.to_string();
-    for (pattern, replacement) in patterns {
-        if let Ok(regex) = Regex::new(pattern) {
-            redacted = regex.replace_all(&redacted, replacement).to_string();
-        }
+    for (regex, replacement) in CACHE_GUARD_REDACTION_PATTERNS.iter() {
+        redacted = regex.replace_all(&redacted, *replacement).to_string();
     }
     redacted
 }
@@ -557,7 +658,8 @@ pub async fn check_or_pause_cache_guard(
             is_non_interactive_thread(&session.thread),
         )
     };
-    if !has_anthropic_explicit_cache_markers(request_body) {
+    let has_explicit_markers = has_anthropic_explicit_cache_markers(request_body);
+    if !has_explicit_markers {
         return Ok(CacheGuardOutcome::Pass(None));
     }
 
@@ -580,32 +682,39 @@ pub async fn check_or_pause_cache_guard(
         return Ok(CacheGuardOutcome::Pass(None));
     }
 
-    let sanitized = body_for_cache_guard(request_body);
+    let sanitized = body_for_cache_guard_with_boundary(
+        request_body,
+        anthropic_cache_prefix_boundary(request_body),
+    );
 
-    let has_explicit_markers = has_anthropic_explicit_cache_markers(request_body);
-
-    let maybe_violation_prev = {
-        let session = session_arc.lock().await;
+    let (request_generation, reset_generation, maybe_violation_prev) = {
+        let mut session = session_arc.lock().await;
+        session.cache_guard_request_generation = session
+            .cache_guard_request_generation
+            .checked_add(1)
+            .expect("cache guard request generation overflow");
+        let request_generation = session.cache_guard_request_generation;
+        let reset_generation = session.cache_guard_reset_generation;
         if session.cache_guard_force_next {
-            None
+            (request_generation, reset_generation, None)
         } else if let Some(prev) = session.cache_guard_snapshot.as_ref() {
             if cache_prefix_compatible(prev, &sanitized, has_explicit_markers) {
-                None
+                (request_generation, reset_generation, None)
             } else {
-                Some(prev.clone())
+                (request_generation, reset_generation, Some(prev.clone()))
             }
         } else {
-            None
+            (request_generation, reset_generation, None)
         }
     };
 
     let Some(previous) = maybe_violation_prev else {
-        return Ok(CacheGuardOutcome::Pass(Some(sanitized)));
+        return Ok(CacheGuardOutcome::Pass(Some(CacheGuardSnapshot {
+            body: sanitized,
+            request_generation,
+            reset_generation,
+        })));
     };
-
-    if cache_prefix_compatible(&previous, &sanitized, has_explicit_markers) {
-        return Ok(CacheGuardOutcome::Pass(Some(sanitized)));
-    }
 
     let mut diff = unified_json_diff(
         &preview_body_for_cache_guard_diff(&previous),
@@ -618,13 +727,19 @@ pub async fn check_or_pause_cache_guard(
     let reason = {
         let mut session = session_arc.lock().await;
         if session.cache_guard_force_next {
-            return Ok(CacheGuardOutcome::Pass(Some(sanitized)));
+            return Ok(CacheGuardOutcome::Pass(Some(CacheGuardSnapshot {
+                body: sanitized,
+                request_generation,
+                reset_generation,
+            })));
         }
         if let Some(outcome) = cache_guard_outcome_if_snapshot_changed(
             session.cache_guard_snapshot.as_ref(),
             &previous,
             &sanitized,
             has_explicit_markers,
+            request_generation,
+            reset_generation,
         ) {
             return Ok(outcome);
         }
@@ -666,15 +781,25 @@ fn cache_guard_outcome_if_snapshot_changed(
     captured_previous: &Value,
     sanitized: &Value,
     has_explicit_markers: bool,
+    request_generation: u64,
+    reset_generation: u64,
 ) -> Option<CacheGuardOutcome> {
     if current == Some(captured_previous) {
         return None;
     }
     let Some(current) = current else {
-        return Some(CacheGuardOutcome::Pass(Some(sanitized.clone())));
+        return Some(CacheGuardOutcome::Pass(Some(CacheGuardSnapshot {
+            body: sanitized.clone(),
+            request_generation,
+            reset_generation,
+        })));
     };
     if cache_prefix_compatible(current, sanitized, has_explicit_markers) {
-        Some(CacheGuardOutcome::Pass(Some(sanitized.clone())))
+        Some(CacheGuardOutcome::Pass(Some(CacheGuardSnapshot {
+            body: sanitized.clone(),
+            request_generation,
+            reset_generation,
+        })))
     } else {
         None
     }
@@ -689,35 +814,105 @@ fn cache_prefix_compatible(prev: &Value, next: &Value, has_explicit_markers: boo
 // cache-prefix comparison; trajectory persistence intentionally omits it.
 pub async fn commit_cache_guard_snapshot(
     session_arc: Arc<AMutex<crate::chat::types::ChatSession>>,
-    sanitized_body: Value,
+    snapshot: CacheGuardSnapshot,
 ) {
     let mut session = session_arc.lock().await;
-    session.cache_guard_snapshot = Some(sanitized_body);
-    session.cache_guard_force_next = false;
+    if snapshot.request_generation > session.cache_guard_snapshot_generation
+        && snapshot.reset_generation == session.cache_guard_reset_generation
+    {
+        session.cache_guard_snapshot = Some(snapshot.body);
+        session.cache_guard_snapshot_generation = snapshot.request_generation;
+        session.cache_guard_force_next = false;
+    }
 }
 
-fn is_ignored_key(key: &str, top_level: bool) -> bool {
-    RECURSIVELY_IGNORED_KEYS.contains(&key) || top_level && TOP_LEVEL_IGNORED_KEYS.contains(&key)
+fn is_ignored_key(key: &str, top_level: bool, parent_key: Option<&str>) -> bool {
+    RECURSIVELY_IGNORED_KEYS.contains(&key)
+        || (matches!(key, "started_at_ms" | "completed_at_ms") && parent_key == Some("tool_calls"))
+        || top_level && TOP_LEVEL_IGNORED_KEYS.contains(&key)
 }
 
-fn sanitize_value(value: &Value, top_level: bool) -> Value {
+fn sanitize_value_with_parent(value: &Value, top_level: bool, parent_key: Option<&str>) -> Value {
     match value {
         Value::Object(map) => {
             let mut out = Map::new();
             for (key, value) in map {
-                if is_ignored_key(key, top_level) {
+                if is_ignored_key(key, top_level, parent_key) {
                     continue;
                 }
-                out.insert(key.clone(), sanitize_value(value, false));
+                out.insert(
+                    key.clone(),
+                    sanitize_value_with_parent(value, false, Some(key)),
+                );
             }
             Value::Object(out)
         }
         Value::Array(arr) => Value::Array(
             arr.iter()
-                .map(|value| sanitize_value(value, false))
+                .map(|value| sanitize_value_with_parent(value, false, parent_key))
                 .collect(),
         ),
         _ => value.clone(),
+    }
+}
+
+#[cfg(test)]
+fn legacy_body_for_cache_guard(value: &Value) -> Value {
+    let mut sanitized = sanitize_body_for_cache_guard(value);
+    if let Some((message_index, content_index)) = value
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| last_message_cache_marker_index(messages))
+    {
+        truncate_messages_at(&mut sanitized, message_index, content_index);
+        return sanitized;
+    }
+    if let Some(index) = value
+        .get("system")
+        .and_then(Value::as_array)
+        .and_then(|values| last_direct_cache_marker_index(values))
+    {
+        truncate_top_level_array_at(&mut sanitized, "system", index);
+        remove_top_level_key(&mut sanitized, "messages");
+        return sanitized;
+    }
+    if let Some(index) = value
+        .get("tools")
+        .and_then(Value::as_array)
+        .and_then(|values| last_direct_cache_marker_index(values))
+    {
+        truncate_top_level_array_at(&mut sanitized, "tools", index);
+        remove_top_level_key(&mut sanitized, "system");
+        remove_top_level_key(&mut sanitized, "messages");
+    }
+    sanitized
+}
+
+#[cfg(test)]
+fn truncate_top_level_array_at(sanitized: &mut Value, key: &str, index: usize) {
+    if let Some(values) = sanitized.get_mut(key).and_then(Value::as_array_mut) {
+        values.truncate(index + 1);
+    }
+}
+
+#[cfg(test)]
+fn truncate_messages_at(sanitized: &mut Value, message_index: usize, content_index: usize) {
+    if let Some(messages) = sanitized.get_mut("messages").and_then(Value::as_array_mut) {
+        messages.truncate(message_index + 1);
+        if let Some(content) = messages
+            .get_mut(message_index)
+            .and_then(|message| message.get_mut("content"))
+            .and_then(Value::as_array_mut)
+        {
+            content.truncate(content_index + 1);
+        }
+    }
+}
+
+#[cfg(test)]
+fn remove_top_level_key(sanitized: &mut Value, key: &str) {
+    if let Some(object) = sanitized.as_object_mut() {
+        object.remove(key);
     }
 }
 
@@ -751,6 +946,63 @@ mod tests {
         assert!(out["messages"][1]["provider_specific_fields"]
             .get("cache_control")
             .is_none());
+    }
+
+    #[test]
+    fn tool_call_timing_metadata_is_ignored_recursively() {
+        let prev = sanitize_body_for_cache_guard(&json!({
+            "messages": [{
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "cat", "arguments": "{}"}
+                }]
+            }]
+        }));
+        let next = sanitize_body_for_cache_guard(&json!({
+            "messages": [{
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "cat", "arguments": "{}"},
+                    "started_at_ms": 1_700_000_000_000u64,
+                    "completed_at_ms": 1_700_000_000_123u64
+                }]
+            }]
+        }));
+
+        assert!(is_append_only_prefix(&prev, &next));
+        assert!(next["messages"][0]["tool_calls"][0]
+            .get("started_at_ms")
+            .is_none());
+        assert!(next["messages"][0]["tool_calls"][0]
+            .get("completed_at_ms")
+            .is_none());
+    }
+
+    #[test]
+    fn tool_schema_timing_fields_remain_semantic() {
+        let prev = sanitize_body_for_cache_guard(&json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "name": "schedule",
+                "input_schema": {"properties": {"started_at_ms": {"type": "integer"}}}
+            }]
+        }));
+        let next = sanitize_body_for_cache_guard(&json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "name": "schedule",
+                "input_schema": {"properties": {"started_at_ms": {"type": "string"}}}
+            }]
+        }));
+
+        assert!(next["tools"][0]["input_schema"]["properties"]
+            .get("started_at_ms")
+            .is_some());
+        assert!(!is_append_only_prefix(&prev, &next));
     }
 
     #[test]
@@ -1019,6 +1271,63 @@ mod tests {
     }
 
     #[test]
+    fn marker_first_sanitization_matches_legacy_prefix_truncation() {
+        let message_marker_body = json!({
+            "model": "test",
+            "temperature": 0.7,
+            "system": [{"type": "text", "text": "system"}],
+            "tools": [{"name": "cat", "input_schema": {"type": "object"}}],
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "cached", "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": "uncached"}
+                ]},
+                {"role": "assistant", "content": "suffix"}
+            ]
+        });
+        let system_marker_body = json!({
+            "system": [
+                {"type": "text", "text": "cached", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "suffix"}
+            ],
+            "messages": [{"role": "user", "content": "suffix"}]
+        });
+        let tools_marker_body = json!({
+            "system": [{"type": "text", "text": "suffix"}],
+            "tools": [
+                {"name": "cat", "cache_control": {"type": "ephemeral"}},
+                {"name": "write"}
+            ],
+            "messages": [{"role": "user", "content": "suffix"}]
+        });
+
+        for body in [message_marker_body, system_marker_body, tools_marker_body] {
+            assert_eq!(
+                body_for_cache_guard(&body),
+                legacy_body_for_cache_guard(&body)
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_marker_without_truncation_boundary_still_enables_guard() {
+        let body = json!({
+            "messages": [{
+                "role": "user",
+                "cache_control": {"type": "ephemeral"},
+                "content": "stable"
+            }]
+        });
+
+        assert!(has_anthropic_explicit_cache_markers(&body));
+        assert!(anthropic_cache_prefix_boundary(&body).is_none());
+        assert_eq!(
+            body_for_cache_guard(&body),
+            sanitize_body_for_cache_guard(&body)
+        );
+    }
+
+    #[test]
     fn comparable_anthropic_prefix_allows_marker_moving_forward() {
         let prev = sanitize_body_for_cache_guard(&json!({
             "messages": [{
@@ -1247,6 +1556,43 @@ mod tests {
         assert_eq!(session.runtime.pause_reasons.len(), 1);
     }
 
+    #[tokio::test]
+    async fn cache_guard_allows_tool_call_timing_metadata_changes() {
+        let app = app_with_cache_priced_model("test/model-with-cache").await;
+        let session_arc = Arc::new(AMutex::new(session_with_task_role(None)));
+        let prev_body = json!({
+            "model": "test",
+            "messages": [{
+                "role": "assistant",
+                "content": [{"type": "text", "text": "stable", "cache_control": {"type": "ephemeral"}}],
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "cat", "arguments": "{}"}
+                }]
+            }]
+        });
+        {
+            let mut session = session_arc.lock().await;
+            session.cache_guard_snapshot = Some(body_for_cache_guard(&prev_body));
+        }
+        let mut next_body = prev_body.clone();
+        next_body["messages"][0]["tool_calls"][0]["started_at_ms"] = json!(1_700_000_000_000u64);
+        next_body["messages"][0]["tool_calls"][0]["completed_at_ms"] = json!(1_700_000_000_123u64);
+
+        let outcome = check_or_pause_cache_guard(
+            app,
+            session_arc.clone(),
+            "test/model-with-cache",
+            &next_body,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, CacheGuardOutcome::Pass(Some(_))));
+        assert!(session_arc.lock().await.runtime.pause_reasons.is_empty());
+    }
+
     #[test]
     fn test_append_only_prefix_input_keys_strict() {
         let prev = json!({
@@ -1352,6 +1698,14 @@ mod tests {
         assert!(preview_text.contains("[redacted text chars="));
         assert!(preview_text.contains("sha256="));
         assert!(preview_text.contains("[truncated"));
+    }
+
+    #[test]
+    fn cache_guard_redaction_patterns_are_cached_and_preserve_output() {
+        assert_eq!(
+            redact_common_secret_patterns("Bearer abc.def sk-secret-123 api_key=abcd"),
+            "Bearer [REDACTED] [REDACTED_SECRET] api_key=[REDACTED]"
+        );
     }
 
     #[test]
@@ -1514,6 +1868,8 @@ mod tests {
             &captured_previous,
             &sanitized,
             false,
+            1,
+            0,
         );
 
         assert!(matches!(outcome, Some(CacheGuardOutcome::Pass(Some(_)))));
@@ -1539,6 +1895,8 @@ mod tests {
             &captured_previous,
             &sanitized,
             false,
+            1,
+            0,
         );
 
         assert!(outcome.is_none());
@@ -1560,6 +1918,8 @@ mod tests {
             &captured_previous,
             &sanitized,
             false,
+            1,
+            0,
         );
 
         assert!(outcome.is_none());
@@ -1893,7 +2253,7 @@ mod tests {
         {
             let mut s = session_arc.lock().await;
             s.cache_guard_snapshot = Some(body_for_cache_guard(&prev_body));
-            s.cache_guard_force_next = true;
+            s.reset_cache_guard_snapshot();
         }
 
         let next_body = json!({
@@ -1912,7 +2272,7 @@ mod tests {
         .await
         .unwrap();
 
-        let CacheGuardOutcome::Pass(Some(sanitized)) = outcome else {
+        let CacheGuardOutcome::Pass(Some(snapshot)) = outcome else {
             panic!("cache guard should force a snapshot commit")
         };
         {
@@ -1924,10 +2284,56 @@ mod tests {
             assert!(session.runtime.pause_reasons.is_empty());
         }
 
-        commit_cache_guard_snapshot(session_arc.clone(), sanitized.clone()).await;
+        let expected = snapshot.body.clone();
+        commit_cache_guard_snapshot(session_arc.clone(), snapshot).await;
         let session = session_arc.lock().await;
         assert!(!session.cache_guard_force_next);
-        assert_eq!(session.cache_guard_snapshot.as_ref(), Some(&sanitized));
+        assert_eq!(session.cache_guard_snapshot.as_ref(), Some(&expected));
+    }
+
+    #[tokio::test]
+    async fn cache_guard_concurrent_commits_keep_newest_snapshot() {
+        let session_arc = Arc::new(AMutex::new(session_with_task_role(None)));
+        let older = CacheGuardSnapshot {
+            body: json!({"messages": [{"role": "user", "content": "older"}]}),
+            request_generation: 10,
+            reset_generation: 0,
+        };
+        let newer = CacheGuardSnapshot {
+            body: json!({"messages": [{"role": "user", "content": "newer"}]}),
+            request_generation: 11,
+            reset_generation: 0,
+        };
+
+        commit_cache_guard_snapshot(session_arc.clone(), newer.clone()).await;
+        commit_cache_guard_snapshot(session_arc.clone(), older).await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.cache_guard_snapshot.as_ref(), Some(&newer.body));
+        assert_eq!(
+            session.cache_guard_snapshot_generation,
+            newer.request_generation
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_guard_reset_rejects_in_flight_pre_reset_snapshot() {
+        let session_arc = Arc::new(AMutex::new(session_with_task_role(None)));
+        let snapshot = CacheGuardSnapshot {
+            body: json!({"messages": [{"role": "user", "content": "stale"}]}),
+            request_generation: 1,
+            reset_generation: 0,
+        };
+        {
+            let mut session = session_arc.lock().await;
+            session.reset_cache_guard_snapshot();
+        }
+
+        commit_cache_guard_snapshot(session_arc.clone(), snapshot).await;
+
+        let session = session_arc.lock().await;
+        assert!(session.cache_guard_snapshot.is_none());
+        assert!(session.cache_guard_force_next);
     }
 
     #[tokio::test]
@@ -1952,7 +2358,7 @@ mod tests {
         {
             let mut session = session_arc.lock().await;
             session.cache_guard_snapshot = Some(body_for_cache_guard(&prev_body));
-            session.cache_guard_force_next = true;
+            session.reset_cache_guard_snapshot();
         }
 
         let first = check_or_pause_cache_guard(

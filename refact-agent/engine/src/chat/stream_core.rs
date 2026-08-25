@@ -1634,20 +1634,15 @@ pub(crate) async fn clear_unbound_openai_codex_websocket_session(chat_id: &str) 
 }
 
 async fn commit_cache_guard_snapshot_if_needed(
-    app: AppState,
-    chat_id: Option<&String>,
-    sanitized_for_commit: Option<serde_json::Value>,
+    snapshot_for_commit: Option<(
+        Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+        crate::chat::cache_guard::CacheGuardSnapshot,
+    )>,
 ) {
-    let (Some(chat_id), Some(sanitized)) = (chat_id, sanitized_for_commit) else {
+    let Some((session_arc, snapshot)) = snapshot_for_commit else {
         return;
     };
-    let session_arc_opt = {
-        let sessions = app.chat.sessions.read().await;
-        sessions.get(chat_id).cloned()
-    };
-    if let Some(session_arc) = session_arc_opt {
-        crate::chat::cache_guard::commit_cache_guard_snapshot(session_arc, sanitized).await;
-    }
+    crate::chat::cache_guard::commit_cache_guard_snapshot(session_arc, snapshot).await;
 }
 
 async fn ensure_openai_codex_websocket_connected(
@@ -2348,7 +2343,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
         &http_parts.body,
     );
 
-    let mut sanitized_for_commit: Option<serde_json::Value> = None;
+    let mut snapshot_for_commit = None;
     if let Some(chat_id) = &params.chat_id {
         let session_arc_opt = {
             let sessions = app.chat.sessions.read().await;
@@ -2358,7 +2353,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
             let outcome = tokio::select! {
                 res = crate::chat::cache_guard::check_or_pause_cache_guard(
                     app.clone(),
-                    session_arc,
+                    session_arc.clone(),
                     &params.llm_request.model_id,
                     &http_parts.body,
                 ) => res.map_err(|e| LlmStreamError::new(e, partial_output_emitted))?,
@@ -2368,7 +2363,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
             };
             match outcome {
                 crate::chat::cache_guard::CacheGuardOutcome::Pass(s) => {
-                    sanitized_for_commit = s;
+                    snapshot_for_commit = s.map(|snapshot| (session_arc, snapshot));
                 }
                 crate::chat::cache_guard::CacheGuardOutcome::Paused { reason } => {
                     tracing::info!("Generation paused by cache guard: {}", reason);
@@ -2434,12 +2429,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
                             returned_session,
                         )
                         .await;
-                        commit_cache_guard_snapshot_if_needed(
-                            app.clone(),
-                            params.chat_id.as_ref(),
-                            sanitized_for_commit.clone(),
-                        )
-                        .await;
+                        commit_cache_guard_snapshot_if_needed(snapshot_for_commit.clone()).await;
                         replay_collector.replay(collector);
                         return Ok(LlmStreamOutcome::Choices(results));
                     }
@@ -2726,12 +2716,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
             }
         };
         if should_commit_cache_guard_after_http_success(status, &text) {
-            commit_cache_guard_snapshot_if_needed(
-                app.clone(),
-                params.chat_id.as_ref(),
-                sanitized_for_commit,
-            )
-            .await;
+            commit_cache_guard_snapshot_if_needed(snapshot_for_commit).await;
         }
         let text = crate::providers::runtime_credential::redact(
             text,
@@ -2743,12 +2728,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
         ));
     }
 
-    commit_cache_guard_snapshot_if_needed(
-        app.clone(),
-        params.chat_id.as_ref(),
-        sanitized_for_commit,
-    )
-    .await;
+    commit_cache_guard_snapshot_if_needed(snapshot_for_commit).await;
 
     let progress_events = Arc::new(AtomicU64::new(0));
     let mut tracking_collector = PartialOutputCollector {

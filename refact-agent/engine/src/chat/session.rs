@@ -462,6 +462,9 @@ impl ChatSession {
             compression_retry_after_ms: Default::default(),
             pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
+            cache_guard_request_generation: 0,
+            cache_guard_snapshot_generation: 0,
+            cache_guard_reset_generation: 0,
             cache_guard_force_next: false,
             provider_usage_stale: false,
             task_agent_error: None,
@@ -580,6 +583,9 @@ impl ChatSession {
             compression_retry_after_ms: Default::default(),
             pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
+            cache_guard_request_generation: 0,
+            cache_guard_snapshot_generation: 0,
+            cache_guard_reset_generation: 0,
             cache_guard_force_next: false,
             provider_usage_stale: false,
             task_agent_error: None,
@@ -1025,7 +1031,7 @@ impl ChatSession {
         self.pending_max_new_tokens_boost = None;
         self.thread.reactive_compact_attempts = None;
         self.thread.previous_response_id = None;
-        self.cache_guard_force_next = true;
+        self.reset_cache_guard_snapshot();
         self.provider_usage_stale = true;
         self.is_compressing = false;
         self.runtime.is_compressing = false;
@@ -1062,6 +1068,11 @@ impl ChatSession {
 
     pub fn touch(&mut self) {
         self.last_activity = Instant::now();
+    }
+
+    pub fn reset_cache_guard_snapshot(&mut self) {
+        self.cache_guard_reset_generation = self.cache_guard_reset_generation.saturating_add(1);
+        self.cache_guard_force_next = true;
     }
 
     pub fn mark_tool_started(&mut self) {

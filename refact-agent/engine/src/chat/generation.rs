@@ -1217,7 +1217,7 @@ async fn maybe_compact_after_high_pressure_length_stop(
     if outcome.applied() {
         let mut session = session_arc.lock().await;
         session.thread.previous_response_id = None;
-        session.cache_guard_force_next = true;
+        session.reset_cache_guard_snapshot();
         return true;
     }
 
@@ -1786,7 +1786,7 @@ pub fn start_generation(
                                 let mut session = session_arc.lock().await;
                                 session.clear_stream_for_retry();
                                 session.thread.previous_response_id = None;
-                                session.cache_guard_force_next = true;
+                                session.reset_cache_guard_snapshot();
                                 session.thread.reactive_compact_attempts =
                                     Some(MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS);
                                 continue;
@@ -1817,7 +1817,7 @@ pub fn start_generation(
                                     let mut session = session_arc.lock().await;
                                     session.clear_stream_for_retry();
                                     session.thread.previous_response_id = None;
-                                    session.cache_guard_force_next = true;
+                                    session.reset_cache_guard_snapshot();
                                     session.thread.reactive_compact_attempts =
                                         Some(MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS + 1);
                                     continue;
@@ -1836,7 +1836,7 @@ pub fn start_generation(
                         let mut session = session_arc.lock().await;
                         session.clear_stream_for_retry();
                         session.thread.previous_response_id = None;
-                        session.cache_guard_force_next = true;
+                        session.reset_cache_guard_snapshot();
                         session.thread.reactive_compact_attempts =
                             Some(MAX_CONTEXT_LIMIT_COMPACTION_ROUNDS + 1);
                         continue;
@@ -4176,7 +4176,7 @@ mod tests {
             )
         );
         session.thread.previous_response_id = None;
-        session.cache_guard_force_next = true;
+        session.reset_cache_guard_snapshot();
 
         assert!(session.cache_guard_force_next);
         assert!(session.thread.previous_response_id.is_none());

@@ -2548,7 +2548,7 @@ async fn handle_tool_decisions(
         {
             let mut session = session_arc.lock().await;
             if accepted_any {
-                session.cache_guard_force_next = true;
+                session.reset_cache_guard_snapshot();
             }
             let approved_ids = decisions
                 .iter()
