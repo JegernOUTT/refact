@@ -663,6 +663,424 @@ pub struct TaskBoardViewData {
     pub ready: TaskBoardReadyCards,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeMetaResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub id: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub kind: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub root: PathBuf,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub source_workspace_root: PathBuf,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub repo_root: PathBuf,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub branch: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub base_branch: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub base_commit: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub task_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub card_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub agent_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub enforce: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeStatusResponse {
+    pub path_exists: Option<bool>,
+    pub is_git_worktree: Option<bool>,
+    pub dirty: Option<bool>,
+    pub conflicted: Option<bool>,
+    pub staged_count: Option<usize>,
+    pub unstaged_count: Option<usize>,
+    pub untracked_count: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub branch: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub head_commit: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeReferenceResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub kind: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub chat_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub task_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub card_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub agent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeRecordResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub meta: WorktreeMetaResponse,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub created_at: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub updated_at: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub last_seen_at: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub references: Vec<WorktreeReferenceResponse>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub reference_count: usize,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub status: WorktreeStatusResponse,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeListResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub project_hash: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub source_workspace_root: PathBuf,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub source_current_branch: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub source_branches: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub worktrees: Vec<WorktreeRecordResponse>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateWorktreeRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_workspace_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateWorktreeResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub worktree: WorktreeRecordResponse,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub branch_was_created: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub dirty_source_warning: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeleteWorktreeResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub deleted: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub branch_deleted: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub stale_path: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub affected_references: Vec<WorktreeReferenceResponse>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub affected_reference_count: usize,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeDiffFileResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub path: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub status: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub source: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub additions: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub deletions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeDiffStatsResponse {
+    pub committed_files: Option<usize>,
+    pub staged_files: Option<usize>,
+    pub unstaged_files: Option<usize>,
+    pub untracked_files: Option<usize>,
+    pub files_changed: Option<usize>,
+    pub additions: Option<usize>,
+    pub deletions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeDiffResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub id: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub branch: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub base_branch: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub base_commit: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub ahead: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub behind: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub status: WorktreeStatusResponse,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub files: Vec<WorktreeDiffFileResponse>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub stats: WorktreeDiffStatsResponse,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub patch: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub patch_truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MergeWorktreeRequest {
+    pub strategy: String,
+    pub delete_after_merge: bool,
+    pub include_uncommitted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_message: Option<String>,
+    pub generate_commit_message: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeConflictStateResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub files: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub aborted: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub merge_in_progress: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub instructions: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MergeWorktreeResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub id: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub status: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub merged: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub strategy: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub source_branch: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub target_branch: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub committed_uncommitted: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub merge_commit: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub cleanup: Option<WorktreeRemovalResponse>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub conflict: Option<WorktreeConflictStateResponse>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub affected_references: Vec<WorktreeReferenceResponse>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub affected_reference_count: usize,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeRemovalResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub worktree_deleted: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub branch_deleted: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub registry_deleted: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub stale_path: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenWorktreeResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub id: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub path: PathBuf,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub branch: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub can_open_folder: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeCleanupRequest {
+    #[serde(default)]
+    pub ids: Vec<String>,
+    #[serde(default = "default_true")]
+    pub clean_only: bool,
+    #[serde(default)]
+    pub delete_branches: bool,
+    #[serde(default)]
+    pub allow_shared: bool,
+    #[serde(default = "default_cleanup_min_age_hours")]
+    pub min_age_hours: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_workspace_root: Option<String>,
+}
+
+impl Default for WorktreeCleanupRequest {
+    fn default() -> Self {
+        Self {
+            ids: Vec::new(),
+            clean_only: default_true(),
+            delete_branches: false,
+            allow_shared: false,
+            min_age_hours: default_cleanup_min_age_hours(),
+            source_workspace_root: None,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_cleanup_min_age_hours() -> u64 {
+    24
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeCleanupTargetResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub id: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub root: PathBuf,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub branch: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub shared: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub stale: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub changed_files: usize,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub additions: usize,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub deletions: usize,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub delete_branch: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub references: Vec<WorktreeReferenceResponse>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub disk_usage_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeCleanupSkippedResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub id: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub root: Option<PathBuf>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub reason: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub details: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeCleanupPlanResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub generated_at: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub request: WorktreeCleanupRequest,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub candidates: Vec<WorktreeCleanupTargetResponse>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub skipped: Vec<WorktreeCleanupSkippedResponse>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeCleanupDeletedResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub id: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub root: PathBuf,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub branch: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub worktree_deleted: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub branch_deleted: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub registry_deleted: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub stale_path: bool,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeCleanupResultResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub generated_at: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub request: WorktreeCleanupRequest,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub deleted: Vec<WorktreeCleanupDeletedResponse>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub skipped: Vec<WorktreeCleanupSkippedResponse>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeInventorySummaryResponse {
+    pub total: Option<usize>,
+    pub clean: Option<usize>,
+    pub dirty: Option<usize>,
+    pub stale: Option<usize>,
+    pub conflicted: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeInventoryResponse {
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub project_hash: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub source_workspace_root: PathBuf,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub generated_at: String,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub summary: WorktreeInventorySummaryResponse,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub worktrees: Vec<Value>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub cleanup_candidates: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChatEvent {
     pub chat_id: Option<String>,
@@ -1080,6 +1498,101 @@ impl DaemonClient {
     ) -> Result<CompetitorImportRunResponse, ClientError> {
         let path = competitor_import_path(project_id);
         self.post_json(&path, &competitor_import_body(source, scope))
+            .await
+    }
+
+    pub async fn list_worktrees(
+        &self,
+        project_id: &str,
+    ) -> Result<WorktreeListResponse, ClientError> {
+        self.get_json(&worktrees_path(project_id, "")).await
+    }
+
+    pub async fn create_worktree(
+        &self,
+        project_id: &str,
+        request: &CreateWorktreeRequest,
+    ) -> Result<CreateWorktreeResponse, ClientError> {
+        self.post_serialized(&worktrees_path(project_id, ""), request)
+            .await
+    }
+
+    pub async fn worktree_summary(
+        &self,
+        project_id: &str,
+    ) -> Result<WorktreeInventoryResponse, ClientError> {
+        self.get_json(&worktrees_path(project_id, "/summary")).await
+    }
+
+    pub async fn worktree_cleanup_dry_run(
+        &self,
+        project_id: &str,
+        request: &WorktreeCleanupRequest,
+    ) -> Result<WorktreeCleanupPlanResponse, ClientError> {
+        self.post_serialized(&worktrees_path(project_id, "/cleanup-dry-run"), request)
+            .await
+    }
+
+    pub async fn worktree_cleanup(
+        &self,
+        project_id: &str,
+        request: &WorktreeCleanupRequest,
+    ) -> Result<WorktreeCleanupResultResponse, ClientError> {
+        self.post_serialized(&worktrees_path(project_id, "/cleanup"), request)
+            .await
+    }
+
+    pub async fn get_worktree(
+        &self,
+        project_id: &str,
+        id: &str,
+    ) -> Result<WorktreeRecordResponse, ClientError> {
+        self.get_json(&worktree_path(project_id, id, "")).await
+    }
+
+    pub async fn delete_worktree(
+        &self,
+        project_id: &str,
+        id: &str,
+        delete_branch: bool,
+        force_referenced: bool,
+    ) -> Result<DeleteWorktreeResponse, ClientError> {
+        let path = format!(
+            "{}?delete_branch={delete_branch}&force_referenced={force_referenced}",
+            worktree_path(project_id, id, "")
+        );
+        let response = self
+            .with_auth(self.client.delete(self.url(&path)))
+            .send()
+            .await
+            .map_err(|error| ClientError::Http(error.to_string()))?;
+        decode_response(response).await
+    }
+
+    pub async fn worktree_diff(
+        &self,
+        project_id: &str,
+        id: &str,
+    ) -> Result<WorktreeDiffResponse, ClientError> {
+        self.get_json(&worktree_path(project_id, id, "/diff")).await
+    }
+
+    pub async fn merge_worktree(
+        &self,
+        project_id: &str,
+        id: &str,
+        request: &MergeWorktreeRequest,
+    ) -> Result<MergeWorktreeResponse, ClientError> {
+        self.post_serialized(&worktree_path(project_id, id, "/merge"), request)
+            .await
+    }
+
+    pub async fn open_worktree(
+        &self,
+        project_id: &str,
+        id: &str,
+    ) -> Result<OpenWorktreeResponse, ClientError> {
+        self.post_json(&worktree_path(project_id, id, "/open"), &json!({}))
             .await
     }
 
@@ -1828,6 +2341,16 @@ impl DaemonClient {
         decode_response(response).await
     }
 
+    async fn post_serialized<T, R>(&self, path: &str, body: &T) -> Result<R, ClientError>
+    where
+        T: Serialize,
+        R: for<'de> Deserialize<'de>,
+    {
+        let body = serde_json::to_value(body)
+            .map_err(|error| ClientError::Json(format!("failed to serialize request: {error}")))?;
+        self.post_json(path, &body).await
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
@@ -2391,6 +2914,21 @@ fn competitor_import_path(project_id: &str) -> String {
     format!(
         "/p/{}/v1/ext/competitor-import",
         encode_path_segment(project_id)
+    )
+}
+
+fn worktrees_path(project_id: &str, suffix: &str) -> String {
+    format!(
+        "/p/{}/v1/worktrees{suffix}",
+        encode_path_segment(project_id)
+    )
+}
+
+fn worktree_path(project_id: &str, id: &str, suffix: &str) -> String {
+    format!(
+        "/p/{}/v1/worktrees/{}{suffix}",
+        encode_path_segment(project_id),
+        encode_path_segment(id)
     )
 }
 
@@ -3891,6 +4429,111 @@ mod tests {
                 $assert::<KnowledgeStats>(json!({}), json!({"doc_count": 1}));
             };
         }
+        macro_rules! worktree_meta_response {
+            ($assert:ident) => {
+                $assert::<WorktreeMetaResponse>(json!({}), json!({"id": "wt-1"}));
+            };
+        }
+        macro_rules! worktree_status_response {
+            ($assert:ident) => {
+                $assert::<WorktreeStatusResponse>(json!({}), json!({"dirty": true}));
+            };
+        }
+        macro_rules! worktree_reference_response {
+            ($assert:ident) => {
+                $assert::<WorktreeReferenceResponse>(json!({}), json!({"kind": "chat"}));
+            };
+        }
+        macro_rules! worktree_record_response {
+            ($assert:ident) => {
+                $assert::<WorktreeRecordResponse>(json!({}), json!({"meta": {}}));
+            };
+        }
+        macro_rules! worktree_list_response {
+            ($assert:ident) => {
+                $assert::<WorktreeListResponse>(json!({}), json!({"worktrees": [{}]}));
+            };
+        }
+        macro_rules! create_worktree_response {
+            ($assert:ident) => {
+                $assert::<CreateWorktreeResponse>(json!({}), json!({"worktree": {}}));
+            };
+        }
+        macro_rules! delete_worktree_response {
+            ($assert:ident) => {
+                $assert::<DeleteWorktreeResponse>(json!({}), json!({"deleted": true}));
+            };
+        }
+        macro_rules! worktree_diff_file_response {
+            ($assert:ident) => {
+                $assert::<WorktreeDiffFileResponse>(json!({}), json!({"path": "src/lib.rs"}));
+            };
+        }
+        macro_rules! worktree_diff_stats_response {
+            ($assert:ident) => {
+                $assert::<WorktreeDiffStatsResponse>(json!({}), json!({"files_changed": 1}));
+            };
+        }
+        macro_rules! worktree_diff_response {
+            ($assert:ident) => {
+                $assert::<WorktreeDiffResponse>(json!({}), json!({"id": "wt-1"}));
+            };
+        }
+        macro_rules! worktree_conflict_state_response {
+            ($assert:ident) => {
+                $assert::<WorktreeConflictStateResponse>(json!({}), json!({"aborted": true}));
+            };
+        }
+        macro_rules! merge_worktree_response {
+            ($assert:ident) => {
+                $assert::<MergeWorktreeResponse>(json!({}), json!({"status": "merged"}));
+            };
+        }
+        macro_rules! worktree_removal_response {
+            ($assert:ident) => {
+                $assert::<WorktreeRemovalResponse>(json!({}), json!({"worktree_deleted": true}));
+            };
+        }
+        macro_rules! open_worktree_response {
+            ($assert:ident) => {
+                $assert::<OpenWorktreeResponse>(json!({}), json!({"id": "wt-1"}));
+            };
+        }
+        macro_rules! worktree_cleanup_target_response {
+            ($assert:ident) => {
+                $assert::<WorktreeCleanupTargetResponse>(json!({}), json!({"id": "wt-1"}));
+            };
+        }
+        macro_rules! worktree_cleanup_skipped_response {
+            ($assert:ident) => {
+                $assert::<WorktreeCleanupSkippedResponse>(json!({}), json!({"id": "wt-1"}));
+            };
+        }
+        macro_rules! worktree_cleanup_plan_response {
+            ($assert:ident) => {
+                $assert::<WorktreeCleanupPlanResponse>(json!({}), json!({"candidates": [{}]}));
+            };
+        }
+        macro_rules! worktree_cleanup_deleted_response {
+            ($assert:ident) => {
+                $assert::<WorktreeCleanupDeletedResponse>(json!({}), json!({"id": "wt-1"}));
+            };
+        }
+        macro_rules! worktree_cleanup_result_response {
+            ($assert:ident) => {
+                $assert::<WorktreeCleanupResultResponse>(json!({}), json!({"deleted": [{}]}));
+            };
+        }
+        macro_rules! worktree_inventory_summary_response {
+            ($assert:ident) => {
+                $assert::<WorktreeInventorySummaryResponse>(json!({}), json!({"total": 1}));
+            };
+        }
+        macro_rules! worktree_inventory_response {
+            ($assert:ident) => {
+                $assert::<WorktreeInventoryResponse>(json!({}), json!({"summary": {}}));
+            };
+        }
         macro_rules! daemon_event_record {
             ($assert:ident) => {
                 $assert::<DaemonEventRecord>(json!({}), json!({"kind": "worker_ready"}));
@@ -3930,6 +4573,27 @@ mod tests {
             knowledge_node,
             knowledge_edge,
             knowledge_stats,
+            worktree_meta_response,
+            worktree_status_response,
+            worktree_reference_response,
+            worktree_record_response,
+            worktree_list_response,
+            create_worktree_response,
+            delete_worktree_response,
+            worktree_diff_file_response,
+            worktree_diff_stats_response,
+            worktree_diff_response,
+            worktree_conflict_state_response,
+            merge_worktree_response,
+            worktree_removal_response,
+            open_worktree_response,
+            worktree_cleanup_target_response,
+            worktree_cleanup_skipped_response,
+            worktree_cleanup_plan_response,
+            worktree_cleanup_deleted_response,
+            worktree_cleanup_result_response,
+            worktree_inventory_summary_response,
+            worktree_inventory_response,
             daemon_event_record
         );
     }
@@ -4188,6 +4852,114 @@ mod tests {
             competitor_import_body(None, "global"),
             json!({"scope":"global"})
         );
+    }
+
+    #[test]
+    fn worktree_client_paths_encode_project_and_worktree_ids() {
+        assert_eq!(
+            worktrees_path("project/id", ""),
+            "/p/project%2Fid/v1/worktrees"
+        );
+        assert_eq!(
+            worktree_path("project/id", "worktree id", "/merge"),
+            "/p/project%2Fid/v1/worktrees/worktree%20id/merge"
+        );
+    }
+
+    #[test]
+    fn worktree_client_defaults_preserve_backend_cleanup_contract() {
+        let request = WorktreeCleanupRequest::default();
+        assert!(request.clean_only);
+        assert_eq!(request.min_age_hours, 24);
+        assert!(request.ids.is_empty());
+    }
+
+    #[test]
+    fn worktree_response_tolerates_missing_ahead_and_behind() {
+        let response: WorktreeDiffResponse = serde_json::from_value(json!({
+            "id": "wt-1",
+            "status": {},
+            "files": [],
+            "stats": {},
+            "patch": "",
+            "patch_truncated": false,
+        }))
+        .unwrap();
+        assert_eq!(response.ahead, None);
+        assert_eq!(response.behind, None);
+    }
+
+    #[tokio::test]
+    async fn worktree_client_uses_all_existing_proxy_routes() {
+        let (server, requests) = spawn_json_response_server_with_requests(vec![
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({}),
+            json!({}),
+        ]);
+        let client = DaemonClient::new(&server.base_url, None).unwrap();
+        let cleanup = WorktreeCleanupRequest::default();
+        let merge = MergeWorktreeRequest {
+            strategy: "squash".to_string(),
+            delete_after_merge: true,
+            include_uncommitted: false,
+            target_branch: Some("main".to_string()),
+            commit_message: None,
+            generate_commit_message: false,
+        };
+
+        client.list_worktrees("project/id").await.unwrap();
+        client
+            .create_worktree("project/id", &CreateWorktreeRequest::default())
+            .await
+            .unwrap();
+        client.worktree_summary("project/id").await.unwrap();
+        client
+            .worktree_cleanup_dry_run("project/id", &cleanup)
+            .await
+            .unwrap();
+        client
+            .worktree_cleanup("project/id", &cleanup)
+            .await
+            .unwrap();
+        client.get_worktree("project/id", "wt 1").await.unwrap();
+        client
+            .delete_worktree("project/id", "wt 1", false, false)
+            .await
+            .unwrap();
+        client.worktree_diff("project/id", "wt 1").await.unwrap();
+        client
+            .merge_worktree("project/id", "wt 1", &merge)
+            .await
+            .unwrap();
+        client.open_worktree("project/id", "wt 1").await.unwrap();
+        server.stop();
+
+        let requests = (0..10)
+            .map(|_| requests.recv().unwrap())
+            .collect::<Vec<_>>();
+        for expected in [
+            "GET /p/project%2Fid/v1/worktrees ",
+            "POST /p/project%2Fid/v1/worktrees ",
+            "GET /p/project%2Fid/v1/worktrees/summary ",
+            "POST /p/project%2Fid/v1/worktrees/cleanup-dry-run ",
+            "POST /p/project%2Fid/v1/worktrees/cleanup ",
+            "GET /p/project%2Fid/v1/worktrees/wt%201 ",
+            "DELETE /p/project%2Fid/v1/worktrees/wt%201?delete_branch=false&force_referenced=false ",
+            "GET /p/project%2Fid/v1/worktrees/wt%201/diff ",
+            "POST /p/project%2Fid/v1/worktrees/wt%201/merge ",
+            "POST /p/project%2Fid/v1/worktrees/wt%201/open ",
+        ]
+        .iter()
+        .zip(requests) {
+            assert!(expected.1.starts_with(expected.0), "{}", expected.1);
+        }
     }
 
     #[test]

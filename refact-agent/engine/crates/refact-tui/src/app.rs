@@ -554,6 +554,7 @@ impl App {
                 AppAction::None
             }
             misc::MiscCommand::Board => self.open_task_board(),
+            misc::MiscCommand::Worktrees => self.start_worktree_command(args),
         }
     }
 
@@ -1288,6 +1289,9 @@ pub enum AppAction {
     },
     LoadDiff {
         root: PathBuf,
+    },
+    Worktree {
+        action: surfaces::WorktreeAction,
     },
     CopyToClipboard {
         text: String,

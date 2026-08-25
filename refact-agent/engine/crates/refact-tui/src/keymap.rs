@@ -1079,6 +1079,7 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(KeyContext::VimInsert, KeyAction::VimNormalMode, &["esc"]),
     ];
     entries.extend(ask_form_entries());
+    entries.extend(worktree_entries());
     entries.push(entry(
         KeyContext::TranscriptCell,
         KeyAction::ToggleSelectedTool,
@@ -1108,6 +1109,13 @@ fn ask_form_entries() -> Vec<KeymapEntry> {
             KeyAction::InsertNewline,
             &["ctrl-j", "shift-enter", "alt-enter"],
         ),
+    ]
+}
+
+fn worktree_entries() -> Vec<KeymapEntry> {
+    vec![
+        entry(KeyContext::Worktree, KeyAction::Accept, &["enter"]),
+        entry(KeyContext::Worktree, KeyAction::Cancel, &["esc"]),
     ]
 }
 
@@ -1413,7 +1421,7 @@ newline = "enter"
     fn reserved_contexts_are_unbound_but_remain_in_help() {
         let registry = KeymapRegistry::default();
 
-        for context in [KeyContext::History, KeyContext::Goal, KeyContext::Worktree] {
+        for context in [KeyContext::History, KeyContext::Goal] {
             assert!(!registry
                 .entries
                 .iter()
@@ -1453,7 +1461,7 @@ newline = "enter"
         }
 
         let rows = registry.help_rows();
-        for context in [KeyContext::History, KeyContext::Goal, KeyContext::Worktree] {
+        for context in [KeyContext::History, KeyContext::Goal] {
             assert!(rows.iter().any(|row| {
                 row.context == context
                     && row.action.is_none()
@@ -1475,6 +1483,10 @@ newline = "enter"
             .entries
             .iter()
             .any(|entry| entry.context == KeyContext::Activity));
+        assert!(registry
+            .entries
+            .iter()
+            .any(|entry| entry.context == KeyContext::Worktree));
     }
 
     #[test]

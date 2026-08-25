@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::history::cells::tool_display_name;
+use crate::sessions::WorktreeMeta;
 
 use super::transcript::{
     citation_item, finalized_assistant_content_part, is_plan_delta_message, render_message_key,
@@ -384,6 +385,7 @@ impl App {
 
     pub(super) fn handle_thread_updated(&mut self, raw: &Value) {
         let params = thread_update_params(raw);
+        self.update_worktree_meta(params);
         if let Some(title) = params
             .get("title")
             .and_then(Value::as_str)
@@ -974,6 +976,7 @@ impl App {
 impl App {
     pub(super) fn handle_snapshot(&mut self, raw: &Value) -> AppAction {
         if let Some(thread) = raw.get("thread") {
+            self.worktree_meta = parse_worktree_meta(thread.get("worktree"), self);
             if let Some(title) = thread
                 .get("title")
                 .and_then(Value::as_str)
@@ -1070,6 +1073,28 @@ fn task_id_from_thread(thread: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|task_id| !task_id.is_empty())
         .map(str::to_string)
+}
+
+impl App {
+    fn update_worktree_meta(&mut self, raw: &Value) {
+        if raw.get("worktree").is_none() {
+            return;
+        }
+        self.worktree_meta = parse_worktree_meta(raw.get("worktree"), self);
+    }
+}
+
+fn parse_worktree_meta(value: Option<&Value>, app: &mut App) -> Option<WorktreeMeta> {
+    match value {
+        Some(Value::Null) | None => None,
+        Some(value) => match serde_json::from_value::<WorktreeMeta>(value.clone()) {
+            Ok(meta) => Some(meta),
+            Err(error) => {
+                app.add_notice(format!("Ignored invalid worktree metadata: {error}"));
+                None
+            }
+        },
+    }
 }
 
 impl App {

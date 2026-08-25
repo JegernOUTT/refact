@@ -280,6 +280,8 @@ pub struct App {
     pub(super) events_pane: EventsPaneState,
     pub(super) current_project: Option<OpenProjectResponse>,
     pub(super) chat_id: String,
+    pub(super) worktree_meta: Option<crate::sessions::WorktreeMeta>,
+    pub(super) pending_worktree_merge: Option<surfaces::WorktreeMergeConfirmation>,
     pub(super) session_title: Option<String>,
     pub(super) recent_sessions: Vec<PickerItem>,
     pub(super) show_session_header: bool,
@@ -402,6 +404,8 @@ impl App {
             events_pane: EventsPaneState::new(),
             current_project: Some(project),
             chat_id,
+            worktree_meta: None,
+            pending_worktree_merge: None,
             session_title: None,
             recent_sessions: Vec::new(),
             show_session_header: false,
@@ -502,6 +506,8 @@ impl App {
             events_pane: EventsPaneState::new(),
             current_project: None,
             chat_id: uuid::Uuid::new_v4().to_string(),
+            worktree_meta: None,
+            pending_worktree_merge: None,
             session_title: None,
             recent_sessions: Vec::new(),
             show_session_header: false,
@@ -566,6 +572,15 @@ impl App {
 
     pub fn composer(&self) -> &str {
         self.composer.text()
+    }
+
+    pub(crate) fn worktree_meta(&self) -> Option<&crate::sessions::WorktreeMeta> {
+        self.worktree_meta.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_worktree_merge(&self) -> Option<&surfaces::WorktreeMergeConfirmation> {
+        self.pending_worktree_merge.as_ref()
     }
 
     pub fn composer_state(&self) -> &ComposerState {

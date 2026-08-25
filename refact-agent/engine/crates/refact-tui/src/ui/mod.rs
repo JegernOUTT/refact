@@ -19,6 +19,7 @@ mod settings;
 pub mod status_card;
 pub mod status_indicator;
 mod transcript;
+mod worktree;
 
 const ASCII_FRAME_MAX_WIDTH: u16 = 60;
 const BORDERLESS_MODAL_MAX_WIDTH: u16 = 39;
@@ -112,6 +113,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     if let Some(modal) = app.approval_modal() {
         approval::render_approval_modal(frame, modal, area);
     }
+    worktree::render_worktree_merge_confirmation(frame, app, area);
     if app.help_open() {
         help::render_help(frame, app, area);
     }
@@ -370,7 +372,6 @@ help = "f1"
             crate::keymap::KeyContext::Activity,
             crate::keymap::KeyContext::Board,
             crate::keymap::KeyContext::Goal,
-            crate::keymap::KeyContext::Worktree,
             crate::keymap::KeyContext::Settings,
         ] {
             assert!(text.contains("not yet bound"), "{}", context.label());

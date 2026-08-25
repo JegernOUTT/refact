@@ -20,6 +20,7 @@ pub enum MiscCommand {
     Import,
     Settings,
     Board,
+    Worktrees,
 }
 
 pub const CLEAR_COMMAND: CommandDef = CommandDef {
@@ -228,6 +229,18 @@ pub const BOARD_COMMAND: CommandDef = CommandDef {
     availability: CommandAvailability::Always,
     action: CommandAction::Misc {
         command: MiscCommand::Board,
+    },
+};
+
+pub const WORKTREES_COMMAND: CommandDef = CommandDef {
+    name: "worktrees",
+    aliases: &["worktree"],
+    description:
+        "surface: inspect, diff, merge, or clean worktrees (requires REFACT_TUI_SURFACES=1)",
+    args_hint: "[list|summary|create|show|diff|open|delete|cleanup|merge]",
+    availability: CommandAvailability::Always,
+    action: CommandAction::Misc {
+        command: MiscCommand::Worktrees,
     },
 };
 

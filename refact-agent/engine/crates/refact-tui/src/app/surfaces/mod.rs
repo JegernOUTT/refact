@@ -37,6 +37,8 @@ pub(crate) use settings::{
     model_settings_caps, settings_caps_for_model, ModelSettingsCapabilities, SettingsRow,
     SettingsState,
 };
+mod worktree;
+pub(super) use worktree::{WorktreeAction, WorktreeMergeConfirmation};
 
 #[derive(Debug, Clone)]
 pub struct ProjectPickerState {

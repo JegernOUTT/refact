@@ -553,6 +553,26 @@ fn task_board_scenario(app: &mut App) {
     });
 }
 
+fn worktree_identity_scenario(app: &mut App) {
+    app.apply_chat_event(chat_event(
+        app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {
+                "id": app.chat_id(),
+                "worktree": {
+                    "id": "wt-matrix",
+                    "branch": "refact/task/matrix",
+                    "root": "/tmp/wt-matrix"
+                }
+            },
+            "runtime": {"state": "idle"},
+            "messages": [{"role": "assistant", "content": "Worktree identity is visible", "stream_finished": true}]
+        }),
+    ));
+}
+
 fn render_scenarios() -> Vec<RenderScenario> {
     vec![
         RenderScenario {
@@ -651,6 +671,12 @@ fn render_scenarios() -> Vec<RenderScenario> {
             setup: task_board_scenario,
             render_before_resize: false,
         },
+        RenderScenario {
+            name: "worktree identity",
+            marker: Some("wt-matrix"),
+            setup: worktree_identity_scenario,
+            render_before_resize: false,
+        },
     ]
 }
 
@@ -734,7 +760,7 @@ fn keymap_help_golden_snapshot() {
     │    activity Esc                   cancel, close, or abort active work                    │
     │       board Esc, q                cancel, close, or abort active work                    │
     │        goal —                   not yet bound                                            │
-    │   worktrees —                   not yet bound                                            │
+    │   worktrees Esc                   cancel, close, or abort active work                    │
     │    settings Backspace             delete left or remove queued item                      │
     │    ask form Backspace             delete left or remove queued item                      │
     │transcript cell t                     expand selected tool card                           │

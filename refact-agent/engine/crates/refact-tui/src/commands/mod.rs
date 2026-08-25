@@ -153,6 +153,7 @@ fn command_registry_vec() -> &'static Vec<CommandDef> {
             misc::IMPORT_COMMAND,
             misc::SETTINGS_COMMAND,
             misc::BOARD_COMMAND,
+            misc::WORKTREES_COMMAND,
             CommandDef {
                 name: "stop",
                 aliases: &["cancel", "clean"],
@@ -263,6 +264,7 @@ mod tests {
             "/hooks",
             "/logout",
             "/import",
+            "/worktrees",
         ] {
             assert!(
                 items.iter().any(|item| item.title == title),

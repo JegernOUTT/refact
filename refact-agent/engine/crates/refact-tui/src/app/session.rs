@@ -466,6 +466,8 @@ impl App {
         self.inbound_event_state = InboundEventState::default();
         self.browser_state = BrowserState::default();
         self.current_project = Some(project.clone());
+        self.worktree_meta = None;
+        self.pending_worktree_merge = None;
         self.chat_id = self
             .last_chat_by_project
             .get(&project.project_id)
@@ -532,6 +534,8 @@ impl App {
         let history_entries = self.composer.history_entries().to_vec();
         self.save_local_input_handoff();
         self.chat_id = chat_id;
+        self.worktree_meta = None;
+        self.pending_worktree_merge = None;
         self.restore_local_input_handoff(history_entries);
         self.session_title = title;
         self.show_session_header = true;
@@ -576,6 +580,8 @@ impl App {
         let history_entries = self.composer.history_entries().to_vec();
         self.save_local_input_handoff();
         self.chat_id = chat_id;
+        self.worktree_meta = None;
+        self.pending_worktree_merge = None;
         self.restore_local_input_handoff(history_entries);
         self.session_title = Some(title.clone());
         self.show_session_header = true;

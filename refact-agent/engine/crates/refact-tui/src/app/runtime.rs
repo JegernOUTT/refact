@@ -6,7 +6,12 @@ use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::client::{ChatSeqDecision, ChatSeqTracker, ClientError, DaemonClient};
+use crate::client::{
+    ChatSeqDecision, ChatSeqTracker, ClientError, CreateWorktreeRequest, DaemonClient,
+    DeleteWorktreeResponse, MergeWorktreeRequest, MergeWorktreeResponse, OpenWorktreeResponse,
+    WorktreeCleanupPlanResponse, WorktreeCleanupResultResponse, WorktreeDiffResponse,
+    WorktreeInventoryResponse, WorktreeListResponse, WorktreeRecordResponse,
+};
 use crate::terminal::{FrameRequester, TerminalTitleConfig, TARGET_FRAME_INTERVAL};
 
 use super::*;
@@ -146,6 +151,16 @@ pub(super) enum RuntimeEvent {
         result: Result<(), String>,
     },
     DiffLoaded(Result<String, String>),
+    WorktreeListLoaded(Result<WorktreeListResponse, String>),
+    WorktreeSummaryLoaded(Result<WorktreeInventoryResponse, String>),
+    WorktreeLoaded(Result<WorktreeRecordResponse, String>),
+    WorktreeCreated(Result<crate::client::CreateWorktreeResponse, String>),
+    WorktreeDiffLoaded(Result<WorktreeDiffResponse, String>),
+    WorktreeCleanupPlanLoaded(Result<WorktreeCleanupPlanResponse, String>),
+    WorktreeCleanupFinished(Result<WorktreeCleanupResultResponse, String>),
+    WorktreeMergeFinished(Result<MergeWorktreeResponse, String>),
+    WorktreeOpened(Result<OpenWorktreeResponse, String>),
+    WorktreeDeleted(Result<DeleteWorktreeResponse, String>),
 }
 
 #[derive(Debug, Default)]
@@ -634,6 +649,24 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
             RuntimeEvent::DiffLoaded(Err(error)) => {
                 app.add_notice(format!("Failed to load git diff: {error}"))
             }
+            RuntimeEvent::WorktreeListLoaded(result) => app.handle_worktree_list_loaded(result),
+            RuntimeEvent::WorktreeSummaryLoaded(result) => {
+                app.handle_worktree_summary_loaded(result)
+            }
+            RuntimeEvent::WorktreeLoaded(result) => app.handle_worktree_loaded(result),
+            RuntimeEvent::WorktreeCreated(result) => app.handle_worktree_created(result),
+            RuntimeEvent::WorktreeDiffLoaded(result) => app.handle_worktree_diff_loaded(result),
+            RuntimeEvent::WorktreeCleanupPlanLoaded(result) => {
+                app.handle_worktree_cleanup_plan_loaded(result)
+            }
+            RuntimeEvent::WorktreeCleanupFinished(result) => {
+                app.handle_worktree_cleanup_finished(result)
+            }
+            RuntimeEvent::WorktreeMergeFinished(result) => {
+                app.handle_worktree_merge_finished(result)
+            }
+            RuntimeEvent::WorktreeOpened(result) => app.handle_worktree_opened(result),
+            RuntimeEvent::WorktreeDeleted(result) => app.handle_worktree_deleted(result),
         }
         if let Some(request) = app.take_pending_history_save() {
             spawn_history_save_task(request, tx.clone());
@@ -1099,6 +1132,110 @@ pub(super) async fn run_action(
             tokio::spawn(async move {
                 let result = load_git_diff(root).await;
                 let _ = tx.send(RuntimeEvent::DiffLoaded(result)).await;
+            });
+        }
+        AppAction::Worktree { action } => {
+            let Some(project_id) = app.current_project_id().map(str::to_string) else {
+                app.add_notice("No active project for /worktrees");
+                return;
+            };
+            let client = client.clone();
+            let tx = tx.clone();
+            let chat_id = app.chat_id().to_string();
+            tokio::spawn(async move {
+                match action {
+                    surfaces::WorktreeAction::List => {
+                        let result = client
+                            .list_worktrees(&project_id)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = tx.send(RuntimeEvent::WorktreeListLoaded(result)).await;
+                    }
+                    surfaces::WorktreeAction::Summary => {
+                        let result = client
+                            .worktree_summary(&project_id)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = tx.send(RuntimeEvent::WorktreeSummaryLoaded(result)).await;
+                    }
+                    surfaces::WorktreeAction::Inspect { id } => {
+                        let result = client
+                            .get_worktree(&project_id, &id)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = tx.send(RuntimeEvent::WorktreeLoaded(result)).await;
+                    }
+                    surfaces::WorktreeAction::Create { branch } => {
+                        let result = client
+                            .create_worktree(
+                                &project_id,
+                                &CreateWorktreeRequest {
+                                    branch,
+                                    chat_id: Some(chat_id),
+                                    kind: Some("chat".to_string()),
+                                    ..CreateWorktreeRequest::default()
+                                },
+                            )
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = tx.send(RuntimeEvent::WorktreeCreated(result)).await;
+                    }
+                    surfaces::WorktreeAction::Diff { id } => {
+                        let result = client
+                            .worktree_diff(&project_id, &id)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = tx.send(RuntimeEvent::WorktreeDiffLoaded(result)).await;
+                    }
+                    surfaces::WorktreeAction::Open { id } => {
+                        let result = client
+                            .open_worktree(&project_id, &id)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = tx.send(RuntimeEvent::WorktreeOpened(result)).await;
+                    }
+                    surfaces::WorktreeAction::Delete { id } => {
+                        let result = client
+                            .delete_worktree(&project_id, &id, false, false)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = tx.send(RuntimeEvent::WorktreeDeleted(result)).await;
+                    }
+                    surfaces::WorktreeAction::CleanupPlan { request } => {
+                        let result = client
+                            .worktree_cleanup_dry_run(&project_id, &request)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = tx
+                            .send(RuntimeEvent::WorktreeCleanupPlanLoaded(result))
+                            .await;
+                    }
+                    surfaces::WorktreeAction::Cleanup { request } => {
+                        let result = client
+                            .worktree_cleanup(&project_id, &request)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = tx.send(RuntimeEvent::WorktreeCleanupFinished(result)).await;
+                    }
+                    surfaces::WorktreeAction::Merge { confirmation } => {
+                        let result = client
+                            .merge_worktree(
+                                &project_id,
+                                &confirmation.id,
+                                &MergeWorktreeRequest {
+                                    strategy: confirmation.strategy,
+                                    delete_after_merge: confirmation.delete_after_merge,
+                                    include_uncommitted: confirmation.include_uncommitted,
+                                    target_branch: Some(confirmation.target_branch),
+                                    commit_message: None,
+                                    generate_commit_message: false,
+                                },
+                            )
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = tx.send(RuntimeEvent::WorktreeMergeFinished(result)).await;
+                    }
+                }
             });
         }
         AppAction::CopyToClipboard { .. } => {}

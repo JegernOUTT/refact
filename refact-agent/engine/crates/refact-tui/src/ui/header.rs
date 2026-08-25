@@ -44,14 +44,30 @@ fn header_line(app: &App) -> Line<'static> {
     } else {
         String::new()
     };
+    let worktree = app.worktree_meta().map(|meta| {
+        let branch = meta
+            .branch
+            .as_deref()
+            .filter(|branch| !branch.is_empty())
+            .unwrap_or("unknown");
+        let id = meta
+            .id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or("worktree");
+        format!(" · wt {id} {branch}")
+    });
     let accent = app.theme().style(ThemeRole::Accent);
     let muted = app.theme().style(ThemeRole::Muted);
     let mut spans = vec![
         Span::styled("refact", accent),
         Span::raw(" "),
         Span::styled(project.to_string(), accent),
-        Span::styled(" | ", muted),
     ];
+    if let Some(worktree) = worktree {
+        spans.push(Span::styled(worktree, muted));
+    }
+    spans.push(Span::styled(" | ", muted));
     append_header_action(&mut spans, &new, "new", accent, muted);
     spans.push(Span::styled(" · ", muted));
     append_header_action(&mut spans, &projects, "projects", accent, muted);
@@ -179,5 +195,40 @@ mod tests {
             Some(value) => std::env::set_var("REFACT_TUI_SURFACES", value),
             None => std::env::remove_var("REFACT_TUI_SURFACES"),
         }
+    }
+
+    #[test]
+    fn header_shows_worktree_identity_only_for_worktree_backed_chat() {
+        let mut app = App::new(project());
+        let initial = header_line(&app)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(!initial.contains("wt wt-1"));
+
+        app.apply_chat_event(crate::client::ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: serde_json::json!({
+                "thread": {
+                    "worktree": {
+                        "id": "wt-1",
+                        "branch": "refact/task/T-59",
+                        "root": "/tmp/wt"
+                    }
+                },
+                "runtime": {"state": "idle"},
+                "messages": []
+            }),
+        });
+
+        let header = header_line(&app)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(header.contains("wt wt-1 refact/task/T-59"));
     }
 }

@@ -8,6 +8,7 @@ mod overlay;
 mod picker;
 mod settings;
 mod vim;
+mod worktree;
 
 impl App {
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
@@ -32,6 +33,7 @@ impl App {
             }
             KeyContext::Approval => return self.handle_approval_key(key),
             KeyContext::AskForm => return self.handle_ask_questions_key(key),
+            KeyContext::Worktree => return self.handle_worktree_key(key),
             KeyContext::ModalPicker => return self.handle_modal_picker_key(key),
             KeyContext::Settings => return self.handle_settings_key(key),
             KeyContext::ProjectPicker => return self.handle_project_picker_key(key),
@@ -95,6 +97,9 @@ impl App {
         }
         if self.approval_modal().is_some() {
             return KeyContext::Approval;
+        }
+        if self.pending_worktree_merge.is_some() {
+            return KeyContext::Worktree;
         }
         if self.ask_questions_form.is_some() {
             return KeyContext::AskForm;
