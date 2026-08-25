@@ -193,6 +193,10 @@ impl StreamController {
         self.rendered_lines[start..].to_vec()
     }
 
+    pub fn current_tail_lines_reflowed(&self) -> Vec<HyperlinkLine> {
+        self.render_source(&self.live())
+    }
+
     pub fn has_live_tail(&self) -> bool {
         self.has_tail()
     }
@@ -476,7 +480,7 @@ impl PlanStreamController {
     }
 
     pub fn current_tail_display_lines(&self) -> Vec<HyperlinkLine> {
-        let lines = self.stream.current_tail_lines();
+        let lines = self.stream.current_tail_lines_reflowed();
         if lines.is_empty() {
             return Vec::new();
         }
@@ -667,6 +671,14 @@ mod tests {
             .join("\n")
     }
 
+    fn current_tail_text(stream: &StreamController) -> Vec<String> {
+        stream
+            .current_tail_lines_reflowed()
+            .iter()
+            .map(|line| line_to_plain(&line.line))
+            .collect()
+    }
+
     #[test]
     fn commit_tick_drains_one_complete_line() {
         let mut stream = controller();
@@ -846,6 +858,14 @@ mod tests {
         while stream.run_commit_tick().is_some() {}
         assert!(stream.committed().starts_with(&emitted));
         assert_eq!(stream.finalize(), "alpha beta gamma\ndelta\n");
+    }
+
+    #[test]
+    fn current_tail_reflows_markdown_soft_breaks() {
+        let mut stream = StreamController::new(Some(12), std::path::Path::new("."));
+        stream.push_delta("alpha beta gamma\ndelta epsilon zeta");
+
+        assert_eq!(current_tail_text(&stream), vec!["delta", "epsilon zeta"]);
     }
 
     #[test]

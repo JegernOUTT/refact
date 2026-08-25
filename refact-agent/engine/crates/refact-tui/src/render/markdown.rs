@@ -1449,6 +1449,18 @@ mod tests {
     }
 
     #[test]
+    fn soft_breaks_reflow_at_narrow_widths() {
+        let lines = render_markdown_with_options(
+            "alpha beta gamma\ndelta epsilon zeta",
+            RenderOptions::plain(Some(12)),
+        );
+        assert_eq!(
+            text(&lines),
+            vec!["alpha beta", "gamma", "delta", "epsilon zeta"]
+        );
+    }
+
+    #[test]
     fn renders_aligned_table_snapshot() {
         let source = "| Name | Count | Note |\n| --- | ---: | :---: |\n| α | 2 | small |\n| longer | 12 | wrapped words here |";
         let lines = render_markdown_with_options(source, RenderOptions::plain(Some(32)));

@@ -13,11 +13,6 @@ struct StyledChar {
     style: Style,
 }
 
-#[derive(Clone)]
-enum Piece {
-    Range(Range<usize>),
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TokenKind {
     Space,
@@ -181,7 +176,7 @@ pub fn wrap_line(line: Line<'static>, width: Option<usize>) -> Vec<Line<'static>
     }
     let tokens = tokens(&chars);
     let mut out = Vec::new();
-    let mut current = Vec::<Piece>::new();
+    let mut current = Vec::<Range<usize>>::new();
     let mut current_width = 0usize;
 
     let mut pending_space = None::<Range<usize>>;
@@ -289,16 +284,10 @@ where
         } else {
             opts.subsequent_indent
         };
-        let range = match line {
-            Cow::Borrowed(slice) => borrowed_slice_range(text, slice).unwrap_or_else(|| {
-                map_owned_wrapped_line_to_range(text, cursor, slice, synthetic_prefix)
-            }),
-            Cow::Owned(slice) => {
-                map_owned_wrapped_line_to_range(text, cursor, slice, synthetic_prefix)
-            }
-        };
+        let range = wrapped_line_range(text, cursor, line, synthetic_prefix);
         let trailing_spaces = trailing_ascii_spaces_len(&text[range.end..]);
-        lines.push(range.start..range.end + trailing_spaces + 1);
+        let end = range.end.saturating_add(trailing_spaces).min(text.len());
+        lines.push(range.start..end);
         cursor = range.end + trailing_spaces;
     }
     lines
@@ -318,14 +307,7 @@ where
         } else {
             opts.subsequent_indent
         };
-        let range = match line {
-            Cow::Borrowed(slice) => borrowed_slice_range(text, slice).unwrap_or_else(|| {
-                map_owned_wrapped_line_to_range(text, cursor, slice, synthetic_prefix)
-            }),
-            Cow::Owned(slice) => {
-                map_owned_wrapped_line_to_range(text, cursor, slice, synthetic_prefix)
-            }
-        };
+        let range = wrapped_line_range(text, cursor, line, synthetic_prefix);
         cursor = range.end;
         lines.push(range);
     }
@@ -505,14 +487,14 @@ fn append_space_and_word(
     word_range: Range<usize>,
     width: usize,
     out: &mut Vec<Line<'static>>,
-    current: &mut Vec<Piece>,
+    current: &mut Vec<Range<usize>>,
     current_width: &mut usize,
 ) {
     let space_width = range_width(chars, space_range.clone());
     let word_width = range_width(chars, word_range.clone());
     if *current_width + space_width + word_width <= width {
-        current.push(Piece::Range(space_range));
-        current.push(Piece::Range(word_range));
+        current.push(space_range);
+        current.push(word_range);
         *current_width += space_width + word_width;
         return;
     }
@@ -529,7 +511,7 @@ fn append_range(
     range: Range<usize>,
     width: usize,
     out: &mut Vec<Line<'static>>,
-    current: &mut Vec<Piece>,
+    current: &mut Vec<Range<usize>>,
     current_width: &mut usize,
 ) {
     let token_width = range_width(chars, range.clone());
@@ -539,11 +521,11 @@ fn append_range(
         }
         push_hard_wrapped_range(chars, range, width, out);
     } else if *current_width + token_width <= width {
-        current.push(Piece::Range(range));
+        current.push(range);
         *current_width += token_width;
     } else {
         push_current(chars, out, current, current_width);
-        current.push(Piece::Range(range));
+        current.push(range);
         *current_width = token_width;
     }
 }
@@ -585,14 +567,14 @@ fn tokens(chars: &[StyledChar]) -> Vec<Token> {
 fn push_current(
     chars: &[StyledChar],
     out: &mut Vec<Line<'static>>,
-    current: &mut Vec<Piece>,
+    current: &mut Vec<Range<usize>>,
     current_width: &mut usize,
 ) {
     if current.is_empty() {
         *current_width = 0;
         return;
     }
-    out.push(line_from_pieces(chars, current));
+    out.push(line_from_ranges(chars, current));
     current.clear();
     *current_width = 0;
 }
@@ -621,12 +603,10 @@ fn push_hard_wrapped_range(
     }
 }
 
-fn line_from_pieces(chars: &[StyledChar], pieces: &[Piece]) -> Line<'static> {
+fn line_from_ranges(chars: &[StyledChar], ranges: &[Range<usize>]) -> Line<'static> {
     let mut spans = Vec::<Span<'static>>::new();
-    for piece in pieces {
-        match piece {
-            Piece::Range(range) => push_range_spans(chars, range.clone(), &mut spans),
-        }
+    for range in ranges {
+        push_range_spans(chars, range.clone(), &mut spans);
     }
     Line::from(spans)
 }
@@ -672,6 +652,39 @@ fn borrowed_slice_range(text: &str, slice: &str) -> Option<Range<usize>> {
     }
 
     Some(slice_start - text_start..slice_end - text_start)
+}
+
+fn wrapped_line_range(
+    text: &str,
+    cursor: usize,
+    line: &Cow<'_, str>,
+    synthetic_prefix: &str,
+) -> Range<usize> {
+    let range = match line {
+        Cow::Borrowed(slice) => borrowed_slice_range(text, slice).unwrap_or_else(|| {
+            map_owned_wrapped_line_to_range(text, cursor, slice, synthetic_prefix)
+        }),
+        Cow::Owned(slice) => map_owned_wrapped_line_to_range(text, cursor, slice, synthetic_prefix),
+    };
+    clamp_range_to_text(text, range)
+}
+
+fn clamp_range_to_text(text: &str, range: Range<usize>) -> Range<usize> {
+    let mut start = range.start.min(text.len());
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+
+    let mut end = range.end.min(text.len());
+    while end > start && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    if end < start {
+        start..start
+    } else {
+        start..end
+    }
 }
 
 fn map_owned_wrapped_line_to_range(
@@ -1469,6 +1482,44 @@ mod tests {
             .collect::<String>();
         assert_eq!(rebuilt, text);
         assert!(ranges.len() > 1);
+    }
+
+    #[test]
+    fn mapped_wrap_ranges_are_clamped_to_utf8_boundaries() {
+        for (text, width) in [
+            ("", 0),
+            ("", 1),
+            ("ascii", 0),
+            ("ascii", 1),
+            ("å β", 0),
+            ("å β", 1),
+            ("👩‍💻", 0),
+            ("👩‍💻", 1),
+            ("trailing  ", 1),
+            ("final", 1),
+            ("final\n", 1),
+        ] {
+            for ranges in [
+                wrap_ranges(text, Options::new(width)),
+                wrap_ranges_trim(text, Options::new(width)),
+            ] {
+                for range in ranges {
+                    assert!(range.start <= range.end);
+                    assert!(range.end <= text.len());
+                    assert!(text.is_char_boundary(range.start));
+                    assert!(text.is_char_boundary(range.end));
+                    let _ = &text[range];
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_ranges_keep_trailing_spaces_without_overrunning_final_lines() {
+        assert_eq!(wrap_ranges("alpha", Options::new(80)), vec![0..5]);
+        assert_eq!(wrap_ranges("alpha  ", Options::new(80)), vec![0..7]);
+        assert_eq!(wrap_ranges("one two", Options::new(3)), vec![0..4, 4..7]);
+        assert_eq!(wrap_ranges("alpha\n", Options::new(80)), vec![0..5, 6..6]);
     }
 
     #[test]
