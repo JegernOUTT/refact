@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
 
+use crate::history::cells::tool_display_name;
+
 use super::transcript::{
     citation_item, finalized_assistant_content_part, is_plan_delta_message, render_message_key,
     rendered_state_keys_for_message, server_content_block_item, session_header_key,
@@ -1257,7 +1259,7 @@ impl SubagentSummary {
     pub(super) fn detail(&self) -> String {
         let mut parts = vec![format!(
             "{} [{}]",
-            sanitize_tool_inline(&self.tool_name),
+            tool_display_name(&self.tool_name),
             sanitize_tool_inline(&self.tool_call_id)
         )];
         parts.push(if self.active { "active" } else { "recent" }.to_string());

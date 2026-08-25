@@ -42,7 +42,7 @@ pub use request_input::RequestInputToolCell;
 pub use search::SearchToolCell;
 pub use server::ServerToolCell;
 pub use session::SessionCell;
-pub use tool_family::{tool_family, ToolFamily};
+pub use tool_family::{tool_display_name, tool_family, ToolFamily};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HistoryCellKind {
@@ -587,7 +587,7 @@ fn command_label(card: &ToolCard) -> String {
     argument_value(card, &["command", "cmd"])
         .map(|command| format!("$ {command}"))
         .or_else(|| argument_value(card, &["process_id"]).map(|id| format!("process {id}")))
-        .unwrap_or_else(|| format!("{}({})", card.name, card.args_preview))
+        .unwrap_or_else(|| format!("{}({})", tool_display_name(&card.name), card.args_preview))
 }
 
 fn search_label(card: &ToolCard) -> String {
@@ -595,13 +595,13 @@ fn search_label(card: &ToolCard) -> String {
         card,
         &["pattern", "query", "search_key", "symbols", "path", "scope"],
     )
-    .map(|query| format!("{} · {query}", card.name))
-    .unwrap_or_else(|| format!("{}({})", card.name, card.args_preview))
+    .map(|query| format!("{} · {query}", tool_display_name(&card.name)))
+    .unwrap_or_else(|| format!("{}({})", tool_display_name(&card.name), card.args_preview))
 }
 
 fn request_input_label(card: &ToolCard) -> String {
     argument_value(card, &["question", "prompt", "message", "title"])
-        .unwrap_or_else(|| format!("{}({})", card.name, card.args_preview))
+        .unwrap_or_else(|| format!("{}({})", tool_display_name(&card.name), card.args_preview))
 }
 
 fn argument_value(card: &ToolCard, keys: &[&str]) -> Option<String> {

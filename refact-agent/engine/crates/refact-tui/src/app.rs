@@ -4334,13 +4334,18 @@ new-chat = "ctrl-x"
             kind: "snapshot".to_string(),
             raw: json!({"runtime": {"state": "idle"}, "messages": [
                 {"message_id": "u1", "role": "user", "content": "hello"},
-                {"message_id": "a1", "role": "assistant", "content": "hi"}
+                {
+                    "message_id": "a1",
+                    "role": "assistant",
+                    "content": "hi",
+                    "tool_calls": [{"id": "call-1", "function": {"name": "t_process_start", "arguments": "{}"}}]
+                }
             ]}),
         });
         assert_eq!(app.execute_command_name("raw"), AppAction::None);
-        assert!(app
-            .transcript_overlay()
-            .is_some_and(|overlay| overlay.is_copy_mode()));
+        let overlay = app.transcript_overlay().unwrap();
+        assert!(overlay.is_copy_mode());
+        assert!(overlay.lines().join("\n").contains("t_process_start"));
     }
 
     #[test]
@@ -7640,6 +7645,31 @@ new-chat = "ctrl-x"
                 if lines.join("\n").contains("tool_subagent [call-1]")
                     && lines.join("\n").contains("collecting context")
         ));
+    }
+
+    #[test]
+    fn subagents_command_hides_internal_tool_prefixes() {
+        let mut app = App::new(project());
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_delta".to_string(),
+            raw: json!({"ops": [{"op": "set_tool_calls", "tool_calls": [{"id": "call-1", "function": {"name": "t_process_start", "arguments": "{}"}}]}]}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "subchat_update".to_string(),
+            raw: json!({"tool_call_id": "call-1", "subchat_id": "collecting context", "attached_files": []}),
+        });
+        app.execute_command_name("subagents");
+
+        let rendered = match app.visible_transcript().last() {
+            Some(TranscriptItem::Info(lines)) => lines.join("\n"),
+            _ => panic!("expected subagents card"),
+        };
+        assert!(rendered.contains("process_start [call-1]"));
+        assert!(!rendered.contains("t_process_start"));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use super::ToolCellType;
+use crate::text_safety::sanitize_tool_inline;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolFamily {
@@ -189,6 +190,10 @@ pub fn tool_family(name: &str) -> ToolFamily {
                 .find_map(|(prefix, family)| name.starts_with(prefix).then_some(*family))
         })
         .unwrap_or(ToolFamily::Unknown)
+}
+
+pub fn tool_display_name(name: &str) -> String {
+    sanitize_tool_inline(name.strip_prefix("t_").unwrap_or(name))
 }
 
 impl ToolFamily {
@@ -468,5 +473,12 @@ mod tests {
             ToolFamily::Server
         );
         assert_eq!(tool_family("srvtoolu_123"), ToolFamily::Server);
+    }
+
+    #[test]
+    fn display_names_hide_internal_prefixes_without_changing_registry_input() {
+        assert_eq!(tool_display_name("t_process_start"), "process_start");
+        assert_eq!(tool_display_name("shell"), "shell");
+        assert_eq!(tool_family("t_process_start"), ToolFamily::Unknown);
     }
 }

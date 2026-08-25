@@ -239,7 +239,7 @@ fn transcript_cells_golden_snapshot() {
 
   › Inspect @src/lib.rs and summarize the TUI parity risks.
 
-  • collapsed
+  • … 1 line hidden (expand)
 
   • ## Findings
 

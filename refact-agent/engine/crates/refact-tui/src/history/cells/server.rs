@@ -21,7 +21,7 @@ impl HistoryCell for ServerToolCell {
         let mut lines = server_call_header_lines(&self.card, width);
         lines.push(tool_summary_line(
             &self.card,
-            self.card.name.clone(),
+            tool_display_name(&self.card.name),
             self.card
                 .duration_ms
                 .map(format_duration)
@@ -111,7 +111,9 @@ fn server_invocation(card: &ToolCard) -> ServerInvocation {
             .unwrap_or_else(|| "tool".to_string());
         return ServerInvocation {
             server: "mcp".to_string(),
-            tool: tool_name.trim_start_matches("mcp_").to_string(),
+            tool: tool_display_name(&tool_name)
+                .trim_start_matches("mcp_")
+                .to_string(),
             args: mcp_args_string(parsed.as_ref()),
         };
     }
@@ -122,7 +124,7 @@ fn server_invocation(card: &ToolCard) -> ServerInvocation {
         .unwrap_or_default();
     ServerInvocation {
         server: "server".to_string(),
-        tool: card.name.clone(),
+        tool: tool_display_name(&card.name),
         args,
     }
 }

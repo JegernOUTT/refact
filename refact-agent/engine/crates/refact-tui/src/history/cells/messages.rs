@@ -242,7 +242,15 @@ impl HistoryCell for ReasoningCell {
 
     fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
         let lines = if self.collapsed {
-            vec![HyperlinkLine::new(reasoning_line("collapsed"))]
+            vec![HyperlinkLine::new(reasoning_line(&format!(
+                "… {} {} hidden (expand)",
+                self.text.lines().count().max(1),
+                if self.text.lines().count() == 1 {
+                    "line"
+                } else {
+                    "lines"
+                }
+            )))]
         } else {
             let renderer = MarkdownRenderer::new(Some(prefixed_body_width(width)));
             style_hyperlink_lines(renderer.render_with_links(&self.text), reasoning_style())
@@ -456,6 +464,8 @@ mod tests {
         cell.update_text("updated plan");
         assert!(!cell.collapsed());
         cell.set_collapsed(true);
-        assert_eq!(text(&cell.render(40)), "• collapsed");
+        let rendered = text(&cell.render(40));
+        assert_eq!(rendered, "• … 1 line hidden (expand)");
+        assert!(!rendered.contains("• collapsed"));
     }
 }

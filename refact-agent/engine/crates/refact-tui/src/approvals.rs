@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::client::ToolDecision;
 use crate::key_hint;
+use crate::history::cells::tool_display_name;
 use crate::render::wrapping::wrap_line;
 use crate::render::{color_enabled_from_env, render_unified_diff};
 use crate::style::accent_style;
@@ -506,7 +507,7 @@ fn summary_reason_line(
     };
     Line::from(vec![
         Span::styled(prefix, prefix_style),
-        Span::styled(reason.tool_name.clone(), tool_style),
+        Span::styled(tool_display_name(&reason.tool_name), tool_style),
         Span::styled("  ", Style::default()),
         Span::styled(command, command_style),
     ])
@@ -543,7 +544,10 @@ fn render_detail_lines(state: &ApprovalModalState, width: usize, lines: &mut Vec
                 format!("tool {}/{}", idx + 1, state.reasons().len()),
                 heading_style,
             ),
-            Span::styled(format!(" · {}", reason.tool_name), heading_style),
+            Span::styled(
+                format!(" · {}", tool_display_name(&reason.tool_name)),
+                heading_style,
+            ),
         ]));
         if !reason.tool_call_id.is_empty() {
             lines.push(meta_line("id", &reason.tool_call_id));
@@ -720,6 +724,22 @@ mod tests {
         let rendered = text(&render_modal_lines(queue.front().unwrap(), 80));
         assert!(rendered.contains("approval 1 of 2"));
         assert!(rendered.contains("1 more pending in queue"));
+    }
+
+    #[test]
+    fn approval_display_hides_internal_tool_prefixes() {
+        let mut modal = ApprovalModalState::new(vec![PauseReason {
+            tool_name: "t_process_start".to_string(),
+            ..reason("call-1")
+        }]);
+        let compact = text(&render_modal_lines(&modal, 80));
+        assert!(compact.contains("process_start"));
+        assert!(!compact.contains("t_process_start"));
+
+        modal.toggle_details();
+        let detailed = text(&render_modal_lines(&modal, 80));
+        assert!(detailed.contains("process_start"));
+        assert!(!detailed.contains("t_process_start"));
     }
 
     #[test]

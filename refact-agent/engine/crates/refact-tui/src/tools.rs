@@ -4,6 +4,7 @@ use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::render::MarkdownRenderer;
+use crate::history::cells::tool_display_name;
 use crate::text_safety::{
     compact_tool_preview, sanitize_json_strings, sanitize_tool_inline, sanitize_tool_text,
 };
@@ -481,10 +482,6 @@ pub fn render_tool_arguments(args: &str, width: usize) -> Vec<Line<'static>> {
     MarkdownRenderer::new(Some(width.max(8))).render(&source)
 }
 
-pub fn tool_display_name(name: &str) -> String {
-    sanitize_tool_inline(name.strip_prefix("t_").unwrap_or(name))
-}
-
 pub fn tool_argument_summary(args: &str, max_graphemes: usize) -> Option<String> {
     let value = serde_json::from_str::<Value>(args).ok();
     let summary = match value {
@@ -843,6 +840,18 @@ mod tests {
         assert!(header.contains("future_tool · description:"));
         assert!(!header.contains("t_future_tool"));
         assert!(!header.contains("{\"description\""));
+    }
+
+    #[test]
+    fn internal_tool_prefix_is_hidden_in_headers_but_preserved_on_cards() {
+        let card = ToolCard::from_tool_call(&json!({
+            "function": {"name": "t_process_start", "arguments": "{}"}
+        }));
+
+        let rendered = plain_text(&card.render_lines(80));
+        assert_eq!(card.name, "t_process_start");
+        assert!(rendered.contains("process_start"));
+        assert!(!rendered.contains("t_process_start"));
     }
 
     #[test]
