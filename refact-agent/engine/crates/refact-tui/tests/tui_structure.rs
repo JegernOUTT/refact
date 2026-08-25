@@ -63,7 +63,7 @@ fn assert_production_line_cap(relative_path: &str, cap: usize) {
 fn tui_tool_literals_are_registered_or_explicitly_exempt() {
     let tui_source = read_tui_source("src/history/cells/tool_family.rs");
     let registered = engine_registered_tool_names();
-    let exact_matches = string_literals_from_const(&tui_source, "EXACT_TOOL_FAMILIES");
+    let exact_matches = string_literals_from_const(&tui_source, "TUI_TOOL_FAMILY_REGISTRY");
     let provider_native_matches =
         string_literals_from_const(&tui_source, "PROVIDER_NATIVE_TOOL_NAMES");
     let prefix_matches = string_literals_from_const(&tui_source, "PREFIX_TOOL_FAMILIES");
