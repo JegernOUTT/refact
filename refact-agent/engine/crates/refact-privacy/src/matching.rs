@@ -310,6 +310,7 @@ impl CompiledPolicy {
 
     #[cfg(unix)]
     fn build_guarded_alias_index(&self, roots: &[PathBuf]) -> HashMap<FileIdentity, Vec<PathBuf>> {
+        use std::os::unix::fs::MetadataExt;
         let mut index: HashMap<FileIdentity, Vec<PathBuf>> = HashMap::new();
         let mut pending = roots
             .iter()
@@ -334,11 +335,15 @@ impl CompiledPolicy {
                 pending.extend(entries.filter_map(Result::ok).map(|entry| entry.path()));
                 continue;
             }
+            if !metadata.is_file() || metadata.nlink() <= 1 {
+                continue;
+            }
             if !self.path_matches_guarded_zone(&path, roots) {
                 continue;
             }
-            let Some(identity) = hard_linked_file_identity(&path) else {
-                continue;
+            let identity = FileIdentity {
+                device: metadata.dev(),
+                inode: metadata.ino(),
             };
             index.entry(identity).or_default().push(path);
         }
@@ -465,11 +470,11 @@ fn strictest_shell_behavior(left: ShellBehavior, right: ShellBehavior) -> ShellB
 }
 
 fn normalize(value: &str) -> String {
-    value
-        .replace('\\', "/")
-        .nfc()
-        .collect::<String>()
-        .to_lowercase()
+    let slashed = value.replace('\\', "/");
+    if slashed.is_ascii() {
+        return slashed.to_ascii_lowercase();
+    }
+    slashed.nfc().collect::<String>().to_lowercase()
 }
 
 fn absolute_path(path: &Path) -> PathBuf {

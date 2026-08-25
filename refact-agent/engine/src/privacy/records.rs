@@ -616,9 +616,20 @@ pub fn declared_file_records(
     gcx: &Arc<GlobalContext>,
     paths: impl IntoIterator<Item = PathBuf>,
 ) -> Result<Vec<FileRecord>, String> {
+    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+    let compiled = policy.compile().map_err(|error| error.to_string())?;
+    let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
+    let derived_zones = new_derived_privacy_zones();
     let mut records = Vec::new();
     for path in paths {
-        let record = declared_file_record(gcx, &path)?;
+        let record = file_record_with(
+            gcx,
+            &compiled,
+            &mappings,
+            &path,
+            Attribution::Declared,
+            &derived_zones,
+        );
         if !records.contains(&record) {
             records.push(record);
         }
