@@ -21,6 +21,7 @@ const PLAN_SYNTHESIS_SEPARATOR: &str = "\n\n---\n\n## Plan updates\n\n";
 const GOAL_SYNTHESIS_SEPARATOR: &str = "\n\n---\n\n## Goal updates\n\n";
 
 mod approval;
+mod code_intel;
 mod exec;
 mod messages;
 mod notices;
@@ -33,6 +34,7 @@ mod session;
 mod tool_family;
 
 pub use approval::ApprovalCell;
+pub use code_intel::CodeIntelToolCell;
 pub use exec::{ExecToolCell, SubchatCell, ToolCallCell};
 pub use messages::{AssistantCell, AssistantStreamCell, ContentBlockCell, ReasoningCell, UserCell};
 pub use notices::{EventCell, EventCellData, InfoCell, NoticeCell, StatusCell};
@@ -413,6 +415,12 @@ pub fn render_transcript_item_hyperlink_lines_with_theme(
 }
 
 pub fn cell_from_tool_card(card: ToolCard, selected: bool) -> Box<dyn HistoryCell> {
+    if tool_family(&card.name) == ToolFamily::CodeIntel {
+        return match CodeIntelToolCell::new(&card, selected) {
+            Some(cell) => Box::new(cell),
+            None => Box::new(ToolCallCell::new(card, selected)),
+        };
+    }
     match tool_cell_type_for(&card.name) {
         ToolCellType::Exec => Box::new(ExecToolCell::new(card, selected)),
         ToolCellType::Diff => Box::new(DiffToolCell::new(card, selected)),
@@ -947,6 +955,11 @@ mod tests {
             (
                 "search_pattern",
                 ToolFamily::CodeSearch,
+                ToolCellType::Search,
+            ),
+            (
+                "codegraph_overview",
+                ToolFamily::CodeIntel,
                 ToolCellType::Search,
             ),
             ("cat", ToolFamily::FileSearch, ToolCellType::Search),

@@ -11,6 +11,7 @@ pub enum ToolFamily {
     WebSearch,
     WebFetch,
     CodeSearch,
+    CodeIntel,
     FileSearch,
     TreeSearch,
     DocumentationSearch,
@@ -46,15 +47,15 @@ const TUI_TOOL_FAMILY_REGISTRY: &[(&str, ToolFamily)] = &[
     ("search_pattern", ToolFamily::CodeSearch),
     ("search_semantic", ToolFamily::CodeSearch),
     ("search_symbol_definition", ToolFamily::CodeSearch),
-    ("codegraph_overview", ToolFamily::CodeSearch),
-    ("code_health", ToolFamily::CodeSearch),
-    ("git_risk", ToolFamily::CodeSearch),
-    ("code_why", ToolFamily::CodeSearch),
-    ("code_duplication", ToolFamily::CodeSearch),
-    ("dead_code", ToolFamily::CodeSearch),
-    ("security_scan", ToolFamily::CodeSearch),
-    ("pr_blast", ToolFamily::CodeSearch),
-    ("code_map", ToolFamily::CodeSearch),
+    ("codegraph_overview", ToolFamily::CodeIntel),
+    ("code_health", ToolFamily::CodeIntel),
+    ("git_risk", ToolFamily::CodeIntel),
+    ("code_why", ToolFamily::CodeIntel),
+    ("code_duplication", ToolFamily::CodeIntel),
+    ("dead_code", ToolFamily::CodeIntel),
+    ("security_scan", ToolFamily::CodeIntel),
+    ("pr_blast", ToolFamily::CodeIntel),
+    ("code_map", ToolFamily::CodeIntel),
     ("review", ToolFamily::CodeSearch),
     ("cat", ToolFamily::FileSearch),
     ("glob", ToolFamily::FileSearch),
@@ -205,6 +206,7 @@ impl ToolFamily {
             Self::WebSearch
             | Self::WebFetch
             | Self::CodeSearch
+            | Self::CodeIntel
             | Self::FileSearch
             | Self::TreeSearch
             | Self::DocumentationSearch
@@ -222,6 +224,8 @@ impl ToolFamily {
             (Self::WebFetch, false) => "Fetched the web",
             (Self::CodeSearch, true) => "Searching code",
             (Self::CodeSearch, false) => "Searched code",
+            (Self::CodeIntel, true) => "Analyzing code",
+            (Self::CodeIntel, false) => "Analyzed code",
             (Self::FileSearch, true) => "Searching files",
             (Self::FileSearch, false) => "Searched files",
             (Self::TreeSearch, true) => "Inspecting the file tree",
