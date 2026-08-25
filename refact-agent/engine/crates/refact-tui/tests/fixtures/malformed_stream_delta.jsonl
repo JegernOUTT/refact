@@ -1,0 +1,2 @@
+{"chat_id":"chat-fixture","seq":"0","type":"snapshot","thread":{},"runtime":{"state":"idle"},"messages":[]}
+{"chat_id":"chat-fixture","seq":"1","type":"stream_delta","message_id":"assistant-1","ops":{"op":"append_content","text":"lost"}}

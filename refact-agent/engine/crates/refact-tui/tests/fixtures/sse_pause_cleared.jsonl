@@ -1,0 +1,3 @@
+{"chat_id":"chat-fixture","seq":"0","type":"snapshot","thread":{},"runtime":{"state":"idle"},"messages":[]}
+{"chat_id":"chat-fixture","seq":"1","type":"pause_required","pause_id":"pause-1","reasons":[{"type":"confirmation","tool_name":"shell","command":"echo snack","rule":"confirmation","tool_call_id":"call-pause"}]}
+{"chat_id":"chat-fixture","seq":"2","type":"pause_cleared","pause_id":"pause-1"}

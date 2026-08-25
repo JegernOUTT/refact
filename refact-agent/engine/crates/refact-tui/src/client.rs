@@ -2597,6 +2597,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn branch_from_chat_serializes_required_identifiers() {
+        let branch = capture_command(|client| async move {
+            client
+                .send_branch_from_chat("project", "chat", "source", "message-1")
+                .await
+        })
+        .await;
+        assert_eq!(branch["type"], "branch_from_chat");
+        assert_eq!(branch["source_chat_id"], "source");
+        assert_eq!(branch["up_to_message_id"], "message-1");
+        assert!(branch["client_request_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn set_params_serializes_exact_wire_shape() {
+        let set_params = capture_command(|client| async move {
+            client
+                .send_set_params("project", "chat", json!({"model": "gpt-demo"}))
+                .await
+        })
+        .await;
+        assert_eq!(set_params["type"], "set_params");
+        assert_eq!(set_params["patch"], json!({"model": "gpt-demo"}));
+        assert!(set_params["client_request_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn user_message_serializes_explicit_correlation_pair() {
+        let user = capture_command(|client| async move {
+            client
+                .send_user_message("project", "chat", "request-1", "message-1", "hello")
+                .await
+        })
+        .await;
+        assert_command(
+            &user,
+            json!({
+                "client_request_id": "request-1",
+                "client_message_id": "message-1",
+                "type": "user_message",
+                "content": "hello",
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_from_index_serializes_exact_wire_shape() {
+        let retry = capture_command(|client| async move {
+            client
+                .send_retry_from_index("project", "chat", 3, json!("retry"))
+                .await
+        })
+        .await;
+        assert_eq!(retry["type"], "retry_from_index");
+        assert_eq!(retry["index"], 3);
+        assert_eq!(retry["content"], "retry");
+        assert_eq!(retry["attachments"], json!([]));
+        assert!(retry["client_request_id"].is_string());
+    }
+
+    #[tokio::test]
+    async fn abort_serializes_exact_wire_shape() {
+        let abort =
+            capture_command(|client| async move { client.send_abort("project", "chat").await })
+                .await;
+        assert_eq!(abort["type"], "abort");
+        assert!(abort["client_request_id"].is_string());
+    }
+
+    #[tokio::test]
     async fn set_goal_serializes_unlimited_and_explicit_budget() {
         let unlimited = capture_command(|client| async move {
             client

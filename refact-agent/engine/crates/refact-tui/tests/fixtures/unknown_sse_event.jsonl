@@ -1,0 +1,3 @@
+{"chat_id":"chat-fixture","seq":"0","type":"snapshot","thread":{},"runtime":{"state":"idle"},"messages":[]}
+{"chat_id":"chat-fixture","seq":"1","type":"future_event","payload":{"version":2}}
+{"chat_id":"chat-fixture","seq":"2","type":"runtime_updated","state":"generating"}

@@ -295,6 +295,7 @@ fn fixture_directory_covers_required_protocol_cases() {
     assert_eq!(
         names,
         vec![
+            "all_roles.jsonl",
             "approvals.jsonl",
             "assistant_message_added_dedup.jsonl",
             "assistant_streaming.jsonl",
@@ -303,6 +304,8 @@ fn fixture_directory_covers_required_protocol_cases() {
             "extra_updates.jsonl",
             "file_part.jsonl",
             "image_part.jsonl",
+            "malformed_authoritative.jsonl",
+            "malformed_stream_delta.jsonl",
             "protocol_mutations.jsonl",
             "reasoning.jsonl",
             "redacted_thinking.jsonl",
@@ -320,16 +323,84 @@ fn fixture_directory_covers_required_protocol_cases() {
             "sse_browser_timeline.jsonl",
             "sse_browser_toolbar_action.jsonl",
             "sse_ide_tool_required.jsonl",
+            "sse_pause_cleared.jsonl",
             "sse_process_completed.jsonl",
+            "sse_queue_updated.jsonl",
             "sse_runtime_updated.jsonl",
             "sse_snapshot_auxiliary.jsonl",
             "subchat_turn_cleanup.jsonl",
             "thinking_blocks.jsonl",
             "tool_calls.jsonl",
+            "unknown_content_part.jsonl",
             "unknown_delta_ops.jsonl",
+            "unknown_sse_event.jsonl",
             "usage_updates.jsonl",
         ]
     );
+}
+
+#[test]
+fn all_roles_fixture_routes_visible_and_state_only_messages() {
+    let run = run_fixture("all_roles.jsonl");
+    assert!(run.recovery.is_none());
+    assert_eq!(
+        run.app
+            .transcript_state()
+            .messages()
+            .iter()
+            .map(|message| message.role.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "user",
+            "assistant",
+            "tool",
+            "notice",
+            "plan",
+            "goal",
+            "event",
+            "system",
+            "context_file",
+            "diff",
+            "plain_text",
+            "cd_instruction",
+            "compression_report",
+            "error",
+            "future_role",
+        ]
+    );
+
+    let text = transcript_text(&run.app);
+    for expected in [
+        "user:User prompt",
+        "assistant:Assistant answer",
+        "tool:call-tool:tool:Tool result",
+        "notice:Local notice",
+        "System|System prompt",
+        "context_file|src/lib.rs",
+        "tool:call-diff:diff:--- a/src/lib.rs",
+        "plain_text|Command output",
+        "cd_instruction|Continue from the last tool call",
+        "Compression report|Compression saved 512 tokens",
+        "notice:Error: Provider unavailable",
+        "Unknown role: future_role",
+        "future_payload",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?} in {text:?}");
+    }
+    assert!(run
+        .app
+        .visible_transcript()
+        .iter()
+        .any(|item| matches!(item, TranscriptItem::Plan(plan) if plan.content == "Base plan")));
+    assert!(run
+        .app
+        .visible_transcript()
+        .iter()
+        .any(|item| matches!(item, TranscriptItem::Goal(goal) if goal.content == "Base goal")));
+    assert!(matches!(
+        run.app.events_pane().events(),
+        [event] if event.kind == "chat.process_completed" && event.payload["content"] == "Process completed"
+    ));
 }
 
 #[test]
@@ -564,6 +635,7 @@ fn content_block_fixtures_produce_visible_cells() {
             "[file: report.pdf, application/pdf, 42 bytes]",
         ),
         ("audio_part.jsonl", "[audio: audio/wav, 4 bytes]"),
+        ("unknown_content_part.jsonl", "[content: future_content]"),
     ];
 
     for (fixture, expected) in fixtures {
@@ -911,6 +983,23 @@ fn every_remaining_sse_event_fixture_is_parsed_and_stored() {
 }
 
 #[test]
+fn queue_and_pause_clear_fixtures_keep_their_state_contracts() {
+    let queue = run_fixture("sse_queue_updated.jsonl");
+    assert!(queue.recovery.is_none());
+    assert_eq!(queue.app.server_queue_size(), 2);
+    assert_eq!(
+        queue.app.server_queue_previews(),
+        ["first server prompt", "second server prompt"]
+    );
+    assert!(queue.app.input_queue().is_empty());
+
+    let pause_clear = run_fixture("sse_pause_cleared.jsonl");
+    assert!(pause_clear.recovery.is_none());
+    assert_eq!(pause_clear.app.session_state(), SessionState::Paused);
+    assert!(pause_clear.app.approval_modal().is_none());
+}
+
+#[test]
 fn runtime_updated_parses_and_stores_goal_compression_and_usage() {
     let mut app = App::new(State::project());
     let chat_id = app.chat_id().to_string();
@@ -994,32 +1083,11 @@ fn runtime_updated_terminal_compression_clears_active_and_omitted_fields_stay_no
 
 #[test]
 fn unknown_event_advances_sequence_only_with_a_visible_notice() {
-    let mut app = App::new(State::project());
-    let chat_id = app.chat_id().to_string();
-    let mut tracker = ChatSeqTracker::new();
-    let snapshot = chat_event_from_fixture(
-        json!({"seq": "0", "type": "snapshot", "thread": {}, "runtime": {"state": "idle"}, "messages": []}),
-        &chat_id,
-    );
-    assert_eq!(tracker.observe(&snapshot), ChatSeqDecision::Apply);
-    app.apply_chat_event(snapshot);
-
-    let unknown = chat_event_from_fixture(
-        json!({"seq": "1", "type": "future_event", "payload": {"version": 2}}),
-        &chat_id,
-    );
-    assert_eq!(tracker.observe(&unknown), ChatSeqDecision::Apply);
-    app.apply_chat_event(unknown);
-    assert_eq!(app.inbound_event_state().unknown_events().len(), 1);
-    assert!(transcript_text(&app).contains("notice:Unknown SSE event: future_event"));
-
-    let next = chat_event_from_fixture(
-        json!({"seq": "2", "type": "runtime_updated", "state": "generating"}),
-        &chat_id,
-    );
-    assert_eq!(tracker.observe(&next), ChatSeqDecision::Apply);
-    app.apply_chat_event(next);
-    assert_eq!(app.session_state(), SessionState::Generating);
+    let run = run_fixture("unknown_sse_event.jsonl");
+    assert!(run.recovery.is_none());
+    assert_eq!(run.app.inbound_event_state().unknown_events().len(), 1);
+    assert!(transcript_text(&run.app).contains("notice:Unknown SSE event: future_event"));
+    assert_eq!(run.app.session_state(), SessionState::Generating);
 }
 
 #[test]
@@ -1027,16 +1095,11 @@ fn malformed_stream_delta_is_rejected_without_mutating_transcript() {
     let mut app = App::new(State::project());
     let chat_id = app.chat_id().to_string();
     let mut tracker = ChatSeqTracker::new();
-    let snapshot = chat_event_from_fixture(
-        json!({"seq": "0", "type": "snapshot", "thread": {}, "runtime": {"state": "idle"}, "messages": []}),
-        &chat_id,
-    );
+    let fixture = fixture_events("malformed_stream_delta.jsonl");
+    let snapshot = chat_event_from_fixture(fixture[0].clone(), &chat_id);
     assert_eq!(tracker.observe(&snapshot), ChatSeqDecision::Apply);
     app.apply_chat_event(snapshot);
-    let malformed = chat_event_from_fixture(
-        json!({"seq": "1", "type": "stream_delta", "message_id": "assistant-1", "ops": {"op": "append_content", "text": "lost"}}),
-        &chat_id,
-    );
+    let malformed = chat_event_from_fixture(fixture[1].clone(), &chat_id);
 
     assert!(matches!(
         malformed.protocol_event(),
@@ -1063,71 +1126,23 @@ fn malformed_authoritative_envelopes_request_resubscribe_without_mutating_state(
     let mut app = App::new(State::project());
     let chat_id = app.chat_id().to_string();
     let mut tracker = ChatSeqTracker::new();
-    let snapshot = chat_event_from_fixture(
-        json!({
-            "seq": "0",
-            "type": "snapshot",
-            "messages": [{"message_id": "u1", "role": "user", "content": "kept"}]
-        }),
-        &chat_id,
-    );
+    let fixture = fixture_events("malformed_authoritative.jsonl");
+    let snapshot = chat_event_from_fixture(fixture[0].clone(), &chat_id);
     assert_eq!(tracker.observe(&snapshot), ChatSeqDecision::Apply);
     app.apply_chat_event(snapshot);
 
-    for (seq, raw, expected) in [
-        (
-            "1",
-            json!({"type": "snapshot"}),
-            "missing or non-array messages",
-        ),
-        (
-            "1",
-            json!({"type": "snapshot", "messages": null}),
-            "missing or non-array messages",
-        ),
-        (
-            "1",
-            json!({"type": "snapshot", "messages": {}}),
-            "missing or non-array messages",
-        ),
-        (
-            "1",
-            json!({"type": "ack", "accepted": true}),
-            "missing or empty client_request_id",
-        ),
-        (
-            "1",
-            json!({"type": "ack", "client_request_id": "", "accepted": true}),
-            "missing or empty client_request_id",
-        ),
-        (
-            "1",
-            json!({"type": "ack", "client_request_id": "request-1"}),
-            "missing or non-boolean accepted",
-        ),
-        (
-            "1",
-            json!({"type": "ack", "client_request_id": "request-1", "accepted": "true"}),
-            "missing or non-boolean accepted",
-        ),
-        (
-            "1",
-            json!({"type": "messages_truncated"}),
-            "missing or invalid non-negative integer from_index",
-        ),
-        (
-            "1",
-            json!({"type": "messages_truncated", "from_index": -1}),
-            "missing or invalid non-negative integer from_index",
-        ),
-        (
-            "1",
-            json!({"type": "messages_truncated", "from_index": "0"}),
-            "missing or invalid non-negative integer from_index",
-        ),
-    ] {
-        let mut raw = raw;
-        raw["seq"] = json!(seq);
+    for (raw, expected) in fixture.into_iter().skip(1).zip([
+        "missing or non-array messages",
+        "missing or non-array messages",
+        "missing or non-array messages",
+        "missing or empty client_request_id",
+        "missing or empty client_request_id",
+        "missing or non-boolean accepted",
+        "missing or non-boolean accepted",
+        "missing or invalid non-negative integer from_index",
+        "missing or invalid non-negative integer from_index",
+        "missing or invalid non-negative integer from_index",
+    ]) {
         let event = chat_event_from_fixture(raw, &chat_id);
         assert!(matches!(
             tracker.observe(&event),

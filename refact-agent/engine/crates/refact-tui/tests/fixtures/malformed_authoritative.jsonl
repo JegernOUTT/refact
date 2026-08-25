@@ -1,0 +1,11 @@
+{"chat_id":"chat-fixture","seq":"0","type":"snapshot","messages":[{"message_id":"u1","role":"user","content":"kept"}]}
+{"chat_id":"chat-fixture","seq":"1","type":"snapshot"}
+{"chat_id":"chat-fixture","seq":"1","type":"snapshot","messages":null}
+{"chat_id":"chat-fixture","seq":"1","type":"snapshot","messages":{}}
+{"chat_id":"chat-fixture","seq":"1","type":"ack","accepted":true}
+{"chat_id":"chat-fixture","seq":"1","type":"ack","client_request_id":"","accepted":true}
+{"chat_id":"chat-fixture","seq":"1","type":"ack","client_request_id":"request-1"}
+{"chat_id":"chat-fixture","seq":"1","type":"ack","client_request_id":"request-1","accepted":"true"}
+{"chat_id":"chat-fixture","seq":"1","type":"messages_truncated"}
+{"chat_id":"chat-fixture","seq":"1","type":"messages_truncated","from_index":-1}
+{"chat_id":"chat-fixture","seq":"1","type":"messages_truncated","from_index":"0"}

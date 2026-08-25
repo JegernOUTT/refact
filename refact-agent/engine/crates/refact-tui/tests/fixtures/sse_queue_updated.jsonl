@@ -1,0 +1,2 @@
+{"chat_id":"chat-fixture","seq":"0","type":"snapshot","thread":{},"runtime":{"state":"idle"},"messages":[]}
+{"chat_id":"chat-fixture","seq":"1","type":"queue_updated","queue_size":2,"queued_items":[{"preview":"first server prompt"},{"preview":"second server prompt"}]}

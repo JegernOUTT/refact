@@ -112,25 +112,49 @@ Current adopted commands and aliases:
 
 ## Golden protocol fixture harness
 
-Offline protocol fixtures live in `tests/fixtures/*.jsonl`. Each line is one Refact chat SSE JSON payload. `tests/tui_protocol.rs` loads a fixture, converts lines to `ChatEvent`, runs `ChatSeqTracker`, drives `App::apply_chat_event`, and asserts transcript/app state without a daemon, terminal, or network.
+Offline protocol fixtures live in `tests/fixtures/*.jsonl`. Each line is one Refact chat SSE JSON payload. `tests/tui_protocol.rs` loads a fixture, converts lines to `ChatEvent`, runs `ChatSeqTracker`, drives `App::apply_chat_event`, and asserts transcript/app state without a daemon, terminal, or network. `fixture_directory_covers_required_protocol_cases` is the exact manifest: adding, renaming, or removing a fixture requires updating both that test and this register.
 
-Fixture coverage:
+### Disposition rules
 
-| Fixture | Coverage |
+- Transcript roles and content blocks produce a visible transcript/history cell, plan/goal cell, tool card, notice, or event-pane record.
+- Runtime, queue, background-agent, process, IDE, and browser envelopes are retained in typed app state. Their interactive Activity and Browser presentation belongs to the later surface cards, so retention without a normal transcript cell is intentional.
+- Malformed authoritative envelopes request resubscription before state changes. Unknown SSE envelopes and delta operations are retained and visibly noticed; unknown content parts and roles retain sanitized payload text in a visible fallback.
+
+### Exact fixture register
+
+| Fixture | Coverage and disposition |
 |---|---|
-| `assistant_streaming.jsonl` | `snapshot`, assistant `stream_started`, split Markdown table/code-fence `append_content`, `stream_finished`, usage totals |
-| `reasoning.jsonl` | `append_reasoning` interleaved with assistant content; `set_reasoning` replaces partial summaries |
-| `tool_calls.jsonl` | `set_tool_calls`, stable tool id, `message_added` tool result |
-| `approvals.jsonl` | `pause_required` and approval modal state |
-| `usage_updates.jsonl` | `runtime.usage`, `set_usage`, and final usage update |
-| `citations.jsonl` | `add_citation` delta visibility |
-| `extra_updates.jsonl` | `merge_extra` updates preserved on the transcript model |
-| `thinking_blocks.jsonl` | `set_thinking_blocks` delta visibility |
-| `server_content_blocks.jsonl` | `add_server_content_block` delta visibility |
-| `snapshot_resume.jsonl` | snapshot/resume rebuild from persisted user/assistant/tool messages |
-| `snapshot_recovery_content.jsonl` | sequence-gap snapshot correction for stable message ids without duplicate native scrollback insertions |
-| `seq_gap.jsonl` | sequence gap recovery without applying the gap delta |
-| `unknown_delta_ops.jsonl` | unknown delta ops preserved and tolerated without stopping later deltas |
+| `all_roles.jsonl` | All 15 wire roles: transcript-visible user/assistant/tool/notice/system/context/diff/plain-text/instruction/compression/error/unknown, plan and goal cells, and retained `event` in the event pane. |
+| `approvals.jsonl`, `sse_pause_cleared.jsonl` | `pause_required` creates approval state; `pause_cleared` clears its scoped approval while the runtime state remains authoritative. |
+| `assistant_streaming.jsonl`, `assistant_message_added_dedup.jsonl` | Snapshot, stream lifecycle, split Markdown table/code fence, final usage, and persisted assistant deduplication. |
+| `reasoning.jsonl` | `append_reasoning` plus `set_reasoning` replacement during an assistant stream. |
+| `tool_calls.jsonl`, `subchat_turn_cleanup.jsonl` | `set_tool_calls`, tool-result `message_added`, `subchat_update`, turn-end status cleanup, and attached files. |
+| `citations.jsonl`, `thinking_blocks.jsonl`, `server_content_blocks.jsonl` | Citation, signed thinking, and server-block delta retention with visible content-block cells. |
+| `redacted_thinking.jsonl`, `refusal.jsonl`, `image_part.jsonl`, `file_part.jsonl`, `audio_part.jsonl`, `unknown_content_part.jsonl` | Every retained content-block family: redaction marker, refusal text, multimodal placeholders, and sanitized unknown-content fallback. |
+| `extra_updates.jsonl`, `usage_updates.jsonl` | `merge_extra`, `set_usage`, runtime usage, and final usage replacement. |
+| `protocol_mutations.jsonl` | `thread_updated`, `message_updated`, `message_removed`, and `messages_truncated`. |
+| `snapshot_resume.jsonl`, `snapshot_recovery_content.jsonl` | Persisted snapshot reconstruction, sequence-gap recovery, and stable-ID native-scrollback replacement without duplicate cells. |
+| `seq_gap.jsonl`, `malformed_stream_delta.jsonl`, `malformed_authoritative.jsonl` | Sequence-gap recovery and fail-closed malformed stream/snapshot/ack/truncation contracts without transcript mutation. |
+| `sse_snapshot_auxiliary.jsonl`, `sse_background_agent_updated.jsonl` | Snapshot and incremental background-agent state retention. |
+| `sse_ack.jsonl` | Accepted command correlation acknowledgement. |
+| `sse_process_completed.jsonl`, `sse_ide_tool_required.jsonl` | Typed process completion and IDE-tool-request state retention. |
+| `sse_queue_updated.jsonl` | Passive daemon queue size and preview retention; never mutates the local editable queue. |
+| `sse_runtime_updated.jsonl` | Runtime state plus goal budget/progress, compression, and usage retention. |
+| `sse_browser_frame.jsonl`, `sse_browser_status.jsonl`, `sse_browser_closed.jsonl`, `sse_browser_timeline.jsonl`, `sse_browser_context_oversize.jsonl`, `sse_browser_toolbar_action.jsonl` | Typed browser state/event retention; Browser surface rendering is intentionally deferred. |
+| `unknown_delta_ops.jsonl`, `unknown_sse_event.jsonl` | Unknown operations and envelopes remain forward-compatible: raw state is retained and a visible notice is emitted while following sequence events still apply. |
+
+### Outbound command register
+
+`client::tests` captures the JSON body sent through the project-scoped command endpoint. Every TUI chat command wrapper has an exact wire-shape assertion:
+
+| Command family | Wire types |
+|---|---|
+| Conversation control | `branch_from_chat`, `user_message`, `retry_from_index`, `abort`, `regenerate` |
+| Thread mutations | `set_params`, `update_message`, `remove_message`, `restore_messages` |
+| Goal control | `set_goal`, `set_goal_budget`, `update_goal`, `goal_control` |
+| Tool and runtime responses | `ide_tool_result`, `tool_decisions`, `clean_background_processes`, `browser_context_decision` |
+
+The singular tool-decision wrapper deliberately serializes the shared plural `tool_decisions` envelope. `set_goal` omits `budget` for unlimited goals, and only `pause`, `resume`, and `stop` are valid goal-control actions.
 
 ## Render snapshot strategy
 
