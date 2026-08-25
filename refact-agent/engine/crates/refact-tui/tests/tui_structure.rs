@@ -140,9 +140,41 @@ fn engine_registered_tool_names() -> std::collections::HashSet<String> {
         .captures_iter(registry_source)
         .map(|captures| captures[1].to_string())
         .collect::<std::collections::HashSet<_>>();
-    registered_types
+    let mut registered = registered_types
         .iter()
         .filter_map(|tool_type| tool_description_name(&engine_root.join("src/tools"), tool_type))
+        .collect::<std::collections::HashSet<_>>();
+    registered.extend(exposed_default_subagent_tool_names(&engine_root));
+    registered
+}
+
+fn exposed_default_subagent_tool_names(engine_root: &Path) -> std::collections::HashSet<String> {
+    let directory = engine_root.join("crates/refact-yaml-configs/src/defaults/subagents");
+    let id_re =
+        Regex::new(r"(?m)^id:\s*([a-z][a-z0-9_]*)\s*(?:#.*)?$").expect("valid subagent id regex");
+    let exposed_re =
+        Regex::new(r"(?m)^expose_as_tool:\s*true\s*(?:#.*)?$").expect("valid expose-as-tool regex");
+    fs::read_dir(&directory)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| panic!("failed to read subagent entry: {error}"))
+                .path()
+        })
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("yaml"))
+        .filter_map(|path| {
+            let source = read_source(&path);
+            if !exposed_re.is_match(&source) {
+                return None;
+            }
+            Some(
+                id_re
+                    .captures(&source)
+                    .unwrap_or_else(|| panic!("missing id in exposed subagent {}", path.display()))
+                    [1]
+                .to_string(),
+            )
+        })
         .collect()
 }
 
