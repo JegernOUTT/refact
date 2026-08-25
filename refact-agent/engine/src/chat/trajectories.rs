@@ -127,8 +127,20 @@ pub const TRAJECTORY_LABEL_MAX_CHARS: usize = TRAJECTORY_META_TITLE_MAX_CHARS;
 
 pub use refact_chat_history::trajectory_event::TrajectoryEvent;
 
+static TRAJECTORY_WRITER_ROLLOUT: OnceLock<bool> = OnceLock::new();
+static TRAJECTORY_WATCHER_SELF_WRITE_ROLLOUT: OnceLock<bool> = OnceLock::new();
+
+fn rollout_switch_enabled<F>(cache: &OnceLock<bool>, read: F) -> bool
+where
+    F: FnOnce() -> bool,
+{
+    *cache.get_or_init(read)
+}
+
 pub fn trajectory_writer_rollout_enabled() -> bool {
-    trajectory_writer_rollout_enabled_for(std::env::var(TRAJECTORY_WRITER_ENV).ok().as_deref())
+    rollout_switch_enabled(&TRAJECTORY_WRITER_ROLLOUT, || {
+        trajectory_writer_rollout_enabled_for(std::env::var(TRAJECTORY_WRITER_ENV).ok().as_deref())
+    })
 }
 
 pub(crate) fn trajectory_writer_rollout_enabled_for(value: Option<&str>) -> bool {
@@ -142,11 +154,20 @@ pub(crate) fn trajectory_writer_rollout_enabled_for(value: Option<&str>) -> bool
 }
 
 pub fn trajectory_watcher_self_write_rollout_enabled() -> bool {
-    trajectory_watcher_self_write_rollout_enabled_for(
-        std::env::var(TRAJECTORY_WATCHER_SELF_WRITE_ENV)
-            .ok()
-            .as_deref(),
-    )
+    #[cfg(test)]
+    if let Some(enabled) = *trajectory_watcher_self_write_test_override()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    {
+        return enabled;
+    }
+    rollout_switch_enabled(&TRAJECTORY_WATCHER_SELF_WRITE_ROLLOUT, || {
+        trajectory_watcher_self_write_rollout_enabled_for(
+            std::env::var(TRAJECTORY_WATCHER_SELF_WRITE_ENV)
+                .ok()
+                .as_deref(),
+        )
+    })
 }
 
 pub(crate) fn trajectory_watcher_self_write_rollout_enabled_for(value: Option<&str>) -> bool {
@@ -157,6 +178,12 @@ pub(crate) fn trajectory_watcher_self_write_rollout_enabled_for(value: Option<&s
             || value.eq_ignore_ascii_case("yes")
             || value.eq_ignore_ascii_case("on")
     })
+}
+
+#[cfg(test)]
+fn trajectory_watcher_self_write_test_override() -> &'static StdMutex<Option<bool>> {
+    static OVERRIDE: OnceLock<StdMutex<Option<bool>>> = OnceLock::new();
+    OVERRIDE.get_or_init(|| StdMutex::new(None))
 }
 
 const TRAJECTORY_SELF_WRITE_TTL: Duration = Duration::from_secs(10);
@@ -3307,6 +3334,7 @@ struct DetachedTrajectoryWriteCache {
     backing_path: Option<PathBuf>,
     existing_metadata: Option<serde_json::Map<String, serde_json::Value>>,
     source: Option<TrajectorySourceIdentity>,
+    backing_fingerprint: Option<TrajectoryWriteFingerprint>,
 }
 
 impl Default for DetachedTrajectoryWriterState {
@@ -3323,8 +3351,17 @@ impl Default for DetachedTrajectoryWriterState {
     }
 }
 
-type DetachedTrajectoryWriterRegistry =
-    std::collections::HashMap<String, Weak<AMutex<DetachedTrajectoryWriterState>>>;
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DetachedTrajectoryWriterKey {
+    workspace_folders: Vec<PathBuf>,
+    source: TrajectorySourceIdentity,
+    chat_id: String,
+}
+
+type DetachedTrajectoryWriterRegistry = std::collections::HashMap<
+    DetachedTrajectoryWriterKey,
+    Weak<AMutex<DetachedTrajectoryWriterState>>,
+>;
 
 fn detached_trajectory_writers() -> &'static StdMutex<DetachedTrajectoryWriterRegistry> {
     static WRITERS: OnceLock<StdMutex<DetachedTrajectoryWriterRegistry>> = OnceLock::new();
@@ -3334,19 +3371,13 @@ fn detached_trajectory_writers() -> &'static StdMutex<DetachedTrajectoryWriterRe
 fn detached_trajectory_writer_key(
     gcx: &Arc<GlobalContext>,
     snapshot: &TrajectorySnapshot,
-) -> String {
-    let workspace_key = gcx
+) -> DetachedTrajectoryWriterKey {
+    let workspace_folders = gcx
         .documents_state
         .workspace_folders
         .lock()
-        .map(|folders| {
-            folders
-                .iter()
-                .map(|folder| folder.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("|")
-        })
-        .unwrap_or_else(|_| gcx.cache_dir.to_string_lossy().into_owned());
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
     let source = if let Some(task_meta) = snapshot.task_meta.as_ref() {
         TrajectorySourceIdentity::from_task_meta(task_meta)
     } else if snapshot.buddy_meta.is_some() {
@@ -3354,7 +3385,11 @@ fn detached_trajectory_writer_key(
     } else {
         TrajectorySourceIdentity::Normal
     };
-    format!("{workspace_key}:{source:?}:{}", snapshot.chat_id)
+    DetachedTrajectoryWriterKey {
+        workspace_folders,
+        source,
+        chat_id: snapshot.chat_id.clone(),
+    }
 }
 
 fn detached_trajectory_writer(
@@ -3363,7 +3398,7 @@ fn detached_trajectory_writer(
 ) -> Arc<AMutex<DetachedTrajectoryWriterState>> {
     let mut writers = detached_trajectory_writers()
         .lock()
-        .expect("detached trajectory writer registry poisoned");
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     writers.retain(|_, writer| writer.strong_count() > 0);
     let key = detached_trajectory_writer_key(gcx, snapshot);
     if let Some(writer) = writers.get(&key).and_then(Weak::upgrade) {
@@ -3377,7 +3412,7 @@ fn detached_trajectory_writer(
 fn prune_detached_trajectory_writers() {
     detached_trajectory_writers()
         .lock()
-        .expect("detached trajectory writer registry poisoned")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .retain(|_, writer| writer.strong_count() > 0);
 }
 
@@ -3386,7 +3421,7 @@ async fn flush_detached_trajectory_writers() -> Result<(), Vec<String>> {
         let writers = {
             let mut writers = detached_trajectory_writers()
                 .lock()
-                .expect("detached trajectory writer registry poisoned");
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             writers.retain(|_, writer| writer.strong_count() > 0);
             writers
                 .values()
@@ -3478,6 +3513,10 @@ async fn run_detached_trajectory_writer(
                 state.notify.notify_waiters();
             }
             Err(error) => {
+                warn!(
+                    "Detached trajectory writer failed at version {}: {}",
+                    version, error
+                );
                 state.error = Some(error);
                 state.in_flight = false;
                 state.notify.notify_waiters();
@@ -3759,16 +3798,37 @@ async fn save_trajectory_snapshot_inner(
     } else {
         TrajectorySourceIdentity::Normal
     };
-    let cached_path = if let Some(write_cache) = write_cache.as_ref() {
+    let cached_entry = if let Some(write_cache) = write_cache.as_ref() {
         let write_cache = write_cache.lock().await;
-        (write_cache.source.as_ref() == Some(&source))
-            .then(|| write_cache.backing_path.clone())
-            .flatten()
+        if write_cache.source.as_ref() == Some(&source) {
+            match (
+                write_cache.backing_path.clone(),
+                write_cache.existing_metadata.clone(),
+                write_cache.backing_fingerprint.clone(),
+            ) {
+                (Some(path), Some(metadata), Some(fingerprint)) => {
+                    Some((path, metadata, fingerprint))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
     } else {
         None
     };
-    let file_path_result = if let Some(path) = cached_path {
-        Ok(path)
+    let cached_path_and_metadata = match cached_entry {
+        Some((path, metadata, fingerprint))
+            if metadata.get("id").and_then(|value| value.as_str())
+                == Some(snapshot.chat_id.as_str())
+                && trajectory_fingerprint_matches(&path, &fingerprint).await =>
+        {
+            Some((path, metadata))
+        }
+        _ => None,
+    };
+    let file_path_result = if let Some((path, _)) = cached_path_and_metadata.as_ref() {
+        Ok(path.clone())
     } else if let Some(ref task_meta) = snapshot.task_meta {
         safe_new_task_trajectory_file(gcx.clone(), task_meta, &snapshot.chat_id).await
     } else if snapshot.buddy_meta.is_some() {
@@ -3796,16 +3856,7 @@ async fn save_trajectory_snapshot_inner(
             return Err(error);
         }
     };
-    let cached_metadata = if let Some(write_cache) = write_cache.as_ref() {
-        let write_cache = write_cache.lock().await;
-        (write_cache.source.as_ref() == Some(&source)
-            && write_cache.backing_path.as_deref() == Some(file_path.as_path()))
-        .then(|| write_cache.existing_metadata.clone())
-        .flatten()
-    } else {
-        None
-    };
-    let existing_trajectory = match cached_metadata {
+    let existing_trajectory = match cached_path_and_metadata.map(|(_, metadata)| metadata) {
         Some(existing_trajectory) => Some(existing_trajectory),
         None => match read_existing_trajectory_object(&file_path, &snapshot.chat_id).await {
             Ok(existing_trajectory) => existing_trajectory,
@@ -3821,12 +3872,6 @@ async fn save_trajectory_snapshot_inner(
             }
         },
     };
-    if let Some(write_cache) = write_cache.as_ref() {
-        let mut write_cache = write_cache.lock().await;
-        write_cache.backing_path = Some(file_path.clone());
-        write_cache.existing_metadata = existing_trajectory.clone();
-        write_cache.source = Some(source.clone());
-    }
 
     let updated_at = chrono::Utc::now().to_rfc3339();
     trajectory["updated_at"] = serde_json::Value::String(updated_at.clone());
@@ -3891,6 +3936,20 @@ async fn save_trajectory_snapshot_inner(
         None,
     );
     atomic_write_result?;
+
+    if let Some(write_cache) = write_cache.as_ref() {
+        let metadata = trajectory.as_object().cloned();
+        let fingerprint = trajectory_write_fingerprint(&file_path).await;
+        let mut write_cache = write_cache.lock().await;
+        if let (Some(metadata), Some(fingerprint)) = (metadata, fingerprint) {
+            write_cache.backing_path = Some(file_path.clone());
+            write_cache.existing_metadata = Some(metadata);
+            write_cache.source = Some(source.clone());
+            write_cache.backing_fingerprint = Some(fingerprint);
+        } else {
+            *write_cache = DetachedTrajectoryWriteCache::default();
+        }
+    }
 
     info!(
         "Saved trajectory for chat {} ({} messages) to {:?}",
@@ -7518,23 +7577,24 @@ mod tests {
     use std::process::Command;
     use std::sync::Mutex as StdMutex;
 
-    struct TrajectoryWatcherSelfWriteEnvGuard(Option<std::ffi::OsString>);
+    struct TrajectoryWatcherSelfWriteEnvGuard(Option<bool>);
 
     impl TrajectoryWatcherSelfWriteEnvGuard {
         fn enable() -> Self {
-            let previous = std::env::var_os(TRAJECTORY_WATCHER_SELF_WRITE_ENV);
-            std::env::set_var(TRAJECTORY_WATCHER_SELF_WRITE_ENV, "1");
+            let mut override_value = trajectory_watcher_self_write_test_override()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = *override_value;
+            *override_value = Some(true);
             Self(previous)
         }
     }
 
     impl Drop for TrajectoryWatcherSelfWriteEnvGuard {
         fn drop(&mut self) {
-            if let Some(previous) = self.0.take() {
-                std::env::set_var(TRAJECTORY_WATCHER_SELF_WRITE_ENV, previous);
-            } else {
-                std::env::remove_var(TRAJECTORY_WATCHER_SELF_WRITE_ENV);
-            }
+            *trajectory_watcher_self_write_test_override()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.0.take();
         }
     }
 
@@ -7976,6 +8036,33 @@ mod tests {
     }
 
     #[test]
+    fn trajectory_rollout_switches_are_fixed_after_the_first_read() {
+        let writer_cache = OnceLock::new();
+        let watcher_cache = OnceLock::new();
+        assert!(rollout_switch_enabled(&writer_cache, || true));
+        assert!(rollout_switch_enabled(&watcher_cache, || true));
+        assert!(rollout_switch_enabled(&writer_cache, || false));
+        assert!(rollout_switch_enabled(&watcher_cache, || false));
+    }
+
+    #[tokio::test]
+    async fn detached_trajectory_writer_keys_preserve_workspace_boundaries() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let snapshot = test_snapshot("writer-key", "Writer key", Vec::new());
+        {
+            let mut folders = gcx.documents_state.workspace_folders.lock().unwrap();
+            *folders = vec![PathBuf::from("alpha|beta"), PathBuf::from("gamma")];
+        }
+        let first = detached_trajectory_writer_key(&gcx, &snapshot);
+        {
+            let mut folders = gcx.documents_state.workspace_folders.lock().unwrap();
+            *folders = vec![PathBuf::from("alpha"), PathBuf::from("beta|gamma")];
+        }
+        let second = detached_trajectory_writer_key(&gcx, &snapshot);
+        assert_ne!(first, second);
+    }
+
+    #[test]
     fn trajectory_writer_ten_thousand_stale_interleavings_preserve_newer_dirty_state() {
         let mut session = ChatSession::new("trajectory-ten-thousand-stale".to_string());
         for _ in 0..10_000 {
@@ -8049,6 +8136,123 @@ mod tests {
         drop(session);
         let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
         assert_eq!(loaded.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn trajectory_writer_cache_preserves_external_metadata() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "detached-writer-cache";
+        let first = test_snapshot(
+            chat_id,
+            "First",
+            vec![ChatMessage::new("user".to_string(), "first".to_string())],
+        );
+        let write_cache = Arc::new(AMutex::new(DetachedTrajectoryWriteCache::default()));
+        save_trajectory_snapshot_inner(gcx.clone(), first, Some(write_cache.clone()))
+            .await
+            .unwrap();
+        let path = workspace
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(chat_id)
+            .join(format!("{chat_id}.json"));
+        let mut external: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        external["external_metadata"] = json!({"preserved": true});
+        tokio::fs::write(&path, serde_json::to_string_pretty(&external).unwrap())
+            .await
+            .unwrap();
+
+        let second = test_snapshot(
+            chat_id,
+            "Second",
+            vec![ChatMessage::new("user".to_string(), "second".to_string())],
+        );
+        save_trajectory_snapshot_inner(gcx, second, Some(write_cache))
+            .await
+            .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
+        assert_eq!(saved["external_metadata"], json!({"preserved": true}));
+    }
+
+    #[tokio::test]
+    async fn trajectory_writer_cache_rejects_replaced_trajectory_for_another_chat() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "detached-writer-cache-replaced";
+        let write_cache = Arc::new(AMutex::new(DetachedTrajectoryWriteCache::default()));
+        save_trajectory_snapshot_inner(
+            gcx.clone(),
+            test_snapshot(
+                chat_id,
+                "First",
+                vec![ChatMessage::new("user".to_string(), "first".to_string())],
+            ),
+            Some(write_cache.clone()),
+        )
+        .await
+        .unwrap();
+        let path = workspace
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(chat_id)
+            .join(format!("{chat_id}.json"));
+        let foreign = json!({
+            "id": "other-chat",
+            "title": "Foreign",
+            "messages": [],
+        });
+        tokio::fs::write(&path, serde_json::to_string_pretty(&foreign).unwrap())
+            .await
+            .unwrap();
+
+        let error = save_trajectory_snapshot_inner(
+            gcx,
+            test_snapshot(
+                chat_id,
+                "Second",
+                vec![ChatMessage::new("user".to_string(), "second".to_string())],
+            ),
+            Some(write_cache),
+        )
+        .await
+        .unwrap_err();
+        assert!(is_trajectory_id_mismatch_error(&error));
+        let saved: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
+        assert_eq!(saved["id"], "other-chat");
+    }
+
+    #[tokio::test]
+    async fn trajectory_writer_failure_is_stored_and_reported_to_waiters() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let mut snapshot = test_snapshot(
+            "detached-writer-failure",
+            "Failure",
+            vec![ChatMessage::new("user".to_string(), "failure".to_string())],
+        );
+        snapshot.messages[0].message_id = "detached-writer-failure-message".to_string();
+        let writer = Arc::new(AMutex::new(DetachedTrajectoryWriterState {
+            pending: Some((1, snapshot.clone())),
+            requested_version: 1,
+            in_flight: true,
+            ..Default::default()
+        }));
+        set_test_message_serialization_failure(Some(snapshot.messages[0].message_id.clone()));
+        run_detached_trajectory_writer(gcx, writer.clone()).await;
+        set_test_message_serialization_failure(None);
+
+        let error = wait_for_detached_trajectory_commit(writer.clone(), 1)
+            .await
+            .unwrap_err();
+        assert!(error.contains("test failure"));
+        assert_eq!(writer.lock().await.error.as_deref(), Some(error.as_str()));
     }
 
     #[serial]
