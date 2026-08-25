@@ -1,11 +1,14 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::files_correction::get_project_dirs;
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
 use crate::global_context::GlobalContext;
 use crate::knowledge_graph::kg_structs::KnowledgeFrontmatter;
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
+use tokio::sync::mpsc;
 
 pub use refact_core::knowledge_index::{
     KnowledgeCard, KnowledgeIndex, KnowledgeSearchFilters, KnowledgeSearchHit,
@@ -246,30 +249,182 @@ pub fn format_related_memories_section(
     )
 }
 
+async fn knowledge_dir_candidates(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = get_project_dirs(gcx.clone())
+        .await
+        .into_iter()
+        .map(|d| d.join(KNOWLEDGE_FOLDER_NAME))
+        .collect();
+    let global_dir = gcx.config_dir.join("knowledge");
+    dirs.push(global_dir);
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+async fn knowledge_dirs_for_index(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
+    knowledge_dir_candidates(gcx)
+        .await
+        .into_iter()
+        .filter(|dir| dir.exists())
+        .collect()
+}
+
+async fn knowledge_watch_roots(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = get_project_dirs(gcx.clone())
+        .await
+        .into_iter()
+        .filter_map(|dir| {
+            let refact_dir = dir.join(".refact");
+            refact_dir
+                .is_dir()
+                .then_some(refact_dir)
+                .or_else(|| dir.is_dir().then_some(dir))
+        })
+        .collect();
+    if gcx.config_dir.is_dir() {
+        roots.push(gcx.config_dir.clone());
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn is_under_knowledge_root(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+pub async fn refresh_knowledge_index_path(
+    gcx: Arc<GlobalContext>,
+    path: &Path,
+    is_remove: bool,
+) -> bool {
+    if path
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return false;
+    }
+    let roots = knowledge_dir_candidates(gcx.clone()).await;
+    if !is_under_knowledge_root(path, &roots) {
+        return false;
+    }
+
+    if is_remove {
+        let mut index = gcx.knowledge_index.lock().await;
+        index.remove_path(path);
+        index.remove_paths_under(path);
+        return true;
+    }
+
+    let root = match roots.iter().find(|root| path.starts_with(root)) {
+        Some(root) => root,
+        None => return false,
+    };
+    if !should_index_markdown_path(path, root, &["archive", "archived", ".history"]) {
+        let mut index = gcx.knowledge_index.lock().await;
+        index.remove_path(path);
+        return true;
+    }
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
+        _ => {
+            let mut index = gcx.knowledge_index.lock().await;
+            index.remove_path(path);
+            return true;
+        }
+    };
+    if !metadata.is_file() {
+        return true;
+    }
+    let text = match tokio::fs::read_to_string(path).await {
+        Ok(text) => text,
+        Err(_) => return true,
+    };
+    let (frontmatter, content_start) = KnowledgeFrontmatter::parse(&text);
+    let content = text.get(content_start..).unwrap_or("");
+    let mut index = gcx.knowledge_index.lock().await;
+    index.remove_path(path);
+    if frontmatter.is_archived() || frontmatter.is_deprecated() {
+        return true;
+    }
+    let path = path.to_path_buf();
+    index.add_signature(
+        refact_buddy_core::memory_dedup::content_signature(content),
+        path.clone(),
+    );
+    index.add_from_frontmatter(path, &frontmatter, Some(content));
+    true
+}
+
+pub async fn knowledge_index_watcher_background_task(gcx: Arc<GlobalContext>) {
+    let roots = knowledge_watch_roots(gcx.clone()).await;
+    if roots.is_empty() {
+        tracing::info!("knowledge_index: watcher skipped because no knowledge roots exist");
+        return;
+    }
+    let knowledge_dirs = knowledge_dir_candidates(gcx.clone()).await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut watcher = match RecommendedWatcher::new(
+        move |result: Result<notify::Event, notify::Error>| {
+            if let Ok(event) = result {
+                if event
+                    .paths
+                    .iter()
+                    .any(|path| is_under_knowledge_root(path, &knowledge_dirs))
+                {
+                    let _ = tx.send(event);
+                }
+            }
+        },
+        Config::default(),
+    ) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            tracing::warn!("knowledge_index: failed to create watcher: {error}");
+            return;
+        }
+    };
+    for root in &roots {
+        if let Err(error) = watcher.watch(root, RecursiveMode::Recursive) {
+            tracing::warn!(
+                "knowledge_index: failed to watch {}: {error}",
+                root.display()
+            );
+        }
+    }
+
+    loop {
+        tokio::select! {
+            event = rx.recv() => match event {
+                Some(event) => {
+                    let is_remove = matches!(event.kind, notify::EventKind::Remove(_));
+                    if matches!(event.kind, notify::EventKind::Create(_) | notify::EventKind::Modify(_) | notify::EventKind::Remove(_)) {
+                        for path in event.paths {
+                            refresh_knowledge_index_path(gcx.clone(), &path, is_remove).await;
+                        }
+                    }
+                }
+                None => break,
+            },
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                if gcx.shutdown_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 pub async fn build_knowledge_index(gcx: Arc<GlobalContext>) -> KnowledgeIndex {
     let mut index = KnowledgeIndex::empty();
 
-    let project_dirs = get_project_dirs(gcx.clone()).await;
-
-    // Local + global knowledge dirs.
-    let mut knowledge_dirs: Vec<PathBuf> = project_dirs
-        .iter()
-        .map(|d| d.join(KNOWLEDGE_FOLDER_NAME))
-        .filter(|d| d.exists())
-        .collect();
-
-    // Global knowledge dir lives under the config dir.
-    // This keeps KG/index behavior aligned with memories_search().
-    let global_dir = gcx.config_dir.join("knowledge");
-    if global_dir.exists() {
-        knowledge_dirs.push(global_dir);
-    }
-
-    scan_knowledge_dirs(&mut index, knowledge_dirs).await;
+    scan_knowledge_dirs(&mut index, knowledge_dirs_for_index(gcx.clone()).await).await;
 
     let task_dirs = crate::tasks::storage::get_all_tasks_dirs(gcx).await;
     scan_task_dirs(&mut index, task_dirs).await;
 
+    index.mark_ready();
     index
 }
 
@@ -317,6 +472,9 @@ fn collect_knowledge_markdown_paths_blocking(knowledge_dirs: Vec<PathBuf>) -> Ve
 
 fn should_index_markdown_path(path: &Path, root: &Path, ignored_components: &[&str]) -> bool {
     if !path.is_file() {
+        return false;
+    }
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return false;
     }
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -458,6 +616,80 @@ mod tests {
         assert!(deprecated_path.exists());
         assert!(active_path.exists());
         assert_eq!(index.related_for_tags(&vec!["new".to_string()], 5).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn refresh_knowledge_index_path_tracks_write_archive_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        let path = knowledge_dir.join("note.md");
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+
+        tokio::fs::write(
+            &path,
+            "---\ntitle: Café\ntags: [unicode]\nstatus: active\n---\n\nRésumé needle",
+        )
+        .await
+        .unwrap();
+        assert!(refresh_knowledge_index_path(gcx.clone(), &path, false).await);
+        {
+            let index = gcx.knowledge_index.lock().await;
+            assert_eq!(
+                index
+                    .search("résumé", &KnowledgeSearchFilters::default(), 1)
+                    .len(),
+                1
+            );
+        }
+
+        tokio::fs::write(
+            &path,
+            "---\ntitle: Café\ntags: [unicode]\nstatus: archived\n---\n\nRésumé needle",
+        )
+        .await
+        .unwrap();
+        refresh_knowledge_index_path(gcx.clone(), &path, false).await;
+        assert!(gcx
+            .knowledge_index
+            .lock()
+            .await
+            .search("résumé", &KnowledgeSearchFilters::default(), 1)
+            .is_empty());
+
+        tokio::fs::remove_file(&path).await.unwrap();
+        assert!(refresh_knowledge_index_path(gcx.clone(), &path, true).await);
+        assert!(gcx
+            .knowledge_index
+            .lock()
+            .await
+            .card_for_path(&path)
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_knowledge_index_path_rejects_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        let outside = dir.path().join("outside.md");
+        let link = knowledge_dir.join("link.md");
+        tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
+        tokio::fs::write(&outside, "---\ntags: [private]\n---\n\nprivate needle")
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+
+        refresh_knowledge_index_path(gcx.clone(), &link, false).await;
+        assert!(gcx
+            .knowledge_index
+            .lock()
+            .await
+            .card_for_path(&link)
+            .is_none());
     }
 
     #[tokio::test]

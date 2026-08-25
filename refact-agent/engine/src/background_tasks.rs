@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 const ABORT_TIMEOUT: Duration = Duration::from_secs(10);
 
 use crate::global_context::GlobalContext;
-use crate::knowledge_index::build_knowledge_index;
+use crate::knowledge_index::{build_knowledge_index, knowledge_index_watcher_background_task};
 
 pub struct BackgroundTasksHolder {
     tasks: Vec<JoinHandle<()>>,
@@ -159,10 +159,10 @@ pub async fn start_background_tasks(
             stats_rx,
         )),
         tokio::spawn(async move {
-            // Build in-memory knowledge index in background (best-effort).
             let index = build_knowledge_index(gcx_for_knowledge_index.clone()).await;
             *gcx_for_knowledge_index.knowledge_index.lock().await = index;
             tracing::info!("knowledge_index: built");
+            knowledge_index_watcher_background_task(gcx_for_knowledge_index).await;
         }),
         tokio::spawn({
             let gcx = gcx.clone();

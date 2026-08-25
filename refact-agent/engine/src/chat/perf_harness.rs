@@ -1278,6 +1278,10 @@ impl AutoEnrichmentFixture {
             })),
         };
         *gcx.vec_db.lock().await = vecdb.clone().map(|backend| backend as Arc<dyn VecdbSearch>);
+        if matches!(workload.vecdb_mode, AutoEnrichmentVecdbMode::Unavailable) {
+            let index = crate::knowledge_index::build_knowledge_index(gcx.clone()).await;
+            *gcx.knowledge_index.lock().await = index;
+        }
         Ok(Self {
             _temp_dir: temp_dir,
             gcx,
@@ -1365,6 +1369,15 @@ async fn run_auto_enrichment_benchmark_async() -> Result<AutoEnrichmentBenchmark
             query_mode: AutoEnrichmentQueryMode::Repeated,
             vecdb_mode: AutoEnrichmentVecdbMode::Empty,
             history_message_count: 64,
+            privacy_exclusion_count: 1,
+        },
+        AutoEnrichmentWorkload {
+            chat_count: 10,
+            root_count: 1,
+            knowledge_file_count: 10_000,
+            query_mode: AutoEnrichmentQueryMode::Repeated,
+            vecdb_mode: AutoEnrichmentVecdbMode::Unavailable,
+            history_message_count: 8,
             privacy_exclusion_count: 1,
         },
     ];
@@ -4389,6 +4402,29 @@ mod tests {
         })
         .expect("report serializes");
         validate_auto_enrichment_report_json(&json).expect("report schema validates");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn auto_enrichment_ten_thousand_file_fallback_reads_no_corpus_files() {
+        let report = benchmark_runtime_builder()
+            .enable_all()
+            .build()
+            .expect("runtime starts")
+            .block_on(run_auto_enrichment_workload(&AutoEnrichmentWorkload {
+                chat_count: 1,
+                root_count: 1,
+                knowledge_file_count: 10_000,
+                query_mode: AutoEnrichmentQueryMode::Repeated,
+                vecdb_mode: AutoEnrichmentVecdbMode::Unavailable,
+                history_message_count: 4,
+                privacy_exclusion_count: 1,
+            }))
+            .expect("fallback fixture runs");
+
+        assert_eq!(report.repeated_work.fallback_files_read, 0);
+        assert_eq!(report.privacy_exclusion_violations, 0);
+        assert!(report.inserted_contexts > 0);
     }
 
     #[test]

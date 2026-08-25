@@ -65,16 +65,22 @@ fn format_enrichment_card(m: &crate::memories::MemoRecord) -> String {
     out.push_str("# Related memory (short form)\n");
     out.push_str("Note: this is a heuristic match and may be unrelated to the actual problem.\n\n");
     if let Some(title) = &m.title {
-        out.push_str(&format!("Title: {}\n", title));
+        out.push_str(&format!("Title: {}\n", bounded_card_field(title)));
     }
     if let Some(kind) = &m.kind {
-        out.push_str(&format!("Kind: {}\n", kind));
+        out.push_str(&format!("Kind: {}\n", bounded_card_field(kind)));
     }
     if let Some(score) = m.score {
         out.push_str(&format!("Relevance: {:.0}%\n", score * 100.0));
     }
     if !m.tags.is_empty() {
-        out.push_str(&format!("Tags: {}\n", m.tags.join(", ")));
+        let tags = m
+            .tags
+            .iter()
+            .take(16)
+            .map(|tag| bounded_card_field(tag))
+            .collect::<Vec<_>>();
+        out.push_str(&format!("Tags: {}\n", tags.join(", ")));
     }
     if let Some(path) = &m.file_path {
         out.push_str(&format!("Memory file: {}\n", path.display()));
@@ -87,12 +93,18 @@ fn format_enrichment_card(m: &crate::memories::MemoRecord) -> String {
     out
 }
 
+fn bounded_card_field(value: &str) -> String {
+    value.chars().take(512).collect()
+}
+
 const KNOWLEDGE_TOP_N: usize = 3;
 const TRAJECTORY_TOP_N: usize = 2;
 const KNOWLEDGE_SCORE_THRESHOLD: f32 = 0.75;
 const FORCED_KNOWLEDGE_SCORE_THRESHOLD: f32 = 0.50;
 const KNOWLEDGE_ENRICHMENT_MARKER: &str = "knowledge_enrichment";
 pub const MAX_QUERY_LENGTH: usize = 2000;
+pub const AUTO_ENRICHMENT_TOTAL_TOKEN_CAP: usize = 1600;
+pub const AUTO_ENRICHMENT_CARD_TOKEN_CAP: usize = 480;
 const MAX_ENRICHMENT_PREVIEW_ITEMS: usize = 5;
 const MAX_ENRICHMENT_PREVIEW_CANDIDATES: usize = 64;
 const ENRICHMENT_CACHE_MAX_ENTRIES: usize = 128;
@@ -818,7 +830,7 @@ fn elapsed_us(started: Option<Instant>) -> u64 {
 }
 
 fn estimate_tokens(text: &str) -> u64 {
-    (text.len() as u64).saturating_add(3) / 4
+    u64::try_from(crate::tokens::count_text_tokens_with_fallback(None, text)).unwrap_or(u64::MAX)
 }
 
 fn context_message_stats(message: &ChatMessage) -> (u64, u64, u64) {
@@ -832,7 +844,10 @@ fn context_message_stats(message: &ChatMessage) -> (u64, u64, u64) {
     (
         files.len() as u64,
         char_count,
-        (char_count.saturating_add(3)) / 4,
+        files
+            .iter()
+            .map(|file| estimate_tokens(&file.file_content))
+            .sum(),
     )
 }
 
@@ -1069,25 +1084,7 @@ async fn create_knowledge_context(
     );
 
     let card_started = perf_diagnostics::is_enabled().then(Instant::now);
-    let context_files: Vec<ContextFile> = high_score_memories
-        .iter()
-        .filter_map(|memo| {
-            let file_path = memo.file_path.as_ref()?;
-            let card = format_enrichment_card(memo);
-            let line_count = card.lines().count().max(1);
-            Some(ContextFile {
-                file_name: file_path.to_string_lossy().to_string(),
-                file_content: card,
-                line1: 1,
-                line2: line_count,
-                file_rev: None,
-                symbols: vec![],
-                gradient_type: -1,
-                usefulness: 80.0 + (memo.score.unwrap_or(0.75) * 20.0),
-                skip_pp: true,
-            })
-        })
-        .collect();
+    let context_files = build_bounded_enrichment_context_files(high_score_memories);
 
     if context_files.is_empty() {
         return None;
@@ -1132,6 +1129,90 @@ async fn create_knowledge_context(
         }),
     );
     Some(context)
+}
+
+fn build_bounded_enrichment_context_files(
+    mut memories: Vec<crate::memories::MemoRecord>,
+) -> Vec<ContextFile> {
+    memories.sort_by(|a, b| {
+        b.score
+            .unwrap_or_default()
+            .total_cmp(&a.score.unwrap_or_default())
+            .then_with(|| a.file_path.cmp(&b.file_path))
+            .then_with(|| a.memid.cmp(&b.memid))
+    });
+
+    let mut remaining_tokens = AUTO_ENRICHMENT_TOTAL_TOKEN_CAP;
+    let mut context_files = Vec::new();
+    for memo in memories {
+        let Some(file_path) = memo.file_path.as_ref() else {
+            continue;
+        };
+        let card_cap = AUTO_ENRICHMENT_CARD_TOKEN_CAP.min(remaining_tokens);
+        let (content, content_truncated) = bounded_enrichment_content(&memo.content, card_cap);
+        let mut bounded_memo = memo.clone();
+        bounded_memo.content = content;
+        let mut card = format_enrichment_card(&bounded_memo);
+        if content_truncated {
+            card.push_str("\nEnrichment metadata: truncated=true\n");
+        }
+        let Some(card) = truncate_enrichment_card(&card, card_cap) else {
+            continue;
+        };
+        let card_tokens = estimate_tokens(&card);
+        if card_tokens > remaining_tokens as u64 {
+            continue;
+        }
+        remaining_tokens = remaining_tokens.saturating_sub(card_tokens as usize);
+        let line_count = card.lines().count().max(1);
+        context_files.push(ContextFile {
+            file_name: file_path.to_string_lossy().to_string(),
+            file_content: card,
+            line1: 1,
+            line2: line_count,
+            file_rev: None,
+            symbols: vec![],
+            gradient_type: -1,
+            usefulness: 80.0 + (memo.score.unwrap_or(0.75) * 20.0),
+            skip_pp: true,
+        });
+        if remaining_tokens == 0 {
+            break;
+        }
+    }
+    context_files
+}
+
+fn bounded_enrichment_content(content: &str, token_cap: usize) -> (String, bool) {
+    let max_chars = token_cap.saturating_mul(4).max(1);
+    let mut chars = content.chars();
+    let bounded = chars.by_ref().take(max_chars).collect::<String>();
+    (bounded, chars.next().is_some())
+}
+
+fn truncate_enrichment_card(card: &str, token_cap: usize) -> Option<String> {
+    if estimate_tokens(card) <= token_cap as u64 {
+        return Some(card.to_string());
+    }
+
+    const TRUNCATION_METADATA: &str = "\nEnrichment metadata: truncated=true\n";
+    let mut truncated = String::new();
+    for line in card.lines() {
+        let mut candidate = truncated.clone();
+        candidate.push_str(line);
+        candidate.push('\n');
+        candidate.push_str(TRUNCATION_METADATA);
+        if estimate_tokens(&candidate) > token_cap as u64 {
+            break;
+        }
+        truncated.push_str(line);
+        truncated.push('\n');
+    }
+    if truncated.trim().is_empty() {
+        return None;
+    }
+    truncated.push_str(TRUNCATION_METADATA);
+    Some(truncated)
 }
 
 fn has_knowledge_enrichment_near(messages: &[ChatMessage], user_idx: usize) -> bool {
@@ -1639,7 +1720,11 @@ mod tests {
 
         assert_eq!(
             context_message_stats(&message),
-            (1, "private enrichment content".len() as u64, 7)
+            (
+                1,
+                "private enrichment content".len() as u64,
+                estimate_tokens("private enrichment content")
+            )
         );
     }
 
@@ -1877,6 +1962,65 @@ mod tests {
             user.extra["knowledge_enrichment"]["query_fingerprint"],
             query_fingerprint
         );
+    }
+
+    #[test]
+    fn bounded_enrichment_cards_preserve_order_and_mark_truncation() {
+        let memories = vec![
+            crate::memories::MemoRecord {
+                memid: "lower".to_string(),
+                tags: vec!["knowledge".to_string()],
+                content: "lower relevance\n".repeat(1_000),
+                file_path: Some(PathBuf::from("/knowledge/lower.md")),
+                title: Some("Lower".to_string()),
+                created: None,
+                kind: Some("memory".to_string()),
+                score: Some(0.80),
+                line_range: None,
+            },
+            crate::memories::MemoRecord {
+                memid: "higher".to_string(),
+                tags: vec!["knowledge".to_string()],
+                content: "higher relevance\n".repeat(1_000),
+                file_path: Some(PathBuf::from("/knowledge/higher.md")),
+                title: Some("Higher".to_string()),
+                created: None,
+                kind: Some("memory".to_string()),
+                score: Some(0.95),
+                line_range: None,
+            },
+        ];
+
+        let files = build_bounded_enrichment_context_files(memories);
+        assert_eq!(
+            files.first().map(|file| file.file_name.as_str()),
+            Some("/knowledge/higher.md")
+        );
+        assert!(files.iter().all(
+            |file| estimate_tokens(&file.file_content) <= AUTO_ENRICHMENT_CARD_TOKEN_CAP as u64
+        ));
+        assert!(files
+            .iter()
+            .any(|file| file.file_content.contains("truncated=true")));
+        assert!(
+            files
+                .iter()
+                .map(|file| estimate_tokens(&file.file_content))
+                .sum::<u64>()
+                <= AUTO_ENRICHMENT_TOTAL_TOKEN_CAP as u64
+        );
+    }
+
+    #[test]
+    fn enrichment_card_truncation_keeps_markdown_line_boundaries() {
+        let card =
+            "# Heading\n\n- café\n- résumé\n\n```rust\nlet value = \"🌻\";\n```\n".repeat(100);
+        let truncated =
+            truncate_enrichment_card(&card, 120).expect("card should retain a safe prefix");
+
+        assert!(truncated.ends_with("Enrichment metadata: truncated=true\n"));
+        assert!(estimate_tokens(&truncated) <= 120);
+        assert!(truncated.is_char_boundary(truncated.len()));
     }
 
     #[test]

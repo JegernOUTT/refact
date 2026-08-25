@@ -21,7 +21,7 @@ fn path_contains_component(path: &Path, component: &str) -> bool {
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
-use crate::knowledge_index::KnowledgeIndex;
+use crate::knowledge_index::{KnowledgeIndex, KnowledgeSearchFilters};
 use crate::chat::find_trajectory_path;
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
 use crate::files_correction::get_project_dirs;
@@ -1732,8 +1732,6 @@ async fn memories_search_fallback(
         .filter(|w| !FALLBACK_STOP_WORDS.contains(w))
         .filter(|w| seen_query_words.insert((*w).to_string()))
         .collect();
-    let mut scored_results: Vec<(usize, MemoRecord)> = Vec::new();
-
     if knowledge_dirs.is_empty() || query_words.is_empty() {
         record_enrichment_metric(
             diagnostic_chat_id,
@@ -1746,106 +1744,69 @@ async fn memories_search_fallback(
         return Ok(vec![]);
     }
 
-    let mut fallback_files = 0u64;
-    let mut fallback_bytes = 0u64;
-    for knowledge_dir in knowledge_dirs {
-        if !knowledge_dir.exists() {
-            continue;
-        }
-        for entry in WalkDir::new(knowledge_dir)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            if path_contains_component(path, "archive") {
-                continue;
-            }
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if ext != "md" && ext != "mdx" {
-                continue;
-            }
-
-            let text =
-                match get_file_text_from_memory_or_disk(gcx.clone(), &path.to_path_buf()).await {
-                    Ok(t) => {
-                        fallback_files += 1;
-                        fallback_bytes = fallback_bytes.saturating_add(t.len() as u64);
-                        t
+    let candidate_cap = top_n.saturating_mul(4).clamp(1, 32);
+    let (records, index_available) = {
+        let index = gcx.knowledge_index.lock().await;
+        let index_available = index.is_ready();
+        let records = if index_available {
+            index
+                .search_bounded(
+                    query,
+                    &KnowledgeSearchFilters::default(),
+                    candidate_cap,
+                    candidate_cap,
+                )
+                .into_iter()
+                .filter(|hit| {
+                    knowledge_dirs
+                        .iter()
+                        .any(|dir| hit.card.file_path.starts_with(dir))
+                })
+                .filter(|hit| {
+                    exclude_root.is_none_or(|root| {
+                        index.source_chat_id_for_path(&hit.card.file_path) != Some(root)
+                    })
+                })
+                .take(top_n)
+                .map(|hit| {
+                    let content = index
+                        .content_for_path(&hit.card.file_path)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(500)
+                        .collect();
+                    MemoRecord {
+                        memid: hit.card.id,
+                        tags: hit.card.tags,
+                        content,
+                        file_path: Some(hit.card.file_path),
+                        line_range: None,
+                        title: Some(hit.card.title),
+                        created: hit.card.created,
+                        kind: hit.card.kind,
+                        score: Some((hit.score / 2.0).clamp(0.0, 1.0)),
                     }
-                    Err(_) => continue,
-                };
-
-            let text_lower = text.to_lowercase();
-            let score: usize = query_words
-                .iter()
-                .filter(|w| text_lower.contains(*w))
-                .count();
-            if score == 0 {
-                continue;
-            }
-
-            let (frontmatter, content_start) = KnowledgeFrontmatter::parse(&text);
-            if frontmatter.is_archived() || frontmatter.is_deprecated() {
-                continue;
-            }
-
-            if let (Some(ex_root), Some(ref source_id)) =
-                (exclude_root, &frontmatter.source_chat_id)
-            {
-                if source_id == ex_root {
-                    tracing::debug!(
-                        "Fallback: excluding knowledge created by current chat: {:?}",
-                        path
-                    );
-                    continue;
-                }
-            }
-
-            let id = frontmatter
-                .id
-                .clone()
-                .unwrap_or_else(|| path.to_string_lossy().to_string());
-            let content_preview: String = text[content_start..].chars().take(500).collect();
-
-            let normalized_score = if score >= 2 {
-                (score as f32 / 2.0).min(1.0)
-            } else {
-                0.70
-            };
-
-            scored_results.push((
-                score,
-                MemoRecord {
-                    memid: id,
-                    tags: frontmatter.tags,
-                    content: content_preview,
-                    file_path: Some(path.to_path_buf()),
-                    line_range: None,
-                    title: frontmatter.title,
-                    created: frontmatter.created,
-                    kind: frontmatter.kind,
-                    score: Some(normalized_score),
-                },
-            ));
-        }
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        (records, index_available)
+    };
+    if !index_available {
+        warn!("memories: fallback index unavailable; returning no knowledge candidates");
     }
-
-    scored_results.sort_by(|a, b| b.0.cmp(&a.0));
-    let records = scored_results
-        .into_iter()
-        .take(top_n)
-        .map(|(_, r)| r)
-        .collect::<Vec<_>>();
     record_enrichment_metric(
         diagnostic_chat_id,
         PerfComponent::EnrichmentFallback,
-        PerfOutcome::Success,
+        if index_available {
+            PerfOutcome::Success
+        } else {
+            PerfOutcome::Skipped
+        },
         elapsed_us(fallback_started),
-        Some(fallback_bytes),
-        Some(fallback_files),
+        Some(0),
+        Some(0),
     );
     Ok(records)
 }
@@ -2032,6 +1993,8 @@ pub async fn delete_document_from_disk(
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     info!("Deleted document from disk: {}", doc_path.display());
+
+    gcx.knowledge_index.lock().await.remove_path(doc_path);
 
     let vec_db = gcx.vec_db.clone();
     if let Some(vecdb) = vec_db.lock().await.clone() {
@@ -2950,5 +2913,45 @@ mod firewall_tests {
         let _records = memories_search(gcx.clone(), "codegraph", 5, 5, None)
             .await
             .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fallback_search_uses_ready_index_without_reading_the_corpus() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        let indexed = write_knowledge_note(&knowledge_dir, "indexed.md", "codegraph needle").await;
+        for index in 0..1_000 {
+            tokio::fs::write(
+                knowledge_dir.join(format!("unindexed-{index}.md")),
+                "codegraph corpus file that fallback must not read",
+            )
+            .await
+            .unwrap();
+        }
+        {
+            let mut index = gcx.knowledge_index.lock().await;
+            let text = tokio::fs::read_to_string(&indexed).await.unwrap();
+            let (frontmatter, content_start) = KnowledgeFrontmatter::parse(&text);
+            index.add_from_frontmatter(indexed.clone(), &frontmatter, Some(&text[content_start..]));
+            index.mark_ready();
+        }
+
+        let records = memories_search(gcx, "codegraph", 5, 0, None).await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].file_path.as_deref(), Some(indexed.as_path()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fallback_search_discloses_unavailable_index_without_scanning() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        write_knowledge_note(&knowledge_dir, "unavailable.md", "codegraph needle").await;
+
+        let records = memories_search(gcx, "codegraph", 5, 0, None).await.unwrap();
+        assert!(records.is_empty());
     }
 }

@@ -33,6 +33,8 @@ pub struct KnowledgeIndex {
     content_by_path: HashMap<PathBuf, String>,
     by_signature: HashMap<String, Vec<PathBuf>>,
     by_signal_key: HashMap<String, Vec<PathBuf>>,
+    source_chat_by_path: HashMap<PathBuf, String>,
+    ready: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -69,8 +71,8 @@ fn push_unique(values: &mut Vec<String>, value: impl Into<String>) {
 
 fn text_tokens(text: &str) -> Vec<String> {
     let mut seen = HashSet::new();
-    text.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-' && ch != ':')
-        .map(|token| token.trim().to_ascii_lowercase())
+    text.split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-' && ch != ':')
+        .map(|token| token.trim().to_lowercase())
         .filter(|token| token.len() >= 2)
         .filter(|token| seen.insert(token.clone()))
         .collect()
@@ -112,19 +114,22 @@ fn card_is_task_scoped(card: &KnowledgeCard) -> bool {
 }
 
 fn rank_cards(mut cards: Vec<KnowledgeCard>, max_items: usize) -> Vec<KnowledgeCard> {
-    cards.sort_by(|a, b| {
-        let ak = kind_priority(a.kind.as_deref());
-        let bk = kind_priority(b.kind.as_deref());
-        bk.cmp(&ak)
-            .then_with(|| {
-                let ar = recency_key(a.created_at.as_deref(), a.created.as_deref());
-                let br = recency_key(b.created_at.as_deref(), b.created.as_deref());
-                br.cmp(&ar)
-            })
-            .then_with(|| a.title.cmp(&b.title))
-    });
+    cards.sort_by(rank_cards_order);
     cards.truncate(max_items);
     cards
+}
+
+fn rank_cards_order(a: &KnowledgeCard, b: &KnowledgeCard) -> std::cmp::Ordering {
+    let ak = kind_priority(a.kind.as_deref());
+    let bk = kind_priority(b.kind.as_deref());
+    bk.cmp(&ak)
+        .then_with(|| {
+            let ar = recency_key(a.created_at.as_deref(), a.created.as_deref());
+            let br = recency_key(b.created_at.as_deref(), b.created.as_deref());
+            br.cmp(&ar)
+        })
+        .then_with(|| a.title.cmp(&b.title))
+        .then_with(|| a.file_path.cmp(&b.file_path))
 }
 
 fn first_nonempty_line(text: &str) -> Option<String> {
@@ -190,7 +195,7 @@ fn content_snippet(content: &str, terms: &[String]) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
-    let lower = trimmed.to_ascii_lowercase();
+    let lower = trimmed.to_lowercase();
     let start = terms
         .iter()
         .filter_map(|term| lower.find(term))
@@ -215,6 +220,7 @@ impl KnowledgeIndex {
         retain_cards_not_at_path(&mut self.by_content, file_path);
         self.by_path.remove(file_path);
         self.content_by_path.remove(file_path);
+        self.source_chat_by_path.remove(file_path);
         self.by_signature.retain(|_, paths| {
             paths.retain(|path| path != file_path);
             !paths.is_empty()
@@ -223,6 +229,18 @@ impl KnowledgeIndex {
             paths.retain(|path| path != file_path);
             !paths.is_empty()
         });
+    }
+
+    pub fn remove_paths_under(&mut self, root: &Path) {
+        let paths = self
+            .by_path
+            .keys()
+            .filter(|path| path.starts_with(root))
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in paths {
+            self.remove_path(&path);
+        }
     }
 
     pub fn add_signature(&mut self, signature: impl Into<String>, file_path: PathBuf) {
@@ -267,6 +285,18 @@ impl KnowledgeIndex {
 
     pub fn card_for_path(&self, file_path: &Path) -> Option<&KnowledgeCard> {
         self.by_path.get(file_path)
+    }
+
+    pub fn source_chat_id_for_path(&self, file_path: &Path) -> Option<&str> {
+        self.source_chat_by_path.get(file_path).map(String::as_str)
+    }
+
+    pub fn mark_ready(&mut self) {
+        self.ready = true;
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.ready
     }
 
     pub fn is_empty(&self) -> bool {
@@ -404,6 +434,10 @@ impl KnowledgeIndex {
 
         if let Some(signal_key) = fm.signal_key.as_deref() {
             self.add_signal_key(signal_key, file_path.clone());
+        }
+        if let Some(source_chat_id) = fm.source_chat_id.as_deref() {
+            self.source_chat_by_path
+                .insert(file_path.clone(), source_chat_id.to_string());
         }
         self.add_card_with_content(
             KnowledgeCard {
@@ -640,6 +674,26 @@ impl KnowledgeIndex {
         filters: &KnowledgeSearchFilters,
         max_items: usize,
     ) -> Vec<KnowledgeSearchHit> {
+        self.search_with_candidate_cap(query, filters, max_items, usize::MAX)
+    }
+
+    pub fn search_bounded(
+        &self,
+        query: &str,
+        filters: &KnowledgeSearchFilters,
+        max_items: usize,
+        max_candidates_per_term: usize,
+    ) -> Vec<KnowledgeSearchHit> {
+        self.search_with_candidate_cap(query, filters, max_items, max_candidates_per_term.max(1))
+    }
+
+    fn search_with_candidate_cap(
+        &self,
+        query: &str,
+        filters: &KnowledgeSearchFilters,
+        max_items: usize,
+        max_candidates_per_term: usize,
+    ) -> Vec<KnowledgeSearchHit> {
         let terms = query_terms(query);
         let mut scores: HashMap<PathBuf, (KnowledgeCard, f32)> = HashMap::new();
         let mut add_score = |card: &KnowledgeCard, score: f32| {
@@ -653,24 +707,24 @@ impl KnowledgeIndex {
         };
 
         if terms.is_empty() {
-            for card in self.all_cards() {
+            for card in self.all_cards().into_iter().take(max_candidates_per_term) {
                 add_score(&card, 1.0);
             }
         }
 
         for term in &terms {
             if let Some(cards) = self.by_tag.get(term) {
-                for card in cards {
+                for card in cards.iter().take(max_candidates_per_term) {
                     add_score(card, 4.0);
                 }
             }
             if let Some(cards) = self.by_filename.get(term) {
-                for card in cards {
+                for card in cards.iter().take(max_candidates_per_term) {
                     add_score(card, 3.0);
                 }
             }
             if let Some(cards) = self.by_content.get(term) {
-                for card in cards {
+                for card in cards.iter().take(max_candidates_per_term) {
                     add_score(card, 1.0);
                 }
             }
@@ -690,6 +744,15 @@ impl KnowledgeIndex {
                 }
             })
             .collect();
+        if hits.len() > max_candidates_per_term {
+            hits.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| rank_cards_order(&a.card, &b.card))
+            });
+            hits.truncate(max_candidates_per_term);
+        }
         hits.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -897,5 +960,39 @@ mod tests {
         let top = index.lessons_for_pulse(1);
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].title, "Newer Convention");
+    }
+
+    #[test]
+    fn source_chat_id_is_removed_with_its_card() {
+        let path = PathBuf::from("/k/current.md");
+        let mut frontmatter = lesson_frontmatter("Current", &["lesson"], None, "2026-01-01", None);
+        frontmatter.source_chat_id = Some("chat-current".to_string());
+        let mut index = KnowledgeIndex::empty();
+        index.add_from_frontmatter(path.clone(), &frontmatter, Some("body"));
+
+        assert_eq!(index.source_chat_id_for_path(&path), Some("chat-current"));
+        index.remove_paths_under(Path::new("/k"));
+        assert!(index.source_chat_id_for_path(&path).is_none());
+    }
+
+    #[test]
+    fn bounded_search_caps_candidates_independent_of_index_size() {
+        let mut index = KnowledgeIndex::empty();
+        for number in 0..10_000 {
+            index.add_from_frontmatter(
+                PathBuf::from(format!("/k/{number}.md")),
+                &lesson_frontmatter(
+                    &format!("Note {number}"),
+                    &["fixture"],
+                    None,
+                    "2026-01-01",
+                    None,
+                ),
+                Some("codegraph fixture"),
+            );
+        }
+
+        let hits = index.search_bounded("codegraph", &KnowledgeSearchFilters::default(), 3, 12);
+        assert_eq!(hits.len(), 3);
     }
 }
