@@ -717,8 +717,9 @@ fn persisted_assistant_message_added_dedups_streamed_turn() {
     assert!(run.recovery.is_none());
 
     let text = transcript_text(&run.app);
-    assert_eq!(text.matches("assistant:hello once").count(), 1);
+    assert_eq!(text, "assistant:hello persisted");
     assert_eq!(run.app.transcript_state().messages().len(), 1);
+    assert!(run.app.transcript_state().messages()[0].stream_finished);
 }
 
 #[test]

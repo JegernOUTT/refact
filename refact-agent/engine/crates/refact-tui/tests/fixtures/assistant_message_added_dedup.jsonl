@@ -3,3 +3,4 @@
 {"chat_id":"chat-fixture","seq":"2","type":"stream_delta","message_id":"assistant-1","ops":[{"op":"append_content","text":"hello once"}]}
 {"chat_id":"chat-fixture","seq":"3","type":"stream_finished","message_id":"assistant-1"}
 {"chat_id":"chat-fixture","seq":"4","type":"message_added","message":{"message_id":"assistant-1","role":"assistant","content":"hello once"},"index":0}
+{"chat_id":"chat-fixture","seq":"5","type":"message_updated","message_id":"assistant-1","message":{"message_id":"assistant-1","role":"assistant","content":"hello persisted"}}

@@ -1311,7 +1311,10 @@ impl TranscriptState {
     }
 
     pub fn add_message_at(&mut self, raw: &Value, index: Option<usize>) -> bool {
-        let message = TranscriptMessage::from_wire(raw);
+        let mut message = TranscriptMessage::from_wire(raw);
+        if let Some(existing_index) = self.message_index_by_id(message.message_id.as_deref()) {
+            self.preserve_omitted_stream_finality(existing_index, &mut message, raw);
+        }
         self.add_transcript_message(message, index)
     }
 
@@ -1324,6 +1327,7 @@ impl TranscriptState {
         }
         let lookup_id = message.message_id.as_deref().or(message_id);
         if let Some(idx) = self.message_index_by_id(lookup_id) {
+            self.preserve_omitted_stream_finality(idx, &mut message, raw);
             if let Some(usage) = message.usage.clone() {
                 self.usage = Some(usage);
             }
@@ -1332,6 +1336,26 @@ impl TranscriptState {
             true
         } else {
             self.add_transcript_message(message, None)
+        }
+    }
+
+    fn preserve_omitted_stream_finality(
+        &self,
+        existing_index: usize,
+        message: &mut TranscriptMessage,
+        raw: &Value,
+    ) {
+        let Some(existing) = self.messages.get(existing_index) else {
+            return;
+        };
+        if raw.get("stream_finished").is_none()
+            && existing.stream_finished
+            && matches!(
+                existing.role,
+                TranscriptRole::Assistant | TranscriptRole::Tool | TranscriptRole::Diff
+            )
+        {
+            message.stream_finished = true;
         }
     }
 
@@ -2381,6 +2405,110 @@ mod tests {
             Some("a")
         );
         assert_eq!(state.messages().len(), 3);
+    }
+
+    #[test]
+    fn stream_finished_authoritative_replacements_preserve_omitted_finality() {
+        let mut state = TranscriptState::new();
+        state.reset_from_messages(&[
+            json!({
+                "message_id": "finished",
+                "role": "assistant",
+                "content": "finished",
+                "stream_finished": true,
+            }),
+            json!({
+                "message_id": "active",
+                "role": "assistant",
+                "content": "active",
+                "stream_finished": false,
+            }),
+        ]);
+
+        assert!(!state.add_message_at(
+            &json!({
+                "message_id": "finished",
+                "role": "assistant",
+                "content": "persisted",
+            }),
+            Some(2),
+        ));
+        assert_eq!(
+            state
+                .messages()
+                .iter()
+                .map(|message| message.message_id.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("active"), Some("finished")],
+        );
+        assert!(state.messages()[1].stream_finished);
+
+        state.apply_delta_ops(
+            Some("active"),
+            &[DeltaOp::AppendContent {
+                text: " updated".to_string(),
+            }],
+        );
+        assert_eq!(state.messages()[0].content, "active updated");
+
+        assert!(state.update_message(
+            Some("finished"),
+            &json!({
+                "message_id": "finished",
+                "role": "assistant",
+                "content": "reopened",
+                "stream_finished": false,
+            }),
+        ));
+        assert!(!state.messages()[1].stream_finished);
+
+        assert!(state.update_message(
+            Some("active"),
+            &json!({
+                "message_id": "active",
+                "role": "assistant",
+                "content": "still active",
+            }),
+        ));
+        assert!(!state.messages()[0].stream_finished);
+
+        assert!(state.update_message(
+            Some("active"),
+            &json!({
+                "message_id": "active",
+                "role": "assistant",
+                "content": "now finished",
+                "stream_finished": true,
+            }),
+        ));
+        assert!(state.messages()[0].stream_finished);
+
+        assert!(state.add_message_at(
+            &json!({
+                "message_id": "new",
+                "role": "assistant",
+                "content": "new active",
+            }),
+            None,
+        ));
+        assert!(!state.messages()[2].stream_finished);
+
+        for role in ["tool", "diff"] {
+            let mut state = TranscriptState::new();
+            state.reset_from_messages(&[json!({
+                "message_id": format!("{role}-finished"),
+                "role": role,
+                "content": "finished",
+                "stream_finished": true,
+            })]);
+
+            assert!(!state.add_message(&json!({
+                "message_id": format!("{role}-finished"),
+                "role": role,
+                "content": "persisted",
+            })));
+            assert!(state.messages()[0].stream_finished, "{role}");
+        }
     }
 
     #[test]
