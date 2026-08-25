@@ -276,10 +276,15 @@ fn append_status_line(
     timeout_secs: u64,
 ) {
     match status {
-        ExecStatus::Exited { exit_code } => out.push_str(&format!(
-            "The command was running {:.3}s, finished with exit code {}\n",
-            duration.as_secs_f64(),
-            exit_code.unwrap_or_default()
+        ExecStatus::Exited {
+            exit_code: Some(exit_code),
+        } => out.push_str(&format!(
+            "The command was running {:.3}s, finished with exit code {exit_code}\n",
+            duration.as_secs_f64()
+        )),
+        ExecStatus::Exited { exit_code: None } => out.push_str(&format!(
+            "The command was running {:.3}s, finished with unknown exit status\n",
+            duration.as_secs_f64()
         )),
         ExecStatus::SandboxLauncherFailed { exit_code } => out.push_str(&format!(
             "⚠️ The sandbox launcher failed before the command ran (exit code {exit_code}).\n"
@@ -307,11 +312,14 @@ fn append_status_line(
 
 fn tool_failed_for_status(status: &ExecStatus) -> Option<bool> {
     match status {
-        ExecStatus::SandboxLauncherFailed { .. }
+        ExecStatus::Exited { exit_code: Some(0) } => Some(false),
+        ExecStatus::Exited { exit_code: None }
+        | ExecStatus::Exited { exit_code: Some(_) }
+        | ExecStatus::SandboxLauncherFailed { .. }
         | ExecStatus::Failed { .. }
         | ExecStatus::Killed
         | ExecStatus::TimedOut => Some(true),
-        ExecStatus::Starting | ExecStatus::Running | ExecStatus::Exited { .. } => None,
+        ExecStatus::Starting | ExecStatus::Running => None,
     }
 }
 
@@ -873,7 +881,7 @@ mod tests {
             .await
             .iter()
             .any(|snapshot| snapshot.meta.process_id.as_str() == process_id));
-        assert!(message.tool_failed.is_none());
+        assert_eq!(message.tool_failed, Some(false));
     }
 
     #[tokio::test]
@@ -991,7 +999,60 @@ mod tests {
         assert!(body.contains("exit code 7"));
         assert_eq!(exec["status"], "exited");
         assert_eq!(exec["exit_code"], 7);
-        assert!(message.tool_failed.is_none());
+        assert_eq!(message.tool_failed, Some(true));
+    }
+
+    #[test]
+    fn cmdline_exit_status_rendering_metadata_and_failure_are_consistent() {
+        let duration = Duration::from_millis(250);
+        let cases = [
+            (
+                ExecStatus::Exited { exit_code: Some(0) },
+                "finished with exit code 0",
+                json!(0),
+                Some(false),
+            ),
+            (
+                ExecStatus::Exited { exit_code: Some(7) },
+                "finished with exit code 7",
+                json!(7),
+                Some(true),
+            ),
+            (
+                ExecStatus::Exited { exit_code: None },
+                "finished with unknown exit status",
+                Value::Null,
+                Some(true),
+            ),
+        ];
+
+        for (status, expected_output, expected_exit_code, expected_failed) in cases {
+            let mut output = String::new();
+            append_status_line(&mut output, &status, duration, 10);
+            let snapshot = ExecProcessSnapshot::new(crate::exec::ExecProcessMeta::new(
+                ExecMode::Foreground,
+                "status".to_string(),
+            ))
+            .with_status(status.clone());
+            let extra = exec_extra(&snapshot, duration);
+            let exec = extra.get("exec").unwrap();
+
+            assert!(output.contains(expected_output));
+            assert_eq!(exec["status"], "exited");
+            assert_eq!(exec["exit_code"], expected_exit_code);
+            assert_eq!(tool_failed_for_status(&status), expected_failed);
+        }
+    }
+
+    #[test]
+    fn cmdline_terminal_failure_statuses_remain_failed() {
+        for status in [
+            ExecStatus::SandboxLauncherFailed { exit_code: 1 },
+            ExecStatus::Killed,
+            ExecStatus::TimedOut,
+        ] {
+            assert_eq!(tool_failed_for_status(&status), Some(true));
+        }
     }
 
     #[tokio::test]
