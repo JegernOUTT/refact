@@ -482,7 +482,26 @@ async fn consume_trajectory_self_write(path: &Path, source: &TrajectorySourceIde
     }
 }
 
-fn clear_trajectory_self_writes() {
+fn clear_trajectory_self_writes(watched_roots: &[PathBuf]) {
+    let mut registry = trajectory_self_writes()
+        .lock()
+        .expect("trajectory self-write registry poisoned");
+    prune_trajectory_self_writes(&mut registry, Instant::now());
+    registry.retain(|(path, _), _| !watched_roots.iter().any(|root| path.starts_with(root)));
+}
+
+struct TrajectorySelfWriteScope {
+    watched_roots: Vec<PathBuf>,
+}
+
+impl Drop for TrajectorySelfWriteScope {
+    fn drop(&mut self) {
+        clear_trajectory_self_writes(&self.watched_roots);
+    }
+}
+
+#[cfg(test)]
+fn clear_all_trajectory_self_writes() {
     trajectory_self_writes()
         .lock()
         .expect("trajectory self-write registry poisoned")
@@ -5374,6 +5393,13 @@ fn should_dispatch_trajectory_path(path: &Path, task_roots: &[PathBuf]) -> bool 
     task_trajectory_context_from_path(path, task_roots).is_some()
 }
 
+fn is_trajectory_temporary_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.rsplit_once(".tmp."))
+        .is_some_and(|(prefix, random)| prefix.ends_with(".json") && !random.is_empty())
+}
+
 fn trajectory_source_identity_from_path(
     path: &Path,
     task_roots: &[PathBuf],
@@ -5461,6 +5487,40 @@ enum TrajectoryWatcherMessage {
     ScanPath(PathBuf),
 }
 
+fn trajectory_watcher_message_for_path(
+    path: PathBuf,
+    is_remove: bool,
+    task_roots: &[PathBuf],
+) -> Option<TrajectoryWatcherMessage> {
+    if is_trajectory_temporary_file(&path) {
+        return None;
+    }
+    if should_dispatch_trajectory_path(&path, task_roots) {
+        let chat_id = path.file_stem()?.to_str()?.to_string();
+        return Some(TrajectoryWatcherMessage::Trajectory {
+            chat_id,
+            is_remove,
+            source: trajectory_source_identity_from_path(&path, task_roots),
+            path,
+        });
+    }
+    (!is_remove && is_under_task_root(&path, task_roots))
+        .then_some(TrajectoryWatcherMessage::ScanPath(path))
+}
+
+async fn process_trajectory_watcher_change(
+    gcx: Arc<GlobalContext>,
+    chat_id: String,
+    is_remove: bool,
+    source: TrajectorySourceIdentity,
+    path: PathBuf,
+) {
+    if consume_trajectory_self_write(&path, &source).await {
+        return;
+    }
+    process_trajectory_change_for_source(gcx, &chat_id, is_remove, Some(source)).await;
+}
+
 pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
     let gcx_weak = Arc::downgrade(&gcx);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TrajectoryWatcherMessage>();
@@ -5483,6 +5543,18 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
                 warn!("Skipping non-real tasks dir {:?} for watcher", dir);
             }
         }
+        let watched_roots = futures::future::join_all(
+            trajectories_dirs
+                .iter()
+                .chain(task_roots.iter())
+                .map(fs::canonicalize),
+        )
+        .await
+        .into_iter()
+        .filter_map(Result::ok)
+        .map(|root| dunce::simplified(&root).to_path_buf())
+        .collect::<Vec<_>>();
+        let _self_write_cleanup = TrajectorySelfWriteScope { watched_roots };
 
         let tx_clone = tx.clone();
         let task_roots_for_callback = task_roots.clone();
@@ -5499,28 +5571,19 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
                 }
                 let is_remove = matches!(event.kind, notify::EventKind::Remove(_));
                 for path in event.paths {
-                    if path.extension().map(|e| e == "tmp").unwrap_or(false) {
-                        continue;
-                    }
-                    if should_dispatch_trajectory_path(&path, &task_roots_for_callback) {
-                        if let Some(chat_id) = path.file_stem().and_then(|s| s.to_str()) {
-                            let _ = tx_clone.send(TrajectoryWatcherMessage::Trajectory {
-                                chat_id: chat_id.to_string(),
-                                is_remove,
-                                source: trajectory_source_identity_from_path(
-                                    &path,
-                                    &task_roots_for_callback,
-                                ),
-                                path,
-                            });
-                        }
-                    } else if !is_remove && is_under_task_root(&path, &task_roots_for_callback) {
-                        let _ = tx_clone.send(TrajectoryWatcherMessage::ScanPath(path));
+                    if let Some(message) = trajectory_watcher_message_for_path(
+                        path,
+                        is_remove,
+                        &task_roots_for_callback,
+                    ) {
+                        let _ = tx_clone.send(message);
                     }
                 }
             }
         };
 
+        // Buddy conversations deliberately stay outside this watcher because active Buddy sessions
+        // do not apply external trajectory reloads.
         let watcher = match RecommendedWatcher::new(event_callback, Config::default()) {
             Ok(w) => w,
             Err(e) => {
@@ -5625,15 +5688,10 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
             for ((chat_id, source), is_remove, path) in ready {
                 pending.remove(&(chat_id.clone(), source.clone()));
                 if let Some(gcx) = gcx_weak.upgrade() {
-                    if !is_remove && consume_trajectory_self_write(&path, &source).await {
-                        continue;
-                    }
-                    process_trajectory_change_for_source(gcx, &chat_id, is_remove, Some(source))
-                        .await;
+                    process_trajectory_watcher_change(gcx, chat_id, is_remove, source, path).await;
                 }
             }
         }
-        clear_trajectory_self_writes();
     });
 }
 
@@ -20001,7 +20059,7 @@ mod tests {
     #[tokio::test]
     async fn trajectory_watcher_self_write_consumes_exact_fingerprint_once() {
         let _env = TrajectoryWatcherSelfWriteEnvGuard::enable();
-        clear_trajectory_self_writes();
+        clear_all_trajectory_self_writes();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("self-write.json");
         let content = "{\"id\":\"self-write\"}";
@@ -20014,14 +20072,14 @@ mod tests {
 
         assert!(consume_trajectory_self_write(&path, &TrajectorySourceIdentity::Normal).await);
         assert!(!consume_trajectory_self_write(&path, &TrajectorySourceIdentity::Normal).await);
-        clear_trajectory_self_writes();
+        clear_all_trajectory_self_writes();
     }
 
     #[serial]
     #[tokio::test]
     async fn trajectory_watcher_self_write_does_not_consume_modified_or_deleted_files() {
         let _env = TrajectoryWatcherSelfWriteEnvGuard::enable();
-        clear_trajectory_self_writes();
+        clear_all_trajectory_self_writes();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("external-write.json");
         let handle = register_trajectory_self_write(
@@ -20042,14 +20100,14 @@ mod tests {
         assert!(!consume_trajectory_self_write(&path, &TrajectorySourceIdentity::Normal).await);
         fs::remove_file(&path).await.unwrap();
         assert!(!consume_trajectory_self_write(&path, &TrajectorySourceIdentity::Normal).await);
-        clear_trajectory_self_writes();
+        clear_all_trajectory_self_writes();
     }
 
     #[serial]
     #[tokio::test]
     async fn trajectory_watcher_self_write_respects_source_and_expires_records() {
         let _env = TrajectoryWatcherSelfWriteEnvGuard::enable();
-        clear_trajectory_self_writes();
+        clear_all_trajectory_self_writes();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("same-id.json");
         let normal = TrajectorySourceIdentity::Normal;
@@ -20079,7 +20137,130 @@ mod tests {
             }
         }
         assert!(!consume_trajectory_self_write(&path, &normal).await);
-        clear_trajectory_self_writes();
+        clear_all_trajectory_self_writes();
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_watcher_self_write_consumes_remove_after_atomic_replacement() {
+        let _env = TrajectoryWatcherSelfWriteEnvGuard::enable();
+        clear_all_trajectory_self_writes();
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "self-write-remove";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(&path, chat_id, "Before Self Write", "before")
+            .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Before Self Write".to_string();
+            session
+                .messages
+                .push(ChatMessage::new("user".to_string(), "before".to_string()));
+            session.trajectory_dirty = false;
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        let tmp_path = unique_trajectory_tmp_path(&path);
+        atomic_write_json_with_tmp_path(
+            &path,
+            &tmp_path,
+            Ok(content),
+            Some("Failed to write trajectory"),
+            Some(TrajectorySourceIdentity::Normal),
+        )
+        .await
+        .unwrap();
+        process_trajectory_watcher_change(
+            gcx,
+            chat_id.to_string(),
+            true,
+            TrajectorySourceIdentity::Normal,
+            path,
+        )
+        .await;
+
+        let session = session_arc.lock().await;
+        assert_eq!(session.thread.title, "Before Self Write");
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.external_reload_pending, None);
+        drop(session);
+        clear_all_trajectory_self_writes();
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_watcher_self_write_cleanup_keeps_other_watcher_scope() {
+        let _env = TrajectoryWatcherSelfWriteEnvGuard::enable();
+        clear_all_trajectory_self_writes();
+        let dir = tempfile::tempdir().unwrap();
+        let first_root = dir.path().join("first");
+        let second_root = dir.path().join("second");
+        tokio::fs::create_dir_all(&first_root).await.unwrap();
+        tokio::fs::create_dir_all(&second_root).await.unwrap();
+        let first_path = first_root.join("first.json");
+        let second_path = second_root.join("second.json");
+        let first_handle = register_trajectory_self_write(
+            &first_path,
+            TrajectorySourceIdentity::Normal,
+            "{\"id\":\"first\"}",
+        )
+        .await
+        .unwrap();
+        let second_handle = register_trajectory_self_write(
+            &second_path,
+            TrajectorySourceIdentity::Normal,
+            "{\"id\":\"second\"}",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(&first_path, "{\"id\":\"first\"}")
+            .await
+            .unwrap();
+        tokio::fs::write(&second_path, "{\"id\":\"second\"}")
+            .await
+            .unwrap();
+        complete_trajectory_self_write(Some(first_handle)).await;
+        complete_trajectory_self_write(Some(second_handle)).await;
+
+        clear_trajectory_self_writes(&[dunce::simplified(
+            &tokio::fs::canonicalize(&first_root).await.unwrap(),
+        )
+        .to_path_buf()]);
+
+        assert!(
+            !consume_trajectory_self_write(&first_path, &TrajectorySourceIdentity::Normal).await
+        );
+        assert!(
+            consume_trajectory_self_write(&second_path, &TrajectorySourceIdentity::Normal).await
+        );
+        clear_all_trajectory_self_writes();
+    }
+
+    #[test]
+    fn trajectory_watcher_ignores_atomic_temporary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let task_root = dir.path().join(".refact").join("tasks");
+        std::fs::create_dir_all(&task_root).unwrap();
+        let temporary = task_root
+            .join("task-1")
+            .join("trajectories")
+            .join("agents")
+            .join("agent-1")
+            .join("chat.json.tmp.abc123");
+
+        assert!(is_trajectory_temporary_file(&temporary));
+        assert!(trajectory_watcher_message_for_path(temporary, false, &[task_root]).is_none());
     }
 
     #[tokio::test]
