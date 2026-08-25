@@ -81,9 +81,7 @@ describe("getToolEnrichment", () => {
       getToolEnrichment({
         tool_enrichment: {
           schema_version: 1,
-          references: [
-            { kind: "future", target: "x", provenance: "native" },
-          ],
+          references: [{ kind: "future", target: "x", provenance: "native" }],
         },
       }),
     ).toBeNull();

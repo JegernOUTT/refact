@@ -9,6 +9,8 @@ use crate::chat::types::ThreadParams;
 use super::settings::{BuddySettings, HumorLevel};
 use super::types::{BuddyBubblePolicy, BuddyChatPhraseBank, BuddyPersonalityProfile, BuddyRuntimeEvent};
 use super::voice_service::{voice_service, ChatReactionSpeechIntent, VoiceCtx};
+#[cfg(test)]
+use super::voice_service::VoiceService;
 
 pub use refact_buddy_core::chat_reactions::*;
 
@@ -719,6 +721,7 @@ async fn render_chat_reaction_text(
     analysis_text: &str,
     voice_inputs: &ChatReactionVoiceInputs,
     phrase_bank: Option<BuddyChatPhraseBank>,
+    #[cfg(test)] voice: &VoiceService,
 ) -> String {
     if let Some(bank) = phrase_bank.as_ref() {
         if super::actor::chat_phrase_bank_is_fresh(bank, Utc::now()) {
@@ -741,6 +744,9 @@ async fn render_chat_reaction_text(
         workflow_id: Some("chat_reaction"),
         workflow_summary: Some(analysis_text),
     };
+    #[cfg(test)]
+    let rendered = voice.render_chat_reaction(app.clone(), ctx, intent).await;
+    #[cfg(not(test))]
     let rendered = voice_service()
         .await
         .render_chat_reaction(app.clone(), ctx, intent)
@@ -808,6 +814,8 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
         (candidate, reservation, voice_inputs, phrase_bank)
     };
 
+    #[cfg(test)]
+    let voice = voice_service().await;
     let app2 = app.clone();
     let chat_id = accepted.chat_id.clone();
     tokio::spawn(async move {
@@ -839,6 +847,8 @@ pub async fn maybe_enqueue_chat_reaction(app: AppState, accepted: AcceptedUserMe
             &candidate.analysis_text,
             &voice_inputs,
             phrase_bank,
+            #[cfg(test)]
+            &voice,
         )
         .await;
         let event = build_reaction_event(

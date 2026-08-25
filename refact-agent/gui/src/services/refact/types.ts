@@ -423,10 +423,7 @@ export function getToolEnrichment(
     return null;
   }
   if (!value.references.every(isToolEnrichmentReference)) return null;
-  if (
-    value.truncated !== undefined &&
-    typeof value.truncated !== "boolean"
-  ) {
+  if (value.truncated !== undefined && typeof value.truncated !== "boolean") {
     return null;
   }
   if (

@@ -154,7 +154,9 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
                   >
                     {reference.kind}: {reference.label ?? reference.target}
                     {reference.line1
-                      ? `:${reference.line1}-${reference.line2 ?? reference.line1}`
+                      ? `:${reference.line1}-${
+                          reference.line2 ?? reference.line1
+                        }`
                       : ""}
                     {reference.count ? ` (${reference.count})` : ""}
                     {reference.status ? ` (${reference.status})` : ""}

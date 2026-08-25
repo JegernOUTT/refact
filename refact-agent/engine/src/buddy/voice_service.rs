@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 #[cfg(test)]
-use tokio::sync::OwnedMutexGuard;
+use tokio::sync::Barrier;
 use tokio::sync::Mutex as AMutex;
 use tracing::debug;
 use uuid::Uuid;
@@ -184,32 +184,45 @@ impl VoiceRenderer for SubchatVoiceRenderer {
 
 static VOICE_SERVICE: tokio::sync::OnceCell<Arc<VoiceService>> = tokio::sync::OnceCell::const_new();
 #[cfg(test)]
-static TEST_VOICE_SERVICE: OnceLock<StdMutex<Option<Arc<VoiceService>>>> = OnceLock::new();
+static TEST_VOICE_SERVICES: OnceLock<StdMutex<HashMap<TestVoiceServiceScope, Arc<VoiceService>>>> =
+    OnceLock::new();
+
 #[cfg(test)]
-static TEST_VOICE_SERVICE_LOCK: tokio::sync::OnceCell<Arc<AMutex<()>>> =
-    tokio::sync::OnceCell::const_new();
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum TestVoiceServiceScope {
+    Task(tokio::task::Id),
+    Thread(std::thread::ThreadId),
+}
+
+#[cfg(test)]
+fn test_voice_service_scope() -> TestVoiceServiceScope {
+    tokio::task::try_id()
+        .map(TestVoiceServiceScope::Task)
+        .unwrap_or_else(|| TestVoiceServiceScope::Thread(std::thread::current().id()))
+}
 
 #[cfg(test)]
 pub struct VoiceServiceTestGuard {
-    _guard: OwnedMutexGuard<()>,
+    scope: TestVoiceServiceScope,
 }
 
 #[cfg(test)]
 impl Drop for VoiceServiceTestGuard {
     fn drop(&mut self) {
-        if let Some(service) = TEST_VOICE_SERVICE.get() {
-            *service.lock().unwrap() = None;
+        if let Some(services) = TEST_VOICE_SERVICES.get() {
+            services.lock().unwrap().remove(&self.scope);
         }
     }
 }
 
 #[cfg(test)]
 fn test_voice_service_override() -> Option<Arc<VoiceService>> {
-    TEST_VOICE_SERVICE
-        .get_or_init(|| StdMutex::new(None))
+    TEST_VOICE_SERVICES
+        .get_or_init(|| StdMutex::new(HashMap::new()))
         .lock()
         .unwrap()
-        .clone()
+        .get(&test_voice_service_scope())
+        .cloned()
 }
 
 #[cfg(test)]
@@ -237,16 +250,13 @@ pub fn test_voice_service_with_delayed_responses(
 
 #[cfg(test)]
 pub async fn install_test_voice_service(service: Arc<VoiceService>) -> VoiceServiceTestGuard {
-    let lock = TEST_VOICE_SERVICE_LOCK
-        .get_or_init(|| async { Arc::new(AMutex::new(())) })
-        .await
-        .clone();
-    let guard = lock.lock_owned().await;
-    *TEST_VOICE_SERVICE
-        .get_or_init(|| StdMutex::new(None))
+    let scope = test_voice_service_scope();
+    TEST_VOICE_SERVICES
+        .get_or_init(|| StdMutex::new(HashMap::new()))
         .lock()
-        .unwrap() = Some(service);
-    VoiceServiceTestGuard { _guard: guard }
+        .unwrap()
+        .insert(scope, service);
+    VoiceServiceTestGuard { scope }
 }
 
 pub async fn voice_service() -> Arc<VoiceService> {
@@ -1150,6 +1160,26 @@ mod tests {
 
         assert_eq!(line.chars().count(), CHAT_REACTION_VOICE_MAX_CHARS);
         assert!(line.ends_with('…'));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_voice_service_overrides_are_isolated_across_concurrent_tasks() {
+        let barrier = Arc::new(Barrier::new(100));
+        let mut tasks = Vec::with_capacity(100);
+
+        for _ in 0..100 {
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                let (service, _) = test_voice_service_with_responses(vec![None]);
+                let _guard = install_test_voice_service(service.clone()).await;
+                barrier.wait().await;
+                assert!(Arc::ptr_eq(&voice_service().await, &service));
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap();
+        }
     }
 
     #[test]

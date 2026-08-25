@@ -809,7 +809,74 @@ mod tests {
             .iter()
             .map(|component| component.as_str())
             .collect();
-        assert_eq!(labels.len(), 57);
+        let unique_labels: std::collections::BTreeSet<_> = labels.iter().copied().collect();
+        let expected_labels: std::collections::BTreeSet<_> = [
+            "trajectory.snapshot",
+            "trajectory.serialize",
+            "trajectory.atomic_write",
+            "trajectory.commit",
+            "trajectory.index_lock_wait",
+            "trajectory.index_read",
+            "trajectory.index_write",
+            "trajectory.index_rebuild",
+            "command.queue_wait",
+            "stream.first_delta",
+            "sse.serialize",
+            "sse.broadcast",
+            "sse.lagged",
+            "tool.confirmation_wait",
+            "tool.catalog_build",
+            "tool.mutable_vector_build",
+            "tool.pool_parallel_expansion",
+            "tool.session_extraction",
+            "tool.catalog_pool_acquire",
+            "tool.alias_resolution",
+            "tool.confirmation_preflight",
+            "tool.policy_lookup",
+            "tool.execution_wait",
+            "tool.execution_lookup",
+            "tool.semaphore_wait",
+            "tool.runtime",
+            "tool.pre_hook",
+            "tool.post_hook",
+            "tool.result_postprocess",
+            "tool.result_merge",
+            "tool.session_merge_events",
+            "tool.checkpoint_scheduling",
+            "enrichment.attempt",
+            "enrichment.decision.first_user",
+            "enrichment.decision.forced",
+            "enrichment.decision.signaled",
+            "enrichment.skip.no_user",
+            "enrichment.skip.already_present",
+            "enrichment.skip.empty_query",
+            "enrichment.skip.command",
+            "enrichment.skip.threshold",
+            "enrichment.session_snapshot",
+            "enrichment.existing_context_scan",
+            "enrichment.query_normalize",
+            "enrichment.root_discovery",
+            "enrichment.current_root_resolve",
+            "enrichment.vecdb_lock_wait",
+            "enrichment.vecdb_lock_hold",
+            "enrichment.embedding",
+            "enrichment.scoped_search",
+            "enrichment.merge_dedup",
+            "enrichment.file_reread",
+            "enrichment.fallback",
+            "enrichment.card_build",
+            "enrichment.cache_miss",
+            "enrichment.cache_hit",
+            "enrichment.cache_coalesced",
+            "enrichment.insertion",
+            "enrichment.insertion_stale",
+            "enrichment.persistence_scheduling",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(labels.len(), PerfComponent::ALL.len());
+        assert_eq!(unique_labels.len(), labels.len());
+        assert_eq!(unique_labels, expected_labels);
         assert!(labels.iter().all(|label| label.len() <= 40));
         assert!(labels.contains(&"command.queue_wait"));
         assert!(labels.contains(&"stream.first_delta"));
