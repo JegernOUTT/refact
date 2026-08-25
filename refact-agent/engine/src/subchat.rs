@@ -3215,10 +3215,8 @@ mod subchat_tests {
 
         let error = gate_subchat_boundary(&gcx, &messages, "untrusted/model").unwrap_err();
 
-        assert_eq!(
-            error,
-            "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry."
-        );
+        assert!(error.starts_with("Output withheld by user privacy policy"));
+        assert!(error.contains("zone \""));
     }
 
     #[tokio::test]
@@ -3234,10 +3232,8 @@ mod subchat_tests {
         let sanitized = sanitize_messages_for_new_thread(&messages);
         let error = prepare_subchat_messages(&gcx, sanitized, "untrusted/model").unwrap_err();
 
-        assert_eq!(
-            error,
-            "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry."
-        );
+        assert!(error.starts_with("Output withheld by user privacy policy"));
+        assert!(error.contains("zone \""));
     }
 
     #[tokio::test]
@@ -3258,10 +3254,8 @@ mod subchat_tests {
         let sanitized = sanitize_messages_for_new_thread(&request);
         let error = prepare_subchat_messages(&gcx, sanitized, "untrusted/model").unwrap_err();
 
-        assert_eq!(
-            error,
-            "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry."
-        );
+        assert!(error.starts_with("Output withheld by user privacy policy"));
+        assert!(error.contains("zone \""));
     }
 
     #[tokio::test]

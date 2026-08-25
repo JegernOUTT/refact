@@ -59,8 +59,35 @@ pub struct Refusal {
 }
 
 impl Refusal {
-    pub fn model_facing(&self) -> &'static str {
-        "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry."
+    pub fn model_facing(&self) -> String {
+        let target = self.destination.id.0.as_str();
+        if self.offending.is_empty() {
+            return format!(
+                "Output withheld by user privacy policy — \"{target}\" cannot receive guarded files carried by this request."
+            );
+        }
+        let mut listed: Vec<String> = Vec::new();
+        let mut seen: Vec<(&str, &str)> = Vec::new();
+        let mut hidden = 0usize;
+        for (_, record) in &self.offending {
+            let key = (record.path.as_str(), record.zone.as_str());
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            if listed.len() < 5 {
+                listed.push(format!("  - {} (zone \"{}\")", record.path, record.zone));
+            } else {
+                hidden += 1;
+            }
+        }
+        if hidden > 0 {
+            listed.push(format!("  - ...and {hidden} more"));
+        }
+        format!(
+            "Output withheld by user privacy policy — \"{target}\" cannot receive these guarded files:\n{}\nRetrying the same request will be refused again. Continue without those files, or ask the user to allow these zones for \"{target}\".",
+            listed.join("\n")
+        )
     }
 }
 
@@ -402,10 +429,10 @@ mod tests {
             Err(refusal) => refusal,
         };
 
-        assert_eq!(
-            refusal.model_facing(),
-            "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry."
-        );
+        let facing = refusal.model_facing();
+        assert!(facing.starts_with("Output withheld by user privacy policy"));
+        assert!(facing.contains("zone \""));
+        assert!(facing.contains(".env"));
     }
 
     #[test]

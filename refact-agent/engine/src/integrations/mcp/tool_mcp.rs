@@ -761,7 +761,8 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error, "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry.");
+        assert!(error.starts_with("Output withheld by user privacy policy"));
+        assert!(error.contains("zone \""));
         assert_eq!(dispatched.load(Ordering::Relaxed), 0);
     }
 
@@ -811,7 +812,8 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error, "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry.");
+        assert!(error.starts_with("Output withheld by user privacy policy"));
+        assert!(error.contains("zone \""));
         assert_eq!(dispatched.load(Ordering::Relaxed), 0);
     }
 

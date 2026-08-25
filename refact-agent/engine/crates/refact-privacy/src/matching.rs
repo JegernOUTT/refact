@@ -47,6 +47,8 @@ pub struct CompiledPolicy {
     normal_index: usize,
     #[cfg(unix)]
     secret_identities: RwLock<HashMap<FileIdentity, usize>>,
+    #[cfg(unix)]
+    guarded_aliases: RwLock<HashMap<Vec<PathBuf>, HashMap<FileIdentity, Vec<PathBuf>>>>,
 }
 
 pub fn compile_patterns(patterns: &[String]) -> Result<Vec<Pattern>, PolicyError> {
@@ -149,6 +151,8 @@ impl PrivacyPolicy {
             normal_index,
             #[cfg(unix)]
             secret_identities: RwLock::new(HashMap::new()),
+            #[cfg(unix)]
+            guarded_aliases: RwLock::new(HashMap::new()),
         })
     }
 }
@@ -187,7 +191,7 @@ impl CompiledPolicy {
 
         #[cfg(unix)]
         if let Some(identity) = hard_linked_file_identity(path) {
-            append_identity_aliases(&mut candidate_paths, identity, &roots);
+            self.extend_with_guarded_aliases(&mut candidate_paths, identity, &roots);
             append_relative_candidates(&mut candidate_paths, &roots);
         }
 
@@ -274,6 +278,85 @@ impl CompiledPolicy {
                 None
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn extend_with_guarded_aliases(
+        &self,
+        paths: &mut Vec<PathBuf>,
+        identity: FileIdentity,
+        roots: &[PathBuf],
+    ) {
+        let key = roots.to_vec();
+        if let Some(aliases) = self
+            .guarded_aliases
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&key)
+            .map(|index| index.get(&identity).cloned().unwrap_or_default())
+        {
+            paths.extend(aliases);
+            return;
+        }
+        let index = self.build_guarded_alias_index(roots);
+        if let Some(aliases) = index.get(&identity) {
+            paths.extend(aliases.iter().cloned());
+        }
+        self.guarded_aliases
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, index);
+    }
+
+    #[cfg(unix)]
+    fn build_guarded_alias_index(&self, roots: &[PathBuf]) -> HashMap<FileIdentity, Vec<PathBuf>> {
+        let mut index: HashMap<FileIdentity, Vec<PathBuf>> = HashMap::new();
+        let mut pending = roots
+            .iter()
+            .map(|root| canonicalize_or_original(root))
+            .collect::<Vec<_>>();
+        let mut visited = 0usize;
+        while let Some(path) = pending.pop() {
+            if visited >= MAX_GUARDED_INDEX_ENTRIES {
+                break;
+            }
+            visited += 1;
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                let Ok(entries) = std::fs::read_dir(&path) else {
+                    continue;
+                };
+                pending.extend(entries.filter_map(Result::ok).map(|entry| entry.path()));
+                continue;
+            }
+            if !self.path_matches_guarded_zone(&path, roots) {
+                continue;
+            }
+            let Some(identity) = hard_linked_file_identity(&path) else {
+                continue;
+            };
+            index.entry(identity).or_default().push(path);
+        }
+        index
+    }
+
+    #[cfg(unix)]
+    fn path_matches_guarded_zone(&self, path: &Path, roots: &[PathBuf]) -> bool {
+        let mut candidate_paths = vec![path.to_path_buf(), absolute_path(path)];
+        append_relative_candidates(&mut candidate_paths, roots);
+        let candidates = normalized_candidates(&candidate_paths);
+        self.zones.iter().enumerate().any(|(index, compiled)| {
+            index != self.normal_index
+                && compiled
+                    .patterns
+                    .iter()
+                    .any(|pattern| candidates.iter().any(|c| pattern.matches(c)))
+        })
     }
 
     #[cfg(unix)]
@@ -460,28 +543,7 @@ fn hard_linked_file_identity(path: &Path) -> Option<FileIdentity> {
 }
 
 #[cfg(unix)]
-fn append_identity_aliases(paths: &mut Vec<PathBuf>, identity: FileIdentity, roots: &[PathBuf]) {
-    let mut pending = roots
-        .iter()
-        .map(|root| canonicalize_or_original(root))
-        .collect::<Vec<_>>();
-    while let Some(path) = pending.pop() {
-        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-        if metadata.is_dir() {
-            let Ok(entries) = std::fs::read_dir(path) else {
-                continue;
-            };
-            pending.extend(entries.filter_map(Result::ok).map(|entry| entry.path()));
-        } else if file_identity(&path) == Some(identity) {
-            paths.push(path);
-        }
-    }
-}
+const MAX_GUARDED_INDEX_ENTRIES: usize = 200_000;
 
 #[cfg(test)]
 mod tests {
@@ -966,6 +1028,41 @@ mod tests {
                 .zone_for_path_with_roots(&alias, [temp.path()])
                 .name,
             "secrets"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guarded_alias_index_records_only_restrictive_matches() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let secret_dir = temp.path().join("secrets");
+        std::fs::create_dir(&secret_dir).expect("secret dir should be created");
+        let secret = secret_dir.join("secret.txt");
+        std::fs::write(&secret, "secret").expect("secret should be written");
+        std::fs::hard_link(&secret, temp.path().join("alias.txt"))
+            .expect("secret hard link should be created");
+        let plain = temp.path().join("plain.txt");
+        std::fs::write(&plain, "plain").expect("plain should be written");
+        std::fs::hard_link(&plain, temp.path().join("plain-alias.txt"))
+            .expect("plain hard link should be created");
+        let compiled = policy(vec![
+            zone("secrets", &["secrets/*"], &[]),
+            zone("normal", &["*"], &["*"]),
+        ])
+        .compile()
+        .expect("policy should compile");
+
+        let index = compiled.build_guarded_alias_index(&[temp.path().to_path_buf()]);
+
+        let secret_identity = file_identity(&secret).expect("secret identity");
+        let plain_identity = file_identity(&plain).expect("plain identity");
+        assert!(
+            index.contains_key(&secret_identity),
+            "restrictive-zone file must be indexed"
+        );
+        assert!(
+            !index.contains_key(&plain_identity),
+            "non-restrictive hard-linked files must not be indexed"
         );
     }
 

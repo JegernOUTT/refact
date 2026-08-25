@@ -15,7 +15,7 @@ use crate::files_correction::registered_worktree_path_mappings;
 use crate::files_in_workspace::{check_file_privacy_for_model_context, registered_alias_paths};
 use crate::global_context::GlobalContext;
 
-pub const SHELL_WITHHELD_MESSAGE: &str = "Output withheld by user privacy policy — this command read guarded files. Other tools will refuse identically. Do not retry.";
+pub const SHELL_WITHHELD_MESSAGE: &str = "Output withheld by user privacy policy — the command ran, but its output read guarded files and cannot be shown.";
 pub const SHELL_APPROVAL_MESSAGE: &str =
     "Output awaiting user approval — this command read guarded files.";
 
@@ -46,28 +46,11 @@ pub fn provider_destination(model_id: &str) -> Destination {
 
 pub fn shell_observation_needed(gcx: &Arc<GlobalContext>, destination: &Destination) -> bool {
     let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
-    if policy.blocked.is_empty()
-        && policy
+    !policy.blocked.is_empty()
+        || policy
             .zones
             .iter()
-            .all(|zone| destination.matches_send_to(&zone.send_to))
-    {
-        return false;
-    }
-    let workspace_files = gcx.documents_state.workspace_files.lock().unwrap().clone();
-    if workspace_files.is_empty() {
-        return false;
-    }
-    let Ok(compiled) = policy.compile() else {
-        return true;
-    };
-    let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
-    let roots = privacy_roots(gcx, &mappings);
-    workspace_files.into_iter().any(|path| {
-        let candidates = record_path_candidates(gcx, &path, &mappings);
-        let zone = compiled.strictest_zone_for_paths_with_roots(candidates, &roots);
-        zone.name == "blocked" || !destination.matches_send_to(&zone.send_to)
-    })
+            .any(|zone| !destination.matches_send_to(&zone.send_to))
 }
 
 pub fn shell_observation_needed_for_session(
@@ -342,9 +325,7 @@ pub async fn apply_shell_observation(
     let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
     let records = match observation {
         ObservationStatus::Observed(access) => {
-            let records = observed_file_records_with_derived(gcx, access.reads, derived_zones)?;
-            inherit_observed_write_zones(gcx, &policy, &records, access.writes, derived_zones)?;
-            records
+            classify_observed_access(gcx, &policy, access, derived_zones).await?
         }
         ObservationStatus::Pending(access) => {
             message.extra.insert(
@@ -355,9 +336,7 @@ pub async fn apply_shell_observation(
                     "incomplete": true,
                 }),
             );
-            let records = observed_file_records_with_derived(gcx, access.reads, derived_zones)?;
-            inherit_observed_write_zones(gcx, &policy, &records, access.writes, derived_zones)?;
-            records
+            classify_observed_access(gcx, &policy, access, derived_zones).await?
         }
         ObservationStatus::Incomplete(access) => {
             message.extra.insert(
@@ -368,9 +347,7 @@ pub async fn apply_shell_observation(
                     "incomplete": true,
                 }),
             );
-            let records = observed_file_records_with_derived(gcx, access.reads, derived_zones)?;
-            inherit_observed_write_zones(gcx, &policy, &records, access.writes, derived_zones)?;
-            records
+            classify_observed_access(gcx, &policy, access, derived_zones).await?
         }
         ObservationStatus::Unavailable(reason) => {
             let compiled = policy.compile().map_err(|error| error.to_string())?;
@@ -392,38 +369,101 @@ pub async fn apply_shell_observation(
     };
     merge_records(message, records.clone());
 
-    let behaviors = records.iter().filter_map(|record| {
-        if record.zone == "blocked" {
-            return Some(ShellBehavior::Deny);
-        }
-        policy
-            .zones
+    let offending: Vec<(&FileRecord, ShellBehavior)> = records
+        .iter()
+        .filter_map(|record| {
+            if record.zone == "blocked" {
+                return Some((record, ShellBehavior::Deny));
+            }
+            policy
+                .zones
+                .iter()
+                .find(|zone| zone.name == record.zone)
+                .filter(|zone| !destination.matches_send_to(&zone.send_to))
+                .map(|zone| (record, zone.on_shell_read))
+        })
+        .collect();
+    let behavior =
+        offending
             .iter()
-            .find(|zone| zone.name == record.zone)
-            .filter(|zone| !destination.matches_send_to(&zone.send_to))
-            .map(|zone| zone.on_shell_read)
-    });
-    let behavior = behaviors.fold(None, |decision, behavior| match (decision, behavior) {
-        (_, ShellBehavior::Deny) => Some(ShellBehavior::Deny),
-        (Some(ShellBehavior::Deny), _) => Some(ShellBehavior::Deny),
-        (_, ShellBehavior::Withhold) => Some(ShellBehavior::Withhold),
-        (Some(ShellBehavior::Withhold), _) => Some(ShellBehavior::Withhold),
-        (_, ShellBehavior::Ask) => Some(ShellBehavior::Ask),
-    });
+            .map(|(_, behavior)| *behavior)
+            .fold(None, |decision, behavior| match (decision, behavior) {
+                (_, ShellBehavior::Deny) => Some(ShellBehavior::Deny),
+                (Some(ShellBehavior::Deny), _) => Some(ShellBehavior::Deny),
+                (_, ShellBehavior::Withhold) => Some(ShellBehavior::Withhold),
+                (Some(ShellBehavior::Withhold), _) => Some(ShellBehavior::Withhold),
+                (_, ShellBehavior::Ask) => Some(ShellBehavior::Ask),
+            });
+    let guarded = guarded_read_list(&offending);
+    let target = destination.id.0.as_str();
     match behavior {
-        Some(ShellBehavior::Deny) => {
-            Err("Denied by user privacy policy — this command read guarded files".to_string())
-        }
+        Some(ShellBehavior::Deny) => Err(format!(
+            "Denied by user privacy policy — the command read guarded files, so its output was discarded:\n{guarded}\nThe command already ran; re-running it unchanged will be denied again. Scope it so it does not read those paths, or ask the user to relax the zone."
+        )),
         Some(ShellBehavior::Withhold) => {
-            retain_local_shell_output(message, SHELL_WITHHELD_MESSAGE, false);
+            retain_local_shell_output(
+                message,
+                &format!(
+                    "Output withheld by user privacy policy — the command ran, but its output cannot be sent to \"{target}\" because it read guarded files:\n{guarded}\nAny side effects already happened, so do not re-run it just to retry. To see output, re-run it scoped so it does not read those paths, or ask the user to allow these zones for \"{target}\"."
+                ),
+                false,
+            );
             Ok(ShellReadDecision::Pass)
         }
         Some(ShellBehavior::Ask) => {
-            retain_local_shell_output(message, SHELL_APPROVAL_MESSAGE, true);
+            retain_local_shell_output(
+                message,
+                &format!(
+                    "Output awaiting user approval — the command ran, but its output stays hidden until the user approves it, because it read guarded files:\n{guarded}"
+                ),
+                true,
+            );
             Ok(ShellReadDecision::Ask)
         }
         None => Ok(ShellReadDecision::Pass),
     }
+}
+
+async fn classify_observed_access(
+    gcx: &Arc<GlobalContext>,
+    policy: &refact_privacy::PrivacyPolicy,
+    access: refact_exec::ObservedAccess,
+    derived_zones: &DerivedPrivacyZones,
+) -> Result<Vec<FileRecord>, String> {
+    let gcx = gcx.clone();
+    let policy = policy.clone();
+    let derived_zones = derived_zones.clone();
+    tokio::task::spawn_blocking(move || {
+        let records = observed_file_records_with_derived(&gcx, access.reads, &derived_zones)?;
+        inherit_observed_write_zones(&gcx, &policy, &records, access.writes, &derived_zones)?;
+        Ok(records)
+    })
+    .await
+    .map_err(|error| format!("privacy classification task failed: {error}"))?
+}
+
+const MAX_LISTED_GUARDED_READS: usize = 5;
+
+fn guarded_read_list(offending: &[(&FileRecord, ShellBehavior)]) -> String {
+    let mut listed: Vec<String> = Vec::new();
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    let mut hidden = 0usize;
+    for (record, _) in offending {
+        let key = (record.path.as_str(), record.zone.as_str());
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        if listed.len() < MAX_LISTED_GUARDED_READS {
+            listed.push(format!("  - {} (zone \"{}\")", record.path, record.zone));
+        } else {
+            hidden += 1;
+        }
+    }
+    if hidden > 0 {
+        listed.push(format!("  - ...and {hidden} more"));
+    }
+    listed.join("\n")
 }
 
 fn retain_local_shell_output(message: &mut ChatMessage, replacement: &str, ask_pending: bool) {
@@ -538,11 +578,29 @@ fn file_record(
     let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
     let compiled = policy.compile().map_err(|error| error.to_string())?;
     let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
-    Ok(FileRecord {
-        path: refact_core::chat_types::normalize_file_name(path.to_string_lossy().into_owned()),
-        zone: zone_for_record_path(gcx, &compiled, path, &mappings, derived_zones),
+    Ok(file_record_with(
+        gcx,
+        &compiled,
+        &mappings,
+        path,
         attribution,
-    })
+        derived_zones,
+    ))
+}
+
+fn file_record_with(
+    gcx: &Arc<GlobalContext>,
+    compiled: &refact_privacy::CompiledPolicy,
+    mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
+    path: &Path,
+    attribution: Attribution,
+    derived_zones: &DerivedPrivacyZones,
+) -> FileRecord {
+    FileRecord {
+        path: refact_core::chat_types::normalize_file_name(path.to_string_lossy().into_owned()),
+        zone: zone_for_record_path(gcx, compiled, path, mappings, derived_zones),
+        attribution,
+    }
 }
 
 pub fn declared_file_record(gcx: &Arc<GlobalContext>, path: &Path) -> Result<FileRecord, String> {
@@ -580,14 +638,30 @@ fn observed_file_records_with_derived(
     paths: impl IntoIterator<Item = PathBuf>,
     derived_zones: &DerivedPrivacyZones,
 ) -> Result<Vec<FileRecord>, String> {
+    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+    let compiled = policy.compile().map_err(|error| error.to_string())?;
+    let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
     let mut records = Vec::new();
     for path in paths {
-        let record = file_record(gcx, &path, Attribution::Observed, derived_zones)?;
+        let record = file_record_with(
+            gcx,
+            &compiled,
+            &mappings,
+            &path,
+            Attribution::Observed,
+            derived_zones,
+        );
         if !records.contains(&record) {
             records.push(record);
         }
     }
     Ok(records)
+}
+
+fn is_taintable_write_target(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
 }
 
 fn inherit_observed_write_zones(
@@ -612,6 +686,9 @@ fn inherit_observed_write_zones(
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     for path in writes {
+        if !is_taintable_write_target(&path) {
+            continue;
+        }
         for candidate in record_path_candidates(gcx, &path, &mappings) {
             let replace = derived_zones
                 .get(&candidate)
@@ -852,6 +929,38 @@ mod tests {
         assert_eq!(record.zone, "derived-earlier");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shared_sink_writes_do_not_inherit_guarded_zone() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = temp.path().join("secret.txt");
+        std::fs::write(&secret, "secret").unwrap();
+        let gcx = gcx_with_policy(&secret, &[], ShellBehavior::Withhold).await;
+        let derived_zones = new_derived_privacy_zones();
+        let mut message = tool_message("secret output");
+
+        apply_shell_observation(
+            &gcx,
+            "cat secret.txt 2>/dev/null",
+            temp.path(),
+            &provider_destination("untrusted/model"),
+            ObservationStatus::Observed(ObservedAccess {
+                reads: vec![secret.clone()],
+                writes: vec![PathBuf::from("/dev/null")],
+            }),
+            &derived_zones,
+            &mut message,
+        )
+        .await
+        .unwrap();
+
+        let tainted = derived_zones.read().unwrap();
+        assert!(
+            !tainted.keys().any(|path| path == Path::new("/dev/null")),
+            "shared character devices must never inherit a guarded zone"
+        );
+    }
+
     #[tokio::test]
     async fn observed_guarded_read_withholds_output_and_keeps_local_copy() {
         let temp = tempfile::tempdir().unwrap();
@@ -877,7 +986,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(decision, ShellReadDecision::Pass);
-        assert_eq!(message.content.content_text_only(), SHELL_WITHHELD_MESSAGE);
+        let withheld = message.content.content_text_only();
+        assert!(withheld.starts_with("Output withheld by user privacy policy"));
+        assert!(withheld.contains("secret.txt"));
+        assert!(withheld.contains("zone \"secrets\""));
         assert_eq!(
             message.extra["privacy_shell"]["local_only_output"],
             "secret output"
@@ -974,10 +1086,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(read_message.extra["privacy"]["files"][0]["zone"], "secrets");
-        assert_eq!(
-            read_message.content.content_text_only(),
-            SHELL_WITHHELD_MESSAGE
-        );
+        let withheld = read_message.content.content_text_only();
+        assert!(withheld.starts_with("Output withheld by user privacy policy"));
+        assert!(withheld.contains("zone \"secrets\""));
 
         let mut other_session_message = tool_message("ordinary output");
         apply_shell_observation(
@@ -1092,7 +1203,9 @@ mod tests {
 
         assert_eq!(decision, ShellReadDecision::Ask);
         assert!(shell_ask_pending(&message));
-        assert_eq!(message.content.content_text_only(), SHELL_APPROVAL_MESSAGE);
+        let pending = message.content.content_text_only();
+        assert!(pending.starts_with("Output awaiting user approval"));
+        assert!(pending.contains("zone \"secrets\""));
         assert!(resolve_shell_ask(&mut message, true));
         assert_eq!(message.content.content_text_only(), "approval output");
         assert!(!shell_ask_pending(&message));
@@ -1102,7 +1215,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_workspace_files_skips_observation() {
+    async fn restrictive_policy_requires_observation_outside_the_workspace() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         gcx.privacy_policy_load.write().unwrap().policy = Arc::new(PrivacyPolicy {
             zones: vec![Zone {
@@ -1114,7 +1227,7 @@ mod tests {
             ..PrivacyPolicy::default()
         });
 
-        assert!(!shell_observation_needed(
+        assert!(shell_observation_needed(
             &gcx,
             &provider_destination("untrusted/model")
         ));
