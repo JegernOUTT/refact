@@ -22,10 +22,7 @@ impl HistoryCell for SearchToolCell {
         lines.push(tool_summary_line(
             &self.card,
             search_label(&self.card),
-            self.card
-                .duration_ms
-                .map(format_duration)
-                .unwrap_or_default(),
+            rendered_duration(&self.card),
         ));
         lines.extend(subchat_lines(&self.card, width));
         if self.card.expanded && !self.card.result.is_empty() {

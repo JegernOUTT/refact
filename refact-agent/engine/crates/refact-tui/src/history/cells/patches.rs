@@ -72,10 +72,7 @@ impl HistoryCell for DiffToolCell {
         lines.push(tool_summary_line(
             &self.card,
             diff_summary(&stats),
-            self.card
-                .duration_ms
-                .map(format_duration)
-                .unwrap_or_default(),
+            rendered_duration(&self.card),
         ));
         lines.extend(subchat_lines(&self.card, width));
         lines.extend(diff_summary_header_lines(&source, width));

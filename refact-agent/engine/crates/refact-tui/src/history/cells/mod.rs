@@ -618,18 +618,48 @@ fn value_to_string(value: &Value) -> String {
     }
 }
 
-fn exit_code_from_result(result: &str) -> Option<String> {
-    result.lines().find_map(|line| {
-        let trimmed = line.trim();
-        if let Some(value) = trimmed.strip_prefix("exit_code:") {
-            let value = value.trim();
-            return (!value.is_empty() && value != "<none>").then(|| value.to_string());
-        }
-        trimmed
-            .rsplit_once("exit code ")
-            .map(|(_, code)| code.trim().to_string())
-            .filter(|code| !code.is_empty())
-    })
+fn tool_exit_code(card: &ToolCard) -> Option<i32> {
+    card.reported_exit_code()
+        .unwrap_or_else(|| legacy_exit_code_from_result(&card.result))
+}
+
+fn legacy_exit_code_from_result(result: &str) -> Option<i32> {
+    result
+        .lines()
+        .find_map(|line| legacy_exit_code_from_status_line(line.trim()))
+}
+
+fn legacy_exit_code_from_status_line(line: &str) -> Option<i32> {
+    let line = line.strip_prefix("The command was running ")?;
+    let (duration, exit_code) = line.split_once("s, finished with exit code ")?;
+    valid_legacy_duration(duration)
+        .then_some(())
+        .and_then(|()| parse_exit_code(exit_code))
+}
+
+fn valid_legacy_duration(value: &str) -> bool {
+    let (seconds, fraction) = match value.split_once('.') {
+        Some((seconds, fraction)) => (seconds, Some(fraction)),
+        None => (value, None),
+    };
+    !seconds.is_empty()
+        && seconds.bytes().all(|byte| byte.is_ascii_digit())
+        && fraction.is_none_or(|fraction| {
+            !fraction.is_empty() && fraction.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+fn parse_exit_code(value: &str) -> Option<i32> {
+    (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(value)
+        .and_then(|value| value.parse::<i32>().ok())
+}
+
+fn rendered_duration(card: &ToolCard) -> String {
+    card.duration_ms
+        .filter(|duration_ms| *duration_ms > 0)
+        .map(format_duration)
+        .unwrap_or_default()
 }
 
 fn output_lines(
@@ -1019,5 +1049,25 @@ mod tests {
         assert!(lines.iter().all(|line| {
             line.style.fg.is_none() && line.spans.iter().all(|span| span.style.fg.is_none())
         }));
+    }
+
+    #[test]
+    fn legacy_exit_codes_require_a_complete_runtime_status_line() {
+        assert_eq!(
+            legacy_exit_code_from_result(
+                "output\nThe command was running 0.120s, finished with exit code 17"
+            ),
+            Some(17)
+        );
+        for result in [
+            "The tool documentation says exit code 17 means failure.",
+            "finished with exit code 17",
+            "The command was running one second, finished with exit code 17",
+            "The command was running 0.120s, finished with exit code -1",
+            "The command was running 0.120s, finished with exit code failed",
+            "The command was running 0.120s, finished with exit code 17 afterward",
+        ] {
+            assert_eq!(legacy_exit_code_from_result(result), None, "{result}");
+        }
     }
 }

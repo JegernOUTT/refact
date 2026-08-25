@@ -2260,6 +2260,28 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_uses_structured_exec_metadata() {
+        let mut app = App::new(project());
+        app.handle_chat_event(tool_call_delta_event(&app, "call-1"));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"message": {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": "The command was running 0.120s, finished with exit code 1",
+                "tool_failed": false,
+                "extra": {"exec": {"duration_ms": 8_000, "exit_code": 0}}
+            }}),
+        });
+
+        let rendered = rendered_item_plain_text(&TranscriptItem::Tool(tool_cards(&app)[0].clone()));
+        assert!(rendered.contains("exit 0 · 8.0s"));
+        assert!(!rendered.contains("exit 1"));
+    }
+
+    #[test]
     fn native_new_chat_session_header_updates_model_without_duplication() {
         let mut app = App::new(project());
         app.set_native_scrollback(true);

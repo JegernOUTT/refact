@@ -853,7 +853,11 @@ impl App {
                     card.set_result(&result);
                     card.status = status;
                     card.subchat_active = false;
-                    card.duration_ms = Some(completed_at_ms.saturating_sub(card.started_at_ms));
+                    if card.duration_ms.is_none() {
+                        card.duration_ms = completed_at_ms
+                            .checked_sub(card.started_at_ms)
+                            .filter(|duration_ms| *duration_ms > 0);
+                    }
                     if active_ask_tool_id.as_deref() == Some(card.id.as_str()) {
                         card.expanded = false;
                     }
@@ -870,7 +874,6 @@ impl App {
         let mut card = ToolCard::from_tool_call(&json!({"id": id, "name": name}));
         card.set_result(&result);
         card.status = status;
-        card.duration_ms = Some(0);
         if active_ask_tool_id.as_deref() == Some(card.id.as_str()) {
             card.expanded = false;
         }
@@ -890,7 +893,9 @@ impl App {
                 card.subchat_active = false;
                 if card.status.is_active() {
                     card.status = ToolStatus::Succeeded;
-                    card.duration_ms = Some(completed_at_ms.saturating_sub(card.started_at_ms));
+                    card.duration_ms = completed_at_ms
+                        .checked_sub(card.started_at_ms)
+                        .filter(|duration_ms| *duration_ms > 0);
                 }
             }
         }
@@ -1230,8 +1235,9 @@ impl App {
         if !self.record_state_history_key(key) {
             return;
         }
+        let tool_call_id = message.tool_call_id.as_deref().unwrap_or_default();
         self.complete_tool(
-            message.tool_call_id.as_deref().unwrap_or_default(),
+            tool_call_id,
             message.role.as_str(),
             message.content.clone(),
             if message.tool_failed {
@@ -1241,6 +1247,16 @@ impl App {
             },
             now_ms(),
         );
+        if let Some(TranscriptItem::Tool(card)) = self
+            .transcript
+            .iter_mut()
+            .rev()
+            .find(|item| {
+                matches!(item, TranscriptItem::Tool(card) if card.id == tool_call_id || tool_call_id.is_empty())
+            })
+        {
+            card.apply_result_metadata(&message.extra);
+        }
     }
 }
 

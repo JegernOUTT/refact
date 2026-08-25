@@ -113,11 +113,12 @@ impl HistoryCell for ExecToolCell {
             default_theme_style(ThemeRole::Accent),
         )];
         let mut meta = Vec::new();
-        if let Some(exit_code) = exit_code_from_result(&self.card.result) {
+        if let Some(exit_code) = tool_exit_code(&self.card) {
             meta.push(format!("exit {exit_code}"));
         }
-        if let Some(duration_ms) = self.card.duration_ms {
-            meta.push(format_duration(duration_ms));
+        let duration = rendered_duration(&self.card);
+        if !duration.is_empty() {
+            meta.push(duration);
         }
         lines.push(tool_summary_line(
             &self.card,
@@ -189,9 +190,7 @@ fn exec_output_lines(card: &ToolCard, width: usize) -> Vec<Line<'static>> {
 }
 
 fn failed_exit(card: &ToolCard) -> bool {
-    card.status == ToolStatus::Failed
-        || exit_code_from_result(&card.result)
-            .is_some_and(|code| code.trim() != "0" && code.trim() != "<none>")
+    card.status == ToolStatus::Failed || tool_exit_code(card).is_some_and(|code| code != 0)
 }
 
 fn collect_exec_output_lines(result: &str) -> Vec<ExecOutputLine> {
@@ -485,5 +484,51 @@ mod tests {
         assert!(!rendered.contains('\x07'));
         assert!(!rendered.contains("pwned"));
         assert!(rendered.contains("okdone"));
+    }
+
+    #[test]
+    fn structured_exec_metadata_wins_over_legacy_result_text() {
+        for (structured_exit, status) in [(0, ToolStatus::Succeeded), (7, ToolStatus::Failed)] {
+            let mut card = tool_card(
+                "shell",
+                json!({"command": "false"}),
+                "The command was running 0.120s, finished with exit code 1",
+            );
+            card.status = status;
+            card.apply_result_metadata(&serde_json::Map::from_iter([(
+                "exec".to_string(),
+                json!({"duration_ms": 2_345, "exit_code": structured_exit}),
+            )]));
+
+            let rendered = text(&ExecToolCell::new(card, false).render(80));
+            assert!(rendered.contains(&format!("$ false · exit {structured_exit} · 2.3s")));
+            assert!(!rendered.contains("exit 1"));
+        }
+    }
+
+    #[test]
+    fn no_duration_is_rendered_without_a_positive_stamp() {
+        let mut card = tool_card("shell", json!({"command": "echo hi"}), "hi");
+        card.duration_ms = Some(0);
+
+        let rendered = text(&ExecToolCell::new(card, false).render(80));
+        assert!(rendered.contains("$ echo hi"));
+        assert!(!rendered.contains("0ms"));
+    }
+
+    #[test]
+    fn invalid_structured_exit_code_never_uses_result_prose() {
+        let mut card = tool_card(
+            "shell",
+            json!({"command": "echo hi"}),
+            "The documentation mentions exit code 17.",
+        );
+        card.apply_result_metadata(&serde_json::Map::from_iter([(
+            "exec".to_string(),
+            json!({"exit_code": -1}),
+        )]));
+
+        let rendered = text(&ExecToolCell::new(card, false).render(80));
+        assert!(!rendered.contains("exit 17"));
     }
 }

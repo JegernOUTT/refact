@@ -853,8 +853,8 @@ impl App {
                         items.push(item);
                     }
                 }
-                TranscriptRole::Tool | TranscriptRole::Diff => items.push(TranscriptItem::Tool(
-                    ToolCard::from_tool_call(&json!({
+                TranscriptRole::Tool | TranscriptRole::Diff => {
+                    let mut card = ToolCard::from_tool_call(&json!({
                         "id": message.tool_call_id.clone().unwrap_or_default(),
                         "name": message.role.as_str()
                     }))
@@ -865,8 +865,10 @@ impl App {
                         } else {
                             ToolStatus::Succeeded
                         },
-                    ),
-                )),
+                    );
+                    card.apply_result_metadata(&message.extra);
+                    items.push(TranscriptItem::Tool(card));
+                }
                 TranscriptRole::ClientLocalNotice => {
                     items.push(TranscriptItem::Notice(message.content.clone()))
                 }

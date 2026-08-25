@@ -102,6 +102,7 @@ pub struct ToolCard {
     pub result: String,
     pub status: ToolStatus,
     pub duration_ms: Option<u64>,
+    exit_code: Option<Option<i32>>,
     pub started_at_ms: u64,
     pub expanded: bool,
     pub subchat_log: Vec<String>,
@@ -139,6 +140,8 @@ impl ToolCard {
         let mut attached_files = string_array_field(value, "attached_files");
         let attached_files_truncated = attached_files.len() > MAX_SUBCHAT_ATTACHED_FILES;
         attached_files.truncate(MAX_SUBCHAT_ATTACHED_FILES);
+        let started_at_ms = timestamp_field(value, "started_at_ms");
+        let completed_at_ms = timestamp_field(value, "completed_at_ms");
         Self {
             id,
             name,
@@ -146,8 +149,13 @@ impl ToolCard {
             args_preview: compact_preview(&raw_args, 96),
             result: String::new(),
             status: tool_status_from_value(value),
-            duration_ms: None,
-            started_at_ms: now_ms(),
+            duration_ms: structured_duration_ms(value).flatten().or_else(|| {
+                completed_at_ms
+                    .zip(started_at_ms)
+                    .and_then(|(end, start)| end.checked_sub(start))
+            }),
+            exit_code: structured_exit_code(value),
+            started_at_ms: started_at_ms.unwrap_or_else(now_ms),
             expanded: false,
             subchat_log: subchat_log_from_value(value),
             attached_files,
@@ -183,10 +191,29 @@ impl ToolCard {
         self.result = sanitize_tool_text(result);
     }
 
+    pub fn apply_result_metadata(&mut self, extra: &serde_json::Map<String, Value>) {
+        if let Some(duration_ms) = structured_duration_ms_from_extra(extra) {
+            self.duration_ms = duration_ms;
+        }
+        if let Some(exit_code) = structured_exit_code_from_extra(extra) {
+            self.exit_code = Some(exit_code);
+        }
+    }
+
+    pub fn reported_exit_code(&self) -> Option<Option<i32>> {
+        self.exit_code
+    }
+
     pub fn update_from_tool_call(&mut self, update: ToolCard) {
         self.name = update.name;
         self.args = update.args;
         self.args_preview = update.args_preview;
+        if update.duration_ms.is_some() {
+            self.duration_ms = update.duration_ms;
+        }
+        if update.exit_code.is_some() {
+            self.exit_code = update.exit_code;
+        }
         self.subchat_log = update.subchat_log;
         self.attached_files = update.attached_files;
         self.subchat_depth = update.subchat_depth;
@@ -211,6 +238,7 @@ impl ToolCard {
     pub fn summary(&self) -> String {
         let duration = self
             .duration_ms
+            .filter(|duration_ms| *duration_ms > 0)
             .map(format_duration)
             .unwrap_or_else(|| "".to_string());
         let mut parts = vec![format!(
@@ -430,6 +458,51 @@ fn tool_status_from_value(value: &Value) -> ToolStatus {
         Some("cancelled") | Some("canceled") | Some("aborted") => ToolStatus::Cancelled,
         _ => ToolStatus::Running,
     }
+}
+
+fn timestamp_field(value: &Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(Value::as_u64)
+}
+
+fn structured_duration_ms(value: &Value) -> Option<Option<u64>> {
+    structured_field(value, &["duration_ms"]).map(Value::as_u64)
+}
+
+fn structured_exit_code(value: &Value) -> Option<Option<i32>> {
+    structured_field(value, &["exit_code", "exitCode"])
+        .map(|value| value.as_u64().and_then(|code| i32::try_from(code).ok()))
+}
+
+fn structured_duration_ms_from_extra(
+    extra: &serde_json::Map<String, Value>,
+) -> Option<Option<u64>> {
+    structured_field_from_extra(extra, &["duration_ms"]).map(Value::as_u64)
+}
+
+fn structured_exit_code_from_extra(extra: &serde_json::Map<String, Value>) -> Option<Option<i32>> {
+    structured_field_from_extra(extra, &["exit_code", "exitCode"])
+        .map(|value| value.as_u64().and_then(|code| i32::try_from(code).ok()))
+}
+
+fn structured_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    value
+        .get("exec")
+        .and_then(|exec| field(exec, keys))
+        .or_else(|| field(value, keys))
+}
+
+fn structured_field_from_extra<'a>(
+    extra: &'a serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Option<&'a Value> {
+    extra
+        .get("exec")
+        .and_then(|exec| field(exec, keys))
+        .or_else(|| keys.iter().find_map(|key| extra.get(*key)))
+}
+
+fn field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter().find_map(|key| value.get(*key))
 }
 
 fn string_array_field(value: &Value, field: &str) -> Vec<String> {
@@ -932,6 +1005,29 @@ mod tests {
         assert!(!rendered.contains("pwned"));
         assert!(rendered.contains("shell"));
         assert!(rendered.contains("echo done"));
+    }
+
+    #[test]
+    fn tool_call_timestamps_produce_real_duration() {
+        let card = ToolCard::from_tool_call(&json!({
+            "name": "shell",
+            "started_at_ms": 10_000,
+            "completed_at_ms": 18_000,
+        }));
+
+        assert_eq!(card.duration_ms, Some(8_000));
+        assert!(card.summary().contains("8.0s"));
+    }
+
+    #[test]
+    fn malformed_or_negative_structured_exit_codes_prevent_legacy_fallback() {
+        for exit_code in [json!(-1), json!("7"), json!(i32::MAX as u64 + 1)] {
+            let card = ToolCard::from_tool_call(&json!({
+                "name": "shell",
+                "exec": {"exit_code": exit_code},
+            }));
+            assert_eq!(card.reported_exit_code(), Some(None));
+        }
     }
 
     #[test]
