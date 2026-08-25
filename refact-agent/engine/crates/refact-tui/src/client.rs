@@ -2604,10 +2604,13 @@ mod tests {
                 .await
         })
         .await;
-        assert_eq!(branch["type"], "branch_from_chat");
-        assert_eq!(branch["source_chat_id"], "source");
-        assert_eq!(branch["up_to_message_id"], "message-1");
-        assert!(branch["client_request_id"].is_string());
+        let mut expected = json!({
+            "type": "branch_from_chat",
+            "source_chat_id": "source",
+            "up_to_message_id": "message-1",
+        });
+        expected["client_request_id"] = branch["client_request_id"].clone();
+        assert_command(&branch, expected);
     }
 
     #[tokio::test]
@@ -2618,9 +2621,12 @@ mod tests {
                 .await
         })
         .await;
-        assert_eq!(set_params["type"], "set_params");
-        assert_eq!(set_params["patch"], json!({"model": "gpt-demo"}));
-        assert!(set_params["client_request_id"].is_string());
+        let mut expected = json!({
+            "type": "set_params",
+            "patch": {"model": "gpt-demo"},
+        });
+        expected["client_request_id"] = set_params["client_request_id"].clone();
+        assert_command(&set_params, expected);
     }
 
     #[tokio::test]
@@ -2650,11 +2656,14 @@ mod tests {
                 .await
         })
         .await;
-        assert_eq!(retry["type"], "retry_from_index");
-        assert_eq!(retry["index"], 3);
-        assert_eq!(retry["content"], "retry");
-        assert_eq!(retry["attachments"], json!([]));
-        assert!(retry["client_request_id"].is_string());
+        let mut expected = json!({
+            "type": "retry_from_index",
+            "index": 3,
+            "content": "retry",
+            "attachments": [],
+        });
+        expected["client_request_id"] = retry["client_request_id"].clone();
+        assert_command(&retry, expected);
     }
 
     #[tokio::test]
@@ -2662,8 +2671,9 @@ mod tests {
         let abort =
             capture_command(|client| async move { client.send_abort("project", "chat").await })
                 .await;
-        assert_eq!(abort["type"], "abort");
-        assert!(abort["client_request_id"].is_string());
+        let mut expected = json!({"type": "abort"});
+        expected["client_request_id"] = abort["client_request_id"].clone();
+        assert_command(&abort, expected);
     }
 
     #[tokio::test]

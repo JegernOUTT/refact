@@ -1127,10 +1127,6 @@ fn malformed_authoritative_envelopes_request_resubscribe_without_mutating_state(
     let chat_id = app.chat_id().to_string();
     let mut tracker = ChatSeqTracker::new();
     let fixture = fixture_events("malformed_authoritative.jsonl");
-    let snapshot = chat_event_from_fixture(fixture[0].clone(), &chat_id);
-    assert_eq!(tracker.observe(&snapshot), ChatSeqDecision::Apply);
-    app.apply_chat_event(snapshot);
-
     let expected_reasons = [
         "missing or non-array messages",
         "missing or non-array messages",
@@ -1165,7 +1161,14 @@ fn malformed_authoritative_envelopes_request_resubscribe_without_mutating_state(
         "missing or empty message_id",
         "missing or empty message_id",
     ];
-    assert_eq!(fixture.len(), expected_reasons.len() + 1);
+    assert_eq!(
+        fixture.len(),
+        expected_reasons.len() + 1,
+        "malformed authoritative fixture event count must match its expected reasons"
+    );
+    let snapshot = chat_event_from_fixture(fixture[0].clone(), &chat_id);
+    assert_eq!(tracker.observe(&snapshot), ChatSeqDecision::Apply);
+    app.apply_chat_event(snapshot);
 
     for (raw, expected) in fixture.into_iter().skip(1).zip(expected_reasons) {
         let event = chat_event_from_fixture(raw, &chat_id);
