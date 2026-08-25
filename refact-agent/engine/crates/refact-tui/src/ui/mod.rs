@@ -19,6 +19,7 @@ pub mod status_indicator;
 mod transcript;
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
+    crate::vendored::terminal_hyperlinks::clear_buffer_hyperlinks();
     app.begin_frame_render();
     let area = frame.area();
     let session_tabs_height = session_tabs::height(app);

@@ -29,21 +29,27 @@ use tokio::sync::mpsc::error::TrySendError;
 
 pub type RefactTerminal = Terminal<StdoutBackend>;
 
-pub struct StdoutBackend {
-    inner: CrosstermBackend<io::Stdout>,
+pub struct StdoutBackend<W: Write = io::Stdout> {
+    inner: CrosstermBackend<W>,
     cursor_position: Position,
 }
 
-impl StdoutBackend {
+impl StdoutBackend<io::Stdout> {
     fn new(cursor_position: Position) -> Self {
+        Self::with_writer(io::stdout(), cursor_position)
+    }
+}
+
+impl<W: Write> StdoutBackend<W> {
+    fn with_writer(writer: W, cursor_position: Position) -> Self {
         Self {
-            inner: CrosstermBackend::new(io::stdout()),
+            inner: CrosstermBackend::new(writer),
             cursor_position,
         }
     }
 }
 
-impl Write for StdoutBackend {
+impl<W: Write> Write for StdoutBackend<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.inner.write(buf)
     }
@@ -53,12 +59,41 @@ impl Write for StdoutBackend {
     }
 }
 
-impl Backend for StdoutBackend {
+impl<W: Write> Backend for StdoutBackend<W> {
     fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
-        self.inner.draw(content)
+        let result = (|| {
+            let mut pending = Vec::new();
+            let mut open_destination = None::<String>;
+            for (x, y, cell) in content {
+                let destination =
+                    crate::vendored::terminal_hyperlinks::buffer_hyperlink_destination(cell)
+                        .and_then(|destination| {
+                            crate::vendored::terminal_hyperlinks::web_destination(&destination)
+                        });
+                if destination != open_destination {
+                    self.inner.draw(pending.drain(..))?;
+                    if open_destination.is_some() {
+                        self.inner.write_all(b"\x1b]8;;\x1b\\")?;
+                    }
+                    if let Some(destination) = destination.as_deref() {
+                        self.inner
+                            .write_all(format!("\x1b]8;;{destination}\x1b\\").as_bytes())?;
+                    }
+                    open_destination = destination;
+                }
+                pending.push((x, y, cell));
+            }
+            self.inner.draw(pending.drain(..))?;
+            if open_destination.is_some() {
+                self.inner.write_all(b"\x1b]8;;\x1b\\")?;
+            }
+            Ok(())
+        })();
+        crate::vendored::terminal_hyperlinks::clear_buffer_hyperlinks();
+        result
     }
 
     fn hide_cursor(&mut self) -> io::Result<()> {
@@ -898,6 +933,10 @@ fn probe_startup_cursor_position() -> Position {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Style;
+    use ratatui::text::Line;
     use std::panic::AssertUnwindSafe;
     use std::sync::{Arc, Mutex};
 
@@ -1161,6 +1200,55 @@ mod tests {
             Backend::get_cursor_position(&mut backend).unwrap(),
             Position { x: 4, y: 9 }
         );
+    }
+
+    #[test]
+    fn stdout_backend_emits_osc8_without_mutating_cell_symbols() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 1));
+        buffer.set_string(0, 0, "link", Style::default());
+        let line = crate::vendored::terminal_hyperlinks::HyperlinkLine {
+            line: Line::from("link"),
+            hyperlinks: vec![crate::vendored::terminal_hyperlinks::TerminalHyperlink {
+                columns: 0..4,
+                destination: "https://example.com".to_string(),
+            }],
+        };
+        let area = buffer.area;
+        crate::vendored::terminal_hyperlinks::mark_buffer_hyperlinks(&buffer, area, &[line], true);
+
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut backend = StdoutBackend::with_writer(TestWriter(output.clone()), Position::ORIGIN);
+        backend
+            .draw(
+                buffer
+                    .content()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, cell)| (index as u16, 0, cell)),
+            )
+            .unwrap();
+
+        assert!(buffer
+            .content()
+            .iter()
+            .all(|cell| !cell.symbol().contains('\x1b')));
+        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("\x1b]8;;https://example.com\x1b\\"));
+        assert!(output.contains("\x1b]8;;\x1b\\"));
+        assert!(output.contains("link"));
+    }
+
+    struct TestWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for TestWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]

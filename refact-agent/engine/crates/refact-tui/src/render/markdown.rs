@@ -1578,14 +1578,6 @@ mod tests {
             .hyperlinks
             .iter()
             .all(|link| link.destination == "https://example.com/docs"));
-
-        let enabled = crate::vendored::terminal_hyperlinks::line_with_osc8(&lines[0], true);
-        let enabled_text = line_to_plain(&enabled);
-        assert_eq!(
-            crate::vendored::terminal_hyperlinks::strip_osc8(&enabled_text),
-            "Read docs (https://example.com/docs) today"
-        );
-        assert!(enabled_text.contains("\x1b]8;;https://example.com/docs\x1b\\docs\x1b]8;;\x1b\\"));
     }
 
     #[test]

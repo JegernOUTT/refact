@@ -169,7 +169,7 @@ Set `REFACT_TUI_ALT_SCREEN=1` to use the previous alternate-screen/full-transcri
 Resize policy matches Codex: pending finalized cells re-render at the current width before insertion, while content already inserted into native scrollback keeps the width it had when inserted.
 Resize reflow is capped to 1,000 pending finalized cells per frame. Extra pending cells remain queued and render on later frames, so resize cannot force unbounded transcript rewrapping.
 
-Markdown links carry hyperlink metadata beside visible ratatui lines. OSC8 bytes are added only when writing to a terminal buffer or native scrollback insertion, so wrapping and width calculations see plain visible text. `NO_COLOR`, `TERM=dumb`, and unsupported terminals keep the same styled visible text without OSC8; `REFACT_TUI_HYPERLINKS=1` or `0` overrides probing.
+Markdown links carry hyperlink metadata beside visible ratatui lines. OSC8 bytes are emitted only at the terminal output boundary, so wrapping and width calculations see plain visible text. `NO_COLOR`, `TERM=dumb`, and unsupported terminals keep the same styled visible text without OSC8; `REFACT_TUI_HYPERLINKS=1` or `0` overrides probing.
 
 Recovery snapshots replace the inline live region and pending finalized cells using revision-aware transcript keys, so changed content with stable message ids is rendered while identical snapshots do not enqueue duplicate cells. Finalized cells already inserted into native terminal scrollback are intentionally left as-is; the live transcript and future pending insertions follow the latest snapshot.
 

@@ -229,7 +229,7 @@ impl Renderable for HyperlinkLinesRenderable {
         Paragraph::new(Text::from(visible_lines(view)))
             .wrap(Wrap { trim: false })
             .render(area, buffer);
-        mark_buffer_hyperlinks(buffer, area, &self.lines, hyperlinks_enabled_from_env());
+        mark_buffer_hyperlinks(&*buffer, area, &self.lines, hyperlinks_enabled_from_env());
     }
 
     fn desired_height(&self, width: u16) -> u16 {

@@ -1,8 +1,10 @@
 // Adapted from openai/codex codex-rs/tui terminal_hyperlinks.rs, Apache-2.0.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::Range;
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -192,67 +194,62 @@ pub fn remap_wrapped_line(
     out
 }
 
-pub fn line_with_osc8(line: &HyperlinkLine, enabled: bool) -> Line<'static> {
-    if !enabled || line.hyperlinks.is_empty() {
-        return line.line.clone();
-    }
-    Line {
-        style: line.line.style,
-        alignment: line.line.alignment,
-        spans: decorate_spans(line),
-    }
-}
-
-pub fn lines_with_osc8(lines: &[HyperlinkLine], enabled: bool) -> Vec<Line<'static>> {
-    lines
-        .iter()
-        .map(|line| line_with_osc8(line, enabled))
-        .collect()
-}
-
-pub fn mark_buffer_hyperlinks(
-    buffer: &mut Buffer,
-    area: Rect,
-    lines: &[HyperlinkLine],
-    enabled: bool,
-) {
-    if !enabled || area.width == 0 {
+pub fn mark_buffer_hyperlinks(buffer: &Buffer, area: Rect, lines: &[HyperlinkLine], enabled: bool) {
+    if area.width == 0 {
         return;
     }
-    for (row, line) in lines.iter().enumerate().take(area.height as usize) {
-        for link in &line.hyperlinks {
-            let Some(destination) = web_destination(&link.destination) else {
-                continue;
-            };
-            let mut cells = Vec::new();
-            for column in link.columns.clone() {
-                if column >= area.width as usize {
-                    continue;
-                }
-                let x = area.x + column as u16;
-                let y = area.y + row as u16;
-                let cell = &buffer[(x, y)];
-                if !cell.skip && !cell.symbol().trim().is_empty() {
-                    cells.push((x, y));
+    if enabled {
+        BUFFER_HYPERLINKS.with(|hyperlinks| {
+            let mut hyperlinks = hyperlinks.borrow_mut();
+            for (row, line) in lines.iter().enumerate().take(area.height as usize) {
+                for link in &line.hyperlinks {
+                    let Some(destination) = web_destination(&link.destination) else {
+                        continue;
+                    };
+                    for column in link.columns.clone() {
+                        if column >= area.width as usize {
+                            continue;
+                        }
+                        let x = area.x + column as u16;
+                        let y = area.y + row as u16;
+                        let cell = &buffer[(x, y)];
+                        if !cell.skip && !cell.symbol().trim().is_empty() {
+                            hyperlinks.insert(cell_id(cell), (cell.clone(), destination.clone()));
+                        }
+                    }
                 }
             }
-            let Some(first) = cells.first().copied() else {
-                continue;
-            };
-            let last = cells.last().copied().unwrap_or(first);
-            let start = osc8_start(&destination);
-            let end = osc8_end();
-            if first == last {
-                let symbol = buffer[first].symbol().to_string();
-                buffer[first].set_symbol(&format!("{start}{symbol}{end}"));
-            } else {
-                let symbol = buffer[first].symbol().to_string();
-                buffer[first].set_symbol(&format!("{start}{symbol}"));
-                let symbol = buffer[last].symbol().to_string();
-                buffer[last].set_symbol(&format!("{symbol}{end}"));
-            }
-        }
+        });
     }
+    assert!(
+        buffer
+            .content()
+            .iter()
+            .all(|cell| !cell.symbol().contains('\x1b')),
+        "hyperlink metadata must remain outside cell symbols"
+    );
+}
+
+thread_local! {
+    static BUFFER_HYPERLINKS: RefCell<HashMap<usize, (Cell, String)>> = RefCell::new(HashMap::new());
+}
+
+pub fn clear_buffer_hyperlinks() {
+    BUFFER_HYPERLINKS.with(|hyperlinks| hyperlinks.borrow_mut().clear());
+}
+
+pub(crate) fn buffer_hyperlink_destination(cell: &Cell) -> Option<String> {
+    BUFFER_HYPERLINKS.with(|hyperlinks| {
+        hyperlinks
+            .borrow()
+            .get(&cell_id(cell))
+            .filter(|(expected, _)| expected == cell)
+            .map(|(_, destination)| destination.clone())
+    })
+}
+
+fn cell_id(cell: &Cell) -> usize {
+    cell as *const Cell as usize
 }
 
 pub fn hyperlinks_enabled_from_env() -> bool {
@@ -311,10 +308,10 @@ pub fn hyperlinks_enabled_from_probe(probe: EnvProbe<'_>) -> bool {
 }
 
 pub fn osc8_hyperlink(destination: &str, text: &str) -> String {
-    let Some(destination) = web_destination(destination) else {
+    let Some(start) = osc8_start(destination) else {
         return text.to_string();
     };
-    format!("{}{}{}", osc8_start(&destination), text, osc8_end())
+    format!("{start}{text}{OSC8_END}")
 }
 
 pub fn strip_osc8(text: &str) -> String {
@@ -325,16 +322,29 @@ pub fn strip_osc8(text: &str) -> String {
     while index < bytes.len() {
         if bytes[index..].starts_with(b"\x1b]8;;") {
             index += 5;
+            let payload_start = index;
+            let mut terminated = false;
             while index < bytes.len() {
                 if bytes[index] == b'\x07' {
                     index += 1;
+                    terminated = true;
                     break;
                 }
                 if index + 1 < bytes.len() && bytes[index] == b'\x1b' && bytes[index + 1] == b'\\' {
                     index += 2;
+                    terminated = true;
                     break;
                 }
                 index += 1;
+            }
+            if !terminated {
+                stripped.push_str(
+                    &text[payload_start..]
+                        .chars()
+                        .filter(|ch| !ch.is_control())
+                        .collect::<String>(),
+                );
+                break;
             }
             continue;
         }
@@ -347,46 +357,6 @@ pub fn strip_osc8(text: &str) -> String {
     }
 
     stripped
-}
-
-fn decorate_spans(line: &HyperlinkLine) -> Vec<Span<'static>> {
-    let mut out = Vec::new();
-    let mut column = 0usize;
-    let mut link_index = 0usize;
-    let mut active_link_index = None;
-    for span in &line.line.spans {
-        for ch in span.content.chars() {
-            let width = ch.width().unwrap_or(0);
-            while line
-                .hyperlinks
-                .get(link_index)
-                .is_some_and(|link| link.columns.end <= column)
-            {
-                link_index += 1;
-            }
-            let selected_link_index = line
-                .hyperlinks
-                .get(link_index)
-                .and_then(|link| link.columns.contains(&column).then_some(link_index));
-            if active_link_index != selected_link_index {
-                if active_link_index.is_some() {
-                    append_to_last_span(&mut out, &osc8_end());
-                }
-                if let Some(destination) = selected_link_index
-                    .and_then(|index| web_destination(&line.hyperlinks[index].destination))
-                {
-                    push_styled_content(&mut out, &osc8_start(&destination), span.style);
-                }
-                active_link_index = selected_link_index;
-            }
-            push_styled_content(&mut out, &ch.to_string(), span.style);
-            column += width;
-        }
-    }
-    if active_link_index.is_some() {
-        append_to_last_span(&mut out, &osc8_end());
-    }
-    out
 }
 
 fn line_text(line: &Line<'_>) -> String {
@@ -499,41 +469,16 @@ fn has_unmatched_closing_delimiter(candidate: &str, closing: char) -> bool {
         > candidate.chars().filter(|ch| *ch == opening).count()
 }
 
-fn osc8_start(destination: &str) -> String {
-    format!("\x1b]8;;{destination}\x1b\\")
+fn osc8_start(destination: &str) -> Option<String> {
+    web_destination(destination).map(|destination| format!("\x1b]8;;{destination}\x1b\\"))
 }
 
-fn osc8_end() -> String {
-    "\x1b]8;;\x1b\\".to_string()
-}
-
-fn push_styled_content(out: &mut Vec<Span<'static>>, content: &str, style: ratatui::style::Style) {
-    if let Some(last) = out.last_mut() {
-        if last.style == style {
-            last.content.to_mut().push_str(content);
-            return;
-        }
-    }
-    out.push(Span::styled(content.to_string(), style));
-}
-
-fn append_to_last_span(out: &mut [Span<'static>], content: &str) {
-    if let Some(last) = out.last_mut() {
-        last.content.to_mut().push_str(content);
-    }
-}
+const OSC8_END: &str = "\x1b]8;;\x1b\\";
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::wrapping::line_to_plain;
-
-    fn plain(line: &Line<'static>) -> String {
-        line.spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect()
-    }
+    use ratatui::widgets::{Paragraph, Widget};
 
     #[test]
     fn osc8_wraps_and_strips_with_st_terminator() {
@@ -543,18 +488,6 @@ mod tests {
             "\x1b]8;;https://example.com\x1b\\site\x1b]8;;\x1b\\"
         );
         assert_eq!(strip_osc8(&linked), "site");
-    }
-
-    #[test]
-    fn decorates_markdown_link_range_without_changing_visible_text() {
-        let mut line = HyperlinkLine::new(Line::default());
-        line.push_span(Span::raw("read "), None);
-        line.push_span(Span::raw("site"), Some("https://example.com"));
-        let decorated = line_with_osc8(&line, true);
-        let snapshot = plain(&decorated);
-        assert_eq!(strip_osc8(&snapshot), "read site");
-        assert!(snapshot.contains("\x1b]8;;https://example.com\x1b\\site\x1b]8;;\x1b\\"));
-        assert_eq!(plain(&line_with_osc8(&line, false)), "read site");
     }
 
     #[test]
@@ -577,10 +510,7 @@ mod tests {
 
         let lines = prefix_hyperlink_lines(vec![line], Span::raw("• "), Span::raw("  "));
 
-        assert_eq!(
-            line_to_plain(&lines[0].line),
-            "• Read https://example.com/docs"
-        );
+        assert_eq!(line_text(&lines[0].line), "• Read https://example.com/docs");
         assert_eq!(
             lines[0].hyperlinks,
             vec![TerminalHyperlink {
@@ -600,7 +530,7 @@ mod tests {
         assert_eq!(
             lines
                 .iter()
-                .map(|line| line_to_plain(&line.line))
+                .map(|line| line_text(&line.line))
                 .collect::<Vec<_>>(),
             vec!["Read", "https://example.com/docs", "and keep going"]
         );
@@ -640,5 +570,47 @@ mod tests {
             term_program: Some("iTerm.app"),
             ..EnvProbe::default()
         }));
+    }
+
+    #[test]
+    fn unterminated_osc8_preserves_remaining_text() {
+        assert_eq!(
+            strip_osc8("before \x1b]8;;https://example.comafter\x1b"),
+            "before https://example.comafter"
+        );
+    }
+
+    #[test]
+    fn hyperlink_metadata_never_enters_cell_symbols_or_buffer_diff() {
+        let area = Rect::new(0, 0, 6, 1);
+        let line = HyperlinkLine {
+            line: Line::from("abcdef"),
+            hyperlinks: vec![TerminalHyperlink {
+                columns: 1..4,
+                destination: "https://example.com".to_string(),
+            }],
+        };
+        let mut previous = Buffer::empty(area);
+        Paragraph::new(line.line.clone()).render(area, &mut previous);
+        clear_buffer_hyperlinks();
+        mark_buffer_hyperlinks(&previous, area, &[line.clone()], true);
+
+        let mut next = Buffer::empty(area);
+        Paragraph::new(Line::from("abXdef")).render(area, &mut next);
+        clear_buffer_hyperlinks();
+        mark_buffer_hyperlinks(&next, area, &[line], true);
+
+        assert!(next
+            .content()
+            .iter()
+            .all(|cell| !cell.symbol().contains('\x1b')));
+        assert_eq!(
+            previous
+                .diff(&next)
+                .into_iter()
+                .map(|(x, y, cell)| (x, y, cell.symbol()))
+                .collect::<Vec<_>>(),
+            vec![(2, 0, "X")]
+        );
     }
 }

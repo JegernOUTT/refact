@@ -722,12 +722,13 @@ pub fn insert_history<B: Backend>(
     }
     let lines = insertion.lines;
     let enabled = hyperlinks_enabled_from_env();
+    crate::vendored::terminal_hyperlinks::clear_buffer_hyperlinks();
     terminal.insert_before(height, move |buffer| {
         let area = buffer.area;
         fill_line_backgrounds(buffer, area, &lines);
         let visible = visible_lines(lines.clone());
         Paragraph::new(visible).render(area, buffer);
-        mark_buffer_hyperlinks(buffer, area, &lines, enabled);
+        mark_buffer_hyperlinks(&*buffer, area, &lines, enabled);
     })
 }
 
@@ -1186,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_link_inserted_into_scrollback_carries_osc8_when_enabled() {
+    fn markdown_link_inserted_into_scrollback_keeps_cell_symbols_visible() {
         let mut history = HistoryBuffer::new();
         history.enqueue(TranscriptItem::Assistant(
             "Read [docs](https://example.com/docs) now".to_string(),
@@ -1205,18 +1206,14 @@ mod tests {
         let area = buffer.area;
         let lines = insertions[0].lines.clone();
         Paragraph::new(visible_lines(lines.clone())).render(area, &mut buffer);
-        mark_buffer_hyperlinks(&mut buffer, area, &lines, true);
+        mark_buffer_hyperlinks(&buffer, area, &lines, true);
         let raw = buffer
             .content()
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(raw.contains("\x1b]8;;https://example.com/docs\x1b\\"));
-        assert_eq!(
-            crate::vendored::terminal_hyperlinks::strip_osc8(&raw)
-                .contains("Read docs (https://example.com/docs) now"),
-            true
-        );
+        assert!(!raw.contains('\x1b'));
+        assert!(raw.contains("Read docs (https://example.com/docs) now"));
     }
 
     #[test]
