@@ -19,7 +19,7 @@ pub enum ToolFamily {
     Unknown,
 }
 
-const EXACT_TOOL_FAMILIES: &[(&str, ToolFamily)] = &[
+const TUI_TOOL_FAMILY_REGISTRY: &[(&str, ToolFamily)] = &[
     ("shell", ToolFamily::Shell),
     ("clean_background_processes", ToolFamily::Process),
     ("shell_service", ToolFamily::Process),
@@ -35,8 +35,6 @@ const EXACT_TOOL_FAMILIES: &[(&str, ToolFamily)] = &[
     ("undo_textdoc", ToolFamily::Diff),
     ("rm", ToolFamily::Diff),
     ("mv", ToolFamily::Diff),
-    ("mcp_call", ToolFamily::Mcp),
-    ("mcp_tool_search", ToolFamily::Mcp),
     ("web_search", ToolFamily::WebSearch),
     ("web", ToolFamily::WebFetch),
     ("chrome", ToolFamily::WebFetch),
@@ -151,6 +149,8 @@ const EXACT_TOOL_FAMILIES: &[(&str, ToolFamily)] = &[
     ("create_knowledge", ToolFamily::KnowledgeSearch),
     ("get_trajectory_context", ToolFamily::KnowledgeSearch),
     ("search_trajectories", ToolFamily::KnowledgeSearch),
+    ("design_review", ToolFamily::Server),
+    ("visual_qa", ToolFamily::Server),
 ];
 
 const PROVIDER_NATIVE_TOOL_NAMES: &[&str] = &[
@@ -176,7 +176,7 @@ const PREFIX_TOOL_FAMILIES: &[(&str, ToolFamily)] = &[
 ];
 
 pub fn tool_family(name: &str) -> ToolFamily {
-    EXACT_TOOL_FAMILIES
+    TUI_TOOL_FAMILY_REGISTRY
         .iter()
         .find_map(|(tool_name, family)| (*tool_name == name).then_some(*family))
         .or_else(|| {
@@ -248,7 +248,7 @@ impl ToolFamily {
 mod tests {
     use super::*;
 
-    const STATIC_ENGINE_TOOL_NAMES: &[&str] = &[
+    const CURRENT_STATIC_BUILTIN_TOOL_NAMES: &[&str] = &[
         "shell",
         "process_start",
         "process_list",
@@ -410,20 +410,37 @@ mod tests {
         "agent_result",
         "agent_cancel",
         "worktree_merge",
-        "mcp_call",
     ];
 
     const LAZY_MCP_TOOL_NAMES: &[&str] = &["mcp_tool_search", "mcp_call"];
+    const DEFAULT_EXPOSED_CONFIG_SUBAGENT_TOOL_NAMES: &[&str] = &["design_review", "visual_qa"];
+
+    fn current_static_builtin_constructor_count() -> usize {
+        let source = include_str!("../../../../../src/tools/tools_list.rs");
+        let (_, source) = source
+            .split_once("pub(crate) fn builtin_system_tools")
+            .expect("builtin tool catalog must exist");
+        let (source, _) = source
+            .split_once("async fn get_config_subagent_tools")
+            .expect("config subagent catalog must follow builtins");
+        source.matches("Box::new").count()
+    }
 
     #[test]
     fn static_engine_tool_registry_has_no_unknown_families() {
-        let registered = STATIC_ENGINE_TOOL_NAMES
+        let registered = CURRENT_STATIC_BUILTIN_TOOL_NAMES
             .iter()
             .copied()
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(STATIC_ENGINE_TOOL_NAMES.len(), 162);
-        assert_eq!(STATIC_ENGINE_TOOL_NAMES.len(), registered.len());
-        let unknown = STATIC_ENGINE_TOOL_NAMES
+        assert_eq!(current_static_builtin_constructor_count(), 161);
+        assert_eq!(CURRENT_STATIC_BUILTIN_TOOL_NAMES.len(), 161);
+        assert_eq!(
+            CURRENT_STATIC_BUILTIN_TOOL_NAMES.len(),
+            current_static_builtin_constructor_count(),
+            "current built-in constructor inventory drifted"
+        );
+        assert_eq!(CURRENT_STATIC_BUILTIN_TOOL_NAMES.len(), registered.len());
+        let unknown = CURRENT_STATIC_BUILTIN_TOOL_NAMES
             .iter()
             .filter(|name| tool_family(name) == ToolFamily::Unknown)
             .collect::<Vec<_>>();
@@ -446,7 +463,9 @@ mod tests {
             "request-user-input",
         ] {
             assert!(
-                !EXACT_TOOL_FAMILIES.iter().any(|(name, _)| *name == alias),
+                !TUI_TOOL_FAMILY_REGISTRY
+                    .iter()
+                    .any(|(name, _)| *name == alias),
                 "retired alias remains registered: {alias}"
             );
             assert_eq!(tool_family(alias), ToolFamily::Unknown, "{alias}");
@@ -462,8 +481,14 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_tool_conventions_are_classified() {
+    fn lazy_mcp_and_dynamic_subagent_conventions_are_classified() {
         for name in LAZY_MCP_TOOL_NAMES {
+            assert!(
+                !TUI_TOOL_FAMILY_REGISTRY
+                    .iter()
+                    .any(|(registered, _)| registered == name),
+                "lazy MCP tool must not be a static registry entry: {name}"
+            );
             assert_eq!(tool_family(name), ToolFamily::Mcp, "{name}");
         }
         assert_eq!(tool_family("mcp_github_get_issue"), ToolFamily::Mcp);
@@ -480,5 +505,35 @@ mod tests {
         assert_eq!(tool_display_name("t_process_start"), "process_start");
         assert_eq!(tool_display_name("shell"), "shell");
         assert_eq!(tool_family("t_process_start"), ToolFamily::Unknown);
+    }
+
+    #[test]
+    fn default_exposed_config_subagent_tools_are_classified_separately() {
+        let configs = [
+            (
+                "design_review",
+                include_str!(
+                    "../../../../refact-yaml-configs/src/defaults/subagents/design_review.yaml"
+                ),
+            ),
+            (
+                "visual_qa",
+                include_str!(
+                    "../../../../refact-yaml-configs/src/defaults/subagents/visual_qa.yaml"
+                ),
+            ),
+        ];
+
+        assert_eq!(DEFAULT_EXPOSED_CONFIG_SUBAGENT_TOOL_NAMES.len(), 2);
+        for (name, config) in configs {
+            assert!(
+                !CURRENT_STATIC_BUILTIN_TOOL_NAMES.contains(&name),
+                "config subagent must not be counted as a static built-in: {name}"
+            );
+            assert!(DEFAULT_EXPOSED_CONFIG_SUBAGENT_TOOL_NAMES.contains(&name));
+            assert!(config.contains(&format!("id: {name}\n")));
+            assert!(config.contains("expose_as_tool: true"));
+            assert_eq!(tool_family(name), ToolFamily::Server, "{name}");
+        }
     }
 }
