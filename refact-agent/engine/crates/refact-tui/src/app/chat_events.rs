@@ -501,9 +501,7 @@ impl App {
 
     pub(super) fn update_usage_value(&mut self, usage: &Value) {
         self.transcript_state.set_usage(usage.clone());
-        if let Some(summary) = UsageSummary::from_value(usage) {
-            self.usage = Some(summary);
-        }
+        self.usage = UsageSummary::from_value(usage);
     }
 
     pub(super) fn apply_runtime_state(&mut self, raw: &Value) -> bool {
@@ -1434,7 +1432,18 @@ fn collect_tool_call_ids(value: &Value, ids: &mut Vec<String>) {
 mod tests {
     use serde_json::json;
 
-    use super::approval_tool_call_ids;
+    use super::*;
+
+    fn project() -> OpenProjectResponse {
+        OpenProjectResponse {
+            project_id: "p1".to_string(),
+            slug: "demo".to_string(),
+            root: PathBuf::from("/tmp/demo"),
+            pinned: Some(false),
+            worker: None,
+            cron_pending: None,
+        }
+    }
 
     #[test]
     fn approval_tool_call_ids_deduplicate_nested_values() {
@@ -1444,5 +1453,35 @@ mod tests {
         }));
 
         assert_eq!(ids, ["call-1", "call-2"]);
+    }
+
+    #[test]
+    fn usage_updates_clear_explicit_empty_and_null_values() {
+        let mut app = App::new(project());
+
+        app.update_usage_value(&json!({
+            "prompt_tokens": 12,
+            "completion_tokens": 8,
+        }));
+        assert_eq!(app.usage().unwrap().total_tokens, Some(20));
+
+        app.update_usage_value(&Value::Null);
+        assert_eq!(app.usage(), None);
+
+        app.update_usage_value(&json!({
+            "prompt_tokens": 12,
+            "completion_tokens": 8,
+        }));
+        app.update_usage_value(&json!({}));
+        assert_eq!(app.usage(), None);
+
+        app.update_usage_value(&json!({
+            "prompt_tokens": 12,
+            "completion_tokens": 8,
+        }));
+        app.update_usage_value(&json!({"prompt_tokens": 9}));
+        assert_eq!(app.usage().unwrap().prompt_tokens, Some(9));
+        assert_eq!(app.usage().unwrap().completion_tokens, None);
+        assert_eq!(app.usage().unwrap().total_tokens, None);
     }
 }

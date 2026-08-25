@@ -52,20 +52,22 @@ pub struct UsageSummary {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ReasoningModelCaps {
-    effort_options: Vec<String>,
+    effort_options: Option<Vec<String>>,
     supports_thinking_budget: Option<bool>,
     supports_adaptive_thinking_budget: Option<bool>,
 }
 
 impl ReasoningModelCaps {
     fn has_reasoning_support(&self) -> bool {
-        !self.effort_options.is_empty()
+        self.effort_options
+            .as_ref()
+            .is_some_and(|options| !options.is_empty())
             || self.supports_thinking_budget == Some(true)
             || self.supports_adaptive_thinking_budget == Some(true)
     }
 
     fn reasoning_support_is_confirmed_absent(&self) -> bool {
-        self.effort_options.is_empty()
+        self.effort_options.as_ref().is_some_and(Vec::is_empty)
             && self.supports_thinking_budget == Some(false)
             && self.supports_adaptive_thinking_budget == Some(false)
     }
@@ -73,7 +75,24 @@ impl ReasoningModelCaps {
     fn supports_effort(&self, level: command_session::ReasoningLevel) -> bool {
         self.effort_options
             .iter()
+            .flatten()
             .any(|option| option == level.as_str())
+    }
+
+    fn merge_from(&mut self, higher_precedence: &Self) {
+        if higher_precedence.effort_options.is_some() {
+            self.effort_options = higher_precedence.effort_options.clone();
+        }
+        if higher_precedence.supports_thinking_budget.is_some() {
+            self.supports_thinking_budget = higher_precedence.supports_thinking_budget;
+        }
+        if higher_precedence
+            .supports_adaptive_thinking_budget
+            .is_some()
+        {
+            self.supports_adaptive_thinking_budget =
+                higher_precedence.supports_adaptive_thinking_budget;
+        }
     }
 }
 
@@ -816,15 +835,26 @@ pub(super) fn insert_model_reasoning_caps(
 ) {
     let caps = reasoning_caps_from_model(model);
     if !id.is_empty() {
-        reasoning.insert(id.to_string(), caps.clone());
+        merge_model_reasoning_caps(reasoning, id, &caps);
     }
     if let Some(model_id) = model
         .get("id")
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
     {
-        reasoning.insert(model_id.to_string(), caps);
+        merge_model_reasoning_caps(reasoning, model_id, &caps);
     }
+}
+
+pub(super) fn merge_model_reasoning_caps(
+    reasoning: &mut HashMap<String, ReasoningModelCaps>,
+    id: &str,
+    caps: &ReasoningModelCaps,
+) {
+    reasoning
+        .entry(id.to_string())
+        .or_default()
+        .merge_from(caps);
 }
 
 pub(super) fn reasoning_caps_from_model(model: &Value) -> ReasoningModelCaps {
@@ -832,11 +862,13 @@ pub(super) fn reasoning_caps_from_model(model: &Value) -> ReasoningModelCaps {
         effort_options: model
             .get("reasoning_effort_options")
             .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect(),
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            }),
         supports_thinking_budget: bool_field(model, "supports_thinking_budget"),
         supports_adaptive_thinking_budget: bool_field(model, "supports_adaptive_thinking_budget"),
     }
@@ -958,8 +990,11 @@ pub(super) fn resolve_chat_model_id(caps: &Value, model: &str) -> Option<String>
     if ids.iter().any(|id| id == model) {
         return Some(model.to_string());
     }
-    ids.into_iter()
-        .find(|id| id.rsplit('/').next().is_some_and(|suffix| suffix == model))
+    let mut matches = ids
+        .into_iter()
+        .filter(|id| id.rsplit('/').next().is_some_and(|suffix| suffix == model));
+    let matched = matches.next()?;
+    matches.next().is_none().then_some(matched)
 }
 
 pub(super) fn chat_model_ids(caps: &Value) -> Vec<String> {
@@ -1006,10 +1041,11 @@ pub(super) fn push_unique_model_id(ids: &mut Vec<String>, id: &str) {
 
 pub(super) fn context_window_for_model(windows: &HashMap<String, u64>, model: &str) -> Option<u64> {
     windows.get(model).copied().or_else(|| {
-        windows.iter().find_map(|(id, window)| {
-            id.rsplit('/').next().filter(|suffix| *suffix == model)?;
-            Some(*window)
-        })
+        let mut matches = windows
+            .iter()
+            .filter(|(id, _)| id.rsplit('/').next().is_some_and(|suffix| suffix == model));
+        let (_, window) = matches.next()?;
+        matches.next().is_none().then_some(*window)
     })
 }
 
@@ -1018,10 +1054,11 @@ pub(super) fn reasoning_caps_for_model<'a>(
     model: &str,
 ) -> Option<&'a ReasoningModelCaps> {
     reasoning.get(model).or_else(|| {
-        reasoning.iter().find_map(|(id, caps)| {
-            id.rsplit('/').next().filter(|suffix| *suffix == model)?;
-            Some(caps)
-        })
+        let mut matches = reasoning
+            .iter()
+            .filter(|(id, _)| id.rsplit('/').next().is_some_and(|suffix| suffix == model));
+        let (_, caps) = matches.next()?;
+        matches.next().is_none().then_some(caps)
     })
 }
 
@@ -1255,5 +1292,94 @@ mod tests {
             reasoning_caps_from_model(&serde_json::json!({"supports_thinking_budget": false})),
         );
         assert!(!app.reasoning_level_supported(command_session::ReasoningLevel::On));
+    }
+
+    #[test]
+    fn reasoning_capability_duplicate_ids_merge_sparse_fields() {
+        let caps = model_reasoning_caps(&serde_json::json!({
+            "chat_models": {
+                "provider/model": {
+                "reasoning_effort_options": ["low"],
+                "supports_thinking_budget": true,
+                },
+            },
+            "models": {"chat": [{
+                "id": "provider/model",
+                "supports_adaptive_thinking_budget": true,
+            }]},
+            "available_models": [{"id": "provider/model", "name": "Model"}],
+        }));
+
+        assert_eq!(
+            caps["provider/model"].effort_options,
+            Some(vec!["low".to_string()])
+        );
+        assert_eq!(caps["provider/model"].supports_thinking_budget, Some(true));
+        assert_eq!(
+            caps["provider/model"].supports_adaptive_thinking_budget,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn reasoning_capability_source_precedence_overrides_explicit_conflicts() {
+        let caps = model_reasoning_caps(&serde_json::json!({
+            "available_models": [{
+                "id": "provider/model",
+                "reasoning_effort_options": ["low"],
+                "supports_thinking_budget": true,
+                "supports_adaptive_thinking_budget": true,
+            }],
+            "models": {"chat": [{
+                "id": "provider/model",
+                "supports_thinking_budget": false,
+            }]},
+            "chat_models": {
+                "provider/model": {"reasoning_effort_options": ["high"]},
+            },
+        }));
+
+        assert_eq!(
+            caps["provider/model"].effort_options,
+            Some(vec!["low".to_string()])
+        );
+        assert_eq!(caps["provider/model"].supports_thinking_budget, Some(true));
+        assert_eq!(
+            caps["provider/model"].supports_adaptive_thinking_budget,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn caps_lookup_requires_unique_suffix_and_prefers_exact_ids() {
+        let caps = serde_json::json!({
+            "chat_models": {
+                "provider-a/demo": {
+                    "n_ctx": 10,
+                    "reasoning_effort_options": ["low"],
+                },
+                "provider-b/demo": {
+                    "n_ctx": 20,
+                    "reasoning_effort_options": ["high"],
+                },
+            },
+        });
+        let reasoning = model_reasoning_caps(&caps);
+        let windows = model_context_windows(&caps);
+
+        assert_eq!(resolve_chat_model_id(&caps, "demo"), None);
+        assert_eq!(
+            resolve_chat_model_id(&caps, "provider-a/demo"),
+            Some("provider-a/demo".to_string())
+        );
+        assert_eq!(context_window_for_model(&windows, "demo"), None);
+        assert_eq!(
+            context_window_for_model(&windows, "provider-a/demo"),
+            Some(10)
+        );
+        assert_eq!(reasoning_caps_for_model(&reasoning, "demo"), None);
+        assert!(reasoning_caps_for_model(&reasoning, "provider-a/demo")
+            .unwrap()
+            .supports_effort(command_session::ReasoningLevel::Low));
     }
 }
