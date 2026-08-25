@@ -100,6 +100,63 @@ pub(super) struct ThemePickerSnapshot {
 pub use history::{HistoryAction, HistorySurface};
 
 impl App {
+    pub(in crate::app) fn execute_misc_command(
+        &mut self,
+        command: misc::MiscCommand,
+        args: &str,
+    ) -> AppAction {
+        match command {
+            misc::MiscCommand::Theme => {
+                self.composer.clear();
+                if args.trim().is_empty() {
+                    self.open_theme_picker();
+                } else {
+                    self.apply_theme_name(args.trim(), true);
+                }
+                AppAction::None
+            }
+            misc::MiscCommand::ToggleVim => {
+                self.composer.clear();
+                let enabled = self.vim.toggle();
+                let label = if enabled { "enabled" } else { "disabled" };
+                self.add_notice(format!("Composer vim mode {label}"));
+                AppAction::None
+            }
+            misc::MiscCommand::DebugConfig => {
+                self.composer.clear();
+                self.show_debug_config_card();
+                AppAction::None
+            }
+            misc::MiscCommand::CopyLastAssistant => self.copy_last_assistant_message(),
+            misc::MiscCommand::RawTranscript => {
+                self.composer.clear();
+                self.open_raw_transcript_overlay()
+            }
+            misc::MiscCommand::Subagents => {
+                self.composer.clear();
+                if activity::surfaces_enabled() {
+                    self.open_activity_surface()
+                } else {
+                    self.show_subagents_card();
+                    AppAction::None
+                }
+            }
+            misc::MiscCommand::Mcp => self.open_read_only_view(ReadOnlyView::Mcp),
+            misc::MiscCommand::Skills => self.open_read_only_view(ReadOnlyView::Skills),
+            misc::MiscCommand::Memories => self.open_read_only_view(ReadOnlyView::Memories),
+            misc::MiscCommand::Hooks => self.open_read_only_view(ReadOnlyView::Hooks),
+            misc::MiscCommand::Logout => self.start_provider_logout(args),
+            misc::MiscCommand::Import => self.start_competitor_import(args),
+            misc::MiscCommand::Settings => {
+                self.composer.clear();
+                self.open_settings_surface();
+                AppAction::None
+            }
+            misc::MiscCommand::Board => self.open_task_board(),
+            misc::MiscCommand::Worktrees => self.start_worktree_command(args),
+        }
+    }
+
     pub(crate) fn settings_surface_enabled() -> bool {
         settings_surface_enabled_from_value(std::env::var("REFACT_TUI_SURFACES").ok().as_deref())
     }
