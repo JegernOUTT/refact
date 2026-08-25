@@ -45,6 +45,10 @@ impl App {
             Some(KeyAction::OpenProjects) => AppAction::LoadProjects,
             Some(KeyAction::OpenModels) => AppAction::LoadModels,
             Some(KeyAction::OpenModes) => AppAction::LoadModes,
+            Some(KeyAction::OpenSettings) => {
+                self.open_settings_surface();
+                AppAction::None
+            }
             Some(KeyAction::OpenTranscriptOverlay) => self.open_transcript_overlay(),
             Some(KeyAction::OpenExternalEditor) => AppAction::OpenExternalEditor {
                 draft: self.composer.text().to_string(),

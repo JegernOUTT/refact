@@ -285,29 +285,142 @@ fn fuzzy_subsequence_match(field: &str, needle: &str) -> bool {
 
 pub fn model_items_from_caps(caps: &Value) -> Vec<PickerItem> {
     let mut out = Vec::new();
-    if let Some(models) = caps.get("chat_models").and_then(Value::as_object) {
-        for (id, value) in models {
-            let title = value
-                .get("name")
-                .or_else(|| value.get("id"))
-                .and_then(Value::as_str)
-                .unwrap_or(id)
-                .to_string();
-            let description = value
-                .get("description")
-                .or_else(|| value.get("provider"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            out.push(PickerItem {
-                id: id.clone(),
-                title,
-                description,
-            });
-        }
+    for models in [
+        caps.get("chat_models"),
+        caps.get("models").and_then(|models| models.get("chat")),
+        caps.get("available_models"),
+    ] {
+        collect_model_items(models, &mut out);
     }
     out.sort_by(|a, b| a.title.cmp(&b.title).then_with(|| a.id.cmp(&b.id)));
     out
+}
+
+fn collect_model_items(models: Option<&Value>, out: &mut Vec<PickerItem>) {
+    match models {
+        Some(Value::Object(models)) => {
+            for (id, model) in models {
+                push_model_item(out, id, model);
+            }
+        }
+        Some(Value::Array(models)) => {
+            for model in models {
+                if let Some(id) = model.get("id").and_then(Value::as_str) {
+                    push_model_item(out, id, model);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_model_item(out: &mut Vec<PickerItem>, id: &str, value: &Value) {
+    if id.trim().is_empty() || out.iter().any(|item| item.id == id) {
+        return;
+    }
+    let title = value
+        .get("name")
+        .or_else(|| value.get("display_name"))
+        .or_else(|| value.get("id"))
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(id)
+        .to_string();
+    out.push(PickerItem {
+        id: id.to_string(),
+        title,
+        description: model_description(value),
+    });
+}
+
+fn model_description(value: &Value) -> String {
+    let mut details = Vec::new();
+    if let Some(description) = value
+        .get("description")
+        .or_else(|| value.get("provider"))
+        .or_else(|| value.get("selected_provider"))
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+    {
+        details.push(description.to_string());
+    }
+    details.push(
+        model_context_window(value)
+            .map(|tokens| format!("{} context", format_token_count(tokens)))
+            .unwrap_or_else(|| "context unknown".to_string()),
+    );
+    details.push(model_reasoning_label(value));
+    details.push(model_pricing_label(value));
+    details.join(" · ")
+}
+
+fn model_context_window(value: &Value) -> Option<u64> {
+    [
+        "n_ctx",
+        "context_window",
+        "context_window_tokens",
+        "context_length",
+        "max_context_window_tokens",
+        "max_prompt_tokens",
+        "max_model_len",
+    ]
+    .into_iter()
+    .find_map(|key| value.get(key).and_then(Value::as_u64))
+}
+
+fn model_reasoning_label(value: &Value) -> String {
+    let effort = value
+        .get("reasoning_effort_options")
+        .and_then(Value::as_array)
+        .is_some_and(|options| !options.is_empty());
+    let budget = value
+        .get("supports_thinking_budget")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let adaptive = value
+        .get("supports_adaptive_thinking_budget")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if effort || budget || adaptive {
+        "reasoning supported".to_string()
+    } else {
+        "reasoning unavailable".to_string()
+    }
+}
+
+fn model_pricing_label(value: &Value) -> String {
+    let Some(pricing) = value.get("pricing").and_then(Value::as_object) else {
+        return "pricing unknown".to_string();
+    };
+    let input = pricing.get("prompt").and_then(Value::as_f64);
+    let output = pricing.get("generated").and_then(Value::as_f64);
+    match (input, output) {
+        (Some(input), Some(output)) => {
+            format!(
+                "${} in / ${} out per 1M",
+                compact_price(input),
+                compact_price(output)
+            )
+        }
+        _ => "pricing unknown".to_string(),
+    }
+}
+
+fn compact_price(value: f64) -> String {
+    format!("{value:.4}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
+fn format_token_count(tokens: u64) -> String {
+    if tokens >= 1_000_000 && tokens % 1_000_000 == 0 {
+        format!("{}M", tokens / 1_000_000)
+    } else if tokens >= 1_000 && tokens % 1_000 == 0 {
+        format!("{}K", tokens / 1_000)
+    } else {
+        tokens.to_string()
+    }
 }
 
 pub fn mode_items_from_response(response: &Value) -> Vec<PickerItem> {
@@ -506,5 +619,29 @@ mod tests {
         let items = model_items_from_caps(&caps);
         assert_eq!(items[0].id, "m1");
         assert_eq!(items[0].title, "Model One");
+        assert!(items[0].description.contains("context unknown"));
+        assert!(items[0].description.contains("pricing unknown"));
+    }
+
+    #[test]
+    fn model_picker_includes_capabilities_and_tolerates_missing_pricing() {
+        let caps = serde_json::json!({
+            "chat_models": {
+                "priced": {
+                    "name": "Priced model",
+                    "n_ctx": 128000,
+                    "reasoning_effort_options": ["low"],
+                    "pricing": {"prompt": 3.0, "generated": 15.0},
+                },
+                "unknown": {"n_ctx": 8192},
+            },
+        });
+        let items = model_items_from_caps(&caps);
+        let priced = items.iter().find(|item| item.id == "priced").unwrap();
+        assert!(priced.description.contains("128K context"));
+        assert!(priced.description.contains("reasoning supported"));
+        assert!(priced.description.contains("$3 in / $15 out per 1M"));
+        let unknown = items.iter().find(|item| item.id == "unknown").unwrap();
+        assert!(unknown.description.contains("pricing unknown"));
     }
 }

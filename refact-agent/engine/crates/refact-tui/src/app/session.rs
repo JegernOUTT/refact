@@ -146,6 +146,7 @@ impl App {
     pub fn apply_caps(&mut self, caps: &Value) {
         self.model_context_windows = model_context_windows(caps);
         self.model_reasoning_caps = model_reasoning_caps(caps);
+        self.model_settings_caps = surfaces::model_settings_caps(caps);
         self.default_context_window_tokens =
             default_context_window(caps, &self.model_context_windows);
         let mut changed = false;
@@ -164,6 +165,7 @@ impl App {
         if changed {
             self.refresh_session_header_item();
         }
+        self.refresh_settings_surface();
     }
 
     pub(super) fn set_recent_sessions(&mut self, mut items: Vec<PickerItem>) {
@@ -490,6 +492,9 @@ impl App {
         self.clear_reasoning_level();
         self.model_context_windows.clear();
         self.model_reasoning_caps.clear();
+        self.model_settings_caps.clear();
+        self.thread_params = Value::Object(Map::new());
+        self.settings_surface = None;
         self.clear_ask_questions_state();
         self.default_context_window_tokens = None;
         self.retry_hint = None;
@@ -530,6 +535,8 @@ impl App {
         self.browser_state = BrowserState::default();
         self.model = None;
         self.mode = None;
+        self.thread_params = Value::Object(Map::new());
+        self.settings_surface = None;
         self.clear_pending_target_params();
         self.clear_reasoning_level();
         self.replace_with_session(
@@ -569,6 +576,8 @@ impl App {
         self.browser_state = BrowserState::default();
         self.model = None;
         self.mode = None;
+        self.thread_params = Value::Object(Map::new());
+        self.settings_surface = None;
         self.clear_reasoning_level();
         self.clear_pending_target_params();
         self.replace_with_session(

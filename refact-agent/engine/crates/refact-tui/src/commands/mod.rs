@@ -151,6 +151,7 @@ fn command_registry_vec() -> &'static Vec<CommandDef> {
             misc::HOOKS_COMMAND,
             misc::LOGOUT_COMMAND,
             misc::IMPORT_COMMAND,
+            misc::SETTINGS_COMMAND,
             CommandDef {
                 name: "stop",
                 aliases: &["cancel", "clean"],

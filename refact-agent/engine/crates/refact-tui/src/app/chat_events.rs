@@ -435,6 +435,7 @@ impl App {
         {
             self.permission_policy.auto_approve_dangerous_commands = value;
         }
+        self.update_thread_params(&params);
         self.refresh_session_header_item();
     }
 
@@ -1003,6 +1004,8 @@ impl App {
                 .and_then(Value::as_str)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
+            self.thread_params = thread.clone();
+            self.refresh_settings_surface();
         }
         if let Some(messages) = raw.get("messages").and_then(Value::as_array) {
             self.transcript_state.reset_from_messages(messages);

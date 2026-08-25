@@ -15,6 +15,7 @@ pub(crate) mod menu;
 mod overlay;
 pub mod picker;
 pub mod session_tabs;
+mod settings;
 pub mod status_card;
 pub mod status_indicator;
 mod transcript;
@@ -95,6 +96,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
     if let Some(picker) = app.modal_picker() {
         picker::render_modal_picker(frame, picker, area, composer_area);
+    }
+    if app.settings_surface_open() {
+        settings::render_settings(frame, app, area);
     }
     if app.transcript_overlay().is_some() {
         app.set_transcript_overlay_visible_height(overlay::transcript_overlay_body_height(area));

@@ -544,6 +544,11 @@ impl App {
             misc::MiscCommand::Hooks => self.open_read_only_view(ReadOnlyView::Hooks),
             misc::MiscCommand::Logout => self.start_provider_logout(args),
             misc::MiscCommand::Import => self.start_competitor_import(args),
+            misc::MiscCommand::Settings => {
+                self.composer.clear();
+                self.open_settings_surface();
+                AppAction::None
+            }
         }
     }
 
@@ -1192,6 +1197,11 @@ impl App {
     #[cfg(test)]
     pub fn test_execute_command_name(&mut self, name: &str) -> AppAction {
         self.execute_command_name(name)
+    }
+
+    #[cfg(test)]
+    pub fn test_set_thread_params(&mut self, params: Value) {
+        self.thread_params = params;
     }
 
     pub fn submit_browser_context_decision(

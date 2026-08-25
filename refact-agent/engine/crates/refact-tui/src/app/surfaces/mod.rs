@@ -28,6 +28,13 @@ use super::transcript::{
 };
 use super::*;
 
+mod settings;
+
+pub(crate) use settings::{
+    model_settings_caps, settings_caps_for_model, ModelSettingsCapabilities, SettingsRow,
+    SettingsState,
+};
+
 #[derive(Debug, Clone)]
 pub struct ProjectPickerState {
     projects: Vec<ProjectEntry>,
@@ -84,6 +91,70 @@ pub(super) struct ThemePickerSnapshot {
 }
 
 impl App {
+    pub(crate) fn settings_surface_enabled() -> bool {
+        settings_surface_enabled_from_value(std::env::var("REFACT_TUI_SURFACES").ok().as_deref())
+    }
+
+    pub(crate) fn open_settings_surface(&mut self) {
+        if !Self::settings_surface_enabled() {
+            self.add_notice("/settings requires REFACT_TUI_SURFACES=1");
+            return;
+        }
+        self.settings_surface = Some(SettingsState::new(
+            &self.thread_params,
+            settings_caps_for_model(&self.model_settings_caps, self.model.as_deref()),
+        ));
+    }
+
+    pub(crate) fn refresh_settings_surface(&mut self) {
+        if let Some(settings) = self.settings_surface.as_mut() {
+            settings.refresh(
+                &self.thread_params,
+                settings_caps_for_model(&self.model_settings_caps, self.model.as_deref()),
+            );
+        }
+    }
+
+    pub(crate) fn update_thread_params(&mut self, params: &Value) {
+        let Some(update) = params.as_object() else {
+            return;
+        };
+        let thread = self
+            .thread_params
+            .as_object_mut()
+            .expect("thread params object");
+        for (key, value) in update {
+            thread.insert(key.clone(), value.clone());
+        }
+        self.refresh_settings_surface();
+    }
+
+    pub(crate) fn settings_rows(&self) -> Vec<SettingsRow> {
+        self.settings_surface
+            .as_ref()
+            .map(SettingsState::rows)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn settings_selected(&self) -> usize {
+        self.settings_surface
+            .as_ref()
+            .map(SettingsState::selected)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn settings_surface_open(&self) -> bool {
+        self.settings_surface.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_open_settings_surface(&mut self) {
+        self.settings_surface = Some(SettingsState::new(
+            &self.thread_params,
+            settings_caps_for_model(&self.model_settings_caps, self.model.as_deref()),
+        ));
+    }
+
     pub fn set_transcript_overlay_visible_height(&mut self, height: usize) {
         self.transcript_overlay_visible_height = Some(height);
     }
@@ -902,6 +973,15 @@ impl App {
     }
 }
 
+fn settings_surface_enabled_from_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 fn info_message_item(message: &TranscriptMessage, label: &str) -> TranscriptItem {
     TranscriptItem::Info(vec![
         label.to_string(),
@@ -1000,6 +1080,14 @@ fn toml_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_surface_gate_requires_a_truthy_value() {
+        assert!(settings_surface_enabled_from_value(Some("1")));
+        assert!(settings_surface_enabled_from_value(Some("true")));
+        assert!(!settings_surface_enabled_from_value(None));
+        assert!(!settings_surface_enabled_from_value(Some("0")));
+    }
 
     #[test]
     fn view_overlay_uses_rendered_lines_as_raw_fallback() {

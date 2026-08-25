@@ -18,6 +18,7 @@ pub enum MiscCommand {
     Hooks,
     Logout,
     Import,
+    Settings,
 }
 
 pub const CLEAR_COMMAND: CommandDef = CommandDef {
@@ -207,6 +208,17 @@ pub const IMPORT_COMMAND: CommandDef = CommandDef {
     },
 };
 
+pub const SETTINGS_COMMAND: CommandDef = CommandDef {
+    name: "settings",
+    aliases: &[],
+    description: "per-chat capability-aware settings surface",
+    args_hint: "",
+    availability: CommandAvailability::Always,
+    action: CommandAction::Misc {
+        command: MiscCommand::Settings,
+    },
+};
+
 pub const UNAVAILABLE_COMMANDS: &[CommandDef] = &[
     unavailable(
         "side",
@@ -240,11 +252,6 @@ pub const UNAVAILABLE_COMMANDS: &[CommandDef] = &[
         "realtime",
         &[],
         "realtime voice controls are GUI-only today",
-    ),
-    unavailable(
-        "settings",
-        &[],
-        "interactive settings are GUI-only; edit the TUI config file for keymap and theme",
     ),
     unavailable("feedback", &[], "feedback submission has no TUI endpoint"),
     unavailable(

@@ -5,6 +5,7 @@ mod ask;
 mod main;
 mod overlay;
 mod picker;
+mod settings;
 mod vim;
 
 impl App {
@@ -27,6 +28,7 @@ impl App {
             KeyContext::Approval => return self.handle_approval_key(key),
             KeyContext::AskForm => return self.handle_ask_questions_key(key),
             KeyContext::ModalPicker => return self.handle_modal_picker_key(key),
+            KeyContext::Settings => return self.handle_settings_key(key),
             KeyContext::ProjectPicker => return self.handle_project_picker_key(key),
             _ => {}
         }
@@ -60,6 +62,7 @@ impl App {
             KeyContext::AskForm => self.handle_ask_questions_paste(text),
             KeyContext::ModalPicker => self.handle_modal_picker_paste(text),
             KeyContext::ProjectPicker => self.handle_project_picker_paste(text),
+            KeyContext::Settings => self.handle_settings_paste(text),
             KeyContext::History => {
                 for ch in text.chars() {
                     self.composer.history_search_insert_char(ch);
@@ -85,6 +88,9 @@ impl App {
         }
         if self.modal_picker.is_some() {
             return KeyContext::ModalPicker;
+        }
+        if self.settings_surface.is_some() {
+            return KeyContext::Settings;
         }
         if self.composer_mode == ComposerMode::ProjectPicker {
             return KeyContext::ProjectPicker;

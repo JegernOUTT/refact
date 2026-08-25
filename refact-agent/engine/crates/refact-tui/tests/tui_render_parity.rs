@@ -647,7 +647,7 @@ fn keymap_help_golden_snapshot() {
     │       board —                   not yet bound                                            │
     │        goal —                   not yet bound                                            │
     │   worktrees —                   not yet bound                                            │
-    │    settings —                   not yet bound                                            │
+    │    settings Backspace             delete left or remove queued item                      │
     │    ask form Backspace             delete left or remove queued item                      │
     │transcript cell t                     expand selected tool card                           │
     └──────────────────────────────────────────────────────────────────────────────────────────┘

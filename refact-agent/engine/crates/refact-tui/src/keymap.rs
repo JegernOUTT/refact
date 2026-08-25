@@ -99,6 +99,7 @@ pub enum KeyAction {
     OpenProjects,
     OpenModels,
     OpenModes,
+    OpenSettings,
     OpenTranscriptOverlay,
     OpenExternalEditor,
     ToggleReasoning,
@@ -165,6 +166,7 @@ impl KeyAction {
             Self::OpenProjects => "projects",
             Self::OpenModels => "models",
             Self::OpenModes => "modes",
+            Self::OpenSettings => "settings",
             Self::OpenTranscriptOverlay => "transcript-overlay",
             Self::OpenExternalEditor => "external-editor",
             Self::ToggleReasoning => "toggle-reasoning",
@@ -231,6 +233,7 @@ impl KeyAction {
             Self::OpenProjects => "open project picker",
             Self::OpenModels => "open model picker",
             Self::OpenModes => "open mode picker",
+            Self::OpenSettings => "open per-chat settings",
             Self::OpenTranscriptOverlay => "open transcript overlay",
             Self::OpenExternalEditor => "edit composer in external editor",
             Self::ToggleReasoning => "fold or unfold reasoning blocks",
@@ -305,6 +308,7 @@ const ALL_ACTIONS: &[KeyAction] = &[
     KeyAction::OpenProjects,
     KeyAction::OpenModels,
     KeyAction::OpenModes,
+    KeyAction::OpenSettings,
     KeyAction::OpenTranscriptOverlay,
     KeyAction::OpenExternalEditor,
     KeyAction::ToggleReasoning,
@@ -911,6 +915,7 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(KeyContext::Main, KeyAction::OpenProjects, &["ctrl-p"]),
         entry(KeyContext::Main, KeyAction::OpenModels, &["alt-m"]),
         entry(KeyContext::Main, KeyAction::OpenModes, &["ctrl-o"]),
+        entry(KeyContext::Main, KeyAction::OpenSettings, &["alt-s"]),
         entry(
             KeyContext::Main,
             KeyAction::OpenTranscriptOverlay,
@@ -991,6 +996,13 @@ fn default_entries() -> Vec<KeymapEntry> {
             KeyAction::ScrollPageDown,
             &["pagedown"],
         ),
+        entry(KeyContext::Settings, KeyAction::Cancel, &["esc"]),
+        entry(KeyContext::Settings, KeyAction::Accept, &["enter", "space"]),
+        entry(KeyContext::Settings, KeyAction::MoveUp, &["up"]),
+        entry(KeyContext::Settings, KeyAction::MoveDown, &["down"]),
+        entry(KeyContext::Settings, KeyAction::MoveHome, &["home"]),
+        entry(KeyContext::Settings, KeyAction::MoveEnd, &["end"]),
+        entry(KeyContext::Settings, KeyAction::Backspace, &["backspace"]),
         entry(KeyContext::Approval, KeyAction::ApprovalApproveOnce, &["y"]),
         entry(
             KeyContext::Approval,
@@ -1398,7 +1410,6 @@ newline = "enter"
             KeyContext::Board,
             KeyContext::Goal,
             KeyContext::Worktree,
-            KeyContext::Settings,
         ] {
             assert!(!registry
                 .entries
@@ -1421,6 +1432,23 @@ newline = "enter"
             }
         }
 
+        assert!(registry
+            .entries
+            .iter()
+            .any(|entry| entry.context == KeyContext::Settings));
+        for code in [
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Home,
+            KeyCode::End,
+        ] {
+            assert!(registry
+                .action_for(KeyContext::Settings, key(code, KeyModifiers::empty()))
+                .is_some());
+        }
+
         let rows = registry.help_rows();
         for context in [
             KeyContext::History,
@@ -1428,7 +1456,6 @@ newline = "enter"
             KeyContext::Board,
             KeyContext::Goal,
             KeyContext::Worktree,
-            KeyContext::Settings,
         ] {
             assert!(rows.iter().any(|row| {
                 row.context == context
@@ -1437,6 +1464,11 @@ newline = "enter"
                     && row.description == "not yet bound"
             }));
         }
+        assert!(rows.iter().any(|row| {
+            row.context == KeyContext::Settings
+                && row.action == Some(KeyAction::Accept)
+                && row.bindings.contains("Enter")
+        }));
     }
 
     #[test]
