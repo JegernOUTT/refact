@@ -21,6 +21,9 @@ impl App {
             self.help_open = false;
             return AppAction::None;
         }
+        if self.activity_surface.is_some() {
+            return self.handle_activity_key(key);
+        }
         match self.focused_key_context() {
             KeyContext::Overlay | KeyContext::OverlaySearch => {
                 return self.handle_transcript_overlay_key(key);
@@ -55,6 +58,7 @@ impl App {
 
     pub(super) fn handle_paste(&mut self, text: &str) {
         match self.focused_key_context() {
+            KeyContext::Activity => {}
             KeyContext::Overlay | KeyContext::OverlaySearch => {
                 self.handle_transcript_overlay_paste(text)
             }
@@ -73,6 +77,9 @@ impl App {
     }
 
     pub(super) fn focused_key_context(&self) -> KeyContext {
+        if self.activity_surface.is_some() {
+            return KeyContext::Activity;
+        }
         if let Some(overlay) = self.transcript_overlay.as_ref() {
             return if overlay.search_input().is_some() {
                 KeyContext::OverlaySearch
@@ -102,6 +109,27 @@ impl App {
             return KeyContext::TranscriptCell;
         }
         KeyContext::Main
+    }
+
+    fn handle_activity_key(&mut self, key: KeyEvent) -> AppAction {
+        let dispatch = self.keymap.dispatch(KeyContext::Activity, key);
+        match dispatch.action {
+            Some(KeyAction::Cancel) => {
+                self.activity_surface = None;
+                self.transcript_overlay = None;
+                AppAction::None
+            }
+            Some(KeyAction::MoveUp) => {
+                self.move_activity_selection(-1);
+                AppAction::None
+            }
+            Some(KeyAction::MoveDown) => {
+                self.move_activity_selection(1);
+                AppAction::None
+            }
+            Some(KeyAction::Accept) => self.open_selected_activity_agent(),
+            _ => AppAction::None,
+        }
     }
 
     fn transcript_cell_context_active(&self) -> bool {

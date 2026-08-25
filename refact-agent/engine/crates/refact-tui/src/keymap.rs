@@ -974,6 +974,10 @@ fn default_entries() -> Vec<KeymapEntry> {
         ),
         entry(KeyContext::ModalPicker, KeyAction::MoveUp, &["up"]),
         entry(KeyContext::ModalPicker, KeyAction::MoveDown, &["down"]),
+        entry(KeyContext::Activity, KeyAction::Cancel, &["esc"]),
+        entry(KeyContext::Activity, KeyAction::Accept, &["enter"]),
+        entry(KeyContext::Activity, KeyAction::MoveUp, &["up"]),
+        entry(KeyContext::Activity, KeyAction::MoveDown, &["down"]),
         entry(
             KeyContext::ModalPicker,
             KeyAction::ToggleSelectedTool,
@@ -1406,7 +1410,6 @@ newline = "enter"
 
         for context in [
             KeyContext::History,
-            KeyContext::Activity,
             KeyContext::Board,
             KeyContext::Goal,
             KeyContext::Worktree,
@@ -1452,7 +1455,6 @@ newline = "enter"
         let rows = registry.help_rows();
         for context in [
             KeyContext::History,
-            KeyContext::Activity,
             KeyContext::Board,
             KeyContext::Goal,
             KeyContext::Worktree,

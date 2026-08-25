@@ -451,6 +451,7 @@ impl App {
         self.cancel_backtrack();
         self.abort_in_flight = false;
         self.transcript_overlay = None;
+        self.activity_surface = None;
         self.save_local_input_handoff();
         self.history_path = Some(history_path_for_root(&project.root));
         let history_entries = self
@@ -523,6 +524,7 @@ impl App {
         self.cancel_backtrack();
         self.abort_in_flight = false;
         self.transcript_overlay = None;
+        self.activity_surface = None;
         let history_entries = self.composer.history_entries().to_vec();
         self.save_local_input_handoff();
         self.chat_id = chat_id;
@@ -564,6 +566,7 @@ impl App {
         self.cancel_backtrack();
         self.abort_in_flight = false;
         self.transcript_overlay = None;
+        self.activity_surface = None;
         let history_entries = self.composer.history_entries().to_vec();
         self.save_local_input_handoff();
         self.chat_id = chat_id;

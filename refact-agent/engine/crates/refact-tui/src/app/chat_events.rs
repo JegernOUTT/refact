@@ -219,7 +219,9 @@ impl App {
                 self.inbound_event_state
                     .apply_snapshot(background_agents, browser.clone());
                 self.browser_state.apply_snapshot(browser);
-                return self.handle_snapshot(&raw);
+                let action = self.handle_snapshot(&raw);
+                self.refresh_activity_surface();
+                return action;
             }
             SseEvent::BackgroundAgentUpdated { agent } => {
                 self.inbound_event_state.update_background_agent(agent);
@@ -376,6 +378,7 @@ impl App {
                 self.inbound_event_state.record_unknown(event);
             }
         }
+        self.refresh_activity_surface();
         AppAction::None
     }
 

@@ -443,7 +443,7 @@ impl App {
         }
     }
 
-    fn execute_command_name(&mut self, name: &str) -> AppAction {
+    pub fn execute_command_name(&mut self, name: &str) -> AppAction {
         let (name, args) = split_command_name_and_args(name);
         let Some(command) = command_by_name(name) else {
             self.add_notice(format!("/{name} is not registered"));
@@ -535,8 +535,12 @@ impl App {
             }
             misc::MiscCommand::Subagents => {
                 self.composer.clear();
-                self.show_subagents_card();
-                AppAction::None
+                if surfaces::activity::surfaces_enabled() {
+                    self.open_activity_surface()
+                } else {
+                    self.show_subagents_card();
+                    AppAction::None
+                }
             }
             misc::MiscCommand::Mcp => self.open_read_only_view(ReadOnlyView::Mcp),
             misc::MiscCommand::Skills => self.open_read_only_view(ReadOnlyView::Skills),
@@ -1020,6 +1024,7 @@ impl App {
     fn set_workers(&mut self, workers: Vec<WorkerInfo>) {
         self.update_current_worker_from_list(&workers);
         self.events_pane.set_workers(workers);
+        self.refresh_activity_surface();
     }
 
     fn push_daemon_event(&mut self, event: DaemonEventRecord) {

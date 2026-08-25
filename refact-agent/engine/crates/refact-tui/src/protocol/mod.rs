@@ -263,6 +263,7 @@ pub struct InboundEventState {
     browser: Option<BrowserSnapshot>,
     last_background_agent_updated: Option<BackgroundAgentSummary>,
     last_process_completed: Option<ProcessCompletedEvent>,
+    process_completed: Vec<ProcessCompletedEvent>,
     ide_tool_required: Option<IdeToolRequiredEvent>,
     last_browser_frame: Option<BrowserFrameEvent>,
     last_browser_status: Option<BrowserStatusEvent>,
@@ -288,6 +289,10 @@ impl InboundEventState {
 
     pub fn last_process_completed(&self) -> Option<&ProcessCompletedEvent> {
         self.last_process_completed.as_ref()
+    }
+
+    pub fn process_completed(&self) -> &[ProcessCompletedEvent] {
+        &self.process_completed
     }
 
     pub fn ide_tool_required(&self) -> Option<&IdeToolRequiredEvent> {
@@ -345,7 +350,11 @@ impl InboundEventState {
     }
 
     pub fn set_process_completed(&mut self, event: ProcessCompletedEvent) {
-        self.last_process_completed = Some(event);
+        self.last_process_completed = Some(event.clone());
+        self.process_completed.push(event);
+        if self.process_completed.len() > 100 {
+            self.process_completed.remove(0);
+        }
     }
 
     pub fn set_ide_tool_required(&mut self, event: IdeToolRequiredEvent) {

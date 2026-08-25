@@ -6,6 +6,7 @@ use crate::protocol::{
     BrowserClosedEvent, BrowserContextOversizeEvent, BrowserFrameEvent, BrowserSnapshot,
     RuntimeUpdatedEvent,
 };
+use super::surfaces::activity::ActivitySurfaceState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct HistorySaveRequest {
@@ -313,6 +314,7 @@ pub struct App {
     pub(super) last_escape_at: Option<Instant>,
     pub(super) transcript_overlay: Option<PagerOverlay>,
     pub(super) transcript_overlay_visible_height: Option<usize>,
+    pub(super) activity_surface: Option<ActivitySurfaceState>,
     pub(super) help_open: bool,
     pub(super) usage: Option<UsageSummary>,
     pub(super) should_quit: bool,
@@ -432,6 +434,7 @@ impl App {
             last_escape_at: None,
             transcript_overlay: None,
             transcript_overlay_visible_height: None,
+            activity_surface: None,
             help_open: false,
             usage: None,
             should_quit: false,
@@ -529,6 +532,7 @@ impl App {
             last_escape_at: None,
             transcript_overlay: None,
             transcript_overlay_visible_height: None,
+            activity_surface: None,
             help_open: false,
             usage: None,
             should_quit: false,

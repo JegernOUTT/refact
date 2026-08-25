@@ -28,6 +28,7 @@ use super::transcript::{
 };
 use super::*;
 
+pub(super) mod activity;
 mod settings;
 
 pub(crate) use settings::{
@@ -816,6 +817,73 @@ impl App {
             self.transcript_raw_text_lines(),
         ));
         AppAction::None
+    }
+
+    pub(super) fn open_activity_surface(&mut self) -> AppAction {
+        if !activity::surfaces_enabled() {
+            self.add_notice("/subagents activity surface is gated by REFACT_TUI_SURFACES=1");
+            return AppAction::None;
+        }
+        self.composer.clear();
+        self.activity_surface = Some(activity::ActivitySurfaceState::new(
+            self.inbound_event_state.background_agents(),
+        ));
+        self.refresh_activity_surface();
+        AppAction::RefreshWorkers
+    }
+
+    pub(super) fn refresh_activity_surface(&mut self) {
+        let Some(surface) = self.activity_surface.as_ref() else {
+            return;
+        };
+        let process_cards = self
+            .transcript
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Tool(card) if activity::is_process_registry_card(card) => {
+                    Some(card)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let overlay = activity::overlay(
+            self.inbound_event_state.background_agents(),
+            self.events_pane.workers(),
+            self.current_worker(),
+            self.inbound_event_state.process_completed(),
+            &process_cards,
+            surface.selected_agent_id(),
+        );
+        self.transcript_overlay = Some(PagerOverlay::new(
+            "Activity",
+            overlay.lines.clone(),
+            overlay.lines,
+        ));
+    }
+
+    pub(super) fn move_activity_selection(&mut self, offset: isize) {
+        if let Some(surface) = self.activity_surface.as_mut() {
+            surface.move_selection(self.inbound_event_state.background_agents(), offset);
+        }
+        self.refresh_activity_surface();
+    }
+
+    pub(super) fn open_selected_activity_agent(&mut self) -> AppAction {
+        let child_chat_id = self
+            .activity_surface
+            .as_ref()
+            .and_then(|surface| {
+                surface.selected_agent(self.inbound_event_state.background_agents())
+            })
+            .and_then(|agent| agent.child_chat_id.as_deref())
+            .filter(|chat_id| !chat_id.trim().is_empty())
+            .map(str::to_string);
+        let Some(chat_id) = child_chat_id else {
+            self.add_notice("Selected background agent has no child chat to open");
+            return AppAction::None;
+        };
+        self.activity_surface = None;
+        self.resume_chat(chat_id.clone(), format!("Background agent {chat_id}"), None)
     }
 
     pub(super) fn copy_visible_overlay_text(&mut self, height: usize) -> AppAction {

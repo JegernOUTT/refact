@@ -206,6 +206,10 @@ impl App {
         } else if self.backtrack_pending.is_some() {
             self.cancel_backtrack();
             AppAction::None
+        } else if self.activity_surface.is_some() {
+            self.activity_surface = None;
+            self.transcript_overlay = None;
+            AppAction::None
         } else if self.events_pane.open {
             self.events_pane.open = false;
             AppAction::None

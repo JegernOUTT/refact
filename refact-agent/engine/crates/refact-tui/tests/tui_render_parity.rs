@@ -194,6 +194,8 @@ fn render_matrix_snapshot(
     height: u16,
 ) -> String {
     let _environment = color.apply();
+    let _surfaces = (scenario.name == "activity")
+        .then(|| EnvironmentGuard::set(&[("REFACT_TUI_SURFACES", Some("1"))]));
     let mut app = App::new(project());
     (scenario.setup)(&mut app);
     if scenario.render_before_resize {
@@ -477,6 +479,32 @@ fn image_fallback_scenario(app: &mut App) {
     ));
 }
 
+fn activity_scenario(app: &mut App) {
+    app.apply_chat_event(chat_event(
+        app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {"id": app.chat_id(), "model": "gpt-demo", "mode": "agent"},
+            "runtime": {"state": "idle"},
+            "messages": [],
+            "background_agents": [{
+                "agentId": "agent-1",
+                "childChatId": "child-1",
+                "kind": "task",
+                "status": "running",
+                "title": "Implement parser",
+                "progress": "Writing tests",
+                "editedFiles": ["src/parser.rs"],
+                "diffSummary": "one file changed",
+                "conflictSummary": "none",
+                "resultSummary": "partial"
+            }]
+        }),
+    ));
+    app.execute_command_name("subagents");
+}
+
 fn render_scenarios() -> Vec<RenderScenario> {
     vec![
         RenderScenario {
@@ -537,6 +565,12 @@ fn render_scenarios() -> Vec<RenderScenario> {
             name: "history events",
             marker: Some("Proces"),
             setup: history_events_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
+            name: "activity",
+            marker: Some("Activity"),
+            setup: activity_scenario,
             render_before_resize: false,
         },
         RenderScenario {
@@ -643,7 +677,7 @@ fn keymap_help_golden_snapshot() {
     │  vim normal a                     append after cursor and insert                         │
     │  vim insert Esc                   return to vim normal mode                              │
     │     history —                   not yet bound                                            │
-    │    activity —                   not yet bound                                            │
+    │    activity Esc                   cancel, close, or abort active work                    │
     │       board —                   not yet bound                                            │
     │        goal —                   not yet bound                                            │
     │   worktrees —                   not yet bound                                            │
