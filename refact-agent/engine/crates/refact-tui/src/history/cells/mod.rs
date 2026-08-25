@@ -29,6 +29,7 @@ mod request_input;
 mod search;
 mod server;
 mod session;
+mod tool_family;
 
 pub use approval::ApprovalCell;
 pub use exec::{ExecToolCell, SubchatCell, ToolCallCell};
@@ -40,6 +41,7 @@ pub use request_input::RequestInputToolCell;
 pub use search::SearchToolCell;
 pub use server::ServerToolCell;
 pub use session::SessionCell;
+pub use tool_family::{tool_family, ToolFamily};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HistoryCellKind {
@@ -367,19 +369,7 @@ pub fn cell_from_tool_card(card: ToolCard, selected: bool) -> Box<dyn HistoryCel
 }
 
 pub fn tool_cell_type_for(name: &str) -> ToolCellType {
-    if is_process_tool(name) || name == "shell" {
-        ToolCellType::Exec
-    } else if is_diff_tool(name) {
-        ToolCellType::Diff
-    } else if is_server_tool(name) {
-        ToolCellType::Server
-    } else if is_search_tool(name) {
-        ToolCellType::Search
-    } else if is_request_input_tool(name) {
-        ToolCellType::RequestInput
-    } else {
-        ToolCellType::Generic
-    }
+    tool_family(name).cell_type()
 }
 
 pub fn synthesize_plan_content(base: &str, deltas: &[String]) -> String {
@@ -396,67 +386,6 @@ pub fn synthesize_goal_content(base: &str, deltas: &[String]) -> String {
     } else {
         format!("{base}{GOAL_SYNTHESIS_SEPARATOR}{}", deltas.join("\n\n"))
     }
-}
-
-fn is_process_tool(name: &str) -> bool {
-    name.starts_with("process_")
-}
-
-fn is_diff_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "patch"
-            | "apply_patch"
-            | "text_edit"
-            | "create_textdoc"
-            | "update_textdoc"
-            | "replace_textdoc"
-            | "update_textdoc_regex"
-            | "update_textdoc_by_lines"
-            | "update_textdoc_anchored"
-            | "undo_textdoc"
-            | "rm"
-            | "mv"
-    )
-}
-
-fn is_server_tool(name: &str) -> bool {
-    name.starts_with("srvtoolu_")
-        || matches!(
-            name,
-            "web_search_call"
-                | "file_search_call"
-                | "code_interpreter_call"
-                | "mcp_call"
-                | "local_shell_call"
-                | "image_generation_call"
-                | "computer_use_call"
-                | "web_fetch"
-                | "web_search"
-                | "code_execution"
-        )
-}
-
-fn is_search_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "knowledge"
-            | "search"
-            | "search_pattern"
-            | "search_symbol_definition"
-            | "tree"
-            | "cat"
-            | "doc_list"
-            | "doc_get"
-            | "vecdb_search"
-    )
-}
-
-fn is_request_input_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "ask_questions" | "request_user_input" | "request-user-input" | "agent_ask_planner"
-    )
 }
 
 fn role_line(label: impl Into<String>, style: Style) -> Line<'static> {
@@ -835,17 +764,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dispatch_table_maps_known_tool_names() {
-        assert_eq!(tool_cell_type_for("shell"), ToolCellType::Exec);
-        assert_eq!(tool_cell_type_for("process_read"), ToolCellType::Exec);
-        assert_eq!(tool_cell_type_for("apply_patch"), ToolCellType::Diff);
-        assert_eq!(tool_cell_type_for("search_pattern"), ToolCellType::Search);
-        assert_eq!(
-            tool_cell_type_for("ask_questions"),
-            ToolCellType::RequestInput
-        );
-        assert_eq!(tool_cell_type_for("web_search_call"), ToolCellType::Server);
-        assert_eq!(tool_cell_type_for("totally_unknown"), ToolCellType::Generic);
+    fn tool_family_registry_classifies_tool_cells() {
+        let cases = [
+            ("shell", ToolFamily::Shell, ToolCellType::Exec),
+            ("process_read", ToolFamily::Process, ToolCellType::Exec),
+            ("apply_patch", ToolFamily::Diff, ToolCellType::Diff),
+            ("web_search", ToolFamily::WebSearch, ToolCellType::Search),
+            ("web", ToolFamily::WebFetch, ToolCellType::Search),
+            (
+                "search_pattern",
+                ToolFamily::CodeSearch,
+                ToolCellType::Search,
+            ),
+            ("cat", ToolFamily::FileSearch, ToolCellType::Search),
+            ("tree", ToolFamily::TreeSearch, ToolCellType::Search),
+            (
+                "doc_list",
+                ToolFamily::DocumentationSearch,
+                ToolCellType::Search,
+            ),
+            (
+                "knowledge",
+                ToolFamily::KnowledgeSearch,
+                ToolCellType::Search,
+            ),
+            (
+                "ask_questions",
+                ToolFamily::RequestInput,
+                ToolCellType::RequestInput,
+            ),
+            ("web_search_call", ToolFamily::Server, ToolCellType::Server),
+            (
+                "totally_unknown",
+                ToolFamily::Unknown,
+                ToolCellType::Generic,
+            ),
+        ];
+
+        for (name, family, cell_type) in cases {
+            assert_eq!(tool_family(name), family, "{name}");
+            assert_eq!(tool_cell_type_for(name), cell_type, "{name}");
+        }
     }
 
     #[test]

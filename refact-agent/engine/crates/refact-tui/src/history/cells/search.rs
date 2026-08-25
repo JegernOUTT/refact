@@ -54,11 +54,7 @@ impl HistoryCell for SearchToolCell {
 }
 
 fn search_header_lines(card: &ToolCard, width: usize) -> Vec<Line<'static>> {
-    let header = if card.status.is_active() {
-        "Searching the web"
-    } else {
-        "Searched the web"
-    };
+    let header = tool_family(&card.name).search_header(card.status.is_active());
     let detail = search_detail(card);
     let line = if detail.is_empty() {
         Line::from(bold_span(header))
@@ -106,7 +102,7 @@ mod tests {
         let rendered = text(&SearchToolCell::new(card, false).render(80));
         assert_eq!(
             rendered,
-            "• Searched the web for needle\n▾ ✅ succeeded search_pattern · needle · 1.2s\n  └ src/main.rs:1: needle\n"
+            "• Searched code for needle\n▾ ✅ succeeded search_pattern · needle · 1.2s\n  └ src/main.rs:1: needle\n"
         );
     }
 
@@ -118,7 +114,45 @@ mod tests {
         let rendered = text(&SearchToolCell::new(card, false).render(80));
         assert_eq!(
             rendered,
-            "• Searching the web needle\n▾ ⏳ running search_pattern · needle\n"
+            "• Searching code needle\n▾ ⏳ running search_pattern · needle\n"
         );
+    }
+
+    #[test]
+    fn search_headers_are_family_aware() {
+        let cases = [
+            ("web_search", "Searching the web", "Searched the web"),
+            ("web", "Fetching the web", "Fetched the web"),
+            ("search_pattern", "Searching code", "Searched code"),
+            ("cat", "Searching files", "Searched files"),
+            (
+                "tree",
+                "Inspecting the file tree",
+                "Inspected the file tree",
+            ),
+            (
+                "doc_get",
+                "Searching documentation",
+                "Searched documentation",
+            ),
+            ("vecdb_search", "Searching knowledge", "Searched knowledge"),
+            ("knowledge", "Searching knowledge", "Searched knowledge"),
+            ("unknown_search", "Searching", "Searched"),
+        ];
+
+        for (name, active, complete) in cases {
+            let mut card = tool_card(name, json!({"query": "needle"}), "");
+            card.status = ToolStatus::Running;
+            assert!(
+                text(&search_header_lines(&card, 80)).contains(active),
+                "{name}"
+            );
+
+            card.status = ToolStatus::Succeeded;
+            assert!(
+                text(&search_header_lines(&card, 80)).contains(complete),
+                "{name}"
+            );
+        }
     }
 }

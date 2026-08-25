@@ -171,7 +171,7 @@ fn exec_output_lines(card: &ToolCard, width: usize) -> Vec<Line<'static>> {
     let source = collect_exec_output_lines(&card.result);
     let failed = failed_exit(card);
     let only_err = failed && source.iter().any(|line| line.stderr);
-    let max_lines = if card.name == "shell" {
+    let max_lines = if tool_family(&card.name).is_shell() {
         USER_SHELL_TOOL_CALL_MAX_LINES
     } else {
         TOOL_CALL_MAX_LINES

@@ -102,7 +102,7 @@ struct ServerInvocation {
 
 fn server_invocation(card: &ToolCard) -> ServerInvocation {
     let parsed = serde_json::from_str::<Value>(&card.args).ok();
-    if card.name == "mcp_call" {
+    if tool_family(&card.name).is_mcp() {
         let tool_name = parsed
             .as_ref()
             .and_then(|value| value.get("tool_name"))
