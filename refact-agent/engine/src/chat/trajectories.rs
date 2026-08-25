@@ -4084,6 +4084,8 @@ async fn commit_trajectory_snapshot_for_session(
     }
     let saved_version = snapshot.version;
     let chat_id = snapshot.chat_id.clone();
+    let message_count = snapshot.messages.len() as u64;
+    let span = perf_diagnostics::span(PerfComponent::TrajectoryCommit, Some(&chat_id), None);
     let save_mutex = {
         let session = session_arc.lock().await;
         session.trajectory_save_mutex.clone()
@@ -4096,9 +4098,21 @@ async fn commit_trajectory_snapshot_for_session(
         }
     }
 
-    persist_trajectory_snapshot_with_intent(gcx, snapshot, TrajectoryCommitIntent::Required)
-        .await
-        .map_err(|error| format!("Failed to save trajectory for {}: {}", chat_id, error))?;
+    let result =
+        persist_trajectory_snapshot_with_intent(gcx, snapshot, TrajectoryCommitIntent::Required)
+            .await;
+    span.finish(
+        if result.is_ok() {
+            PerfOutcome::Success
+        } else {
+            PerfOutcome::Failure
+        },
+        None,
+        Some(message_count),
+        Some(saved_version),
+        None,
+    );
+    result.map_err(|error| format!("Failed to save trajectory for {}: {}", chat_id, error))?;
 
     let mut session = session_arc.lock().await;
     let committed = session.complete_trajectory_commit(saved_version);

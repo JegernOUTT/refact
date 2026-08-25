@@ -375,6 +375,7 @@ pub struct GlobalContext {
     pub chat_sessions: crate::chat::SessionsMap,
     pub trajectory_index_coordinator:
         Arc<crate::chat::trajectory_index::TrajectoryIndexCoordinator>,
+    pub performance_telemetry: Arc<crate::chat::perf_telemetry::PerformanceTelemetry>,
     pub voice_service: SharedVoiceService,
     pub project_registry_cache: Arc<StdRwLock<RegistryCacheManager>>,
     pub providers: Arc<ARwLock<ProviderRegistry>>,
@@ -879,6 +880,7 @@ pub async fn create_global_context(
         trajectory_index_coordinator: Arc::new(
             crate::chat::trajectory_index::TrajectoryIndexCoordinator::new(),
         ),
+        performance_telemetry: crate::chat::perf_diagnostics::process_telemetry(),
         voice_service: crate::voice::VoiceService::new(),
         project_registry_cache: Arc::new(StdRwLock::new(RegistryCacheManager::new())),
         providers: Arc::new(ARwLock::new(
@@ -1172,6 +1174,7 @@ pub mod tests {
             trajectory_index_coordinator: Arc::new(
                 crate::chat::trajectory_index::TrajectoryIndexCoordinator::new(),
             ),
+            performance_telemetry: crate::chat::perf_diagnostics::process_telemetry(),
             voice_service: crate::voice::VoiceService::new(),
             project_registry_cache: Arc::new(StdRwLock::new(RegistryCacheManager::new())),
             providers: Arc::new(ARwLock::new(ProviderRegistry::default())),

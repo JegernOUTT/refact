@@ -1439,19 +1439,16 @@ impl ChatSession {
     }
 
     pub(crate) fn record_command_queue_wait(&mut self, client_request_id: &str) {
-        if !perf_diagnostics::is_enabled() {
-            return;
-        }
         self.record_command_queue_wait_at(client_request_id, Instant::now());
     }
 
     pub(crate) fn record_command_queue_wait_at(&mut self, client_request_id: &str, now: Instant) {
-        if !perf_diagnostics::is_enabled() {
-            return;
-        }
         let Some(enqueued_at) = self.command_enqueued_at.remove(client_request_id) else {
             return;
         };
+        if !perf_diagnostics::is_enabled() {
+            return;
+        }
         perf_diagnostics::record(
             PerfComponent::CommandQueueWait,
             Some(&self.chat_id),

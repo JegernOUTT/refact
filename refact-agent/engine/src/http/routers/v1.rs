@@ -168,6 +168,7 @@ mod mcp_marketplace;
 mod mcp_marketplace_sources;
 mod mcp_oauth;
 mod mcp_server_info;
+mod performance;
 mod plugins;
 mod privacy;
 mod project_configs;
@@ -316,6 +317,15 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/rag-status", get(handle_v1_rag_status))
         .route("/config-path", get(handle_v1_config_path))
         .route("/customization", get(handle_v1_customization))
+        .route(
+            "/performance/telemetry",
+            get(performance::handle_v1_performance_telemetry_get)
+                .post(performance::handle_v1_performance_telemetry_post),
+        )
+        .route(
+            "/performance/telemetry/reset",
+            post(performance::handle_v1_performance_telemetry_reset),
+        )
         .route("/project-configs", get(handle_v1_project_configs_get))
         .route(
             "/indexing-settings",

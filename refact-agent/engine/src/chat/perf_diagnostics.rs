@@ -6,11 +6,14 @@ use rand::RngCore;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use super::perf_telemetry::PerformanceTelemetry;
+
 pub const PERFORMANCE_DIAGNOSTICS_ENV: &str = "REFACT_PERF_DIAGNOSTICS";
 pub const PERFORMANCE_DIAGNOSTICS_SCHEMA_VERSION: u8 = 1;
 const ID_HASH_HEX_CHARS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum PerfComponent {
     TrajectorySnapshot,
     TrajectorySerialize,
@@ -202,6 +205,10 @@ impl PerfComponent {
             Self::EnrichmentPersistenceScheduling => "enrichment.persistence_scheduling",
         }
     }
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +245,8 @@ impl PerfOutcome {
 pub struct PerfEvent {
     pub schema_version: u8,
     pub component: &'static str,
+    #[serde(skip)]
+    pub(crate) component_index: u8,
     pub outcome: &'static str,
     pub elapsed_us: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -311,6 +320,20 @@ impl PerfSink for TracingSink {
             path_hash = ?event.path_hash,
             "trajectory_performance"
         );
+    }
+}
+
+struct ProcessPerfSink {
+    telemetry: Arc<PerformanceTelemetry>,
+    tracing_enabled: bool,
+}
+
+impl PerfSink for ProcessPerfSink {
+    fn record(&self, event: PerfEvent) {
+        self.telemetry.record(&event);
+        if self.tracing_enabled {
+            TracingSink.record(event);
+        }
     }
 }
 
@@ -449,6 +472,7 @@ impl PerfSpan {
         active.recorder.sink.record(PerfEvent {
             schema_version: PERFORMANCE_DIAGNOSTICS_SCHEMA_VERSION,
             component: active.component.as_str(),
+            component_index: active.component.index() as u8,
             outcome: outcome.as_str(),
             elapsed_us,
             size_bytes,
@@ -465,7 +489,7 @@ impl PerfSpan {
 }
 
 static PROCESS_RECORDER: OnceLock<Arc<PerfRecorder>> = OnceLock::new();
-static PROCESS_RECORDER_INITIALIZED: OnceLock<()> = OnceLock::new();
+static PROCESS_TELEMETRY: OnceLock<Arc<PerformanceTelemetry>> = OnceLock::new();
 
 #[cfg(any(test, feature = "bench"))]
 thread_local! {
@@ -475,28 +499,58 @@ thread_local! {
 }
 
 pub fn initialize_from_environment() {
-    PROCESS_RECORDER_INITIALIZED.get_or_init(|| {
-        let enabled = std::env::var(PERFORMANCE_DIAGNOSTICS_ENV)
-            .ok()
-            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"));
-        if enabled {
-            let _ = PROCESS_RECORDER.set(Arc::new(PerfRecorder::new(
+    let _ = process_telemetry();
+}
+
+pub fn process_telemetry() -> Arc<PerformanceTelemetry> {
+    PROCESS_TELEMETRY
+        .get_or_init(|| {
+            let enabled = diagnostics_enabled_from_environment();
+            Arc::new(PerformanceTelemetry::new(enabled))
+        })
+        .clone()
+}
+
+fn diagnostics_enabled_from_environment() -> bool {
+    std::env::var(PERFORMANCE_DIAGNOSTICS_ENV)
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+}
+
+#[cfg(test)]
+pub(crate) fn clear_process_telemetry_for_test() {
+    let telemetry = process_telemetry();
+    telemetry.reset();
+}
+
+fn process_recorder() -> Arc<PerfRecorder> {
+    PROCESS_RECORDER
+        .get_or_init(|| {
+            Arc::new(PerfRecorder::new(
                 Arc::new(MonotonicClock::default()),
-                Arc::new(TracingSink),
-            )));
-        }
-    });
+                Arc::new(ProcessPerfSink {
+                    telemetry: process_telemetry(),
+                    tracing_enabled: diagnostics_enabled_from_environment(),
+                }),
+            ))
+        })
+        .clone()
 }
 
 fn active_recorder() -> Option<Arc<PerfRecorder>> {
-    PROCESS_RECORDER.get().cloned().or_else(|| {
-        #[cfg(any(test, feature = "bench"))]
-        {
-            return TEST_RECORDERS.with(|recorders| recorders.borrow().last().cloned());
-        }
-        #[cfg(not(any(test, feature = "bench")))]
-        None
-    })
+    #[cfg(any(test, feature = "bench"))]
+    if let Some(recorder) = TEST_RECORDERS.with(|recorders| recorders.borrow().last().cloned()) {
+        return Some(recorder);
+    }
+    PROCESS_TELEMETRY
+        .get()
+        .filter(|telemetry| telemetry.enabled())
+        .map(|_| process_recorder())
 }
 
 pub fn is_enabled() -> bool {
@@ -522,6 +576,7 @@ pub fn record(
     recorder.sink.record(PerfEvent {
         schema_version: PERFORMANCE_DIAGNOSTICS_SCHEMA_VERSION,
         component: component.as_str(),
+        component_index: component.index() as u8,
         outcome: outcome.as_str(),
         elapsed_us,
         size_bytes,
@@ -551,6 +606,7 @@ pub fn record_enrichment(
     recorder.sink.record(PerfEvent {
         schema_version: PERFORMANCE_DIAGNOSTICS_SCHEMA_VERSION,
         component: component.as_str(),
+        component_index: component.index() as u8,
         outcome: outcome.as_str(),
         elapsed_us,
         size_bytes,
@@ -665,6 +721,27 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn disabled_process_telemetry_keeps_the_default_recording_path_inactive() {
+        let _lock = PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let telemetry = process_telemetry();
+        let was_enabled = telemetry.enabled();
+        telemetry.set_enabled(false);
+        telemetry.reset();
+        assert!(!is_enabled());
+        record(
+            PerfComponent::TrajectoryCommit,
+            Some("private-chat"),
+            PerfOutcome::Success,
+            1,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(process_telemetry().snapshot().components[3].sample_count, 0);
+        telemetry.set_enabled(was_enabled);
+    }
 
     struct TestClock {
         now: AtomicU64,
