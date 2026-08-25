@@ -135,7 +135,11 @@ mod tests {
                 "Searching documentation",
                 "Searched documentation",
             ),
-            ("vecdb_search", "Searching knowledge", "Searched knowledge"),
+            (
+                "task_mem_search",
+                "Searching knowledge",
+                "Searched knowledge",
+            ),
             ("knowledge", "Searching knowledge", "Searched knowledge"),
             ("unknown_search", "Searching", "Searched"),
         ];
