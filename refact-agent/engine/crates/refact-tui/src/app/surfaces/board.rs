@@ -428,8 +428,10 @@ fn push_json(lines: &mut Vec<Line<'static>>, value: &serde_json::Value) {
 mod tests {
     use super::*;
     use crate::client::{
-        TaskBoardCard, TaskBoardReadyCards, TaskBoardResponse, TaskBoardTask, TaskBoardViewData,
+        OpenProjectResponse, TaskBoardCard, TaskBoardReadyCards, TaskBoardResponse, TaskBoardTask,
+        TaskBoardViewData,
     };
+    use std::path::PathBuf;
 
     fn card(id: &str, column: &str, depends_on: &[&str]) -> TaskBoardCard {
         TaskBoardCard {
@@ -471,6 +473,46 @@ mod tests {
         }
     }
 
+    fn board_snapshot(width: u16, height: u16) -> String {
+        let board = BoardSurface::loaded(data());
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_task_board(frame, &board, frame.area()))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    fn app_snapshot(width: u16, height: u16) -> String {
+        let mut app = crate::app::App::new(OpenProjectResponse {
+            project_id: "project-1".to_string(),
+            slug: "fixture".to_string(),
+            root: PathBuf::from("/tmp/fixture"),
+            pinned: Some(false),
+            worker: None,
+            cron_pending: None,
+        });
+        app.test_show_task_board(data());
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
     #[test]
     fn dependency_state_marks_ready_and_blocked_cards() {
         let board = BoardSurface::loaded(data());
@@ -498,6 +540,38 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("ready"));
         assert!(text.contains("blocked"));
+    }
+
+    #[test]
+    fn board_rendering_retains_column_labels_at_supported_widths() {
+        for (width, marker) in [(120, "Planned"), (60, "Planned"), (40, "Planned:")] {
+            let text = board_snapshot(width, 20);
+            assert!(text.contains("Task board"), "{width}: {text}");
+            assert!(text.contains(marker), "{width}: {text}");
+            assert!(text.contains("Regressed"), "{width}: {text}");
+        }
+    }
+
+    #[test]
+    fn board_surface_degrades_and_marks_compact_overflow() {
+        let narrow = app_snapshot(40, 15);
+        assert!(narrow.contains("Task board"), "{narrow}");
+        assert!(narrow.contains("Planned:"), "{narrow}");
+        assert!(narrow.contains("T-1"), "{narrow}");
+        assert!(!narrow.chars().any(|character| {
+            matches!(
+                character,
+                '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' | '─' | '│'
+            )
+        }));
+
+        let compact = app_snapshot(30, 10);
+        assert!(compact.contains("Task board"), "{compact}");
+        assert!(compact.contains("Planned:"), "{compact}");
+        assert!(compact.contains("Regressed:"), "{compact}");
+        assert!(compact.contains("… content truncated"), "{compact}");
+        assert!(!compact.contains('+'), "{compact}");
+        assert!(!compact.contains('|'), "{compact}");
     }
 
     #[test]

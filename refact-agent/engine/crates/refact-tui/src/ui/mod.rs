@@ -122,6 +122,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
     if let Some(board) = app.task_board_surface() {
         crate::app::surfaces::board::render_task_board(frame, board, area);
+        degrade_frames(frame, area);
+        if compact {
+            render_compact_truncation_indicator(frame, area);
+        }
         return;
     }
     if app.goal_overlay_open() {
