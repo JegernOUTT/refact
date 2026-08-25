@@ -873,7 +873,10 @@ impl App {
                     items.push(TranscriptItem::Notice(message.content.clone()))
                 }
                 TranscriptRole::System => {
-                    items.push(info_message_item(message, "System"));
+                    items.push(TranscriptItem::SystemFact(vec![
+                        "System".to_string(),
+                        visible_message_content(message, "(empty)"),
+                    ]));
                 }
                 TranscriptRole::ContextFile
                 | TranscriptRole::PlainText

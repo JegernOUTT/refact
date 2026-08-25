@@ -32,11 +32,16 @@ impl HistoryCell for NoticeCell {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InfoCell {
     lines: Vec<String>,
+    dim: bool,
 }
 
 impl InfoCell {
     pub fn new(lines: Vec<String>) -> Self {
-        Self { lines }
+        Self { lines, dim: false }
+    }
+
+    pub fn system_fact(lines: Vec<String>) -> Self {
+        Self { lines, dim: true }
     }
 }
 
@@ -48,12 +53,20 @@ impl HistoryCell for InfoCell {
     fn render_raw(&self, _width: usize) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         if let Some((first, rest)) = self.lines.split_first() {
-            lines.push(info_line(first));
+            lines.push(if self.dim {
+                system_fact_line(first)
+            } else {
+                info_line(first)
+            });
             lines.extend(rest.iter().map(|text| {
-                Line::from(Span::styled(
-                    text.clone(),
-                    default_theme_style(ThemeRole::Muted),
-                ))
+                if self.dim {
+                    system_fact_detail_line(text)
+                } else {
+                    Line::from(Span::styled(
+                        text.clone(),
+                        default_theme_style(ThemeRole::Muted),
+                    ))
+                }
             }));
         }
         finish(lines)
@@ -163,11 +176,25 @@ fn info_line(text: &str) -> Line<'static> {
     ])
 }
 
+fn system_fact_line(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("• {text}"),
+        default_theme_style(ThemeRole::Muted).add_modifier(Modifier::DIM),
+    ))
+}
+
+fn system_fact_detail_line(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        text.to_string(),
+        default_theme_style(ThemeRole::Muted).add_modifier(Modifier::DIM),
+    ))
+}
+
 fn warning_lines(text: &str, width: usize) -> Vec<Line<'static>> {
     adaptive_wrap_lines(
         [Line::from(Span::styled(text.to_string(), warning_style()))],
         RtOptions::new(width.max(1))
-            .initial_indent(Line::from(Span::styled("⚠ ", warning_style())))
+            .initial_indent(Line::from(Span::styled("! ", warning_style())))
             .subsequent_indent(Line::from("  ")),
     )
 }
@@ -206,7 +233,7 @@ mod tests {
         );
         assert_eq!(
             text(&NoticeCell::new("TUI keymap warning: duplicate binding").render(18)),
-            "⚠ TUI keymap\n  warning:\n  duplicate\n  binding\n"
+            "! TUI keymap\n  warning:\n  duplicate\n  binding\n"
         );
     }
 
@@ -223,6 +250,21 @@ mod tests {
             "• TUI debug config\nConfig: /tmp/refact.toml\nTheme: dark\n"
         );
         assert_eq!(lines[1].spans[0].style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn system_facts_use_a_dim_channel() {
+        let lines = InfoCell::system_fact(vec![
+            "System".to_string(),
+            "Server-maintained fact".to_string(),
+        ])
+        .render(80);
+
+        assert_eq!(text(&lines), "• System\nServer-maintained fact\n");
+        assert!(lines.iter().flat_map(|line| &line.spans).all(|span| {
+            span.style.add_modifier.contains(Modifier::DIM)
+                && span.style.fg == Some(Color::DarkGray)
+        }));
     }
 
     #[test]

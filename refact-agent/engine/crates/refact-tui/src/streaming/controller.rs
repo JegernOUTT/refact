@@ -4,11 +4,11 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::history::cells::{
-    raw_lines_from_source, AssistantStreamCell, HistoryCell, HistoryRenderMode, PlanStreamCell,
+    plan_header_line, raw_lines_from_source, AssistantStreamCell, HistoryCell, HistoryRenderMode,
+    PlanStreamCell,
 };
 use crate::render::{color_enabled_from_env, RenderCache, RenderCacheKey};
 use crate::style::proposed_plan_style;
@@ -540,16 +540,6 @@ impl PlanStreamController {
     }
 }
 
-fn plan_header_line(title: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("• ", Style::default().add_modifier(Modifier::DIM)),
-        Span::styled(
-            title.to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-    ])
-}
-
 fn previous_char_boundary(source: &str, index: usize) -> usize {
     let mut index = index.min(source.len());
     while !source.is_char_boundary(index) {
@@ -879,6 +869,29 @@ mod tests {
         assert!(idle);
         assert!(rendered.contains("Proposed Plan"));
         assert!(rendered.contains("## Heading"));
+    }
+
+    #[test]
+    fn plan_stream_header_matches_static_plan_header() {
+        let static_header = crate::history::cells::PlanCell::new(
+            crate::history::cells::PlanCellData::new("", "agent", 1, 0),
+        )
+        .render(80)
+        .into_iter()
+        .next()
+        .expect("static plan header");
+
+        let mut stream = PlanStreamController::new(Some(80), std::path::Path::new("."));
+        stream.push_delta("content\n");
+        let (cell, _) = stream.drain_for_commit_tick(DrainPlan::Batch(usize::MAX));
+        let stream_header = cell
+            .expect("streamed plan cell")
+            .render(80)
+            .into_iter()
+            .next()
+            .expect("streamed plan header");
+
+        assert_eq!(stream_header, static_header);
     }
 
     fn utf8_chunks(source: &str, max_bytes: usize) -> Vec<&str> {

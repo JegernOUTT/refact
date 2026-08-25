@@ -259,7 +259,7 @@ fn update_label(delta_count: usize) -> String {
     }
 }
 
-fn plan_header_line(title: &str) -> Line<'static> {
+pub fn plan_header_line(title: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled("• ", Style::default().add_modifier(Modifier::DIM)),
         Span::styled(

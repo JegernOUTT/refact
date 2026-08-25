@@ -239,6 +239,7 @@ fn transcript_text(app: &App) -> String {
             TranscriptItem::Diff(text) => format!("diff:{text}"),
             TranscriptItem::Notice(text) => format!("notice:{text}"),
             TranscriptItem::Info(lines) => format!("info:{}", lines.join("|")),
+            TranscriptItem::SystemFact(lines) => format!("system_fact:{}", lines.join("|")),
             TranscriptItem::Status(_, _) => "status".to_string(),
             TranscriptItem::Approval(_, outcome) => format!("approval:{outcome:?}"),
             TranscriptItem::Session { title, subtitle } => {

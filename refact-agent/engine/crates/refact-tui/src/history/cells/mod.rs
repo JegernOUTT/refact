@@ -37,7 +37,7 @@ pub use exec::{ExecToolCell, SubchatCell, ToolCallCell};
 pub use messages::{AssistantCell, AssistantStreamCell, ContentBlockCell, ReasoningCell, UserCell};
 pub use notices::{EventCell, EventCellData, InfoCell, NoticeCell, StatusCell};
 pub use patches::{DiffCell, DiffToolCell};
-pub use plans::{GoalCell, GoalCellData, PlanCell, PlanCellData, PlanStreamCell};
+pub use plans::{plan_header_line, GoalCell, GoalCellData, PlanCell, PlanCellData, PlanStreamCell};
 pub use request_input::RequestInputToolCell;
 pub use search::SearchToolCell;
 pub use server::ServerToolCell;
@@ -365,6 +365,7 @@ pub fn cell_from_transcript_item(item: &TranscriptItem, selected: bool) -> Box<d
         TranscriptItem::Diff(text) => Box::new(DiffCell::new(text.clone())),
         TranscriptItem::Notice(text) => Box::new(NoticeCell::new(text.clone())),
         TranscriptItem::Info(lines) => Box::new(InfoCell::new(lines.clone())),
+        TranscriptItem::SystemFact(lines) => Box::new(InfoCell::system_fact(lines.clone())),
         TranscriptItem::Status(snapshot, theme) => {
             Box::new(StatusCell::new(snapshot.clone(), theme.clone()))
         }

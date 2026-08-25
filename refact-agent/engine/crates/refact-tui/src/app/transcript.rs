@@ -29,6 +29,7 @@ pub enum TranscriptItem {
     Diff(String),
     Notice(String),
     Info(Vec<String>),
+    SystemFact(Vec<String>),
     Status(session::StatusSnapshot, TuiTheme),
     Approval(ApprovalModalState, Option<ToolStatus>),
     Session {
@@ -838,7 +839,7 @@ impl App {
                     TranscriptItem::Notice(message.content.clone()),
                 );
             }
-            TranscriptRole::System => self.push_state_info_message(message, "System"),
+            TranscriptRole::System => self.push_state_system_fact(message),
             TranscriptRole::ContextFile
             | TranscriptRole::PlainText
             | TranscriptRole::CdInstruction => {
@@ -895,6 +896,16 @@ impl App {
             render_message_key(message, label, 0),
             TranscriptItem::Info(vec![
                 label.to_string(),
+                visible_message_content(message, "(empty)"),
+            ]),
+        );
+    }
+
+    pub(super) fn push_state_system_fact(&mut self, message: &TranscriptMessage) {
+        self.push_state_history_item(
+            render_message_key(message, "System", 0),
+            TranscriptItem::SystemFact(vec![
+                "System".to_string(),
                 visible_message_content(message, "(empty)"),
             ]),
         );
@@ -1429,6 +1440,25 @@ mod tests {
         ));
         assert!(state_key_has_stable_identity(
             "message-1:assistant:0:0000000000000000"
+        ));
+    }
+
+    #[test]
+    fn system_messages_use_the_system_fact_channel() {
+        let message = TranscriptMessage::from_wire(&json!({
+            "message_id": "system-1",
+            "role": "system",
+            "content": "Server-maintained fact",
+            "stream_finished": true,
+        }));
+        let mut app = App::notice_only("test");
+
+        app.append_render_message(&message);
+
+        assert!(matches!(
+            app.visible_transcript().last(),
+            Some(TranscriptItem::SystemFact(lines))
+                if lines == &["System".to_string(), "Server-maintained fact".to_string()]
         ));
     }
 }
