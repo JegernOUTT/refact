@@ -511,32 +511,78 @@ fn tracked_edit_range(
     before: &EditorSnapshot,
     after: &EditorSnapshot,
 ) -> Option<(usize, usize, usize)> {
+    if !snapshot_offsets_are_valid(before) || !snapshot_offsets_are_valid(after) {
+        return None;
+    }
+
     if let Some(range) = before.selection_range() {
-        return Some((range.start, range.end, after.cursor));
+        return is_single_edit(before, after, range.clone(), after.cursor).then_some((
+            range.start,
+            range.end,
+            after.cursor,
+        ));
     }
+
+    if after.text.len() < before.text.len() {
+        let removed_len = before.text.len().checked_sub(after.text.len())?;
+        let old_end = after.cursor.checked_add(removed_len)?;
+        return is_single_edit(before, after, after.cursor..old_end, after.cursor).then_some((
+            after.cursor,
+            old_end,
+            after.cursor,
+        ));
+    }
+
     if after.cursor > before.cursor {
-        let prefix = &before.text[..before.cursor];
-        let suffix = &before.text[before.cursor..];
-        if after.text.starts_with(prefix) && after.text.ends_with(suffix) {
-            return Some((before.cursor, before.cursor, after.cursor));
-        }
+        return is_single_edit(before, after, before.cursor..before.cursor, after.cursor)
+            .then_some((before.cursor, before.cursor, after.cursor));
     }
-    if after.cursor < before.cursor {
-        let prefix = &before.text[..after.cursor];
-        let suffix = &before.text[before.cursor..];
-        if after.text.starts_with(prefix) && after.text.ends_with(suffix) {
-            return Some((after.cursor, before.cursor, after.cursor));
-        }
+
+    None
+}
+
+fn snapshot_offsets_are_valid(snapshot: &EditorSnapshot) -> bool {
+    is_char_boundary(&snapshot.text, snapshot.cursor)
+        && snapshot
+            .selection_anchor
+            .is_none_or(|anchor| is_char_boundary(&snapshot.text, anchor))
+}
+
+fn is_char_boundary(text: &str, offset: usize) -> bool {
+    offset <= text.len() && text.is_char_boundary(offset)
+}
+
+fn is_single_edit(
+    before: &EditorSnapshot,
+    after: &EditorSnapshot,
+    old_range: Range<usize>,
+    new_end: usize,
+) -> bool {
+    if !is_char_boundary(&before.text, old_range.start)
+        || !is_char_boundary(&before.text, old_range.end)
+        || !is_char_boundary(&after.text, new_end)
+    {
+        return false;
     }
-    let removed_len = before.text.len().checked_sub(after.text.len())?;
-    let old_end = before.cursor + removed_len;
-    let prefix = &before.text[..before.cursor];
-    let suffix = &before.text[old_end..];
-    (after.text.starts_with(prefix) && after.text.ends_with(suffix)).then_some((
-        before.cursor,
-        old_end,
-        before.cursor,
-    ))
+
+    let Some(removed_len) = old_range.end.checked_sub(old_range.start) else {
+        return false;
+    };
+    let Some(inserted_len) = new_end.checked_sub(old_range.start) else {
+        return false;
+    };
+    let Some(expected_len) = before
+        .text
+        .len()
+        .checked_sub(removed_len)
+        .and_then(|len| len.checked_add(inserted_len))
+    else {
+        return false;
+    };
+
+    expected_len == after.text.len()
+        && before.text.get(..old_range.start) == after.text.get(..old_range.start)
+        && before.text.get(old_range.end..) == after.text.get(new_end..)
 }
 
 fn large_paste_placeholder(char_count: usize, id: u64) -> String {
@@ -1218,6 +1264,115 @@ mod tests {
         let placeholders = composer.pending_paste_placeholders();
         assert_eq!(placeholders.len(), 1);
         placeholders.into_iter().next().unwrap()
+    }
+
+    fn snapshot(text: &str, cursor: usize, selection_anchor: Option<usize>) -> EditorSnapshot {
+        EditorSnapshot {
+            text: text.to_string(),
+            cursor,
+            selection_anchor,
+        }
+    }
+
+    #[test]
+    fn tracked_edit_range_preserves_ordinary_insertions_and_deletions() {
+        let insertion_before = snapshot("abc", 1, None);
+        let insertion_after = snapshot("aXYbc", 3, None);
+        assert_eq!(
+            tracked_edit_range(&insertion_before, &insertion_after),
+            Some((1, 1, 3))
+        );
+
+        let backspace_before = snapshot("abc", 2, None);
+        let backspace_after = snapshot("ac", 1, None);
+        assert_eq!(
+            tracked_edit_range(&backspace_before, &backspace_after),
+            Some((1, 2, 1))
+        );
+
+        let delete_before = snapshot("abc", 1, None);
+        let delete_after = snapshot("ac", 1, None);
+        assert_eq!(
+            tracked_edit_range(&delete_before, &delete_after),
+            Some((1, 2, 1))
+        );
+    }
+
+    #[test]
+    fn tracked_edit_range_preserves_selection_replacement() {
+        let before = snapshot("aβcz", 4, Some(1));
+        let after = snapshot("a漢z", 4, None);
+
+        assert_eq!(tracked_edit_range(&before, &after), Some((1, 4, 4)));
+    }
+
+    #[test]
+    fn tracked_edit_range_handles_multibyte_grapheme_deletion() {
+        let family = "👨‍👩‍👧‍👦";
+        let before_text = format!("a{family}z");
+        let before = snapshot(&before_text, before_text.len() - 1, None);
+        let after = snapshot("az", 1, None);
+
+        assert_eq!(
+            tracked_edit_range(&before, &after),
+            Some((1, before_text.len() - 1, 1))
+        );
+    }
+
+    #[test]
+    fn tracked_edit_range_preserves_long_line_deletion_near_end() {
+        let prefix = "prefix\n";
+        let before_text = format!("{prefix}{}tail", "x".repeat(16 * 1024));
+        let before = snapshot(&before_text, before_text.len() - 1, None);
+        let after = snapshot(prefix, prefix.len(), None);
+
+        assert_eq!(
+            tracked_edit_range(&before, &after),
+            Some((prefix.len(), before_text.len(), prefix.len()))
+        );
+    }
+
+    #[test]
+    fn tracked_edit_range_rejects_compound_changes() {
+        let before = snapshot("abcdef", 2, None);
+        let after = snapshot("abXdeY", 3, None);
+        let selected_before = snapshot("abcdef", 4, Some(2));
+
+        assert_eq!(tracked_edit_range(&before, &after), None);
+        assert_eq!(tracked_edit_range(&selected_before, &after), None);
+    }
+
+    #[test]
+    fn tracked_edit_range_rejects_out_of_bounds_and_non_boundary_offsets() {
+        let non_boundary = snapshot("é", 1, None);
+        let out_of_bounds = snapshot("x", usize::MAX, Some(0));
+        let valid = snapshot("", 0, None);
+
+        assert_eq!(tracked_edit_range(&non_boundary, &valid), None);
+        assert_eq!(tracked_edit_range(&out_of_bounds, &valid), None);
+    }
+
+    #[test]
+    fn tracked_edit_range_does_not_panic_for_valid_snapshot_pairs() {
+        let texts = ["", "ab", "éβ", "👨‍👩‍👧‍👦z"];
+        let mut snapshots = Vec::new();
+        for text in texts {
+            let offsets = (0..=text.len())
+                .filter(|offset| text.is_char_boundary(*offset))
+                .collect::<Vec<_>>();
+            for &cursor in &offsets {
+                snapshots.push(snapshot(text, cursor, None));
+                for &anchor in &offsets {
+                    snapshots.push(snapshot(text, cursor, Some(anchor)));
+                }
+            }
+        }
+
+        for before in &snapshots {
+            for after in &snapshots {
+                let _ = tracked_edit_range(before, after);
+            }
+        }
     }
 
     #[test]
