@@ -140,7 +140,15 @@ pub fn exceeds_highlight_limits(total_bytes: usize, total_lines: usize) -> bool 
 }
 
 pub fn highlight_code_to_lines(code: &str, lang: &str) -> Vec<Line<'static>> {
-    highlight_code_to_styled_spans(code, lang)
+    highlight_code_to_lines_with_color(code, lang, super::color_enabled_from_env())
+}
+
+pub(super) fn highlight_code_to_lines_with_color(
+    code: &str,
+    lang: &str,
+    color_enabled: bool,
+) -> Vec<Line<'static>> {
+    highlight_code_to_styled_spans_with_color(code, lang, color_enabled)
         .map(|lines| lines.into_iter().map(Line::from).collect())
         .unwrap_or_else(|| plain_code_lines(code))
 }
@@ -150,6 +158,17 @@ pub fn highlight_bash_to_lines(script: &str) -> Vec<Line<'static>> {
 }
 
 pub fn highlight_code_to_styled_spans(code: &str, lang: &str) -> Option<Vec<Vec<Span<'static>>>> {
+    highlight_code_to_styled_spans_with_color(code, lang, super::color_enabled_from_env())
+}
+
+pub(super) fn highlight_code_to_styled_spans_with_color(
+    code: &str,
+    lang: &str,
+    color_enabled: bool,
+) -> Option<Vec<Vec<Span<'static>>>> {
+    if !color_enabled {
+        return None;
+    }
     let guard = match theme_lock().read() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -370,7 +389,7 @@ fn find_syntax(lang: &str) -> Option<&'static SyntaxReference> {
                 .iter()
                 .find(|syntax| syntax.name.to_ascii_lowercase() == lower)
         })
-        .or_else(|| syntax_set.find_syntax_by_extension(lang))
+        .or_else(|| syntax_set.find_syntax_by_extension(patched))
 }
 
 fn language_name(lang: &str) -> &str {
@@ -475,7 +494,7 @@ mod tests {
 
     #[test]
     fn highlight_rust_has_multiple_styled_spans() {
-        let lines = highlight_code_to_lines("fn main() {}", "rust");
+        let lines = highlight_code_to_lines_with_color("fn main() {}", "rust", true);
         assert_eq!(reconstructed(&lines), "fn main() {}");
         assert!(lines[0].spans.len() > 1);
         assert!(lines[0]
@@ -518,6 +537,11 @@ mod tests {
             "rust"
         )
         .is_none());
+    }
+
+    #[test]
+    fn styled_spans_skip_highlighting_when_color_is_disabled() {
+        assert!(highlight_code_to_styled_spans_with_color("fn main() {}", "rust", false).is_none());
     }
 
     #[test]
@@ -736,6 +760,7 @@ mod tests {
         ] {
             assert!(find_syntax(lang).is_some(), "missing syntax for {lang}");
         }
+        assert_eq!(find_syntax("golang").unwrap().name, "Go");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::diff_model::FileChange;
 use crate::terminal_palette::{stdout_color_level, StdoutColorLevel};
 
-use super::highlight::{exceeds_highlight_limits, highlight_code_to_styled_spans};
+use super::highlight::{exceeds_highlight_limits, highlight_code_to_styled_spans_with_color};
 use super::wrapping::wrap_line;
 
 const WORD_DIFF_MAX_CHARS: usize = 4096;
@@ -97,6 +97,15 @@ pub fn create_diff_summary(
     cwd: &Path,
     wrap_cols: usize,
 ) -> Vec<Line<'static>> {
+    create_diff_summary_with_color_enabled(changes, cwd, wrap_cols, super::color_enabled_from_env())
+}
+
+fn create_diff_summary_with_color_enabled(
+    changes: &HashMap<PathBuf, FileChange>,
+    cwd: &Path,
+    wrap_cols: usize,
+    color_enabled: bool,
+) -> Vec<Line<'static>> {
     let mut rows = changes
         .iter()
         .map(|(path, change)| {
@@ -127,7 +136,7 @@ pub fn create_diff_summary(
     let mut out = Vec::new();
     let mut header = vec![Span::styled(
         "• ",
-        Style::default().add_modifier(Modifier::DIM),
+        modifier_style(Modifier::DIM, color_enabled),
     )];
     if let [(path, move_path, added, removed, change)] = rows.as_slice() {
         let verb = match change {
@@ -137,24 +146,27 @@ pub fn create_diff_summary(
         };
         header.push(Span::styled(
             verb.to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
+            modifier_style(Modifier::BOLD, color_enabled),
         ));
         header.push(Span::raw(" "));
         header.extend(path_spans(path, move_path.as_ref(), cwd));
         header.push(Span::raw(" "));
-        header.extend(line_count_summary_spans(*added, *removed));
+        header.extend(line_count_summary_spans(*added, *removed, color_enabled));
     } else {
         let noun = if rows.len() == 1 { "file" } else { "files" };
         header.push(Span::styled(
             "Edited".to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
+            modifier_style(Modifier::BOLD, color_enabled),
         ));
         header.push(Span::raw(format!(" {} {} ", rows.len(), noun)));
-        header.extend(line_count_summary_spans(total_added, total_removed));
+        header.extend(line_count_summary_spans(
+            total_added,
+            total_removed,
+            color_enabled,
+        ));
     }
     out.push(Line::from(header));
 
-    let color_enabled = super::color_enabled_from_env();
     let skip_file_header = rows.len() == 1;
     for (idx, (path, move_path, added, removed, change)) in rows.into_iter().enumerate() {
         if idx > 0 {
@@ -163,11 +175,11 @@ pub fn create_diff_summary(
         if !skip_file_header {
             let mut file_header = vec![Span::styled(
                 "  └ ",
-                Style::default().add_modifier(Modifier::DIM),
+                modifier_style(Modifier::DIM, color_enabled),
             )];
             file_header.extend(path_spans(&path, move_path.as_ref(), cwd));
             file_header.push(Span::raw(" "));
-            file_header.extend(line_count_summary_spans(added, removed));
+            file_header.extend(line_count_summary_spans(added, removed, color_enabled));
             out.push(Line::from(file_header));
         }
         let lang_path = move_path.as_ref().unwrap_or(&path);
@@ -418,6 +430,7 @@ fn render_hunk_lines(
                     content_style_for(DiffLineType::Insert, style_context.color_enabled),
                     removed_syntax,
                     added_syntax,
+                    style_context.color_enabled,
                 );
                 out.extend(render_numbered_diff_line(
                     removed.line_number,
@@ -510,7 +523,10 @@ fn render_hunk_gap(gutter_width: usize, style_context: DiffStyleContext) -> Line
             format!("{:gutter_width$} ", ""),
             gutter_style(style_context.color_enabled),
         ),
-        Span::styled("⋮", Style::default().add_modifier(Modifier::DIM)),
+        Span::styled(
+            "⋮",
+            modifier_style(Modifier::DIM, style_context.color_enabled),
+        ),
     ])
 }
 
@@ -527,12 +543,19 @@ fn render_meta_line(
     )
 }
 
-fn line_count_summary_spans(added: usize, removed: usize) -> Vec<Span<'static>> {
+fn line_count_summary_spans(
+    added: usize,
+    removed: usize,
+    color_enabled: bool,
+) -> Vec<Span<'static>> {
     vec![
         Span::raw("("),
-        Span::styled(format!("+{added}"), style_for(DiffKind::Add, true)),
+        Span::styled(format!("+{added}"), style_for(DiffKind::Add, color_enabled)),
         Span::raw(" "),
-        Span::styled(format!("-{removed}"), style_for(DiffKind::Delete, true)),
+        Span::styled(
+            format!("-{removed}"),
+            style_for(DiffKind::Delete, color_enabled),
+        ),
         Span::raw(")"),
     ]
 }
@@ -592,6 +615,7 @@ fn word_diff_spans_with_syntax(
     add_style: Style,
     removed_syntax: Option<&Vec<Span<'static>>>,
     added_syntax: Option<&Vec<Span<'static>>>,
+    color_enabled: bool,
 ) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
     if removed.len() > WORD_DIFF_MAX_CHARS || added.len() > WORD_DIFF_MAX_CHARS {
         return line_level_spans(removed, added, delete_style, add_style);
@@ -612,6 +636,7 @@ fn word_diff_spans_with_syntax(
             delete_style,
             removed_syntax.filter(|spans| spans_plain(spans) == removed),
             true,
+            color_enabled,
         ),
         spans_for_tokens(
             &added_tokens,
@@ -619,6 +644,7 @@ fn word_diff_spans_with_syntax(
             add_style,
             added_syntax.filter(|spans| spans_plain(spans) == added),
             false,
+            color_enabled,
         ),
     )
 }
@@ -732,6 +758,7 @@ fn spans_for_tokens(
     base_style: Style,
     syntax_spans: Option<&Vec<Span<'static>>>,
     dim_syntax: bool,
+    color_enabled: bool,
 ) -> Vec<Span<'static>> {
     let mut out = Vec::new();
     for token in tokens {
@@ -744,10 +771,10 @@ fn spans_for_tokens(
             vec![Span::styled(token.text.clone(), base_style)]
         };
         for span in &mut spans {
-            if dim_syntax && syntax_spans.is_some() {
+            if color_enabled && dim_syntax && syntax_spans.is_some() {
                 span.style = span.style.add_modifier(Modifier::DIM);
             }
-            if changed {
+            if color_enabled && changed {
                 span.style = changed_span_style(span.style);
             }
         }
@@ -816,7 +843,7 @@ fn syntax_lines_for_refs(
         return None;
     }
     let text = lines.join("\n");
-    let syntax_lines = highlight_code_to_styled_spans(&text, lang)?;
+    let syntax_lines = highlight_code_to_styled_spans_with_color(&text, lang, color_enabled)?;
     (syntax_lines.len() == lines.len()).then_some(syntax_lines)
 }
 
@@ -928,20 +955,9 @@ fn parse_hunk_header(line: &str) -> Option<HunkHeader> {
     if !line.starts_with("@@") {
         return None;
     }
-    let end = line[2..].find("@@")? + 2;
-    let header = &line[..end];
-    let mut old_start = None;
-    let mut new_start = None;
-    for part in header.split_whitespace() {
-        if let Some(rest) = part.strip_prefix('-') {
-            old_start = parse_range_start(rest);
-        } else if let Some(rest) = part.strip_prefix('+') {
-            new_start = parse_range_start(rest);
-        }
-    }
     Some(HunkHeader {
-        old_start: old_start?,
-        new_start: new_start?,
+        old_start: parse_range_start(line[2..].split_whitespace().next()?.strip_prefix('-')?)?,
+        new_start: parse_range_start(line[2..].split_whitespace().nth(1)?.strip_prefix('+')?)?,
     })
 }
 
@@ -1034,10 +1050,7 @@ fn sign_for(kind: DiffLineType) -> char {
 
 fn style_for(kind: DiffKind, color_enabled: bool) -> Style {
     if !color_enabled {
-        return match kind {
-            DiffKind::File | DiffKind::Hunk => Style::default().add_modifier(Modifier::BOLD),
-            _ => Style::default(),
-        };
+        return Style::default();
     }
     match kind {
         DiffKind::File => Style::default()
@@ -1058,7 +1071,15 @@ fn gutter_style(color_enabled: bool) -> Style {
             .fg(Color::DarkGray)
             .add_modifier(Modifier::DIM)
     } else {
-        Style::default().add_modifier(Modifier::DIM)
+        Style::default()
+    }
+}
+
+fn modifier_style(modifier: Modifier, color_enabled: bool) -> Style {
+    if color_enabled {
+        Style::default().add_modifier(modifier)
+    } else {
+        Style::default()
     }
 }
 
@@ -1105,6 +1126,13 @@ mod tests {
 
     fn plain(lines: &[Line<'static>]) -> Vec<String> {
         lines.iter().map(line_to_plain).collect()
+    }
+
+    fn has_style(lines: &[Line<'static>]) -> bool {
+        lines.iter().any(|line| {
+            line.style != Style::default()
+                || line.spans.iter().any(|span| span.style != Style::default())
+        })
     }
 
     #[test]
@@ -1161,6 +1189,37 @@ mod tests {
         );
         assert!(plain(&lines).contains(&"20 -old".to_string()));
         assert!(plain(&lines).contains(&"20 +new".to_string()));
+    }
+
+    #[test]
+    fn incomplete_hunk_header_keeps_body_numbered_and_word_diffed() {
+        let partial = render_unified_diff(
+            "--- a/x.rs\n+++ b/x.rs\n@@ -10,1 +10,1\n-let status = \"slow\";\n+let status = \"fast\";",
+            Some(80),
+            true,
+        );
+        let complete = render_unified_diff(
+            "--- a/x.rs\n+++ b/x.rs\n@@ -10,1 +10,1 @@\n-let status = \"slow\";\n+let status = \"fast\";",
+            Some(80),
+            true,
+        );
+
+        for lines in [&partial, &complete] {
+            let rendered = plain(lines);
+            assert!(rendered.contains(&"10 -let status = \"slow\";".to_string()));
+            assert!(rendered.contains(&"10 +let status = \"fast\";".to_string()));
+            let added = lines
+                .iter()
+                .find(|line| line_to_plain(line) == "10 +let status = \"fast\";")
+                .unwrap();
+            let changed = added
+                .spans
+                .iter()
+                .find(|span| span.content.as_ref().contains("fast"))
+                .unwrap();
+            assert!(changed.style.add_modifier.contains(Modifier::BOLD));
+            assert!(changed.style.add_modifier.contains(Modifier::REVERSED));
+        }
     }
 
     #[test]
@@ -1247,6 +1306,28 @@ mod tests {
         let lines = render_unified_diff("@@ -1 +1 @@\n-old\n+new", Some(80), false);
         assert!(plain(&lines).contains(&"1 -old".to_string()));
         assert!(plain(&lines).contains(&"1 +new".to_string()));
+    }
+
+    #[test]
+    fn no_color_diff_and_summary_have_no_styles() {
+        let diff = render_unified_diff(
+            "--- a/x.rs\n+++ b/x.rs\n@@ -1 +1 @@\n-let status = \"slow\";\n+let status = \"fast\";\n@@ -10 +10 @@\n-old\n+new",
+            Some(80),
+            false,
+        );
+        assert!(!has_style(&diff));
+
+        let mut changes = HashMap::new();
+        changes.insert(
+            PathBuf::from("src/x.rs"),
+            FileChange::Update {
+                unified_diff: "@@ -1 +1 @@\n-old\n+new".to_string(),
+                move_path: None,
+            },
+        );
+        let summary =
+            create_diff_summary_with_color_enabled(&changes, Path::new("/tmp/project"), 80, false);
+        assert!(!has_style(&summary));
     }
 
     #[test]

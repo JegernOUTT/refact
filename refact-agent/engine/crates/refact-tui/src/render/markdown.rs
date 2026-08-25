@@ -11,7 +11,7 @@ use url::Url;
 
 use super::color_enabled_from_env;
 use super::diff::{is_unified_diff, render_unified_diff};
-use super::highlight::highlight_code_to_lines;
+use super::highlight::highlight_code_to_lines_with_color;
 use super::line_utils::line_to_static;
 use super::markdown_table::{render_table, TableRenderStyles, TableState};
 use super::wrapping::{adaptive_wrap_line, RtOptions};
@@ -645,7 +645,7 @@ impl Writer {
             return;
         };
         let code_lines = if self.options.color_enabled {
-            highlight_code_to_lines(&code_block.source, &code_block.lang)
+            highlight_code_to_lines_with_color(&code_block.source, &code_block.lang, true)
         } else {
             plain_code_lines(&code_block.source)
         };
