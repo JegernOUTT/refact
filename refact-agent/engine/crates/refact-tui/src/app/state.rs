@@ -1,8 +1,11 @@
 use super::session_lifecycle::context_window_for_model;
 use super::*;
-use crate::client::request_id;
+use crate::client::{request_id, BrowserContextDecision};
 use crate::commands::session as command_session;
-use crate::protocol::RuntimeUpdatedEvent;
+use crate::protocol::{
+    BrowserClosedEvent, BrowserContextOversizeEvent, BrowserFrameEvent, BrowserSnapshot,
+    RuntimeUpdatedEvent,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct HistorySaveRequest {
@@ -14,6 +17,139 @@ pub(super) struct HistorySaveRequest {
 pub enum ComposerMode {
     Chat,
     ProjectPicker,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BrowserContextDecisionOptions {
+    pub include_actions: bool,
+    pub include_console: bool,
+    pub include_network: bool,
+    pub include_mutations: bool,
+    pub include_screenshot: bool,
+    pub last_n_actions: Option<usize>,
+    pub last_n_console: Option<usize>,
+    pub last_n_network: Option<usize>,
+}
+
+impl BrowserContextDecisionOptions {
+    pub fn include_all() -> Self {
+        Self {
+            include_actions: true,
+            include_console: true,
+            include_network: true,
+            include_mutations: true,
+            include_screenshot: true,
+            last_n_actions: None,
+            last_n_console: None,
+            last_n_network: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrowserContextPromptState {
+    pub event: BrowserContextOversizeEvent,
+}
+
+impl BrowserContextPromptState {
+    fn decision(&self, options: BrowserContextDecisionOptions) -> BrowserContextDecision {
+        BrowserContextDecision {
+            pending_message_id: self.event.pending_message_id.clone(),
+            include_actions: options.include_actions,
+            include_console: options.include_console,
+            include_network: options.include_network,
+            include_mutations: options.include_mutations,
+            include_screenshot: options.include_screenshot,
+            last_n_actions: options.last_n_actions,
+            last_n_console: options.last_n_console,
+            last_n_network: options.last_n_network,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BrowserState {
+    pub is_open: bool,
+    pub connected: bool,
+    pub runtime_id: Option<String>,
+    pub active_tab: Option<String>,
+    pub current_url: Option<String>,
+    pub current_title: Option<String>,
+    pub tabs: Vec<crate::protocol::BrowserTab>,
+    pub latest_frame: Option<BrowserFrameEvent>,
+    pub timeline: Vec<Value>,
+    pub last_toolbar_action: Option<String>,
+    pub last_closed: Option<BrowserClosedEvent>,
+    pub context_prompt: Option<BrowserContextPromptState>,
+}
+
+impl BrowserState {
+    pub(super) fn apply_snapshot(&mut self, snapshot: Option<BrowserSnapshot>) {
+        *self = Self::default();
+        if let Some(snapshot) = snapshot {
+            self.apply_status(snapshot);
+        }
+    }
+
+    pub(super) fn apply_status(&mut self, snapshot: BrowserSnapshot) {
+        self.is_open = !snapshot.runtime_id.is_empty();
+        self.connected = snapshot.connected;
+        self.runtime_id = (!snapshot.runtime_id.is_empty()).then_some(snapshot.runtime_id);
+        self.active_tab = snapshot.active_tab;
+        self.current_url = snapshot.url;
+        self.current_title = snapshot.title;
+        self.tabs = snapshot.tabs;
+        self.last_closed = None;
+    }
+
+    pub(super) fn apply_frame(&mut self, frame: BrowserFrameEvent) {
+        self.latest_frame = Some(frame);
+    }
+
+    pub(super) fn apply_closed(&mut self, event: BrowserClosedEvent) {
+        if self
+            .runtime_id
+            .as_deref()
+            .is_none_or(|runtime_id| runtime_id == event.runtime_id)
+        {
+            self.is_open = false;
+            self.connected = false;
+            self.runtime_id = Some(event.runtime_id.clone());
+            self.active_tab = None;
+            self.current_url = None;
+            self.current_title = None;
+            self.tabs.clear();
+            self.context_prompt = None;
+        }
+        self.last_closed = Some(event);
+    }
+
+    pub(super) fn apply_timeline(&mut self, events: Vec<Value>) {
+        self.timeline.extend(events);
+    }
+
+    pub(super) fn apply_context_oversize(&mut self, event: BrowserContextOversizeEvent) {
+        self.context_prompt = Some(BrowserContextPromptState { event });
+    }
+
+    pub(super) fn apply_toolbar_action(&mut self, action: String) {
+        self.last_toolbar_action = Some(action);
+    }
+
+    pub(super) fn take_context_prompt(
+        &mut self,
+        options: BrowserContextDecisionOptions,
+    ) -> Option<(BrowserContextDecision, BrowserContextPromptState)> {
+        let prompt = self.context_prompt.take()?;
+        let decision = prompt.decision(options);
+        Some((decision, prompt))
+    }
+
+    pub(super) fn restore_context_prompt(&mut self, prompt: BrowserContextPromptState) {
+        if self.context_prompt.is_none() {
+            self.context_prompt = Some(prompt);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +250,7 @@ pub struct App {
     pub(super) transcript: Vec<TranscriptItem>,
     pub(super) transcript_state: TranscriptState,
     pub(super) inbound_event_state: InboundEventState,
+    pub(super) browser_state: BrowserState,
     pub(super) runtime_snapshot: Option<RuntimeUpdatedEvent>,
     pub(super) composer: ComposerState,
     pub(super) keymap: KeymapRegistry,
@@ -229,6 +366,7 @@ impl App {
                 project.root.display()
             )),
             inbound_event_state: InboundEventState::default(),
+            browser_state: BrowserState::default(),
             runtime_snapshot: None,
             composer: ComposerState::new(history_entries),
             keymap,
@@ -322,6 +460,7 @@ impl App {
             transcript: vec![TranscriptItem::Notice(notice.clone())],
             transcript_state: notice_transcript_state(notice),
             inbound_event_state: InboundEventState::default(),
+            browser_state: BrowserState::default(),
             runtime_snapshot: None,
             composer: ComposerState::new(Vec::new()),
             keymap: KeymapRegistry::default(),
@@ -504,6 +643,10 @@ impl App {
 
     pub fn inbound_event_state(&self) -> &InboundEventState {
         &self.inbound_event_state
+    }
+
+    pub fn browser_state(&self) -> &BrowserState {
+        &self.browser_state
     }
 
     pub fn runtime_snapshot(&self) -> Option<&RuntimeUpdatedEvent> {

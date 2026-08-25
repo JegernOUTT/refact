@@ -27,6 +27,7 @@ impl App {
     ) -> AppAction {
         let origin = match &context {
             CommandContextTag::Abort { origin }
+            | CommandContextTag::BrowserContextDecision { origin, .. }
             | CommandContextTag::Rename { origin, .. }
             | CommandContextTag::Fork { origin, .. }
             | CommandContextTag::Archive { origin, .. } => Some(origin),
@@ -57,6 +58,7 @@ impl App {
                 self.clear_active_ask_questions();
                 self.dispatch_next_queued_input()
             }
+            CommandContextTag::BrowserContextDecision { .. } => AppAction::None,
             CommandContextTag::RetryFromIndex { .. } => {
                 self.pending_backtrack_rollback = None;
                 AppAction::None
@@ -93,6 +95,10 @@ impl App {
                 self.abort_in_flight = false;
                 self.add_notice(format!("Abort failed: {error}"));
                 AppAction::None
+            }
+            CommandContextTag::BrowserContextDecision { prompt, .. } => {
+                self.browser_state.restore_context_prompt(prompt);
+                self.notice_command_failure("Browser context decision", error)
             }
             CommandContextTag::RetryFromIndex { rollback } => {
                 if let Some(rollback) = self.pending_backtrack_rollback.take().or(rollback) {

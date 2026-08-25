@@ -458,6 +458,8 @@ impl App {
             .unwrap_or_default();
         self.server_queue_size = 0;
         self.server_queue_previews.clear();
+        self.inbound_event_state = InboundEventState::default();
+        self.browser_state = BrowserState::default();
         self.current_project = Some(project.clone());
         self.chat_id = self
             .last_chat_by_project
@@ -524,6 +526,8 @@ impl App {
         self.show_session_header = true;
         self.server_queue_size = 0;
         self.server_queue_previews.clear();
+        self.inbound_event_state = InboundEventState::default();
+        self.browser_state = BrowserState::default();
         self.model = None;
         self.mode = None;
         self.clear_pending_target_params();
@@ -561,6 +565,8 @@ impl App {
         self.show_session_header = true;
         self.server_queue_size = 0;
         self.server_queue_previews.clear();
+        self.inbound_event_state = InboundEventState::default();
+        self.browser_state = BrowserState::default();
         self.model = None;
         self.mode = None;
         self.clear_reasoning_level();

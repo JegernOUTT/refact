@@ -11,10 +11,10 @@ use crate::ask_questions::{
     AskQuestionType, AskQuestionsForm, AskQuestionsOutcome, AskQuestionsRequest,
 };
 use crate::client::{
-    ChatEvent, DaemonStatus, CompetitorImportInfoResponse, CompetitorImportRunResponse,
-    HooksResponse, KnowledgeGraphResponse, McpViewData, OpenProjectResponse, ProjectEntry,
-    ProviderListResponse, ProviderOAuthLogoutResponse, SlashCommandsListResponse, ToolDecision,
-    WorkerInfo,
+    BrowserContextDecision, ChatEvent, DaemonStatus, CompetitorImportInfoResponse,
+    CompetitorImportRunResponse, HooksResponse, KnowledgeGraphResponse, McpViewData,
+    OpenProjectResponse, ProjectEntry, ProviderListResponse, ProviderOAuthLogoutResponse,
+    SlashCommandsListResponse, ToolDecision, WorkerInfo,
 };
 use crate::commands::{command_by_name, misc, session, workflow, CommandAction, InfoTopic, LocalToggle};
 use crate::composer::queue::{InputQueue, QueuedInput, INPUT_QUEUE_CAPACITY};
@@ -63,7 +63,10 @@ mod transcript;
 mod workers;
 use self::command_results::CommandOrigin;
 pub use self::session_lifecycle::{ClipboardCopySource, SessionState, SubscriptionStatus, UsageSummary};
-pub use self::state::{App, ClientMessageCorrelation, ComposerMode};
+pub use self::state::{
+    App, BrowserContextDecisionOptions, BrowserContextPromptState, BrowserState,
+    ClientMessageCorrelation, ComposerMode,
+};
 pub use surfaces::ProjectPickerState;
 pub use transcript::TranscriptItem;
 use self::session_lifecycle::{resolve_chat_model_id, ReasoningModelCaps};
@@ -158,6 +161,10 @@ enum CommandContextTag {
     },
     Abort {
         origin: CommandOrigin,
+    },
+    BrowserContextDecision {
+        origin: CommandOrigin,
+        prompt: BrowserContextPromptState,
     },
     Rename {
         origin: CommandOrigin,
@@ -1186,6 +1193,16 @@ impl App {
     pub fn test_execute_command_name(&mut self, name: &str) -> AppAction {
         self.execute_command_name(name)
     }
+
+    pub fn submit_browser_context_decision(
+        &mut self,
+        options: BrowserContextDecisionOptions,
+    ) -> AppAction {
+        let Some((decision, prompt)) = self.browser_state.take_context_prompt(options) else {
+            return AppAction::None;
+        };
+        AppAction::SendBrowserContextDecision { decision, prompt }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1256,6 +1273,10 @@ pub enum AppAction {
         decisions: Vec<ToolDecision>,
         patch: Option<Value>,
         rollback: ToolDecisionRollback,
+    },
+    SendBrowserContextDecision {
+        decision: BrowserContextDecision,
+        prompt: BrowserContextPromptState,
     },
     Abort,
     Quit {
@@ -5624,6 +5645,293 @@ new-chat = "ctrl-x"
         assert_eq!(command["patch"]["boost_reasoning"], true);
         assert_eq!(command["patch"]["reasoning_effort"], "high");
         assert!(command["patch"]["thinking_budget"].is_null());
+    }
+
+    #[test]
+    fn browser_events_drive_browser_state_and_reconnect_snapshot() {
+        let mut app = App::new(project());
+        let chat_id = app.chat_id().to_string();
+
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(chat_id.clone()),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({
+                "type": "snapshot",
+                "thread": {},
+                "runtime": {"state": "idle"},
+                "messages": [],
+                "browser": {
+                    "runtime_id": "browser-1",
+                    "connected": true,
+                    "active_tab": "tab-1",
+                    "url": "https://example.test",
+                    "title": "Example",
+                    "tabs": [{"tab_id": "tab-1", "url": "https://example.test", "title": "Example"}]
+                }
+            }),
+        });
+        assert!(app.browser_state().is_open);
+        assert_eq!(
+            app.browser_state().current_url.as_deref(),
+            Some("https://example.test")
+        );
+        assert_eq!(app.browser_state().tabs.len(), 1);
+
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(chat_id.clone()),
+            seq: None,
+            kind: "browser_frame".to_string(),
+            raw: json!({
+                "type": "browser_frame",
+                "tab_id": "tab-1",
+                "mime": "image/jpeg",
+                "data": "frame-data",
+                "changed_text": "Saved"
+            }),
+        });
+        assert_eq!(
+            app.browser_state()
+                .latest_frame
+                .as_ref()
+                .map(|frame| frame.changed_text.as_deref()),
+            Some(Some("Saved"))
+        );
+
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(chat_id.clone()),
+            seq: None,
+            kind: "browser_timeline".to_string(),
+            raw: json!({
+                "type": "browser_timeline",
+                "events": [{"type": "click", "summary": "Saved"}]
+            }),
+        });
+        assert_eq!(app.browser_state().timeline.len(), 1);
+
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(chat_id.clone()),
+            seq: None,
+            kind: "browser_toolbar_action".to_string(),
+            raw: json!({"type": "browser_toolbar_action", "action": "screenshot"}),
+        });
+        assert_eq!(
+            app.browser_state().last_toolbar_action.as_deref(),
+            Some("screenshot")
+        );
+
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(chat_id.clone()),
+            seq: None,
+            kind: "browser_status".to_string(),
+            raw: json!({
+                "type": "browser_status",
+                "runtime_id": "browser-1",
+                "connected": true,
+                "active_tab": "tab-2",
+                "url": "https://second.example.test",
+                "title": "Second",
+                "tabs": [{"tab_id": "tab-2", "url": "https://second.example.test", "title": "Second"}]
+            }),
+        });
+        assert_eq!(app.browser_state().active_tab.as_deref(), Some("tab-2"));
+        assert_eq!(app.browser_state().current_title.as_deref(), Some("Second"));
+
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(chat_id.clone()),
+            seq: None,
+            kind: "browser_context_oversize".to_string(),
+            raw: json!({
+                "type": "browser_context_oversize",
+                "total_bytes": 1000,
+                "action_count": 2,
+                "action_bytes": 200,
+                "console_count": 3,
+                "console_bytes": 300,
+                "network_count": 4,
+                "network_bytes": 400,
+                "mutation_bytes": 100,
+                "pending_message_id": "pending-1"
+            }),
+        });
+        assert_eq!(
+            app.browser_state()
+                .context_prompt
+                .as_ref()
+                .map(|prompt| prompt.event.pending_message_id.as_str()),
+            Some("pending-1")
+        );
+
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(chat_id),
+            seq: None,
+            kind: "browser_closed".to_string(),
+            raw: json!({
+                "type": "browser_closed",
+                "runtime_id": "browser-1",
+                "reason": "user_closed"
+            }),
+        });
+        assert!(!app.browser_state().is_open);
+        assert!(app.browser_state().current_url.is_none());
+        assert!(app.browser_state().context_prompt.is_none());
+        assert_eq!(app.browser_state().timeline.len(), 1);
+        assert_eq!(
+            app.browser_state()
+                .last_closed
+                .as_ref()
+                .map(|closed| closed.reason.as_str()),
+            Some("user_closed")
+        );
+    }
+
+    #[test]
+    fn browser_snapshot_replaces_stale_event_state_on_reconnect() {
+        let mut app = App::new(project());
+        let chat_id = app.chat_id().to_string();
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(chat_id.clone()),
+            seq: None,
+            kind: "browser_frame".to_string(),
+            raw: json!({
+                "type": "browser_frame",
+                "tab_id": "tab-1",
+                "mime": "image/jpeg",
+                "data": "frame-data"
+            }),
+        });
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(chat_id.clone()),
+            seq: None,
+            kind: "browser_timeline".to_string(),
+            raw: json!({"type": "browser_timeline", "events": [{"type": "click"}]}),
+        });
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(chat_id.clone()),
+            seq: None,
+            kind: "browser_context_oversize".to_string(),
+            raw: json!({
+                "type": "browser_context_oversize",
+                "pending_message_id": "pending-1"
+            }),
+        });
+
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(chat_id),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({
+                "type": "snapshot",
+                "thread": {},
+                "runtime": {"state": "idle"},
+                "messages": [],
+                "browser": {
+                    "runtime_id": "browser-2",
+                    "connected": true,
+                    "active_tab": "tab-2",
+                    "url": "https://reconnected.example.test",
+                    "title": "Reconnected",
+                    "tabs": []
+                }
+            }),
+        });
+
+        assert_eq!(app.browser_state().runtime_id.as_deref(), Some("browser-2"));
+        assert!(app.browser_state().latest_frame.is_none());
+        assert!(app.browser_state().timeline.is_empty());
+        assert!(app.browser_state().context_prompt.is_none());
+    }
+
+    #[tokio::test]
+    async fn browser_context_prompt_sends_decision_and_restores_after_failure() {
+        let state = CommandState::default();
+        let base_url = spawn_command_server(state.clone());
+        let client = DaemonClient::new(base_url, None).unwrap();
+        let mut app = App::new(project());
+        let chat_id = app.chat_id().to_string();
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(chat_id),
+            seq: None,
+            kind: "browser_context_oversize".to_string(),
+            raw: json!({
+                "type": "browser_context_oversize",
+                "total_bytes": 1000,
+                "pending_message_id": "pending-1"
+            }),
+        });
+
+        let action = app.submit_browser_context_decision(BrowserContextDecisionOptions {
+            include_actions: true,
+            include_console: false,
+            include_network: true,
+            include_mutations: false,
+            include_screenshot: true,
+            last_n_actions: Some(2),
+            last_n_console: None,
+            last_n_network: Some(3),
+        });
+        assert!(app.browser_state().context_prompt.is_none());
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut subscriptions = SubscriptionManager::new();
+        let mut daemon_events = DaemonEventSubscription::new();
+        run_action(
+            &mut app,
+            action,
+            &client,
+            &tx,
+            &mut subscriptions,
+            &mut daemon_events,
+        )
+        .await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(RuntimeEvent::CommandFinished {
+                context: CommandContextTag::BrowserContextDecision { .. },
+                result: Ok(()),
+                ..
+            })
+        ));
+        let command = state.find_command("browser_context_decision").unwrap();
+        assert_eq!(command["pending_message_id"], "pending-1");
+        assert_eq!(command["include_actions"], true);
+        assert_eq!(command["include_console"], false);
+        assert_eq!(command["include_network"], true);
+        assert_eq!(command["include_mutations"], false);
+        assert_eq!(command["include_screenshot"], true);
+        assert_eq!(command["last_n_actions"], 2);
+        assert_eq!(command["last_n_network"], 3);
+
+        let failed =
+            app.submit_browser_context_decision(BrowserContextDecisionOptions::include_all());
+        assert_eq!(failed, AppAction::None);
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "browser_context_oversize".to_string(),
+            raw: json!({
+                "type": "browser_context_oversize",
+                "total_bytes": 1000,
+                "pending_message_id": "pending-2"
+            }),
+        });
+        let action =
+            app.submit_browser_context_decision(BrowserContextDecisionOptions::include_all());
+        let AppAction::SendBrowserContextDecision { prompt, .. } = action else {
+            panic!("expected browser context action");
+        };
+        let origin = app.command_origin();
+        app.handle_command_finished(
+            CommandContextTag::BrowserContextDecision { origin, prompt },
+            Err("offline".to_string()),
+        );
+        assert_eq!(
+            app.browser_state()
+                .context_prompt
+                .as_ref()
+                .map(|prompt| prompt.event.pending_message_id.as_str()),
+            Some("pending-2")
+        );
     }
 
     #[tokio::test]

@@ -2335,7 +2335,7 @@ pub struct GoalBudget {
     pub no_progress_turns: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BrowserContextDecision {
     pub pending_message_id: String,
     pub include_actions: bool,

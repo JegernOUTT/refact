@@ -1131,6 +1131,36 @@ pub(super) async fn run_action(
                 );
             }
         }
+        AppAction::SendBrowserContextDecision { decision, prompt } => {
+            let context = CommandContextTag::BrowserContextDecision {
+                origin: app.command_origin(),
+                prompt,
+            };
+            if let Some(project_id) = app.current_project_id().map(str::to_string) {
+                let chat_id = app.chat_id().to_string();
+                let generation = subscriptions.command_generation();
+                let client = client.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .send_browser_context_decision(&project_id, &chat_id, decision)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx
+                        .send(RuntimeEvent::CommandFinished {
+                            generation,
+                            context,
+                            result,
+                        })
+                        .await;
+                });
+            } else {
+                let _ = app.handle_command_finished(
+                    context,
+                    Err("no active project for browser context decision".to_string()),
+                );
+            }
+        }
         AppAction::Abort => {
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
                 let chat_id = app.chat_id().to_string();

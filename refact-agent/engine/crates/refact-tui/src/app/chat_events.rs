@@ -215,7 +215,8 @@ impl App {
                 ..
             } => {
                 self.inbound_event_state
-                    .apply_snapshot(background_agents, browser);
+                    .apply_snapshot(background_agents, browser.clone());
+                self.browser_state.apply_snapshot(browser);
                 return self.handle_snapshot(&raw);
             }
             SseEvent::BackgroundAgentUpdated { agent } => {
@@ -337,17 +338,31 @@ impl App {
             SseEvent::IdeToolRequired { event } => {
                 self.inbound_event_state.set_ide_tool_required(event);
             }
-            SseEvent::BrowserFrame { event } => self.inbound_event_state.set_browser_frame(event),
-            SseEvent::BrowserStatus { event } => self.inbound_event_state.set_browser_status(event),
-            SseEvent::BrowserClosed { event } => self.inbound_event_state.set_browser_closed(event),
+            SseEvent::BrowserFrame { event } => {
+                self.inbound_event_state.set_browser_frame(event.clone());
+                self.browser_state.apply_frame(event);
+            }
+            SseEvent::BrowserStatus { event } => {
+                self.inbound_event_state.set_browser_status(event.clone());
+                self.browser_state.apply_status(event.snapshot);
+            }
+            SseEvent::BrowserClosed { event } => {
+                self.inbound_event_state.set_browser_closed(event.clone());
+                self.browser_state.apply_closed(event);
+            }
             SseEvent::BrowserTimeline { event } => {
-                self.inbound_event_state.set_browser_timeline(event)
+                self.inbound_event_state.set_browser_timeline(event.clone());
+                self.browser_state.apply_timeline(event.events);
             }
             SseEvent::BrowserContextOversize { event } => {
-                self.inbound_event_state.set_browser_context_oversize(event)
+                self.inbound_event_state
+                    .set_browser_context_oversize(event.clone());
+                self.browser_state.apply_context_oversize(event);
             }
             SseEvent::BrowserToolbarAction { event } => {
-                self.inbound_event_state.set_browser_toolbar_action(event)
+                self.inbound_event_state
+                    .set_browser_toolbar_action(event.clone());
+                self.browser_state.apply_toolbar_action(event.action);
             }
             SseEvent::Unknown { event } => {
                 let kind = if event.kind.is_empty() {
