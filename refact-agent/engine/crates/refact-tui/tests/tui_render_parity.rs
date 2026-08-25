@@ -83,9 +83,11 @@ fn terminal_snapshot(terminal: &Terminal<TestBackend>, width: u16, height: u16) 
 fn normalize_dynamic_durations(snapshot: String) -> String {
     let duration_re = regex_lite::Regex::new(r" · [0-9]+ms").unwrap();
     let chat_id_re = regex_lite::Regex::new(r" · [0-9a-f]{8} ─").unwrap();
+    let event_timestamp_re = regex_lite::Regex::new(r"│[0-9]{2}:[0-9]{2}:[0-9]{2} ·").unwrap();
     let version_re = regex_lite::Regex::new(r"refact \(v[^)]+\)").unwrap();
     let snapshot = duration_re.replace_all(&snapshot, " · <ms>");
     let snapshot = chat_id_re.replace_all(&snapshot, " · <chat> ─");
+    let snapshot = event_timestamp_re.replace_all(&snapshot, "│<time> ·");
     version_re
         .replace_all(snapshot.trim_end_matches('\n'), "refact (v<version>)")
         .to_string()
@@ -669,16 +671,16 @@ fn events_pane_golden_snapshot() {
     assert_snapshot(
         actual,
         r#"┌──────────────────────────────────────────────────────────────────────────────────────┐
-│daemon events                                     workers                             │
-│p1 chat.process_completed                         No workers                          │
-│{"source":"exec.registry","content":"Process cargo                                    │
-│test exited with code 0","payload":{"process_…                                        │
-│                                                                                      │
-│                                                                                      │
-│                                                                                      │
-│                                                                                      │
-│                                                                                      │
-│                                                                                      │
+│daemon events                                    │workers                             │
+│<time> · ■ · exec.registry · Process completed…│No workers                          │
+│                                                 │                                    │
+│                                                 │                                    │
+│                                                 │                                    │
+│                                                 │                                    │
+│                                                 │                                    │
+│                                                 │                                    │
+│                                                 │                                    │
+│                                                 │                                    │
 └──────────────────────────────────────────────────────────────────────────────────────┘"#,
     );
 }
