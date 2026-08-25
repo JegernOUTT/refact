@@ -160,6 +160,19 @@ The singular tool-decision wrapper deliberately serializes the shared plural `to
 
 Rendered output snapshots use `ratatui::backend::TestBackend` in plain `cargo test`. The test harness renders the real `ui::render` into an in-memory buffer, normalizes rows with trailing spaces trimmed, and compares a deterministic string snapshot. This starts with one assistant-streaming snapshot and can later move to `insta` if the crate adopts snapshot files.
 
+### Degradation rules
+
+The TUI has one text-first degradation contract, exercised by the render-parity matrix:
+
+1. **Colour has a textual counterpart.** Colour may emphasize state, but every state remains identifiable through a glyph or text label in `NO_COLOR` output.
+2. **Modals lose their frame below 40 columns.** Their title, content, and controls remain; only the border is removed.
+3. **Two-column surfaces stack below 60 columns.** The daemon-events and workers dock becomes vertical instead of squeezing either field away.
+4. **Docks keep their highest-priority leading field.** At `30×10` or smaller, header, transcript, status, composer, and footer shorten their suffixes before their leading field; an open secondary dock yields to the transcript.
+5. **Box drawing becomes ASCII below 60 columns.** `┌─┐│└┘`-style frame characters become `+-|`, so narrow terminals that cannot display box drawing keep structural meaning.
+6. **Nothing vanishes silently.** At `30×10` or smaller, the layout reserves two transcript rows and renders `… content truncated` whenever compact layout omits overflow.
+
+`tests/tui_render_parity.rs` runs every registered scenario at `120×40`, `96×30`, `60×20`, and `40×15` with truecolor, ANSI-16, and `NO_COLOR` environments. Its registry covers idle, streaming, running and failed tools, approval, ask form, error turn, goal states, mode transition, history/events, a 500-turn trajectory, mid-resize, and post-reconnect. A registered scenario must supply an expected visible marker; the harness fails immediately if it does not, preventing silent snapshot gaps. Image content uses its textual fallback in this matrix.
+
 ## Native scrollback
 
 C-3 uses `ratatui::Viewport::Inline` by default. Finalized transcript cells are rendered once, queued through `history::HistoryBuffer`, and inserted with `Terminal::insert_before`, so the transcript lives in the terminal's native scrollback and mouse copy works on real terminal text. The frame render path only redraws the inline live region: active stream tail, running tools, approvals, composer, and footer.

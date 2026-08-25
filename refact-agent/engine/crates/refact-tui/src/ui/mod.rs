@@ -1,4 +1,5 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Frame;
 
 use crate::app::{App, ComposerMode};
@@ -18,6 +19,12 @@ pub mod status_card;
 pub mod status_indicator;
 mod transcript;
 
+const ASCII_FRAME_MAX_WIDTH: u16 = 60;
+const BORDERLESS_MODAL_MAX_WIDTH: u16 = 39;
+const COMPACT_MAX_WIDTH: u16 = 30;
+const COMPACT_MAX_HEIGHT: u16 = 10;
+const COMPACT_MIN_TRANSCRIPT_HEIGHT: u16 = 2;
+
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     crate::vendored::terminal_hyperlinks::clear_buffer_hyperlinks();
     app.begin_frame_render();
@@ -29,7 +36,17 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         .ask_questions_form()
         .map(|form| ask::desired_height(form, area.height))
         .unwrap_or_else(|| app.composer_height(area.width));
-    let main_constraints = if app.events_pane().open {
+    let compact = area.width <= COMPACT_MAX_WIDTH && area.height <= COMPACT_MAX_HEIGHT;
+    let events_open = app.events_pane().open && !compact;
+    let main_constraints = if compact {
+        compact_constraints(
+            area.height,
+            session_tabs_height,
+            status_height,
+            composer_height,
+            footer_height,
+        )
+    } else if events_open {
         vec![
             Constraint::Length(1),
             Constraint::Length(session_tabs_height),
@@ -59,12 +76,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         session_tabs::render(frame, app, chunks[1]);
     }
     transcript::render_transcript(frame, app, chunks[2]);
-    let composer_area = if app.events_pane().open {
-        chunks[5]
-    } else {
-        chunks[4]
-    };
-    if app.events_pane().open {
+    let composer_area = if events_open { chunks[5] } else { chunks[4] };
+    if events_open {
         events::render_events_pane(frame, app, chunks[3]);
         status_indicator::render(frame, app, chunks[4]);
         render_composer_region(frame, app, composer_area);
@@ -73,6 +86,9 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         status_indicator::render(frame, app, chunks[3]);
         render_composer_region(frame, app, composer_area);
         footer::render(frame, app, chunks[5]);
+    }
+    if compact {
+        render_compact_truncation_indicator(frame, chunks[2]);
     }
     if matches!(app.composer_mode(), ComposerMode::ProjectPicker) {
         picker::render_project_picker(frame, app.project_picker(), area);
@@ -91,6 +107,100 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
     if app.help_open() {
         help::render_help(frame, app, area);
+    }
+    degrade_frames(frame, area);
+}
+
+fn compact_constraints(
+    height: u16,
+    session_tabs_height: u16,
+    requested_status_height: u16,
+    requested_composer_height: u16,
+    footer_height: u16,
+) -> Vec<Constraint> {
+    let body_height = height.saturating_sub(1 + session_tabs_height + footer_height);
+    let composer_height =
+        requested_composer_height.min(body_height.saturating_sub(COMPACT_MIN_TRANSCRIPT_HEIGHT));
+    let status_height = requested_status_height
+        .min(body_height.saturating_sub(composer_height + COMPACT_MIN_TRANSCRIPT_HEIGHT));
+    let remaining_height = body_height.saturating_sub(composer_height + status_height);
+    vec![
+        Constraint::Length(1),
+        Constraint::Length(session_tabs_height),
+        Constraint::Length(remaining_height),
+        Constraint::Length(status_height),
+        Constraint::Length(composer_height),
+        Constraint::Length(footer_height),
+    ]
+}
+
+fn render_compact_truncation_indicator(frame: &mut Frame<'_>, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+    let indicator = Rect {
+        x: area.x,
+        y: area.y.saturating_add(area.height.saturating_sub(1)),
+        width: area.width,
+        height: 1,
+    };
+    Paragraph::new("… content truncated").render(indicator, frame.buffer_mut());
+}
+
+fn degrade_frames(frame: &mut Frame<'_>, area: Rect) {
+    let buffer = frame.buffer_mut();
+    if area.width <= BORDERLESS_MODAL_MAX_WIDTH {
+        remove_frame_borders(buffer, area);
+    }
+    if area.width < ASCII_FRAME_MAX_WIDTH {
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let symbol = buffer[(x, y)].symbol();
+                let replacement = match symbol {
+                    "┌" | "┐" | "└" | "┘" | "├" | "┤" | "┬" | "┴" | "┼" => {
+                        Some("+")
+                    }
+                    "─" => Some("-"),
+                    "│" => Some("|"),
+                    _ => None,
+                };
+                if let Some(replacement) = replacement {
+                    buffer[(x, y)].set_symbol(replacement);
+                }
+            }
+        }
+    }
+}
+
+fn remove_frame_borders(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
+    let mut borders = Vec::new();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if buffer[(x, y)].symbol() != "┌" {
+                continue;
+            }
+            let Some(right) =
+                ((x + 1)..area.right()).find(|right| buffer[(*right, y)].symbol() == "┐")
+            else {
+                continue;
+            };
+            let Some(bottom) = ((y + 1)..area.bottom()).find(|bottom| {
+                buffer[(x, *bottom)].symbol() == "└" && buffer[(right, *bottom)].symbol() == "┘"
+            }) else {
+                continue;
+            };
+            borders.push((x, y, right, bottom));
+        }
+    }
+    for (left, top, right, bottom) in borders {
+        for x in left..=right {
+            buffer[(x, top)].set_symbol(" ");
+            buffer[(x, bottom)].set_symbol(" ");
+        }
+        for y in top..=bottom {
+            buffer[(left, y)].set_symbol(" ");
+            buffer[(right, y)].set_symbol(" ");
+        }
     }
 }
 

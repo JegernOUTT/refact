@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -102,6 +103,467 @@ fn normalize_dynamic_durations(snapshot: String) -> String {
 
 fn assert_snapshot(actual: String, expected: &str) {
     assert_eq!(actual, expected);
+}
+
+#[derive(Clone, Copy)]
+enum ColorMode {
+    TrueColor,
+    Ansi16,
+    NoColor,
+}
+
+impl ColorMode {
+    const ALL: [Self; 3] = [Self::TrueColor, Self::Ansi16, Self::NoColor];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::TrueColor => "truecolor",
+            Self::Ansi16 => "ansi16",
+            Self::NoColor => "no-color",
+        }
+    }
+
+    fn apply(self) -> EnvironmentGuard {
+        match self {
+            Self::TrueColor => EnvironmentGuard::set(&[
+                ("TERM", Some("xterm-truecolor")),
+                ("COLORTERM", Some("truecolor")),
+                ("NO_COLOR", None),
+            ]),
+            Self::Ansi16 => EnvironmentGuard::set(&[
+                ("TERM", Some("xterm-16color")),
+                ("COLORTERM", None),
+                ("NO_COLOR", None),
+            ]),
+            Self::NoColor => EnvironmentGuard::set(&[
+                ("TERM", Some("dumb")),
+                ("COLORTERM", None),
+                ("NO_COLOR", Some("1")),
+            ]),
+        }
+    }
+}
+
+struct EnvironmentGuard {
+    previous: Vec<(&'static str, Option<OsString>)>,
+}
+
+impl EnvironmentGuard {
+    fn set(values: &[(&'static str, Option<&str>)]) -> Self {
+        let previous = values
+            .iter()
+            .map(|(key, value)| {
+                let previous = std::env::var_os(key);
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+                (*key, previous)
+            })
+            .collect();
+        Self { previous }
+    }
+}
+
+impl Drop for EnvironmentGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.previous.drain(..).rev() {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
+type ScenarioSetup = fn(&mut App);
+
+struct RenderScenario {
+    name: &'static str,
+    marker: Option<&'static str>,
+    setup: ScenarioSetup,
+    render_before_resize: bool,
+}
+
+const SNAPSHOT_SIZES: [(u16, u16); 4] = [(120, 40), (96, 30), (60, 20), (40, 15)];
+
+fn render_matrix_snapshot(
+    scenario: &RenderScenario,
+    color: ColorMode,
+    width: u16,
+    height: u16,
+) -> String {
+    let _environment = color.apply();
+    let mut app = App::new(project());
+    (scenario.setup)(&mut app);
+    if scenario.render_before_resize {
+        let _ = render_app_snapshot(&mut app, 120, 40);
+    }
+    render_app_snapshot(&mut app, width, height)
+}
+
+fn assert_registered_scenarios_have_snapshots(scenarios: &[RenderScenario]) {
+    for scenario in scenarios {
+        assert!(
+            scenario.marker.is_some(),
+            "registered render scenario `{}` has no snapshot marker",
+            scenario.name
+        );
+    }
+}
+
+fn assert_matrix_snapshot(
+    scenario: &RenderScenario,
+    color: ColorMode,
+    width: u16,
+    height: u16,
+    snapshot: &str,
+) {
+    let marker = scenario.marker.expect("registered scenario marker checked");
+    assert!(
+        snapshot.contains(marker),
+        "{} {} {}x{} lost `{marker}`:\n{snapshot}",
+        scenario.name,
+        color.label(),
+        width,
+        height,
+    );
+    if width < 60 {
+        assert_no_box_drawing(snapshot, scenario.name, color, width, height);
+    }
+}
+
+fn assert_no_box_drawing(
+    snapshot: &str,
+    scenario: &str,
+    color: ColorMode,
+    width: u16,
+    height: u16,
+) {
+    assert!(
+        !snapshot.chars().any(|character| {
+            matches!(
+                character,
+                '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' | '─' | '│'
+            )
+        }),
+        "{scenario} {} {width}x{height} retained box drawing:\n{snapshot}",
+        color.label(),
+    );
+}
+
+fn idle_scenario(_app: &mut App) {}
+
+fn streaming_scenario(app: &mut App) {
+    app.apply_chat_event(chat_event(
+        app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {"id": app.chat_id(), "model": "gpt-demo", "mode": "agent"},
+            "runtime": {"state": "generating"},
+            "messages": [{"role": "user", "content": "stream prompt"}]
+        }),
+    ));
+    app.apply_chat_event(chat_event(
+        app,
+        "stream_started",
+        json!({"type": "stream_started", "message_id": "assistant-stream"}),
+    ));
+    app.apply_chat_event(chat_event(
+        app,
+        "stream_delta",
+        json!({
+            "type": "stream_delta",
+            "message_id": "assistant-stream",
+            "ops": [{"op": "append_content", "text": "Streaming response"}]
+        }),
+    ));
+}
+
+fn tool_running_scenario(app: &mut App) {
+    app.apply_chat_event(chat_event(
+        app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {"id": app.chat_id(), "model": "gpt-demo", "mode": "agent"},
+            "runtime": {"state": "executing_tools"},
+            "messages": [{
+                "role": "assistant",
+                "tool_calls": [{"id": "call-running", "function": {"name": "shell", "arguments": "{}"}}]
+            }]
+        }),
+    ));
+}
+
+fn tool_failed_scenario(app: &mut App) {
+    app.apply_chat_event(chat_event(
+        app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {"id": app.chat_id(), "model": "gpt-demo", "mode": "agent"},
+            "runtime": {"state": "idle"},
+            "messages": [
+                {"role": "assistant", "tool_calls": [{"id": "call-failed", "function": {"name": "shell", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "call-failed", "content": "failed command", "tool_failed": true}
+            ]
+        }),
+    ));
+}
+
+fn approval_scenario(app: &mut App) {
+    app.apply_chat_event(chat_event(
+        app,
+        "pause_required",
+        json!({
+            "type": "pause_required",
+            "pause_id": "matrix-approval",
+            "reasons": [{
+                "type": "confirmation",
+                "tool_name": "apply_patch",
+                "command": "apply patch",
+                "rule": "ask",
+                "tool_call_id": "call-approval"
+            }]
+        }),
+    ));
+}
+
+fn ask_form_scenario(app: &mut App) {
+    let content = json!({
+        "type": "ask_questions",
+        "tool_call_id": "call-ask",
+        "questions": [{"id": "confirm", "type": "yes_no", "text": "Continue matrix?"}]
+    })
+    .to_string();
+    app.apply_chat_event(chat_event(
+        app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {"id": app.chat_id(), "model": "gpt-demo", "mode": "agent"},
+            "runtime": {"state": "waiting_user_input"},
+            "messages": [
+                {"role": "assistant", "tool_calls": [{"id": "call-ask", "function": {"name": "ask_questions", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "call-ask", "content": content}
+            ]
+        }),
+    ));
+}
+
+fn error_scenario(app: &mut App) {
+    app.apply_chat_event(chat_event(
+        app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {"id": app.chat_id(), "model": "gpt-demo", "mode": "agent"},
+            "runtime": {"state": "error"},
+            "messages": [{"role": "error", "content": "Provider unavailable", "_ui_only": true}]
+        }),
+    ));
+}
+
+fn goal_scenario(app: &mut App) {
+    app.apply_chat_event(chat_event(
+        app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {"id": app.chat_id(), "model": "gpt-demo", "mode": "agent"},
+            "runtime": {"state": "idle", "goal": {"active": true, "status": "pursuing", "turn_count": 1}},
+            "messages": [{
+                "role": "goal",
+                "content": "Ship the snapshot matrix",
+                "extra": {"goal": {"version": 1}}
+            }]
+        }),
+    ));
+}
+
+fn mode_transition_scenario(app: &mut App) {
+    app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::empty()));
+    app.apply_chat_event(chat_event(
+        app,
+        "message_added",
+        json!({
+            "type": "message_added",
+            "message": {
+                "role": "event",
+                "content": "Mode transition",
+                "extra": {"event": {"subkind": "mode_switch", "source": "chat.session", "payload": {"from": "ask", "to": "agent"}}}
+            }
+        }),
+    ));
+}
+
+fn history_events_scenario(app: &mut App) {
+    app.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::empty()));
+    app.apply_chat_event(chat_event(
+        app,
+        "message_added",
+        json!({
+            "type": "message_added",
+            "message": {
+                "role": "event",
+                "content": "History event retained",
+                "extra": {"event": {"subkind": "process_completed", "source": "exec.registry", "payload": {"exit_code": 0}}}
+            }
+        }),
+    ));
+}
+
+fn trajectory_500_turn_scenario(app: &mut App) {
+    let messages = (0..500)
+        .flat_map(|turn| {
+            [
+                json!({"role": "user", "content": format!("turn {turn} request")}),
+                json!({"role": "assistant", "content": format!("turn {turn} response"), "stream_finished": true}),
+            ]
+        })
+        .collect::<Vec<_>>();
+    app.apply_chat_event(chat_event(
+        app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {"id": app.chat_id(), "model": "gpt-demo", "mode": "agent"},
+            "runtime": {"state": "idle"},
+            "messages": messages
+        }),
+    ));
+}
+
+fn mid_resize_scenario(app: &mut App) {
+    app.apply_chat_event(chat_event(
+        app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {"id": app.chat_id(), "model": "gpt-demo", "mode": "agent"},
+            "runtime": {"state": "generating"},
+            "messages": [{"role": "assistant", "content": "Resize keeps this visible", "stream_finished": true}]
+        }),
+    ));
+}
+
+fn post_reconnect_scenario(app: &mut App) {
+    app.apply_chat_event(chat_event(
+        app,
+        "message_added",
+        json!({
+            "type": "message_added",
+            "message": {"role": "notice", "content": "SSE resync restored the transcript"}
+        }),
+    ));
+}
+
+fn image_fallback_scenario(app: &mut App) {
+    app.apply_chat_event(chat_event(
+        app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {"id": app.chat_id(), "model": "gpt-demo", "mode": "agent"},
+            "runtime": {"state": "idle"},
+            "messages": [{
+                "role": "assistant",
+                "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJDRA=="}}],
+                "stream_finished": true
+            }]
+        }),
+    ));
+}
+
+fn render_scenarios() -> Vec<RenderScenario> {
+    vec![
+        RenderScenario {
+            name: "idle",
+            marker: Some("Opened project"),
+            setup: idle_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
+            name: "streaming",
+            marker: Some("Streaming response"),
+            setup: streaming_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
+            name: "tool running",
+            marker: Some("running"),
+            setup: tool_running_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
+            name: "tool failed",
+            marker: Some("failed"),
+            setup: tool_failed_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
+            name: "approval",
+            marker: Some("Approval"),
+            setup: approval_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
+            name: "ask form",
+            marker: Some("Question"),
+            setup: ask_form_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
+            name: "error turn",
+            marker: Some("Error"),
+            setup: error_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
+            name: "goal dock",
+            marker: Some("Current Goal"),
+            setup: goal_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
+            name: "mode transition",
+            marker: Some("Mode sw"),
+            setup: mode_transition_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
+            name: "history events",
+            marker: Some("Proces"),
+            setup: history_events_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
+            name: "500 turn trajectory",
+            marker: Some("turn 499"),
+            setup: trajectory_500_turn_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
+            name: "mid resize",
+            marker: Some("Resize keeps"),
+            setup: mid_resize_scenario,
+            render_before_resize: true,
+        },
+        RenderScenario {
+            name: "post reconnect",
+            marker: Some("SSE resync"),
+            setup: post_reconnect_scenario,
+            render_before_resize: false,
+        },
+        RenderScenario {
+            name: "image fallback",
+            marker: Some("[image:"),
+            setup: image_fallback_scenario,
+            render_before_resize: false,
+        },
+    ]
 }
 
 fn fixture_snapshot_messages() -> Vec<Value> {
@@ -694,5 +1156,102 @@ fn events_pane_golden_snapshot() {
 │                                                 │                                    │
 │                                                 │                                    │
 └──────────────────────────────────────────────────────────────────────────────────────┘"#,
+    );
+}
+
+#[test]
+fn degradation_matrix_covers_registered_scenarios() {
+    let scenarios = render_scenarios();
+    assert_registered_scenarios_have_snapshots(&scenarios);
+
+    for scenario in &scenarios {
+        for color in ColorMode::ALL {
+            for (width, height) in SNAPSHOT_SIZES {
+                let snapshot = render_matrix_snapshot(scenario, color, width, height);
+                assert_matrix_snapshot(scenario, color, width, height, &snapshot);
+            }
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "registered render scenario `missing` has no snapshot marker")]
+fn registered_scenario_without_snapshot_marker_fails_loudly() {
+    assert_registered_scenarios_have_snapshots(&[RenderScenario {
+        name: "missing",
+        marker: None,
+        setup: idle_scenario,
+        render_before_resize: false,
+    }]);
+}
+
+#[test]
+fn compact_layout_reserves_transcript_and_marks_truncation() {
+    let _environment = ColorMode::NoColor.apply();
+    let mut app = App::new(project());
+    app.apply_chat_event(chat_event(
+        &app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {"id": app.chat_id(), "model": "gpt-demo", "mode": "agent"},
+            "runtime": {"state": "generating"},
+            "messages": [{"role": "assistant", "content": "Transcript survives the compact layout", "stream_finished": true}]
+        }),
+    ));
+
+    let snapshot = render_app_snapshot(&mut app, 30, 10);
+
+    assert!(snapshot.contains("Transcript"), "{snapshot}");
+    assert!(snapshot.contains("… content truncated"), "{snapshot}");
+}
+
+#[test]
+fn compact_layout_prioritizes_transcript_over_secondary_docks() {
+    let _environment = ColorMode::NoColor.apply();
+    let mut app = App::new(project());
+    history_events_scenario(&mut app);
+
+    let snapshot = render_app_snapshot(&mut app, 30, 10);
+
+    assert!(!snapshot.contains("daemon events"), "{snapshot}");
+    assert!(snapshot.contains("… content truncated"), "{snapshot}");
+}
+
+#[test]
+fn narrow_modals_drop_borders_and_events_stack() {
+    let _environment = ColorMode::NoColor.apply();
+    let approval = RenderScenario {
+        name: "approval",
+        marker: Some("Approval"),
+        setup: approval_scenario,
+        render_before_resize: false,
+    };
+    let modal_snapshot = render_matrix_snapshot(&approval, ColorMode::NoColor, 39, 20);
+    assert!(!modal_snapshot.contains("+---"), "{modal_snapshot}");
+    assert!(!modal_snapshot.contains("|Approval"), "{modal_snapshot}");
+
+    let events = RenderScenario {
+        name: "history events",
+        marker: Some("Proces"),
+        setup: history_events_scenario,
+        render_before_resize: false,
+    };
+    let events_snapshot = render_matrix_snapshot(&events, ColorMode::NoColor, 59, 20);
+    let event_row = events_snapshot
+        .lines()
+        .position(|line| line.contains("daemon events"))
+        .unwrap();
+    let worker_row = events_snapshot
+        .lines()
+        .position(|line| line.contains("workers"))
+        .unwrap();
+    assert!(event_row < worker_row, "{events_snapshot}");
+    assert_no_box_drawing(
+        &events_snapshot,
+        "history events",
+        ColorMode::NoColor,
+        59,
+        20,
     );
 }
