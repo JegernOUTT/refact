@@ -450,11 +450,6 @@ impl App {
     pub(super) fn set_project(&mut self, project: OpenProjectResponse) {
         self.cancel_backtrack();
         self.abort_in_flight = false;
-        self.transcript_overlay = None;
-        self.activity_surface = None;
-        self.board_surface = None;
-        self.browser_surface = None;
-        self.task_id = None;
         self.save_local_input_handoff();
         self.history_path = Some(history_path_for_root(&project.root));
         let history_entries = self
@@ -462,13 +457,7 @@ impl App {
             .as_deref()
             .map(load_history)
             .unwrap_or_default();
-        self.server_queue_size = 0;
-        self.server_queue_previews.clear();
-        self.inbound_event_state = InboundEventState::default();
-        self.browser_state = BrowserState::default();
         self.current_project = Some(project.clone());
-        self.worktree_meta = None;
-        self.pending_worktree_merge = None;
         self.chat_id = self
             .last_chat_by_project
             .get(&project.project_id)
@@ -487,10 +476,7 @@ impl App {
         self.clear_stream_controllers();
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.clear();
-        self.composer_mode = ComposerMode::Chat;
-        self.modal_picker = None;
-        self.clear_approvals();
-        self.selected_tool_index = None;
+        self.reset_session_surfaces();
         self.usage = None;
         self.model = None;
         self.mode = None;
@@ -500,8 +486,6 @@ impl App {
         self.model_reasoning_caps.clear();
         self.model_settings_caps.clear();
         self.thread_params = Value::Object(Map::new());
-        self.settings_surface = None;
-        self.clear_ask_questions_state();
         self.default_context_window_tokens = None;
         self.retry_hint = None;
         self.sync_current_session_in_recent();
@@ -519,27 +503,15 @@ impl App {
     pub(super) fn open_chat_shell(&mut self, chat_id: String, title: Option<String>) {
         self.cancel_backtrack();
         self.abort_in_flight = false;
-        self.transcript_overlay = None;
-        self.activity_surface = None;
-        self.board_surface = None;
-        self.browser_surface = None;
-        self.task_id = None;
         let history_entries = self.composer.history_entries().to_vec();
         self.save_local_input_handoff();
         self.chat_id = chat_id;
-        self.worktree_meta = None;
-        self.pending_worktree_merge = None;
         self.restore_local_input_handoff(history_entries);
         self.session_title = title;
         self.show_session_header = true;
-        self.server_queue_size = 0;
-        self.server_queue_previews.clear();
-        self.inbound_event_state = InboundEventState::default();
-        self.browser_state = BrowserState::default();
         self.model = None;
         self.mode = None;
         self.thread_params = Value::Object(Map::new());
-        self.settings_surface = None;
         self.clear_pending_target_params();
         self.clear_reasoning_level();
         self.replace_with_session(
@@ -550,10 +522,8 @@ impl App {
         self.clear_stream_controllers();
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.truncate(1);
-        self.clear_approvals();
-        self.selected_tool_index = None;
+        self.reset_session_surfaces();
         self.usage = None;
-        self.clear_ask_questions_state();
         self.retry_hint = None;
         self.sync_current_session_in_recent();
     }
@@ -566,28 +536,15 @@ impl App {
     ) -> AppAction {
         self.cancel_backtrack();
         self.abort_in_flight = false;
-        self.history_surface = None;
-        self.transcript_overlay = None;
-        self.activity_surface = None;
-        self.board_surface = None;
-        self.browser_surface = None;
-        self.task_id = None;
         let history_entries = self.composer.history_entries().to_vec();
         self.save_local_input_handoff();
         self.chat_id = chat_id;
-        self.worktree_meta = None;
-        self.pending_worktree_merge = None;
         self.restore_local_input_handoff(history_entries);
         self.session_title = Some(title.clone());
         self.show_session_header = true;
-        self.server_queue_size = 0;
-        self.server_queue_previews.clear();
-        self.inbound_event_state = InboundEventState::default();
-        self.browser_state = BrowserState::default();
         self.model = None;
         self.mode = None;
         self.thread_params = Value::Object(Map::new());
-        self.settings_surface = None;
         self.clear_reasoning_level();
         self.clear_pending_target_params();
         self.replace_with_session(
@@ -598,10 +555,8 @@ impl App {
         self.clear_stream_controllers();
         self.rendered_state_cursor = 0;
         self.rendered_state_keys.truncate(1);
-        self.clear_approvals();
-        self.selected_tool_index = None;
+        self.reset_session_surfaces();
         self.usage = None;
-        self.clear_ask_questions_state();
         self.retry_hint = None;
         self.sync_current_session_in_recent();
         AppAction::SubscribeCurrent
@@ -683,6 +638,34 @@ impl App {
         self.pending_send_retry = None;
         self.pending_reasoning_rollback = None;
         self.pending_backtrack_rollback = None;
+    }
+
+    fn reset_session_surfaces(&mut self) {
+        // Keep every per-session surface and overlay reset here when adding a new surface.
+        self.server_queue_size = 0;
+        self.server_queue_previews.clear();
+        self.inbound_event_state = InboundEventState::default();
+        self.browser_state = BrowserState::default();
+        self.composer_mode = ComposerMode::Chat;
+        self.picker = surfaces::ProjectPickerState::new(Vec::new());
+        self.modal_picker = None;
+        self.theme_picker_snapshot = None;
+        self.clear_approvals();
+        self.clear_ask_questions_state();
+        self.events_pane.open = false;
+        self.worktree_meta = None;
+        self.pending_worktree_merge = None;
+        self.settings_surface = None;
+        self.transcript_overlay = None;
+        self.transcript_overlay_visible_height = None;
+        self.activity_surface = None;
+        self.board_surface = None;
+        self.browser_surface = None;
+        self.history_surface = None;
+        self.goal_overlay_open = false;
+        self.help_open = false;
+        self.task_id = None;
+        self.selected_tool_index = None;
     }
 
     pub(super) fn save_local_input_handoff(&mut self) {
@@ -1111,6 +1094,131 @@ mod tests {
             worker: None,
             cron_pending: None,
         }
+    }
+
+    fn open_every_session_surface(app: &mut App) {
+        let ask_request = AskQuestionsRequest::from_tool_content(
+            r#"{"type":"ask_questions","tool_call_id":"ask-1","questions":[{"id":"continue","type":"yes_no","text":"Continue?"}]}"#,
+            None,
+        )
+        .unwrap();
+        app.server_queue_size = 1;
+        app.server_queue_previews.push("queued prompt".to_string());
+        app.browser_state.is_open = true;
+        app.open_project_picker(vec![ProjectEntry {
+            id: "picker-project".to_string(),
+            slug: "picker project".to_string(),
+            root: PathBuf::from("/tmp/picker-project"),
+            pinned: None,
+            last_active_ms: None,
+            settings: Value::Null,
+        }]);
+        app.open_theme_picker();
+        app.modal_picker = Some(PickerState::new(PickerKind::Model, Vec::new()));
+        app.test_set_approval(ApprovalModalState::new(vec![
+            crate::approvals::PauseReason {
+                reason_type: "confirmation".to_string(),
+                tool_name: "shell".to_string(),
+                command: "echo test".to_string(),
+                rule: "default".to_string(),
+                tool_call_id: "approval-1".to_string(),
+                integr_config_path: None,
+                args: None,
+                diff: None,
+            },
+        ]));
+        app.test_set_ask_questions_form(AskQuestionsForm::new(ask_request.clone()));
+        app.pending_manual_ask_questions = Some(ask_request);
+        app.events_pane.open = true;
+        app.worktree_meta = Some(crate::sessions::WorktreeMeta::default());
+        app.pending_worktree_merge = Some(surfaces::WorktreeMergeConfirmation {
+            id: "worktree-1".to_string(),
+            strategy: "squash".to_string(),
+            target_branch: "main".to_string(),
+            include_uncommitted: false,
+            delete_after_merge: true,
+        });
+        app.settings_surface = Some(surfaces::SettingsState::new(
+            &Value::Null,
+            surfaces::ModelSettingsCapabilities::default(),
+        ));
+        app.transcript_overlay = Some(PagerOverlay::new("Test", Vec::new(), Vec::new()));
+        app.transcript_overlay_visible_height = Some(42);
+        app.activity_surface = Some(surfaces::activity::ActivitySurfaceState::default());
+        app.board_surface = Some(surfaces::board::BoardSurface::loading());
+        app.browser_surface = Some(surfaces::browser::BrowserSurface::new());
+        app.history_surface = Some(surfaces::HistorySurface::new(Vec::new()));
+        app.goal_overlay_open = true;
+        app.help_open = true;
+        app.task_id = Some("task-1".to_string());
+        app.selected_tool_index = Some(0);
+    }
+
+    fn assert_session_surfaces_closed(app: &App) {
+        assert_eq!(app.server_queue_size, 0);
+        assert!(app.server_queue_previews.is_empty());
+        assert_eq!(app.browser_state, BrowserState::default());
+        assert_eq!(app.composer_mode, ComposerMode::Chat);
+        assert!(app.picker.filtered_projects().is_empty());
+        assert!(app.modal_picker.is_none());
+        assert!(app.theme_picker_snapshot.is_none());
+        assert!(app.approval_modal().is_none());
+        assert!(app.ask_questions_form.is_none());
+        assert!(app.pending_manual_ask_questions.is_none());
+        assert!(!app.events_pane.open);
+        assert!(app.worktree_meta.is_none());
+        assert!(app.pending_worktree_merge.is_none());
+        assert!(app.settings_surface.is_none());
+        assert!(app.transcript_overlay.is_none());
+        assert!(app.transcript_overlay_visible_height.is_none());
+        assert!(app.activity_surface.is_none());
+        assert!(app.board_surface.is_none());
+        assert!(app.browser_surface.is_none());
+        assert!(app.history_surface.is_none());
+        assert!(!app.goal_overlay_open);
+        assert!(!app.help_open);
+        assert!(app.task_id.is_none());
+        assert!(app.selected_tool_index.is_none());
+    }
+
+    #[test]
+    fn reset_session_surfaces_covers_every_session_surface() {
+        let mut app = App::new(project());
+        open_every_session_surface(&mut app);
+
+        app.reset_session_surfaces();
+
+        assert_session_surfaces_closed(&app);
+    }
+
+    #[test]
+    fn project_switch_closes_every_session_surface() {
+        let mut app = App::new(project());
+        open_every_session_surface(&mut app);
+
+        app.set_project(next_project());
+
+        assert_session_surfaces_closed(&app);
+    }
+
+    #[test]
+    fn new_chat_closes_every_session_surface() {
+        let mut app = App::new(project());
+        open_every_session_surface(&mut app);
+
+        app.new_chat();
+
+        assert_session_surfaces_closed(&app);
+    }
+
+    #[test]
+    fn resumed_chat_closes_every_session_surface() {
+        let mut app = App::new(project());
+        open_every_session_surface(&mut app);
+
+        app.resume_chat("next-chat".to_string(), "Next chat".to_string(), None);
+
+        assert_session_surfaces_closed(&app);
     }
 
     #[test]
