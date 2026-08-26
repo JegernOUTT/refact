@@ -31,16 +31,16 @@ Every Wave C row is now dispositioned. ✅ rows have native Refact TUI implement
 | C-5 | Rich transcript cells | `history_cell/*`, `chatwidget/transcript.rs`, `approval_events.rs` | ✅ Done: assistant, reasoning, notices, info, plan, diff, approval, tool, and session cells live in `src/history/cells.rs`. |
 | C-6 | Tool lifecycle cells | `chatwidget/tool_lifecycle.rs`, `chatwidget/tool_requests.rs`, `chatwidget/exec_state.rs`, `status_indicator_widget.rs` | ✅ Done: stable tool card lifecycle, status labels, collapse state, and output truncation live in `src/tools.rs` and `src/history/cells.rs`. |
 | C-7 | Composer | `public_widgets/composer_input.rs`, `chatwidget/input_submission.rs`, `chatwidget/input_restore.rs`, `clipboard_paste.rs`, `file_search.rs` | ✅ Done: multiline composer, cursor movement, history restore, paste handling, queue awareness, file mentions, and slash popup entry live in `src/composer/*` and `src/app.rs`. |
-| C-8 | Popups and pickers | `chatwidget/model_popups.rs`, `chatwidget/permission_popups.rs`, `chatwidget/settings_popups.rs`, `chatwidget/keymap_picker.rs`, `theme_picker.rs`, `oss_selection.rs` | ✅ Done: reusable modal picker surfaces for projects, models, modes, permissions, sessions, slash commands, file mentions, and themes live in `src/pickers.rs` and `src/app.rs`; ❌ GUI-only settings panes remain deferred because they require broader configuration editors. |
+| C-8 | Popups and pickers | `chatwidget/model_popups.rs`, `chatwidget/permission_popups.rs`, `chatwidget/settings_popups.rs`, `chatwidget/keymap_picker.rs`, `theme_picker.rs`, `oss_selection.rs` | ✅ Done: reusable modal picker surfaces for projects, models, modes, permissions, sessions, slash commands, file mentions, and themes live in `src/pickers.rs` and `src/app.rs`; the capability-aware per-chat settings surface is in `src/app/surfaces/settings.rs`. Settings, modes, and permissions require `REFACT_TUI_SURFACES=1`. |
 | C-9 | Input queue and turn runtime | `chatwidget/input_queue.rs`, `chatwidget/turn_runtime.rs`, `chatwidget/interrupts.rs`, `chatwidget/command_lifecycle.rs` | ✅ Done: local editable queue, cancellation, dispatch-after-finish, and passive daemon queue state live in `src/composer/queue.rs` and `src/app.rs`. Abort keeps queued inputs and dispatches the next queued prompt once the abort command succeeds while idle; deleting a selected queue item remains the explicit queue-removal path. |
 | C-10 | Approvals UX | `approval_events.rs`, `chatwidget/permission_popups.rs`, `chatwidget/tool_requests.rs` | ✅ Done: FIFO approval modal, details toggle, allow once/chat, deny, and patch auto-approval live in `src/approvals.rs` and `src/app.rs`. The `ask_questions` answer form opens when a successful pending ask_questions tool result puts the chat in `waiting_user_input`; Esc closes the form and leaves the composer available for manual fallback. |
 | C-11 | Session ops | `session_archive_commands.rs`, `thread_transcript.rs`, `chatwidget/session_flow.rs`, `chatwidget/replay.rs`, `app_backtrack.rs` | ✅ Done: `/new`, `/resume`, `/fork`, `/rename`, `/archive`, snapshot resume, and backtrack/retry live in `src/commands/session.rs`, `src/sessions.rs`, and `src/app.rs`. |
 | C-12 | Backtrack, overlays, external editor | `app_backtrack.rs`, `pager_overlay.rs`, `external_editor.rs`, `clipboard_copy.rs`, `get_git_diff.rs` | ✅ Done: Esc-Esc backtrack, transcript pager/raw overlay, OSC52 terminal clipboard, external editor, and git diff loading live in `src/overlay.rs`, `src/clipboard.rs`, `src/terminal.rs`, `src/app.rs`, and `src/commands/workflow.rs`. |
 | C-13 | Usage and status footer | `status_indicator_widget.rs`, `chatwidget/status_surfaces.rs`, `chatwidget/status_state.rs`, `chatwidget/status_controls.rs`, `service_tier_resolution.rs`, `chatwidget/rate_limits.rs` | ✅ Done: model/mode, worker/daemon state, queue/busy state, usage totals, and `/status` info card live in `src/ui/footer.rs`, `src/app.rs`, and `src/commands/session.rs`; ❌ service-tier/rate-limit controls are deferred because the Refact daemon does not expose that surface to the TUI. |
-| C-14 | Keymap, Vim, theme | `key_hint.rs`, `keymap_setup/*`, `tui/keyboard_modes.rs`, `theme_picker.rs`, `style.rs`, `terminal_title.rs` | ✅ Done: configurable keymap, generated help, Vim composer mode, built-in themes, live `/theme`, and themed UI styles live in `src/keymap.rs`, `src/theme.rs`, `src/ui/*`, and `src/commands/misc.rs`; ❌ terminal title/statusline preferences are deferred because no TUI config contract exists beyond keymap/theme. |
+| C-14 | Keymap, Vim, theme | `key_hint.rs`, `keymap_setup/*`, `tui/keyboard_modes.rs`, `theme_picker.rs`, `style.rs`, `terminal_title.rs` | ✅ Done: configurable keymap, generated help, Vim composer mode, built-in themes, live `/theme`, themed UI styles, and terminal-title control live in `src/keymap.rs`, `src/theme.rs`, `src/ui/*`, `src/commands/misc.rs`, and `src/terminal.rs`. Terminal title defaults on for a TTY and is configured with top-level `terminal_title` or `[terminal].title`; `REFACT_TUI_TERMINAL_TITLE` overrides either. ❌ terminal statusline preferences remain deferred. |
 | C-15 | Slash commands: core/session | `slash_command.rs`, `chatwidget/slash_dispatch.rs` | ✅ Done: `/new`, `/clear`, `/quit`, `/exit`, `/model`, `/permissions`, `/keymap`, `/vim`, `/status`, `/debug-config`, `/copy`, `/raw`, `/diff`, and `/mention` are in the registry. Implemented commands link to `src/commands/session.rs`, `src/commands/workflow.rs`, `src/commands/misc.rs`, and `/copy` writes the last assistant response via OSC52. |
-| C-16 | Slash commands: workflow/integrations | `slash_command.rs`, `chatwidget/slash_dispatch.rs`, `chatwidget/skills.rs`, `chatwidget/hooks.rs`, `chatwidget/mcp_startup.rs` | ✅ Done: `/review`, `/plan`, `/goal`, `/agent`, `/diff`, `/compact`, `/mention`, and `/stop` live in `src/commands/workflow.rs` and `src/app.rs`; ❌ `/subagents`, `/side`, `/btw`, `/skills`, `/hooks`, `/memories`, `/mcp`, `/apps`, `/plugins`, and `/ps` are either explicit unavailable commands or mapped to `/events` where supported. |
-| C-17 | Slash commands: settings/debug/edge | `slash_command.rs`, `debug_config.rs`, `local_chatgpt_auth.rs`, `config_update.rs`, `terminal_title.rs` | ✅ Done: `/rename`, `/title`, `/resume`, `/fork`, `/archive`, `/init`, `/compact`, `/theme`, `/events`, `/help`, `/keymap`, `/vim`, `/debug-config`, `/raw`, and `/quit` have deterministic handlers; ❌ Codex-only `/ide`, `/statusline`, `/pets`, `/personality`, `/realtime`, `/settings`, `/feedback`, `/logout`, `/rollout`, `/approve`, `/test-approval`, `/app`, `/experimental`, `/setup-default-sandbox`, `/sandbox-add-read-dir`, `/debug-m-drop`, and `/debug-m-update` are explicit unavailable commands with one-line reasons. |
+| C-16 | Slash commands: workflow/integrations | `slash_command.rs`, `chatwidget/slash_dispatch.rs`, `chatwidget/skills.rs`, `chatwidget/hooks.rs`, `chatwidget/mcp_startup.rs` | ✅ Done: `/review`, `/plan`, `/goal`, `/agent`, `/diff`, `/compact`, `/mention`, and `/stop` live in `src/commands/workflow.rs` and `src/app.rs`; `/subagents` has a local card by default and opens its Activity surface behind `REFACT_TUI_SURFACES=1`; `/mcp`, `/skills`, `/hooks`, and `/memories` open read-only overlays; `/ps` aliases `/events`. ❌ `/side`, `/btw`, `/apps`, and `/plugins` remain explicit unavailable commands. |
+| C-17 | Slash commands: settings/debug/edge | `slash_command.rs`, `debug_config.rs`, `local_chatgpt_auth.rs`, `config_update.rs`, `terminal_title.rs` | ✅ Done: `/rename`, `/title`, `/resume`, `/fork`, `/archive`, `/init`, `/compact`, `/theme`, `/events`, `/help`, `/keymap`, `/vim`, `/debug-config`, `/raw`, `/quit`, `/settings`, and `/logout` have deterministic handlers. ❌ Codex-only `/ide`, `/statusline`, `/pets`, `/personality`, `/realtime`, `/feedback`, `/rollout`, `/approve`, `/test-approval`, `/app`, `/experimental`, `/setup-default-sandbox`, `/sandbox-add-read-dir`, `/debug-m-drop`, and `/debug-m-update` are explicit unavailable commands with one-line reasons. |
 
 ### Slash command inventory closure
 
@@ -60,8 +60,8 @@ Current adopted commands and aliases:
 | `/clear` | ✅ local transcript clear in `src/commands/misc.rs` |
 | `/quit`, `/exit` | ✅ local quit action in `src/commands/misc.rs` |
 | `/model` | ✅ model picker via daemon caps |
-| `/mode`, `/tool-use` | ✅ mode picker via daemon modes |
-| `/permissions`, `/approval` | ✅ permissions picker using supported per-chat flags |
+| `/mode`, `/tool-use` | ✅ mode picker via daemon modes; requires `REFACT_TUI_SURFACES=1` |
+| `/permissions`, `/approval` | ✅ permissions picker using supported per-chat flags; requires `REFACT_TUI_SURFACES=1` |
 | `/keymap` | ✅ generated help from the active keymap registry |
 | `/vim` | ✅ live composer Vim-mode toggle |
 | `/status` | ✅ daemon, worker, session, model, and usage info card |
@@ -72,7 +72,7 @@ Current adopted commands and aliases:
 | `/mention`, `/file`, `/files` | ✅ file mention picker reuse |
 | `/review` | ✅ structured review prompt |
 | `/plan` | ✅ generated local plan cell from hidden plan messages |
-| `/goal` | ✅ structured goal-clarification prompt |
+| `/goal` | ✅ shows the current goal; set, update, budget, pause, resume, and stop controls require `REFACT_TUI_SURFACES=1` |
 | `/agent` | ✅ backend `set_params` patch for Agent mode |
 | `/compact` | ✅ structured compaction prompt fallback |
 | `/stop`, `/cancel`, `/clean` | ✅ abort active generation |
@@ -83,13 +83,13 @@ Current adopted commands and aliases:
 | `/rename`, `/title` | ✅ set chat title |
 | `/archive`, `/remove` | ✅ delete current chat from recent sessions |
 | `/init` | ✅ structured bootstrap prompt |
-| `/subagents`, `/multi-agents` | ❌ deferred: no TUI subagent picker; use GUI customization |
+| `/subagents`, `/multi-agents` | ✅ local active/recent subagent card; opens Activity when `REFACT_TUI_SURFACES=1` |
 | `/side` | ❌ deferred: no Refact daemon side-conversation command |
 | `/btw` | ❌ deferred: no background side-note routing command |
-| `/skills` | ❌ deferred: GUI-only marketplace/editor |
-| `/hooks` | ❌ deferred: GUI-only hook editor |
-| `/memories` | ❌ deferred: memory browsing not exposed in TUI |
-| `/mcp` | ❌ deferred: MCP setup/marketplace not exposed in TUI |
+| `/skills` | ✅ read-only overlay listing available skills and slash commands |
+| `/hooks` | ✅ read-only overlay listing configured hooks |
+| `/memories` | ✅ read-only overlay showing knowledge-graph memory entries and summary |
+| `/mcp` | ✅ read-only overlay showing configured MCP servers, status, and tools |
 | `/apps` | ❌ deferred: no Refact daemon apps surface |
 | `/plugins` | ❌ deferred: plugin marketplace not exposed in TUI |
 | `/ide` | ❌ deferred: IDE attach state not exposed in TUI |
@@ -97,9 +97,12 @@ Current adopted commands and aliases:
 | `/pets`, `/pet` | ❌ deferred: Buddy pets are GUI-only |
 | `/personality` | ❌ deferred: Buddy personality settings are GUI-only |
 | `/realtime` | ❌ deferred: realtime voice controls are GUI-only |
-| `/settings` | ❌ deferred: interactive settings are GUI-only; edit `~/.config/refact/tui.toml` for keymap/theme |
+| `/settings` | ✅ capability-aware per-chat settings surface; requires `REFACT_TUI_SURFACES=1` |
 | `/feedback` | ❌ deferred: no TUI feedback endpoint |
-| `/logout` | ❌ deferred: daemon auth/logout is not enabled for the TUI |
+| `/logout` | ✅ backend action that clears provider OAuth credentials |
+| `/browser` | ✅ browser status, frame, timeline, and context-selection surface; requires `REFACT_TUI_SURFACES=1` |
+| `/board`, `/tasks` | ✅ read-only task-board surface; requires `REFACT_TUI_SURFACES=1` |
+| `/worktrees`, `/worktree` | ✅ inspect, diff, merge, or clean worktrees; requires `REFACT_TUI_SURFACES=1` |
 | `/rollout` | ❌ deferred: no rollout-control endpoint |
 | `/approve` | ❌ deferred: approval decisions happen in the approval modal or `/permissions` picker |
 | `/test-approval` | ❌ deferred: synthetic approval injection is not release TUI behavior |
@@ -171,7 +174,17 @@ The TUI has one text-first degradation contract, exercised by the render-parity 
 5. **Box drawing becomes ASCII below 60 columns.** `┌─┐│└┘`-style frame characters become `+-|`, so narrow terminals that cannot display box drawing keep structural meaning.
 6. **Nothing vanishes silently.** At `30×10` or smaller, the layout reserves two transcript rows and renders `… content truncated` whenever compact layout omits overflow.
 
-`tests/tui_render_parity.rs` runs every registered scenario at `120×40`, `96×30`, `60×20`, and `40×15` with truecolor, ANSI-16, and `NO_COLOR` environments. Its registry covers idle, streaming, running and failed tools, approval, ask form, error turn, goal states, mode transition, history/events, a 500-turn trajectory, mid-resize, and post-reconnect. A registered scenario must supply an expected visible marker; the harness fails immediately if it does not, preventing silent snapshot gaps. Image content uses its textual fallback in this matrix.
+`tests/tui_render_parity.rs` runs all 19 registered scenarios at `120×40`, `96×30`, `60×20`, and `40×15` with truecolor, ANSI-16, and `NO_COLOR` environments: idle, streaming, running and failed tools, approval, ask form, error turn, goal dock, mode transition, history surface, history events, Activity, a 500-turn trajectory, mid-resize, post-reconnect, image fallback, task board, Browser, and worktree identity. A registered scenario must supply an expected visible marker; the harness fails immediately if it does not, preventing silent snapshot gaps. Image content uses its textual fallback in this matrix.
+
+Run the matrix with `RUST_TEST_THREADS=1 cargo test -p refact-tui --test tui_render_parity`. The harness changes process-global terminal environment variables for each color mode and enables the surface rollout flag for its Activity and Browser scenarios, so serial execution keeps the matrix isolated from other environment-mutating tests.
+
+## Runtime configuration
+
+- `REFACT_DAEMON_URL` takes precedence over the launcher-provided daemon URL. `REFACT_DAEMON_TOKEN`, when set, is supplied as the explicit daemon token.
+- `REFACT_TUI_SURFACES=1` enables the rollout surfaces and controls: settings, mode and permissions pickers, goal mutations, Activity, Browser, task board, and worktree operations. The accepted enable values are `1`, `true`, `yes`, and `on`, case-insensitively; the default is disabled. `/subagents` still shows its local activity card without the flag.
+- `REFACT_TUI_ALT_SCREEN=1` uses the alternate-screen transcript fallback instead of the default inline viewport. `REFACT_TUI_HYPERLINKS=1` or `0` forces OSC8 hyperlink probing on or off.
+- `REFACT_TUI_SIXEL` opts into sixel image output when color is enabled. Kitty and iTerm2 image protocols are detected from terminal environment data; unsupported terminals retain the textual image fallback.
+- `REFACT_TUI_TERMINAL_TITLE=1` or `0` overrides the terminal-title setting. `REFACT_TUI_REDUCED_MOTION` enables reduced motion, and `REFACT_TUI_NOTIFY` can disable notifications with `quiet`, `silent`, `none`, `disabled`, or a false value.
 
 ## Native scrollback
 
@@ -197,4 +210,4 @@ cd refact-agent/engine
 REFACT_SKIP_GUI_BUILD=1 REFACT_DAEMON_WORKER_CMD="python3 tests/fake_worker.py" cargo run --bin refact -- tui --project .
 ```
 
-Type a prompt and press Enter to stream the fake worker response, press Esc during a turn to send abort, press F2 or `/events` to toggle daemon events/workers, use `/theme` to apply a built-in theme, and press Ctrl-Q or `/quit` to restore the terminal and exit cleanly.
+This smoke command intentionally skips refreshing embedded GUI assets; use the normal engine build when those assets must be bundled. Type a prompt and press Enter to stream the fake worker response, press Esc during a turn to send abort, press F2 or `/events` to toggle daemon events/workers, use `/theme` to apply a built-in theme, and press Ctrl-Q or `/quit` to restore the terminal and exit cleanly.

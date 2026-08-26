@@ -15,9 +15,15 @@ cargo test --lib && cargo test --doc
 bash tools/compile_bench.sh               # compile-time before/after benchmark
 ```
 
-Release profile: `opt-level = "z"`, `lto = true`, `strip = true`, `codegen-units = 1`.
+Release profile: `opt-level = "z"`, `lto = true`, `strip = true`. It does not configure `codegen-units`; the separate `ci-release` profile inherits release settings, then overrides `strip = false`, `lto = "thin"`, and `codegen-units = 16`.
 
 Dev profile keeps workspace crates debuggable but optimizes CodeGraph's parser and SQLite dependencies with `[profile.dev.package.*] opt-level = 3`: tree-sitter core, every tree-sitter grammar crate, `tree-sitter-language`, `rusqlite`, `tokio-rusqlite`, `libsqlite3-sys`, and `sqlite-vec`. This makes `target/debug/refact-lsp` indexing close to release speed for parse-dominated cold indexes; the first dev build is slower because these dependencies compile optimized, and the shared sccache setup mitigates repeated work across worktrees.
+
+`cargo build`, `cargo run`, and release builds normally rebuild and embed GUI assets. `REFACT_SKIP_GUI_BUILD=1` skips that refresh only for API-only developer builds.
+
+### Worktree delivery
+
+Run checks in the worktree before landing its changes. `merge_worktree` squash-merges a worktree into the local `main` branch; it does not publish anything. Push separately afterward with `git push origin main`.
 
 ## Architecture
 
@@ -948,7 +954,7 @@ SQLite + vec0 extension for memory-plane semantic search. File splitters handle 
 
 ### Temporary concurrent-chat rollout switches
 
-Until the concurrent-chat acceptance gates pass, all five optimizations are default-off and can be enabled independently with a truthy environment value (`1`, `true`, `yes`, or `on`): `REFACT_TRAJECTORY_WRITER`, `REFACT_TRAJECTORY_INDEX_COORDINATOR`, `REFACT_TRAJECTORY_WATCHER_SELF_WRITE`, `REFACT_TOOL_CATALOG_SNAPSHOTS`, and `REFACT_VECDB_PATH_COALESCING`. The last switch affects deferred regular VecDB paths only; immediate enqueue behavior is unchanged. Set a switch to `0` or unset it and restart the engine to recover its legacy behavior. This changes no trajectory JSON or index schema, performs no migration, and deletes no data. Full-soak benchmarks set and restore all five values serially, using all-off `legacy` and all-on `optimized` variants; any production rollout must preserve that restart-safe independence.
+Until the concurrent-chat acceptance gates pass, all five optimizations are default-off and can be enabled independently. `REFACT_TRAJECTORY_WRITER`, `REFACT_TRAJECTORY_WATCHER_SELF_WRITE`, `REFACT_TOOL_CATALOG_SNAPSHOTS`, and `REFACT_VECDB_PATH_COALESCING` accept trimmed, case-insensitive `1`, `true`, `yes`, or `on`. `REFACT_TRAJECTORY_INDEX_COORDINATOR` currently accepts only `1`, `true`, `TRUE`, `yes`, or `YES`; `on` does not enable that switch. The last switch affects deferred regular VecDB paths only; immediate enqueue behavior is unchanged. Set a switch to `0` or unset it and restart the engine to recover its legacy behavior. This changes no trajectory JSON or index schema, performs no migration, and deletes no data. Full-soak benchmarks set and restore all five values serially, using all-off `legacy` and `1` for every all-on `optimized` switch; any production rollout must preserve that restart-safe independence.
 
 ## Providers
 
