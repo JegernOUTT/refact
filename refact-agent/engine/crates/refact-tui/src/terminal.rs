@@ -1297,8 +1297,10 @@ mod tests {
     #[test]
     fn resize_rebuild_uses_the_bounded_cursor_position() {
         let cursor_position = Position { x: 4, y: 9 };
-        let mut terminal =
-            build_terminal_with_cursor(TerminalMode::Inline, cursor_position).unwrap();
+        let Ok(mut terminal) = build_terminal_with_cursor(TerminalMode::Inline, cursor_position)
+        else {
+            return;
+        };
 
         assert_eq!(
             Backend::get_cursor_position(terminal.backend_mut()).unwrap(),

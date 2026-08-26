@@ -17,7 +17,7 @@ import {
   formatUsagePercent,
 } from "../../utils/providerQuota";
 import styles from "./UsageCounter.module.css";
-import { resolveSelectedProvider } from "./providerUsageIndicator";
+import { resolveSelectedProvider } from "./resolveSelectedProvider";
 
 const CircularUsage: React.FC<{ pct?: number }> = ({ pct }) => {
   const size = 20;

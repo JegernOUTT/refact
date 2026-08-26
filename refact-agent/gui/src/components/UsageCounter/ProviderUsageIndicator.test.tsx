@@ -10,7 +10,7 @@ import {
   ProviderUsageIndicatorContent,
   SnapshotRows,
 } from "./ProviderUsageIndicator";
-import { resolveSelectedProvider } from "./providerUsageIndicator";
+import { resolveSelectedProvider } from "./resolveSelectedProvider";
 
 vi.mock("../LongTailPrimitives", () => {
   const Flex = React.forwardRef<

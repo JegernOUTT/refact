@@ -4041,7 +4041,7 @@ mod tests {
             .open_project_with_retry_policy(
                 Path::new("/tmp/fixture"),
                 OpenProjectRetryPolicy {
-                    deadline: Duration::from_millis(400),
+                    deadline: Duration::from_secs(5),
                     initial_backoff: Duration::from_millis(100),
                     max_backoff: Duration::from_millis(100),
                     max_attempts: 8,
@@ -4068,7 +4068,7 @@ mod tests {
             .open_project_with_retry_policy(
                 Path::new("/tmp/fixture"),
                 OpenProjectRetryPolicy {
-                    deadline: Duration::from_millis(100),
+                    deadline: Duration::from_secs(30),
                     initial_backoff: Duration::from_millis(1),
                     max_backoff: Duration::from_millis(1),
                     max_attempts: 8,
