@@ -22,16 +22,16 @@ export interface BrowserLifecycleSettings {
   relaunch_settle_ms: number;
 }
 
-export interface BrowserViewportGroup {
+export interface BrowserViewportSettings {
   width: number;
   height: number;
   scale_factor: number;
 }
 
-export interface BrowserViewportSettings {
-  desktop: BrowserViewportGroup;
-  mobile: BrowserViewportGroup;
-  tablet: BrowserViewportGroup;
+export interface BrowserViewportGroup {
+  desktop: BrowserViewportSettings;
+  mobile: BrowserViewportSettings;
+  tablet: BrowserViewportSettings;
 }
 
 export interface BrowserTimingSettings {
@@ -53,7 +53,7 @@ export interface BrowserCaptureSettings {
 export interface BrowserSettings {
   launch: BrowserLaunchSettings;
   lifecycle: BrowserLifecycleSettings;
-  viewport: BrowserViewportSettings;
+  viewport: BrowserViewportGroup;
   timing: BrowserTimingSettings;
   capture: BrowserCaptureSettings;
 }

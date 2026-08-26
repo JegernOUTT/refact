@@ -1,17 +1,7 @@
-.viewportGroup {
-  display: grid;
+.control {
+  width: 100%;
+  max-width: var(--rf-input-max, var(--rf-setting-item-control-max, 360px));
   min-width: 0;
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  background: var(--rf-surface-1);
-}
-
-.viewportTitle {
-  margin: 0;
-  padding: var(--rf-space-3);
-  color: var(--rf-color-muted);
-  font-size: var(--rf-text-2);
-  line-height: var(--rf-line-2);
 }
 
 .status,

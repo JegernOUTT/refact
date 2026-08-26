@@ -57,12 +57,14 @@ function parseExtraArgs(value: string): string[] {
 
 interface NumberSettingProps {
   label: string;
+  ariaLabel?: string;
   value: number;
   onChange: (value: number) => void;
   integer?: boolean;
 }
 
 function NumberSetting({
+  ariaLabel,
   integer = true,
   label,
   onChange,
@@ -74,7 +76,8 @@ function NumberSetting({
       title={label}
       control={
         <FieldText
-          aria-label={label}
+          className={styles.control}
+          aria-label={ariaLabel ?? label}
           type="number"
           step={integer ? 1 : "any"}
           value={value.toString()}
@@ -87,31 +90,33 @@ function NumberSetting({
 
 interface ViewportSettingsProps {
   label: string;
-  value: BrowserViewportGroup;
-  onChange: (value: BrowserViewportGroup) => void;
+  value: BrowserViewportSettings;
+  onChange: (value: BrowserViewportSettings) => void;
 }
 
 function ViewportSettings({ label, onChange, value }: ViewportSettingsProps) {
   return (
-    <div className={styles.viewportGroup}>
-      <h3 className={styles.viewportTitle}>{label}</h3>
+    <SettingsGroup title={`Viewport — ${label}`}>
       <NumberSetting
-        label={`${label} width`}
+        label="Width"
+        ariaLabel={`${label} width`}
         value={value.width}
         onChange={(width) => onChange({ ...value, width })}
       />
       <NumberSetting
-        label={`${label} height`}
+        label="Height"
+        ariaLabel={`${label} height`}
         value={value.height}
         onChange={(height) => onChange({ ...value, height })}
       />
       <NumberSetting
         integer={false}
-        label={`${label} scale factor`}
+        label="Scale factor"
+        ariaLabel={`${label} scale factor`}
         value={value.scale_factor}
         onChange={(scale_factor) => onChange({ ...value, scale_factor })}
       />
-    </div>
+    </SettingsGroup>
   );
 }
 
@@ -178,8 +183,8 @@ export const BrowserSettingsSection: React.FC = () => {
   };
 
   const updateViewport = (
-    key: keyof BrowserViewportSettings,
-    value: BrowserViewportGroup,
+    key: keyof BrowserViewportGroup,
+    value: BrowserViewportSettings,
   ) => {
     setDraft((current) =>
       current
@@ -256,6 +261,7 @@ export const BrowserSettingsSection: React.FC = () => {
       <SettingsGroup title="Launch">
         <SettingItem title="Chrome path">
           <FieldText
+            className={styles.control}
             aria-label="Chrome path"
             value={draft.launch.chrome_path}
             onChange={(value) => updateLaunch("chrome_path", value)}
@@ -294,6 +300,7 @@ export const BrowserSettingsSection: React.FC = () => {
           description="Separate arguments with commas or new lines."
         >
           <TextArea
+            className={styles.control}
             aria-label="Extra arguments"
             rows={3}
             value={extraArgsText}
@@ -305,6 +312,7 @@ export const BrowserSettingsSection: React.FC = () => {
         </SettingItem>
         <SettingItem title="Downloads directory">
           <FieldText
+            className={styles.control}
             aria-label="Downloads directory"
             value={draft.launch.downloads_dir}
             onChange={(value) => updateLaunch("downloads_dir", value)}
@@ -312,6 +320,7 @@ export const BrowserSettingsSection: React.FC = () => {
         </SettingItem>
         <SettingItem title="Proxy server">
           <FieldText
+            className={styles.control}
             aria-label="Proxy server"
             value={draft.launch.proxy_server}
             onChange={(value) => updateLaunch("proxy_server", value)}
@@ -319,6 +328,7 @@ export const BrowserSettingsSection: React.FC = () => {
         </SettingItem>
         <SettingItem title="Proxy bypass">
           <FieldText
+            className={styles.control}
             aria-label="Proxy bypass"
             value={draft.launch.proxy_bypass}
             onChange={(value) => updateLaunch("proxy_bypass", value)}
@@ -351,23 +361,21 @@ export const BrowserSettingsSection: React.FC = () => {
         />
       </SettingsGroup>
 
-      <SettingsGroup title="Viewport">
-        <ViewportSettings
-          label="Desktop"
-          value={draft.viewport.desktop}
-          onChange={(value) => updateViewport("desktop", value)}
-        />
-        <ViewportSettings
-          label="Mobile"
-          value={draft.viewport.mobile}
-          onChange={(value) => updateViewport("mobile", value)}
-        />
-        <ViewportSettings
-          label="Tablet"
-          value={draft.viewport.tablet}
-          onChange={(value) => updateViewport("tablet", value)}
-        />
-      </SettingsGroup>
+      <ViewportSettings
+        label="Desktop"
+        value={draft.viewport.desktop}
+        onChange={(value) => updateViewport("desktop", value)}
+      />
+      <ViewportSettings
+        label="Mobile"
+        value={draft.viewport.mobile}
+        onChange={(value) => updateViewport("mobile", value)}
+      />
+      <ViewportSettings
+        label="Tablet"
+        value={draft.viewport.tablet}
+        onChange={(value) => updateViewport("tablet", value)}
+      />
 
       <SettingsGroup title="Timing">
         <NumberSetting
