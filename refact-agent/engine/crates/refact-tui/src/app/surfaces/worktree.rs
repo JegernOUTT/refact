@@ -4,6 +4,7 @@ use crate::client::{
     WorktreeListResponse, WorktreeRecordResponse,
 };
 use crate::overlay::PagerOverlay;
+use crate::text_safety::{sanitize_tool_inline, sanitize_tool_text};
 
 use super::*;
 
@@ -95,8 +96,16 @@ impl App {
                 None => return self.worktree_usage(),
             },
             Some("cleanup") => {
-                let apply = parts.next() == Some("apply");
-                let ids = parts.map(str::to_string).collect();
+                let mut ids = Vec::new();
+                let apply = match parts.next() {
+                    Some("apply") => true,
+                    Some(id) => {
+                        ids.push(id.to_string());
+                        false
+                    }
+                    None => false,
+                };
+                ids.extend(parts.map(str::to_string));
                 let request = WorktreeCleanupRequest {
                     ids,
                     ..WorktreeCleanupRequest::default()
@@ -426,11 +435,16 @@ fn worktree_diff_lines(response: &WorktreeDiffResponse) -> Vec<String> {
         );
     }
     for file in &response.files {
-        lines.push(format!("{} {}", file.status, file.path));
+        lines.push(format!(
+            "{} {}",
+            file.status,
+            sanitize_tool_inline(&file.path)
+        ));
     }
-    if !response.patch.is_empty() {
+    let patch = sanitize_tool_text(&response.patch);
+    if !patch.is_empty() {
         lines.push(String::new());
-        lines.extend(response.patch.lines().map(str::to_string));
+        lines.extend(patch.lines().map(str::to_string));
     }
     lines
 }
@@ -599,7 +613,7 @@ fn worktree_merge_result_notice(response: &MergeWorktreeResponse) -> String {
                     "Preflight conflict blocked the merge before changes were applied. Resolve the listed conflicts before retrying. No push was performed.".to_string()
                 }
                 Some(conflict) if conflict.aborted => {
-                    "Preflight or merge conflict was rolled back cleanly. Resolve the listed conflicts before retrying. No push was performed.".to_string()
+                    "Merge conflict rollback reported warnings. Inspect the target workspace before retrying. No push was performed.".to_string()
                 }
                 Some(conflict) if conflict.merge_in_progress => {
                     "Merge conflict remains in progress in the target workspace. Resolve or abort it before retrying. No push was performed.".to_string()
@@ -716,7 +730,7 @@ mod tests {
                     warnings: vec!["rollback warning".to_string()],
                     ..MergeWorktreeResponse::default()
                 },
-                "rolled back cleanly",
+                "rollback reported warnings",
             ),
             (
                 MergeWorktreeResponse {
@@ -752,6 +766,88 @@ mod tests {
         assert!(!worktree_surfaces_enabled_from(None));
         assert!(!worktree_surfaces_enabled_from(Some("0")));
         assert!(worktree_surfaces_enabled_from(Some("true")));
+    }
+
+    #[test]
+    fn cleanup_command_parses_apply_only_as_the_first_token() {
+        let cases = [
+            (
+                "cleanup",
+                WorktreeAction::CleanupPlan {
+                    request: WorktreeCleanupRequest::default(),
+                },
+            ),
+            (
+                "cleanup apply",
+                WorktreeAction::Cleanup {
+                    request: WorktreeCleanupRequest::default(),
+                },
+            ),
+            (
+                "cleanup wt-1 wt-2",
+                WorktreeAction::CleanupPlan {
+                    request: WorktreeCleanupRequest {
+                        ids: vec!["wt-1".to_string(), "wt-2".to_string()],
+                        ..WorktreeCleanupRequest::default()
+                    },
+                },
+            ),
+            (
+                "cleanup apply wt-1 wt-2",
+                WorktreeAction::Cleanup {
+                    request: WorktreeCleanupRequest {
+                        ids: vec!["wt-1".to_string(), "wt-2".to_string()],
+                        ..WorktreeCleanupRequest::default()
+                    },
+                },
+            ),
+        ];
+
+        for (command, action) in cases {
+            let mut app = App::notice_only("test");
+            assert_eq!(
+                app.start_worktree_command_with_enabled(command, true),
+                AppAction::Worktree { action }
+            );
+        }
+    }
+
+    #[test]
+    fn aborted_conflict_with_warnings_does_not_claim_clean_rollback() {
+        let notice = worktree_merge_result_notice(&MergeWorktreeResponse {
+            status: "conflict".to_string(),
+            conflict: Some(crate::client::WorktreeConflictStateResponse {
+                aborted: true,
+                ..Default::default()
+            }),
+            warnings: vec!["rollback warning".to_string()],
+            ..MergeWorktreeResponse::default()
+        });
+
+        assert!(notice.contains("rollback reported warnings"));
+        assert!(!notice.contains("cleanly"));
+        assert!(notice.contains("No push"));
+    }
+
+    #[test]
+    fn diff_pager_sanitizes_paths_and_patch_text() {
+        let lines = worktree_diff_lines(&WorktreeDiffResponse {
+            id: "wt-1".to_string(),
+            files: vec![crate::client::WorktreeDiffFileResponse {
+                status: "M".to_string(),
+                path: "src/\x1b[31mname\0.rs".to_string(),
+                ..Default::default()
+            }],
+            patch: "--- a/src/\x1b[31mname\0.rs\n+\x1b[2Jnew".to_string(),
+            ..WorktreeDiffResponse::default()
+        });
+
+        assert!(lines.iter().any(|line| line == "M src/name .rs"));
+        assert!(lines.iter().any(|line| line == "--- a/src/name .rs"));
+        assert!(lines.iter().any(|line| line == "+new"));
+        assert!(lines
+            .iter()
+            .all(|line| !line.chars().any(|character| character.is_control())));
     }
 
     #[test]
