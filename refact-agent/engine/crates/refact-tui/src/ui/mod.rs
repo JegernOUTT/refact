@@ -2,7 +2,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Frame;
 
-use crate::app::{App, ComposerMode};
+use crate::app::App;
 
 mod approval;
 mod ask;
@@ -29,24 +29,54 @@ const COMPACT_MAX_WIDTH: u16 = 30;
 const COMPACT_MAX_HEIGHT: u16 = 10;
 const COMPACT_MIN_TRANSCRIPT_HEIGHT: u16 = 2;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SurfaceLayer {
+    Main,
+    History,
+    Board,
+    Browser,
+    Activity,
+    AskForm,
+    ProjectPicker,
+    Settings,
+    ModalPicker,
+    Overlay,
+    Goal,
+    Approval,
+    Worktree,
+    Help,
+}
+
+impl SurfaceLayer {
+    fn is_exclusive(self) -> bool {
+        matches!(
+            self,
+            Self::History | Self::Board | Self::Browser | Self::Activity
+        )
+    }
+}
+
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     crate::vendored::terminal_hyperlinks::clear_buffer_hyperlinks();
     app.begin_frame_render();
     let area = frame.area();
-    if app.history_surface().is_some() {
-        history::render_history_surface(frame, app, area);
-        degrade_frames(frame, area);
+    let compact = area.width <= COMPACT_MAX_WIDTH && area.height <= COMPACT_MAX_HEIGHT;
+    let layer = app.surface_layer();
+    if layer.is_exclusive() {
+        render_exclusive_surface(frame, app, area, layer, compact);
         return;
     }
     let session_tabs_height = session_tabs::height(app);
     let status_height = status_indicator::height(app, area.width);
     let goal_dock_height = goal_dock::height(app);
     let footer_height = footer::desired_height(area.width);
-    let composer_height = app
-        .ask_questions_form()
-        .map(|form| ask::desired_height(form, area.height))
-        .unwrap_or_else(|| app.composer_height(area.width));
-    let compact = area.width <= COMPACT_MAX_WIDTH && area.height <= COMPACT_MAX_HEIGHT;
+    let composer_height = match layer {
+        SurfaceLayer::AskForm => app
+            .ask_questions_form()
+            .map(|form| ask::desired_height(form, area.height))
+            .unwrap_or_else(|| app.composer_height(area.width)),
+        _ => app.composer_height(area.width),
+    };
     let events_open = app.events_pane().open && !compact;
     let main_constraints = if compact {
         compact_constraints(
@@ -94,61 +124,84 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         events::render_events_pane(frame, app, chunks[3]);
         status_indicator::render(frame, app, chunks[4]);
         goal_dock::render(frame, app, chunks[5]);
-        render_composer_region(frame, app, chunks[6]);
+        render_composer_region(frame, app, chunks[6], layer);
         footer::render(frame, app, chunks[7]);
     } else {
         status_indicator::render(frame, app, chunks[3]);
         goal_dock::render(frame, app, chunks[4]);
-        render_composer_region(frame, app, chunks[5]);
+        render_composer_region(frame, app, chunks[5], layer);
         footer::render(frame, app, chunks[6]);
     }
     if compact {
         render_compact_truncation_indicator(frame, chunks[2]);
     }
-    if matches!(app.composer_mode(), ComposerMode::ProjectPicker) {
-        picker::render_project_picker(frame, app.project_picker(), area);
-    }
-    if let Some(picker) = app.modal_picker() {
-        picker::render_modal_picker(frame, picker, area, composer_area);
-    }
-    if app.settings_surface_open() {
-        settings::render_settings(frame, app, area);
-    }
-    if app.transcript_overlay().is_some() {
-        app.set_transcript_overlay_visible_height(overlay::transcript_overlay_body_height(area));
-    }
-    if let Some(overlay) = app.transcript_overlay() {
-        overlay::render_transcript_overlay(frame, overlay, area);
-    }
-    if let Some(board) = app.task_board_surface() {
-        crate::app::surfaces::board::render_task_board(frame, board, area);
-        degrade_frames(frame, area);
-        if compact {
-            render_compact_truncation_indicator(frame, area);
+    match layer {
+        SurfaceLayer::ProjectPicker => {
+            picker::render_project_picker(frame, app.project_picker(), area);
         }
-        return;
-    }
-    if app.browser_surface().is_some() {
-        let state = app.browser_state().clone();
-        let browser = app.browser_surface().expect("browser surface is open");
-        crate::app::surfaces::browser::render_browser_surface(frame, &state, browser, area);
-        degrade_frames(frame, area);
-        if compact {
-            render_compact_truncation_indicator(frame, area);
+        SurfaceLayer::ModalPicker => {
+            if let Some(picker) = app.modal_picker() {
+                picker::render_modal_picker(frame, picker, area, composer_area);
+            }
         }
-        return;
-    }
-    if app.goal_overlay_open() {
-        goal_dock::render_overlay(frame, app, area);
-    }
-    if let Some(modal) = app.approval_modal() {
-        approval::render_approval_modal(frame, modal, area);
-    }
-    worktree::render_worktree_merge_confirmation(frame, app, area);
-    if app.help_open() {
-        help::render_help(frame, app, area);
+        SurfaceLayer::Settings => settings::render_settings(frame, app, area),
+        SurfaceLayer::Overlay => {
+            app.set_transcript_overlay_visible_height(overlay::transcript_overlay_body_height(
+                area,
+            ));
+            if let Some(overlay) = app.transcript_overlay() {
+                overlay::render_transcript_overlay(frame, overlay, area);
+            }
+        }
+        SurfaceLayer::Goal => goal_dock::render_overlay(frame, app, area),
+        SurfaceLayer::Approval => {
+            if let Some(modal) = app.approval_modal() {
+                approval::render_approval_modal(frame, modal, area);
+            }
+        }
+        SurfaceLayer::Worktree => worktree::render_worktree_merge_confirmation(frame, app, area),
+        SurfaceLayer::Help => help::render_help(frame, app, area),
+        SurfaceLayer::Main
+        | SurfaceLayer::History
+        | SurfaceLayer::Board
+        | SurfaceLayer::Browser
+        | SurfaceLayer::Activity
+        | SurfaceLayer::AskForm => {}
     }
     degrade_frames(frame, area);
+}
+
+fn render_exclusive_surface(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    layer: SurfaceLayer,
+    compact: bool,
+) {
+    match layer {
+        SurfaceLayer::History => history::render_history_surface(frame, app, area),
+        SurfaceLayer::Board => {
+            if let Some(board) = app.task_board_surface() {
+                crate::app::surfaces::board::render_task_board(frame, board, area);
+            }
+        }
+        SurfaceLayer::Browser => {
+            let state = app.browser_state().clone();
+            if let Some(browser) = app.browser_surface() {
+                crate::app::surfaces::browser::render_browser_surface(frame, &state, browser, area);
+            }
+        }
+        SurfaceLayer::Activity => {
+            if let Some(overlay) = app.transcript_overlay() {
+                overlay::render_transcript_overlay(frame, overlay, area);
+            }
+        }
+        _ => return,
+    }
+    degrade_frames(frame, area);
+    if compact {
+        render_compact_truncation_indicator(frame, area);
+    }
 }
 
 fn compact_constraints(
@@ -247,9 +300,11 @@ fn remove_frame_borders(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
     }
 }
 
-fn render_composer_region(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    if let Some(form) = app.ask_questions_form() {
-        ask::render_ask_form(frame, form, area);
+fn render_composer_region(frame: &mut Frame<'_>, app: &App, area: Rect, layer: SurfaceLayer) {
+    if layer == SurfaceLayer::AskForm {
+        if let Some(form) = app.ask_questions_form() {
+            ask::render_ask_form(frame, form, area);
+        }
     } else {
         composer::render_composer(frame, app, area);
     }
