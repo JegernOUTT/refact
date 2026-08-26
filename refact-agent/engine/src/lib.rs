@@ -122,6 +122,9 @@ pub mod tasks;
 pub mod trajectory_memos;
 pub mod voice;
 
+#[cfg(test)]
+pub mod test_paths;
+
 const EXEC_SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {

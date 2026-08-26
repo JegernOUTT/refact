@@ -745,7 +745,10 @@ mod tests {
     fn daemon_needs_upgrade_same_version_different_hash_upgrades() {
         let mut info = daemon_info(8488, None);
         info.executable_sha256 = Some("0".repeat(64));
-        assert!(!daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            daemon_needs_upgrade(&info, env!("CARGO_PKG_VERSION")),
+            !cfg!(debug_assertions)
+        );
         assert_eq!(
             daemon_upgrade_reason(&info, env!("CARGO_PKG_VERSION")),
             Some(DaemonUpgradeReason::SameVersionDifferentExecutable)

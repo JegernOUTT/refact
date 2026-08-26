@@ -240,8 +240,8 @@ mod tests {
     fn knowledge_references_use_native_query_artifact_and_workspace_path_metadata() {
         let memory = crate::memories::MemoRecord {
             memid: "memory-1".to_string(),
-            file_path: Some(std::path::PathBuf::from(
-                "/workspace/.refact/knowledge/memory.md",
+            file_path: Some(crate::test_paths::abs(
+                "workspace/.refact/knowledge/memory.md",
             )),
             line_range: Some((3, 5)),
             title: Some("Memory title".to_string()),
@@ -254,7 +254,7 @@ mod tests {
         add_knowledge_references(
             &mut references,
             &[memory],
-            &[std::path::PathBuf::from("/workspace")],
+            &[crate::test_paths::abs("workspace")],
         );
         let mut message = ChatMessage::new("tool".to_string(), "raw knowledge".to_string());
         references.attach(&mut message);

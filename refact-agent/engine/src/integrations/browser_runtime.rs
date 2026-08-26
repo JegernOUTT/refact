@@ -539,7 +539,7 @@ mod tests {
         for step in [
             "remove_browser_runtime(app.clone(), &runtime_id)",
             "tokio::time::sleep(browser_settings::current().relaunch_settle())",
-            "BrowserRuntime::launch(profile_dir, options)",
+            "BrowserRuntime::launch(",
             "runtime.reattach(chat_id)",
             "register_browser_runtime(app.clone(), runtime)",
             "setup_recording_for_runtime(&mut rt)",

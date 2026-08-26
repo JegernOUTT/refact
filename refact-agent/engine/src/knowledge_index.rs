@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn extract_task_id_rejects_non_refact_tasks_path() {
         assert_eq!(
-            extract_task_id_from_path(Path::new("/repo/tasks/examples/x.md")),
+            extract_task_id_from_path(&crate::test_paths::abs("repo/tasks/examples/x.md")),
             None
         );
     }
@@ -590,7 +590,9 @@ mod tests {
     #[test]
     fn extract_task_id_accepts_refact_tasks_path() {
         assert_eq!(
-            extract_task_id_from_path(Path::new("/workspace/.refact/tasks/T-1/memories/x.md")),
+            extract_task_id_from_path(&crate::test_paths::abs(
+                "workspace/.refact/tasks/T-1/memories/x.md",
+            )),
             Some("T-1".to_string())
         );
     }

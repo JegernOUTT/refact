@@ -5658,6 +5658,7 @@ impl Tool for ToolCodeMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_paths::{abs, abs_str};
     use git2::{Repository, Signature, Time};
 
     #[test]
@@ -5715,31 +5716,31 @@ mod tests {
 
     #[test]
     fn code_intel_scope_accepts_root_paths_and_rejects_noise_and_outside_paths() {
-        let root = Path::new("/workspace/refact");
-        assert!(code_intel_path_allowed(root, "src/main.rs"));
+        let root = abs("workspace/refact");
+        assert!(code_intel_path_allowed(&root, "src/main.rs"));
         assert!(code_intel_path_allowed(
-            root,
-            "/workspace/refact/src/main.rs"
+            &root,
+            &abs_str("workspace/refact/src/main.rs")
         ));
-        assert!(!code_intel_path_allowed(root, "target/debug/generated.rs"));
+        assert!(!code_intel_path_allowed(&root, "target/debug/generated.rs"));
         assert!(!code_intel_path_allowed(
-            root,
+            &root,
             "web/node_modules/pkg/index.js"
         ));
         assert!(code_intel_path_allowed(
-            root,
+            &root,
             "competitors/rival/src/lib.rs"
         ));
         assert!(!code_intel_path_allowed(
-            root,
-            "/workspace/other/src/main.rs"
+            &root,
+            &abs_str("workspace/other/src/main.rs")
         ));
 
-        let competitor_root = Path::new("/workspace/refact/competitors/rival");
-        assert!(code_intel_path_allowed(competitor_root, "src/lib.rs"));
+        let competitor_root = abs("workspace/refact/competitors/rival");
+        assert!(code_intel_path_allowed(&competitor_root, "src/lib.rs"));
         assert!(code_intel_path_allowed(
-            competitor_root,
-            "/workspace/refact/competitors/rival/src/lib.rs"
+            &competitor_root,
+            &abs_str("workspace/refact/competitors/rival/src/lib.rs")
         ));
     }
 
@@ -5747,10 +5748,10 @@ mod tests {
     fn scoped_graph_removes_noise_outside_nodes_and_incident_edges() {
         let graph = refact_codegraph::analytics::GraphData {
             nodes: vec![
-                (1, "main".into(), "/workspace/refact/src/main.rs".into()),
+                (1, "main".into(), abs_str("workspace/refact/src/main.rs")),
                 (2, "generated".into(), "dist/bundle.js".into()),
                 (3, "rival".into(), "competitors/rival/src/lib.rs".into()),
-                (4, "outside".into(), "/workspace/other/src/lib.rs".into()),
+                (4, "outside".into(), abs_str("workspace/other/src/lib.rs")),
             ],
             edges: vec![
                 (1, 2, "calls".into()),
@@ -5758,22 +5759,22 @@ mod tests {
                 (1, 4, "calls".into()),
             ],
         };
-        let scoped = scoped_graph_data(&graph, Path::new("/workspace/refact"));
+        let scoped = scoped_graph_data(&graph, &abs("workspace/refact"));
         let analytics = refact_codegraph::analytics::compute_graph_analytics_from_data(&scoped);
 
         assert_eq!(
             scoped.nodes,
             vec![
-                (1, "main".into(), "/workspace/refact/src/main.rs".into()),
+                (1, "main".into(), abs_str("workspace/refact/src/main.rs")),
                 (3, "rival".into(), "competitors/rival/src/lib.rs".into()),
             ]
         );
         assert_eq!(scoped.edges, vec![(1, 3, "calls".into())]);
         assert_eq!(analytics.overview.node_count, 2);
         assert_eq!(analytics.overview.edge_count, 1);
-        assert!(analytics.overview.top_pagerank.iter().all(
-            |entry| !entry.path.contains("dist/") && !entry.path.contains("/workspace/other/")
-        ));
+        assert!(analytics.overview.top_pagerank.iter().all(|entry| {
+            !entry.path.contains("dist/") && !entry.path.starts_with(&abs_str("workspace/other"))
+        }));
     }
 
     #[test]
@@ -5791,9 +5792,9 @@ mod tests {
             vec![
                 symbol(1, "src/dead.rs"),
                 symbol(2, "dist/generated.rs"),
-                symbol(3, "/workspace/other/dead.rs"),
+                symbol(3, &abs_str("workspace/other/dead.rs")),
             ],
-            Some(Path::new("/workspace/refact")),
+            Some(&abs("workspace/refact")),
         );
 
         assert_eq!(scoped.len(), 1);
@@ -5817,7 +5818,7 @@ mod tests {
             duplicated_tokens_by_path: HashMap::new(),
         };
 
-        let scoped = scoped_clone_analysis(&analysis, Path::new("/workspace/refact"))
+        let scoped = scoped_clone_analysis(&analysis, &abs("workspace/refact"))
             .await
             .unwrap();
         assert_eq!(scoped.files, 2);
@@ -5846,7 +5847,7 @@ mod tests {
             duplicated_tokens_by_path: HashMap::from([("src/a.rs".into(), 500)]),
         };
 
-        let scoped = scoped_clone_analysis(&analysis, Path::new("/workspace/refact"))
+        let scoped = scoped_clone_analysis(&analysis, &abs("workspace/refact"))
             .await
             .unwrap();
 
@@ -6010,21 +6011,26 @@ mod tests {
 
     #[test]
     fn scoped_code_map_inputs_remove_noise_pages_and_links() {
-        let root = Path::new("/workspace/refact");
+        let root = abs("workspace/refact");
         let (files, nodes, edges, centrality) = scoped_code_map_inputs(
-            root,
+            &root,
             vec![
                 ("src/main.rs".into(), "fn main() {}".into()),
                 ("dist/generated.js".into(), "function generated() {}".into()),
                 (
-                    "/workspace/other/outside.rs".into(),
+                    abs_str("workspace/other/outside.rs"),
                     "fn outside() {}".into(),
                 ),
             ],
             vec![
                 code_map_node_record(1, "function", "main", "src/main.rs"),
                 code_map_node_record(2, "function", "generated", "dist/generated.js"),
-                code_map_node_record(3, "function", "outside", "/workspace/other/outside.rs"),
+                code_map_node_record(
+                    3,
+                    "function",
+                    "outside",
+                    &abs_str("workspace/other/outside.rs"),
+                ),
             ],
             vec![(1, 2, "calls".into()), (2, 3, "calls".into())],
             code_map_centrality(&[("src/main.rs", 0.123)], &[]),
@@ -6037,7 +6043,7 @@ mod tests {
             centrality,
             None,
             None,
-            Some(root),
+            Some(&root),
             &code_map_markdown_args(2_000),
         );
 
@@ -6566,7 +6572,7 @@ mod tests {
     #[test]
     fn pr_blast_reviewers_are_ownership_based_stable_and_bot_filtered() {
         let report = refact_codegraph::pr_blast::BlastReport {
-            changed_files: vec!["/repo/src/core.rs".to_string()],
+            changed_files: vec![abs_str("repo/src/core.rs")],
             directly_impacted: vec![refact_codegraph::pr_blast::BlastImpact {
                 path: "src/caller.rs".to_string(),
                 symbol: "caller".to_string(),
@@ -6596,8 +6602,7 @@ mod tests {
             ]),
         );
 
-        let reviewers =
-            pr_blast_suggested_reviewers(&report, Some(Path::new("/repo")), Some(&intel));
+        let reviewers = pr_blast_suggested_reviewers(&report, Some(&abs("repo")), Some(&intel));
 
         assert_eq!(reviewers.len(), 2);
         assert_eq!(reviewers[0].author, "a@example.com");
@@ -6617,7 +6622,7 @@ mod tests {
         let intel = refact_git_intel::GitIntel::default();
 
         assert!(pr_blast_suggested_reviewers(&report, None, Some(&intel)).is_empty());
-        assert!(pr_blast_suggested_reviewers(&report, Some(Path::new("/repo")), None).is_empty());
+        assert!(pr_blast_suggested_reviewers(&report, Some(&abs("repo")), None).is_empty());
         assert!(pr_blast_is_bot_author("robot[bot]@example.com"));
         assert!(pr_blast_is_bot_author("review-agent@example.com"));
         assert!(pr_blast_is_bot_author(
@@ -6740,8 +6745,8 @@ fn caller_5() { brain(5); }
 
         let scoped = health_graph_snapshot_with_scope(
             Some(&service),
-            Some(Path::new("/workspace/refact")),
-            Some(Path::new("/workspace/refact")),
+            Some(&abs("workspace/refact")),
+            Some(&abs("workspace/refact")),
         )
         .await
         .unwrap();
@@ -7234,7 +7239,7 @@ def orphan():
         let trends = Vec::new();
         let git_paths = HashSet::new();
 
-        let global = health_graph_snapshot(Some(&service), Some(Path::new("/workspace/refact")))
+        let global = health_graph_snapshot(Some(&service), Some(&abs("workspace/refact")))
             .await
             .unwrap();
         let global_ctx = HealthAnalysisContext {
@@ -7260,8 +7265,8 @@ def orphan():
 
         let scoped = health_graph_snapshot_with_scope(
             Some(&service),
-            Some(Path::new("/workspace/refact")),
-            Some(Path::new("/workspace/refact")),
+            Some(&abs("workspace/refact")),
+            Some(&abs("workspace/refact")),
         )
         .await
         .unwrap();
@@ -7277,7 +7282,7 @@ def orphan():
         .unwrap();
 
         let other_indexed_root =
-            health_graph_snapshot(Some(&service), Some(Path::new("/workspace/other")))
+            health_graph_snapshot(Some(&service), Some(&abs("workspace/other")))
                 .await
                 .unwrap();
         let other_indexed_ctx = HealthAnalysisContext {
@@ -7299,10 +7304,9 @@ def orphan():
             )
             .await
             .unwrap();
-        let next_generation =
-            health_graph_snapshot(Some(&service), Some(Path::new("/workspace/refact")))
-                .await
-                .unwrap();
+        let next_generation = health_graph_snapshot(Some(&service), Some(&abs("workspace/refact")))
+            .await
+            .unwrap();
         let next_generation_ctx = HealthAnalysisContext {
             graph: Some(&next_generation),
             ..global_ctx
@@ -7322,12 +7326,13 @@ def orphan():
         assert_ne!(global.scope_signature, scoped.scope_signature);
         assert_ne!(global.scope_signature, other_indexed_root.scope_signature);
         assert_ne!(global.graph_generation, next_generation.graph_generation);
+        let expected_indexed_root = abs_str("workspace/refact").replace('\\', "/");
         assert_eq!(
             global
                 .import_index
                 .as_ref()
                 .map(|index| index.indexed_root.as_str()),
-            Some("/workspace/refact")
+            Some(expected_indexed_root.as_str())
         );
     }
 
@@ -7340,11 +7345,11 @@ def orphan():
         let second_service =
             service_with_file("src/health_service_cache_probe.rs", &text, "rust").await;
         let first_graph =
-            health_graph_snapshot(Some(&first_service), Some(Path::new("/workspace/refact")))
+            health_graph_snapshot(Some(&first_service), Some(&abs("workspace/refact")))
                 .await
                 .unwrap();
         let second_graph =
-            health_graph_snapshot(Some(&second_service), Some(Path::new("/workspace/refact")))
+            health_graph_snapshot(Some(&second_service), Some(&abs("workspace/refact")))
                 .await
                 .unwrap();
         assert_eq!(first_graph.graph_generation, second_graph.graph_generation);
@@ -7516,12 +7521,15 @@ def orphan():
         )
         .unwrap();
 
-        assert!(
-            coverage_file_for_path(&ambiguous, "/indexed/worktree/shared.rs", None, None,)
-                .is_none()
-        );
+        assert!(coverage_file_for_path(
+            &ambiguous,
+            &abs_str("indexed/worktree/shared.rs"),
+            None,
+            None,
+        )
+        .is_none());
         assert_eq!(
-            coverage_file_for_path(&unique, "/indexed/worktree/shared.rs", None, None)
+            coverage_file_for_path(&unique, &abs_str("indexed/worktree/shared.rs"), None, None)
                 .unwrap()
                 .path,
             "generated/shared.rs"
@@ -7586,7 +7594,7 @@ def orphan():
         let matched = health_stored_path_for_request(
             vec!["a/util.rs".to_string(), "b/util.rs".to_string()],
             "util.rs",
-            Some(Path::new("/repo")),
+            Some(&abs("repo")),
         );
 
         assert_eq!(matched, None);

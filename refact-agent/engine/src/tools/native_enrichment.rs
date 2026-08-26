@@ -212,9 +212,10 @@ mod tests {
 
     #[test]
     fn workspace_relative_path_requires_a_safe_workspace_path() {
-        let root = PathBuf::from("/workspace");
+        let root = crate::test_paths::abs("workspace");
+        let source = crate::test_paths::abs("workspace/src/lib.rs");
         assert_eq!(
-            workspace_relative_path(Path::new("/workspace/src/lib.rs"), &[root.clone()]),
+            workspace_relative_path(&source, &[root.clone()]),
             Some("src/lib.rs".to_string())
         );
         assert_eq!(
@@ -229,26 +230,11 @@ mod tests {
 
     #[test]
     fn native_references_are_bounded_and_keep_the_first_range() {
-        let root = PathBuf::from("/workspace");
+        let root = crate::test_paths::abs("workspace");
+        let source = crate::test_paths::abs("workspace/src/lib.rs");
         let mut references = NativeReferences::new();
-        references.add_path(
-            Path::new("/workspace/src/lib.rs"),
-            &[root.clone()],
-            2,
-            4,
-            "match",
-            Some(0.9),
-            "test",
-        );
-        references.add_path(
-            Path::new("/workspace/src/lib.rs"),
-            &[root],
-            6,
-            8,
-            "match",
-            Some(0.8),
-            "test",
-        );
+        references.add_path(&source, &[root.clone()], 2, 4, "match", Some(0.9), "test");
+        references.add_path(&source, &[root], 6, 8, "match", Some(0.8), "test");
         assert_eq!(references.references.len(), 2);
         for index in 0..MAX_REFERENCES {
             references.add_symbol(&format!("symbol_{index}"), "definition", "test");
