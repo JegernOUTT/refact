@@ -223,6 +223,12 @@ mod tests {
             )),
             None
         );
+        assert_eq!(
+            roots.classify_file(Path::new(
+                "/workspace/project/.refact/buddy/chats/conversations/chat.json"
+            )),
+            None
+        );
     }
 
     #[test]

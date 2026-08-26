@@ -9,7 +9,8 @@ use hyper::Body;
 use serde::de::{Deserializer as _, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::{Mutex as AMutex, Notify, broadcast};
+use futures::FutureExt;
+use tokio::sync::{Mutex as AMutex, Notify, broadcast, mpsc};
 use tokio::fs;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::{debug, info, warn};
@@ -983,8 +984,113 @@ pub fn is_internal_trace_link_type(link_type: Option<&str>) -> bool {
     link_type.is_some_and(|value| value.starts_with(INTERNAL_TRACE_LINK_PREFIX))
 }
 
-fn should_vectorize_trajectory(link_type: Option<&str>) -> bool {
-    !is_internal_trace_link_type(link_type)
+fn should_vectorize_trajectory(source: &TrajectorySourceIdentity, link_type: Option<&str>) -> bool {
+    !matches!(source, TrajectorySourceIdentity::Buddy) && !is_internal_trace_link_type(link_type)
+}
+
+const TRAJECTORY_VECTORIZATION_QUEUE_CAPACITY: usize = 64;
+
+#[derive(Default)]
+pub struct TrajectoryVectorizationQueue {
+    sender: Option<mpsc::Sender<PathBuf>>,
+    worker: Option<tokio::task::JoinHandle<()>>,
+}
+
+async fn wait_for_trajectory_vectorization_shutdown(
+    shutdown_flag: Arc<std::sync::atomic::AtomicBool>,
+) {
+    while !shutdown_flag.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn enqueue_trajectory_vectorization(gcx: Arc<GlobalContext>, file_path: PathBuf) {
+    if gcx.shutdown_flag.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let finished_worker = {
+        let mut queue = gcx.trajectory_vectorization_queue.lock().await;
+        if queue
+            .worker
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+        {
+            queue.sender = None;
+            queue.worker.take()
+        } else {
+            None
+        }
+    };
+    if let Some(worker) = finished_worker {
+        if let Err(error) = worker.await {
+            warn!("trajectory VecDB enqueue worker failed: {error}");
+        }
+    }
+
+    let sender = {
+        let mut queue = gcx.trajectory_vectorization_queue.lock().await;
+        if queue.sender.is_none() {
+            let (sender, receiver) = mpsc::channel(TRAJECTORY_VECTORIZATION_QUEUE_CAPACITY);
+            queue.sender = Some(sender);
+            queue.worker = Some(tokio::spawn(run_trajectory_vectorization_queue(
+                Arc::downgrade(&gcx),
+                receiver,
+            )));
+        }
+        queue.sender.as_ref().cloned()
+    };
+
+    let Some(sender) = sender else {
+        return;
+    };
+    if sender.try_send(file_path).is_err() {
+        warn!("skipping best-effort trajectory VecDB enqueue because its queue is unavailable");
+    }
+}
+
+async fn run_trajectory_vectorization_queue(
+    gcx_weak: Weak<GlobalContext>,
+    mut receiver: mpsc::Receiver<PathBuf>,
+) {
+    let Some(gcx) = gcx_weak.upgrade() else {
+        return;
+    };
+    let shutdown_flag = gcx.shutdown_flag.clone();
+    drop(gcx);
+
+    loop {
+        let file_path = tokio::select! {
+            file_path = receiver.recv() => file_path,
+            _ = wait_for_trajectory_vectorization_shutdown(shutdown_flag.clone()) => return,
+        };
+        let Some(file_path) = file_path else {
+            return;
+        };
+        let Some(gcx) = gcx_weak.upgrade() else {
+            return;
+        };
+        let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
+        if !roots.is_trajectory_file(&file_path) {
+            continue;
+        }
+        let vecdb = gcx.vec_db.lock().await.clone();
+        if let Some(vecdb) = vecdb {
+            let documents = vec![file_path.to_string_lossy().to_string()];
+            tokio::select! {
+                result = std::panic::AssertUnwindSafe(vecdb.vectorizer_enqueue_files(
+                    &documents,
+                    false,
+                    roots,
+                )).catch_unwind() => {
+                    if result.is_err() {
+                        warn!("best-effort trajectory VecDB enqueue panicked");
+                    }
+                }
+                _ = wait_for_trajectory_vectorization_shutdown(shutdown_flag.clone()) => return,
+            }
+        }
+    }
 }
 
 pub fn internal_trace_link_type(feature: &str) -> String {
@@ -4005,19 +4111,8 @@ async fn save_trajectory_snapshot_inner(
         prune_buddy_conversations_throttled(gcx.clone()).await;
     }
 
-    if should_vectorize_trajectory(snapshot.link_type.as_deref()) {
-        let roots = crate::indexing_routing::memory_plane_roots(gcx.clone()).await;
-        let vec_db = app.workspace.vec_db.clone();
-        let vecdb = vec_db.lock().await.clone();
-        if let Some(vecdb) = vecdb {
-            vecdb
-                .vectorizer_enqueue_files(
-                    &vec![file_path.to_string_lossy().to_string()],
-                    false,
-                    roots,
-                )
-                .await;
-        };
+    if should_vectorize_trajectory(&source, snapshot.link_type.as_deref()) {
+        enqueue_trajectory_vectorization(gcx.clone(), file_path.clone()).await;
     }
 
     if snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none() {
@@ -7658,7 +7753,12 @@ mod tests {
 
     struct BlockingRecordingVecdb {
         enqueued: Arc<StdMutex<Vec<String>>>,
+        enqueue_started: Arc<Notify>,
         release_enqueue: Arc<Notify>,
+    }
+
+    struct PanickingVecdb {
+        enqueue_started: Arc<Notify>,
     }
 
     #[async_trait]
@@ -7701,7 +7801,86 @@ mod tests {
             _roots: refact_core::memory_plane::MemoryPlaneRoots,
         ) {
             self.enqueued.lock().unwrap().extend(documents.to_vec());
+            self.enqueue_started.notify_one();
             self.release_enqueue.notified().await;
+        }
+
+        fn current_constants(&self) -> (EmbeddingModelConfig, usize) {
+            (
+                EmbeddingModelConfig {
+                    model_id: String::new(),
+                    endpoint: String::new(),
+                    endpoint_style: String::new(),
+                    embedding_endpoint_style: String::new(),
+                    api_key: String::new(),
+                    model_name: String::new(),
+                    embedding_size: 0,
+                    dimensions: None,
+                    query_prefix: String::new(),
+                    document_prefix: String::new(),
+                    rejection_threshold: 0.0,
+                    embedding_batch: 1,
+                    n_ctx: 0,
+                },
+                0,
+            )
+        }
+
+        async fn embed_query(&self, _query: &str) -> Result<Vec<f32>, String> {
+            Ok(vec![])
+        }
+
+        async fn vecdb_search_with_embedding(
+            &self,
+            _embedding: &Vec<f32>,
+            _top_n: usize,
+            _filter_mb: Option<String>,
+        ) -> Result<Vec<VecdbRecord>, String> {
+            Ok(vec![])
+        }
+    }
+
+    #[async_trait]
+    impl VecdbSearch for PanickingVecdb {
+        async fn vecdb_search(
+            &self,
+            query: String,
+            _top_n: usize,
+            _filter_mb: Option<String>,
+        ) -> Result<SearchResult, String> {
+            Ok(SearchResult {
+                query_text: query,
+                results: vec![],
+            })
+        }
+
+        async fn get_status(&self) -> Result<VecDbStatus, String> {
+            Ok(VecDbStatus {
+                files_unprocessed: 0,
+                files_total: 0,
+                requests_made_since_start: 0,
+                vectors_made_since_start: 0,
+                db_size: 0,
+                db_cache_size: 0,
+                state: "done".to_string(),
+                queue_additions: false,
+                vecdb_max_files_hit: false,
+                vecdb_errors: Default::default(),
+            })
+        }
+
+        async fn remove_file(&self, _file_path: &PathBuf) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn vectorizer_enqueue_files(
+            &self,
+            _documents: &[String],
+            _process_immediately: bool,
+            _roots: refact_core::memory_plane::MemoryPlaneRoots,
+        ) {
+            self.enqueue_started.notify_one();
+            panic!("test VecDB enqueue failure");
         }
 
         fn current_constants(&self) -> (EmbeddingModelConfig, usize) {
@@ -8047,17 +8226,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trajectory_commit_finishes_before_best_effort_vecdb_enqueue() {
+    async fn trajectory_commit_finishes_before_blocked_vecdb_enqueue() {
         let workspace = tempfile::tempdir().unwrap();
         let (gcx, _) = make_app_with_workspace(workspace.path()).await;
         let enqueued = Arc::new(StdMutex::new(Vec::new()));
+        let enqueue_started = Arc::new(Notify::new());
         let release_enqueue = Arc::new(Notify::new());
         *gcx.vec_db.lock().await = Some(Arc::new(BlockingRecordingVecdb {
             enqueued: enqueued.clone(),
+            enqueue_started: enqueue_started.clone(),
             release_enqueue: release_enqueue.clone(),
         }));
 
-        let save = tokio::spawn(save_trajectory_snapshot(
+        let mut save = tokio::spawn(save_trajectory_snapshot(
             gcx.clone(),
             test_snapshot(
                 "commit-before-enqueue",
@@ -8066,21 +8247,103 @@ mod tests {
             ),
         ));
 
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if !enqueued.lock().unwrap().is_empty() {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), enqueue_started.notified())
+            .await
+            .unwrap();
         assert!(load_trajectory_for_chat(gcx, "commit-before-enqueue")
             .await
             .is_some());
+        tokio::time::timeout(Duration::from_millis(100), &mut save)
+            .await
+            .expect("required trajectory commit must not wait for VecDB enqueue")
+            .unwrap()
+            .unwrap();
         release_enqueue.notify_one();
-        save.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn buddy_trajectory_save_is_not_enqueued_for_vectorization() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let enqueued = Arc::new(StdMutex::new(Vec::new()));
+        let enqueue_started = Arc::new(Notify::new());
+        let release_enqueue = Arc::new(Notify::new());
+        *gcx.vec_db.lock().await = Some(Arc::new(BlockingRecordingVecdb {
+            enqueued: enqueued.clone(),
+            enqueue_started: enqueue_started.clone(),
+            release_enqueue,
+        }));
+        let mut snapshot = test_snapshot(
+            "buddy-not-vectorized",
+            "Buddy",
+            vec![ChatMessage::new("user".to_string(), "hello".to_string())],
+        );
+        snapshot.buddy_meta = Some(buddy_thread_meta());
+
+        save_trajectory_snapshot(gcx, snapshot).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), enqueue_started.notified())
+                .await
+                .is_err()
+        );
+
+        assert!(enqueued.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn internal_trace_save_is_not_enqueued_for_vectorization() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let enqueued = Arc::new(StdMutex::new(Vec::new()));
+        let enqueue_started = Arc::new(Notify::new());
+        let release_enqueue = Arc::new(Notify::new());
+        *gcx.vec_db.lock().await = Some(Arc::new(BlockingRecordingVecdb {
+            enqueued: enqueued.clone(),
+            enqueue_started: enqueue_started.clone(),
+            release_enqueue,
+        }));
+        let mut snapshot = test_snapshot(
+            "internal-trace-not-vectorized",
+            "Trace",
+            vec![ChatMessage::new("user".to_string(), "hello".to_string())],
+        );
+        snapshot.link_type = Some(internal_trace_link_type("title_generation"));
+
+        save_trajectory_snapshot(gcx, snapshot).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), enqueue_started.notified())
+                .await
+                .is_err()
+        );
+
+        assert!(enqueued.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn vecdb_enqueue_failure_does_not_fail_trajectory_save() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let enqueue_started = Arc::new(Notify::new());
+        *gcx.vec_db.lock().await = Some(Arc::new(PanickingVecdb {
+            enqueue_started: enqueue_started.clone(),
+        }));
+
+        save_trajectory_snapshot(
+            gcx.clone(),
+            test_snapshot(
+                "enqueue-failure",
+                "Committed",
+                vec![ChatMessage::new("user".to_string(), "durable".to_string())],
+            ),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), enqueue_started.notified())
+            .await
+            .expect("best-effort VecDB enqueue should have run");
+        assert!(load_trajectory_for_chat(gcx, "enqueue-failure")
+            .await
+            .is_some());
     }
 
     #[test]
@@ -9222,14 +9485,22 @@ mod tests {
 
     #[test]
     fn internal_traces_are_not_enqueued_for_vectorization() {
-        assert!(!should_vectorize_trajectory(Some(
-            "internal:title_generation"
-        )));
-        assert!(!should_vectorize_trajectory(Some(
-            "internal:commit_message"
-        )));
-        assert!(should_vectorize_trajectory(Some("subagent")));
-        assert!(should_vectorize_trajectory(None));
+        assert!(!should_vectorize_trajectory(
+            &TrajectorySourceIdentity::Normal,
+            Some("internal:title_generation")
+        ));
+        assert!(!should_vectorize_trajectory(
+            &TrajectorySourceIdentity::Normal,
+            Some("internal:commit_message")
+        ));
+        assert!(should_vectorize_trajectory(
+            &TrajectorySourceIdentity::Normal,
+            Some("subagent")
+        ));
+        assert!(should_vectorize_trajectory(
+            &TrajectorySourceIdentity::Normal,
+            None
+        ));
     }
 
     #[tokio::test]

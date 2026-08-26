@@ -240,6 +240,14 @@ mod tests {
             .join("meta.yaml")
             .to_string_lossy()
             .to_string();
+        let buddy_conversation = project_root
+            .join(".refact")
+            .join("buddy")
+            .join("chats")
+            .join("conversations")
+            .join("chat.json")
+            .to_string_lossy()
+            .to_string();
         let code = project_root
             .join("src")
             .join("main.rs")
@@ -256,6 +264,7 @@ mod tests {
                 task_memory.clone(),
                 non_refact_task_trajectory.clone(),
                 task_meta.clone(),
+                buddy_conversation.clone(),
                 code.clone(),
             ],
             &roots,
@@ -269,11 +278,13 @@ mod tests {
         assert!(!memory_paths.contains(&task_memory));
         assert!(!memory_paths.contains(&non_refact_task_trajectory));
         assert!(!memory_paths.contains(&task_meta));
+        assert!(!memory_paths.contains(&buddy_conversation));
         assert!(code_paths.contains(&knowledge_source));
         assert!(code_paths.contains(&task_trajectory_tool));
         assert!(code_paths.contains(&task_memory));
         assert!(code_paths.contains(&non_refact_task_trajectory));
         assert!(code_paths.contains(&task_meta));
+        assert!(code_paths.contains(&buddy_conversation));
         assert!(code_paths.contains(&code));
     }
 
