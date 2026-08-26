@@ -733,6 +733,12 @@ impl AppToolRegistry {
 pub(crate) fn tool_catalog_snapshot_rollout_enabled() -> bool {
     std::env::var(TOOL_CATALOG_SNAPSHOTS_ENV)
         .ok()
+        .as_deref()
+        .or_else(|| {
+            crate::runtime_settings::current()
+                .tool_catalog_snapshots_enabled
+                .then_some("1")
+        })
         .is_some_and(|value| {
             let value = value.trim();
             value == "1"

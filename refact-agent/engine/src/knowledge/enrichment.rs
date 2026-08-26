@@ -97,8 +97,6 @@ fn bounded_card_field(value: &str) -> String {
     value.chars().take(512).collect()
 }
 
-const KNOWLEDGE_TOP_N: usize = 3;
-const TRAJECTORY_TOP_N: usize = 2;
 const KNOWLEDGE_SCORE_THRESHOLD: f32 = 0.75;
 const FORCED_KNOWLEDGE_SCORE_THRESHOLD: f32 = 0.50;
 const KNOWLEDGE_ENRICHMENT_MARKER: &str = "knowledge_enrichment";
@@ -587,6 +585,7 @@ async fn enrichment_cache_key(
     current_chat_id: Option<&str>,
     score_threshold: f32,
 ) -> EnrichmentCacheKey {
+    let settings = crate::runtime_settings::current();
     crate::privacy::load_privacy_if_needed(gcx.clone()).await;
     let project_dirs = get_project_dirs(gcx.clone()).await;
     let mut roots = project_dirs
@@ -668,8 +667,8 @@ async fn enrichment_cache_key(
         index_generation,
         embedding_config_fingerprint,
         current_root_fingerprint,
-        top_n_memories: KNOWLEDGE_TOP_N,
-        top_n_trajectories: TRAJECTORY_TOP_N,
+        top_n_memories: settings.auto_enrichment_knowledge_top_n,
+        top_n_trajectories: settings.auto_enrichment_trajectory_top_n,
         score_threshold_bits: score_threshold.to_bits(),
     }
 }
@@ -1015,14 +1014,15 @@ async fn create_knowledge_context(
     let gcx_for_fetch = gcx.clone();
     let query_for_fetch = query_text.to_string();
     let current_chat_for_fetch = current_chat_id.map(str::to_string);
+    let settings = crate::runtime_settings::current();
     let (cached, disposition) = gcx
         .enrichment_cache
         .get_or_fetch(cache_key, move || async move {
             let memories = memories_search_for_enrichment(
                 gcx_for_fetch.clone(),
                 &query_for_fetch,
-                KNOWLEDGE_TOP_N,
-                TRAJECTORY_TOP_N,
+                settings.auto_enrichment_knowledge_top_n,
+                settings.auto_enrichment_trajectory_top_n,
                 current_chat_for_fetch.as_deref(),
                 current_chat_for_fetch.as_deref(),
             )
@@ -1084,7 +1084,11 @@ async fn create_knowledge_context(
     );
 
     let card_started = perf_diagnostics::is_enabled().then(Instant::now);
-    let context_files = build_bounded_enrichment_context_files(high_score_memories);
+    let context_files = build_bounded_enrichment_context_files(
+        high_score_memories,
+        crate::runtime_settings::current().auto_enrichment_total_token_cap,
+        crate::runtime_settings::current().auto_enrichment_card_token_cap,
+    );
 
     if context_files.is_empty() {
         return None;
@@ -1133,6 +1137,8 @@ async fn create_knowledge_context(
 
 fn build_bounded_enrichment_context_files(
     mut memories: Vec<crate::memories::MemoRecord>,
+    total_token_cap: usize,
+    card_token_cap: usize,
 ) -> Vec<ContextFile> {
     memories.sort_by(|a, b| {
         b.score
@@ -1142,13 +1148,13 @@ fn build_bounded_enrichment_context_files(
             .then_with(|| a.memid.cmp(&b.memid))
     });
 
-    let mut remaining_tokens = AUTO_ENRICHMENT_TOTAL_TOKEN_CAP;
+    let mut remaining_tokens = total_token_cap;
     let mut context_files = Vec::new();
     for memo in memories {
         let Some(file_path) = memo.file_path.as_ref() else {
             continue;
         };
-        let card_cap = AUTO_ENRICHMENT_CARD_TOKEN_CAP.min(remaining_tokens);
+        let card_cap = card_token_cap.min(remaining_tokens);
         let (content, content_truncated) = bounded_enrichment_content(&memo.content, card_cap);
         let mut bounded_memo = memo.clone();
         bounded_memo.content = content;
@@ -1737,8 +1743,8 @@ mod tests {
             index_generation: 1,
             embedding_config_fingerprint: [3; 32],
             current_root_fingerprint: [4; 32],
-            top_n_memories: KNOWLEDGE_TOP_N,
-            top_n_trajectories: TRAJECTORY_TOP_N,
+            top_n_memories: crate::runtime_settings::current().auto_enrichment_knowledge_top_n,
+            top_n_trajectories: crate::runtime_settings::current().auto_enrichment_trajectory_top_n,
             score_threshold_bits: KNOWLEDGE_SCORE_THRESHOLD.to_bits(),
         }
     }
@@ -1991,7 +1997,11 @@ mod tests {
             },
         ];
 
-        let files = build_bounded_enrichment_context_files(memories);
+        let files = build_bounded_enrichment_context_files(
+            memories,
+            AUTO_ENRICHMENT_TOTAL_TOKEN_CAP,
+            AUTO_ENRICHMENT_CARD_TOKEN_CAP,
+        );
         assert_eq!(
             files.first().map(|file| file.file_name.as_str()),
             Some("/knowledge/higher.md")

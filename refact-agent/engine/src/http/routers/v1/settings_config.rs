@@ -389,10 +389,271 @@ pub async fn handle_v1_skills_settings_post(
     Ok(Json(settings))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum TrajectorySettingsPost {
+    Direct(crate::runtime_settings::TrajectoryRuntimeSettings),
+    Wrapped {
+        config: crate::runtime_settings::TrajectoryRuntimeSettings,
+    },
+}
+
+impl TrajectorySettingsPost {
+    fn into_config(self) -> crate::runtime_settings::TrajectoryRuntimeSettings {
+        match self {
+            Self::Direct(config) | Self::Wrapped { config } => config,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrajectorySettingsResponse {
+    path: String,
+    config: crate::runtime_settings::TrajectoryRuntimeSettings,
+    current: crate::runtime_settings::TrajectoryRuntimeSettings,
+    defaults: crate::runtime_settings::TrajectoryRuntimeSettings,
+    fields: Vec<TrajectorySettingField>,
+    environment_precedence: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct TrajectorySettingField {
+    name: &'static str,
+    value_type: &'static str,
+    minimum: Option<u64>,
+    maximum: Option<u64>,
+    apply_mode: &'static str,
+}
+
+fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
+    let live_usize = |name, minimum, maximum| TrajectorySettingField {
+        name,
+        value_type: "integer",
+        minimum: Some(minimum),
+        maximum: Some(maximum),
+        apply_mode: "live",
+    };
+    let restart_usize = |name, minimum, maximum| TrajectorySettingField {
+        name,
+        value_type: "integer",
+        minimum: Some(minimum),
+        maximum: Some(maximum),
+        apply_mode: "restart_required",
+    };
+    let restart_bool = |name| TrajectorySettingField {
+        name,
+        value_type: "boolean",
+        minimum: None,
+        maximum: None,
+        apply_mode: "restart_required",
+    };
+    vec![
+        live_usize("internal_traces_keep_per_folder", 10, 10_000),
+        live_usize("internal_trace_prune_interval_secs", 60, 86_400),
+        live_usize("buddy_conversations_keep", 10, 100_000),
+        live_usize("buddy_conversations_prune_interval_secs", 60, 86_400),
+        live_usize("buddy_conversations_prune_min_age_secs", 60, 365 * 86_400),
+        live_usize("session_idle_timeout_secs", 60, 86_400),
+        live_usize("session_cleanup_interval_secs", 10, 86_400),
+        live_usize("stream_idle_timeout_secs", 10, 86_400),
+        live_usize("stream_total_timeout_secs", 60, 172_800),
+        live_usize("max_queue_size", 1, 10_000),
+        restart_usize("event_channel_capacity", 16, 1_000_000),
+        live_usize("recent_request_ids_capacity", 1, 100_000),
+        live_usize("max_parallel_tools", 1, 10_000),
+        live_usize("max_images_per_message", 1, 1_000),
+        live_usize("max_file_size", 1_024, 50_000_000),
+        live_usize("auto_enrichment_total_token_cap", 64, 32_000),
+        live_usize("auto_enrichment_card_token_cap", 32, 16_000),
+        live_usize("auto_enrichment_knowledge_top_n", 1, 20),
+        live_usize("auto_enrichment_trajectory_top_n", 1, 20),
+        restart_bool("trajectory_writer_enabled"),
+        restart_bool("trajectory_index_coordinator_enabled"),
+        restart_bool("trajectory_watcher_self_write_enabled"),
+        restart_bool("tool_catalog_snapshots_enabled"),
+        restart_bool("vecdb_path_coalescing_enabled"),
+    ]
+}
+
+fn trajectory_settings_response(
+    path: PathBuf,
+    config: crate::runtime_settings::TrajectoryRuntimeSettings,
+) -> Json<TrajectorySettingsResponse> {
+    Json(TrajectorySettingsResponse {
+        path: path.to_string_lossy().to_string(),
+        config,
+        current: crate::runtime_settings::current(),
+        defaults: crate::runtime_settings::TrajectoryRuntimeSettings::default(),
+        fields: trajectory_settings_fields(),
+        environment_precedence: "REFACT_TRAJECTORY_WRITER, REFACT_TRAJECTORY_INDEX_COORDINATOR, REFACT_TRAJECTORY_WATCHER_SELF_WRITE, REFACT_TOOL_CATALOG_SNAPSHOTS, and REFACT_VECDB_PATH_COALESCING override persisted rollout switches after restart.",
+    })
+}
+
+pub async fn handle_v1_trajectory_settings_get(
+    State(app): State<AppState>,
+) -> Result<Json<TrajectorySettingsResponse>, ScratchError> {
+    let path = crate::runtime_settings::settings_path(&app.paths.config_dir);
+    let config = crate::runtime_settings::load_from_path(&path)
+        .await
+        .map_err(server_error)?;
+    Ok(trajectory_settings_response(path, config))
+}
+
+pub async fn handle_v1_trajectory_settings_post(
+    State(app): State<AppState>,
+    body: hyper::body::Bytes,
+) -> Result<Json<TrajectorySettingsResponse>, ScratchError> {
+    let settings = serde_json::from_slice::<TrajectorySettingsPost>(&body)
+        .map_err(|error| {
+            ScratchError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("invalid trajectory settings payload: {error}"),
+            )
+        })?
+        .into_config();
+    crate::runtime_settings::validate(&settings).map_err(bad_request)?;
+    let path = crate::runtime_settings::settings_path(&app.paths.config_dir);
+    let yaml = serde_yaml::to_string(&settings)
+        .map_err(|error| server_error(format!("cannot serialize trajectory settings: {error}")))?;
+    atomic_write(&path, &yaml).await?;
+    crate::runtime_settings::install_live(&settings);
+    Ok(trajectory_settings_response(path, settings))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::sync::Arc;
+
+    async fn trajectory_settings_app() -> AppState {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        AppState::from_gcx(gcx).await
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn trajectory_settings_defaults_round_trip_and_persist() {
+        crate::runtime_settings::reset_for_test();
+        let app = trajectory_settings_app().await;
+        let initial = handle_v1_trajectory_settings_get(State(app.clone()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(
+            initial.config,
+            crate::runtime_settings::TrajectoryRuntimeSettings::default()
+        );
+        assert_eq!(initial.fields.len(), 24);
+        assert!(initial
+            .fields
+            .iter()
+            .any(|field| field.name == "event_channel_capacity"
+                && field.apply_mode == "restart_required"));
+
+        let mut updated = initial.config.clone();
+        updated.internal_traces_keep_per_folder = 25;
+        updated.session_idle_timeout_secs = 120;
+        updated.auto_enrichment_total_token_cap = 640;
+        updated.auto_enrichment_card_token_cap = 320;
+        let saved = handle_v1_trajectory_settings_post(
+            State(app.clone()),
+            hyper::body::Bytes::from(serde_json::to_vec(&updated).unwrap()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(saved.config, updated);
+        assert_eq!(
+            crate::runtime_settings::current().session_idle_timeout_secs,
+            120
+        );
+        let reloaded = handle_v1_trajectory_settings_get(State(app))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(reloaded.config, updated);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn trajectory_settings_validation_preserves_previous_configuration() {
+        crate::runtime_settings::reset_for_test();
+        let app = trajectory_settings_app().await;
+        let mut valid = crate::runtime_settings::TrajectoryRuntimeSettings::default();
+        valid.max_queue_size = 7;
+        handle_v1_trajectory_settings_post(
+            State(app.clone()),
+            hyper::body::Bytes::from(serde_json::to_vec(&valid).unwrap()),
+        )
+        .await
+        .unwrap();
+        let mut invalid = valid.clone();
+        invalid.max_queue_size = 0;
+        let error = handle_v1_trajectory_settings_post(
+            State(app.clone()),
+            hyper::body::Bytes::from(serde_json::to_vec(&invalid).unwrap()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status_code, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("max_queue_size"));
+        assert_eq!(
+            handle_v1_trajectory_settings_get(State(app))
+                .await
+                .unwrap()
+                .0
+                .config,
+            valid
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn trajectory_settings_live_values_apply_and_restart_values_wait() {
+        crate::runtime_settings::reset_for_test();
+        let app = trajectory_settings_app().await;
+        let initial_capacity = refact_chat_history::config::limits().event_channel_capacity;
+        let mut updated = crate::runtime_settings::TrajectoryRuntimeSettings::default();
+        updated.max_queue_size = 9;
+        updated.event_channel_capacity = initial_capacity + 100;
+        updated.auto_enrichment_total_token_cap = 800;
+        updated.auto_enrichment_card_token_cap = 400;
+        handle_v1_trajectory_settings_post(
+            State(app),
+            hyper::body::Bytes::from(serde_json::to_vec(&updated).unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refact_chat_api::max_queue_size(), 9);
+        assert_eq!(
+            refact_chat_history::config::limits().event_channel_capacity,
+            initial_capacity
+        );
+        assert_eq!(
+            crate::runtime_settings::current().auto_enrichment_total_token_cap,
+            800
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn trajectory_settings_environment_rollout_override_wins() {
+        let previous = std::env::var_os(crate::chat::trajectories::TRAJECTORY_WRITER_ENV);
+        std::env::set_var(crate::chat::trajectories::TRAJECTORY_WRITER_ENV, "1");
+        assert!(
+            crate::chat::trajectories::trajectory_writer_rollout_enabled_for(
+                std::env::var(crate::chat::trajectories::TRAJECTORY_WRITER_ENV)
+                    .ok()
+                    .as_deref()
+            )
+        );
+        if let Some(previous) = previous {
+            std::env::set_var(crate::chat::trajectories::TRAJECTORY_WRITER_ENV, previous);
+        } else {
+            std::env::remove_var(crate::chat::trajectories::TRAJECTORY_WRITER_ENV);
+        }
+    }
 
     #[tokio::test]
     async fn global_and_project_indexing_load_save_and_absent_project() {

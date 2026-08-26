@@ -810,6 +810,14 @@ pub async fn create_global_context(
     let http_client = http_client_builder.build().unwrap();
     let (scheduler_config, hooks_config, terminal_security_config, review_commands_config) =
         load_engine_global_config(&config_dir, &cmdline).await;
+    let trajectory_settings_path = crate::runtime_settings::settings_path(&config_dir);
+    let trajectory_settings = crate::runtime_settings::load_from_path(&trajectory_settings_path)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!("{error}");
+            crate::runtime_settings::TrajectoryRuntimeSettings::default()
+        });
+    crate::runtime_settings::install_startup(trajectory_settings);
 
     let mut workspace_dirs: Vec<PathBuf> = vec![];
     if !cmdline.workspace_folder.is_empty() {

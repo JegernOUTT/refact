@@ -24,17 +24,33 @@ use crate::vdb_trajectory_splitter::TrajectoryFileSplitter;
 const DEBUG_WRITE_VECDB_FILES: bool = false;
 const COOLDOWN_SECONDS: u64 = 10;
 pub const VECDB_PATH_COALESCING_ENV: &str = "REFACT_VECDB_PATH_COALESCING";
+static VECDB_PATH_COALESCING_CONFIG: std::sync::LazyLock<std::sync::RwLock<bool>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(false));
 
 pub fn vecdb_path_coalescing_rollout_enabled() -> bool {
     std::env::var(VECDB_PATH_COALESCING_ENV)
         .ok()
-        .is_some_and(|value| {
-            let value = value.trim();
-            value == "1"
-                || value.eq_ignore_ascii_case("true")
-                || value.eq_ignore_ascii_case("yes")
-                || value.eq_ignore_ascii_case("on")
+        .as_deref()
+        .map(rollout_enabled_for)
+        .unwrap_or_else(|| {
+            *VECDB_PATH_COALESCING_CONFIG
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
         })
+}
+
+fn rollout_enabled_for(value: &str) -> bool {
+    let value = value.trim();
+    value == "1"
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("on")
+}
+
+pub fn install_vecdb_path_coalescing_setting(enabled: bool) {
+    *VECDB_PATH_COALESCING_CONFIG
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = enabled;
 }
 
 fn memory_plane_file_kind(

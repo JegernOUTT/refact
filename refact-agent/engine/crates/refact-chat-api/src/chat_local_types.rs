@@ -4,37 +4,82 @@ use refact_core::chat_types::{ChatMessage, Checkpoint};
 use crate::diagnostics::is_ui_only_message;
 use crate::{TaskMeta, ThreadParams};
 
-const MAX_QUEUE_SIZE: usize = 100;
-const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
-const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const DEFAULT_MAX_QUEUE_SIZE: usize = 100;
+const DEFAULT_SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const DEFAULT_SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const STREAM_HEARTBEAT: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy)]
+pub struct RuntimeChatTimeouts {
+    pub max_queue_size: usize,
+    pub session_idle: Duration,
+    pub session_cleanup_interval: Duration,
+    pub stream_idle: Duration,
+    pub stream_total: Duration,
+}
+
+impl Default for RuntimeChatTimeouts {
+    fn default() -> Self {
+        Self {
+            max_queue_size: DEFAULT_MAX_QUEUE_SIZE,
+            session_idle: DEFAULT_SESSION_IDLE_TIMEOUT,
+            session_cleanup_interval: DEFAULT_SESSION_CLEANUP_INTERVAL,
+            stream_idle: DEFAULT_STREAM_IDLE_TIMEOUT,
+            stream_total: STREAM_TOTAL_TIMEOUT,
+        }
+    }
+}
+
+static RUNTIME_TIMEOUTS: std::sync::LazyLock<std::sync::RwLock<RuntimeChatTimeouts>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(RuntimeChatTimeouts::default()));
 
 pub const SEGMENT_SUMMARY_KIND: &str = "llm_segment_summary";
 
 pub fn max_queue_size() -> usize {
-    MAX_QUEUE_SIZE
+    RUNTIME_TIMEOUTS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .max_queue_size
 }
 
 pub fn session_idle_timeout() -> Duration {
-    SESSION_IDLE_TIMEOUT
+    RUNTIME_TIMEOUTS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .session_idle
 }
 
 pub fn session_cleanup_interval() -> Duration {
-    SESSION_CLEANUP_INTERVAL
+    RUNTIME_TIMEOUTS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .session_cleanup_interval
 }
 
 pub fn stream_idle_timeout() -> Duration {
-    STREAM_IDLE_TIMEOUT
+    RUNTIME_TIMEOUTS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .stream_idle
 }
 
 pub fn stream_total_timeout() -> Duration {
-    STREAM_TOTAL_TIMEOUT
+    RUNTIME_TIMEOUTS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .stream_total
 }
 
 pub fn stream_heartbeat() -> Duration {
     STREAM_HEARTBEAT
+}
+
+pub fn install_runtime_timeouts(timeouts: RuntimeChatTimeouts) {
+    *RUNTIME_TIMEOUTS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = timeouts;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -90,20 +90,54 @@ impl ChatConfig {
     }
 }
 
-pub static CHAT_CONFIG: std::sync::LazyLock<ChatConfig> = std::sync::LazyLock::new(ChatConfig::new);
+pub static CHAT_CONFIG: std::sync::LazyLock<std::sync::RwLock<ChatConfig>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(ChatConfig::new()));
 
-pub fn limits() -> &'static ChatLimits {
-    &CHAT_CONFIG.limits
+pub fn limits() -> ChatLimits {
+    CHAT_CONFIG
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .limits
+        .clone()
 }
 
-pub fn timeouts() -> &'static ChatTimeouts {
-    &CHAT_CONFIG.timeouts
+pub fn timeouts() -> ChatTimeouts {
+    CHAT_CONFIG
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .timeouts
+        .clone()
 }
 
-pub fn tokens() -> &'static TokenDefaults {
-    &CHAT_CONFIG.tokens
+pub fn tokens() -> TokenDefaults {
+    CHAT_CONFIG
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .tokens
+        .clone()
 }
 
-pub fn presentation() -> &'static PresentationLimits {
-    &CHAT_CONFIG.presentation
+pub fn presentation() -> PresentationLimits {
+    CHAT_CONFIG
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .presentation
+        .clone()
+}
+
+pub fn install_runtime_config(config: ChatConfig) {
+    *CHAT_CONFIG
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = config;
+}
+
+pub fn apply_live_limits(limits: ChatLimits) {
+    let mut config = CHAT_CONFIG
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    config.limits.max_queue_size = limits.max_queue_size;
+    config.limits.recent_request_ids_capacity = limits.recent_request_ids_capacity;
+    config.limits.max_images_per_message = limits.max_images_per_message;
+    config.limits.max_parallel_tools = limits.max_parallel_tools;
+    config.limits.max_file_size = limits.max_file_size;
 }

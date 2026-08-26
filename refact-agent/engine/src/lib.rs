@@ -98,6 +98,7 @@ pub use refact_postprocessing;
 pub use refact_providers;
 pub mod providers;
 pub mod restream;
+pub mod runtime_settings;
 pub mod worktrees;
 
 pub mod call_validation;

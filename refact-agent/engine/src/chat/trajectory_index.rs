@@ -29,7 +29,12 @@ pub fn trajectory_index_coordinator_rollout_enabled() -> bool {
     trajectory_index_coordinator_rollout_enabled_for(
         std::env::var(TRAJECTORY_INDEX_COORDINATOR_ENV)
             .ok()
-            .as_deref(),
+            .as_deref()
+            .or_else(|| {
+                crate::runtime_settings::current()
+                    .trajectory_index_coordinator_enabled
+                    .then_some("1")
+            }),
     )
 }
 

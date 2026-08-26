@@ -3204,6 +3204,7 @@ async fn execute_tools_inner(
     }
 
     let serial_registry = Arc::new(serial_registry);
+    let max_parallel_tools = refact_chat_history::config::limits().max_parallel_tools;
 
     let mut all_results: Vec<(usize, bool, Vec<ChatMessage>, Vec<ContextFile>)> = Vec::new();
     let mut current_parallel_batch: Vec<(usize, ChatToolCall)> = Vec::new();
@@ -3260,6 +3261,22 @@ async fn execute_tools_inner(
 
         if allow_parallel {
             current_parallel_batch.push((idx, tool_call.clone()));
+            if current_parallel_batch.len() >= max_parallel_tools {
+                let batch_results = execute_parallel_batch(
+                    app.clone(),
+                    ccx.clone(),
+                    &current_parallel_batch,
+                    catalog.clone(),
+                    turn_tool_pool.clone(),
+                    &mut prepared_parallel_slots,
+                    serial_registry.clone(),
+                    mode_id,
+                    model_id,
+                )
+                .await;
+                all_results.extend(batch_results);
+                current_parallel_batch.clear();
+            }
         } else {
             if !current_parallel_batch.is_empty() {
                 let batch_results = execute_parallel_batch(

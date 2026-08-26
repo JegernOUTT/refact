@@ -145,7 +145,16 @@ pub fn trajectory_writer_rollout_enabled() -> bool {
         return enabled;
     }
     rollout_switch_enabled(&TRAJECTORY_WRITER_ROLLOUT, || {
-        trajectory_writer_rollout_enabled_for(std::env::var(TRAJECTORY_WRITER_ENV).ok().as_deref())
+        trajectory_writer_rollout_enabled_for(
+            std::env::var(TRAJECTORY_WRITER_ENV)
+                .ok()
+                .as_deref()
+                .or_else(|| {
+                    crate::runtime_settings::current()
+                        .trajectory_writer_enabled
+                        .then_some("1")
+                }),
+        )
     })
 }
 
@@ -848,8 +857,6 @@ pub async fn get_global_trajectories_dir(gcx: Arc<GlobalContext>) -> PathBuf {
 
 pub const INTERNAL_TRACE_LINK_PREFIX: &str = "internal:";
 pub const UNATTRIBUTED_TRACES_DIR: &str = "internal";
-const INTERNAL_TRACES_KEEP_PER_FOLDER: usize = 200;
-const INTERNAL_TRACE_PRUNE_INTERVAL_SECS: u64 = 3600;
 const PRUNE_THROTTLE_MAX_ENTRIES: usize = 256;
 
 #[derive(Default)]
@@ -1179,12 +1186,16 @@ async fn prune_internal_traces_throttled(dir: &Path) -> Result<usize, String> {
         internal_trace_prune_throttle(),
         dir,
         now,
-        INTERNAL_TRACE_PRUNE_INTERVAL_SECS,
+        crate::runtime_settings::current().internal_trace_prune_interval_secs,
         "internal trace",
     )? {
         return Ok(0);
     }
-    let result = prune_internal_traces_in_folder(dir, INTERNAL_TRACES_KEEP_PER_FOLDER).await;
+    let result = prune_internal_traces_in_folder(
+        dir,
+        crate::runtime_settings::current().internal_traces_keep_per_folder,
+    )
+    .await;
     if result.is_err() {
         release_prune_throttle(internal_trace_prune_throttle(), dir, now);
     }
@@ -1374,8 +1385,6 @@ async fn get_or_create_buddy_conversations_dir(gcx: Arc<GlobalContext>) -> Resul
 }
 
 pub(crate) const BUDDY_CONVERSATIONS_KEEP: usize = 500;
-const BUDDY_CONVERSATIONS_PRUNE_INTERVAL_SECS: u64 = 3600;
-const BUDDY_CONVERSATIONS_PRUNE_MIN_AGE_SECS: u64 = 86_400;
 
 fn buddy_conversation_prune_throttle() -> &'static StdMutex<PruneThrottle> {
     static LAST_PRUNE_BY_DIR: OnceLock<StdMutex<PruneThrottle>> = OnceLock::new();
@@ -1391,11 +1400,12 @@ async fn prune_buddy_conversations_throttled(gcx: Arc<GlobalContext>) {
         Ok(dir) => dir,
         Err(_) => return,
     };
+    let settings = crate::runtime_settings::current();
     if !claim_prune_throttle(
         buddy_conversation_prune_throttle(),
         &dir,
         now,
-        BUDDY_CONVERSATIONS_PRUNE_INTERVAL_SECS,
+        settings.buddy_conversations_prune_interval_secs,
         "buddy conversation",
     )
     .unwrap_or(false)
@@ -1405,7 +1415,8 @@ async fn prune_buddy_conversations_throttled(gcx: Arc<GlobalContext>) {
     let app = AppState::from_gcx(gcx.clone()).await;
     match prune_buddy_conversations_in_dir_with_coordinator(
         &dir,
-        BUDDY_CONVERSATIONS_KEEP,
+        settings.buddy_conversations_keep,
+        settings.buddy_conversations_prune_min_age_secs,
         Some(&app.chat.trajectory_index_coordinator),
     )
     .await
@@ -1424,12 +1435,19 @@ pub(crate) async fn prune_buddy_conversations_in_dir(
     dir: &Path,
     keep: usize,
 ) -> Result<usize, String> {
-    prune_buddy_conversations_in_dir_with_coordinator(dir, keep, None).await
+    prune_buddy_conversations_in_dir_with_coordinator(
+        dir,
+        keep,
+        crate::runtime_settings::current().buddy_conversations_prune_min_age_secs,
+        None,
+    )
+    .await
 }
 
 async fn prune_buddy_conversations_in_dir_with_coordinator(
     dir: &Path,
     keep: usize,
+    min_age_secs: u64,
     coordinator: Option<&trajectory_index::TrajectoryIndexCoordinator>,
 ) -> Result<usize, String> {
     let mut entries = match fs::read_dir(dir).await {
@@ -1482,7 +1500,7 @@ async fn prune_buddy_conversations_in_dir_with_coordinator(
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)
         .unwrap_or(0)
-        .saturating_sub((BUDDY_CONVERSATIONS_PRUNE_MIN_AGE_SECS as i64).saturating_mul(1000));
+        .saturating_sub((min_age_secs as i64).saturating_mul(1000));
     let mut removed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (scanned_modified_ms, path, stem) in files.drain(keep..) {
         if scanned_modified_ms >= min_age_cutoff_ms {

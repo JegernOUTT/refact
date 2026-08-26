@@ -18,8 +18,8 @@ pub use goal_ledger::{
 
 pub use chat_local_types::{
     max_queue_size, session_cleanup_interval, session_idle_timeout, stream_heartbeat,
-    stream_idle_timeout, stream_total_timeout, EnqueueCommandOutcome, PendingBrowserMessage,
-    PendingSkillDeactivation, TrajectorySourceIdentity,
+    stream_idle_timeout, stream_total_timeout, install_runtime_timeouts, EnqueueCommandOutcome,
+    PendingBrowserMessage, PendingSkillDeactivation, RuntimeChatTimeouts, TrajectorySourceIdentity,
 };
 pub use notification_event::{NotificationEvent, NotificationQuestion};
 pub use tool_enrichment::{

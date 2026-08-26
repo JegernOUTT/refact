@@ -507,20 +507,23 @@ fn close_idle_session_for_cleanup(session: &mut ChatSession) -> bool {
 
 pub fn start_session_cleanup_task(app: AppState) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(session_cleanup_interval());
         let shutdown_flag = app.runtime.shutdown_flag.clone();
+        let mut run_immediately = true;
         loop {
-            tokio::select! {
-                _ = interval.tick() => {}
-                _ = async {
-                    while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            if !run_immediately {
+                tokio::select! {
+                    _ = tokio::time::sleep(session_cleanup_interval()) => {}
+                    _ = async {
+                        while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                        }
+                    } => {
+                        tracing::info!("Session cleanup: shutdown detected, stopping");
+                        return;
                     }
-                } => {
-                    tracing::info!("Session cleanup: shutdown detected, stopping");
-                    return;
                 }
             }
+            run_immediately = false;
 
             let sessions = app.chat.sessions.clone();
 

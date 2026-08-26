@@ -329,6 +329,11 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         )
         .route("/project-configs", get(handle_v1_project_configs_get))
         .route(
+            "/trajectory-settings",
+            get(settings_config::handle_v1_trajectory_settings_get)
+                .post(settings_config::handle_v1_trajectory_settings_post),
+        )
+        .route(
             "/indexing-settings",
             get(settings_config::handle_v1_indexing_settings_get)
                 .post(settings_config::handle_v1_indexing_settings_post),

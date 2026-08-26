@@ -100,7 +100,7 @@ pub fn validate_content_with_attachments(
 
 pub fn validate_context_files(files: &[serde_json::Value]) -> Result<(), String> {
     const MAX_ITEMS: usize = 5;
-    const MAX_TOTAL_CHARS: usize = 50_000;
+    let max_total_chars = limits().max_file_size;
     if files.len() > MAX_ITEMS {
         return Err(format!(
             "context_files exceeds limit of {} items (got {})",
@@ -123,10 +123,10 @@ pub fn validate_context_files(files: &[serde_json::Value]) -> Result<(), String>
             .unwrap_or(0);
         total += chars;
     }
-    if total > MAX_TOTAL_CHARS {
+    if total > max_total_chars {
         return Err(format!(
             "context_files exceeds {} character limit (got {})",
-            MAX_TOTAL_CHARS, total
+            max_total_chars, total
         ));
     }
     Ok(())
@@ -240,6 +240,27 @@ mod tests {
             ChatContent::SimpleText(s) => assert!(s.is_empty()),
             _ => panic!("Expected empty SimpleText"),
         }
+    }
+
+    #[test]
+    fn context_files_use_the_configured_size_limit() {
+        let original = crate::config::limits();
+        crate::config::apply_live_limits(crate::config::ChatLimits {
+            max_file_size: 1_024,
+            ..original.clone()
+        });
+        let files = vec![json!({
+            "file_name": "notes.md",
+            "file_content": "x".repeat(1_025),
+            "line1": 1,
+            "line2": 1,
+            "symbols": [],
+            "gradient_type": -1,
+            "usefulness": 0.0,
+            "skip_pp": false,
+        })];
+        assert!(validate_context_files(&files).is_err());
+        crate::config::apply_live_limits(original);
     }
 
     #[test]
