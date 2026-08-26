@@ -22,14 +22,10 @@ pub struct PathTrie {
     index_to_component: HashMap<usize, String>,
 }
 
-fn shortest_root_path(path: &PathBuf, root_paths: &Vec<PathBuf>) -> PathBuf {
-    for root_path in root_paths.iter() {
-        match path.strip_prefix(&root_path) {
-            Ok(_) => return root_path.clone(),
-            Err(_) => continue,
-        }
-    }
-    PathBuf::new()
+fn shortest_root_path<'a>(path: &PathBuf, root_paths: &'a [PathBuf]) -> Option<&'a PathBuf> {
+    root_paths
+        .iter()
+        .find(|root_path| path.strip_prefix(root_path).is_ok())
 }
 
 pub struct ShortPathsIter<'a> {
@@ -102,20 +98,20 @@ impl PathTrie {
             }
         });
 
+        let mut components: Vec<std::borrow::Cow<str>> = Vec::new();
         for path in paths.iter() {
             let root_path = shortest_root_path(path, &sorted_root_paths);
-            let root_path_components = root_path.components().count();
+            let root_path_components = root_path.map_or(0, |p| p.components().count());
+            let root_path_str = root_path.map(|p| p.to_string_lossy());
 
-            let components: Vec<String> = path
-                .components()
-                .map(|comp| comp.as_os_str().to_string_lossy().to_string())
-                .collect();
+            components.clear();
+            components.extend(path.components().map(|comp| comp.as_os_str().to_string_lossy()));
 
             let mut node = &mut root;
             for i in (0..components.len()).rev() {
                 let is_root = root_path_components == i + 1;
-                let component = if is_root {
-                    &root_path.to_string_lossy().to_string()
+                let component: &str = if is_root {
+                    root_path_str.as_deref().unwrap_or_default()
                 } else {
                     &components[i]
                 };
@@ -123,15 +119,14 @@ impl PathTrie {
                     *index
                 } else {
                     let index = component_to_index.len();
-                    component_to_index.insert(component.clone(), index);
-                    index_to_component.insert(index, component.clone());
+                    component_to_index.insert(component.to_string(), index);
+                    index_to_component.insert(index, component.to_string());
                     index
                 };
                 node = node.children.entry(index).or_insert_with(TrieNode::new);
                 node.count += 1;
                 node.is_root = is_root;
                 if is_root {
-                    node.is_root = is_root;
                     break;
                 }
             }

@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::extract::Path as AxumPath;
 use axum::http::{Response, StatusCode};
@@ -116,7 +116,6 @@ use super::trajectory_index;
 
 const TITLE_GENERATION_SUBAGENT_ID: &str = "title_generation";
 pub const TRAJECTORY_WRITER_ENV: &str = "REFACT_TRAJECTORY_WRITER";
-pub const TRAJECTORY_WATCHER_SELF_WRITE_ENV: &str = "REFACT_TRAJECTORY_WATCHER_SELF_WRITE";
 const TRAJECTORY_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const TITLE_GENERATION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
@@ -129,7 +128,6 @@ pub const TRAJECTORY_LABEL_MAX_CHARS: usize = TRAJECTORY_META_TITLE_MAX_CHARS;
 pub use refact_chat_history::trajectory_event::TrajectoryEvent;
 
 static TRAJECTORY_WRITER_ROLLOUT: OnceLock<bool> = OnceLock::new();
-static TRAJECTORY_WATCHER_SELF_WRITE_ROLLOUT: OnceLock<bool> = OnceLock::new();
 
 fn rollout_switch_enabled<F>(cache: &OnceLock<bool>, read: F) -> bool
 where
@@ -192,36 +190,7 @@ impl Drop for TrajectoryWriterRolloutGuard {
 }
 
 pub fn trajectory_watcher_self_write_rollout_enabled() -> bool {
-    #[cfg(test)]
-    if let Some(enabled) = *trajectory_watcher_self_write_test_override()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-    {
-        return enabled;
-    }
-    rollout_switch_enabled(&TRAJECTORY_WATCHER_SELF_WRITE_ROLLOUT, || {
-        trajectory_watcher_self_write_rollout_enabled_for(
-            std::env::var(TRAJECTORY_WATCHER_SELF_WRITE_ENV)
-                .ok()
-                .as_deref(),
-        )
-    })
-}
-
-pub(crate) fn trajectory_watcher_self_write_rollout_enabled_for(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        let value = value.trim();
-        value == "1"
-            || value.eq_ignore_ascii_case("true")
-            || value.eq_ignore_ascii_case("yes")
-            || value.eq_ignore_ascii_case("on")
-    })
-}
-
-#[cfg(test)]
-fn trajectory_watcher_self_write_test_override() -> &'static StdMutex<Option<bool>> {
-    static OVERRIDE: OnceLock<StdMutex<Option<bool>>> = OnceLock::new();
-    OVERRIDE.get_or_init(|| StdMutex::new(None))
+    true
 }
 
 const TRAJECTORY_SELF_WRITE_TTL: Duration = Duration::from_secs(10);
@@ -394,9 +363,6 @@ async fn register_trajectory_self_write(
     source: TrajectorySourceIdentity,
     content: &str,
 ) -> Option<TrajectorySelfWriteHandle> {
-    if !trajectory_watcher_self_write_rollout_enabled() {
-        return None;
-    }
     let key = (
         canonical_trajectory_write_path(path).await?,
         watcher_trajectory_source(&source),
@@ -466,9 +432,6 @@ async fn complete_trajectory_self_write(handle: Option<TrajectorySelfWriteHandle
 }
 
 async fn consume_trajectory_self_write(path: &Path, source: &TrajectorySourceIdentity) -> bool {
-    if !trajectory_watcher_self_write_rollout_enabled() {
-        return false;
-    }
     let Some(path) = canonical_trajectory_write_path(path).await else {
         return false;
     };
@@ -5672,7 +5635,10 @@ async fn process_trajectory_watcher_change(
     source: TrajectorySourceIdentity,
     path: PathBuf,
 ) {
-    if consume_trajectory_self_write(&path, &source).await {
+    if consume_trajectory_self_write(&path, &source).await
+        || (!matches!(source, TrajectorySourceIdentity::Normal)
+            && consume_trajectory_self_write(&path, &TrajectorySourceIdentity::Normal).await)
+    {
         return;
     }
     process_trajectory_change_for_source(gcx, &chat_id, is_remove, Some(source)).await;
@@ -5680,7 +5646,8 @@ async fn process_trajectory_watcher_change(
 
 pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
     let gcx_weak = Arc::downgrade(&gcx);
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TrajectoryWatcherMessage>();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<TrajectoryWatcherMessage>(2048);
+    let dropped_events = Arc::new(AtomicUsize::new(0));
 
     tokio::spawn(async move {
         let trajectories_dirs = get_all_trajectories_dirs_from_weak(&gcx_weak).await;
@@ -5714,6 +5681,7 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
         let _self_write_cleanup = TrajectorySelfWriteScope { watched_roots };
 
         let tx_clone = tx.clone();
+        let dropped_events_for_callback = dropped_events.clone();
         let task_roots_for_callback = task_roots.clone();
         let event_callback = move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
@@ -5733,7 +5701,16 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
                         is_remove,
                         &task_roots_for_callback,
                     ) {
-                        let _ = tx_clone.send(message);
+                        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
+                            tx_clone.try_send(message)
+                        {
+                            let dropped = dropped_events_for_callback
+                                .fetch_add(1, Ordering::Relaxed)
+                                + 1;
+                            if dropped % 100 == 0 {
+                                warn!("Trajectory watcher dropped {} events because the channel is full", dropped);
+                            }
+                        }
                     }
                 }
             }
@@ -7791,27 +7768,6 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::Mutex as StdMutex;
-
-    struct TrajectoryWatcherSelfWriteEnvGuard(Option<bool>);
-
-    impl TrajectoryWatcherSelfWriteEnvGuard {
-        fn enable() -> Self {
-            let mut override_value = trajectory_watcher_self_write_test_override()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let previous = *override_value;
-            *override_value = Some(true);
-            Self(previous)
-        }
-    }
-
-    impl Drop for TrajectoryWatcherSelfWriteEnvGuard {
-        fn drop(&mut self) {
-            *trajectory_watcher_self_write_test_override()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.0.take();
-        }
-    }
 
     struct BlockingRecordingVecdb {
         enqueued: Arc<StdMutex<Vec<String>>>,
@@ -20519,25 +20475,9 @@ mod tests {
         assert_eq!(leftovers, 0);
     }
 
-    #[test]
-    fn trajectory_watcher_self_write_rollout_defaults_off_and_accepts_enabled_values() {
-        assert!(!trajectory_watcher_self_write_rollout_enabled_for(None));
-        assert!(trajectory_watcher_self_write_rollout_enabled_for(Some("1")));
-        assert!(!trajectory_watcher_self_write_rollout_enabled_for(Some(
-            "0"
-        )));
-        assert!(!trajectory_watcher_self_write_rollout_enabled_for(Some(
-            " false "
-        )));
-        assert!(!trajectory_watcher_self_write_rollout_enabled_for(Some(
-            "OFF"
-        )));
-    }
-
     #[serial]
     #[tokio::test]
     async fn trajectory_watcher_self_write_consumes_exact_fingerprint_once() {
-        let _env = TrajectoryWatcherSelfWriteEnvGuard::enable();
         clear_all_trajectory_self_writes();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("self-write.json");
@@ -20557,7 +20497,6 @@ mod tests {
     #[serial]
     #[tokio::test]
     async fn trajectory_watcher_self_write_does_not_consume_modified_or_deleted_files() {
-        let _env = TrajectoryWatcherSelfWriteEnvGuard::enable();
         clear_all_trajectory_self_writes();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("external-write.json");
@@ -20585,7 +20524,6 @@ mod tests {
     #[serial]
     #[tokio::test]
     async fn trajectory_watcher_self_write_respects_source_and_expires_records() {
-        let _env = TrajectoryWatcherSelfWriteEnvGuard::enable();
         clear_all_trajectory_self_writes();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("same-id.json");
@@ -20622,7 +20560,6 @@ mod tests {
     #[serial]
     #[tokio::test]
     async fn trajectory_watcher_self_write_consumes_remove_after_atomic_replacement() {
-        let _env = TrajectoryWatcherSelfWriteEnvGuard::enable();
         clear_all_trajectory_self_writes();
         let dir = tempfile::tempdir().unwrap();
         let (gcx, app) = make_app_with_workspace(dir.path()).await;
@@ -20680,7 +20617,6 @@ mod tests {
     #[serial]
     #[tokio::test]
     async fn trajectory_watcher_self_write_cleanup_keeps_other_watcher_scope() {
-        let _env = TrajectoryWatcherSelfWriteEnvGuard::enable();
         clear_all_trajectory_self_writes();
         let dir = tempfile::tempdir().unwrap();
         let first_root = dir.path().join("first");

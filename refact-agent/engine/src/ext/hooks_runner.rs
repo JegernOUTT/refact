@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -53,7 +53,7 @@ struct CompiledHook {
 }
 
 struct HooksCacheEntry {
-    hooks: Vec<CompiledHook>,
+    hooks: Arc<Vec<CompiledHook>>,
     loaded_at: Instant,
     project_key: String,
 }
@@ -92,7 +92,7 @@ fn compiled_matcher_matches(compiled: Option<&regex::Regex>, tool_name: Option<&
     }
 }
 
-async fn get_compiled_hooks_from_ext_dirs(ext_dirs: &ExtDirs) -> Vec<CompiledHook> {
+async fn get_compiled_hooks_from_ext_dirs(ext_dirs: &ExtDirs) -> Arc<Vec<CompiledHook>> {
     let project_key = ext_dirs
         .project_dirs
         .first()
@@ -103,15 +103,15 @@ async fn get_compiled_hooks_from_ext_dirs(ext_dirs: &ExtDirs) -> Vec<CompiledHoo
         let read = lock.read().await;
         if let Some(entry) = &*read {
             if entry.loaded_at.elapsed() < HOOKS_CACHE_TTL && entry.project_key == project_key {
-                return entry.hooks.clone();
+                return Arc::clone(&entry.hooks);
             }
         }
     }
     let raw_hooks = load_hooks(ext_dirs).await;
-    let compiled = compile_hooks(raw_hooks);
+    let compiled = Arc::new(compile_hooks(raw_hooks));
     let mut write = lock.write().await;
     *write = Some(HooksCacheEntry {
-        hooks: compiled.clone(),
+        hooks: Arc::clone(&compiled),
         loaded_at: Instant::now(),
         project_key,
     });
@@ -161,23 +161,9 @@ fn project_root_trusted(root: &Path, trusted_projects: &[String]) -> bool {
         .any(|trusted| canonical_path(trusted.clone()) == canon_root)
 }
 
-pub async fn get_hooks_for_event(
-    app: AppState,
-    event: HookEvent,
-    tool_name: Option<&str>,
-) -> Vec<HookConfig> {
-    let trusted_projects = app.gcx.hooks_config.trusted_projects.clone();
+async fn get_hooks_for_event(app: AppState) -> Arc<Vec<CompiledHook>> {
     let ext_dirs = get_ext_dirs(app).await;
-    let compiled_hooks = get_compiled_hooks_from_ext_dirs(&ext_dirs).await;
-    compiled_hooks
-        .into_iter()
-        // Trust gating: global hooks always run; project hooks run only when the
-        // project root is listed in hooks.trusted_projects
-        .filter(|h| hook_source_allowed(&h.config.source, &trusted_projects))
-        .filter(|h| h.config.event == event)
-        .filter(|h| compiled_matcher_matches(h.compiled_matcher.as_ref(), tool_name))
-        .map(|h| h.config)
-        .collect()
+    get_compiled_hooks_from_ext_dirs(&ext_dirs).await
 }
 
 async fn run_single_hook_with_semaphore(config: &HookConfig, payload: &HookPayload) -> HookResult {
@@ -190,6 +176,7 @@ async fn run_single_hook_with_semaphore(config: &HookConfig, payload: &HookPaylo
     run_single_hook(config, payload).await
 }
 
+#[cfg(test)]
 async fn run_hooks_from_list(hooks: &[HookConfig], payload: &HookPayload) -> Vec<HookResult> {
     let futs: Vec<_> = hooks
         .iter()
@@ -200,8 +187,16 @@ async fn run_hooks_from_list(hooks: &[HookConfig], payload: &HookPayload) -> Vec
 
 pub async fn run_hooks(app: AppState, event: HookEvent, payload: HookPayload) -> Vec<HookResult> {
     let tool_name = payload.tool_name.clone();
-    let matching_hooks = get_hooks_for_event(app, event, tool_name.as_deref()).await;
-    run_hooks_from_list(&matching_hooks, &payload).await
+    let trusted_projects = app.gcx.hooks_config.trusted_projects.clone();
+    let compiled_hooks = get_hooks_for_event(app).await;
+    let futs: Vec<_> = compiled_hooks
+        .iter()
+        .filter(|h| hook_source_allowed(&h.config.source, &trusted_projects))
+        .filter(|h| h.config.event == event)
+        .filter(|h| compiled_matcher_matches(h.compiled_matcher.as_ref(), tool_name.as_deref()))
+        .map(|h| run_single_hook_with_semaphore(&h.config, &payload))
+        .collect();
+    futures::future::join_all(futs).await
 }
 
 async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(mut reader: R, max_bytes: usize) -> Vec<u8> {

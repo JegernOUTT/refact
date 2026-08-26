@@ -31,7 +31,7 @@ impl CompletionSaveToCache {
 
 #[derive(Debug)]
 pub struct CompletionCache {
-    pub map: HashMap<(String, String), serde_json::Value>,
+    pub map: HashMap<(String, String), Arc<serde_json::Value>>,
     pub in_added_order: Vec<(String, String)>,
 }
 
@@ -47,10 +47,10 @@ impl CompletionCache {
 pub fn cache_get(
     cache: Arc<StdRwLock<CompletionCache>>,
     key: (String, String),
-) -> Option<serde_json::Value> {
+) -> Option<Arc<serde_json::Value>> {
     let cache_locked = cache.write().unwrap();
     if let Some(value) = cache_locked.map.get(&key) {
-        return Some(value.clone());
+        return Some(Arc::clone(value));
     }
     None
 }
@@ -76,7 +76,7 @@ pub fn cache_put(
     cache_locked
         .map
         .entry(new_key_copy.clone())
-        .or_insert(value);
+        .or_insert_with(|| Arc::new(value));
     cache_locked.in_added_order.push(new_key_copy.clone());
 }
 

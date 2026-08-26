@@ -138,7 +138,7 @@ pub fn tool_name_server_prefix(config_path: &str) -> String {
 /// still starting or reconnecting; execution against a not-yet-connected
 /// client fails gracefully in `ToolMCP::tool_execute`.
 static MCP_TOOL_CATALOG_CACHE: std::sync::Mutex<
-    Option<HashMap<String, (std::time::Instant, Vec<rmcp::model::Tool>)>>,
+    Option<HashMap<String, (std::time::Instant, Arc<Vec<rmcp::model::Tool>>)>>,
 > = std::sync::Mutex::new(None);
 const TOOL_CATALOG_CACHE_TTL_SECS: u64 = 1800;
 const TOOL_CATALOG_CACHE_MAX_ENTRIES: usize = 64;
@@ -161,7 +161,7 @@ pub fn tool_catalog_cache_store(config_path: &str, tools: &[rmcp::model::Tool]) 
     }
     cache.insert(
         config_path.to_string(),
-        (std::time::Instant::now(), tools.to_vec()),
+        (std::time::Instant::now(), Arc::new(tools.to_vec())),
     );
 }
 
@@ -169,7 +169,7 @@ fn advance_mcp_catalog_generation(gcx: &Arc<GlobalContext>) {
     gcx.tool_catalog_generations.advance_mcp();
 }
 
-pub fn tool_catalog_cache_get(config_path: &str) -> Option<Vec<rmcp::model::Tool>> {
+pub fn tool_catalog_cache_get(config_path: &str) -> Option<Arc<Vec<rmcp::model::Tool>>> {
     let mut guard = match MCP_TOOL_CATALOG_CACHE.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -177,7 +177,7 @@ pub fn tool_catalog_cache_get(config_path: &str) -> Option<Vec<rmcp::model::Tool
     let cache = guard.as_mut()?;
     match cache.get(config_path) {
         Some((at, tools)) if at.elapsed() < Duration::from_secs(TOOL_CATALOG_CACHE_TTL_SECS) => {
-            Some(tools.clone())
+            Some(Arc::clone(tools))
         }
         Some(_) => {
             cache.remove(config_path);
@@ -381,7 +381,7 @@ pub async fn mcp_integr_tools(
                             .clone()
                             .unwrap_or_else(|| Arc::new(AMutex::new(None)));
                     build_mcp_tool_boxes(
-                        &cached_tools,
+                        cached_tools.as_slice(),
                         config_path,
                         common,
                         mcp_common,

@@ -526,8 +526,8 @@ pub async fn check_if_its_inside_a_workspace_or_config(
 
 pub fn registered_worktree_roots(cache_dir: &Path) -> Vec<PathBuf> {
     registered_worktree_path_mappings(cache_dir)
-        .into_iter()
-        .map(|mapping| mapping.root)
+        .iter()
+        .map(|mapping| mapping.root.clone())
         .collect()
 }
 

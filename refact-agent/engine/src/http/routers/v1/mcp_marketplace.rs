@@ -27,8 +27,9 @@ const OFFICIAL_MCP_CACHE_TTL_SECS: u64 = 900;
 
 const OFFICIAL_MCP_REGISTRY_URL: &str = "https://registry.modelcontextprotocol.io/v0/servers";
 
-static SOURCE_CACHES: Mutex<Option<HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)>>> =
-    Mutex::new(None);
+static SOURCE_CACHES: Mutex<
+    Option<HashMap<String, (Instant, Arc<Vec<MarketplaceServerWithSource>>)>>,
+> = Mutex::new(None);
 static MARKETPLACE_MUTATION_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -134,12 +135,21 @@ fn bundled_index() -> MarketplaceIndex {
     .expect("bundled MCP marketplace index must be valid JSON")
 }
 
-fn get_cache() -> HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)> {
-    SOURCE_CACHES.lock().unwrap().clone().unwrap_or_default()
+fn get_cache(key: &str) -> Option<(Instant, Arc<Vec<MarketplaceServerWithSource>>)> {
+    SOURCE_CACHES
+        .lock()
+        .unwrap()
+        .as_ref()?
+        .get(key)
+        .map(|(instant, servers)| (*instant, Arc::clone(servers)))
 }
 
-fn set_cache(cache: HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)>) {
-    *SOURCE_CACHES.lock().unwrap() = Some(cache);
+fn set_cache(key: String, servers: Arc<Vec<MarketplaceServerWithSource>>) {
+    SOURCE_CACHES
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(key, (Instant::now(), servers));
 }
 
 async fn fetch_refact_index(http_client: &reqwest::Client, url: &str) -> Option<MarketplaceIndex> {
@@ -486,7 +496,6 @@ async fn load_source_servers(
     tag: Option<&str>,
     page: u32,
     page_size: u32,
-    cache: &mut HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)>,
 ) -> (Vec<MarketplaceServerWithSource>, u32, &'static str) {
     let ttl = match source.source_type {
         SourceType::Smithery => SMITHERY_CACHE_TTL_SECS,
@@ -497,7 +506,7 @@ async fn load_source_servers(
     let query_str = query.unwrap_or("");
     let cache_key = source_cache_key(&source.id, query_str, tag, page, page_size);
 
-    if let Some((ts, cached)) = cache.get(&cache_key) {
+    if let Some((ts, cached)) = get_cache(&cache_key) {
         if ts.elapsed().as_secs() < ttl {
             let total = cached.len() as u32;
             let start = ((page - 1) * page_size) as usize;
@@ -542,26 +551,28 @@ async fn load_source_servers(
                 };
 
             let source_id = source.id.clone();
-            let all_with_source: Vec<MarketplaceServerWithSource> = index
-                .servers
-                .into_iter()
-                .filter(|s| {
-                    if query_str.is_empty() {
-                        return true;
-                    }
-                    let q = query_str.to_lowercase();
-                    s.name.to_lowercase().contains(&q)
-                        || s.description.to_lowercase().contains(&q)
-                        || s.tags.iter().any(|t| t.to_lowercase().contains(&q))
-                })
-                .map(|s| MarketplaceServerWithSource {
-                    server: s,
-                    source_id: source_id.clone(),
-                })
-                .collect();
+            let all_with_source: Arc<Vec<MarketplaceServerWithSource>> = Arc::new(
+                index
+                    .servers
+                    .into_iter()
+                    .filter(|s| {
+                        if query_str.is_empty() {
+                            return true;
+                        }
+                        let q = query_str.to_lowercase();
+                        s.name.to_lowercase().contains(&q)
+                            || s.description.to_lowercase().contains(&q)
+                            || s.tags.iter().any(|t| t.to_lowercase().contains(&q))
+                    })
+                    .map(|s| MarketplaceServerWithSource {
+                        server: s,
+                        source_id: source_id.clone(),
+                    })
+                    .collect(),
+            );
 
             let total = all_with_source.len() as u32;
-            cache.insert(cache_key, (Instant::now(), all_with_source.clone()));
+            set_cache(cache_key, Arc::clone(&all_with_source));
             let start = ((page - 1) * page_size) as usize;
             let end = (start + page_size as usize).min(all_with_source.len());
             let page_items = if start < all_with_source.len() {
@@ -601,15 +612,17 @@ async fn load_source_servers(
             match fetch_official_registry_servers(&http_client, query_str, page, page_size).await {
                 Ok((servers, _)) => {
                     let source_id = source.id.clone();
-                    let all_with_source: Vec<MarketplaceServerWithSource> = servers
-                        .into_iter()
-                        .map(|s| MarketplaceServerWithSource {
-                            server: s,
-                            source_id: source_id.clone(),
-                        })
-                        .collect();
+                    let all_with_source: Arc<Vec<MarketplaceServerWithSource>> = Arc::new(
+                        servers
+                            .into_iter()
+                            .map(|s| MarketplaceServerWithSource {
+                                server: s,
+                                source_id: source_id.clone(),
+                            })
+                            .collect(),
+                    );
                     let total = all_with_source.len() as u32;
-                    cache.insert(cache_key, (Instant::now(), all_with_source.clone()));
+                    set_cache(cache_key, Arc::clone(&all_with_source));
                     let start = ((page - 1) * page_size) as usize;
                     let end = (start + page_size as usize).min(all_with_source.len());
                     let page_items = if start < all_with_source.len() {
@@ -678,7 +691,6 @@ pub async fn handle_v1_mcp_marketplace_get(
         }
     }
 
-    let mut cache = get_cache();
     let mut all_servers: Vec<MarketplaceServerWithSource> = vec![];
     let mut sources_meta: Vec<Value> = vec![];
 
@@ -737,7 +749,6 @@ pub async fn handle_v1_mcp_marketplace_get(
             tag_filter,
             fetch_page,
             fetch_page_size,
-            &mut cache,
         )
         .await;
 
@@ -750,8 +761,6 @@ pub async fn handle_v1_mcp_marketplace_get(
 
         all_servers.extend(page_items);
     }
-
-    set_cache(cache);
 
     let (final_servers, final_total, all_tags) = if filter_source.is_some() {
         let mut all_tags: Vec<String> = all_servers
@@ -2183,10 +2192,10 @@ mod tests {
 
     #[test]
     fn test_source_cache_independence() {
-        let mut cache: HashMap<String, (Instant, Vec<MarketplaceServerWithSource>)> =
+        let mut cache: HashMap<String, (Instant, Arc<Vec<MarketplaceServerWithSource>>)> =
             HashMap::new();
-        cache.insert("source-a:".to_string(), (Instant::now(), vec![]));
-        cache.insert("source-b:".to_string(), (Instant::now(), vec![]));
+        cache.insert("source-a:".to_string(), (Instant::now(), Arc::new(vec![])));
+        cache.insert("source-b:".to_string(), (Instant::now(), Arc::new(vec![])));
         assert!(cache.contains_key("source-a:"));
         assert!(cache.contains_key("source-b:"));
         cache.remove("source-a:");

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::path::{Path, PathBuf};
 use tokio::time::Duration;
 use tokio::fs;
@@ -22,7 +22,35 @@ pub use refact_files::indexing_settings::{IndexingEverywhere, IndexingSettings};
 // a file in an ignored dir, same tests
 // changes in indexing.yaml loaded (almost) immediately
 
-const INDEXING_TOO_OLD: Duration = Duration::from_secs(3);
+const INDEXING_TOO_OLD: Duration = Duration::from_secs(30);
+
+#[derive(Clone, PartialEq, Eq)]
+struct IndexingFileStamp {
+    path: PathBuf,
+    modified: Option<SystemTime>,
+    len: Option<u64>,
+}
+
+struct IndexingCheckState {
+    checked_ts: u64,
+    loaded_ts: u64,
+    stamps: Vec<IndexingFileStamp>,
+}
+
+static INDEXING_CHECK_STATES: OnceLock<Mutex<HashMap<usize, IndexingCheckState>>> = OnceLock::new();
+
+async fn indexing_file_stamps(paths: &[PathBuf]) -> Vec<IndexingFileStamp> {
+    let mut stamps = Vec::with_capacity(paths.len());
+    for path in paths {
+        let metadata = fs::metadata(path).await.ok();
+        stamps.push(IndexingFileStamp {
+            path: path.clone(),
+            modified: metadata.as_ref().and_then(|metadata| metadata.modified().ok()),
+            len: metadata.as_ref().map(|metadata| metadata.len()),
+        });
+    }
+    stamps
+}
 
 pub async fn load_indexing_yaml(
     indexing_yaml_path: &Path,
@@ -71,11 +99,18 @@ async fn reload_indexing_everywhere(
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    // Initially this is loaded in _ls_files_under_version_control_recursive()
-    let (config_dir, indexing_yaml, workspace_vcs_roots, indexing_cache) = {
+    let cache_key = Arc::as_ptr(&gcx) as usize;
+    let (config_dir, indexing_yaml, workspace_vcs_roots, indexing_cache, cached) = {
         let indexing_cache = gcx.indexing_everywhere.clone();
         let cached = indexing_cache.read().unwrap().clone();
-        if !force && cached.loaded_ts + INDEXING_TOO_OLD.as_secs() > now {
+        let checked_ts = INDEXING_CHECK_STATES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .get(&cache_key)
+            .map(|state| state.checked_ts)
+            .unwrap_or(cached.loaded_ts);
+        if !force && checked_ts + INDEXING_TOO_OLD.as_secs() > now {
             return cached;
         }
         (
@@ -83,16 +118,47 @@ async fn reload_indexing_everywhere(
             gcx.cmdline.indexing_yaml.clone(),
             gcx.documents_state.workspace_vcs_roots.clone(),
             indexing_cache,
+            cached,
         )
     };
 
+    let global_indexing_path = if indexing_yaml.is_empty() {
+        config_dir.join("indexing.yaml")
+    } else {
+        canonical_path(&indexing_yaml)
+    };
+    let vcs_dirs: Vec<PathBuf> = workspace_vcs_roots
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .map(canonicalize_normalized_path)
+        .collect();
+    let mut indexing_paths = Vec::with_capacity(vcs_dirs.len() + 1);
+    indexing_paths.push(global_indexing_path.clone());
+    indexing_paths.extend(
+        vcs_dirs
+            .iter()
+            .map(|root| root.join(".refact").join("indexing.yaml")),
+    );
+    let stamps = indexing_file_stamps(&indexing_paths).await;
+    if !force {
+        let mut states = INDEXING_CHECK_STATES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap();
+        if states
+            .get(&cache_key)
+            .map(|state| state.loaded_ts == cached.loaded_ts && state.stamps == stamps)
+            .unwrap_or(false)
+        {
+            states.get_mut(&cache_key).unwrap().checked_ts = now;
+            return cached;
+        }
+    }
+
     let indexing_everywhere = {
         let global = {
-            let global_indexing_path = if indexing_yaml.is_empty() {
-                config_dir.join("indexing.yaml")
-            } else {
-                canonical_path(indexing_yaml)
-            };
             load_indexing_yaml(&global_indexing_path, None)
                 .await
                 .unwrap_or_else(|e| {
@@ -101,15 +167,8 @@ async fn reload_indexing_everywhere(
                 })
         };
 
-        let vcs_dirs: Vec<PathBuf> = workspace_vcs_roots
-            .lock()
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect();
         let mut vcs_indexing_settings_map: HashMap<String, IndexingSettings> = HashMap::new();
         for indexing_root in vcs_dirs {
-            let indexing_root = canonicalize_normalized_path(indexing_root);
             let indexing_path = indexing_root.join(".refact").join("indexing.yaml");
             if indexing_path.exists() {
                 match load_indexing_yaml(&indexing_path, Some(&indexing_root)).await {
@@ -134,6 +193,18 @@ async fn reload_indexing_everywhere(
 
     let indexing_everywhere = Arc::new(indexing_everywhere);
     *indexing_cache.write().unwrap() = indexing_everywhere.clone();
+    INDEXING_CHECK_STATES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(
+            cache_key,
+            IndexingCheckState {
+                checked_ts: now,
+                loaded_ts: now,
+                stamps,
+            },
+        );
     indexing_everywhere
 }
 

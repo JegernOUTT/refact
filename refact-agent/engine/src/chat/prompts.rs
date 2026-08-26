@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex as AMutex;
 
@@ -32,7 +32,7 @@ const BUDDY_PULSE_MARKER: &str = "buddy_project_memory_pulse";
 struct BuddyPersonaCacheEntry {
     version: u64,
     identity_name: String,
-    rendered: String,
+    rendered: Arc<str>,
 }
 
 static BUDDY_PERSONA_CACHE: OnceLock<AMutex<HashMap<(String, String), BuddyPersonaCacheEntry>>> =
@@ -470,9 +470,9 @@ pub async fn system_prompt_add_extra_instructions(
     system_prompt
 }
 
-async fn buddy_persona_block(app: AppState, mode_id: &str) -> String {
+async fn buddy_persona_block(app: AppState, mode_id: &str) -> Arc<str> {
     let Some(snapshot) = app.buddy_event_sink.snapshot().await else {
-        return String::new();
+        return Arc::from("");
     };
     let mode_id = map_legacy_mode_to_id(mode_id).to_string();
     let archetype_id = snapshot.state.personality.archetype_id.clone();
@@ -483,16 +483,16 @@ async fn buddy_persona_block(app: AppState, mode_id: &str) -> String {
     let mut cache = cache.lock().await;
     if let Some(entry) = cache.get(&cache_key) {
         if entry.version == version && entry.identity_name == identity_name {
-            return entry.rendered.clone();
+            return Arc::clone(&entry.rendered);
         }
     }
-    let rendered = refact_buddy_core::state::render_persona_block(&snapshot.state);
+    let rendered: Arc<str> = refact_buddy_core::state::render_persona_block(&snapshot.state).into();
     cache.insert(
         cache_key,
         BuddyPersonaCacheEntry {
             version,
             identity_name,
-            rendered: rendered.clone(),
+            rendered: Arc::clone(&rendered),
         },
     );
     rendered
@@ -1447,7 +1447,7 @@ const MAX_TASK_BRIEFING_SIZE: usize = 5_000;
 
 #[derive(Clone)]
 struct TaskBriefingCacheEntry {
-    briefing: String,
+    briefing: Arc<str>,
 }
 
 static TASK_BRIEFING_CACHE: OnceLock<AMutex<HashMap<(String, String), TaskBriefingCacheEntry>>> =
@@ -1669,8 +1669,8 @@ fn task_memory_summary_context_file(content: String) -> ContextFile {
     task_memory_context_file(&PathBuf::from("(task memories summary)"), content, 50.0)
 }
 
-fn task_briefing_context_file(content: String) -> ContextFile {
-    task_memory_context_file(&PathBuf::from("(task briefing)"), content, 100.0)
+fn task_briefing_context_file(content: &str) -> ContextFile {
+    task_memory_context_file(&PathBuf::from("(task briefing)"), content.to_string(), 100.0)
 }
 
 fn task_context_entry_context_file(entry: &TaskContextEntry) -> ContextFile {
@@ -2114,7 +2114,7 @@ async fn task_briefing_for_plan(
     task_id: &str,
     role: &str,
     plan: &TaskContextInjectionPlan,
-) -> Result<Option<String>, String> {
+) -> Result<Option<Arc<str>>, String> {
     if plan.entries.is_empty() {
         return Ok(None);
     }
@@ -2129,15 +2129,22 @@ async fn task_briefing_for_plan(
     let source = task_context_source_text(&plan.entries);
     let content_hash = task_briefing_cache_hash(&task_context_cache_material(&plan.entries));
     let cache_key = (task_id.to_string(), content_hash.clone());
-    if let Some(entry) = task_briefing_cache().lock().await.get(&cache_key).cloned() {
-        return Ok(Some(entry.briefing));
+    if let Some(briefing) = task_briefing_cache()
+        .lock()
+        .await
+        .get(&cache_key)
+        .map(|entry| Arc::clone(&entry.briefing))
+    {
+        return Ok(Some(briefing));
     }
     let prompt_source = source;
-    let briefing = run_task_briefing_subchat(app, task_id, role, &prompt_source).await?;
+    let briefing: Arc<str> = run_task_briefing_subchat(app, task_id, role, &prompt_source)
+        .await?
+        .into();
     task_briefing_cache().lock().await.insert(
         cache_key,
         TaskBriefingCacheEntry {
-            briefing: briefing.clone(),
+            briefing: Arc::clone(&briefing),
         },
     );
     Ok(Some(briefing))
@@ -2313,7 +2320,7 @@ pub async fn inject_task_memories(
         Ok(Some(briefing)) => {
             let task_briefing_msg = ChatMessage {
                 role: "context_file".to_string(),
-                content: ChatContent::ContextFiles(vec![task_briefing_context_file(briefing)]),
+                content: ChatContent::ContextFiles(vec![task_briefing_context_file(&briefing)]),
                 tool_call_id: TASK_BRIEFING_CONTEXT_MARKER.to_string(),
                 ..Default::default()
             };

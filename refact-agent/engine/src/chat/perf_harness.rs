@@ -2491,7 +2491,6 @@ impl FullSoakEnvGuard {
         let values = [
             crate::chat::trajectories::TRAJECTORY_WRITER_ENV,
             crate::chat::trajectory_index::TRAJECTORY_INDEX_COORDINATOR_ENV,
-            crate::chat::trajectories::TRAJECTORY_WATCHER_SELF_WRITE_ENV,
             TOOL_CATALOG_SNAPSHOTS_ENV,
             refact_vecdb::vdb_thread::VECDB_PATH_COALESCING_ENV,
         ]

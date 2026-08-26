@@ -104,9 +104,9 @@ pub async fn handle_v1_code_completion(
         if let Some(cached_json_value) = cached_maybe {
             // info!("cache hit for key {:?}", cache_key.clone());
             if !code_completion_post.stream {
-                return crate::restream::cached_not_stream(&cached_json_value).await;
+                return crate::restream::cached_not_stream(cached_json_value.as_ref()).await;
             } else {
-                return crate::restream::cached_stream(&cached_json_value).await;
+                return crate::restream::cached_stream(cached_json_value.as_ref()).await;
             }
         }
     }

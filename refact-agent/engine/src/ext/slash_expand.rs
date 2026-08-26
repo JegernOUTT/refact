@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -12,8 +12,8 @@ use crate::integrations::mcp::mcp_prompts::{MCP_PROMPT_PREFIX, execute_mcp_promp
 const SLASH_CACHE_TTL: Duration = Duration::from_secs(5);
 
 struct SlashCacheEntry {
-    commands: Vec<SlashCommand>,
-    skill_indices: Vec<SkillIndex>,
+    commands: Arc<Vec<SlashCommand>>,
+    skill_indices: Arc<Vec<SkillIndex>>,
     loaded_at: Instant,
     generation: u64,
 }
@@ -213,7 +213,10 @@ pub async fn expand_slash_command(
         let read = lock.read().await;
         let cached = read.as_ref().and_then(|entry| {
             if entry.generation == generation && entry.loaded_at.elapsed() < SLASH_CACHE_TTL {
-                Some((entry.commands.clone(), entry.skill_indices.clone()))
+                Some((
+                    Arc::clone(&entry.commands),
+                    Arc::clone(&entry.skill_indices),
+                ))
             } else {
                 None
             }
@@ -222,12 +225,12 @@ pub async fn expand_slash_command(
         if let Some(data) = cached {
             data
         } else {
-            let commands = load_slash_commands(&ext_dirs).await;
-            let skill_indices = load_skill_indices(&ext_dirs).await;
+            let commands = Arc::new(load_slash_commands(&ext_dirs).await);
+            let skill_indices = Arc::new(load_skill_indices(&ext_dirs).await);
             let mut write = lock.write().await;
             *write = Some(SlashCacheEntry {
-                commands: commands.clone(),
-                skill_indices: skill_indices.clone(),
+                commands: Arc::clone(&commands),
+                skill_indices: Arc::clone(&skill_indices),
                 loaded_at: Instant::now(),
                 generation,
             });

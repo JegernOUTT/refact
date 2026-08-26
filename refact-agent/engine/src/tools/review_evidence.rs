@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -556,6 +556,7 @@ pub async fn collect_evidence(
     };
     let mut surviving = Vec::with_capacity(findings.len());
     let mut rejections = Vec::new();
+    let changed_files = scope.changed_files.iter().cloned().collect::<HashSet<PathBuf>>();
 
     for (index, mut finding) in std::mem::take(findings).into_iter().enumerate() {
         let Some(file) = resolve_scope_path(scope, &finding.file) else {
@@ -599,11 +600,7 @@ pub async fn collect_evidence(
             finding
                 .checks_performed
                 .push("diff_hunk_skipped:no_diff_base".to_string());
-        } else if !scope
-            .changed_files
-            .iter()
-            .any(|path| crate::files_correction::canonicalize_normalized_path(path.clone()) == file)
-        {
+        } else if !changed_files.contains(&file) {
             finding
                 .checks_performed
                 .push("diff_hunk_skipped:file_unchanged".to_string());

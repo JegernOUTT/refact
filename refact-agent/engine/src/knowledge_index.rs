@@ -1,6 +1,7 @@
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::files_correction::get_project_dirs;
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
@@ -364,7 +365,9 @@ pub async fn knowledge_index_watcher_background_task(gcx: Arc<GlobalContext>) {
         return;
     }
     let knowledge_dirs = knowledge_dir_candidates(gcx.clone()).await;
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel(1024);
+    let dropped_events = Arc::new(AtomicUsize::new(0));
+    let dropped_events_for_callback = dropped_events.clone();
     let mut watcher = match RecommendedWatcher::new(
         move |result: Result<notify::Event, notify::Error>| {
             if let Ok(event) = result {
@@ -373,7 +376,12 @@ pub async fn knowledge_index_watcher_background_task(gcx: Arc<GlobalContext>) {
                     .iter()
                     .any(|path| is_under_knowledge_root(path, &knowledge_dirs))
                 {
-                    let _ = tx.send(event);
+                    if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
+                        let dropped = dropped_events_for_callback.fetch_add(1, Ordering::Relaxed) + 1;
+                        if dropped % 100 == 0 {
+                            tracing::warn!("knowledge_index: dropped {dropped} watcher events because the channel is full");
+                        }
+                    }
                 }
             }
         },
@@ -394,14 +402,18 @@ pub async fn knowledge_index_watcher_background_task(gcx: Arc<GlobalContext>) {
         }
     }
 
+    let mut pending_paths = std::collections::HashSet::<PathBuf>::new();
+    let mut pending_since = None;
     loop {
         tokio::select! {
             event = rx.recv() => match event {
                 Some(event) => {
-                    let is_remove = matches!(event.kind, notify::EventKind::Remove(_));
                     if matches!(event.kind, notify::EventKind::Create(_) | notify::EventKind::Modify(_) | notify::EventKind::Remove(_)) {
                         for path in event.paths {
-                            refresh_knowledge_index_path(gcx.clone(), &path, is_remove).await;
+                            pending_paths.insert(path);
+                        }
+                        if pending_since.is_none() {
+                            pending_since = Some(Instant::now());
                         }
                     }
                 }
@@ -412,6 +424,13 @@ pub async fn knowledge_index_watcher_background_task(gcx: Arc<GlobalContext>) {
                     break;
                 }
             }
+        }
+        if pending_since.is_some_and(|since| since.elapsed() >= Duration::from_millis(300)) {
+            for path in pending_paths.drain() {
+                let is_remove = !path.exists();
+                refresh_knowledge_index_path(gcx.clone(), &path, is_remove).await;
+            }
+            pending_since = None;
         }
     }
 }
