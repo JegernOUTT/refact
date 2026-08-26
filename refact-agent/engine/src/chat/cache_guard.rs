@@ -294,13 +294,14 @@ fn sanitize_array_through_cache_marker(value: &Value, index: usize, parent_key: 
     let Some(values) = value.as_array() else {
         return sanitize_value_with_parent(value, false, Some(parent_key));
     };
-    Value::Array(
+    let truncated = Value::Array(
         values
             .iter()
             .take(index + 1)
             .map(|value| sanitize_value_with_parent(value, false, Some(parent_key)))
             .collect(),
-    )
+    );
+    canonicalize_content_shape(truncated, Some(parent_key))
 }
 
 fn sanitize_messages_through_cache_marker(
@@ -847,12 +848,34 @@ fn sanitize_value_with_parent(value: &Value, top_level: bool, parent_key: Option
             }
             Value::Object(out)
         }
-        Value::Array(arr) => Value::Array(
-            arr.iter()
-                .map(|value| sanitize_value_with_parent(value, false, parent_key))
-                .collect(),
+        Value::Array(arr) => canonicalize_content_shape(
+            Value::Array(
+                arr.iter()
+                    .map(|value| sanitize_value_with_parent(value, false, parent_key))
+                    .collect(),
+            ),
+            parent_key,
         ),
         _ => value.clone(),
+    }
+}
+
+fn canonicalize_content_shape(value: Value, parent_key: Option<&str>) -> Value {
+    if parent_key != Some("content") {
+        return value;
+    }
+    let Value::Array(items) = &value else {
+        return value;
+    };
+    let [Value::Object(block)] = items.as_slice() else {
+        return value;
+    };
+    if block.len() != 2 || block.get("type").and_then(Value::as_str) != Some("text") {
+        return value;
+    }
+    match block.get("text") {
+        Some(Value::String(text)) => Value::String(text.clone()),
+        _ => value,
     }
 }
 
@@ -897,16 +920,20 @@ fn truncate_top_level_array_at(sanitized: &mut Value, key: &str, index: usize) {
 
 #[cfg(test)]
 fn truncate_messages_at(sanitized: &mut Value, message_index: usize, content_index: usize) {
-    if let Some(messages) = sanitized.get_mut("messages").and_then(Value::as_array_mut) {
-        messages.truncate(message_index + 1);
-        if let Some(content) = messages
-            .get_mut(message_index)
-            .and_then(|message| message.get_mut("content"))
-            .and_then(Value::as_array_mut)
-        {
-            content.truncate(content_index + 1);
-        }
+    let Some(messages) = sanitized.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    messages.truncate(message_index + 1);
+    let Some(content) = messages
+        .get_mut(message_index)
+        .and_then(|message| message.get_mut("content"))
+    else {
+        return;
+    };
+    if let Some(items) = content.as_array_mut() {
+        items.truncate(content_index + 1);
     }
+    *content = canonicalize_content_shape(content.take(), Some("content"));
 }
 
 #[cfg(test)]
@@ -925,7 +952,10 @@ mod tests {
     fn test_sanitize_removes_ignored_fields_recursively() {
         let input = json!({
             "messages": [
-                {"role": "user", "content": [{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}]},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": "world"}
+                ]},
                 {"role": "assistant", "content": "ok", "provider_specific_fields": {"x": 1, "cache_control": {"type": "ephemeral"}}}
             ],
             "temperature": 0.3,
@@ -1117,6 +1147,124 @@ mod tests {
             .get("cache_control")
             .is_none());
         assert!(!is_append_only_prefix(&prev, &next));
+    }
+
+    fn drifting_cache_marker_body(marked_assistant: bool) -> Value {
+        let cc = json!({"type": "ephemeral", "ttl": "1h"});
+        let assistant_content = if marked_assistant {
+            json!([{"type": "text", "text": "", "cache_control": cc}])
+        } else {
+            json!("")
+        };
+        let tool_content = if marked_assistant {
+            json!("old output")
+        } else {
+            json!([{"type": "text", "text": "old output", "cache_control": cc}])
+        };
+        json!({
+            "model": "test",
+            "messages": [
+                {"role": "system", "content": [{"type": "text", "text": "sys", "cache_control": cc}]},
+                {"role": "user", "content": "start"},
+                {
+                    "role": "assistant",
+                    "content": assistant_content,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "cat", "arguments": "{}"}
+                    }]
+                },
+                {"role": "tool", "content": tool_content, "tool_call_id": "call_1"}
+            ]
+        })
+    }
+
+    #[test]
+    fn drifting_cache_markers_do_not_break_the_prefix() {
+        let prev = sanitize_body_for_cache_guard(&drifting_cache_marker_body(true));
+        let mut next_body = drifting_cache_marker_body(false);
+        next_body["messages"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"role": "assistant", "content": "next turn"}));
+        let next = sanitize_body_for_cache_guard(&next_body);
+
+        assert_eq!(prev["messages"][2]["content"], json!(""));
+        assert_eq!(prev["messages"][3]["content"], json!("old output"));
+        assert!(is_append_only_prefix(&prev, &next));
+    }
+
+    #[test]
+    fn drifting_cache_markers_survive_anthropic_boundary_truncation() {
+        let prev = body_for_cache_guard(&json!({
+            "model": "test",
+            "messages": [
+                {"role": "user", "content": "start"},
+                {
+                    "role": "tool",
+                    "content": [{"type": "text", "text": "output", "cache_control": {"type": "ephemeral"}}],
+                    "tool_call_id": "call_1"
+                }
+            ]
+        }));
+        let next = body_for_cache_guard(&json!({
+            "model": "test",
+            "messages": [
+                {"role": "user", "content": "start"},
+                {"role": "tool", "content": "output", "tool_call_id": "call_1"},
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "later", "cache_control": {"type": "ephemeral"}}]
+                }
+            ]
+        }));
+
+        assert_eq!(prev["messages"][1]["content"], json!("output"));
+        assert!(is_append_only_prefix(&prev, &next));
+    }
+
+    #[test]
+    fn canonicalized_content_still_detects_real_text_changes() {
+        let prev = sanitize_body_for_cache_guard(&json!({
+            "messages": [{"role": "tool", "content": "old output", "tool_call_id": "call_1"}]
+        }));
+        let next = sanitize_body_for_cache_guard(&json!({
+            "messages": [{
+                "role": "tool",
+                "content": [{"type": "text", "text": "new output", "cache_control": {"type": "ephemeral"}}],
+                "tool_call_id": "call_1"
+            }]
+        }));
+
+        assert!(!is_append_only_prefix(&prev, &next));
+    }
+
+    #[test]
+    fn canonicalization_only_collapses_a_lone_plain_text_block() {
+        let cases = [
+            json!([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]),
+            json!([{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]),
+            json!([{"type": "text", "text": "a", "extra": true}]),
+            json!([{"type": "tool_result", "tool_use_id": "call_1", "content": "ok"}]),
+        ];
+        for content in cases {
+            let sanitized = sanitize_body_for_cache_guard(&json!({
+                "messages": [{"role": "user", "content": content.clone()}]
+            }));
+            assert!(
+                sanitized["messages"][0]["content"].is_array(),
+                "content must stay an array: {content}"
+            );
+        }
+
+        let collapsed = sanitize_body_for_cache_guard(&json!({
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "a", "cache_control": {"type": "ephemeral"}}]
+            }]
+        }));
+        assert_eq!(collapsed["messages"][0]["content"], json!("a"));
     }
 
     #[test]

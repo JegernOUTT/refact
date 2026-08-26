@@ -4574,9 +4574,7 @@ mod tests {
         assert!(sanitized.get("temperature").is_none());
         assert!(sanitized.get("max_tokens").is_none());
         assert_eq!(sanitized["reasoning_effort"], "high");
-        assert!(sanitized["messages"][0]["content"][0]
-            .get("cache_control")
-            .is_none());
+        assert_eq!(sanitized["messages"][0]["content"], serde_json::json!("x"));
     }
 
     #[test]
