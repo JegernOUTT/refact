@@ -4741,7 +4741,7 @@ dependencies = [
 
 [[package]]
 name = "refact-tui"
-version = "8.5.1"
+version = "8.6.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",

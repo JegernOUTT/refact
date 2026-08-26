@@ -11,6 +11,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 
+CARGO_LOCK = "refact-agent/engine/Cargo.lock"
+RELEASE_CRATES = (
+    ("refact-agent/engine/Cargo.toml", "refact-lsp"),
+    ("refact-agent/engine/crates/refact-tui/Cargo.toml", "refact-tui"),
+)
+INTERNAL_CRATE_VERSION = "0.1.0"
+PACKAGE_RE = re.compile(
+    r'\[package\]\s+name\s*=\s*"([^"]+)"\s+version\s*=\s*"([^"]+)"'
+)
+
 
 class VersionBumpError(RuntimeError):
     pass
@@ -92,9 +102,33 @@ def replace_cargo_lock_version(path: Path, package_name: str, version: str) -> N
     write(path, updated)
 
 
+def find_unhandled_release_crates() -> list[str]:
+    handled = {name for _, name in RELEASE_CRATES}
+    unhandled = []
+    for manifest in sorted((ROOT / "refact-agent/engine/crates").glob("*/Cargo.toml")):
+        match = PACKAGE_RE.search(read(manifest))
+        if not match:
+            continue
+        name, crate_version = match.group(1), match.group(2)
+        if name in handled or crate_version == INTERNAL_CRATE_VERSION:
+            continue
+        unhandled.append(f"{manifest.relative_to(ROOT)} ({name} = {crate_version})")
+    return unhandled
+
+
 def bump(version: str) -> list[Path]:
     if not SEMVER_RE.fullmatch(version):
         raise VersionBumpError(f"Invalid SemVer version: {version}")
+
+    unhandled = find_unhandled_release_crates()
+    if unhandled:
+        listing = "\n".join(f"  - {entry}" for entry in unhandled)
+        raise VersionBumpError(
+            "These crates carry a release version but are not bumped by this script.\n"
+            f"{listing}\n"
+            "Add them to RELEASE_CRATES, or reset them to "
+            f"{INTERNAL_CRATE_VERSION} if they are internal."
+        )
 
     files = [
         ROOT / "plugins/intellij/gradle.properties",
@@ -102,8 +136,6 @@ def bump(version: str) -> list[Path]:
         ROOT / "plugins/vscode/package-lock.json",
         ROOT / "refact-agent/gui/package.json",
         ROOT / "refact-agent/gui/package-lock.json",
-        ROOT / "refact-agent/engine/Cargo.toml",
-        ROOT / "refact-agent/engine/Cargo.lock",
     ]
 
     replace_once(
@@ -115,8 +147,14 @@ def bump(version: str) -> list[Path]:
     replace_json_version_fields(files[2], "codify", version, count=2)
     replace_json_version_fields(files[3], "refact-chat-js", version, count=1)
     replace_json_version_fields(files[4], "refact-chat-js", version, count=2)
-    replace_cargo_package_version(files[5], "refact-lsp", version)
-    replace_cargo_lock_version(files[6], "refact-lsp", version)
+
+    cargo_lock = ROOT / CARGO_LOCK
+    for manifest_path, crate_name in RELEASE_CRATES:
+        manifest = ROOT / manifest_path
+        replace_cargo_package_version(manifest, crate_name, version)
+        replace_cargo_lock_version(cargo_lock, crate_name, version)
+        files.append(manifest)
+    files.append(cargo_lock)
 
     return files
 

@@ -128,8 +128,12 @@ slash commands (local, in `.refact/commands/`) orchestrate reusable scripts
 | `release/v<ver>` | VS Code + JetBrains **publish** |
 | `engine/v<ver>` | Engine release |
 
-`tools/bump_release_version.py <ver>` bumps all 6 manifests (intellij, vscode×2,
-gui×2, engine) in one shot; `release.sh` wraps it with tagging.
+`tools/bump_release_version.py <ver>` bumps all 8 manifests (intellij, vscode×2,
+gui×2, engine `Cargo.toml`, `refact-tui/Cargo.toml`, `Cargo.lock`) in one shot;
+`release.sh` wraps it with tagging. `refact-lsp` and `refact-tui` are the only
+crates carrying the release version — every other crate stays at `0.1.0`, and
+the script aborts if a crate drifts off that without being registered in
+`RELEASE_CRATES`.
 
 ### GitHub CLI & CI logs
 
