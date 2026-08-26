@@ -266,7 +266,7 @@ impl App {
         }
     }
 
-    pub(super) fn open_mode_picker(&mut self, modes: Value) {
+    pub fn open_mode_picker(&mut self, modes: Value) {
         if !Self::settings_surface_enabled() {
             self.add_notice("/mode requires REFACT_TUI_SURFACES=1");
             return;
@@ -347,10 +347,7 @@ impl App {
         self.composer_mode = ComposerMode::Chat;
     }
 
-    pub(super) fn open_session_picker_from_trajectories(
-        &mut self,
-        trajectories: Vec<TrajectoryMeta>,
-    ) {
+    pub fn open_session_picker_from_trajectories(&mut self, trajectories: Vec<TrajectoryMeta>) {
         if history::surfaces_enabled_from_env() {
             self.history_surface = Some(HistorySurface::new(trajectories));
             self.modal_picker = None;
@@ -696,7 +693,7 @@ impl App {
         }
     }
 
-    pub(super) fn show_task_board(&mut self, data: crate::client::TaskBoardViewData) {
+    pub fn show_task_board(&mut self, data: crate::client::TaskBoardViewData) {
         self.task_id = Some(data.task.id.clone());
         self.board_surface = Some(board::BoardSurface::loaded(data));
     }

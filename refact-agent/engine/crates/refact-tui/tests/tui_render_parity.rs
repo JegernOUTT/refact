@@ -1,12 +1,13 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Terminal;
-use refact_tui::app::{App, SessionState, UsageSummary};
+use refact_tui::app::{App, AppAction, SessionState, UsageSummary};
 use refact_tui::client::{
     ChatEvent, OpenProjectResponse, TaskBoardCard, TaskBoardReadyCards, TaskBoardResponse,
     TaskBoardTask, TaskBoardViewData, WorkerInfo,
@@ -127,33 +128,40 @@ impl ColorMode {
         }
     }
 
-    fn apply(self) -> EnvironmentGuard {
+    fn apply(self, surfaces: Option<&str>) -> EnvironmentGuard {
         match self {
             Self::TrueColor => EnvironmentGuard::set(&[
                 ("TERM", Some("xterm-truecolor")),
                 ("COLORTERM", Some("truecolor")),
                 ("NO_COLOR", None),
+                ("REFACT_TUI_SURFACES", surfaces),
             ]),
             Self::Ansi16 => EnvironmentGuard::set(&[
                 ("TERM", Some("xterm-16color")),
                 ("COLORTERM", None),
                 ("NO_COLOR", None),
+                ("REFACT_TUI_SURFACES", surfaces),
             ]),
             Self::NoColor => EnvironmentGuard::set(&[
                 ("TERM", Some("dumb")),
                 ("COLORTERM", None),
                 ("NO_COLOR", Some("1")),
+                ("REFACT_TUI_SURFACES", surfaces),
             ]),
         }
     }
 }
 
+static ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
+
 struct EnvironmentGuard {
+    _lock: MutexGuard<'static, ()>,
     previous: Vec<(&'static str, Option<OsString>)>,
 }
 
 impl EnvironmentGuard {
     fn set(values: &[(&'static str, Option<&str>)]) -> Self {
+        let lock = ENVIRONMENT_LOCK.lock().unwrap();
         let previous = values
             .iter()
             .map(|(key, value)| {
@@ -165,7 +173,10 @@ impl EnvironmentGuard {
                 (*key, previous)
             })
             .collect();
-        Self { previous }
+        Self {
+            _lock: lock,
+            previous,
+        }
     }
 }
 
@@ -187,6 +198,7 @@ struct RenderScenario {
     marker: Option<&'static str>,
     setup: ScenarioSetup,
     render_before_resize: bool,
+    requires_surfaces: bool,
 }
 
 const SNAPSHOT_SIZES: [(u16, u16); 4] = [(120, 40), (96, 30), (60, 20), (40, 15)];
@@ -197,9 +209,7 @@ fn render_matrix_snapshot(
     width: u16,
     height: u16,
 ) -> String {
-    let _environment = color.apply();
-    let _surfaces = (scenario.name == "activity" || scenario.name == "browser")
-        .then(|| EnvironmentGuard::set(&[("REFACT_TUI_SURFACES", Some("1"))]));
+    let _environment = color.apply(scenario.requires_surfaces.then_some("1"));
     let mut app = App::new(project());
     (scenario.setup)(&mut app);
     if scenario.render_before_resize {
@@ -410,6 +420,7 @@ fn mode_transition_scenario(app: &mut App) {
 }
 
 fn history_surface_scenario(app: &mut App) {
+    assert_eq!(app.execute_command_name("resume"), AppAction::LoadSessions);
     let trajectories = (0..51)
         .map(|index| TrajectoryMeta {
             id: format!("history-{index}"),
@@ -419,7 +430,7 @@ fn history_surface_scenario(app: &mut App) {
             ..Default::default()
         })
         .collect();
-    app.open_history_surface(trajectories);
+    app.open_session_picker_from_trajectories(trajectories);
 }
 
 fn history_events_scenario(app: &mut App) {
@@ -527,7 +538,11 @@ fn activity_scenario(app: &mut App) {
 }
 
 fn task_board_scenario(app: &mut App) {
-    app.test_show_task_board(TaskBoardViewData {
+    assert_eq!(
+        app.execute_command_name("board"),
+        AppAction::LoadTaskBoard { task_id: None }
+    );
+    app.show_task_board(TaskBoardViewData {
         task: TaskBoardTask {
             id: "task-1".to_string(),
             name: "Task board matrix".to_string(),
@@ -624,6 +639,66 @@ fn worktree_identity_scenario(app: &mut App) {
     ));
 }
 
+fn settings_scenario(app: &mut App) {
+    app.apply_chat_event(chat_event(
+        app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {
+                "id": app.chat_id(),
+                "model": "gpt-demo",
+                "mode": "agent",
+                "auto_approve_editing_tools": false,
+                "auto_approve_dangerous_commands": false
+            },
+            "runtime": {"state": "idle"},
+            "messages": []
+        }),
+    ));
+    assert_eq!(app.execute_command_name("settings"), AppAction::None);
+}
+
+fn mode_picker_scenario(app: &mut App) {
+    assert_eq!(app.execute_command_name("mode"), AppAction::LoadModes);
+    app.open_mode_picker(json!({"modes": [{
+        "id": "task_agent",
+        "title": "Task Agent",
+        "description": "Execute a task card",
+        "is_overlay": false,
+        "ui": {"order": 1, "tags": ["task"]}
+    }]}));
+}
+
+fn permissions_picker_scenario(app: &mut App) {
+    assert_eq!(app.execute_command_name("permissions"), AppAction::None);
+}
+
+fn goal_overlay_scenario(app: &mut App) {
+    app.apply_chat_event(chat_event(
+        app,
+        "snapshot",
+        json!({
+            "type": "snapshot",
+            "thread": {"id": app.chat_id(), "model": "gpt-demo", "mode": "agent"},
+            "runtime": {"state": "idle"},
+            "messages": [{
+                "role": "goal",
+                "content": "Ship parity coverage",
+                "extra": {"goal": {"version": 1, "status": "active", "active": true}}
+            }]
+        }),
+    ));
+    assert_eq!(app.execute_command_name("goal"), AppAction::None);
+}
+
+fn worktree_merge_confirmation_scenario(app: &mut App) {
+    assert_eq!(
+        app.execute_command_name("worktrees merge parity-worktree squash main"),
+        AppAction::None
+    );
+}
+
 fn render_scenarios() -> Vec<RenderScenario> {
     vec![
         RenderScenario {
@@ -631,114 +706,168 @@ fn render_scenarios() -> Vec<RenderScenario> {
             marker: Some("Opened project"),
             setup: idle_scenario,
             render_before_resize: false,
+            requires_surfaces: false,
         },
         RenderScenario {
             name: "streaming",
             marker: Some("Streaming response"),
             setup: streaming_scenario,
             render_before_resize: false,
+            requires_surfaces: false,
         },
         RenderScenario {
             name: "tool running",
             marker: Some("running"),
             setup: tool_running_scenario,
             render_before_resize: false,
+            requires_surfaces: false,
         },
         RenderScenario {
             name: "tool failed",
             marker: Some("failed"),
             setup: tool_failed_scenario,
             render_before_resize: false,
+            requires_surfaces: false,
         },
         RenderScenario {
             name: "approval",
             marker: Some("Approval"),
             setup: approval_scenario,
             render_before_resize: false,
+            requires_surfaces: false,
         },
         RenderScenario {
             name: "ask form",
             marker: Some("Question"),
             setup: ask_form_scenario,
             render_before_resize: false,
+            requires_surfaces: false,
         },
         RenderScenario {
             name: "error turn",
             marker: Some("Error"),
             setup: error_scenario,
             render_before_resize: false,
+            requires_surfaces: false,
         },
         RenderScenario {
             name: "goal dock",
-            marker: Some("Current Goal"),
+            marker: Some("Goal ACTIVE"),
             setup: goal_scenario,
             render_before_resize: false,
+            requires_surfaces: true,
         },
         RenderScenario {
             name: "mode transition",
             marker: Some("Mode sw"),
             setup: mode_transition_scenario,
             render_before_resize: false,
+            requires_surfaces: false,
         },
         RenderScenario {
             name: "history surface",
-            marker: Some("History"),
+            marker: Some("History · 51"),
             setup: history_surface_scenario,
             render_before_resize: false,
+            requires_surfaces: true,
         },
         RenderScenario {
             name: "history events",
             marker: Some("Proces"),
             setup: history_events_scenario,
             render_before_resize: false,
+            requires_surfaces: false,
         },
         RenderScenario {
             name: "activity",
-            marker: Some("Activity"),
+            marker: Some("Background agents / delegates"),
             setup: activity_scenario,
             render_before_resize: false,
+            requires_surfaces: true,
         },
         RenderScenario {
             name: "500 turn trajectory",
             marker: Some("turn 499"),
             setup: trajectory_500_turn_scenario,
             render_before_resize: false,
+            requires_surfaces: false,
         },
         RenderScenario {
             name: "mid resize",
             marker: Some("Resize keeps"),
             setup: mid_resize_scenario,
             render_before_resize: true,
+            requires_surfaces: false,
         },
         RenderScenario {
             name: "post reconnect",
             marker: Some("SSE resync"),
             setup: post_reconnect_scenario,
             render_before_resize: false,
+            requires_surfaces: false,
         },
         RenderScenario {
             name: "image fallback",
             marker: Some("[image:"),
             setup: image_fallback_scenario,
             render_before_resize: false,
+            requires_surfaces: false,
         },
         RenderScenario {
             name: "task board",
-            marker: Some("Task board"),
+            marker: Some("Task board · Task board matrix"),
             setup: task_board_scenario,
             render_before_resize: false,
+            requires_surfaces: true,
         },
         RenderScenario {
             name: "browser",
-            marker: Some("Browser"),
+            marker: Some("Browser · open · connected"),
             setup: browser_scenario,
             render_before_resize: false,
+            requires_surfaces: true,
         },
         RenderScenario {
             name: "worktree identity",
-            marker: Some("wt-matrix"),
+            marker: Some("wt wt-matrix refact/ta"),
             setup: worktree_identity_scenario,
             render_before_resize: false,
+            requires_surfaces: true,
+        },
+        RenderScenario {
+            name: "settings",
+            marker: Some("Settings · this chat only"),
+            setup: settings_scenario,
+            render_before_resize: false,
+            requires_surfaces: true,
+        },
+        RenderScenario {
+            name: "mode picker",
+            marker: Some("Task Agent"),
+            setup: mode_picker_scenario,
+            render_before_resize: false,
+            requires_surfaces: true,
+        },
+        RenderScenario {
+            name: "permissions picker",
+            marker: Some("permissions: 0 selected"),
+            setup: permissions_picker_scenario,
+            render_before_resize: false,
+            requires_surfaces: true,
+        },
+        RenderScenario {
+            name: "goal overlay",
+            marker: Some("Pursuit: owned"),
+            setup: goal_overlay_scenario,
+            render_before_resize: false,
+            requires_surfaces: true,
+        },
+        RenderScenario {
+            name: "worktree merge confirmation",
+            marker: Some("Confirm worktree merge"),
+            setup: worktree_merge_confirmation_scenario,
+            render_before_resize: false,
+            requires_surfaces: true,
         },
     ]
 }
@@ -1362,12 +1491,13 @@ fn registered_scenario_without_snapshot_marker_fails_loudly() {
         marker: None,
         setup: idle_scenario,
         render_before_resize: false,
+        requires_surfaces: false,
     }]);
 }
 
 #[test]
 fn compact_layout_reserves_transcript_and_marks_truncation() {
-    let _environment = ColorMode::NoColor.apply();
+    let _environment = ColorMode::NoColor.apply(None);
     let mut app = App::new(project());
     app.apply_chat_event(chat_event(
         &app,
@@ -1388,7 +1518,7 @@ fn compact_layout_reserves_transcript_and_marks_truncation() {
 
 #[test]
 fn compact_layout_prioritizes_transcript_over_secondary_docks() {
-    let _environment = ColorMode::NoColor.apply();
+    let _environment = ColorMode::NoColor.apply(None);
     let mut app = App::new(project());
     history_events_scenario(&mut app);
 
@@ -1400,7 +1530,6 @@ fn compact_layout_prioritizes_transcript_over_secondary_docks() {
 
 #[test]
 fn compact_layout_marks_every_exclusive_surface() {
-    let _environment = ColorMode::NoColor.apply();
     let scenarios = render_scenarios();
 
     for name in ["history surface", "task board", "browser", "activity"] {
@@ -1418,7 +1547,7 @@ fn compact_layout_marks_every_exclusive_surface() {
 
 #[test]
 fn compact_indicator_survives_overlay_rendering() {
-    let _environment = ColorMode::NoColor.apply();
+    let _environment = ColorMode::NoColor.apply(None);
     let mut app = App::new(project());
     app.apply_chat_event(chat_event(
         &app,
@@ -1438,12 +1567,12 @@ fn compact_indicator_survives_overlay_rendering() {
 
 #[test]
 fn narrow_modals_drop_borders_and_events_stack() {
-    let _environment = ColorMode::NoColor.apply();
     let approval = RenderScenario {
         name: "approval",
         marker: Some("Approval"),
         setup: approval_scenario,
         render_before_resize: false,
+        requires_surfaces: false,
     };
     let modal_snapshot = render_matrix_snapshot(&approval, ColorMode::NoColor, 39, 20);
     assert!(!modal_snapshot.contains("+---"), "{modal_snapshot}");
@@ -1454,6 +1583,7 @@ fn narrow_modals_drop_borders_and_events_stack() {
         marker: Some("Proces"),
         setup: history_events_scenario,
         render_before_resize: false,
+        requires_surfaces: false,
     };
     let events_snapshot = render_matrix_snapshot(&events, ColorMode::NoColor, 59, 20);
     let event_row = events_snapshot
