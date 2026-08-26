@@ -3,7 +3,7 @@ use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -339,7 +339,10 @@ fn legacy_trajectory_index_cache() -> &'static AMutex<HashMap<PathBuf, CachedLeg
 async fn cache_legacy_trajectory_index(dir: &Path, index: TrajectoryIndex) {
     let generation = match directory_generation(dir, index.clone()).await {
         Ok(generation) => generation,
-        Err(_) => return,
+        Err(_) => {
+            invalidate_legacy_trajectory_index_cache(dir).await;
+            return;
+        }
     };
     let mut cache = legacy_trajectory_index_cache().lock().await;
     let key = dir.to_path_buf();
@@ -349,6 +352,10 @@ async fn cache_legacy_trajectory_index(dir: &Path, index: TrajectoryIndex) {
         }
     }
     cache.insert(key, CachedLegacyTrajectoryIndex { index, generation });
+}
+
+async fn invalidate_legacy_trajectory_index_cache(dir: &Path) {
+    legacy_trajectory_index_cache().lock().await.remove(dir);
 }
 
 fn get_trajectory_index_locks() -> &'static AMutex<HashMap<String, Arc<AMutex<()>>>> {
@@ -586,7 +593,9 @@ impl TrajectoryIndexCoordinator {
             )
         };
         let fresh = match generation {
-            Some(generation) => cached_index_is_fresh(dir, index.clone(), generation).await?,
+            Some(generation) => cached_index_is_fresh(dir, index.clone(), generation)
+                .await
+                .unwrap_or(false),
             None => false,
         };
         if !fresh {
@@ -685,14 +694,21 @@ struct CoordinatorLoadResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FileGeneration {
     file_len: u64,
-    file_modified_unix_ms: i64,
+    file_modified_at: SystemTime,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DirectoryContentsGeneration {
+    metadata: FileGeneration,
+    entry_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DirectoryGeneration {
-    root: Option<FileGeneration>,
+    root: Option<DirectoryContentsGeneration>,
     index: Option<FileGeneration>,
-    children: Vec<(String, FileGeneration)>,
+    children: Vec<(String, DirectoryContentsGeneration)>,
+    indexed_files: Vec<(String, Option<FileGeneration>)>,
 }
 
 fn path_generation(path: &Path) -> Result<Option<FileGeneration>, String> {
@@ -706,7 +722,48 @@ fn path_generation(path: &Path) -> Result<Option<FileGeneration>, String> {
     }
     Ok(Some(FileGeneration {
         file_len: metadata.len(),
-        file_modified_unix_ms: unix_modified_ms(&metadata)?,
+        file_modified_at: metadata
+            .modified()
+            .map_err(|error| format!("Failed to read modified time for {:?}: {error}", path))?,
+    }))
+}
+
+fn regular_file_generation(path: &Path) -> Result<Option<FileGeneration>, String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Failed to read metadata {:?}: {error}", path)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Ok(None);
+    }
+    Ok(Some(FileGeneration {
+        file_len: metadata.len(),
+        file_modified_at: metadata
+            .modified()
+            .map_err(|error| format!("Failed to read modified time for {:?}: {error}", path))?,
+    }))
+}
+
+fn directory_contents_generation(
+    path: &Path,
+) -> Result<Option<DirectoryContentsGeneration>, String> {
+    let Some(metadata) = path_generation(path)? else {
+        return Ok(None);
+    };
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Failed to read directory {:?}: {error}", path)),
+    };
+    let mut entry_count = 0;
+    for entry in entries {
+        entry.map_err(|error| format!("Failed to read directory entry in {:?}: {error}", path))?;
+        entry_count += 1;
+    }
+    Ok(Some(DirectoryContentsGeneration {
+        metadata,
+        entry_count,
     }))
 }
 
@@ -714,7 +771,37 @@ fn directory_generation_sync(
     dir: &Path,
     index: &TrajectoryIndex,
 ) -> Result<DirectoryGeneration, String> {
-    let mut child_names: Vec<String> = index
+    let root = directory_contents_generation(dir)?;
+    let mut child_names = Vec::new();
+    if root.is_some() {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|error| format!("Failed to read trajectory directory {:?}: {error}", dir))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "Failed to read trajectory directory entry in {:?}: {error}",
+                    dir
+                )
+            })?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| format!("Trajectory directory has non-UTF-8 entry in {:?}", dir))?;
+            let file_type = entry.file_type().map_err(|error| {
+                format!(
+                    "Failed to read trajectory directory entry type in {:?}: {error}",
+                    dir
+                )
+            })?;
+            if file_type.is_dir() && !file_type.is_symlink() && !name.starts_with('.') {
+                child_names.push(name);
+            }
+        }
+    }
+    child_names.sort();
+    child_names.dedup();
+
+    let mut indexed_file_names: Vec<String> = index
         .entries
         .iter()
         .map(|entry| entry.file_name.as_str())
@@ -724,28 +811,34 @@ fn directory_generation_sync(
                 .iter()
                 .map(|entry| entry.file_name.as_str()),
         )
-        .filter_map(|file_name| {
-            file_name
-                .split_once('/')
-                .map(|(child, _)| child.to_string())
-        })
+        .map(ToString::to_string)
         .collect();
-
-    child_names.sort();
-    child_names.dedup();
+    indexed_file_names.sort();
+    indexed_file_names.dedup();
 
     let mut children = Vec::with_capacity(child_names.len());
     for child in child_names {
-        let Some(generation) = path_generation(&dir.join(&child))? else {
-            continue;
+        let Some(generation) = directory_contents_generation(&dir.join(&child))? else {
+            return Err(format!(
+                "Trajectory child directory changed while checking freshness: {:?}",
+                dir.join(&child)
+            ));
         };
         children.push((child, generation));
     }
 
+    let indexed_files = indexed_file_names
+        .into_iter()
+        .map(|file_name| {
+            regular_file_generation(&dir.join(&file_name)).map(|generation| (file_name, generation))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     Ok(DirectoryGeneration {
-        root: path_generation(dir)?,
+        root,
         index: path_generation(&trajectory_index_path(dir))?,
         children,
+        indexed_files,
     })
 }
 
@@ -767,23 +860,10 @@ fn cached_index_is_fresh_sync(
     if &directory_generation_sync(dir, index)? != generation {
         return Ok(false);
     }
-    for entry in &index.entries {
-        match file_metadata(&trajectory_file_path_for_entry(dir, entry)) {
-            Ok((file_len, file_modified_unix_ms))
-                if file_len == entry.file_len
-                    && file_modified_unix_ms == entry.file_modified_unix_ms => {}
-            _ => return Ok(false),
-        }
-    }
-    for skipped in &index.skipped_files {
-        match file_metadata(&dir.join(&skipped.file_name)) {
-            Ok((file_len, file_modified_unix_ms))
-                if file_len == skipped.file_len
-                    && file_modified_unix_ms == skipped.file_modified_unix_ms => {}
-            _ => return Ok(false),
-        }
-    }
-    Ok(true)
+    Ok(generation
+        .indexed_files
+        .iter()
+        .all(|(_, generation)| generation.is_some()))
 }
 
 async fn cached_index_is_fresh(
@@ -1293,24 +1373,29 @@ async fn write_trajectory_index_atomic_owned(
     dir: &Path,
     index: TrajectoryIndex,
 ) -> Result<(), String> {
-    if !perf_diagnostics::is_enabled() {
-        return write_trajectory_index_atomic_owned_inner(dir, index).await;
+    let result = if !perf_diagnostics::is_enabled() {
+        write_trajectory_index_atomic_owned_inner(dir, index).await
+    } else {
+        let path = trajectory_index_path(dir);
+        let entry_count = index.entries.len() as u64;
+        let span = perf_diagnostics::span(PerfComponent::TrajectoryIndexWrite, None, Some(&path));
+        let result = write_trajectory_index_atomic_owned_inner(dir, index).await;
+        span.finish(
+            if result.is_ok() {
+                PerfOutcome::Success
+            } else {
+                PerfOutcome::Failure
+            },
+            None,
+            Some(entry_count),
+            None,
+            None,
+        );
+        result
+    };
+    if result.is_ok() {
+        invalidate_legacy_trajectory_index_cache(dir).await;
     }
-    let path = trajectory_index_path(dir);
-    let entry_count = index.entries.len() as u64;
-    let span = perf_diagnostics::span(PerfComponent::TrajectoryIndexWrite, None, Some(&path));
-    let result = write_trajectory_index_atomic_owned_inner(dir, index).await;
-    span.finish(
-        if result.is_ok() {
-            PerfOutcome::Success
-        } else {
-            PerfOutcome::Failure
-        },
-        None,
-        Some(entry_count),
-        None,
-        None,
-    );
     result
 }
 
@@ -1636,6 +1721,7 @@ struct DiskTrajectoryFile {
 }
 
 fn scan_trajectory_dir_files_sync(dir: &Path) -> Result<Vec<DiskTrajectoryFile>, String> {
+    record_directory_scan();
     let read_dir = match std::fs::read_dir(dir) {
         Ok(read_dir) => read_dir,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -2003,7 +2089,9 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
         .get(dir)
         .cloned();
     if let Some(cached) = cached {
-        if cached_index_is_fresh(dir, cached.index.clone(), cached.generation.clone()).await? {
+        if let Ok(true) =
+            cached_index_is_fresh(dir, cached.index.clone(), cached.generation.clone()).await
+        {
             record_listing_cache_hit();
             return Ok(cached.index.entries);
         }
@@ -2913,6 +3001,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_cached_listing_reflects_external_creation_and_deletion() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
+
+        assert_eq!(
+            list_trajectory_entries_from_index_or_rebuild(&dir, None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        write_trajectory(&dir, "chat-2", "Two", "agent").await;
+        assert_eq!(
+            list_trajectory_entries_from_index_or_rebuild(&dir, None)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        fs::remove_file(path).await.unwrap();
+        let entries = list_trajectory_entries_from_index_or_rebuild(&dir, None)
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "chat-2");
+    }
+
+    #[tokio::test]
     async fn cached_listings_reflect_created_modified_and_deleted_trajectories() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("trajectories");
@@ -2944,6 +3063,54 @@ mod tests {
         let entries = coordinator.list_entries(&dir, None).await.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, "chat-1");
+    }
+
+    #[tokio::test]
+    async fn coordinator_scans_only_changed_directories_across_repeated_polls() {
+        const DIRECTORY_COUNT: usize = 24;
+        const POLL_COUNT: usize = 12;
+
+        let temp = tempfile::tempdir().unwrap();
+        let coordinator = TrajectoryIndexCoordinator::new();
+        let mut dirs = Vec::new();
+        for number in 0..DIRECTORY_COUNT {
+            let dir = temp.path().join(format!("trajectories-{number}"));
+            write_trajectory(&dir, "chat-1", "One", "agent").await;
+            coordinator.list_entries(&dir, None).await.unwrap();
+            dirs.push(dir);
+        }
+
+        reset_trajectory_index_listing_counters();
+        for _ in 0..POLL_COUNT {
+            for dir in &dirs {
+                assert_eq!(coordinator.list_entries(dir, None).await.unwrap().len(), 1);
+            }
+        }
+        let unchanged = trajectory_index_listing_counters();
+        assert_eq!(unchanged.directory_scans, 0);
+        assert_eq!(
+            unchanged.cache_hits,
+            u64::try_from(DIRECTORY_COUNT * POLL_COUNT).unwrap()
+        );
+
+        write_trajectory(&dirs[0], "chat-2", "Two", "agent").await;
+        assert_eq!(
+            coordinator
+                .list_entries(&dirs[0], None)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        for dir in &dirs[1..] {
+            assert_eq!(coordinator.list_entries(dir, None).await.unwrap().len(), 1);
+        }
+        let changed = trajectory_index_listing_counters();
+        assert_eq!(changed.directory_scans, 1);
+        assert_eq!(
+            changed.cache_hits,
+            u64::try_from(DIRECTORY_COUNT * POLL_COUNT + DIRECTORY_COUNT - 1).unwrap()
+        );
     }
 
     #[tokio::test]
