@@ -8,6 +8,8 @@ use crate::protocol::{
 };
 use super::surfaces::activity::ActivitySurfaceState;
 
+const BROWSER_TOOLBAR_HISTORY_LIMIT: usize = 6;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct HistorySaveRequest {
     pub(super) path: PathBuf,
@@ -80,7 +82,7 @@ pub struct BrowserState {
     pub latest_frame: Option<BrowserFrameEvent>,
     pub frame_version: u64,
     pub timeline: Vec<Value>,
-    pub last_toolbar_action: Option<String>,
+    pub toolbar_actions: Vec<String>,
     pub last_closed: Option<BrowserClosedEvent>,
     pub context_prompt: Option<BrowserContextPromptState>,
 }
@@ -138,7 +140,14 @@ impl BrowserState {
     }
 
     pub(super) fn apply_toolbar_action(&mut self, action: String) {
-        self.last_toolbar_action = Some(action);
+        self.toolbar_actions.push(action);
+        let skipped = self
+            .toolbar_actions
+            .len()
+            .saturating_sub(BROWSER_TOOLBAR_HISTORY_LIMIT);
+        if skipped > 0 {
+            self.toolbar_actions.drain(..skipped);
+        }
     }
 
     pub(super) fn take_context_prompt(
@@ -918,5 +927,20 @@ mod tests {
             Some(value) => std::env::set_var("REFACT_TUI_SURFACES", value),
             None => std::env::remove_var("REFACT_TUI_SURFACES"),
         }
+    }
+
+    #[test]
+    fn browser_toolbar_actions_keep_the_bounded_chronological_tail() {
+        let mut state = BrowserState::default();
+        for action in 0..BROWSER_TOOLBAR_HISTORY_LIMIT + 2 {
+            state.apply_toolbar_action(format!("action-{action}"));
+        }
+
+        assert_eq!(
+            state.toolbar_actions,
+            (2..BROWSER_TOOLBAR_HISTORY_LIMIT + 2)
+                .map(|action| format!("action-{action}"))
+                .collect::<Vec<_>>()
+        );
     }
 }

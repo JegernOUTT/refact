@@ -134,13 +134,10 @@ fn surface_lines(state: &BrowserState, surface: &BrowserSurface) -> Vec<Line<'st
     lines.push(Line::from(""));
     push_timeline_lines(&mut lines, state);
     lines.push(Line::from(""));
+    push_toolbar_history_lines(&mut lines, state);
+    lines.push(Line::from(""));
     if let Some(prompt) = state.context_prompt.as_ref() {
         push_context_prompt_lines(&mut lines, prompt, surface);
-    } else if let Some(action) = state.last_toolbar_action.as_deref() {
-        lines.push(Line::from(format!(
-            "Toolbar observed: {}",
-            sanitize_tool_inline(action)
-        )));
     }
     lines
 }
@@ -204,6 +201,20 @@ fn push_timeline_lines(lines: &mut Vec<Line<'static>>, state: &BrowserState) {
             .iter()
             .skip(skipped)
             .map(|event| Line::from(timeline_line(event))),
+    );
+}
+
+fn push_toolbar_history_lines(lines: &mut Vec<Line<'static>>, state: &BrowserState) {
+    lines.push(Line::from("Toolbar history"));
+    if state.toolbar_actions.is_empty() {
+        lines.push(Line::from("No toolbar actions observed."));
+        return;
+    }
+    lines.extend(
+        state
+            .toolbar_actions
+            .iter()
+            .map(|action| Line::from(format!("• {}", sanitize_tool_inline(action)))),
     );
 }
 
@@ -396,10 +407,40 @@ mod tests {
             FRAME_MARKER,
             "Clicked checkout",
             "Timeline",
-            "Toolbar observed: screenshot",
+            "Toolbar history",
+            "• screenshot",
         ] {
             assert!(rendered.contains(expected), "{expected}: {rendered}");
         }
+    }
+
+    #[test]
+    fn browser_surface_renders_toolbar_history_in_chronological_order() {
+        let mut app = browser_app();
+        let chat_id = app.chat_id().to_string();
+        app.apply_chat_event(ChatEvent {
+            chat_id: Some(chat_id),
+            seq: None,
+            kind: "browser_toolbar_action".to_string(),
+            raw: json!({"type": "browser_toolbar_action", "action": "refresh"}),
+        });
+        let surface = app.browser_surface.as_ref().unwrap();
+        let lines = surface_lines(app.browser_state(), surface)
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        let screenshot = lines
+            .iter()
+            .position(|line| line == "• screenshot")
+            .unwrap();
+        let refresh = lines.iter().position(|line| line == "• refresh").unwrap();
+        assert!(screenshot < refresh);
     }
 
     #[test]

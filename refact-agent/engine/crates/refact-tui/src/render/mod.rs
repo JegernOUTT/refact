@@ -54,8 +54,10 @@ impl RenderCache {
     where
         F: FnOnce() -> Vec<HyperlinkLine>,
     {
-        if let Some(lines) = self.entries.get(&key) {
-            return lines.clone();
+        if let Some(lines) = self.entries.get(&key).cloned() {
+            self.order.retain(|candidate| candidate != &key);
+            self.order.push_back(key);
+            return lines;
         }
         let lines = render();
         self.entries.insert(key, lines.clone());
@@ -87,21 +89,6 @@ impl RenderCache {
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
-}
-
-pub fn cache_markdown_render(
-    cache: &mut RenderCache,
-    source: &str,
-    width: Option<usize>,
-    color_enabled: bool,
-) -> Vec<HyperlinkLine> {
-    let key = RenderCacheKey::new((source, width), width.unwrap_or(usize::MAX), color_enabled);
-    cache.render(key, || {
-        MarkdownRenderer::new(width)
-            .render_with_links(source)
-            .into_iter()
-            .collect()
-    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,4 +141,26 @@ pub fn color_enabled_from_env() -> bool {
         && std::env::var("TERM")
             .map(|term| term != "dumb")
             .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_cache_promotes_hits_and_retains_recently_used_entries() {
+        let mut cache = RenderCache::default();
+        let keys = (0..=MAX_RENDER_CACHE_ENTRIES)
+            .map(|index| RenderCacheKey::new(index, 80, true))
+            .collect::<Vec<_>>();
+
+        for key in keys.iter().take(MAX_RENDER_CACHE_ENTRIES) {
+            cache.render(*key, Vec::new);
+        }
+        cache.render(keys[0], Vec::new);
+        cache.render(keys[MAX_RENDER_CACHE_ENTRIES], Vec::new);
+
+        assert!(cache.entries.contains_key(&keys[0]));
+        assert!(!cache.entries.contains_key(&keys[1]));
+    }
 }

@@ -601,8 +601,9 @@ impl HistoryBuffer {
 
     fn render_entry(&mut self, entry: &HistoryEntry, width: u16) -> Vec<HyperlinkLine> {
         let content_width = width.saturating_sub(HISTORY_CELL_GUTTER).max(1) as usize;
-        self.note_cache_key(entry.id, &*entry.cell, content_width);
-        let lines = self.render_cell(&*entry.cell, content_width);
+        let key = self.cache_key(Some(entry.id), &*entry.cell, content_width);
+        self.note_cache_key(entry.id, key);
+        let lines = self.render_cell(&*entry.cell, content_width, key);
         prefix_hyperlink_lines(
             lines,
             Span::raw(" ".repeat(HISTORY_CELL_GUTTER as usize)),
@@ -617,35 +618,36 @@ impl HistoryBuffer {
         content_width: usize,
     ) -> Vec<HyperlinkLine> {
         let cell = cells::cell_from_transcript_item(item, selected);
-        self.render_cell(&*cell, content_width)
+        let key = self.cache_key(None, &*cell, content_width);
+        self.render_cell(&*cell, content_width, key)
     }
 
     fn render_cell(
         &mut self,
         cell: &dyn cells::HistoryCell,
         content_width: usize,
+        key: RenderCacheKey,
     ) -> Vec<HyperlinkLine> {
-        let key = self.cache_key(cell, content_width);
         let theme = self.theme.clone();
         self.render_cache.render(key, || {
             cell.display_hyperlink_lines_with_theme(content_width, &theme)
         })
     }
 
-    fn cache_key(&self, cell: &dyn cells::HistoryCell, content_width: usize) -> RenderCacheKey {
+    fn cache_key(
+        &self,
+        entry_id: Option<u64>,
+        cell: &dyn cells::HistoryCell,
+        content_width: usize,
+    ) -> RenderCacheKey {
         RenderCacheKey::new(
-            (
-                cell.kind(),
-                format!("{cell:?}"),
-                format!("{:?}", self.theme),
-            ),
+            (entry_id, cell.kind(), cell.revision(), self.theme.name()),
             content_width,
             color_enabled_from_env(),
         )
     }
 
-    fn note_cache_key(&mut self, id: u64, cell: &dyn cells::HistoryCell, content_width: usize) {
-        let key = self.cache_key(cell, content_width);
+    fn note_cache_key(&mut self, id: u64, key: RenderCacheKey) {
         let keys = self.cache_keys.entry(id).or_default();
         if !keys.contains(&key) {
             keys.push(key);
@@ -824,6 +826,9 @@ pub fn render_transcript_item_hyperlink_lines_with_theme(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
     use super::*;
     use crate::approvals::{ApprovalModalState, PauseReason};
     use crate::history::cells::NoticeCell;
@@ -920,6 +925,26 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct EmptyCell;
+
+    #[derive(Debug, Clone)]
+    struct RevisionCountingCell {
+        revision_calls: Arc<AtomicUsize>,
+    }
+
+    impl cells::HistoryCell for RevisionCountingCell {
+        fn kind(&self) -> cells::HistoryCellKind {
+            cells::HistoryCellKind::Info
+        }
+
+        fn render_raw(&self, _width: usize) -> Vec<Line<'static>> {
+            vec![Line::from("counted")]
+        }
+
+        fn revision(&self) -> u64 {
+            self.revision_calls.fetch_add(1, Ordering::Relaxed);
+            1
+        }
+    }
 
     impl cells::HistoryCell for EmptyCell {
         fn kind(&self) -> cells::HistoryCellKind {
@@ -1742,6 +1767,21 @@ mod tests {
         let second = history.pending_insertions(40);
         assert_eq!(history.render_count(), 2);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn cache_key_is_computed_once_per_cell_per_frame() {
+        let revision_calls = Arc::new(AtomicUsize::new(0));
+        let mut history = HistoryBuffer::new();
+        history.enqueue_cell(Box::new(RevisionCountingCell {
+            revision_calls: revision_calls.clone(),
+        }));
+
+        history.pending_insertions(40);
+        assert_eq!(revision_calls.load(Ordering::Relaxed), 1);
+
+        history.pending_insertions(40);
+        assert_eq!(revision_calls.load(Ordering::Relaxed), 2);
     }
 
     #[test]

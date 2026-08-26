@@ -1,4 +1,5 @@
 use crate::client::{worker_state_label, WorkerInfo};
+use crate::history::cells::{tool_family, ToolFamily};
 use crate::protocol::{BackgroundAgentSummary, ProcessCompletedEvent};
 use crate::text_safety::sanitize_tool_inline;
 use crate::tools::ToolCard;
@@ -113,7 +114,10 @@ pub(super) fn overlay(
             lines.push(format!("• {} · {}", clean(name), card.status.label()));
             lines.push(format!("  tool ID: {}", unknown(&card.id)));
             lines.push(format!("  details: {}", unknown(&card.args_preview)));
-            lines.push(format!("  duration ms: {}", option_value(card.duration_ms)));
+            lines.push(format!(
+                "  duration ms: {}",
+                option_value(card.reported_duration_ms())
+            ));
         }
     }
 
@@ -122,11 +126,7 @@ pub(super) fn overlay(
 
 pub(super) fn is_process_registry_card(card: &ToolCard) -> bool {
     let name = card.name.strip_prefix("t_").unwrap_or(&card.name);
-    name.starts_with("process_")
-        || matches!(
-            name,
-            "shell" | "shell_service" | "clean_background_processes"
-        )
+    tool_family(name) == ToolFamily::Process
 }
 
 fn push_agent_lines(lines: &mut Vec<String>, agent: &BackgroundAgentSummary, selected: bool) {
@@ -362,6 +362,38 @@ mod tests {
         assert!(text.contains("result summary: partial"));
         assert!(text.contains("cargo test · exited · service"));
         assert!(text.contains("process_start · running"));
+    }
+
+    #[test]
+    fn process_registry_reuses_tool_family_and_activity_uses_timestamp_duration() {
+        let sleep = ToolCard::from_tool_call(&json!({
+            "function": {"name": "t_sleep", "arguments": "{}"}
+        }));
+        let cron = ToolCard::from_tool_call(&json!({
+            "function": {"name": "t_cron_create", "arguments": "{}"}
+        }));
+        let process = ToolCard::from_tool_call(&json!({
+            "function": {"name": "t_process_start", "arguments": "{}"}
+        }));
+        let shell = ToolCard::from_tool_call(&json!({
+            "function": {"name": "shell", "arguments": "{}"}
+        }));
+        let timestamped = ToolCard::from_tool_call(&json!({
+            "function": {"name": "process_wait", "arguments": "{}"},
+            "started_at_ms": 10,
+            "completed_at_ms": 16
+        }));
+
+        assert!(is_process_registry_card(&sleep));
+        assert!(is_process_registry_card(&cron));
+        assert!(is_process_registry_card(&process));
+        assert!(!is_process_registry_card(&shell));
+        assert_eq!(timestamped.reported_duration_ms(), Some(6));
+
+        let text = overlay(&[], &[], None, &[], &[&timestamped], None)
+            .lines
+            .join("\n");
+        assert!(text.contains("duration ms: 6"));
     }
 
     #[test]

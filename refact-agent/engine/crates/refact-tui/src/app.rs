@@ -5966,8 +5966,8 @@ new-chat = "ctrl-x"
             raw: json!({"type": "browser_toolbar_action", "action": "screenshot"}),
         });
         assert_eq!(
-            app.browser_state().last_toolbar_action.as_deref(),
-            Some("screenshot")
+            app.browser_state().toolbar_actions,
+            vec!["screenshot".to_string()]
         );
 
         app.apply_chat_event(ChatEvent {
