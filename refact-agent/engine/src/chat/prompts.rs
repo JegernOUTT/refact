@@ -1670,7 +1670,11 @@ fn task_memory_summary_context_file(content: String) -> ContextFile {
 }
 
 fn task_briefing_context_file(content: &str) -> ContextFile {
-    task_memory_context_file(&PathBuf::from("(task briefing)"), content.to_string(), 100.0)
+    task_memory_context_file(
+        &PathBuf::from("(task briefing)"),
+        content.to_string(),
+        100.0,
+    )
 }
 
 fn task_context_entry_context_file(entry: &TaskContextEntry) -> ContextFile {
