@@ -82,6 +82,77 @@
   padding: var(--rf-card-pad);
 }
 
+.settingsPanel {
+  display: grid;
+  gap: var(--rf-space-4);
+  padding: var(--rf-card-pad);
+}
+
+.settingsHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--rf-space-3);
+  flex-wrap: wrap;
+}
+
+.settingsHeader > div:first-child,
+.settingsGroup {
+  display: grid;
+  gap: var(--rf-space-2);
+}
+
+.settingsHeader h2,
+.settingsHeader p,
+.settingsGroup h3,
+.settingsGroup p,
+.settingsNote,
+.settingsSuccess {
+  margin: 0;
+}
+
+.settingsHeader h2,
+.settingsGroup h3 {
+  color: var(--rf-color-fg);
+  font: var(--rf-weight-semibold) var(--rf-text-3) / var(--rf-line)
+    var(--rf-font-ui);
+}
+
+.settingsHeader p,
+.settingsGroup > p,
+.settingsNote {
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+}
+
+.settingsGroup {
+  padding-top: var(--rf-space-3);
+  border-top: var(--rf-hairline) solid var(--rf-border);
+}
+
+.settingTitle,
+.settingControl {
+  display: grid;
+  gap: var(--rf-space-1);
+}
+
+.settingTitle {
+  grid-template-columns: auto auto;
+  align-items: center;
+  justify-content: start;
+}
+
+.settingControl {
+  width: 100%;
+}
+
+.settingsSuccess {
+  color: var(--rf-color-success);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+}
+
 .cardHeader {
   display: flex;
   align-items: flex-start;
@@ -209,6 +280,10 @@
   }
 
   .cardHeader {
+    flex-direction: column;
+  }
+
+  .settingsHeader {
     flex-direction: column;
   }
 }

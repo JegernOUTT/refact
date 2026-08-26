@@ -4,6 +4,7 @@ import { http, HttpResponse } from "msw";
 import type {
   PerformanceAggregate,
   PerformanceTelemetryResponse,
+  TrajectorySettingsResponse,
 } from "../../services/refact/performance";
 import { server } from "../../utils/mockServer";
 import { render, screen, waitFor } from "../../utils/test-utils";
@@ -71,6 +72,38 @@ function telemetry(
   };
 }
 
+function trajectorySettings(): TrajectorySettingsResponse {
+  const config = {
+    session_idle_timeout_secs: 1800,
+    trajectory_writer_enabled: true,
+  };
+  return {
+    config,
+    current: config,
+    defaults: config,
+    fields: [
+      {
+        name: "session_idle_timeout_secs",
+        value_type: "integer",
+        minimum: 60,
+        maximum: 86400,
+        apply_mode: "live",
+      },
+      {
+        name: "trajectory_writer_enabled",
+        value_type: "boolean",
+        apply_mode: "restart_required",
+      },
+    ],
+  };
+}
+
+function trajectorySettingsHandler() {
+  return http.get("*/v1/trajectory-settings", () =>
+    HttpResponse.json(trajectorySettings()),
+  );
+}
+
 function renderPage() {
   return render(<PerformancePage onBack={() => undefined} />, {
     preloadedState: configState,
@@ -89,6 +122,7 @@ describe("PerformancePage", () => {
       http.get("*/v1/performance/telemetry", () =>
         HttpResponse.json(telemetry(true)),
       ),
+      trajectorySettingsHandler(),
     );
 
     renderPage();
@@ -117,6 +151,7 @@ describe("PerformancePage", () => {
       http.get("*/v1/performance/telemetry", () =>
         HttpResponse.json(telemetry(enabled, [])),
       ),
+      trajectorySettingsHandler(),
       http.post("*/v1/performance/telemetry", async ({ request }) => {
         updatePayload = await request.json();
         enabled = true;
@@ -139,6 +174,32 @@ describe("PerformancePage", () => {
     expect(screen.getByText("Enabled")).toBeInTheDocument();
   });
 
+  it("disables enabled collection and refetches telemetry", async () => {
+    let enabled = true;
+    let updatePayload: unknown = null;
+    server.use(
+      http.get("*/v1/performance/telemetry", () =>
+        HttpResponse.json(telemetry(enabled, [])),
+      ),
+      trajectorySettingsHandler(),
+      http.post("*/v1/performance/telemetry", async ({ request }) => {
+        updatePayload = await request.json();
+        enabled = false;
+        return HttpResponse.json({ schema_version: 1, enabled });
+      }),
+    );
+    const { user } = renderPage();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Disable collection" }),
+    );
+
+    await waitFor(() => expect(updatePayload).toEqual({ enabled: false }));
+    expect(
+      await screen.findByText("Telemetry collection is disabled"),
+    ).toBeInTheDocument();
+  });
+
   it("resets telemetry and clears the aggregate view", async () => {
     let components: PerformanceAggregate[] = [aggregate()];
     let resetRequests = 0;
@@ -146,6 +207,7 @@ describe("PerformancePage", () => {
       http.get("*/v1/performance/telemetry", () =>
         HttpResponse.json(telemetry(true, components)),
       ),
+      trajectorySettingsHandler(),
       http.post("*/v1/performance/telemetry/reset", () => {
         resetRequests += 1;
         components = [];
@@ -174,6 +236,7 @@ describe("PerformancePage", () => {
       http.get("*/v1/performance/telemetry", () =>
         HttpResponse.json(telemetry(true, [])),
       ),
+      trajectorySettingsHandler(),
     );
     const view = renderPage();
 
@@ -205,6 +268,7 @@ describe("PerformancePage", () => {
         requests += 1;
         return HttpResponse.json(telemetry(false, []));
       }),
+      trajectorySettingsHandler(),
     );
     renderPage();
 

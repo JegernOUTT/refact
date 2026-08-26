@@ -53,6 +53,27 @@ export type PerformanceTelemetryResetResponse = {
   enabled?: boolean;
 };
 
+export type TrajectorySettingValue = boolean | number | string | null;
+
+export type TrajectorySettingsConfig = Record<string, TrajectorySettingValue>;
+
+export type TrajectorySettingField = {
+  name: string;
+  value_type: string;
+  minimum?: number | null;
+  maximum?: number | null;
+  apply_mode: string;
+};
+
+export type TrajectorySettingsResponse = {
+  path?: string;
+  config: TrajectorySettingsConfig;
+  current: TrajectorySettingsConfig;
+  defaults: TrajectorySettingsConfig;
+  fields: TrajectorySettingField[];
+  environment_precedence?: string;
+};
+
 export const performanceApi = createApi({
   reducerPath: "performanceApi",
   baseQuery: fetchBaseQuery({
@@ -105,11 +126,40 @@ export const performanceApi = createApi({
         return { data: result.data as PerformanceTelemetryResetResponse };
       },
     }),
+    getTrajectorySettings: builder.query<TrajectorySettingsResponse, undefined>(
+      {
+        queryFn: async (_arg, api, _extraOptions, baseQuery) => {
+          const state = api.getState() as RootState;
+          const result = await baseQuery({
+            url: buildApiUrlFromState(state, "/v1/trajectory-settings"),
+          });
+          if (result.error) return { error: result.error };
+          return { data: result.data as TrajectorySettingsResponse };
+        },
+      },
+    ),
+    saveTrajectorySettings: builder.mutation<
+      TrajectorySettingsResponse,
+      TrajectorySettingsConfig
+    >({
+      queryFn: async (config, api, _extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const result = await baseQuery({
+          url: buildApiUrlFromState(state, "/v1/trajectory-settings"),
+          method: "POST",
+          body: config,
+        });
+        if (result.error) return { error: result.error };
+        return { data: result.data as TrajectorySettingsResponse };
+      },
+    }),
   }),
 });
 
 export const {
+  useGetTrajectorySettingsQuery,
   useGetPerformanceTelemetryQuery,
   useResetPerformanceTelemetryMutation,
+  useSaveTrajectorySettingsMutation,
   useSetPerformanceTelemetryEnabledMutation,
 } = performanceApi;

@@ -21,6 +21,7 @@ import {
   formatUptime,
 } from "./performanceFormatters";
 import { TelemetryPanel } from "./TelemetryPanel";
+import { TrajectorySettingsPanel } from "./TrajectorySettingsPanel";
 import styles from "./PerformancePage.module.css";
 
 export const PERFORMANCE_POLLING_INTERVAL_MS = 5_000;
@@ -160,7 +161,8 @@ export function PerformancePage({ onBack }: PerformancePageProps) {
               <div>
                 <h2>Collection state</h2>
                 <p>
-                  Telemetry stays aggregate-only and is disabled by default.
+                  Telemetry stays aggregate-only and can be enabled or disabled
+                  for this engine process.
                 </p>
               </div>
               <Badge
@@ -227,6 +229,8 @@ export function PerformancePage({ onBack }: PerformancePageProps) {
               title="Telemetry action failed"
             />
           ) : null}
+
+          <TrajectorySettingsPanel />
 
           {!collectionEnabled ? (
             <EmptyState
