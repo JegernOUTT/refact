@@ -39,7 +39,13 @@ pub fn trajectory_index_coordinator_rollout_enabled() -> bool {
 }
 
 pub(crate) fn trajectory_index_coordinator_rollout_enabled_for(value: Option<&str>) -> bool {
-    value.is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+    value.is_some_and(|value| {
+        let value = value.trim();
+        value == "1"
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+            || value.eq_ignore_ascii_case("on")
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2391,11 +2397,16 @@ mod tests {
     }
 
     #[test]
-    fn coordinator_rollout_switch_retains_legacy_fallback() {
-        for disabled in [None, Some("0"), Some("false"), Some("off")] {
+    fn coordinator_rollout_switch_defaults_on_and_retains_legacy_fallback() {
+        assert!(
+            crate::runtime_settings::TrajectoryRuntimeSettings::default()
+                .trajectory_index_coordinator_enabled
+        );
+        assert!(trajectory_index_coordinator_rollout_enabled_for(Some("1")));
+        for disabled in [Some("0"), Some("false"), Some("off")] {
             assert!(!trajectory_index_coordinator_rollout_enabled_for(disabled));
         }
-        for enabled in [Some("1"), Some("true"), Some("YES")] {
+        for enabled in [Some("1"), Some("true"), Some("YES"), Some("on")] {
             assert!(trajectory_index_coordinator_rollout_enabled_for(enabled));
         }
     }

@@ -25,7 +25,7 @@ const DEBUG_WRITE_VECDB_FILES: bool = false;
 const COOLDOWN_SECONDS: u64 = 10;
 pub const VECDB_PATH_COALESCING_ENV: &str = "REFACT_VECDB_PATH_COALESCING";
 static VECDB_PATH_COALESCING_CONFIG: std::sync::LazyLock<std::sync::RwLock<bool>> =
-    std::sync::LazyLock::new(|| std::sync::RwLock::new(false));
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(true));
 
 pub fn vecdb_path_coalescing_rollout_enabled() -> bool {
     std::env::var(VECDB_PATH_COALESCING_ENV)
@@ -949,13 +949,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn vecdb_path_coalescing_rollout_switch_defaults_off() {
-        assert!(!vecdb_path_coalescing_rollout_enabled());
+    fn vecdb_path_coalescing_rollout_switch_defaults_on_and_honors_false() {
+        let previous = std::env::var_os(VECDB_PATH_COALESCING_ENV);
+        std::env::remove_var(VECDB_PATH_COALESCING_ENV);
+        install_vecdb_path_coalescing_setting(true);
+        assert!(vecdb_path_coalescing_rollout_enabled());
         for enabled in ["1", "true", "YES", "on"] {
             std::env::set_var(VECDB_PATH_COALESCING_ENV, enabled);
             assert!(vecdb_path_coalescing_rollout_enabled());
         }
-        std::env::remove_var(VECDB_PATH_COALESCING_ENV);
+        for disabled in ["0", "false", "no", "off"] {
+            std::env::set_var(VECDB_PATH_COALESCING_ENV, disabled);
+            assert!(!vecdb_path_coalescing_rollout_enabled());
+        }
+        if let Some(previous) = previous {
+            std::env::set_var(VECDB_PATH_COALESCING_ENV, previous);
+        } else {
+            std::env::remove_var(VECDB_PATH_COALESCING_ENV);
+        }
     }
 
     #[test]

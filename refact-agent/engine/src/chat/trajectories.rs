@@ -81,8 +81,11 @@ async fn atomic_write_json_with_tmp_path(
     let result = async {
         let json = json_result?;
         let self_write = match self_write_source {
-            Some(source) => register_trajectory_self_write(path, source, &json).await,
+            Some(source) if trajectory_watcher_self_write_rollout_enabled() => {
+                register_trajectory_self_write(path, source, &json).await
+            }
             None => None,
+            Some(_) => None,
         };
         if let Err(error) = fs::write(tmp_path, &json).await {
             discard_trajectory_self_write(self_write);
@@ -116,6 +119,7 @@ use super::trajectory_index;
 
 const TITLE_GENERATION_SUBAGENT_ID: &str = "title_generation";
 pub const TRAJECTORY_WRITER_ENV: &str = "REFACT_TRAJECTORY_WRITER";
+pub const TRAJECTORY_WATCHER_SELF_WRITE_ENV: &str = "REFACT_TRAJECTORY_WATCHER_SELF_WRITE";
 const TRAJECTORY_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const TITLE_GENERATION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
@@ -199,7 +203,26 @@ impl Drop for TrajectoryWriterRolloutGuard {
 }
 
 pub fn trajectory_watcher_self_write_rollout_enabled() -> bool {
-    true
+    trajectory_watcher_self_write_rollout_enabled_for(
+        std::env::var(TRAJECTORY_WATCHER_SELF_WRITE_ENV)
+            .ok()
+            .as_deref()
+            .or_else(|| {
+                crate::runtime_settings::current()
+                    .trajectory_watcher_self_write_enabled
+                    .then_some("1")
+            }),
+    )
+}
+
+pub(crate) fn trajectory_watcher_self_write_rollout_enabled_for(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.trim();
+        value == "1"
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+            || value.eq_ignore_ascii_case("on")
+    })
 }
 
 const TRAJECTORY_SELF_WRITE_TTL: Duration = Duration::from_secs(10);
@@ -1383,8 +1406,6 @@ async fn get_or_create_buddy_conversations_dir(gcx: Arc<GlobalContext>) -> Resul
     ensure_real_dir_tree(&dir).await?;
     Ok(dir)
 }
-
-pub(crate) const BUDDY_CONVERSATIONS_KEEP: usize = 500;
 
 fn buddy_conversation_prune_throttle() -> &'static StdMutex<PruneThrottle> {
     static LAST_PRUNE_BY_DIR: OnceLock<StdMutex<PruneThrottle>> = OnceLock::new();
@@ -5653,9 +5674,10 @@ async fn process_trajectory_watcher_change(
     source: TrajectorySourceIdentity,
     path: PathBuf,
 ) {
-    if consume_trajectory_self_write(&path, &source).await
-        || (!matches!(source, TrajectorySourceIdentity::Normal)
-            && consume_trajectory_self_write(&path, &TrajectorySourceIdentity::Normal).await)
+    if trajectory_watcher_self_write_rollout_enabled()
+        && (consume_trajectory_self_write(&path, &source).await
+            || (!matches!(source, TrajectorySourceIdentity::Normal)
+                && consume_trajectory_self_write(&path, &TrajectorySourceIdentity::Normal).await))
     {
         return;
     }
@@ -5722,9 +5744,8 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
                         if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
                             tx_clone.try_send(message)
                         {
-                            let dropped = dropped_events_for_callback
-                                .fetch_add(1, Ordering::Relaxed)
-                                + 1;
+                            let dropped =
+                                dropped_events_for_callback.fetch_add(1, Ordering::Relaxed) + 1;
                             if dropped % 100 == 0 {
                                 warn!("Trajectory watcher dropped {} events because the channel is full", dropped);
                             }
@@ -8527,23 +8548,42 @@ mod tests {
     }
 
     #[test]
-    fn trajectory_writer_rollout_switch_defaults_off_and_accepts_explicit_enabled_values() {
-        assert!(!trajectory_writer_rollout_enabled_for(None));
+    fn trajectory_rollout_switches_default_on_and_honor_explicit_false() {
+        let defaults = crate::runtime_settings::TrajectoryRuntimeSettings::default();
+        assert!(defaults.trajectory_writer_enabled);
+        assert!(defaults.trajectory_index_coordinator_enabled);
+        assert!(defaults.trajectory_watcher_self_write_enabled);
+        assert!(defaults.tool_catalog_snapshots_enabled);
+        assert!(defaults.vecdb_path_coalescing_enabled);
+        assert!(trajectory_writer_rollout_enabled_for(
+            defaults.trajectory_writer_enabled.then_some("1")
+        ));
+        assert!(trajectory_watcher_self_write_rollout_enabled_for(
+            defaults
+                .trajectory_watcher_self_write_enabled
+                .then_some("1")
+        ));
         assert!(trajectory_writer_rollout_enabled_for(Some("1")));
         assert!(trajectory_writer_rollout_enabled_for(Some("true")));
         assert!(!trajectory_writer_rollout_enabled_for(Some("0")));
         assert!(!trajectory_writer_rollout_enabled_for(Some(" false ")));
         assert!(!trajectory_writer_rollout_enabled_for(Some("OFF")));
+        assert!(!trajectory_watcher_self_write_rollout_enabled_for(Some(
+            "0"
+        )));
+        assert!(!trajectory_watcher_self_write_rollout_enabled_for(Some(
+            "false"
+        )));
+        assert!(trajectory_watcher_self_write_rollout_enabled_for(Some(
+            "on"
+        )));
     }
 
     #[test]
-    fn trajectory_rollout_switches_are_fixed_after_the_first_read() {
+    fn trajectory_writer_rollout_remains_restart_cached() {
         let writer_cache = OnceLock::new();
-        let watcher_cache = OnceLock::new();
         assert!(rollout_switch_enabled(&writer_cache, || true));
-        assert!(rollout_switch_enabled(&watcher_cache, || true));
         assert!(rollout_switch_enabled(&writer_cache, || false));
-        assert!(rollout_switch_enabled(&watcher_cache, || false));
     }
 
     #[tokio::test]
@@ -20629,6 +20669,67 @@ mod tests {
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.external_reload_pending, None);
         drop(session);
+        clear_all_trajectory_self_writes();
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_watcher_self_write_disable_restores_external_reload_path() {
+        crate::runtime_settings::reset_for_test();
+        clear_all_trajectory_self_writes();
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "self-write-disabled";
+        let path = dir
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(format!("{chat_id}.json"));
+        write_trajectory_file_with_user_message(&path, chat_id, "Before Self Write", "before")
+            .await;
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        {
+            let mut session = session_arc.lock().await;
+            session.thread.title = "Before Self Write".to_string();
+            session
+                .messages
+                .push(ChatMessage::new("user".to_string(), "before".to_string()));
+            session.trajectory_dirty = false;
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session_arc.clone());
+        let mut trajectory_events = app.chat.trajectory_events_tx.subscribe();
+
+        let mut disabled = crate::runtime_settings::TrajectoryRuntimeSettings::default();
+        disabled.trajectory_watcher_self_write_enabled = false;
+        crate::runtime_settings::install_live(&disabled);
+        assert!(!trajectory_watcher_self_write_rollout_enabled());
+
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        let tmp_path = unique_trajectory_tmp_path(&path);
+        atomic_write_json_with_tmp_path(
+            &path,
+            &tmp_path,
+            Ok(content),
+            Some("Failed to write trajectory"),
+            Some(TrajectorySourceIdentity::Normal),
+        )
+        .await
+        .unwrap();
+        process_trajectory_watcher_change(
+            gcx,
+            chat_id.to_string(),
+            true,
+            TrajectorySourceIdentity::Normal,
+            path,
+        )
+        .await;
+
+        assert_eq!(trajectory_events.try_recv().unwrap().id, chat_id);
+        crate::runtime_settings::reset_for_test();
         clear_all_trajectory_self_writes();
     }
 

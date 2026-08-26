@@ -370,6 +370,24 @@ pub struct FullSoakRolloutSwitches {
     pub vecdb_path_coalescing_enabled: bool,
 }
 
+impl FullSoakRolloutSwitches {
+    fn as_all_disabled(&self) -> bool {
+        !self.trajectory_writer_enabled
+            && !self.trajectory_index_coordinator_enabled
+            && !self.trajectory_watcher_self_write_enabled
+            && !self.tool_catalog_snapshots_enabled
+            && !self.vecdb_path_coalescing_enabled
+    }
+
+    fn as_all_enabled(&self) -> bool {
+        self.trajectory_writer_enabled
+            && self.trajectory_index_coordinator_enabled
+            && self.trajectory_watcher_self_write_enabled
+            && self.tool_catalog_snapshots_enabled
+            && self.vecdb_path_coalescing_enabled
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct FullSoakCounters {
     pub queue_processors_started: u64,
@@ -2491,6 +2509,7 @@ impl FullSoakEnvGuard {
         let values = [
             crate::chat::trajectories::TRAJECTORY_WRITER_ENV,
             crate::chat::trajectory_index::TRAJECTORY_INDEX_COORDINATOR_ENV,
+            crate::chat::trajectories::TRAJECTORY_WATCHER_SELF_WRITE_ENV,
             TOOL_CATALOG_SNAPSHOTS_ENV,
             refact_vecdb::vdb_thread::VECDB_PATH_COALESCING_ENV,
         ]
@@ -2611,7 +2630,9 @@ async fn run_full_soak_sample(
     let _env = FullSoakEnvGuard::set(optimized);
     let _writer = TrajectoryWriterRolloutGuard::set(optimized);
     let fixture = FullSoakFixture::new(TOOL_POOL_DESCRIPTOR_COUNT as usize).await?;
-    fixture.vecdb.begin_sample(optimized)?;
+    fixture
+        .vecdb
+        .begin_sample(refact_vecdb::vdb_thread::vecdb_path_coalescing_rollout_enabled())?;
     let sink = Arc::new(MemoryPerfSink::new());
     let recorder = Arc::new(PerfRecorder::with_salt(
         Arc::new(BenchmarkClock::default()),
@@ -2869,8 +2890,9 @@ async fn run_full_soak_sample(
     let subsystems = FullSoakSubsystemFlags {
         chat_sessions: true,
         queue_processors: counters.queue_processors_started > 0,
-        trajectory_writer: optimized,
-        trajectory_index_coordinator: optimized,
+        trajectory_writer: crate::chat::trajectories::trajectory_writer_rollout_enabled(),
+        trajectory_index_coordinator:
+            crate::chat::trajectory_index::trajectory_index_coordinator_rollout_enabled(),
         trajectory_watcher: true,
         codegraph: fixture.base.gcx.codegraph.lock().await.is_some(),
         vecdb_local_backend: true,
@@ -2887,11 +2909,16 @@ async fn run_full_soak_sample(
     };
     let sample = FullSoakSample {
         rollout_switches: FullSoakRolloutSwitches {
-            trajectory_writer_enabled: optimized,
-            trajectory_index_coordinator_enabled: optimized,
-            trajectory_watcher_self_write_enabled: optimized,
-            tool_catalog_snapshots_enabled: optimized,
-            vecdb_path_coalescing_enabled: optimized,
+            trajectory_writer_enabled: crate::chat::trajectories::trajectory_writer_rollout_enabled(
+            ),
+            trajectory_index_coordinator_enabled:
+                crate::chat::trajectory_index::trajectory_index_coordinator_rollout_enabled(),
+            trajectory_watcher_self_write_enabled:
+                crate::chat::trajectories::trajectory_watcher_self_write_rollout_enabled(),
+            tool_catalog_snapshots_enabled: crate::app_state::tool_catalog_snapshot_rollout_enabled(
+            ),
+            vecdb_path_coalescing_enabled:
+                refact_vecdb::vdb_thread::vecdb_path_coalescing_rollout_enabled(),
         },
         subsystems,
         counters,
@@ -4671,17 +4698,9 @@ mod tests {
         assert_eq!(report.variants.len(), 2);
         assert_eq!(report.variants[0].variant, "legacy");
         assert_eq!(report.variants[1].variant, "optimized");
-        assert!(
-            !report.variants[0]
-                .rollout_switches
-                .trajectory_writer_enabled
-        );
+        assert!(report.variants[0].rollout_switches.as_all_disabled());
         assert!(!report.variants[0].subsystems.trajectory_writer);
-        assert!(
-            report.variants[1]
-                .rollout_switches
-                .trajectory_writer_enabled
-        );
+        assert!(report.variants[1].rollout_switches.as_all_enabled());
         assert!(report.variants[1].subsystems.trajectory_writer);
         assert_full_soak_invariants(&report.variants[0].counters, &report.variants[0].subsystems)
             .expect("legacy full soak invariants");

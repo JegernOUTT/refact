@@ -75,11 +75,11 @@ impl Default for TrajectoryRuntimeSettings {
             auto_enrichment_card_token_cap: AUTO_ENRICHMENT_CARD_TOKEN_CAP_DEFAULT,
             auto_enrichment_knowledge_top_n: KNOWLEDGE_TOP_N_DEFAULT,
             auto_enrichment_trajectory_top_n: TRAJECTORY_TOP_N_DEFAULT,
-            trajectory_writer_enabled: false,
-            trajectory_index_coordinator_enabled: false,
-            trajectory_watcher_self_write_enabled: false,
-            tool_catalog_snapshots_enabled: false,
-            vecdb_path_coalescing_enabled: false,
+            trajectory_writer_enabled: true,
+            trajectory_index_coordinator_enabled: true,
+            trajectory_watcher_self_write_enabled: true,
+            tool_catalog_snapshots_enabled: true,
+            vecdb_path_coalescing_enabled: true,
         }
     }
 }
@@ -163,7 +163,6 @@ pub fn install_live(settings: &TrajectoryRuntimeSettings) {
         active.event_channel_capacity,
         active.trajectory_writer_enabled,
         active.trajectory_index_coordinator_enabled,
-        active.trajectory_watcher_self_write_enabled,
         active.tool_catalog_snapshots_enabled,
         active.vecdb_path_coalescing_enabled,
     );
@@ -171,9 +170,8 @@ pub fn install_live(settings: &TrajectoryRuntimeSettings) {
     active.event_channel_capacity = restart_required.0;
     active.trajectory_writer_enabled = restart_required.1;
     active.trajectory_index_coordinator_enabled = restart_required.2;
-    active.trajectory_watcher_self_write_enabled = restart_required.3;
-    active.tool_catalog_snapshots_enabled = restart_required.4;
-    active.vecdb_path_coalescing_enabled = restart_required.5;
+    active.tool_catalog_snapshots_enabled = restart_required.3;
+    active.vecdb_path_coalescing_enabled = restart_required.4;
 }
 
 #[cfg(test)]

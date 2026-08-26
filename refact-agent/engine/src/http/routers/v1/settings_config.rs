@@ -447,6 +447,13 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         maximum: None,
         apply_mode: "restart_required",
     };
+    let live_bool = |name| TrajectorySettingField {
+        name,
+        value_type: "boolean",
+        minimum: None,
+        maximum: None,
+        apply_mode: "live",
+    };
     vec![
         live_usize("internal_traces_keep_per_folder", 10, 10_000),
         live_usize("internal_trace_prune_interval_secs", 60, 86_400),
@@ -469,7 +476,7 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         live_usize("auto_enrichment_trajectory_top_n", 1, 20),
         restart_bool("trajectory_writer_enabled"),
         restart_bool("trajectory_index_coordinator_enabled"),
-        restart_bool("trajectory_watcher_self_write_enabled"),
+        live_bool("trajectory_watcher_self_write_enabled"),
         restart_bool("tool_catalog_snapshots_enabled"),
         restart_bool("vecdb_path_coalescing_enabled"),
     ]
@@ -485,7 +492,7 @@ fn trajectory_settings_response(
         current: crate::runtime_settings::current(),
         defaults: crate::runtime_settings::TrajectoryRuntimeSettings::default(),
         fields: trajectory_settings_fields(),
-        environment_precedence: "REFACT_TRAJECTORY_WRITER, REFACT_TRAJECTORY_INDEX_COORDINATOR, REFACT_TRAJECTORY_WATCHER_SELF_WRITE, REFACT_TOOL_CATALOG_SNAPSHOTS, and REFACT_VECDB_PATH_COALESCING override persisted rollout switches after restart.",
+        environment_precedence: "REFACT_TRAJECTORY_WRITER, REFACT_TRAJECTORY_INDEX_COORDINATOR, REFACT_TRAJECTORY_WATCHER_SELF_WRITE, REFACT_TOOL_CATALOG_SNAPSHOTS, and REFACT_VECDB_PATH_COALESCING take precedence over persisted rollout switches. Persisted writer, index coordinator, tool catalog, and VecDB changes apply after restart; watcher self-write suppression applies live.",
     })
 }
 
@@ -550,6 +557,26 @@ mod tests {
             .iter()
             .any(|field| field.name == "event_channel_capacity"
                 && field.apply_mode == "restart_required"));
+        for name in [
+            "trajectory_writer_enabled",
+            "trajectory_index_coordinator_enabled",
+            "trajectory_watcher_self_write_enabled",
+            "tool_catalog_snapshots_enabled",
+            "vecdb_path_coalescing_enabled",
+        ] {
+            assert!(initial
+                .fields
+                .iter()
+                .any(|field| field.name == name && field.value_type == "boolean"));
+        }
+        assert!(initial.fields.iter().any(|field| field.name
+            == "trajectory_watcher_self_write_enabled"
+            && field.apply_mode == "live"));
+        assert!(initial.defaults.trajectory_writer_enabled);
+        assert!(initial.defaults.trajectory_index_coordinator_enabled);
+        assert!(initial.defaults.trajectory_watcher_self_write_enabled);
+        assert!(initial.defaults.tool_catalog_snapshots_enabled);
+        assert!(initial.defaults.vecdb_path_coalescing_enabled);
 
         let mut updated = initial.config.clone();
         updated.internal_traces_keep_per_folder = 25;
@@ -582,7 +609,7 @@ mod tests {
         let app = trajectory_settings_app().await;
         let mut valid = crate::runtime_settings::TrajectoryRuntimeSettings::default();
         valid.max_queue_size = 7;
-        handle_v1_trajectory_settings_post(
+        let _ = handle_v1_trajectory_settings_post(
             State(app.clone()),
             hyper::body::Bytes::from(serde_json::to_vec(&valid).unwrap()),
         )
@@ -619,12 +646,18 @@ mod tests {
         updated.event_channel_capacity = initial_capacity + 100;
         updated.auto_enrichment_total_token_cap = 800;
         updated.auto_enrichment_card_token_cap = 400;
-        handle_v1_trajectory_settings_post(
-            State(app),
+        updated.trajectory_writer_enabled = false;
+        updated.trajectory_index_coordinator_enabled = false;
+        updated.trajectory_watcher_self_write_enabled = false;
+        updated.tool_catalog_snapshots_enabled = false;
+        updated.vecdb_path_coalescing_enabled = false;
+        let saved = handle_v1_trajectory_settings_post(
+            State(app.clone()),
             hyper::body::Bytes::from(serde_json::to_vec(&updated).unwrap()),
         )
         .await
         .unwrap();
+        assert_eq!(saved.0.config, updated);
         assert_eq!(refact_chat_api::max_queue_size(), 9);
         assert_eq!(
             refact_chat_history::config::limits().event_channel_capacity,
@@ -634,24 +667,86 @@ mod tests {
             crate::runtime_settings::current().auto_enrichment_total_token_cap,
             800
         );
+        assert!(crate::runtime_settings::current().trajectory_writer_enabled);
+        assert!(crate::runtime_settings::current().trajectory_index_coordinator_enabled);
+        assert!(!crate::runtime_settings::current().trajectory_watcher_self_write_enabled);
+        assert!(crate::runtime_settings::current().tool_catalog_snapshots_enabled);
+        assert!(crate::runtime_settings::current().vecdb_path_coalescing_enabled);
+
+        let mut mixed = updated.clone();
+        mixed.trajectory_writer_enabled = true;
+        mixed.trajectory_index_coordinator_enabled = false;
+        mixed.trajectory_watcher_self_write_enabled = true;
+        mixed.tool_catalog_snapshots_enabled = false;
+        mixed.vecdb_path_coalescing_enabled = true;
+        let mixed_saved = handle_v1_trajectory_settings_post(
+            State(app.clone()),
+            hyper::body::Bytes::from(serde_json::to_vec(&mixed).unwrap()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(mixed_saved.0.config, mixed);
+        assert!(crate::runtime_settings::current().trajectory_writer_enabled);
+        assert!(crate::runtime_settings::current().trajectory_index_coordinator_enabled);
+        assert!(crate::runtime_settings::current().trajectory_watcher_self_write_enabled);
+        assert!(crate::runtime_settings::current().tool_catalog_snapshots_enabled);
+        assert!(crate::runtime_settings::current().vecdb_path_coalescing_enabled);
+        assert_eq!(
+            handle_v1_trajectory_settings_get(State(app))
+                .await
+                .unwrap()
+                .0
+                .config,
+            mixed
+        );
     }
 
     #[test]
     #[serial]
     fn trajectory_settings_environment_rollout_override_wins() {
-        let previous = std::env::var_os(crate::chat::trajectories::TRAJECTORY_WRITER_ENV);
-        std::env::set_var(crate::chat::trajectories::TRAJECTORY_WRITER_ENV, "1");
-        assert!(
-            crate::chat::trajectories::trajectory_writer_rollout_enabled_for(
-                std::env::var(crate::chat::trajectories::TRAJECTORY_WRITER_ENV)
-                    .ok()
-                    .as_deref()
-            )
-        );
+        let cases = [
+            (
+                crate::chat::trajectories::TRAJECTORY_WRITER_ENV,
+                crate::chat::trajectories::trajectory_writer_rollout_enabled_for
+                    as fn(Option<&str>) -> bool,
+            ),
+            (
+                crate::chat::trajectory_index::TRAJECTORY_INDEX_COORDINATOR_ENV,
+                crate::chat::trajectory_index::trajectory_index_coordinator_rollout_enabled_for,
+            ),
+            (
+                crate::chat::trajectories::TRAJECTORY_WATCHER_SELF_WRITE_ENV,
+                crate::chat::trajectories::trajectory_watcher_self_write_rollout_enabled_for,
+            ),
+            (
+                crate::app_state::TOOL_CATALOG_SNAPSHOTS_ENV,
+                crate::app_state::tool_catalog_snapshot_rollout_enabled_for,
+            ),
+        ];
+        for (key, enabled) in cases {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, "0");
+            assert!(!enabled(std::env::var(key).ok().as_deref()));
+            std::env::set_var(key, "on");
+            assert!(enabled(std::env::var(key).ok().as_deref()));
+            if let Some(previous) = previous {
+                std::env::set_var(key, previous);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+        let previous = std::env::var_os(refact_vecdb::vdb_thread::VECDB_PATH_COALESCING_ENV);
+        std::env::set_var(refact_vecdb::vdb_thread::VECDB_PATH_COALESCING_ENV, "0");
+        assert!(!refact_vecdb::vdb_thread::vecdb_path_coalescing_rollout_enabled());
+        std::env::set_var(refact_vecdb::vdb_thread::VECDB_PATH_COALESCING_ENV, "on");
+        assert!(refact_vecdb::vdb_thread::vecdb_path_coalescing_rollout_enabled());
         if let Some(previous) = previous {
-            std::env::set_var(crate::chat::trajectories::TRAJECTORY_WRITER_ENV, previous);
+            std::env::set_var(
+                refact_vecdb::vdb_thread::VECDB_PATH_COALESCING_ENV,
+                previous,
+            );
         } else {
-            std::env::remove_var(crate::chat::trajectories::TRAJECTORY_WRITER_ENV);
+            std::env::remove_var(refact_vecdb::vdb_thread::VECDB_PATH_COALESCING_ENV);
         }
     }
 

@@ -470,12 +470,7 @@ impl AppToolRegistry {
 
     #[cfg(test)]
     fn snapshot_cache_enabled_for(value: Option<&str>) -> bool {
-        value.is_some_and(|value| {
-            value == "1"
-                || value.eq_ignore_ascii_case("true")
-                || value.eq_ignore_ascii_case("yes")
-                || value.eq_ignore_ascii_case("on")
-        })
+        tool_catalog_snapshot_rollout_enabled_for(value)
     }
 
     async fn catalog_key_with_scope(
@@ -739,13 +734,17 @@ pub(crate) fn tool_catalog_snapshot_rollout_enabled() -> bool {
                 .tool_catalog_snapshots_enabled
                 .then_some("1")
         })
-        .is_some_and(|value| {
-            let value = value.trim();
-            value == "1"
-                || value.eq_ignore_ascii_case("true")
-                || value.eq_ignore_ascii_case("yes")
-                || value.eq_ignore_ascii_case("on")
-        })
+        .is_some_and(|value| tool_catalog_snapshot_rollout_enabled_for(Some(value)))
+}
+
+pub(crate) fn tool_catalog_snapshot_rollout_enabled_for(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.trim();
+        value == "1"
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+            || value.eq_ignore_ascii_case("on")
+    })
 }
 
 #[async_trait]
@@ -1843,8 +1842,12 @@ mod tests {
 
     #[serial]
     #[test]
-    fn tool_catalog_snapshot_rollout_switch_keeps_the_cold_fallback_available() {
-        for disabled in [None, Some("0"), Some("false"), Some("no"), Some("off")] {
+    fn tool_catalog_snapshot_rollout_switch_defaults_on_and_keeps_the_cold_fallback_available() {
+        assert!(
+            crate::runtime_settings::TrajectoryRuntimeSettings::default()
+                .tool_catalog_snapshots_enabled
+        );
+        for disabled in [Some("0"), Some("false"), Some("no"), Some("off")] {
             assert!(!AppToolRegistry::snapshot_cache_enabled_for(disabled));
         }
         for enabled in [Some("1"), Some("true"), Some("yes")] {
