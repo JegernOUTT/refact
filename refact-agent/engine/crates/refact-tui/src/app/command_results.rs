@@ -14,6 +14,25 @@ impl CommandOrigin {
 }
 
 impl App {
+    pub(super) fn apply_daemon_status(
+        &mut self,
+        status: DaemonStatus,
+        base_url: String,
+        source: crate::client::DaemonUrlSource,
+    ) {
+        self.daemon_online = true;
+        self.daemon_status = Some(status);
+        self.daemon_base_url = Some(base_url);
+        self.daemon_url_source = Some(source);
+        self.show_status_card();
+    }
+
+    pub(super) fn record_daemon_status_error(&mut self, error: &str) {
+        self.daemon_online = false;
+        self.retry_hint = retry_hint_from_message(error);
+        self.add_notice(format!("Failed to load daemon status: {error}"));
+    }
+
     pub(super) fn command_available(&mut self, command: CommandDef, name: &str) -> bool {
         if command.available(CommandContext {
             active_turn: self.is_chat_active(),
