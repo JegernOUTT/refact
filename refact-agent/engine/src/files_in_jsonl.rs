@@ -25,11 +25,7 @@ pub async fn enqueue_all_docs_from_jsonl(
         docs.push(d.to_string_lossy().to_string());
     }
     {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64();
-        *gcx.documents_state.cache_dirty.lock().await = now;
+        crate::files_correction::mark_files_cache_dirty(&gcx.documents_state.cache_dirty).await;
         let jsonl_files = &mut gcx.documents_state.jsonl_files.lock().unwrap();
         jsonl_files.clear();
         jsonl_files.extend(paths);

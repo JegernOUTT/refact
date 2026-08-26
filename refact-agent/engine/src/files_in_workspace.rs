@@ -163,7 +163,7 @@ pub async fn get_file_text_from_memory_or_disk_for_model_context(
 
 pub(crate) struct FileReadContext {
     privacy_settings: Arc<PrivacySettings>,
-    worktree_mappings: Vec<crate::files_correction::RegisteredWorktreePathMapping>,
+    worktree_mappings: crate::files_correction::WorktreePathMappings,
 }
 
 pub(crate) fn registered_alias_paths(
@@ -992,8 +992,42 @@ fn path_is_refact_import_internal(path: &Path) -> bool {
     false
 }
 
+const REFACT_RUNTIME_STATE_ENTRIES: &[&str] = &[
+    "state.json",
+    "runtime_queue.jsonl",
+    "trajectories",
+    "chats",
+    "buddy",
+];
+
+fn path_is_refact_runtime_state(path: &Path) -> bool {
+    let mut seen_refact = false;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        let name = name.to_string_lossy();
+        if seen_refact
+            && REFACT_RUNTIME_STATE_ENTRIES.iter().any(|entry| {
+                name == *entry
+                    || name
+                        .strip_prefix(entry)
+                        .is_some_and(|rest| rest.starts_with('.'))
+            })
+        {
+            return true;
+        }
+        if name == ".refact" {
+            seen_refact = true;
+        }
+    }
+    false
+}
+
 fn path_is_refact_internal(path: &Path) -> bool {
-    path_is_refact_import_internal(path) || crate::file_filter::is_refact_codegraph_path(path)
+    path_is_refact_import_internal(path)
+        || path_is_refact_runtime_state(path)
+        || crate::file_filter::is_refact_codegraph_path(path)
 }
 
 fn path_triggers_registry_reload(path: &Path) -> bool {
@@ -1407,11 +1441,7 @@ async fn enqueue_resolved_docs(
             workspace_files.retain(|path| seen.insert(path.clone()));
             gcx.documents_state.cache_dirty.clone()
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64();
-        *dirty_arc.lock().await = now + 1.0;
+        crate::files_correction::mark_files_cache_dirty(&dirty_arc).await;
     }
 }
 
@@ -1488,10 +1518,7 @@ pub async fn enqueue_all_files_from_workspace_folders(
         gcx.documents_state.cache_dirty.clone()
     };
 
-    *cache_dirty.lock().await = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64();
+    crate::files_correction::mark_files_cache_dirty(&cache_dirty).await;
 
     let current_paths = all_files.iter().cloned().collect::<HashSet<_>>();
     let removed_paths = old_workspace_files
@@ -1673,11 +1700,7 @@ pub async fn on_did_delete(gcx: Arc<GlobalContext>, path: &PathBuf) {
         )
     };
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64();
-    (*dirty_arc.lock().await) = now;
+    crate::files_correction::mark_files_cache_dirty(&dirty_arc).await;
 
     let delete_path = normalize_path_for_index_store(&gcx, path);
 
@@ -3058,10 +3081,12 @@ mod tests {
         let worktree = normalized(&temp.path().join("worktree"));
         let source_file = source.join("src").join("lib.rs");
         let worktree_file = worktree.join("src").join("lib.rs");
-        let mappings = vec![crate::files_correction::RegisteredWorktreePathMapping {
-            root: worktree,
-            source_root: source,
-        }];
+        let mappings = Arc::new(vec![
+            crate::files_correction::RegisteredWorktreePathMapping {
+                root: worktree,
+                source_root: source,
+            },
+        ]);
         let controlled_settings = Arc::new(PrivacySettings {
             privacy_rules: crate::privacy::FilePrivacySettings {
                 only_send_to_servers_I_control: vec![source_file.to_string_lossy().to_string()],

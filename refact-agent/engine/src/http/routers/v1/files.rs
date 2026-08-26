@@ -13,7 +13,7 @@ use crate::custom_error::ScratchError;
 use crate::files_blocklist::{is_blocklisted, IndexingEverywhere};
 use crate::files_correction::{
     check_if_its_inside_a_workspace_worktree_or_config, get_unscoped_project_dirs,
-    registered_worktree_path_mappings, RegisteredWorktreePathMapping,
+    registered_worktree_path_mappings, WorktreePathMappings,
 };
 use crate::files_in_workspace::{check_file_privacy_for_send, strictest_zone_for_path};
 use crate::global_context::GlobalContext;
@@ -193,7 +193,7 @@ fn sort_entries(entries: &mut [TreeEntry]) {
 struct TreePrivacyResolver {
     policy: refact_privacy::CompiledPolicy,
     workspace_roots: Vec<PathBuf>,
-    worktree_mappings: Vec<RegisteredWorktreePathMapping>,
+    worktree_mappings: WorktreePathMappings,
 }
 
 impl TreePrivacyResolver {

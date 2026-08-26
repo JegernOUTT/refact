@@ -20,6 +20,9 @@ use crate::yaml_configs::customization_registry::get_project_registry;
 use sqlite_vec::sqlite3_vec_init;
 use rusqlite::ffi::sqlite3_auto_extension;
 
+#[global_allocator]
+static GLOBAL_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 // mods roughly sorted by dependency ↓
 
 pub use refact_agentic;

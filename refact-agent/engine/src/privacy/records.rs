@@ -90,16 +90,25 @@ pub(crate) async fn filter_path_enrichment_for_model_context(
     let mut metadata = collected.metadata;
     let mut references = Vec::new();
     let mut seen = HashSet::new();
+    let compiled_policy = {
+        let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+        policy.compile().ok()
+    };
+    let worktree_mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
     for candidate in collected.candidates {
         if check_file_privacy_for_model_context(gcx.clone(), &candidate.canonical_path)
             .await
             .is_err()
-            || !path_allowed_for_destination(
-                &gcx,
-                &candidate.canonical_path,
-                destination,
-                derived_zones,
-            )
+            || !compiled_policy.as_ref().is_some_and(|compiled| {
+                path_allowed_for_destination(
+                    &gcx,
+                    compiled,
+                    &worktree_mappings,
+                    &candidate.canonical_path,
+                    destination,
+                    derived_zones,
+                )
+            })
         {
             metadata.withheld_count += 1;
             continue;
@@ -151,16 +160,13 @@ pub(crate) fn tool_enrichment_from_path_references(enrichment: PathEnrichment) -
 
 fn path_allowed_for_destination(
     gcx: &Arc<GlobalContext>,
+    compiled: &refact_privacy::CompiledPolicy,
+    mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
     path: &Path,
     destination: &Destination,
     derived_zones: &DerivedPrivacyZones,
 ) -> bool {
-    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
-    let Ok(compiled) = policy.compile() else {
-        return false;
-    };
-    let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
-    let zone = zone_for_record_path(gcx, &compiled, path, &mappings, derived_zones);
+    let zone = zone_for_record_path(gcx, compiled, path, mappings, derived_zones);
     zone != "blocked"
         && compiled
             .zone_named(&zone)

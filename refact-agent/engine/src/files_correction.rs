@@ -56,13 +56,13 @@ pub struct RegisteredWorktreePathMapping {
 
 const WORKTREE_MAPPINGS_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
+pub type WorktreePathMappings = Arc<Vec<RegisteredWorktreePathMapping>>;
+
 static WORKTREE_MAPPINGS_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<
-        std::collections::HashMap<PathBuf, (Instant, Vec<RegisteredWorktreePathMapping>)>,
-    >,
+    std::sync::Mutex<std::collections::HashMap<PathBuf, (Instant, WorktreePathMappings)>>,
 > = std::sync::OnceLock::new();
 
-pub fn registered_worktree_path_mappings(cache_dir: &Path) -> Vec<RegisteredWorktreePathMapping> {
+pub fn registered_worktree_path_mappings(cache_dir: &Path) -> WorktreePathMappings {
     let cache = WORKTREE_MAPPINGS_CACHE
         .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     {
@@ -71,15 +71,15 @@ pub fn registered_worktree_path_mappings(cache_dir: &Path) -> Vec<RegisteredWork
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some((stamped_at, mappings)) = guard.get(cache_dir) {
             if stamped_at.elapsed() < WORKTREE_MAPPINGS_TTL {
-                return mappings.clone();
+                return Arc::clone(mappings);
             }
         }
     }
-    let mappings = registered_worktree_path_mappings_uncached(cache_dir);
+    let mappings = Arc::new(registered_worktree_path_mappings_uncached(cache_dir));
     cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(cache_dir.to_path_buf(), (Instant::now(), mappings.clone()));
+        .insert(cache_dir.to_path_buf(), (Instant::now(), Arc::clone(&mappings)));
     mappings
 }
 
@@ -209,6 +209,20 @@ pub fn project_dirs_for_unscoped_paths(cache_dir: &Path, project_dirs: &[PathBuf
             .filter_map(|path| normalize_path_for_unscoped_paths(path, &mappings))
             .filter(|path| path.is_dir()),
     )
+}
+
+pub const FILES_CACHE_DEBOUNCE_SECONDS: f64 = 5.0;
+
+pub async fn mark_files_cache_dirty(cache_dirty: &Arc<tokio::sync::Mutex<f64>>) {
+    let deadline = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
+        + FILES_CACHE_DEBOUNCE_SECONDS;
+    let mut dirty = cache_dirty.lock().await;
+    if *dirty <= 0.0 || deadline < *dirty {
+        *dirty = deadline;
+    }
 }
 
 pub async fn files_cache_rebuild_as_needed(
