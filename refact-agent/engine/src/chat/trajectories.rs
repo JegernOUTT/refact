@@ -139,6 +139,13 @@ where
 }
 
 pub fn trajectory_writer_rollout_enabled() -> bool {
+    #[cfg(any(test, feature = "bench"))]
+    if let Some(enabled) = *trajectory_writer_rollout_override()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    {
+        return enabled;
+    }
     rollout_switch_enabled(&TRAJECTORY_WRITER_ROLLOUT, || {
         trajectory_writer_rollout_enabled_for(std::env::var(TRAJECTORY_WRITER_ENV).ok().as_deref())
     })
@@ -152,6 +159,36 @@ pub(crate) fn trajectory_writer_rollout_enabled_for(value: Option<&str>) -> bool
             || value.eq_ignore_ascii_case("yes")
             || value.eq_ignore_ascii_case("on")
     })
+}
+
+#[cfg(any(test, feature = "bench"))]
+fn trajectory_writer_rollout_override() -> &'static StdMutex<Option<bool>> {
+    static OVERRIDE: OnceLock<StdMutex<Option<bool>>> = OnceLock::new();
+    OVERRIDE.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(any(test, feature = "bench"))]
+pub(crate) struct TrajectoryWriterRolloutGuard(Option<bool>);
+
+#[cfg(any(test, feature = "bench"))]
+impl TrajectoryWriterRolloutGuard {
+    pub(crate) fn set(enabled: bool) -> Self {
+        let mut override_value = trajectory_writer_rollout_override()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = *override_value;
+        *override_value = Some(enabled);
+        Self(previous)
+    }
+}
+
+#[cfg(any(test, feature = "bench"))]
+impl Drop for TrajectoryWriterRolloutGuard {
+    fn drop(&mut self) {
+        *trajectory_writer_rollout_override()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.0.take();
+    }
 }
 
 pub fn trajectory_watcher_self_write_rollout_enabled() -> bool {
@@ -4225,6 +4262,9 @@ pub async fn try_save_trajectory_with_intent(
     if !intent.persists() {
         return Ok(true);
     }
+    if !trajectory_writer_rollout_enabled() {
+        return try_save_trajectory_legacy_with_intent(app, session_arc, intent).await;
+    }
     {
         let session = session_arc.lock().await;
         if !session.trajectory_dirty {
@@ -4237,6 +4277,22 @@ pub async fn try_save_trajectory_with_intent(
     }
     let session = session_arc.lock().await;
     Ok(!session.trajectory_dirty)
+}
+
+async fn try_save_trajectory_legacy_with_intent(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+    intent: TrajectoryCommitIntent,
+) -> Result<bool, String> {
+    let snapshot = {
+        let session = session_arc.lock().await;
+        if !session.trajectory_dirty {
+            return Ok(true);
+        }
+        trajectory_snapshot_from_session(&session)
+    };
+    commit_trajectory_snapshot_for_session(app.gcx, session_arc.clone(), snapshot, intent).await?;
+    Ok(!session_arc.lock().await.trajectory_dirty)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4300,8 +4356,12 @@ async fn commit_trajectory_snapshot_for_session(
 async fn schedule_trajectory_writer(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
-    _intent: TrajectoryCommitIntent,
+    intent: TrajectoryCommitIntent,
 ) -> Result<u64, String> {
+    if !trajectory_writer_rollout_enabled() {
+        try_save_trajectory_legacy_with_intent(app, session_arc.clone(), intent).await?;
+        return Ok(session_arc.lock().await.trajectory_committed_version);
+    }
     let should_spawn = {
         let mut session = session_arc.lock().await;
         let target_version = session.trajectory_version;
@@ -4318,10 +4378,11 @@ async fn schedule_trajectory_writer(
         target_version
     };
     let gcx = app.gcx.clone();
+    let writer_session_arc = session_arc.clone();
     tokio::spawn(async move {
         loop {
             let snapshot = {
-                let session = session_arc.lock().await;
+                let session = writer_session_arc.lock().await;
                 if !session.trajectory_dirty {
                     None
                 } else {
@@ -4329,7 +4390,7 @@ async fn schedule_trajectory_writer(
                 }
             };
             let Some(snapshot) = snapshot else {
-                let mut session = session_arc.lock().await;
+                let mut session = writer_session_arc.lock().await;
                 session.trajectory_save_in_flight = false;
                 session.trajectory_save_queued = false;
                 session.trajectory_commit_notify.notify_waiters();
@@ -4338,12 +4399,12 @@ async fn schedule_trajectory_writer(
 
             let result = commit_trajectory_snapshot_for_session(
                 gcx.clone(),
-                session_arc.clone(),
+                writer_session_arc.clone(),
                 snapshot,
                 TrajectoryCommitIntent::Checkpoint,
             )
             .await;
-            let mut session = session_arc.lock().await;
+            let mut session = writer_session_arc.lock().await;
             match result {
                 Ok(_) => {
                     session.trajectory_save_error = None;
@@ -4367,6 +4428,9 @@ async fn schedule_trajectory_writer(
             return;
         }
     });
+    if intent.requires_durability() {
+        wait_for_trajectory_commit(session_arc, should_spawn).await?;
+    }
     Ok(should_spawn)
 }
 
@@ -4449,15 +4513,13 @@ pub fn maybe_save_trajectory_background(app: AppState, session_arc: Arc<AMutex<C
 pub fn maybe_save_trajectory_background_with_intent(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
-    _intent: TrajectoryCommitIntent,
+    intent: TrajectoryCommitIntent,
 ) {
-    if app.runtime.shutdown_flag.load(Ordering::Relaxed) {
+    if app.runtime.shutdown_flag.load(Ordering::Relaxed) || !intent.persists() {
         return;
     }
     tokio::spawn(async move {
-        if let Err(error) =
-            schedule_trajectory_writer(app, session_arc, TrajectoryCommitIntent::Checkpoint).await
-        {
+        if let Err(error) = schedule_trajectory_writer(app, session_arc, intent).await {
             warn!("{}", error);
         }
     });
@@ -8107,8 +8169,11 @@ mod tests {
         assert_eq!(content, vec!["older", "newer"]);
     }
 
+    #[serial]
     #[tokio::test]
-    async fn checkpoint_writer_coalesces_to_the_latest_session_snapshot() {
+    async fn trajectory_writer_enabled_checkpoints_coalesce_to_the_latest_session_snapshot() {
+        let _lock = serial_test_guard();
+        let _writer = TrajectoryWriterRolloutGuard::set(true);
         let workspace = tempfile::tempdir().unwrap();
         let (gcx, app) = make_app_with_workspace(workspace.path()).await;
         let chat_id = "checkpoint-writer-coalesces";
@@ -8147,8 +8212,149 @@ mod tests {
         );
     }
 
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_writer_disabled_checkpoint_saves_synchronously() {
+        let _lock = serial_test_guard();
+        let _writer = TrajectoryWriterRolloutGuard::set(false);
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "checkpoint-writer-legacy";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+
+        session_arc
+            .lock()
+            .await
+            .add_message(ChatMessage::new("user".to_string(), "first".to_string()));
+        try_save_trajectory_with_intent(
+            app,
+            session_arc.clone(),
+            TrajectoryCommitIntent::Checkpoint,
+        )
+        .await
+        .unwrap();
+
+        let session = session_arc.lock().await;
+        assert!(!session.trajectory_dirty);
+        assert!(!session.trajectory_save_in_flight);
+        assert_eq!(
+            session.trajectory_committed_version,
+            session.trajectory_version
+        );
+        drop(session);
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_writer_background_required_intent_waits_for_its_commit() {
+        let _lock = serial_test_guard();
+        let _writer = TrajectoryWriterRolloutGuard::set(true);
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "background-required-writer";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        session_arc
+            .lock()
+            .await
+            .add_message(ChatMessage::new("user".to_string(), "required".to_string()));
+
+        maybe_save_trajectory_background_with_intent(
+            app,
+            session_arc.clone(),
+            TrajectoryCommitIntent::Required,
+        );
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_trajectory_commit(session_arc.clone(), 1),
+        )
+        .await
+        .expect("background required save should commit")
+        .unwrap();
+
+        let session = session_arc.lock().await;
+        assert!(!session.trajectory_dirty);
+        assert_eq!(
+            session.trajectory_committed_version,
+            session.trajectory_version
+        );
+        drop(session);
+        assert!(load_trajectory_for_chat(gcx, chat_id).await.is_some());
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn trajectory_writer_paths_preserve_stale_required_and_shutdown_commits() {
+        let _lock = serial_test_guard();
+        for enabled in [false, true] {
+            let _writer = TrajectoryWriterRolloutGuard::set(enabled);
+            let workspace = tempfile::tempdir().unwrap();
+            let (gcx, app) = make_app_with_workspace(workspace.path()).await;
+            let chat_id = format!("writer-path-{enabled}");
+            let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.clone())));
+
+            let stale = {
+                let mut session = session_arc.lock().await;
+                session.add_message(ChatMessage::new("user".to_string(), "older".to_string()));
+                trajectory_snapshot_from_session(&session)
+            };
+            let current = {
+                let mut session = session_arc.lock().await;
+                session.add_message(ChatMessage::new("user".to_string(), "newer".to_string()));
+                trajectory_snapshot_from_session(&session)
+            };
+            assert_eq!(
+                commit_trajectory_snapshot_for_session(
+                    gcx.clone(),
+                    session_arc.clone(),
+                    current,
+                    TrajectoryCommitIntent::Required,
+                )
+                .await
+                .unwrap(),
+                SessionTrajectoryCommitOutcome::Committed
+            );
+            assert_eq!(
+                commit_trajectory_snapshot_for_session(
+                    gcx.clone(),
+                    session_arc.clone(),
+                    stale,
+                    TrajectoryCommitIntent::Required,
+                )
+                .await
+                .unwrap(),
+                SessionTrajectoryCommitOutcome::SkippedStale
+            );
+
+            session_arc
+                .lock()
+                .await
+                .add_message(ChatMessage::new("user".to_string(), "shutdown".to_string()));
+            app.chat
+                .sessions
+                .write()
+                .await
+                .insert(chat_id.clone(), session_arc);
+            flush_all_trajectories(app).await.unwrap();
+
+            let loaded = load_trajectory_for_chat(gcx, &chat_id).await.unwrap();
+            assert_eq!(
+                loaded
+                    .messages
+                    .iter()
+                    .map(|message| message.content.content_text_only())
+                    .collect::<Vec<_>>(),
+                vec!["older", "newer", "shutdown"]
+            );
+        }
+    }
+
+    #[serial]
     #[tokio::test]
     async fn required_writer_waits_for_a_checkpoint_and_commits_latest_version() {
+        let _lock = serial_test_guard();
+        let _writer = TrajectoryWriterRolloutGuard::set(true);
         let workspace = tempfile::tempdir().unwrap();
         let (gcx, app) = make_app_with_workspace(workspace.path()).await;
         let chat_id = "required-after-checkpoint";
@@ -8406,6 +8612,7 @@ mod tests {
     #[tokio::test]
     async fn trajectory_writer_failed_checkpoint_retries_before_a_required_commit() {
         let _lock = serial_test_guard();
+        let _writer = TrajectoryWriterRolloutGuard::set(true);
         let workspace = tempfile::tempdir().unwrap();
         let (gcx, app) = make_app_with_workspace(workspace.path()).await;
         let chat_id = "checkpoint-retry-required";
@@ -8580,6 +8787,7 @@ mod tests {
     #[tokio::test]
     async fn trajectory_writer_registry_cleans_completed_and_source_isolated_entries() {
         let _lock = serial_test_guard();
+        let _writer = TrajectoryWriterRolloutGuard::set(true);
         let workspace = tempfile::tempdir().unwrap();
         let (gcx, _) = make_app_with_workspace(workspace.path()).await;
         let chat_id = "detached-writer-source-isolation";

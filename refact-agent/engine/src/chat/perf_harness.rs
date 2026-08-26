@@ -29,7 +29,7 @@ use crate::chat::generation::batch_stream_delta_ops;
 use crate::knowledge::enrichment::enrich_messages_with_knowledge;
 use crate::chat::trajectories::{
     find_trajectory_path, load_trajectory_for_chat, persist_trajectory_snapshot_with_intent,
-    trajectory_snapshot_from_session,
+    trajectory_snapshot_from_session, TrajectoryWriterRolloutGuard,
 };
 use crate::chat::trajectory_index::{
     rebuild_trajectory_index_from_disk, upsert_trajectory_index_entry_from_owned_value,
@@ -2610,6 +2610,7 @@ async fn run_full_soak_sample(
         .lock()
         .map_err(|_| "full soak performance recorder lock poisoned".to_string())?;
     let _env = FullSoakEnvGuard::set(optimized);
+    let _writer = TrajectoryWriterRolloutGuard::set(optimized);
     let fixture = FullSoakFixture::new(TOOL_POOL_DESCRIPTOR_COUNT as usize).await?;
     fixture.vecdb.begin_sample(optimized)?;
     let sink = Arc::new(MemoryPerfSink::new());
@@ -3686,6 +3687,7 @@ async fn run_sample(
         .lock()
         .map_err(|_| "performance recorder test lock poisoned".to_string())?;
     let _writer_env_guard = TrajectoryWriterEnvGuard::set(writer_enabled);
+    let _writer = TrajectoryWriterRolloutGuard::set(writer_enabled);
     let sink = Arc::new(MemoryPerfSink::new());
     let recorder = Arc::new(PerfRecorder::with_salt(
         Arc::new(BenchmarkClock::default()),
@@ -4675,11 +4677,13 @@ mod tests {
                 .rollout_switches
                 .trajectory_writer_enabled
         );
+        assert!(!report.variants[0].subsystems.trajectory_writer);
         assert!(
             report.variants[1]
                 .rollout_switches
                 .trajectory_writer_enabled
         );
+        assert!(report.variants[1].subsystems.trajectory_writer);
         assert_full_soak_invariants(&report.variants[0].counters, &report.variants[0].subsystems)
             .expect("legacy full soak invariants");
         assert_full_soak_invariants(&report.variants[1].counters, &report.variants[1].subsystems)
