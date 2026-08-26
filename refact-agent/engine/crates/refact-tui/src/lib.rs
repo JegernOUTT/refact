@@ -41,6 +41,7 @@ pub async fn run_tui(
 ) -> Result<(), app::TuiError> {
     let options = app::TuiOptions {
         daemon_url,
+        daemon_url_source: None,
         project_hint,
     };
     app::run(options).await

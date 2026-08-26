@@ -83,6 +83,7 @@ pub struct StatusSnapshot {
     pub daemon_version: Option<String>,
     pub daemon_port: Option<u16>,
     pub daemon_base_url: Option<String>,
+    pub daemon_url_source: Option<crate::client::DaemonUrlSource>,
     pub worker: String,
     pub project: String,
     pub project_root: Option<String>,
@@ -402,27 +403,26 @@ pub fn permission_policy_patch(policy: PermissionPolicy) -> Value {
 }
 
 pub fn permission_policy_notice(policy: PermissionPolicy) -> String {
-    let mut allowed = Vec::new();
-    if policy.auto_approve_editing_tools {
-        allowed.push("editing tools");
-    }
-    if policy.auto_approve_dangerous_commands {
-        allowed.push("dangerous commands");
-    }
-    let policy = if allowed.is_empty() {
-        "ask before every tool class".to_string()
-    } else {
-        format!("allow {} for this chat", allowed.join(" and "))
-    };
     format!(
-        "Permissions updated: {policy}. TUI sends Allow Once decisions only for the current pause; the server enforces these per-chat Allow Chat flags."
+        "Permissions updated for this chat: editing tools {}; dangerous commands {}. Other permission gates remain separately configured in /permissions. TUI sends Allow Once decisions only for the current pause; the server enforces these two per-chat flags.",
+        auto_approval_policy_label(policy.auto_approve_editing_tools),
+        auto_approval_policy_label(policy.auto_approve_dangerous_commands),
     )
+}
+
+fn auto_approval_policy_label(enabled: bool) -> &'static str {
+    if enabled {
+        "are auto-approved"
+    } else {
+        "are not auto-approved by this flag"
+    }
 }
 
 pub fn status_card_text(snapshot: &StatusSnapshot) -> String {
     format!(
-        "Status\nDaemon: {}\nWorker: {}\nProject: {}\nModel: {} · mode {} · reason:{}\nTerminal background: {}\nSession: {}\nUsage: {}",
+        "Status\nDaemon: {}\nDaemon URL source: {}\nWorker: {}\nProject: {}\nModel: {} · mode {} · reason:{}\nTerminal background: {}\nSession: {}\nUsage: {}",
         daemon_line(snapshot),
+        daemon_url_source_line(snapshot),
         snapshot.worker,
         project_line(snapshot),
         snapshot.model,
@@ -449,6 +449,7 @@ pub fn status_snapshot(
     daemon_online: bool,
     daemon_status: Option<&crate::client::DaemonStatus>,
     daemon_base_url: Option<String>,
+    daemon_url_source: Option<crate::client::DaemonUrlSource>,
     worker: String,
     project: String,
     project_root: Option<String>,
@@ -465,6 +466,7 @@ pub fn status_snapshot(
         daemon_version: daemon_status.and_then(|status| status.version.clone()),
         daemon_port: daemon_status.and_then(|status| status.port),
         daemon_base_url,
+        daemon_url_source,
         worker,
         project,
         project_root,
@@ -492,6 +494,13 @@ fn daemon_line(snapshot: &StatusSnapshot) -> String {
             .map(|url| format!("online at {url}"))
             .unwrap_or_else(|| "online, details loading".to_string()),
     }
+}
+
+fn daemon_url_source_line(snapshot: &StatusSnapshot) -> &'static str {
+    snapshot
+        .daemon_url_source
+        .map(crate::client::DaemonUrlSource::as_str)
+        .unwrap_or("not reported")
 }
 
 fn project_line(snapshot: &StatusSnapshot) -> String {
@@ -584,6 +593,48 @@ mod tests {
             json!({"auto_approve_editing_tools": true, "auto_approve_dangerous_commands": false})
         );
         assert_eq!(selected_permission_ids(policy), vec!["editing_tools"]);
+    }
+
+    #[test]
+    fn permission_policy_notice_describes_only_the_two_editable_flags() {
+        for (policy, editing, dangerous) in [
+            (PermissionPolicy::default(), false, false),
+            (
+                PermissionPolicy {
+                    auto_approve_editing_tools: true,
+                    auto_approve_dangerous_commands: false,
+                },
+                true,
+                false,
+            ),
+            (
+                PermissionPolicy {
+                    auto_approve_editing_tools: false,
+                    auto_approve_dangerous_commands: true,
+                },
+                false,
+                true,
+            ),
+            (
+                PermissionPolicy {
+                    auto_approve_editing_tools: true,
+                    auto_approve_dangerous_commands: true,
+                },
+                true,
+                true,
+            ),
+        ] {
+            let notice = permission_policy_notice(policy);
+            assert_eq!(notice.contains("editing tools are auto-approved"), editing);
+            assert_eq!(
+                notice.contains("dangerous commands are auto-approved"),
+                dangerous
+            );
+            assert!(notice.contains("editing tools are not auto-approved") == !editing);
+            assert!(notice.contains("dangerous commands are not auto-approved") == !dangerous);
+            assert!(notice.contains("Other permission gates"));
+            assert!(!notice.contains("every tool class"));
+        }
     }
 
     #[test]
@@ -683,6 +734,7 @@ mod tests {
             daemon_version: Some("1.2.3".to_string()),
             daemon_port: Some(8488),
             daemon_base_url: Some("http://127.0.0.1:8488".to_string()),
+            daemon_url_source: Some(crate::client::DaemonUrlSource::Cli),
             worker: "ready pid 42 http 9000 lsp 9001".to_string(),
             project: "demo".to_string(),
             project_root: Some("/tmp/demo".to_string()),
@@ -704,8 +756,37 @@ mod tests {
         });
         assert_eq!(
             text,
-            "Status\nDaemon: v1.2.3 on port 8488\nWorker: ready pid 42 http 9000 lsp 9001\nProject: demo (/tmp/demo)\nModel: gpt-demo · mode agent · reason:high\nTerminal background: unavailable (OSC 10/11 probe timed out or is unsupported)\nSession: abcdef12\nUsage: 100 prompt + 50 completion = 150 total tokens; 85% context left"
+            "Status\nDaemon: v1.2.3 on port 8488\nDaemon URL source: cli\nWorker: ready pid 42 http 9000 lsp 9001\nProject: demo (/tmp/demo)\nModel: gpt-demo · mode agent · reason:high\nTerminal background: unavailable (OSC 10/11 probe timed out or is unsupported)\nSession: abcdef12\nUsage: 100 prompt + 50 completion = 150 total tokens; 85% context left"
         );
+    }
+
+    #[test]
+    fn status_snapshot_names_each_daemon_url_source() {
+        for source in [
+            crate::client::DaemonUrlSource::Cli,
+            crate::client::DaemonUrlSource::Environment,
+            crate::client::DaemonUrlSource::Launcher,
+            crate::client::DaemonUrlSource::Discovery,
+        ] {
+            let snapshot = status_snapshot(
+                true,
+                None,
+                Some("http://127.0.0.1:8488".to_string()),
+                Some(source),
+                "ready".to_string(),
+                "demo".to_string(),
+                None,
+                "model".to_string(),
+                "agent".to_string(),
+                "off".to_string(),
+                PermissionPolicy::default(),
+                "chat".to_string(),
+                None,
+                None,
+            );
+            assert!(status_card_text(&snapshot)
+                .contains(&format!("Daemon URL source: {}", source.as_str())));
+        }
     }
 
     #[test]

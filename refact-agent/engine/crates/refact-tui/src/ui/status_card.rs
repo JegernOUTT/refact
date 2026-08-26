@@ -86,6 +86,10 @@ pub(crate) fn render_lines(
     let mut lines = vec![header_line(theme), Line::default()];
 
     lines.push(formatter.line("Daemon", value(snapshot.daemon_label())));
+    lines.push(formatter.line(
+        "Daemon URL source",
+        value(snapshot.daemon_url_source_label().to_string()),
+    ));
     lines.push(formatter.line("Worker", value(snapshot.worker.clone())));
     lines.push(formatter.line("Model", value(snapshot.model.clone())));
     lines.push(formatter.line("Mode", value(snapshot.mode.clone())));
@@ -130,6 +134,7 @@ fn labels(snapshot: &StatusSnapshot) -> Vec<String> {
     let mut seen = BTreeSet::new();
     for label in [
         "Daemon",
+        "Daemon URL source",
         "Worker",
         "Model",
         "Mode",
@@ -350,6 +355,7 @@ fn truncate_line_to_width(line: Line<'static>, max_width: usize) -> Line<'static
 
 trait StatusSnapshotExt {
     fn daemon_label(&self) -> String;
+    fn daemon_url_source_label(&self) -> &'static str;
 }
 
 impl StatusSnapshotExt for StatusSnapshot {
@@ -368,6 +374,12 @@ impl StatusSnapshotExt for StatusSnapshot {
                 .unwrap_or_else(|| "online, details loading".to_string()),
         }
     }
+
+    fn daemon_url_source_label(&self) -> &'static str {
+        self.daemon_url_source
+            .map(crate::client::DaemonUrlSource::as_str)
+            .unwrap_or("not reported")
+    }
 }
 
 #[cfg(test)]
@@ -382,6 +394,7 @@ mod tests {
             daemon_version: Some("1.2.3".to_string()),
             daemon_port: Some(8488),
             daemon_base_url: Some("http://127.0.0.1:8488".to_string()),
+            daemon_url_source: Some(crate::client::DaemonUrlSource::Cli),
             worker: "ready · pid 42 · http 9000 · lsp 9001".to_string(),
             project: "demo".to_string(),
             project_root: Some("/tmp/demo/super/long/path/that/should/truncate".to_string()),

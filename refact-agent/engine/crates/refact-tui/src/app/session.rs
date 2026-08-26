@@ -424,6 +424,7 @@ impl App {
                 self.daemon_online,
                 self.daemon_status.as_ref(),
                 self.daemon_base_url.clone(),
+                self.daemon_url_source,
                 workers::worker_status_line(self.current_worker()),
                 self.current_project()
                     .map(|project| project.slug.clone())

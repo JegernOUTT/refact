@@ -20,6 +20,7 @@ pub enum RefactCliCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiOptions {
     pub project: Option<std::path::PathBuf>,
+    pub daemon_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,7 +76,10 @@ where
 {
     let args: Vec<OsString> = iter.into_iter().map(Into::into).collect();
     let Some(subcommand) = args.get(1) else {
-        return Ok(RefactCliCommand::Tui(TuiOptions { project: None }));
+        return Ok(RefactCliCommand::Tui(TuiOptions {
+            project: None,
+            daemon_url: None,
+        }));
     };
     match subcommand.to_string_lossy().as_ref() {
         "worker" => parse_worker(args),
@@ -113,7 +117,7 @@ pub fn dispatch(command: RefactCliCommand) -> DispatchResult {
 }
 
 pub fn help_text() -> &'static str {
-    "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact                       Open the full-screen TUI\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    ui [<path>] [--json] [--no-open]\n                                Open the dashboard or a project workspace\n    tui [--project <path>]      Open the full-screen TUI\n    worker [engine flags...]    Run the refact worker engine\n    daemon [--foreground] [--port <N>]\n                                Run the refact daemon\n    run [OPTIONS] <prompt>      Run one headless chat turn through the daemon\n    ps                          List daemon workers\n    projects                    Manage daemon project registry\n    cron                        Manage scheduler jobs\n    restart                     Restart a project worker or daemon\n    stop                        Stop a project worker or daemon\n    logs                        Print daemon or worker logs\n    events                      Print daemon events\n    status                      Print daemon health\n    doctor                      Diagnose daemon setup\n    version                     Print version and build information\n    self-update [OPTIONS]       Update this refact binary from GitHub Releases\n\nTUI OPTIONS:\n    --project <path>            Project root (default: cwd)\n\nRUN OPTIONS:\n    --project <path>            Project root (default: cwd)\n    --mode agent|explore        Chat mode (default: agent)\n    --model <model>             Model id\n    --approve deny|ask|auto     Tool approval policy (default: deny)\n    --json                      Emit final JSON instead of streaming text\n    --timeout-secs <N>          Timeout in seconds (default: 600)\n\nAll management commands support --json. Run `refact worker --help` for engine flags."
+    "refact <SUBCOMMAND> [OPTIONS]\n\nUSAGE:\n    refact                       Open the full-screen TUI\n    refact <SUBCOMMAND> [OPTIONS]\n\nSUBCOMMANDS:\n    ui [<path>] [--json] [--no-open]\n                                Open the dashboard or a project workspace\n    tui [--project <path>] [--daemon-url <url>]\n                                Open the full-screen TUI\n    worker [engine flags...]    Run the refact worker engine\n    daemon [--foreground] [--port <N>]\n                                Run the refact daemon\n    run [OPTIONS] <prompt>      Run one headless chat turn through the daemon\n    ps                          List daemon workers\n    projects                    Manage daemon project registry\n    cron                        Manage scheduler jobs\n    restart                     Restart a project worker or daemon\n    stop                        Stop a project worker or daemon\n    logs                        Print daemon or worker logs\n    events                      Print daemon events\n    status                      Print daemon health\n    doctor                      Diagnose daemon setup\n    version                     Print version and build information\n    self-update [OPTIONS]       Update this refact binary from GitHub Releases\n\nTUI OPTIONS:\n    --project <path>            Project root (default: cwd)\n    --daemon-url <url>          Daemon URL override\n\nRUN OPTIONS:\n    --project <path>            Project root (default: cwd)\n    --mode agent|explore        Chat mode (default: agent)\n    --model <model>             Model id\n    --approve deny|ask|auto     Tool approval policy (default: deny)\n    --json                      Emit final JSON instead of streaming text\n    --timeout-secs <N>          Timeout in seconds (default: 600)\n\nAll management commands support --json. Run `refact worker --help` for engine flags."
 }
 
 pub fn daemon_help_text() -> &'static str {
@@ -121,7 +125,7 @@ pub fn daemon_help_text() -> &'static str {
 }
 
 pub fn tui_help_text() -> &'static str {
-    "refact tui [--project <path>]\n\nOpen the full-screen TUI.\n\nOPTIONS:\n    --project <path>            Project root (default: cwd)\n    -h, --help                  Print this help text"
+    "refact tui [--project <path>] [--daemon-url <url>]\n\nOpen the full-screen TUI.\n\nOPTIONS:\n    --project <path>            Project root (default: cwd)\n    --daemon-url <url>          Daemon URL override\n    -h, --help                  Print this help text"
 }
 
 pub fn run_help_text() -> &'static str {
@@ -205,6 +209,7 @@ fn parse_run(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
 
 fn parse_tui(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
     let mut project = None;
+    let mut daemon_url = None;
     let mut i = 2usize;
     while i < args.len() {
         let value = args[i].to_string_lossy();
@@ -216,12 +221,22 @@ fn parse_tui(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
                 };
                 project = Some(std::path::PathBuf::from(path));
             }
+            "--daemon-url" => {
+                i += 1;
+                let Some(url) = args.get(i) else {
+                    return Err(usage_error("--daemon-url requires a URL".to_string()));
+                };
+                daemon_url = Some(url.to_string_lossy().to_string());
+            }
             "--help" | "-h" => return Ok(RefactCliCommand::Help(tui_help_text())),
             other => return Err(usage_error(format!("unexpected tui argument `{}`", other))),
         }
         i += 1;
     }
-    Ok(RefactCliCommand::Tui(TuiOptions { project }))
+    Ok(RefactCliCommand::Tui(TuiOptions {
+        project,
+        daemon_url,
+    }))
 }
 
 fn parse_self_update(args: &[OsString]) -> Result<RefactCliCommand, CliDispatchError> {
@@ -497,15 +512,27 @@ mod tests {
     fn parse_tui_and_bare_refact() {
         assert!(matches!(
             parse_from(["refact"]).unwrap(),
-            RefactCliCommand::Tui(TuiOptions { project: None })
+            RefactCliCommand::Tui(TuiOptions {
+                project: None,
+                daemon_url: None,
+            })
         ));
-        let command = parse_from(["refact", "tui", "--project", "/tmp/project"]).unwrap();
+        let command = parse_from([
+            "refact",
+            "tui",
+            "--project",
+            "/tmp/project",
+            "--daemon-url",
+            "http://127.0.0.1:9000",
+        ])
+        .unwrap();
         match command {
             RefactCliCommand::Tui(options) => {
                 assert_eq!(
                     options.project,
                     Some(std::path::PathBuf::from("/tmp/project"))
                 );
+                assert_eq!(options.daemon_url.as_deref(), Some("http://127.0.0.1:9000"));
             }
             _ => panic!("expected tui command"),
         }

@@ -1169,6 +1169,7 @@ fn status_command_card_golden_snapshot() {
         daemon_version: Some("1.2.3".to_string()),
         daemon_port: Some(32000),
         daemon_base_url: Some("http://127.0.0.1:32000".to_string()),
+        daemon_url_source: Some(refact_tui::client::DaemonUrlSource::Cli),
         worker: "ready · pid 42 · http 32000 · lsp 32001".to_string(),
         project: "fixture".to_string(),
         project_root: Some("/tmp/fixture".to_string()),
@@ -1199,6 +1200,7 @@ fn status_command_card_golden_snapshot() {
 │  refact (v<version>)                                                                     │
 │                                                                                      │
 │  Daemon:                v1.2.3 on port 32000                                         │
+│  Daemon URL source:     cli                                                          │
 │  Worker:                ready · pid 42 · http 32000 · lsp 32001                      │
 │  Model:                 gpt-demo                                                     │
 │  Mode:                  agent                                                        │

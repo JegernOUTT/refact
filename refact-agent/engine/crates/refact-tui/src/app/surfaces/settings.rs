@@ -14,17 +14,18 @@ pub(crate) struct ModelSettingsCapabilities {
 }
 
 impl ModelSettingsCapabilities {
-    fn supports_reasoning(&self) -> bool {
-        self.reasoning_effort_options
-            .as_ref()
-            .is_some_and(|options| !options.is_empty())
-            || self.supports_thinking_budget == Some(true)
+    fn thinking_budget_support(&self) -> Option<bool> {
+        if self.supports_thinking_budget == Some(true)
             || self.supports_adaptive_thinking_budget == Some(true)
-    }
-
-    fn supports_thinking_budget(&self) -> bool {
-        self.supports_thinking_budget == Some(true)
-            || self.supports_adaptive_thinking_budget == Some(true)
+        {
+            Some(true)
+        } else if self.supports_thinking_budget == Some(false)
+            && self.supports_adaptive_thinking_budget == Some(false)
+        {
+            Some(false)
+        } else {
+            None
+        }
     }
 
     fn merge_from(&mut self, other: &Self) {
@@ -173,6 +174,7 @@ pub(crate) struct SettingsState {
     selected: usize,
     editing: bool,
     draft: String,
+    draft_error: Option<String>,
 }
 
 impl SettingsState {
@@ -200,6 +202,7 @@ impl SettingsState {
             selected: 0,
             editing: false,
             draft: String::new(),
+            draft_error: None,
         }
     }
 
@@ -251,12 +254,14 @@ impl SettingsState {
                 self.editing = true;
             }
             self.draft.push_str(text);
+            self.draft_error = None;
         }
     }
 
     pub(crate) fn pop_text(&mut self) {
         if self.editing {
             self.draft.pop();
+            self.draft_error = None;
         }
     }
 
@@ -275,7 +280,22 @@ impl SettingsState {
                 self.draft.clear();
                 return None;
             }
-            parse_numeric_value(control, &self.draft)?
+            let Some(value) = parse_numeric_value(control, &self.draft) else {
+                return None;
+            };
+            if control == SettingControl::ThinkingBudget
+                && value
+                    .as_u64()
+                    .zip(self.caps.max_thinking_tokens)
+                    .is_some_and(|(value, max)| value > max)
+            {
+                self.draft_error = Some(format!(
+                    "thinking budget must not exceed {}",
+                    self.caps.max_thinking_tokens.unwrap_or_default()
+                ));
+                return None;
+            }
+            value
         } else {
             return None;
         };
@@ -293,7 +313,10 @@ impl SettingsState {
 
     fn display_value(&self, control: SettingControl) -> String {
         if self.editing && self.controls.get(self.selected) == Some(&control) {
-            return format!("draft {}", self.draft);
+            return match &self.draft_error {
+                Some(error) => format!("draft {} · {error}", self.draft),
+                None => format!("draft {}", self.draft),
+            };
         }
         if control.is_boolean() {
             return if self.boolean_value(control) {
@@ -324,14 +347,22 @@ impl SettingsState {
             return Some(chatgpt_rejection_reason(control).to_string());
         }
         match control {
-            SettingControl::ThinkingBudget if !self.caps.supports_thinking_budget() => {
+            SettingControl::ThinkingBudget
+                if self.caps.thinking_budget_support() == Some(false) =>
+            {
                 Some("unavailable: this model does not support thinking budgets".to_string())
             }
-            SettingControl::Temperature if self.caps.supports_reasoning() => {
-                Some("unavailable: this model drops it when reasoning is on".to_string())
+            SettingControl::ThinkingBudget if self.caps.thinking_budget_support().is_none() => {
+                Some("unavailable: thinking budget support not reported".to_string())
             }
             SettingControl::Temperature if self.caps.supports_temperature == Some(false) => {
                 Some("unavailable: this model does not support temperature".to_string())
+            }
+            SettingControl::Temperature if self.reasoning_is_enabled() => {
+                Some("unavailable while reasoning is enabled".to_string())
+            }
+            SettingControl::Temperature if self.caps.supports_temperature.is_none() => {
+                Some("unavailable: temperature support not reported".to_string())
             }
             SettingControl::ParallelToolCalls
                 if self.caps.supports_parallel_tools == Some(false) =>
@@ -366,6 +397,19 @@ impl SettingsState {
     fn clear_draft(&mut self) {
         self.editing = false;
         self.draft.clear();
+        self.draft_error = None;
+    }
+
+    fn reasoning_is_enabled(&self) -> bool {
+        self.params
+            .get("boost_reasoning")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || self
+                .params
+                .get("reasoning_effort")
+                .and_then(Value::as_str)
+                .is_some_and(|effort| !effort.trim().is_empty())
     }
 }
 
@@ -610,20 +654,71 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_model_keeps_temperature_visible_with_reason() {
+    fn temperature_follows_active_reasoning_and_reported_capability() {
         let caps = model_settings_caps(&json!({
-            "chat_models": {"reasoning": {"reasoning_effort_options": ["low"]}},
+            "chat_models": {"reasoning": {
+                "reasoning_effort_options": ["low"],
+                "supports_temperature": true
+            }},
         }));
-        let state = SettingsState::new(&json!({"model": "reasoning"}), caps["reasoning"].clone());
-        let temperature = state
+        let temperature = |params| {
+            SettingsState::new(params, caps["reasoning"].clone())
+                .rows()
+                .into_iter()
+                .find(|row| row.key == "temperature")
+                .unwrap()
+        };
+
+        let reasoning_off = json!({"model": "reasoning"});
+        let reasoning_on = json!({"model": "reasoning", "boost_reasoning": true});
+        assert_eq!(temperature(&reasoning_off).unavailable_reason, None);
+        assert_eq!(
+            temperature(&reasoning_on).unavailable_reason.as_deref(),
+            Some("unavailable while reasoning is enabled")
+        );
+        let unknown = SettingsState::new(
+            &json!({"model": "unknown"}),
+            ModelSettingsCapabilities::default(),
+        )
+        .rows()
+        .into_iter()
+        .find(|row| row.key == "temperature")
+        .unwrap();
+        assert_eq!(
+            unknown.unavailable_reason.as_deref(),
+            Some("unavailable: temperature support not reported")
+        );
+    }
+
+    #[test]
+    fn thinking_budget_rejects_values_above_the_reported_maximum() {
+        let caps = model_settings_caps(&all_caps());
+        let mut state = SettingsState::new(&json!({"model": "model"}), caps["model"].clone());
+        state.selected = state
             .rows()
             .into_iter()
-            .find(|row| row.key == "temperature")
+            .position(|row| row.key == "thinking_budget")
             .unwrap();
 
         assert_eq!(
-            temperature.unavailable_reason.as_deref(),
-            Some("unavailable: this model drops it when reasoning is on")
+            activate_numeric(&mut state, "31999")["thinking_budget"],
+            31999
+        );
+        assert_eq!(
+            activate_numeric(&mut state, "32000")["thinking_budget"],
+            32000
+        );
+        assert_eq!(state.activate(), None);
+        state.push_text("32001");
+        assert_eq!(state.activate(), None);
+        let row = state
+            .rows()
+            .into_iter()
+            .find(|row| row.key == "thinking_budget")
+            .unwrap();
+        assert_eq!(
+            row.value,
+            "draft 32001 · thinking budget must not exceed 32000"
         );
     }
 

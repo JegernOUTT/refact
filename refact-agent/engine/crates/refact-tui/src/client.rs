@@ -130,6 +130,25 @@ pub struct DaemonEndpoint {
     pub auth_token: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DaemonUrlSource {
+    Cli,
+    Environment,
+    Launcher,
+    Discovery,
+}
+
+impl DaemonUrlSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cli => "cli",
+            Self::Environment => "env",
+            Self::Launcher => "launcher",
+            Self::Discovery => "discovery",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonInfoFile {
     pub pid: Option<u32>,

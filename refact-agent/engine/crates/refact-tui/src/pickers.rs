@@ -55,8 +55,9 @@ impl ModePickerItem {
             self.thread_defaults.auto_approve_editing_tools,
             self.thread_defaults.auto_approve_dangerous_commands,
         ) {
-            (_, Some(true)) => Some("! edits + dangerous commands auto-approved"),
+            (Some(true), Some(true)) => Some("! edits + dangerous commands auto-approved"),
             (Some(true), _) => Some("! edits auto-approved"),
+            (_, Some(true)) => Some("! dangerous commands auto-approved"),
             _ => None,
         }
     }
@@ -495,20 +496,21 @@ fn model_reasoning_label(value: &Value) -> String {
     let effort = value
         .get("reasoning_effort_options")
         .and_then(Value::as_array)
-        .is_some_and(|options| !options.is_empty());
+        .map(|options| !options.is_empty());
     let budget = value
         .get("supports_thinking_budget")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+        .and_then(Value::as_bool);
     let adaptive = value
         .get("supports_adaptive_thinking_budget")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if effort || budget || adaptive {
-        "reasoning supported".to_string()
-    } else {
-        "reasoning unavailable".to_string()
+        .and_then(Value::as_bool);
+    let support = [effort, budget, adaptive];
+    if support.into_iter().any(|value| value == Some(true)) {
+        return "reasoning supported".to_string();
     }
+    if support.into_iter().all(|value| value == Some(false)) {
+        return "reasoning unavailable".to_string();
+    }
+    "reasoning not reported".to_string()
 }
 
 fn model_pricing_label(value: &Value) -> String {
@@ -575,24 +577,13 @@ pub fn mode_items_from_response(response: &Value) -> Vec<ModePickerItem> {
                 .filter(|tag| !tag.is_empty())
                 .map(str::to_string)
                 .collect::<Vec<_>>();
-            let is_overlay = mode
-                .get("is_overlay")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-                || mode.get("kind").and_then(Value::as_str) == Some("overlay")
-                || mode.get("base").and_then(Value::as_str) == Some("agent")
-                || tags.iter().any(|tag| {
-                    matches!(
-                        tag.to_ascii_lowercase().as_str(),
-                        "overlay" | "model-compat" | "model-compatibility"
-                    )
-                });
-            let group = if is_overlay {
-                "Model compatibility overlays".to_string()
-            } else {
-                tags.first()
-                    .map(|tag| title_case_tag(tag))
-                    .unwrap_or_else(|| "Other modes".to_string())
+            let overlay = mode.get("is_overlay").and_then(Value::as_bool).or_else(|| {
+                (mode.get("kind").and_then(Value::as_str) == Some("overlay")).then_some(true)
+            });
+            let group = match overlay {
+                Some(true) => "Model compatibility overlays".to_string(),
+                Some(false) => mode_group(&tags),
+                None => format!("{} · overlay data unavailable", mode_group(&tags)),
             };
             Some(ModePickerItem {
                 item: PickerItem {
@@ -608,7 +599,7 @@ pub fn mode_items_from_response(response: &Value) -> Vec<ModePickerItem> {
                     .and_then(Value::as_i64)
                     .and_then(|order| i32::try_from(order).ok())
                     .unwrap_or(i32::MAX),
-                is_overlay,
+                is_overlay: overlay.unwrap_or(false),
                 is_current: false,
                 tools_count: mode
                     .get("tools_count")
@@ -663,6 +654,12 @@ fn title_case_tag(tag: &str) -> String {
         return String::new();
     };
     format!("{}{}", first.to_uppercase(), chars.as_str())
+}
+
+fn mode_group(tags: &[String]) -> String {
+    tags.first()
+        .map(|tag| title_case_tag(tag))
+        .unwrap_or_else(|| "Other modes".to_string())
 }
 
 pub fn file_mention_items_from_completions(completions: Vec<String>) -> Vec<PickerItem> {
@@ -856,28 +853,35 @@ mod tests {
         assert!(priced.description.contains("$3 in / $15 out per 1M"));
         let unknown = items.iter().find(|item| item.id == "unknown").unwrap();
         assert!(unknown.description.contains("pricing unknown"));
+        assert!(unknown.description.contains("reasoning not reported"));
     }
 
     #[test]
-    fn mode_items_group_by_tags_order_and_separate_overlays() {
+    fn mode_items_use_explicit_overlay_metadata_and_mark_absent_metadata_unknown() {
         let modes = serde_json::json!({"modes": [
             {
                 "id": "review", "title": "Review", "description": "Inspect changes",
                 "tools_count": 4,
                 "thread_defaults": {"auto_approve_editing_tools": false},
+                "is_overlay": false,
                 "ui": {"order": 30, "tags": ["analysis"]}
             },
             {
                 "id": "ask", "title": "Ask", "description": "Answer questions",
                 "tools_count": 1,
                 "thread_defaults": {"auto_approve_editing_tools": false},
+                "is_overlay": false,
                 "ui": {"order": 5, "tags": ["chat"]}
             },
             {
                 "id": "compat", "title": "Compatibility", "description": "Patch Agent",
-                "base": "agent", "tools_count": 8,
+                "base": "agent", "is_overlay": true, "tools_count": 8,
                 "thread_defaults": {"auto_approve_editing_tools": true},
                 "ui": {"order": 1, "tags": []}
+            },
+            {
+                "id": "unreported", "title": "Unreported", "base": "agent",
+                "tools_count": 2, "ui": {"order": 2, "tags": ["chat"]}
             }
         ]});
 
@@ -888,16 +892,35 @@ mod tests {
                 .iter()
                 .map(|item| item.item.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["ask", "review", "compat"]
+            vec!["unreported", "ask", "review", "compat"]
         );
-        assert_eq!(items[0].group, "Chat");
-        assert_eq!(items[1].group, "Analysis");
-        assert_eq!(items[2].group, "Model compatibility overlays");
-        assert!(items[2].is_overlay);
+        assert_eq!(items[0].group, "Chat · overlay data unavailable");
+        assert!(!items[0].is_overlay);
+        assert_eq!(items[1].group, "Chat");
+        assert_eq!(items[2].group, "Analysis");
+        assert_eq!(items[3].group, "Model compatibility overlays");
+        assert!(items[3].is_overlay);
     }
 
     #[test]
-    fn mode_items_badge_only_resolved_auto_approval_defaults() {
+    fn mode_items_recognize_the_legacy_overlay_kind_without_guessing_from_base_or_tags() {
+        let modes = serde_json::json!({"modes": [
+            {"id": "legacy", "title": "Legacy", "kind": "overlay", "ui": {"tags": []}},
+            {"id": "tagged", "title": "Tagged", "base": "agent", "ui": {"tags": ["overlay"]}}
+        ]});
+
+        let items = mode_items_from_response(&modes);
+
+        let legacy = items.iter().find(|item| item.item.id == "legacy").unwrap();
+        assert!(legacy.is_overlay);
+        assert_eq!(legacy.group, "Model compatibility overlays");
+        let tagged = items.iter().find(|item| item.item.id == "tagged").unwrap();
+        assert!(!tagged.is_overlay);
+        assert_eq!(tagged.group, "Overlay · overlay data unavailable");
+    }
+
+    #[test]
+    fn mode_items_badge_each_auto_approval_dimension_independently() {
         let modes = serde_json::json!({"modes": [
             {
                 "id": "safe", "title": "Safe", "thread_defaults": {
@@ -913,31 +936,47 @@ mod tests {
             },
             {
                 "id": "danger", "title": "Danger", "thread_defaults": {
-                    "auto_approve_editing_tools": true,
+                    "auto_approve_editing_tools": false,
                     "auto_approve_dangerous_commands": true
                 }, "ui": {"order": 3, "tags": []}
+            },
+            {
+                "id": "both", "title": "Both", "thread_defaults": {
+                    "auto_approve_editing_tools": true,
+                    "auto_approve_dangerous_commands": true
+                }, "ui": {"order": 4, "tags": []}
             }
         ]});
 
         let items = mode_items_from_response(&modes);
-        let badged = items
-            .iter()
-            .filter(|item| item.auto_approval_badge().is_some())
-            .count();
-        let resolved_auto_approving = items
-            .iter()
-            .filter(|item| {
-                item.thread_defaults.auto_approve_editing_tools == Some(true)
-                    || item.thread_defaults.auto_approve_dangerous_commands == Some(true)
-            })
-            .count();
-
-        assert_eq!(badged, resolved_auto_approving);
-        assert_eq!(badged, 2);
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.item.id == "safe")
+                .unwrap()
+                .auto_approval_badge(),
+            None
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.item.id == "edit")
+                .unwrap()
+                .auto_approval_badge(),
+            Some("! edits auto-approved")
+        );
         assert_eq!(
             items
                 .iter()
                 .find(|item| item.item.id == "danger")
+                .unwrap()
+                .auto_approval_badge(),
+            Some("! dangerous commands auto-approved")
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|item| item.item.id == "both")
                 .unwrap()
                 .auto_approval_badge(),
             Some("! edits + dangerous commands auto-approved")

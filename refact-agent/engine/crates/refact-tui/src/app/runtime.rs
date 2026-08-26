@@ -142,7 +142,7 @@ pub(super) enum RuntimeEvent {
         open_picker: bool,
         result: Result<Vec<TrajectoryMeta>, String>,
     },
-    DaemonStatusLoaded(Result<(DaemonStatus, String), String>),
+    DaemonStatusLoaded(Result<(DaemonStatus, String, crate::client::DaemonUrlSource), String>),
     WorkersLoaded(Result<Vec<WorkerInfo>, String>),
     HistorySaved(Result<(), String>),
     CommandFinished {
@@ -373,16 +373,31 @@ impl Drop for SubscriptionManager {
     }
 }
 
-fn daemon_base_url_for(
+fn daemon_endpoint_input_for(
     launcher_daemon_url: Option<String>,
+    launcher_source: Option<crate::client::DaemonUrlSource>,
     environment_daemon_url: Option<String>,
-) -> Option<String> {
-    environment_daemon_url.or(launcher_daemon_url)
+) -> (Option<String>, crate::client::DaemonUrlSource) {
+    match environment_daemon_url {
+        Some(url) => (Some(url), crate::client::DaemonUrlSource::Environment),
+        None => match launcher_daemon_url {
+            Some(url) => (
+                Some(url),
+                launcher_source.unwrap_or(crate::client::DaemonUrlSource::Launcher),
+            ),
+            None => (None, crate::client::DaemonUrlSource::Discovery),
+        },
+    }
 }
 
 pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
+    let (daemon_base_url, daemon_url_source) = daemon_endpoint_input_for(
+        options.daemon_url,
+        options.daemon_url_source,
+        std::env::var("REFACT_DAEMON_URL").ok(),
+    );
     let endpoint = match crate::client::resolve_daemon_endpoint_with_auth(
-        daemon_base_url_for(options.daemon_url, std::env::var("REFACT_DAEMON_URL").ok()),
+        daemon_base_url,
         std::env::var("REFACT_DAEMON_TOKEN").ok(),
     ) {
         Ok(endpoint) => endpoint,
@@ -481,6 +496,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                             &tx,
                             &mut subscriptions,
                             &mut daemon_events,
+                            daemon_url_source,
                         )
                         .await
                     }
@@ -507,6 +523,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                         &tx,
                         &mut subscriptions,
                         &mut daemon_events,
+                        daemon_url_source,
                     )
                     .await;
                 }
@@ -639,8 +656,8 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 }
                 Err(error) => app.retry_hint = retry_hint_from_message(&error),
             },
-            RuntimeEvent::DaemonStatusLoaded(Ok((status, base_url))) => {
-                app.apply_daemon_status(status, base_url)
+            RuntimeEvent::DaemonStatusLoaded(Ok((status, base_url, source))) => {
+                app.apply_daemon_status(status, base_url, source)
             }
             RuntimeEvent::DaemonStatusLoaded(Err(error)) => app.record_daemon_status_error(&error),
             RuntimeEvent::WorkersLoaded(Ok(workers)) => app.set_workers(workers),
@@ -665,6 +682,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                         &tx,
                         &mut subscriptions,
                         &mut daemon_events,
+                        daemon_url_source,
                     )
                     .await;
                 }
@@ -732,6 +750,7 @@ pub(super) async fn run_action(
     tx: &mpsc::Sender<RuntimeEvent>,
     subscriptions: &mut SubscriptionManager,
     daemon_events: &mut DaemonEventSubscription,
+    daemon_url_source: crate::client::DaemonUrlSource,
 ) {
     match action {
         AppAction::None => {}
@@ -940,7 +959,7 @@ pub(super) async fn run_action(
                 let result = client
                     .status()
                     .await
-                    .map(|status| (status, base_url))
+                    .map(|status| (status, base_url, daemon_url_source))
                     .map_err(|error| error.to_string());
                 let _ = tx.send(RuntimeEvent::DaemonStatusLoaded(result)).await;
             });
@@ -1902,13 +1921,45 @@ mod tests {
     }
 
     #[test]
-    fn daemon_url_environment_override_takes_precedence() {
+    fn daemon_url_source_reflects_the_winning_input() {
+        use crate::client::DaemonUrlSource;
+
         assert_eq!(
-            daemon_base_url_for(
+            daemon_endpoint_input_for(
                 Some("http://127.0.0.1:8000".to_string()),
+                Some(DaemonUrlSource::Cli),
                 Some("http://127.0.0.1:9000/".to_string()),
             ),
-            Some("http://127.0.0.1:9000/".to_string())
+            (
+                Some("http://127.0.0.1:9000/".to_string()),
+                DaemonUrlSource::Environment,
+            )
+        );
+        assert_eq!(
+            daemon_endpoint_input_for(
+                Some("http://127.0.0.1:8000".to_string()),
+                Some(DaemonUrlSource::Cli),
+                None,
+            ),
+            (
+                Some("http://127.0.0.1:8000".to_string()),
+                DaemonUrlSource::Cli,
+            )
+        );
+        assert_eq!(
+            daemon_endpoint_input_for(
+                Some("http://127.0.0.1:8000".to_string()),
+                Some(DaemonUrlSource::Launcher),
+                None,
+            ),
+            (
+                Some("http://127.0.0.1:8000".to_string()),
+                DaemonUrlSource::Launcher,
+            )
+        );
+        assert_eq!(
+            daemon_endpoint_input_for(None, None, None),
+            (None, DaemonUrlSource::Discovery)
         );
     }
 }

@@ -139,6 +139,7 @@ pub enum TuiError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiOptions {
     pub daemon_url: Option<String>,
+    pub daemon_url_source: Option<crate::client::DaemonUrlSource>,
     pub project_hint: Option<PathBuf>,
 }
 
@@ -637,10 +638,16 @@ impl App {
         summaries
     }
 
-    fn apply_daemon_status(&mut self, status: DaemonStatus, base_url: String) {
+    fn apply_daemon_status(
+        &mut self,
+        status: DaemonStatus,
+        base_url: String,
+        source: crate::client::DaemonUrlSource,
+    ) {
         self.daemon_online = true;
         self.daemon_status = Some(status);
         self.daemon_base_url = Some(base_url);
+        self.daemon_url_source = Some(source);
         self.show_status_card();
     }
 
@@ -1098,10 +1105,16 @@ impl App {
     }
 
     #[cfg(test)]
-    pub fn test_set_daemon_status(&mut self, status: DaemonStatus, base_url: impl Into<String>) {
+    pub fn test_set_daemon_status(
+        &mut self,
+        status: DaemonStatus,
+        base_url: impl Into<String>,
+        source: crate::client::DaemonUrlSource,
+    ) {
         self.daemon_online = true;
         self.daemon_status = Some(status);
         self.daemon_base_url = Some(base_url.into());
+        self.daemon_url_source = Some(source);
     }
 
     #[cfg(test)]
@@ -4812,6 +4825,7 @@ new-chat = "ctrl-x"
                 cron_pending: Some(HashMap::new()),
             },
             "http://127.0.0.1:8488",
+            crate::client::DaemonUrlSource::Cli,
         );
         app.set_workers(vec![WorkerInfo {
             project_id: "p1".to_string(),
@@ -5063,6 +5077,7 @@ new-chat = "ctrl-x"
                 &tx,
                 &mut subscriptions,
                 &mut daemon_events,
+                crate::client::DaemonUrlSource::Discovery,
             )
             .await;
             assert!(matches!(
@@ -5091,6 +5106,7 @@ new-chat = "ctrl-x"
             &tx,
             &mut subscriptions,
             &mut daemon_events,
+            crate::client::DaemonUrlSource::Discovery,
         )
         .await;
         assert!(matches!(
@@ -5797,6 +5813,7 @@ new-chat = "ctrl-x"
             &tx,
             &mut subscriptions,
             &mut daemon_events,
+            crate::client::DaemonUrlSource::Discovery,
         )
         .await;
         assert!(matches!(
@@ -5836,6 +5853,7 @@ new-chat = "ctrl-x"
             &tx,
             &mut subscriptions,
             &mut daemon_events,
+            crate::client::DaemonUrlSource::Discovery,
         )
         .await;
 
@@ -5880,6 +5898,7 @@ new-chat = "ctrl-x"
             &tx,
             &mut subscriptions,
             &mut daemon_events,
+            crate::client::DaemonUrlSource::Discovery,
         )
         .await;
         assert!(matches!(
@@ -6131,6 +6150,7 @@ new-chat = "ctrl-x"
             &tx,
             &mut subscriptions,
             &mut daemon_events,
+            crate::client::DaemonUrlSource::Discovery,
         )
         .await;
 
@@ -6785,6 +6805,7 @@ new-chat = "ctrl-x"
             &tx,
             &mut subscriptions,
             &mut daemon_events,
+            crate::client::DaemonUrlSource::Discovery,
         )
         .await;
 
