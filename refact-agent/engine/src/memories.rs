@@ -2919,8 +2919,10 @@ mod firewall_tests {
     async fn fallback_search_uses_ready_index_without_reading_the_corpus() {
         let dir = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        let project_root =
+            dunce::simplified(&std::fs::canonicalize(dir.path()).unwrap()).to_path_buf();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project_root.clone()];
+        let knowledge_dir = project_root.join(KNOWLEDGE_FOLDER_NAME);
         let indexed = write_knowledge_note(&knowledge_dir, "indexed.md", "codegraph needle").await;
         for index in 0..1_000 {
             tokio::fs::write(

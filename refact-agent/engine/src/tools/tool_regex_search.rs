@@ -638,9 +638,10 @@ mod tests {
             .prefix("refact-regex-no-match-")
             .tempdir()
             .unwrap();
-        let file = temp.path().join("search.rs");
+        let temp_root = dunce::simplified(&fs::canonicalize(temp.path()).unwrap()).to_path_buf();
+        let file = temp_root.join("search.rs");
         fs::write(&file, "fn present() {}\n").unwrap();
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp_root];
         *gcx.documents_state.workspace_files.lock().unwrap() = vec![file];
         let ccx = make_ccx(gcx).await;
         let mut tool = ToolRegexSearch {
@@ -688,9 +689,10 @@ mod tests {
             .prefix("refact-regex-invalid-input-")
             .tempdir()
             .unwrap();
-        let file = temp.path().join("search.rs");
+        let temp_root = dunce::simplified(&fs::canonicalize(temp.path()).unwrap()).to_path_buf();
+        let file = temp_root.join("search.rs");
         fs::write(&file, "fn present() {}\n").unwrap();
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp_root.clone()];
         *gcx.documents_state.workspace_files.lock().unwrap() = vec![file];
         let mut tool = ToolRegexSearch {
             config_path: String::new(),
@@ -710,7 +712,7 @@ mod tests {
             .unwrap_err();
         assert!(regex_error.contains("Invalid regex"), "{regex_error}");
 
-        let missing_path = temp.path().join("missing.rs").to_string_lossy().to_string();
+        let missing_path = temp_root.join("missing.rs").to_string_lossy().to_string();
         let invalid_path_args = HashMap::from_iter([
             ("pattern".to_string(), Value::String("anything".to_string())),
             ("scope".to_string(), Value::String(missing_path)),

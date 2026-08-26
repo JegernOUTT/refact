@@ -556,7 +556,12 @@ pub async fn collect_evidence(
     };
     let mut surviving = Vec::with_capacity(findings.len());
     let mut rejections = Vec::new();
-    let changed_files = scope.changed_files.iter().cloned().collect::<HashSet<PathBuf>>();
+    let changed_files = scope
+        .changed_files
+        .iter()
+        .cloned()
+        .map(crate::files_correction::canonicalize_normalized_path)
+        .collect::<HashSet<PathBuf>>();
 
     for (index, mut finding) in std::mem::take(findings).into_iter().enumerate() {
         let Some(file) = resolve_scope_path(scope, &finding.file) else {
@@ -825,10 +830,12 @@ mod tests {
     #[tokio::test]
     async fn tool_review_evidence_attaches_overlapping_precomputed_diff_hunk() {
         let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("src").join("sample.rs");
+        let temp_root =
+            dunce::simplified(&std::fs::canonicalize(temp.path()).unwrap()).to_path_buf();
+        let file = temp_root.join("src").join("sample.rs");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, "one\ntwo changed\nthree\n").unwrap();
-        let gcx = gcx_for(temp.path()).await;
+        let gcx = gcx_for(&temp_root).await;
         let mut review_scope = scope(file.clone());
         review_scope.diff_base = Some("base".to_string());
         review_scope.changed_files = vec![file.clone()];
@@ -854,9 +861,11 @@ mod tests {
     #[tokio::test]
     async fn tool_review_evidence_silently_records_missing_patch_and_codegraph() {
         let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("sample.rs");
+        let temp_root =
+            dunce::simplified(&std::fs::canonicalize(temp.path()).unwrap()).to_path_buf();
+        let file = temp_root.join("sample.rs");
         std::fs::write(&file, "fn sample() {}\n").unwrap();
-        let gcx = gcx_for(temp.path()).await;
+        let gcx = gcx_for(&temp_root).await;
         let mut review_scope = scope(file.clone());
         review_scope.diff_base = Some("base".to_string());
         review_scope.changed_files = vec![file.clone()];

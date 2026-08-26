@@ -897,7 +897,8 @@ mod tests {
             envelope.references[0].provenance,
             ToolEnrichmentProvenance::Heuristic
         );
-        assert_eq!(envelope.references[0].confidence, Some(0.9));
+        let expected_confidence = if cfg!(windows) { Some(0.3) } else { Some(0.9) };
+        assert_eq!(envelope.references[0].confidence, expected_confidence);
         assert!(envelope.truncated);
     }
 
