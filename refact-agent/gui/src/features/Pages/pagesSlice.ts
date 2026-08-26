@@ -117,6 +117,10 @@ export interface IndexingSettingsPage {
   name: "indexing settings";
 }
 
+export interface BrowserSettingsPage {
+  name: "browser settings";
+}
+
 export interface BuddyPage {
   name: "buddy";
   draftId?: string;
@@ -159,7 +163,8 @@ export type Page =
   | GeneralSettingsPage
   | PrivacySettingsPage
   | ShellSettingsPage
-  | IndexingSettingsPage;
+  | IndexingSettingsPage
+  | BrowserSettingsPage;
 
 export function isIntegrationSetupPage(
   page: Page,

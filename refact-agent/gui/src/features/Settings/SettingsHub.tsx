@@ -19,6 +19,7 @@ import { PrivacySettingsSection } from "../Privacy";
 import { ShellSettingsSection } from "../Shell";
 import { GeneralSettingsSection } from "./GeneralSettingsSection";
 import { IndexingSettingsSection } from "./IndexingSettingsSection";
+import { BrowserSettingsSection } from "./BrowserSettingsSection";
 
 import styles from "./SettingsHub.module.css";
 
@@ -53,6 +54,8 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
         return <ShellSettingsSection />;
       case "indexing":
         return <IndexingSettingsSection />;
+      case "browser":
+        return <BrowserSettingsSection />;
       case "providers":
         return (
           <Providers

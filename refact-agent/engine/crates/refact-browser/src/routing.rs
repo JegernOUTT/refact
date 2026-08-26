@@ -628,6 +628,19 @@ fn content_type_for_path(path: &Path) -> &'static str {
     }
 }
 
+fn declares_structured_body(content_type: &str) -> bool {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    essence.ends_with("/json")
+        || essence.ends_with("+json")
+        || essence.ends_with("/xml")
+        || essence.ends_with("+xml")
+}
+
 fn is_forbidden_request_header(name: &str) -> bool {
     FORBIDDEN_REQUEST_HEADERS
         .iter()
@@ -663,6 +676,21 @@ fn matcher_for_pattern(pattern: &UrlPattern) -> Result<UrlMatcher, String> {
 }
 
 fn validate_handler(handler: &RouteHandler) -> Result<(), String> {
+    if let RouteHandler::Fulfill {
+        body: Some(body),
+        content_type: Some(content_type),
+        body_base64: false,
+        ..
+    } = handler
+    {
+        if body.is_empty() && declares_structured_body(content_type) {
+            return Err(format!(
+                "Route fulfill declares content-type {content_type} but the body is empty; \
+                 clients parsing the response will fail. Supply a body such as \"{{}}\", \
+                 drop content_type, or use a 204 status."
+            ));
+        }
+    }
     match handler {
         RouteHandler::Fulfill { status, .. }
         | RouteHandler::FetchAndFulfill {
@@ -1468,6 +1496,98 @@ mod tests {
 
         decide_get(&registry, "one", "https://example.com/assets/app.js");
         assert_eq!(registry.list()[0].times_remaining, Some(1));
+    }
+
+    #[test]
+    fn empty_body_with_a_structured_content_type_is_rejected() {
+        let registry = RouteRegistry::default();
+        for content_type in [
+            "application/json",
+            "APPLICATION/JSON; charset=utf-8",
+            "application/vnd.api+json",
+            "text/xml",
+            "image/svg+xml",
+        ] {
+            let error = registry
+                .add(
+                    UrlPattern::Text("https://example.com/**".to_string()),
+                    RouteHandler::Fulfill {
+                        status: 200,
+                        headers: BTreeMap::new(),
+                        body: Some(String::new()),
+                        path: None,
+                        json: None,
+                        content_type: Some(content_type.to_string()),
+                        body_base64: false,
+                    },
+                    None,
+                )
+                .unwrap_err();
+            assert!(
+                error.contains("body is empty"),
+                "unexpected error for {content_type}: {error}"
+            );
+        }
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn empty_bodies_stay_legal_without_a_structured_content_type() {
+        let registry = RouteRegistry::default();
+        for content_type in [None, Some("text/plain"), Some("text/html")] {
+            registry
+                .add(
+                    UrlPattern::Text("https://example.com/**".to_string()),
+                    RouteHandler::Fulfill {
+                        status: 200,
+                        headers: BTreeMap::new(),
+                        body: Some(String::new()),
+                        path: None,
+                        json: None,
+                        content_type: content_type.map(str::to_string),
+                        body_base64: false,
+                    },
+                    None,
+                )
+                .unwrap();
+        }
+        assert_eq!(registry.list().len(), 3);
+    }
+
+    #[test]
+    fn exhausting_times_empties_the_registry_so_callers_must_reconcile_interception() {
+        let registry = RouteRegistry::default();
+        registry
+            .add(
+                UrlPattern::Regex {
+                    source: "conversations\\.history".to_string(),
+                    flags: String::new(),
+                },
+                fulfill(200, "{}"),
+                Some(2),
+            )
+            .unwrap();
+
+        for request_id in ["one", "two"] {
+            decide_get(
+                &registry,
+                request_id,
+                "https://example.com/api/conversations.history",
+            );
+        }
+
+        assert!(
+            registry.is_empty(),
+            "times expiry must drain the registry without an explicit unroute"
+        );
+        assert_eq!(
+            registry.remove(Some(&UrlPattern::Regex {
+                source: "conversations\\.history".to_string(),
+                flags: String::new(),
+            })),
+            0,
+            "a later unroute reports zero removals, so teardown cannot be gated on the count"
+        );
     }
 
     #[test]

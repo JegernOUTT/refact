@@ -12,6 +12,7 @@ use crate::call_validation::ContextEnum;
 use crate::integrations::sessions::{IntegrationSession, get_session_hashmap_key};
 
 use crate::global_context::GlobalContext;
+use crate::http::routers::v1::browser_settings;
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::scratchpads::multimodality::MultimodalElement;
 
@@ -84,32 +85,43 @@ pub struct SettingsChrome {
 
 impl SettingsChrome {
     pub fn launch_options(&self) -> BrowserLaunchOptions {
-        let defaults = BrowserLaunchOptions::default();
+        let base = browser_settings::current().to_launch_options();
         BrowserLaunchOptions {
-            headless: self.headless.parse().unwrap_or(defaults.headless),
+            headless: self.headless.parse().unwrap_or(base.headless),
             chrome_path: (!self.chrome_path.is_empty())
-                .then(|| PathBuf::from(self.chrome_path.clone())),
+                .then(|| PathBuf::from(self.chrome_path.clone()))
+                .or_else(|| base.chrome_path.clone()),
             idle_timeout: self
                 .idle_browser_timeout
                 .parse::<u64>()
                 .ok()
-                .map(Duration::from_secs),
-            extra_args: self.extra_args.clone(),
+                .map(Duration::from_secs)
+                .or(base.idle_timeout),
+            extra_args: if self.extra_args.is_empty() {
+                base.extra_args.clone()
+            } else {
+                self.extra_args.clone()
+            },
             chromium_sandbox: self
                 .chromium_sandbox
                 .parse()
-                .unwrap_or(defaults.chromium_sandbox),
-            proxy: (!self.proxy_server.is_empty()).then(|| BrowserProxyOptions {
-                server: self.proxy_server.clone(),
-                bypass: (!self.proxy_bypass.is_empty()).then(|| self.proxy_bypass.clone()),
-            }),
+                .unwrap_or(base.chromium_sandbox),
+            proxy: if self.proxy_server.is_empty() {
+                base.proxy.clone()
+            } else {
+                Some(BrowserProxyOptions {
+                    server: self.proxy_server.clone(),
+                    bypass: (!self.proxy_bypass.is_empty()).then(|| self.proxy_bypass.clone()),
+                })
+            },
             downloads_dir: (!self.downloads_dir.is_empty())
-                .then(|| PathBuf::from(self.downloads_dir.clone())),
+                .then(|| PathBuf::from(self.downloads_dir.clone()))
+                .or_else(|| base.downloads_dir.clone()),
             ignore_https_errors: self
                 .ignore_https_errors
                 .parse()
-                .unwrap_or(defaults.ignore_https_errors),
-            ..defaults
+                .unwrap_or(base.ignore_https_errors),
+            ..base
         }
     }
 }
@@ -2316,6 +2328,8 @@ async fn session_open_tab(
                 let runtime_lock = runtime_arc.lock().await;
                 runtime_lock.browser.new_tab().map_err(|e| e.to_string())?
             };
+            let current_settings = browser_settings::current();
+            let browser_viewport = &current_settings.viewport;
             let method = match device {
                 DeviceType::Desktop => {
                     let (width, height) = match (
@@ -2323,11 +2337,11 @@ async fn session_open_tab(
                         settings_chrome.window_height.parse::<u32>(),
                     ) {
                         (Ok(width), Ok(height)) => (width, height),
-                        _ => (1440, 900),
+                        _ => (browser_viewport.desktop.width, browser_viewport.desktop.height),
                     };
                     let scale_factor = match settings_chrome.scale_factor.parse::<f64>() {
                         Ok(scale_factor) => scale_factor,
-                        _ => 2.0,
+                        _ => browser_viewport.desktop.scale_factor,
                     };
                     set_device_metrics_method(width, height, scale_factor, false)
                 }
@@ -2337,11 +2351,11 @@ async fn session_open_tab(
                         settings_chrome.mobile_window_height.parse::<u32>(),
                     ) {
                         (Ok(width), Ok(height)) => (width, height),
-                        _ => (390, 844),
+                        _ => (browser_viewport.mobile.width, browser_viewport.mobile.height),
                     };
                     let scale_factor = match settings_chrome.mobile_scale_factor.parse::<f64>() {
                         Ok(scale_factor) => scale_factor,
-                        _ => 3.0,
+                        _ => browser_viewport.mobile.scale_factor,
                     };
                     set_device_metrics_method(width, height, scale_factor, true)
                 }
@@ -2351,11 +2365,11 @@ async fn session_open_tab(
                         settings_chrome.tablet_window_height.parse::<u32>(),
                     ) {
                         (Ok(width), Ok(height)) => (width, height),
-                        _ => (834, 1112),
+                        _ => (browser_viewport.tablet.width, browser_viewport.tablet.height),
                     };
                     let scale_factor = match settings_chrome.tablet_scale_factor.parse::<f64>() {
                         Ok(scale_factor) => scale_factor,
-                        _ => 2.0,
+                        _ => browser_viewport.tablet.scale_factor,
                     };
                     set_device_metrics_method(width, height, scale_factor, true)
                 }

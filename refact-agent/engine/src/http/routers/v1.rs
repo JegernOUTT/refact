@@ -175,6 +175,7 @@ mod project_configs;
 pub mod project_information;
 pub mod scheduler;
 mod settings_config;
+pub mod browser_settings;
 mod setup_status;
 mod shell_policy;
 pub mod sidebar;
@@ -336,6 +337,11 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
             "/skills/settings",
             get(settings_config::handle_v1_skills_settings_get)
                 .post(settings_config::handle_v1_skills_settings_post),
+        )
+        .route(
+            "/browser-settings",
+            get(browser_settings::handle_v1_browser_settings_get)
+                .post(browser_settings::handle_v1_browser_settings_post),
         )
         .route(
             "/privacy/policy",

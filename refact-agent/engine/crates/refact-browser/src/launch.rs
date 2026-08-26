@@ -42,6 +42,7 @@ pub struct BrowserLaunchOptions {
     pub proxy: Option<BrowserProxyOptions>,
     pub downloads_dir: Option<PathBuf>,
     pub ignore_https_errors: bool,
+    pub evict_idle_attached: bool,
 }
 
 impl Default for BrowserLaunchOptions {
@@ -57,6 +58,7 @@ impl Default for BrowserLaunchOptions {
             proxy: None,
             downloads_dir: None,
             ignore_https_errors: true,
+            evict_idle_attached: false,
         }
     }
 }

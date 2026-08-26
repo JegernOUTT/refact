@@ -2,6 +2,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   Bot,
   Cable,
+  Chrome,
   Paintbrush,
   Plug,
   ScanSearch,
@@ -18,6 +19,7 @@ export type SettingsSectionId =
   | "privacy"
   | "shell"
   | "indexing"
+  | "browser"
   | "providers"
   | "models"
   | "customization"
@@ -37,6 +39,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   { id: "privacy", label: "Privacy & Access", icon: ShieldCheck },
   { id: "shell", label: "Shell", icon: Terminal },
   { id: "indexing", label: "Indexing", icon: ScanSearch },
+  { id: "browser", label: "Browser", icon: Chrome },
   { id: "providers", label: "Providers", icon: Plug },
   { id: "models", label: "Models", icon: Bot },
   { id: "customization", label: "Customization", icon: Paintbrush },

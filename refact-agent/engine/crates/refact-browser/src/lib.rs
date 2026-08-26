@@ -495,6 +495,7 @@ pub struct BrowserRuntime {
     pub buffers: BrowserBuffers,
     pub network_monitor: Arc<NetworkMonitorHandle>,
     pub route_registry: Arc<RouteRegistry>,
+    route_interception_enabled: bool,
     pub websocket_registry: Arc<WebSocketRegistry>,
     pub har_recorder: Arc<har::HarRecorder>,
     pub coverage_manager: coverage::CoverageManager,
@@ -602,6 +603,7 @@ impl BrowserRuntime {
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
             route_registry: Arc::new(RouteRegistry::default()),
+            route_interception_enabled: false,
             websocket_registry: Arc::new(WebSocketRegistry::default()),
             har_recorder: Arc::new(har::HarRecorder::default()),
             coverage_manager: coverage::CoverageManager::default(),
@@ -663,6 +665,7 @@ impl BrowserRuntime {
             buffers: BrowserBuffers::new(mask_passwords),
             network_monitor: Arc::new(NetworkMonitorHandle::default()),
             route_registry: Arc::new(RouteRegistry::default()),
+            route_interception_enabled: false,
             websocket_registry: Arc::new(WebSocketRegistry::default()),
             har_recorder: Arc::new(har::HarRecorder::default()),
             coverage_manager: coverage::CoverageManager::default(),
@@ -713,6 +716,50 @@ impl BrowserRuntime {
         self.launch_options.window_bounds = Some(bounds);
     }
 
+    fn tabs_snapshot(&self) -> Vec<Arc<headless_chrome::Tab>> {
+        self.browser
+            .get_tabs()
+            .lock()
+            .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default()
+    }
+
+    fn route_interception_required(&self) -> bool {
+        !self.route_registry.is_empty() || self.context_state.http_credentials.is_some()
+    }
+
+    pub fn route_interception_enabled(&self) -> bool {
+        self.route_interception_enabled
+    }
+
+    pub fn route_interception_stale(&self) -> bool {
+        self.route_interception_required() != self.route_interception_enabled
+    }
+
+    pub fn reconcile_route_interception(&mut self) -> Result<(), String> {
+        let required = self.route_interception_required();
+        if required == self.route_interception_enabled {
+            return Ok(());
+        }
+        let handle_auth = self.context_state.http_credentials.is_some();
+        let mut errors = Vec::new();
+        for tab in self.tabs_snapshot() {
+            let outcome = if required {
+                self.route_registry.enable_for_tab(&tab, handle_auth)
+            } else {
+                self.route_registry.disable_for_tab(&tab)
+            };
+            if let Err(error) = outcome {
+                errors.push(error);
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+        self.route_interception_enabled = required;
+        Ok(())
+    }
+
     pub fn add_route(
         &mut self,
         pattern: refact_integrations::browser_models::UrlPattern,
@@ -721,33 +768,11 @@ impl BrowserRuntime {
     ) -> Result<(), String> {
         let handler =
             routing::normalize_route_handler(handler, &self.artifacts_dir, &self.allowed_roots)?;
-        let enable = self.route_registry.is_empty();
         self.route_registry.add(pattern.clone(), handler, times)?;
-        if enable {
-            let tabs = self
-                .browser
-                .get_tabs()
-                .lock()
-                .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            for tab in tabs {
-                if let Err(error) = self
-                    .route_registry
-                    .enable_for_tab(&tab, self.context_state.http_credentials.is_some())
-                {
-                    self.route_registry.remove(Some(&pattern));
-                    for enabled_tab in self
-                        .browser
-                        .get_tabs()
-                        .lock()
-                        .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
-                        .unwrap_or_default()
-                    {
-                        let _ = self.route_registry.disable_for_tab(&enabled_tab);
-                    }
-                    return Err(error);
-                }
-            }
+        if let Err(error) = self.reconcile_route_interception() {
+            self.route_registry.remove(Some(&pattern));
+            let _ = self.reconcile_route_interception();
+            return Err(error);
         }
         Ok(())
     }
@@ -758,63 +783,20 @@ impl BrowserRuntime {
     ) -> Result<usize, String> {
         let previous_routes = self.route_registry.snapshot();
         let removed = self.route_registry.remove(pattern);
-        if removed > 0
-            && self.route_registry.is_empty()
-            && self.context_state.http_credentials.is_none()
-        {
-            let tabs = self
-                .browser
-                .get_tabs()
-                .lock()
-                .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            let mut errors = Vec::new();
-            for tab in tabs {
-                if let Err(error) = self.route_registry.disable_for_tab(&tab) {
-                    errors.push(error);
-                }
-            }
-            if !errors.is_empty() {
-                self.route_registry.restore(previous_routes)?;
-                for tab in self
-                    .browser
-                    .get_tabs()
-                    .lock()
-                    .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
-                    .unwrap_or_default()
-                {
-                    if let Err(error) = self
-                        .route_registry
-                        .enable_for_tab(&tab, self.context_state.http_credentials.is_some())
-                    {
-                        errors.push(error);
-                    }
-                }
-                return Err(errors.join("; "));
-            }
+        if let Err(error) = self.reconcile_route_interception() {
+            self.route_registry.restore(previous_routes)?;
+            let _ = self.reconcile_route_interception();
+            return Err(error);
         }
         Ok(removed)
     }
 
     pub fn set_har_replay(&mut self, replay: har::HarReplay) -> Result<(), String> {
-        let enable = self.route_registry.is_empty();
         self.route_registry.set_har_replay(replay);
-        if enable {
-            for tab in self
-                .browser
-                .get_tabs()
-                .lock()
-                .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default()
-            {
-                if let Err(error) = self
-                    .route_registry
-                    .enable_for_tab(&tab, self.context_state.http_credentials.is_some())
-                {
-                    self.route_registry.clear_har_replay();
-                    return Err(error);
-                }
-            }
+        if let Err(error) = self.reconcile_route_interception() {
+            self.route_registry.clear_har_replay();
+            let _ = self.reconcile_route_interception();
+            return Err(error);
         }
         Ok(())
     }
@@ -839,16 +821,11 @@ impl BrowserRuntime {
         password: String,
     ) -> Result<(), String> {
         self.context_state.http_credentials = Some((username, password));
-        for tab in self
-            .browser
-            .get_tabs()
-            .lock()
-            .map(|tabs| tabs.iter().cloned().collect::<Vec<_>>())
-            .unwrap_or_default()
-        {
+        for tab in self.tabs_snapshot() {
             self.context_state.apply_to_tab(&tab)?;
             self.route_registry.enable_for_tab(&tab, true)?;
         }
+        self.route_interception_enabled = true;
         Ok(())
     }
 
@@ -1060,12 +1037,12 @@ impl Drop for BrowserRuntime {
         self.coverage_manager.cleanup(&tabs);
         self.screencast_manager.cleanup(&tabs);
         let _ = self.webauthn_manager.cleanup(&tabs);
-        if !self.route_registry.is_empty() || self.context_state.http_credentials.is_some() {
+        if self.route_interception_enabled {
             for tab in &tabs {
                 let _ = self.route_registry.disable_for_tab(tab);
             }
-            self.route_registry.remove(None);
         }
+        self.route_registry.remove(None);
         if self.launch_options.downloads_dir.is_none() {
             let _ = std::fs::remove_dir_all(&self.downloads_dir);
         }
@@ -1671,7 +1648,7 @@ pub fn setup_recording_for_tab(
     runtime.context_state.apply_to_tab(&tab)?;
     runtime.clock.apply_to_tab(&tab)?;
     runtime.init_scripts.apply_to_tab(&tab)?;
-    if !runtime.route_registry.is_empty() || runtime.context_state.http_credentials.is_some() {
+    if runtime.route_interception_enabled() {
         runtime
             .route_registry
             .enable_for_tab(&tab, runtime.context_state.http_credentials.is_some())?;
@@ -2652,6 +2629,51 @@ mod tests {
         assert_eq!(
             world::utility_init_script().world_name.as_deref(),
             Some(UTILITY_WORLD_NAME)
+        );
+    }
+
+    // A registry emptied by times-expiry once left Fetch.enable installed on every tab,
+    // stalling all traffic and driving pages into reload loops.
+    #[test]
+    fn interception_teardown_is_driven_by_state_not_by_removal_counts() {
+        let source = include_str!("lib.rs");
+
+        for contract in [
+            "fn route_interception_required(&self) -> bool",
+            "pub fn reconcile_route_interception(&mut self) -> Result<(), String>",
+            "pub fn route_interception_stale(&self) -> bool",
+            "if required == self.route_interception_enabled",
+            "self.route_interception_enabled = required;",
+        ] {
+            assert!(source.contains(contract), "runtime lacks {contract}");
+        }
+
+        let add_route = source
+            .split_once("pub fn add_route(")
+            .unwrap()
+            .1
+            .split_once("\n    }\n")
+            .unwrap()
+            .0;
+        assert!(add_route.contains("self.reconcile_route_interception()"));
+
+        let remove_routes = source
+            .split_once("pub fn remove_routes(")
+            .unwrap()
+            .1
+            .split_once("\n    }\n")
+            .unwrap()
+            .0;
+        assert!(remove_routes.contains("self.reconcile_route_interception()"));
+        assert!(
+            !remove_routes.contains("removed > 0"),
+            "interception teardown must not be gated on the unroute removal count"
+        );
+
+        let controller = include_str!("../../../src/integrations/browser_controller.rs");
+        assert!(
+            controller.contains("rt.route_interception_stale()"),
+            "the step loop must reconcile interception after times-expiry"
         );
     }
 

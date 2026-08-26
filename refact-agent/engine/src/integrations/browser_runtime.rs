@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
@@ -7,6 +7,8 @@ use tokio::sync::Mutex as AMutex;
 use tracing::{info, warn};
 
 pub use refact_browser::*;
+
+use crate::http::routers::v1::browser_settings;
 
 pub fn get_browser_profile_dir(gcx_cache_dir: &PathBuf, thread_id: &str) -> PathBuf {
     gcx_cache_dir.join("browser_profiles").join(thread_id)
@@ -48,6 +50,69 @@ pub async fn remove_browser_runtime(
         .remove(runtime_id)
 }
 
+pub const RUNTIME_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn release_runtime_and_wait(
+    removed: Option<Arc<AMutex<BrowserRuntime>>>,
+    runtime_id: &str,
+) {
+    let Some(removed) = removed else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + RUNTIME_RELEASE_TIMEOUT;
+    while Arc::strong_count(&removed) > 1 {
+        if std::time::Instant::now() >= deadline {
+            warn!(
+                "BrowserRuntime {} still has {} live references after {:?}; \
+                 relaunching while the old Chrome may still hold the profile lock",
+                runtime_id,
+                Arc::strong_count(&removed),
+                RUNTIME_RELEASE_TIMEOUT
+            );
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::task::block_in_place(move || drop(removed));
+}
+
+fn profile_lock_pid(profile_dir: &Path) -> Option<u32> {
+    let target = std::fs::read_link(profile_dir.join("SingletonLock")).ok()?;
+    let target = target.to_string_lossy();
+    let (_, pid) = target.rsplit_once('-')?;
+    pid.parse::<u32>().ok()
+}
+
+fn profile_lock_is_live(profile_dir: &Path) -> Option<u32> {
+    let pid = profile_lock_pid(profile_dir)?;
+    #[cfg(target_os = "linux")]
+    {
+        Path::new(&format!("/proc/{pid}")).exists().then_some(pid)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+fn describe_launch_failure(error: &str, profile_dir: &Path) -> String {
+    if !error.contains("no available ports") {
+        return error.to_string();
+    }
+    match profile_lock_is_live(profile_dir) {
+        Some(pid) => format!(
+            "{error} (Chrome never reported a debugging URL: profile {} is still locked by \
+             live process {pid}; the previous browser did not exit)",
+            profile_dir.display()
+        ),
+        None => format!(
+            "{error} (Chrome never reported a debugging URL after 11 launch attempts; \
+             this usually means Chrome exited immediately rather than that ports are exhausted)"
+        ),
+    }
+}
+
 pub async fn find_runtime_by_chat_id(
     app: crate::app_state::AppState,
     chat_id: &str,
@@ -69,6 +134,7 @@ pub async fn find_runtime_by_chat_id(
     None
 }
 
+#[allow(dead_code)]
 pub const RELAUNCH_SETTLE: Duration = Duration::from_millis(800);
 
 pub const RELAUNCH_WARNING: &str =
@@ -162,16 +228,21 @@ pub async fn relaunch_runtime_for_chat(
             }
             drop(runtime_arc);
             let removed = remove_browser_runtime(app.clone(), &runtime_id).await;
-            drop(removed);
-            tokio::time::sleep(RELAUNCH_SETTLE).await;
+            release_runtime_and_wait(removed, &runtime_id).await;
+            tokio::time::sleep(browser_settings::current().relaunch_settle()).await;
             emitter_active
         }
         None => false,
     };
 
     let mode = options.mode_label();
-    let mut runtime = BrowserRuntime::launch(profile_dir, options)
-        .map_err(|e| format!("Failed to relaunch browser in {} mode: {}", mode, e))?;
+    let mut runtime = BrowserRuntime::launch(profile_dir.clone(), options).map_err(|e| {
+        format!(
+            "Failed to relaunch browser in {} mode: {}",
+            mode,
+            describe_launch_failure(&e, &profile_dir)
+        )
+    })?;
     runtime.reattach(chat_id);
     let runtime_id = register_browser_runtime(app.clone(), runtime).await;
 
@@ -246,9 +317,10 @@ struct RuntimeHealth {
 
 pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
     loop {
+        let monitor_interval = browser_settings::current().monitor_interval();
         let shutdown_flag = app.runtime.shutdown_flag.clone();
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+            _ = tokio::time::sleep(monitor_interval) => {}
             _ = async {
                 while !shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -309,7 +381,9 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                 );
             }
 
-            if chat_id.is_some() && idle_expired {
+            let evict_idle = idle_expired
+                && (chat_id.is_none() || launch_options.evict_idle_attached);
+            if evict_idle {
                 warn!(
                     "BrowserRuntime {} idle timeout ({:?}) for chat {:?}",
                     rid, idle_timeout, chat_id
@@ -464,7 +538,7 @@ mod tests {
 
         for step in [
             "remove_browser_runtime(app.clone(), &runtime_id)",
-            "tokio::time::sleep(RELAUNCH_SETTLE)",
+            "tokio::time::sleep(browser_settings::current().relaunch_settle())",
             "BrowserRuntime::launch(profile_dir, options)",
             "runtime.reattach(chat_id)",
             "register_browser_runtime(app.clone(), runtime)",

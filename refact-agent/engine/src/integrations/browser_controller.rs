@@ -43,20 +43,30 @@ use refact_browser::http_client;
 use refact_core::image_policy::{resize_to_policy, ImageFormat, ImagePolicy};
 
 use crate::global_context::GlobalContext;
+use crate::http::routers::v1::browser_settings;
 
+#[allow(dead_code)]
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 5_000;
+#[allow(dead_code)]
 const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
 const MAX_WAIT_SECONDS: f64 = 60.0;
 const MIN_WAIT_SECONDS: f64 = 0.0;
 const NAVIGATION_LIFECYCLE_EVENT: &str = "load";
 
+#[allow(dead_code)]
 const MAX_DOM_SNAPSHOT_CHARS: usize = 100_000;
+#[allow(dead_code)]
 const MAX_EXTRACT_LINKS: usize = 500;
+#[allow(dead_code)]
 const MAX_EXTRACT_TABLE_ROWS: usize = 100;
+#[allow(dead_code)]
 const DEFAULT_ALL_TEXTS: usize = 50;
 const MAX_ALL_TEXTS: usize = 500;
+#[allow(dead_code)]
 const DEFAULT_ARIA_SNAPSHOT_CHARS: usize = 20_000;
+#[allow(dead_code)]
 const MAX_ARIA_SNAPSHOT_CHARS: usize = 100_000;
+#[allow(dead_code)]
 const MAX_INLINE_SNAPSHOT_BYTES: usize = 6 * 1024;
 const SNAPSHOT_SUMMARY_LINES: usize = 40;
 
@@ -64,9 +74,10 @@ const TAP_AMBIGUOUS_TARGET: &str = "tap requires either a locator or both x and 
 const TAP_REQUIRES_TOUCH: &str = "The page does not support tap: enable touch emulation first with a set_viewport step that sets has_touch to true";
 
 fn clamp_timeout_ms(requested: Option<u64>) -> u64 {
+    let settings = browser_settings::current();
     requested
-        .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS)
-        .min(MAX_WAIT_TIMEOUT_MS)
+        .unwrap_or(settings.timing.default_wait_timeout_ms)
+        .min(settings.timing.max_wait_timeout_ms)
 }
 
 fn clamp_wait_seconds(requested: f64) -> f64 {
@@ -79,6 +90,7 @@ fn clamp_wait_seconds(requested: f64) -> f64 {
     }
 }
 
+#[allow(dead_code)]
 const DEFAULT_POLL_INTERVAL_MS: u64 = 200;
 const REPORT_STABILIZATION_TIMEOUT_MS: u64 = 3_000;
 const REPORT_STABILITY_INTERVAL_MS: u64 = 200;
@@ -337,6 +349,7 @@ impl<'a> BrowserActionDriver<'a> {
         image_policy: &'a ImagePolicy,
         timeout: Duration,
     ) -> Self {
+        let settings = browser_settings::current();
         Self {
             tab,
             world,
@@ -346,7 +359,7 @@ impl<'a> BrowserActionDriver<'a> {
             locator_handler_firings,
             image_policy,
             precheck_deadline: Instant::now()
-                + timeout.min(Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS)),
+                + timeout.min(Duration::from_millis(settings.timing.default_wait_timeout_ms)),
             resolved: None,
             locator_echo: None,
         }
@@ -2206,6 +2219,7 @@ fn prepare_http_request(
     runtime: &mut BrowserRuntime,
     options: &BrowserHttpRequest,
 ) -> Result<PreparedHttpRequest, String> {
+    let settings = browser_settings::current();
     let artifacts_dir = runtime.artifacts_dir.clone();
     let prepared = (|| -> Result<(http_client::HttpRequestSpec, Arc<Tab>), String> {
         let spec = http_client::HttpRequestSpec {
@@ -2221,7 +2235,7 @@ fn prepare_http_request(
                 options
                     .timeout_ms
                     .unwrap_or(http_client::DEFAULT_HTTP_TIMEOUT_MS)
-                    .min(MAX_WAIT_TIMEOUT_MS),
+                    .min(settings.timing.max_wait_timeout_ms),
             ),
             max_redirects: options
                 .max_redirects
@@ -2704,6 +2718,7 @@ pub async fn execute_request_with_runtime(
     request: BrowserActionRequest,
     image_policy: &ImagePolicy,
 ) -> Result<ExecutionReport, String> {
+    let settings = browser_settings::current();
     if request.session != SessionPolicy::SharedDefault {
         return Err(format!(
             "Unsupported browser session policy: {:?}",
@@ -3043,8 +3058,10 @@ pub async fn execute_request_with_runtime(
             if result.ok {
                 result = match &current_tab {
                     Some(tab) => tokio::task::block_in_place(|| {
-                        let completed = file_chooser_manager
-                            .complete(tab, Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS));
+                        let completed = file_chooser_manager.complete(
+                            tab,
+                            Duration::from_millis(settings.timing.default_wait_timeout_ms),
+                        );
                         let _ = tab.set_file_chooser_dialog_interception(false, None);
                         match completed {
                             Ok(upload) => {
@@ -3157,6 +3174,13 @@ pub async fn execute_request_with_runtime(
             rt.touch();
             let action_type = if result.ok { "action" } else { "error" };
             rt.push_agent_action(action_type, &result.summary);
+            if rt.route_interception_stale() {
+                if let Err(error) =
+                    tokio::task::block_in_place(|| rt.reconcile_route_interception())
+                {
+                    tracing::warn!("Failed to reconcile route interception: {error}");
+                }
+            }
         }
 
         let is_non_fatal = is_non_fatal_step(step);
@@ -3434,6 +3458,7 @@ pub fn execute_steps_with_runtime(
     steps: &[BrowserStep],
     image_policy: &ImagePolicy,
 ) -> ExecutionReport {
+    let settings = browser_settings::current();
     refact_browser::adopt_new_tabs(runtime, None);
     let initial_tab_ids = runtime.known_tab_ids();
     let mut current_tab: Option<Arc<Tab>> = runtime.get_active_tab();
@@ -3478,9 +3503,11 @@ pub fn execute_steps_with_runtime(
                         break;
                     }
                     let navigation = url.as_ref().map(|url| {
-                        run_and_wait_for_navigation(&new_tab, DEFAULT_WAIT_TIMEOUT_MS, || {
-                            trigger_page_navigation(&new_tab, url)
-                        })
+                        run_and_wait_for_navigation(
+                            &new_tab,
+                            settings.timing.default_wait_timeout_ms,
+                            || trigger_page_navigation(&new_tab, url),
+                        )
                     });
                     let _ = new_tab.evaluate(INSPECT_ELEMENT_JS, false);
                     current_tab = Some(new_tab);
@@ -3725,9 +3752,10 @@ pub fn execute_steps_with_runtime(
                     );
                     if chooser_was_armed && matches!(other, BrowserStep::Click { .. }) {
                         if result.ok {
-                            let completed = runtime
-                                .file_chooser_manager
-                                .complete(tab, Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS));
+                            let completed = runtime.file_chooser_manager.complete(
+                                tab,
+                                Duration::from_millis(settings.timing.default_wait_timeout_ms),
+                            );
                             let _ = tab.set_file_chooser_dialog_interception(false, None);
                             result = match completed {
                                 Ok(upload) => {
@@ -4098,6 +4126,7 @@ fn perform_action_prechecks(
 }
 
 fn wait_for_pending_navigation(tab: &Tab, deadline: Instant) -> Result<(), String> {
+    let settings = browser_settings::current();
     let mut last_error: Option<String>;
     loop {
         match eval_js_value(tab, "document.readyState === 'loading'") {
@@ -4119,7 +4148,7 @@ fn wait_for_pending_navigation(tab: &Tab, deadline: Instant) -> Result<(), Strin
             ));
         }
         std::thread::sleep(
-            Duration::from_millis(DEFAULT_POLL_INTERVAL_MS)
+            Duration::from_millis(settings.timing.default_poll_interval_ms)
                 .min(deadline.saturating_duration_since(Instant::now())),
         );
     }
@@ -4382,6 +4411,7 @@ fn wait_for_handler_hidden(
     handler: &LocatorHandler,
     deadline: Instant,
 ) -> Result<(), String> {
+    let settings = browser_settings::current();
     loop {
         if matches!(
             probe_locator_handler(tab, world, handler)?,
@@ -4396,7 +4426,7 @@ fn wait_for_handler_hidden(
             ));
         }
         std::thread::sleep(
-            Duration::from_millis(DEFAULT_POLL_INTERVAL_MS)
+            Duration::from_millis(settings.timing.default_poll_interval_ms)
                 .min(deadline.saturating_duration_since(Instant::now())),
         );
     }
@@ -4413,6 +4443,7 @@ fn execute_single_step(
     locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
     mouse_state: &mut MouseState,
 ) -> StepResult {
+    let settings = browser_settings::current();
     if needs_locator_handler_checkpoint(step) && !uses_actionability_engine(step) {
         if let Some(handlers) = handlers {
             if let Err(error) = perform_action_prechecks(
@@ -4421,7 +4452,8 @@ fn execute_single_step(
                 handlers,
                 locator_handler_firings,
                 image_policy,
-                Instant::now() + Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS),
+                Instant::now()
+                    + Duration::from_millis(settings.timing.default_wait_timeout_ms),
             ) {
                 return StepResult::failure(idx, "Locator handler checkpoint failed", error);
             }
@@ -5919,6 +5951,7 @@ fn resolve_drag_endpoint(
     refact_browser::ActionabilitySuccess<(String, ElementHandle, MainFrameCssPoint)>,
     refact_browser::ActionabilityError,
 > {
+    let settings = browser_settings::current();
     let engine = ActionabilityEngine::new(SystemClock::default(), ActionabilityTimeouts::default());
     let timeout = ActionabilityTimeouts::default().action;
     let mut driver = DragActionabilityDriver {
@@ -5929,7 +5962,7 @@ fn resolve_drag_endpoint(
         locator_handler_firings: firings,
         image_policy,
         precheck_deadline: Instant::now()
-            + timeout.min(Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS)),
+            + timeout.min(Duration::from_millis(settings.timing.default_wait_timeout_ms)),
         resolved: None,
         position,
     };
@@ -6123,7 +6156,8 @@ fn step_navigate(tab: &Tab, idx: usize, url: &str, timeout_ms: u64) -> StepResul
 }
 
 fn step_nav_js(tab: &Tab, idx: usize, js: &str, success_msg: &str) -> StepResult {
-    match run_and_wait_for_navigation(tab, DEFAULT_WAIT_TIMEOUT_MS, || {
+    let settings = browser_settings::current();
+    match run_and_wait_for_navigation(tab, settings.timing.default_wait_timeout_ms, || {
         let target = js_navigation_target(tab, js)?;
         tab.evaluate(js, false)
             .map_err(|error| format!("JS navigation trigger failed: {error}"))?;
@@ -7276,6 +7310,7 @@ fn step_wait_for_navigation(
     timeout_ms: u64,
     pre_step_url: Option<&str>,
 ) -> StepResult {
+    let settings = browser_settings::current();
     let current_url = tab.get_url();
     let reference_url = pre_step_url.unwrap_or(&current_url);
     let complete_js = r#"(function() { return document.readyState === 'complete'; })()"#;
@@ -7284,7 +7319,12 @@ fn step_wait_for_navigation(
         return navigation_load_state_step(
             idx,
             format!("Navigation detected: {} -> {}", reference_url, current_url),
-            poll_condition(tab, complete_js, timeout_ms, DEFAULT_POLL_INTERVAL_MS),
+            poll_condition(
+                tab,
+                complete_js,
+                timeout_ms,
+                settings.timing.default_poll_interval_ms,
+            ),
         );
     }
 
@@ -7293,13 +7333,23 @@ fn step_wait_for_navigation(
         js_string_literal(reference_url),
     );
 
-    match poll_condition(tab, &url_changed_js, timeout_ms, DEFAULT_POLL_INTERVAL_MS) {
+    match poll_condition(
+        tab,
+        &url_changed_js,
+        timeout_ms,
+        settings.timing.default_poll_interval_ms,
+    ) {
         Ok(()) => {
             let end_url = tab.get_url();
             navigation_load_state_step(
                 idx,
                 format!("Navigation detected: {} -> {}", reference_url, end_url),
-                poll_condition(tab, complete_js, timeout_ms, DEFAULT_POLL_INTERVAL_MS),
+                poll_condition(
+                    tab,
+                    complete_js,
+                    timeout_ms,
+                    settings.timing.default_poll_interval_ms,
+                ),
             )
         }
         Err(error) => StepResult::failure(
@@ -7325,6 +7375,7 @@ fn describe_url_pattern(pattern: &UrlPattern) -> String {
 }
 
 fn poll_url_match(tab: &Tab, matcher: &UrlMatcher, timeout_ms: u64) -> Result<String, String> {
+    let settings = browser_settings::current();
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let mut last_error: Option<String>;
     loop {
@@ -7347,7 +7398,9 @@ fn poll_url_match(tab: &Tab, matcher: &UrlMatcher, timeout_ms: u64) -> Result<St
                 format!("Timed out after {}ms", timeout_ms),
             ));
         }
-        std::thread::sleep(Duration::from_millis(DEFAULT_POLL_INTERVAL_MS));
+        std::thread::sleep(Duration::from_millis(
+            settings.timing.default_poll_interval_ms,
+        ));
     }
 }
 
@@ -7366,8 +7419,14 @@ fn step_wait_for_url(tab: &Tab, idx: usize, pattern: &UrlPattern, timeout_ms: u6
 }
 
 fn step_wait_for_text(tab: &Tab, idx: usize, text: &str, timeout_ms: u64) -> StepResult {
+    let settings = browser_settings::current();
     let js = browser_locators::js_check_text_present(text);
-    match poll_condition(tab, &js, timeout_ms, DEFAULT_POLL_INTERVAL_MS) {
+    match poll_condition(
+        tab,
+        &js,
+        timeout_ms,
+        settings.timing.default_poll_interval_ms,
+    ) {
         Ok(()) => StepResult::success(idx, format!("Text '{}' found on page", text)),
         Err(e) => StepResult::failure(idx, format!("Wait for text '{}'", text), e),
     }
@@ -7428,6 +7487,7 @@ fn poll_locator_until<T>(
     timeout_ms: u64,
     mut sample: impl FnMut(Vec<ElementHandle>) -> Result<Option<T>, String>,
 ) -> Result<T, String> {
+    let settings = browser_settings::current();
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
         match resolve_locator_handles(tab, world, locator).and_then(&mut sample) {
@@ -7438,7 +7498,9 @@ fn poll_locator_until<T>(
         if Instant::now() >= deadline {
             return Err(format!("Timed out after {}ms", timeout_ms));
         }
-        std::thread::sleep(Duration::from_millis(DEFAULT_POLL_INTERVAL_MS));
+        std::thread::sleep(Duration::from_millis(
+            settings.timing.default_poll_interval_ms,
+        ));
     }
 }
 
@@ -7485,6 +7547,7 @@ const NETWORK_INFLIGHT_TRACKER_JS: &str = r#"(function() {
 })()"#;
 
 fn step_wait_for_network_idle(tab: &Tab, idx: usize, timeout_ms: u64) -> StepResult {
+    let settings = browser_settings::current();
     let _ = tab.evaluate(NETWORK_INFLIGHT_TRACKER_JS, false);
 
     let snapshot_js = r#"(function() {
@@ -7494,7 +7557,7 @@ fn step_wait_for_network_idle(tab: &Tab, idx: usize, timeout_ms: u64) -> StepRes
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let idle_window = Duration::from_millis(NETWORK_IDLE_WINDOW_MS);
-    let poll = Duration::from_millis(DEFAULT_POLL_INTERVAL_MS);
+    let poll = Duration::from_millis(settings.timing.default_poll_interval_ms);
     let mut idle_since: Option<Instant> = None;
 
     loop {
@@ -7696,7 +7759,10 @@ fn step_input_value(
 }
 
 fn all_texts_limit(limit: Option<usize>) -> usize {
-    limit.unwrap_or(DEFAULT_ALL_TEXTS).min(MAX_ALL_TEXTS)
+    let settings = browser_settings::current();
+    limit
+        .unwrap_or(settings.capture.default_all_texts)
+        .min(MAX_ALL_TEXTS)
 }
 
 fn step_all_texts(
@@ -7757,7 +7823,10 @@ fn step_extract_links(
     locator: Option<&BrowserLocator>,
     limit: Option<usize>,
 ) -> StepResult {
-    let effective_limit = limit.unwrap_or(50).min(MAX_EXTRACT_LINKS);
+    let settings = browser_settings::current();
+    let effective_limit = limit
+        .unwrap_or(50)
+        .min(settings.capture.max_extract_links);
     let js = browser_locators::js_extract_links(effective_limit);
     let result = match locator {
         Some(locator) => serde_json::to_value(locator)
@@ -7778,9 +7847,10 @@ fn step_extract_links(
 }
 
 fn truncate_table_rows(mut result: Value, limit: Option<usize>) -> Value {
+    let settings = browser_settings::current();
     let effective_limit = limit
-        .unwrap_or(MAX_EXTRACT_TABLE_ROWS)
-        .min(MAX_EXTRACT_TABLE_ROWS);
+        .unwrap_or(settings.capture.max_extract_table_rows)
+        .min(settings.capture.max_extract_table_rows);
     if let Some(rows) = result.get_mut("rows").and_then(Value::as_array_mut) {
         rows.truncate(effective_limit);
     }
@@ -7815,7 +7885,10 @@ fn step_dom_snapshot(
     selector: &str,
     max_chars: Option<usize>,
 ) -> StepResult {
-    let limit = max_chars.unwrap_or(5000).min(MAX_DOM_SNAPSHOT_CHARS);
+    let settings = browser_settings::current();
+    let limit = max_chars
+        .unwrap_or(5000)
+        .min(settings.capture.max_dom_snapshot_chars);
     let js = format!(
         r#"(function() {{
   var el = document.querySelector({sel});
@@ -7846,6 +7919,7 @@ fn step_accessibility_snapshot(
     idx: usize,
     options: &AccessibilitySnapshotOptions,
 ) -> StepResult {
+    let settings = browser_settings::current();
     let root = match options.locator.as_ref() {
         Some(locator) => match resolve_element(tab, world, locator) {
             Ok(resolved) => Some(resolved.handle),
@@ -7877,8 +7951,8 @@ fn step_accessibility_snapshot(
         Ok(mut snapshot) => {
             let limit = options
                 .max_chars
-                .unwrap_or(DEFAULT_ARIA_SNAPSHOT_CHARS)
-                .min(MAX_ARIA_SNAPSHOT_CHARS);
+                .unwrap_or(settings.capture.default_aria_snapshot_chars)
+                .min(settings.capture.max_aria_snapshot_chars);
             snapshot.yaml = truncate_chars(snapshot.yaml, limit);
             StepResult::success(idx, "Accessibility snapshot").with_data(
                 serde_json::to_value(snapshot)
@@ -7976,9 +8050,10 @@ fn snapshot_head(yaml: &str, max_lines: usize) -> String {
 }
 
 fn build_page_snapshot(yaml: String, artifacts_dir: &Path) -> Result<BrowserPageSnapshot, String> {
+    let settings = browser_settings::current();
     let bytes = yaml.len();
     let lines = yaml.lines().count();
-    if bytes <= MAX_INLINE_SNAPSHOT_BYTES {
+    if bytes <= settings.capture.max_inline_snapshot_bytes {
         return Ok(BrowserPageSnapshot {
             yaml,
             lines,
@@ -8852,6 +8927,7 @@ fn step_set_content(
     html: &str,
     wait_until: Option<BrowserLoadState>,
 ) -> StepResult {
+    let settings = browser_settings::current();
     let frame_id = match tab.call_method(Page::GetFrameTree(None)) {
         Ok(response) => response.frame_tree.frame.id,
         Err(error) => {
@@ -8874,7 +8950,12 @@ fn step_set_content(
     }
     let _ = world.release_all(tab);
     let state = wait_until.unwrap_or(BrowserLoadState::Load);
-    let wait = wait_for_load_state(network_monitor, idx, state, DEFAULT_WAIT_TIMEOUT_MS);
+    let wait = wait_for_load_state(
+        network_monitor,
+        idx,
+        state,
+        settings.timing.default_wait_timeout_ms,
+    );
     let summary = format!("Set page content ({} bytes)", html.len());
     if wait.ok {
         StepResult::success(idx, summary)
@@ -9266,6 +9347,7 @@ fn step_dismiss_overlays(
     image_policy: &ImagePolicy,
     aggressive: bool,
 ) -> StepResult {
+    let settings = browser_settings::current();
     let Some(handlers) = handlers else {
         return match dismiss_overlays(tab, aggressive) {
             Ok(outcome) => StepResult::success(idx, outcome),
@@ -9308,7 +9390,7 @@ fn step_dismiss_overlays(
         handlers,
         firings,
         image_policy,
-        Instant::now() + Duration::from_millis(DEFAULT_WAIT_TIMEOUT_MS),
+        Instant::now() + Duration::from_millis(settings.timing.default_wait_timeout_ms),
         &lease,
         aggressive,
     );
@@ -9680,18 +9762,22 @@ mod tests {
 
     #[test]
     fn popup_wait_arming_clamps_the_timeout_and_remembers_the_armed_step() {
+        let settings = browser_settings::current();
         let armed = PendingPopupWait::arm(
             4,
             2,
-            Some(MAX_WAIT_TIMEOUT_MS + 1_000),
+            Some(settings.timing.max_wait_timeout_ms + 1_000),
             std::collections::BTreeSet::new(),
         );
         assert_eq!(armed.step_index, 4);
         assert_eq!(armed.result_index, 2);
-        assert_eq!(armed.timeout_ms, MAX_WAIT_TIMEOUT_MS);
+        assert_eq!(armed.timeout_ms, settings.timing.max_wait_timeout_ms);
 
         let defaulted = PendingPopupWait::arm(0, 0, None, std::collections::BTreeSet::new());
-        assert_eq!(defaulted.timeout_ms, DEFAULT_WAIT_TIMEOUT_MS);
+        assert_eq!(
+            defaulted.timeout_ms,
+            settings.timing.default_wait_timeout_ms
+        );
     }
 
     #[test]
@@ -10328,12 +10414,13 @@ mod tests {
 
     #[test]
     fn an_oversize_snapshot_spills_to_an_artifact_and_inlines_only_a_head() {
+        let settings = browser_settings::current();
         let directory = tempfile::tempdir().unwrap();
         let yaml = (1..=400)
             .map(|index| format!("- button \"Item {index}\" [ref=e{index}]"))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(yaml.len() > MAX_INLINE_SNAPSHOT_BYTES);
+        assert!(yaml.len() > settings.capture.max_inline_snapshot_bytes);
 
         let snapshot = build_page_snapshot(yaml.clone(), directory.path()).unwrap();
         let artifact = snapshot.artifact.as_ref().unwrap();
@@ -10353,13 +10440,19 @@ mod tests {
 
     #[test]
     fn the_inline_snapshot_budget_switches_exactly_at_the_cap() {
+        let settings = browser_settings::current();
         let directory = tempfile::tempdir().unwrap();
 
-        let at_cap =
-            build_page_snapshot("a".repeat(MAX_INLINE_SNAPSHOT_BYTES), directory.path()).unwrap();
-        let over_cap =
-            build_page_snapshot("a".repeat(MAX_INLINE_SNAPSHOT_BYTES + 1), directory.path())
-                .unwrap();
+        let at_cap = build_page_snapshot(
+            "a".repeat(settings.capture.max_inline_snapshot_bytes),
+            directory.path(),
+        )
+        .unwrap();
+        let over_cap = build_page_snapshot(
+            "a".repeat(settings.capture.max_inline_snapshot_bytes + 1),
+            directory.path(),
+        )
+        .unwrap();
 
         assert!(at_cap.artifact.is_none());
         assert!(!at_cap.truncated);
@@ -10651,7 +10744,8 @@ mod tests {
 
     #[test]
     fn all_texts_limit_defaults_and_clamps_to_the_extraction_cap() {
-        assert_eq!(all_texts_limit(None), DEFAULT_ALL_TEXTS);
+        let settings = browser_settings::current();
+        assert_eq!(all_texts_limit(None), settings.capture.default_all_texts);
         assert_eq!(all_texts_limit(Some(3)), 3);
         assert_eq!(all_texts_limit(Some(0)), 0);
         assert_eq!(all_texts_limit(Some(10_000)), MAX_ALL_TEXTS);
@@ -10723,7 +10817,8 @@ mod tests {
 
     #[test]
     fn extract_table_limit_above_the_extraction_cap_is_clamped() {
-        let rows = (0..MAX_EXTRACT_TABLE_ROWS + 20)
+        let settings = browser_settings::current();
+        let rows = (0..settings.capture.max_extract_table_rows + 20)
             .map(|index| serde_json::json!([index.to_string()]))
             .collect::<Vec<_>>();
         let extracted = serde_json::json!({"ok": true, "rows": rows, "total_rows": 1_000});
@@ -10732,7 +10827,7 @@ mod tests {
 
         assert_eq!(
             truncated["rows"].as_array().unwrap().len(),
-            MAX_EXTRACT_TABLE_ROWS
+            settings.capture.max_extract_table_rows
         );
         assert_eq!(truncated["total_rows"], serde_json::json!(1_000));
     }

@@ -43,6 +43,7 @@ import { chatModesApi } from "../services/refact/chatModes";
 import { customizationApi } from "../services/refact/customization";
 import { projectInformationApi } from "../services/refact/projectInformation";
 import { setupStatusApi } from "../services/refact/setupStatus";
+import { browserSettingsApi } from "../services/refact/browserSettings";
 import { extensionsApi } from "../services/refact/extensions";
 import { pluginsApi } from "../services/refact/plugins";
 import { tipOfTheDaySlice } from "../features/TipOfTheDay";
@@ -165,6 +166,7 @@ const rootReducer = combineSlices(
     [privacyApi.reducerPath]: privacyApi.reducer,
     [shellPolicyApi.reducerPath]: shellPolicyApi.reducer,
     [indexingSettingsApi.reducerPath]: indexingSettingsApi.reducer,
+    [browserSettingsApi.reducerPath]: browserSettingsApi.reducer,
     [performanceApi.reducerPath]: performanceApi.reducer,
     [skillsSettingsApi.reducerPath]: skillsSettingsApi.reducer,
   },
@@ -309,6 +311,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           privacyApi.middleware,
           shellPolicyApi.middleware,
           indexingSettingsApi.middleware,
+          browserSettingsApi.middleware,
           performanceApi.middleware,
           skillsSettingsApi.middleware,
         )
