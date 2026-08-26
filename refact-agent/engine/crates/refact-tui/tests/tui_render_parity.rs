@@ -17,7 +17,7 @@ use refact_tui::pickers::{PickerKind, PickerItem, PickerState};
 use refact_tui::protocol::TranscriptMessage;
 use refact_tui::sessions::TrajectoryMeta;
 use refact_tui::theme::TuiTheme;
-use refact_tui::ui::{footer, status_card, status_indicator};
+use refact_tui::ui::{footer, status_card, status_indicator, BOX_DRAWING_GLYPHS};
 use serde_json::{json, Value};
 
 fn project() -> OpenProjectResponse {
@@ -247,15 +247,19 @@ fn assert_no_box_drawing(
     height: u16,
 ) {
     assert!(
-        !snapshot.chars().any(|character| {
-            matches!(
-                character,
-                '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' | '─' | '│'
-            )
-        }),
+        !snapshot
+            .chars()
+            .any(|character| BOX_DRAWING_GLYPHS.contains(character)),
         "{scenario} {} {width}x{height} retained box drawing:\n{snapshot}",
         color.label(),
     );
+}
+
+fn assert_box_drawing_table_is_complete() {
+    assert_eq!(BOX_DRAWING_GLYPHS.chars().count(), 128);
+    for glyph in "╭╮╰╯═║╔╗╚╝━┃┏┓┗┛".chars() {
+        assert!(BOX_DRAWING_GLYPHS.contains(glyph));
+    }
 }
 
 fn idle_scenario(_app: &mut App) {}
@@ -1335,6 +1339,7 @@ fn events_pane_golden_snapshot() {
 #[test]
 fn degradation_matrix_covers_registered_scenarios() {
     let scenarios = render_scenarios();
+    assert_box_drawing_table_is_complete();
     assert_registered_scenarios_have_snapshots(&scenarios);
 
     for scenario in &scenarios {
@@ -1388,6 +1393,44 @@ fn compact_layout_prioritizes_transcript_over_secondary_docks() {
     let snapshot = render_app_snapshot(&mut app, 30, 10);
 
     assert!(!snapshot.contains("daemon events"), "{snapshot}");
+    assert!(snapshot.contains("… content truncated"), "{snapshot}");
+}
+
+#[test]
+fn compact_layout_marks_every_exclusive_surface() {
+    let _environment = ColorMode::NoColor.apply();
+    let scenarios = render_scenarios();
+
+    for name in ["history surface", "task board", "browser", "activity"] {
+        let scenario = scenarios
+            .iter()
+            .find(|scenario| scenario.name == name)
+            .expect("exclusive surface scenario registered");
+        let snapshot = render_matrix_snapshot(scenario, ColorMode::NoColor, 30, 10);
+        assert!(
+            snapshot.contains("… content truncated"),
+            "{name} omitted its compact truncation indicator:\n{snapshot}"
+        );
+    }
+}
+
+#[test]
+fn compact_indicator_survives_overlay_rendering() {
+    let _environment = ColorMode::NoColor.apply();
+    let mut app = App::new(project());
+    app.apply_chat_event(chat_event(
+        &app,
+        "message_added",
+        json!({
+            "type": "message_added",
+            "message": {"role": "notice", "content": "Overlay must not erase compact indicator"}
+        }),
+    ));
+    app.execute_command_name("raw");
+
+    let snapshot = render_app_snapshot(&mut app, 30, 10);
+
+    assert!(snapshot.contains("Transcript raw"), "{snapshot}");
     assert!(snapshot.contains("… content truncated"), "{snapshot}");
 }
 

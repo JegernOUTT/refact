@@ -28,6 +28,12 @@ const BORDERLESS_MODAL_MAX_WIDTH: u16 = 39;
 const COMPACT_MAX_WIDTH: u16 = 30;
 const COMPACT_MAX_HEIGHT: u16 = 10;
 const COMPACT_MIN_TRANSCRIPT_HEIGHT: u16 = 2;
+pub const BOX_DRAWING_GLYPHS: &str = concat!(
+    "─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟",
+    "┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼┽┾┿",
+    "╀╁╂╃╄╅╆╇╈╉╊╋╌╍╎╏═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟",
+    "╠╡╢╣╤╥╦╧╨╩╪╫╬╭╮╯╰╱╲╳╴╵╶╷╸╹╺╻╼╽╾╿",
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SurfaceLayer {
@@ -132,9 +138,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_composer_region(frame, app, chunks[5], layer);
         footer::render(frame, app, chunks[6]);
     }
-    if compact {
-        render_compact_truncation_indicator(frame, chunks[2]);
-    }
     match layer {
         SurfaceLayer::ProjectPicker => {
             picker::render_project_picker(frame, app.project_picker(), area);
@@ -168,7 +171,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         | SurfaceLayer::Activity
         | SurfaceLayer::AskForm => {}
     }
-    degrade_frames(frame, area);
+    finish_frame(frame, area, compact, chunks[2]);
 }
 
 fn render_exclusive_surface(
@@ -198,9 +201,13 @@ fn render_exclusive_surface(
         }
         _ => return,
     }
+    finish_frame(frame, area, compact, area);
+}
+
+fn finish_frame(frame: &mut Frame<'_>, area: Rect, compact: bool, truncation_area: Rect) {
     degrade_frames(frame, area);
     if compact {
-        render_compact_truncation_indicator(frame, area);
+        render_compact_truncation_indicator(frame, truncation_area);
     }
 }
 
@@ -244,7 +251,10 @@ fn render_compact_truncation_indicator(frame: &mut Frame<'_>, area: Rect) {
 }
 
 fn degrade_frames(frame: &mut Frame<'_>, area: Rect) {
-    let buffer = frame.buffer_mut();
+    degrade_frame_buffer(frame.buffer_mut(), area);
+}
+
+fn degrade_frame_buffer(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
     if area.width <= BORDERLESS_MODAL_MAX_WIDTH {
         remove_frame_borders(buffer, area);
     }
@@ -252,14 +262,7 @@ fn degrade_frames(frame: &mut Frame<'_>, area: Rect) {
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
                 let symbol = buffer[(x, y)].symbol();
-                let replacement = match symbol {
-                    "┌" | "┐" | "└" | "┘" | "├" | "┤" | "┬" | "┴" | "┼" => {
-                        Some("+")
-                    }
-                    "─" => Some("-"),
-                    "│" => Some("|"),
-                    _ => None,
-                };
+                let replacement = ascii_frame_replacement(symbol);
                 if let Some(replacement) = replacement {
                     buffer[(x, y)].set_symbol(replacement);
                 }
@@ -298,6 +301,21 @@ fn remove_frame_borders(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
             buffer[(right, y)].set_symbol(" ");
         }
     }
+}
+
+fn ascii_frame_replacement(symbol: &str) -> Option<&'static str> {
+    if symbol.is_empty() || !BOX_DRAWING_GLYPHS.contains(symbol) {
+        return None;
+    }
+    Some(match symbol {
+        "─" | "━" | "┄" | "┅" | "┈" | "┉" | "╌" | "╍" | "═" | "╴" | "╶" | "╸" | "╺" | "╼" | "╾" => {
+            "-"
+        }
+        "│" | "┃" | "┆" | "┇" | "┊" | "┋" | "╎" | "╏" | "║" | "╵" | "╷" | "╹" | "╻" | "╽" | "╿" => {
+            "|"
+        }
+        _ => "+",
+    })
 }
 
 fn render_composer_region(frame: &mut Frame<'_>, app: &App, area: Rect, layer: SurfaceLayer) {
@@ -405,6 +423,25 @@ mod tests {
 
         assert_eq!(rect, Rect::new(25, 14, 30, 6));
         assert_rect_inside(rect, bounds);
+    }
+
+    #[test]
+    fn degrade_frames_rewrites_every_box_drawing_glyph() {
+        assert_eq!(BOX_DRAWING_GLYPHS.chars().count(), 128);
+        for glyph in "╭╮╰╯═║╔╗╚╝━┃┏┓┗┛".chars() {
+            assert!(BOX_DRAWING_GLYPHS.contains(glyph));
+        }
+        for glyph in BOX_DRAWING_GLYPHS.chars() {
+            let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 1, 1));
+            let symbol = glyph.to_string();
+            buffer[(0, 0)].set_symbol(&symbol);
+            let area = buffer.area;
+            degrade_frame_buffer(&mut buffer, area);
+            let rendered = buffer[(0, 0)].symbol();
+
+            assert!(!BOX_DRAWING_GLYPHS.contains(rendered));
+            assert!(matches!(rendered, "+" | "-" | "|"));
+        }
     }
 
     #[test]
