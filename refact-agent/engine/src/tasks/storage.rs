@@ -497,7 +497,14 @@ pub async fn next_planner_chat_id(
     gcx: Arc<GlobalContext>,
     task_id: &str,
 ) -> Result<String, String> {
-    let existing = list_task_trajectories(gcx, task_id, "planner", None).await?;
+    let existing = list_task_trajectories_for(
+        gcx,
+        task_id,
+        "planner",
+        None,
+        crate::chat::trajectory_index::TrajectoryIndexListingCaller::TaskPlannerIdAllocation,
+    )
+    .await?;
     let prefix = format!("planner-{}-", task_id);
     let max_num = existing
         .iter()
@@ -516,6 +523,23 @@ pub async fn list_task_trajectories(
     role: &str,
     agent_id: Option<&str>,
 ) -> Result<Vec<TrajectoryInfo>, String> {
+    list_task_trajectories_for(
+        gcx,
+        task_id,
+        role,
+        agent_id,
+        crate::chat::trajectory_index::TrajectoryIndexListingCaller::TaskTrajectoryApi,
+    )
+    .await
+}
+
+pub async fn list_task_trajectories_for(
+    gcx: Arc<GlobalContext>,
+    task_id: &str,
+    role: &str,
+    agent_id: Option<&str>,
+    caller: crate::chat::trajectory_index::TrajectoryIndexListingCaller,
+) -> Result<Vec<TrajectoryInfo>, String> {
     let task_dir = find_task_dir(gcx.clone(), task_id).await?;
     let traj_dir = get_task_trajectory_dir(&task_dir, role, agent_id);
 
@@ -527,10 +551,11 @@ pub async fn list_task_trajectories(
         .await
         .chat
         .trajectory_index_coordinator;
-    let entries = crate::chat::trajectory_index::list_trajectory_entries_with_rollout(
+    let entries = crate::chat::trajectory_index::list_trajectory_entries_with_rollout_for(
         &coordinator,
         &traj_dir,
         None,
+        caller,
     )
     .await?;
     let mut trajectories: Vec<TrajectoryInfo> = entries

@@ -16,7 +16,7 @@ use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
 use crate::buddy::events::BuddyEvent;
 use crate::chat::trajectories::trajectory_event_is_displayable_chat;
-use crate::chat::{list_trajectories_page, TrajectoryEvent, TrajectoryMeta};
+use crate::chat::{list_trajectories_page_for, TrajectoryEvent, TrajectoryMeta};
 use crate::custom_error::ScratchError;
 use crate::http::routers::v1::tasks::list_tasks_with_session_state;
 use crate::tasks::events::TaskEvent;
@@ -306,7 +306,13 @@ async fn load_chats_part(gcx: Arc<GlobalContext>) -> InitialSidebarPart {
     let app = crate::app_state::AppState::from_gcx(gcx).await;
     match timeout(
         SIDEBAR_BOOTSTRAP_TIMEOUT,
-        list_trajectories_page(app, SIDEBAR_CHATS_PAGE_SIZE, None, true),
+        list_trajectories_page_for(
+            app,
+            SIDEBAR_CHATS_PAGE_SIZE,
+            None,
+            true,
+            crate::chat::trajectory_index::TrajectoryIndexListingCaller::Sidebar,
+        ),
     )
     .await
     {

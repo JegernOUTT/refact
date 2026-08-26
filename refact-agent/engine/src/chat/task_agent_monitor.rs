@@ -89,14 +89,20 @@ async fn ensure_planner_task_meta(
             return Ok(());
         }
     }
-    let known_planner = storage::list_task_trajectories(app.gcx.clone(), task_id, "planner", None)
-        .await
-        .map(|trajectories| {
-            trajectories
-                .iter()
-                .any(|trajectory| trajectory.id == planner_chat_id)
-        })
-        .unwrap_or(false);
+    let known_planner = storage::list_task_trajectories_for(
+        app.gcx.clone(),
+        task_id,
+        "planner",
+        None,
+        crate::chat::trajectory_index::TrajectoryIndexListingCaller::TaskAgentMonitor,
+    )
+    .await
+    .map(|trajectories| {
+        trajectories
+            .iter()
+            .any(|trajectory| trajectory.id == planner_chat_id)
+    })
+    .unwrap_or(false);
     if known_planner || planner_chat_id.starts_with(&format!("planner-{}-", task_id)) {
         tracing::error!(
             "Planner session {} for task {} lost its task_meta (missing trajectory or schema drift); self-healing planner metadata before '{}' notification",
@@ -1206,24 +1212,29 @@ pub(crate) async fn notify_planner_agents_finished(
             }
         }
         if planner_chat_id.is_none() {
-            planner_chat_id =
-                storage::list_task_trajectories(app.gcx.clone(), task_id, "planner", None)
-                    .await
-                    .ok()
-                    .and_then(|trajectories| {
-                        let prefix = format!("planner-{}-", task_id);
-                        trajectories
-                            .into_iter()
-                            .max_by_key(|t| {
-                                (
-                                    t.id.strip_prefix(&prefix)
-                                        .and_then(|s| s.parse::<u32>().ok())
-                                        .unwrap_or(0),
-                                    t.updated_at.clone(),
-                                )
-                            })
-                            .map(|t| t.id)
-                    });
+            planner_chat_id = storage::list_task_trajectories_for(
+                app.gcx.clone(),
+                task_id,
+                "planner",
+                None,
+                crate::chat::trajectory_index::TrajectoryIndexListingCaller::TaskAgentMonitor,
+            )
+            .await
+            .ok()
+            .and_then(|trajectories| {
+                let prefix = format!("planner-{}-", task_id);
+                trajectories
+                    .into_iter()
+                    .max_by_key(|t| {
+                        (
+                            t.id.strip_prefix(&prefix)
+                                .and_then(|s| s.parse::<u32>().ok())
+                                .unwrap_or(0),
+                            t.updated_at.clone(),
+                        )
+                    })
+                    .map(|t| t.id)
+            });
         }
         planner_chat_id.ok_or_else(|| {
             format!(

@@ -60,6 +60,7 @@ pub use trajectories::{
     handle_v1_trajectories_save, handle_v1_trajectories_delete, handle_v1_trajectories_subscribe,
     maybe_save_trajectory, find_trajectory_path, find_trajectory_or_buddy_path,
     find_trajectory_path_for_active_chat, list_all_trajectories_meta, list_trajectories_page,
+    list_trajectories_page_for,
 };
 pub use handlers::{
     handle_v1_chat_subscribe, handle_v1_chat_command, handle_v1_chat_cancel_queued,

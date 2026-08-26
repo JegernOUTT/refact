@@ -1826,14 +1826,16 @@ async fn indexed_candidate_paths_in_dirs(
     gcx: &Arc<GlobalContext>,
     dirs: &[PathBuf],
     chat_id: &str,
+    caller: trajectory_index::TrajectoryIndexListingCaller,
 ) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let app = AppState::from_gcx(gcx.clone()).await;
     for dir in dirs {
-        let entries = match trajectory_index::list_trajectory_entries_with_rollout(
+        let entries = match trajectory_index::list_trajectory_entries_with_rollout_for(
             &app.chat.trajectory_index_coordinator,
             dir,
             None,
+            caller,
         )
         .await
         {
@@ -1875,7 +1877,13 @@ async fn normal_trajectory_candidate_paths(gcx: Arc<GlobalContext>, chat_id: &st
             }
         }
     }
-    let indexed = indexed_candidate_paths_in_dirs(&gcx, &normal_dirs, chat_id).await;
+    let indexed = indexed_candidate_paths_in_dirs(
+        &gcx,
+        &normal_dirs,
+        chat_id,
+        trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+    )
+    .await;
     extend_unique_paths(&mut paths, &mut seen, indexed);
     paths
 }
@@ -2000,8 +2008,13 @@ async fn find_trajectory_file(
     validate_trajectory_id(chat_id).ok()?;
     let mut candidates = normal_trajectory_candidate_paths(gcx.clone(), chat_id).await;
     let mut seen: std::collections::HashSet<PathBuf> = candidates.iter().cloned().collect();
-    let indexed =
-        indexed_candidate_paths_in_dirs(&gcx, &list_trajectory_dirs(&gcx).await, chat_id).await;
+    let indexed = indexed_candidate_paths_in_dirs(
+        &gcx,
+        &list_trajectory_dirs(&gcx).await,
+        chat_id,
+        trajectory_index::TrajectoryIndexListingCaller::ChatPathLookup,
+    )
+    .await;
     extend_unique_paths(&mut candidates, &mut seen, indexed);
     let task_scoped = trajectory_candidate_paths(gcx.clone(), chat_id).await;
     extend_unique_paths(&mut candidates, &mut seen, task_scoped);
@@ -5263,10 +5276,11 @@ async fn refresh_trajectory_index_entry_for_path(
 async fn remove_stale_trajectory_index_entries(gcx: Arc<GlobalContext>, chat_id: &str) {
     let app = AppState::from_gcx(gcx.clone()).await;
     for dir in list_trajectory_dirs(&gcx).await {
-        let entries = match trajectory_index::list_trajectory_entries_with_rollout(
+        let entries = match trajectory_index::list_trajectory_entries_with_rollout_for(
             &app.chat.trajectory_index_coordinator,
             &dir,
             None,
+            trajectory_index::TrajectoryIndexListingCaller::StaleEntryCleanup,
         )
         .await
         {
@@ -7048,6 +7062,7 @@ async fn collect_trajectory_list_candidates(
     gcx: &Arc<GlobalContext>,
     cursor_filter: Option<&(String, String)>,
     displayable_only: bool,
+    caller: trajectory_index::TrajectoryIndexListingCaller,
 ) -> Vec<TrajectoryListCandidate> {
     let mut candidates = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
@@ -7057,10 +7072,11 @@ async fn collect_trajectory_list_candidates(
         if !is_real_dir(&trajectories_dir).await {
             continue;
         }
-        let entries = match trajectory_index::list_trajectory_entries_with_rollout(
+        let entries = match trajectory_index::list_trajectory_entries_with_rollout_for(
             &app.chat.trajectory_index_coordinator,
             &trajectories_dir,
             None,
+            caller,
         )
         .await
         {
@@ -7285,6 +7301,23 @@ pub async fn list_trajectories_page(
     cursor: Option<String>,
     displayable_only: bool,
 ) -> Result<PaginatedTrajectories, String> {
+    list_trajectories_page_for(
+        app,
+        limit,
+        cursor,
+        displayable_only,
+        trajectory_index::TrajectoryIndexListingCaller::ChatApi,
+    )
+    .await
+}
+
+pub async fn list_trajectories_page_for(
+    app: AppState,
+    limit: usize,
+    cursor: Option<String>,
+    displayable_only: bool,
+    caller: trajectory_index::TrajectoryIndexListingCaller,
+) -> Result<PaginatedTrajectories, String> {
     let gcx = app.gcx.clone();
     let limit = limit.clamp(1, 200);
     let cursor_filter = match cursor.as_deref() {
@@ -7296,11 +7329,12 @@ pub async fn list_trajectories_page(
 
     let task_roots = get_all_task_roots(gcx.clone()).await;
     let mut candidates =
-        collect_trajectory_list_candidates(&gcx, cursor_filter.as_ref(), displayable_only).await;
+        collect_trajectory_list_candidates(&gcx, cursor_filter.as_ref(), displayable_only, caller)
+            .await;
     let total_count = if cursor_filter.is_none() {
         candidates.len()
     } else {
-        collect_trajectory_list_candidates(&gcx, None, displayable_only)
+        collect_trajectory_list_candidates(&gcx, None, displayable_only, caller)
             .await
             .len()
     };
@@ -7365,10 +7399,11 @@ pub async fn list_all_trajectories_meta(app: AppState) -> Result<Vec<TrajectoryM
         if !is_real_dir(&trajectories_dir).await {
             continue;
         }
-        let entries = match trajectory_index::list_trajectory_entries_with_rollout(
+        let entries = match trajectory_index::list_trajectory_entries_with_rollout_for(
             &app.chat.trajectory_index_coordinator,
             &trajectories_dir,
             None,
+            trajectory_index::TrajectoryIndexListingCaller::AllTrajectoriesMetadata,
         )
         .await
         {

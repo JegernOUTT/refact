@@ -15,29 +15,9 @@ pub async fn emit_task_event(gcx: Arc<GlobalContext>, event: TaskEvent) {
 }
 
 async fn enrich_task_meta_with_session_state(gcx: Arc<GlobalContext>, meta: &mut TaskMeta) {
-    let Ok(planner_trajectories) =
-        crate::tasks::storage::list_task_trajectories(gcx.clone(), &meta.id, "planner", None).await
-    else {
-        meta.planner_session_state = None;
-        return;
-    };
-
-    let planner_chat_ids = planner_trajectories
-        .into_iter()
-        .map(|trajectory| trajectory.id)
-        .collect::<Vec<_>>();
-
-    if planner_chat_ids.is_empty() {
-        meta.planner_session_state = None;
-        return;
-    }
-
-    let session_arcs = {
+    let all_session_arcs = {
         let sessions = gcx.chat_sessions.read().await;
-        planner_chat_ids
-            .iter()
-            .filter_map(|planner_chat_id| sessions.get(planner_chat_id).cloned())
-            .collect::<Vec<_>>()
+        sessions.values().cloned().collect::<Vec<_>>()
     };
 
     let mut has_paused = false;
@@ -46,8 +26,15 @@ async fn enrich_task_meta_with_session_state(gcx: Arc<GlobalContext>, meta: &mut
     let mut has_generating = false;
     let mut has_executing_tools = false;
     let mut has_error = false;
-    for session_arc in session_arcs {
+    for session_arc in all_session_arcs {
         let session = session_arc.lock().await;
+        let is_planner =
+            session.thread.task_meta.as_ref().is_some_and(|task_meta| {
+                task_meta.role == "planner" && task_meta.task_id == meta.id
+            });
+        if !is_planner {
+            continue;
+        }
         match session.runtime.state {
             crate::chat::types::SessionState::Paused => has_paused = true,
             crate::chat::types::SessionState::WaitingIde => has_waiting_ide = true,
@@ -120,4 +107,47 @@ pub async fn emit_task_memories_changed(gcx: Arc<GlobalContext>, task_id: &str) 
         },
     )
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn session_state_enrichment_does_not_list_task_trajectories() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut task = TaskMeta {
+            schema_version: 1,
+            id: "task-index-free".to_string(),
+            name: "Task".to_string(),
+            status: refact_tasks::types::TaskStatus::Active,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            cards_total: 0,
+            cards_done: 0,
+            cards_failed: 0,
+            agents_active: 0,
+            base_branch: None,
+            base_commit: None,
+            default_agent_model: None,
+            is_name_generated: false,
+            last_agents_summary_at: None,
+            planner_session_state: Some("stale".to_string()),
+        };
+
+        crate::chat::trajectory_index::reset_trajectory_index_listing_counters();
+        enrich_task_with_session_state(gcx, &mut task).await;
+        let counters = crate::chat::trajectory_index::trajectory_index_listing_counters();
+
+        assert!(task.planner_session_state.is_none());
+        assert_eq!(
+            counters
+                .calls_by_caller
+                .iter()
+                .find(|(caller, _)| *caller == "task_trajectory_api")
+                .unwrap()
+                .1,
+            0
+        );
+    }
 }
