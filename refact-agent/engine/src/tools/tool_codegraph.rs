@@ -7326,7 +7326,7 @@ def orphan():
         assert_ne!(global.scope_signature, scoped.scope_signature);
         assert_ne!(global.scope_signature, other_indexed_root.scope_signature);
         assert_ne!(global.graph_generation, next_generation.graph_generation);
-        let expected_indexed_root = abs_str("workspace/refact").replace('\\', "/");
+        let expected_indexed_root = abs_str("workspace/refact");
         assert_eq!(
             global
                 .import_index

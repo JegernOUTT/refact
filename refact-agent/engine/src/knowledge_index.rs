@@ -377,7 +377,8 @@ pub async fn knowledge_index_watcher_background_task(gcx: Arc<GlobalContext>) {
                     .any(|path| is_under_knowledge_root(path, &knowledge_dirs))
                 {
                     if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
-                        let dropped = dropped_events_for_callback.fetch_add(1, Ordering::Relaxed) + 1;
+                        let dropped =
+                            dropped_events_for_callback.fetch_add(1, Ordering::Relaxed) + 1;
                         if dropped % 100 == 0 {
                             tracing::warn!("knowledge_index: dropped {dropped} watcher events because the channel is full");
                         }
@@ -642,11 +643,12 @@ mod tests {
     #[tokio::test]
     async fn refresh_knowledge_index_path_tracks_write_archive_and_delete() {
         let dir = tempfile::tempdir().unwrap();
-        let knowledge_dir = dir.path().join(KNOWLEDGE_FOLDER_NAME);
+        let dir_root = dunce::simplified(&std::fs::canonicalize(dir.path()).unwrap()).to_path_buf();
+        let knowledge_dir = dir_root.join(KNOWLEDGE_FOLDER_NAME);
         let path = knowledge_dir.join("note.md");
         tokio::fs::create_dir_all(&knowledge_dir).await.unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir_root.clone()];
 
         tokio::fs::write(
             &path,
