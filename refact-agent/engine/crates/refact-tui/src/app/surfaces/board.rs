@@ -606,6 +606,7 @@ mod tests {
 
     #[test]
     fn feature_flag_recognizes_truthy_values() {
+        let _surface_lock = crate::ui::goal_dock::test_surface_lock();
         let previous = std::env::var_os("REFACT_TUI_SURFACES");
         std::env::set_var("REFACT_TUI_SURFACES", "on");
         assert!(task_board_enabled());

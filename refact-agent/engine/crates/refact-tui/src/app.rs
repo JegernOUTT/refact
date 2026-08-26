@@ -4348,6 +4348,7 @@ new-chat = "ctrl-x"
 
     #[test]
     fn board_command_is_feature_gated_and_uses_current_task() {
+        let _surface_lock = goal_dock::test_surface_lock();
         let previous = std::env::var_os("REFACT_TUI_SURFACES");
         std::env::remove_var("REFACT_TUI_SURFACES");
         let mut app = App::new(project());
@@ -4665,6 +4666,7 @@ new-chat = "ctrl-x"
 
     #[test]
     fn session_command_group_parses_and_dispatches() {
+        let _surface_lock = goal_dock::test_surface_lock();
         let mut app = App::new(project());
         assert_eq!(app.execute_command_name("new"), AppAction::SubscribeCurrent);
         assert_eq!(app.execute_command_name("resume"), AppAction::LoadSessions);
@@ -4909,6 +4911,7 @@ new-chat = "ctrl-x"
 
     #[test]
     fn goal_command_shows_current_goal_cell() {
+        let _surface_lock = goal_dock::test_surface_lock();
         let mut app = App::new(project());
         let chat_id = app.chat_id().to_string();
         app.handle_chat_event(ChatEvent {
@@ -4933,6 +4936,7 @@ new-chat = "ctrl-x"
     #[test]
     fn goal_commands_dispatch_all_four_wrappers_and_controls_respect_status() {
         let _surface_lock = goal_dock::test_surface_lock();
+        let previous = std::env::var_os("REFACT_TUI_SURFACES");
         std::env::set_var("REFACT_TUI_SURFACES", "1");
         let mut app = App::new(project());
         assert!(matches!(
@@ -4999,12 +5003,16 @@ new-chat = "ctrl-x"
                 action: GoalControlAction::Resume
             }
         );
-        std::env::remove_var("REFACT_TUI_SURFACES");
+        match previous {
+            Some(value) => std::env::set_var("REFACT_TUI_SURFACES", value),
+            None => std::env::remove_var("REFACT_TUI_SURFACES"),
+        }
     }
 
     #[test]
     fn goal_overlay_uses_goal_key_context_and_dispatches_controls() {
         let _surface_lock = goal_dock::test_surface_lock();
+        let previous = std::env::var_os("REFACT_TUI_SURFACES");
         std::env::set_var("REFACT_TUI_SURFACES", "1");
         let mut app = App::new(project());
         app.handle_chat_event(ChatEvent {
@@ -5031,12 +5039,16 @@ new-chat = "ctrl-x"
         );
         assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::None);
         assert!(!app.test_goal_overlay_open());
-        std::env::remove_var("REFACT_TUI_SURFACES");
+        match previous {
+            Some(value) => std::env::set_var("REFACT_TUI_SURFACES", value),
+            None => std::env::remove_var("REFACT_TUI_SURFACES"),
+        }
     }
 
     #[tokio::test]
     async fn goal_commands_post_all_four_goal_wire_commands() {
         let _surface_lock = goal_dock::test_surface_lock();
+        let previous = std::env::var_os("REFACT_TUI_SURFACES");
         std::env::set_var("REFACT_TUI_SURFACES", "1");
         let state = CommandState::default();
         let base_url = spawn_command_server(state.clone());
@@ -5104,7 +5116,10 @@ new-chat = "ctrl-x"
                 .and_then(|command| command.get("action").cloned()),
             Some(json!("pause"))
         );
-        std::env::remove_var("REFACT_TUI_SURFACES");
+        match previous {
+            Some(value) => std::env::set_var("REFACT_TUI_SURFACES", value),
+            None => std::env::remove_var("REFACT_TUI_SURFACES"),
+        }
     }
 
     #[test]
@@ -7994,6 +8009,7 @@ new-chat = "ctrl-x"
 
     #[test]
     fn subagents_command_lists_live_activity_and_empty_state() {
+        let _surface_lock = goal_dock::test_surface_lock();
         let mut app = App::new(project());
         app.execute_command_name("subagents");
         assert!(matches!(
@@ -8024,6 +8040,7 @@ new-chat = "ctrl-x"
 
     #[test]
     fn subagents_command_hides_internal_tool_prefixes() {
+        let _surface_lock = goal_dock::test_surface_lock();
         let mut app = App::new(project());
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),

@@ -914,6 +914,7 @@ mod tests {
 
     #[test]
     fn task_modes_are_board_discoverable_when_surfaces_are_enabled() {
+        let _surface_lock = crate::ui::goal_dock::test_surface_lock();
         let previous = std::env::var_os("REFACT_TUI_SURFACES");
         std::env::set_var("REFACT_TUI_SURFACES", "1");
         let mut app = App::notice_only("test");

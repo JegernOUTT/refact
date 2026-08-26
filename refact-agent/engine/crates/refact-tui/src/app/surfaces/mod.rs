@@ -1308,6 +1308,7 @@ mod tests {
 
     #[test]
     fn mode_picker_uses_the_surfaces_gate() {
+        let _surface_lock = crate::ui::goal_dock::test_surface_lock();
         let mut app = App::notice_only("test");
         app.open_mode_picker(serde_json::json!({"modes": [{"id": "agent", "title": "Agent"}]}));
 
@@ -1320,6 +1321,7 @@ mod tests {
 
     #[test]
     fn permissions_picker_uses_the_surfaces_gate() {
+        let _surface_lock = crate::ui::goal_dock::test_surface_lock();
         let mut app = App::notice_only("test");
         app.open_permissions_picker();
 

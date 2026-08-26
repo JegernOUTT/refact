@@ -548,6 +548,8 @@ help = "f1"
     #[test]
     fn goal_dock_is_gated_and_absent_without_a_goal() {
         let _surface_lock = goal_dock::test_surface_lock();
+        let previous = std::env::var_os("REFACT_TUI_SURFACES");
+        std::env::remove_var("REFACT_TUI_SURFACES");
         let mut app = App::new(project());
         app.set_native_scrollback(false);
         let backend = TestBackend::new(100, 20);
@@ -592,7 +594,10 @@ help = "f1"
             .collect::<String>();
         assert!(text.contains("Goal ACTIVE"));
         assert!(text.contains("2 turns"));
-        std::env::remove_var("REFACT_TUI_SURFACES");
+        match previous {
+            Some(value) => std::env::set_var("REFACT_TUI_SURFACES", value),
+            None => std::env::remove_var("REFACT_TUI_SURFACES"),
+        }
     }
 
     #[test]

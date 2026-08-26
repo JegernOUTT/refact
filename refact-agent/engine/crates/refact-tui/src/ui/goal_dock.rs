@@ -296,7 +296,9 @@ pub(crate) fn surfaces_enabled() -> bool {
 #[cfg(test)]
 pub(crate) fn test_surface_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub(crate) fn height(app: &App) -> u16 {
