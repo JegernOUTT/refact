@@ -1014,6 +1014,7 @@ pub(super) async fn run_action(
         }
         AppAction::RetryFromIndex { index, content } => {
             let context = CommandContextTag::RetryFromIndex {
+                origin: app.command_origin(),
                 rollback: app.pending_backtrack_rollback.clone(),
             };
             if let Some(project_id) = app.current_project_id().map(str::to_string) {
@@ -1365,6 +1366,7 @@ pub(super) async fn run_action(
             rollback,
         } => {
             let context = CommandContextTag::ToolDecisions {
+                origin: app.command_origin(),
                 client_request_id: client_request_id.clone(),
                 rollback,
             };

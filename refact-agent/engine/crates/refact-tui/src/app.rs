@@ -159,9 +159,11 @@ enum CommandContextTag {
         previous: ReasoningStateSnapshot,
     },
     RetryFromIndex {
+        origin: CommandOrigin,
         rollback: Option<BacktrackRollback>,
     },
     ToolDecisions {
+        origin: CommandOrigin,
         client_request_id: String,
         rollback: ToolDecisionRollback,
     },
@@ -438,6 +440,9 @@ impl App {
             self.add_notice(format!("/{name} is not registered"));
             return AppAction::None;
         };
+        if !self.command_available(*command, name) {
+            return AppAction::None;
+        }
         match command.action {
             CommandAction::BackendCommand { command } => {
                 if command == "stop" && self.is_chat_active() {
@@ -5133,6 +5138,26 @@ new-chat = "ctrl-x"
     }
 
     #[test]
+    fn command_availability_blocks_active_idle_only_and_allows_idle() {
+        let mut app = App::new(project());
+        app.set_session_state(SessionState::Generating);
+
+        assert_eq!(app.execute_command_name("agent"), AppAction::None);
+        assert_eq!(app.mode(), None);
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("/agent is available between turns only"))
+        }));
+
+        app.set_session_state(SessionState::Idle);
+        assert_eq!(
+            app.execute_command_name("agent"),
+            AppAction::SetParams {
+                patch: json!({"mode": "agent", "tool_use": "agent"})
+            }
+        );
+    }
+
+    #[test]
     fn reasoning_command_emits_set_params_and_updates_footer_state() {
         let mut app = App::new(project());
         app.apply_caps(&json!({
@@ -6272,6 +6297,7 @@ new-chat = "ctrl-x"
 
         app.handle_command_finished(
             CommandContextTag::RetryFromIndex {
+                origin: app.command_origin(),
                 rollback: app.pending_backtrack_rollback.clone(),
             },
             Err("retry rejected".to_string()),
@@ -6283,6 +6309,77 @@ new-chat = "ctrl-x"
         );
         assert_eq!(app.session_state(), SessionState::Idle);
         assert_eq!(app.composer(), "edited first");
+    }
+
+    #[test]
+    fn stale_retry_from_index_failure_is_inert_after_chat_switch() {
+        let mut app = App::new(project());
+        let origin = app.command_origin();
+        let chat_id = app.chat_id().to_string();
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(chat_id),
+            seq: None,
+            kind: "snapshot".to_string(),
+            raw: json!({"runtime": {"state": "idle"}, "messages": [
+                {"message_id": "u1", "role": "user", "content": "first"},
+                {"message_id": "a1", "role": "assistant", "content": "one"}
+            ]}),
+        });
+        let rollback = Some(BacktrackRollback {
+            transcript_state: app.transcript_state.clone(),
+            session_state: app.session_state,
+            usage: app.usage,
+            selected_backtrack_index: app.selected_backtrack_index,
+            backtrack_target: app.backtrack_target.clone(),
+            backtrack_pending: app.backtrack_pending.clone(),
+            last_escape_at: app.last_escape_at,
+            prompt: "old retry".to_string(),
+        });
+
+        app.resume_chat("chat-next".to_string(), "Next chat".to_string(), None);
+        app.handle_chat_event(tool_call_delta_event(&app, "call-current"));
+        let status = tool_cards(&app)[0].status;
+        let notice_count = app.visible_transcript().len();
+
+        assert_eq!(
+            app.handle_command_finished(
+                CommandContextTag::RetryFromIndex { origin, rollback },
+                Err("retry rejected".to_string()),
+            ),
+            AppAction::None
+        );
+
+        assert!(app.approval_modal().is_none());
+        assert_eq!(tool_cards(&app)[0].status, status);
+        assert_eq!(app.visible_transcript().len(), notice_count);
+    }
+
+    #[test]
+    fn current_origin_retry_from_index_failure_restores_transcript() {
+        let mut app = App::new(project());
+        let origin = app.command_origin();
+        let rollback = Some(BacktrackRollback {
+            transcript_state: app.transcript_state.clone(),
+            session_state: app.session_state,
+            usage: app.usage,
+            selected_backtrack_index: app.selected_backtrack_index,
+            backtrack_target: app.backtrack_target.clone(),
+            backtrack_pending: app.backtrack_pending.clone(),
+            last_escape_at: app.last_escape_at,
+            prompt: "retry draft".to_string(),
+        });
+        app.set_session_state(SessionState::Generating);
+
+        app.handle_command_finished(
+            CommandContextTag::RetryFromIndex { origin, rollback },
+            Err("retry rejected".to_string()),
+        );
+
+        assert_eq!(app.session_state(), SessionState::Idle);
+        assert_eq!(app.composer(), "retry draft");
+        assert!(app.visible_transcript().iter().any(|item| {
+            matches!(item, TranscriptItem::Notice(text) if text.contains("Retry failed: retry rejected"))
+        }));
     }
 
     #[test]
@@ -6799,6 +6896,7 @@ new-chat = "ctrl-x"
 
         app.handle_command_finished(
             CommandContextTag::ToolDecisions {
+                origin: app.command_origin(),
                 client_request_id: "decision-1".to_string(),
                 rollback,
             },
@@ -6810,6 +6908,72 @@ new-chat = "ctrl-x"
             Some(modal) if modal.tool_call_ids() == ["call-1"]
         ));
         assert_eq!(app.approval_pending_clear_count(), 0);
+    }
+
+    #[test]
+    fn stale_tool_decision_failure_is_inert_after_chat_switch() {
+        let mut app = App::new(project());
+        let origin = app.command_origin();
+        app.handle_chat_event(pause_event(&app, "call-old", "shell"));
+        let AppAction::SendToolDecisions {
+            client_request_id,
+            rollback,
+            ..
+        } = app.handle_key(key(KeyCode::Char('y')))
+        else {
+            panic!("expected tool decision action");
+        };
+
+        app.resume_chat("chat-next".to_string(), "Next chat".to_string(), None);
+        app.handle_chat_event(tool_call_delta_event(&app, "call-current"));
+
+        let status = tool_cards(&app)[0].status;
+        let notice_count = app.visible_transcript().len();
+
+        assert_eq!(
+            app.handle_command_finished(
+                CommandContextTag::ToolDecisions {
+                    origin,
+                    client_request_id,
+                    rollback,
+                },
+                Err("decision rejected".to_string()),
+            ),
+            AppAction::None
+        );
+
+        assert!(app.approval_modal().is_none());
+        assert_eq!(tool_cards(&app)[0].status, status);
+        assert_eq!(app.visible_transcript().len(), notice_count);
+    }
+
+    #[test]
+    fn current_origin_tool_decision_failure_restores_approval_queue() {
+        let mut app = App::new(project());
+        let origin = app.command_origin();
+        app.handle_chat_event(pause_event(&app, "call-1", "shell"));
+        let AppAction::SendToolDecisions {
+            client_request_id,
+            rollback,
+            ..
+        } = app.handle_key(key(KeyCode::Char('y')))
+        else {
+            panic!("expected tool decision action");
+        };
+
+        app.handle_command_finished(
+            CommandContextTag::ToolDecisions {
+                origin,
+                client_request_id,
+                rollback,
+            },
+            Err("decision rejected".to_string()),
+        );
+
+        assert!(matches!(
+            app.approval_modal(),
+            Some(modal) if modal.tool_call_ids() == ["call-1"]
+        ));
     }
 
     #[test]
@@ -6837,6 +7001,7 @@ new-chat = "ctrl-x"
 
         app.handle_command_finished(
             CommandContextTag::ToolDecisions {
+                origin: app.command_origin(),
                 client_request_id: "decision-1".to_string(),
                 rollback,
             },
@@ -6878,6 +7043,7 @@ new-chat = "ctrl-x"
 
         app.handle_command_finished(
             CommandContextTag::ToolDecisions {
+                origin: app.command_origin(),
                 client_request_id: "decision-1".to_string(),
                 rollback,
             },
@@ -6933,6 +7099,7 @@ new-chat = "ctrl-x"
 
         app.handle_command_finished(
             CommandContextTag::ToolDecisions {
+                origin: app.command_origin(),
                 client_request_id: second_id,
                 rollback: second_rollback,
             },
@@ -6940,6 +7107,7 @@ new-chat = "ctrl-x"
         );
         app.handle_command_finished(
             CommandContextTag::ToolDecisions {
+                origin: app.command_origin(),
                 client_request_id: first_id,
                 rollback: first_rollback,
             },
@@ -6985,6 +7153,7 @@ new-chat = "ctrl-x"
 
         app.handle_command_finished(
             CommandContextTag::ToolDecisions {
+                origin: app.command_origin(),
                 client_request_id: second_id,
                 rollback: second_rollback,
             },
@@ -6992,6 +7161,7 @@ new-chat = "ctrl-x"
         );
         app.handle_command_finished(
             CommandContextTag::ToolDecisions {
+                origin: app.command_origin(),
                 client_request_id: first_id,
                 rollback: first_rollback,
             },
@@ -7030,6 +7200,7 @@ new-chat = "ctrl-x"
 
         app.handle_command_finished(
             CommandContextTag::ToolDecisions {
+                origin: app.command_origin(),
                 client_request_id: second_id,
                 rollback: second_rollback,
             },
@@ -7037,6 +7208,7 @@ new-chat = "ctrl-x"
         );
         app.handle_command_finished(
             CommandContextTag::ToolDecisions {
+                origin: app.command_origin(),
                 client_request_id: first_id,
                 rollback: first_rollback,
             },
@@ -7066,6 +7238,7 @@ new-chat = "ctrl-x"
 
         app.handle_command_finished(
             CommandContextTag::ToolDecisions {
+                origin: app.command_origin(),
                 client_request_id,
                 rollback,
             },

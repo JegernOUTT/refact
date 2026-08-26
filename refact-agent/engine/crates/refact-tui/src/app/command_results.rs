@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::{CommandAvailability, CommandContext, CommandDef};
 
 #[derive(Debug, Clone)]
 pub(super) struct CommandOrigin {
@@ -13,6 +14,25 @@ impl CommandOrigin {
 }
 
 impl App {
+    pub(super) fn command_available(&mut self, command: CommandDef, name: &str) -> bool {
+        if command.available(CommandContext {
+            active_turn: self.is_chat_active(),
+        }) {
+            return true;
+        }
+        let notice = match command.availability {
+            CommandAvailability::IdleOnly => {
+                format!("/{name} is available between turns only; an active turn is running")
+            }
+            CommandAvailability::ActiveTurnOnly => {
+                format!("/{name} is only available while a response is running")
+            }
+            CommandAvailability::Always => return true,
+        };
+        self.add_notice(notice);
+        false
+    }
+
     pub(super) fn command_origin(&self) -> CommandOrigin {
         CommandOrigin {
             project_id: self.current_project_id().unwrap_or_default().to_string(),
@@ -28,6 +48,8 @@ impl App {
         let origin = match &context {
             CommandContextTag::Abort { origin }
             | CommandContextTag::BrowserContextDecision { origin, .. }
+            | CommandContextTag::RetryFromIndex { origin, .. }
+            | CommandContextTag::ToolDecisions { origin, .. }
             | CommandContextTag::Rename { origin, .. }
             | CommandContextTag::Fork { origin, .. }
             | CommandContextTag::Archive { origin, .. } => Some(origin),
@@ -100,7 +122,7 @@ impl App {
                 self.browser_state.restore_context_prompt(prompt);
                 self.notice_command_failure("Browser context decision", error)
             }
-            CommandContextTag::RetryFromIndex { rollback } => {
+            CommandContextTag::RetryFromIndex { rollback, .. } => {
                 if let Some(rollback) = self.pending_backtrack_rollback.take().or(rollback) {
                     self.restore_backtrack_rollback(rollback);
                 }
@@ -111,6 +133,7 @@ impl App {
             CommandContextTag::ToolDecisions {
                 client_request_id,
                 rollback,
+                ..
             } => {
                 let _ = client_request_id;
                 self.restore_tool_decision_rollback(rollback);
