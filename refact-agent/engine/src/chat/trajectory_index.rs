@@ -393,6 +393,7 @@ struct TrajectoryIndexDirectoryState {
     index: Option<TrajectoryIndex>,
     generation: Option<DirectoryGeneration>,
     loaded: bool,
+    recovery_flush_required: bool,
     next_sequence: u64,
     pending: Vec<PendingTrajectoryIndexMutation>,
 }
@@ -537,6 +538,7 @@ impl TrajectoryIndexCoordinator {
                     &mut state_guard,
                     TrajectoryIndexMutation::Reconcile(loaded.source_hint),
                 );
+                state_guard.recovery_flush_required = true;
             }
         }
         drop(state_guard);
@@ -650,6 +652,9 @@ impl TrajectoryIndexCoordinator {
         source_hint: Option<TrajectorySourceIdentity>,
     ) -> Result<Vec<TrajectoryIndexEntry>, String> {
         let state = self.ensure_loaded(dir, source_hint.clone()).await?;
+        if state.lock().await.recovery_flush_required {
+            self.flush_directory(dir).await?;
+        }
         let (index, generation) = {
             let state_guard = state.lock().await;
             (
@@ -666,7 +671,21 @@ impl TrajectoryIndexCoordinator {
             None => false,
         };
         if !fresh {
-            return Ok(self.reconcile(dir, source_hint).await?.entries);
+            let recovery_flush_required =
+                matches!(read_trajectory_index(dir).await, Ok(None) | Err(_));
+            let recovery_source_hint = source_hint.clone();
+            let entries = self.reconcile(dir, source_hint).await?.entries;
+            if recovery_flush_required {
+                let mut state_guard = state.lock().await;
+                push_pending_mutation(
+                    &mut state_guard,
+                    TrajectoryIndexMutation::Reconcile(recovery_source_hint),
+                );
+                state_guard.recovery_flush_required = true;
+                drop(state_guard);
+                self.flush_directory(dir).await?;
+            }
+            return Ok(entries);
         }
         record_listing_cache_hit();
         record_coordinator_count(PerfComponent::TrajectoryIndexCacheHit);
@@ -732,6 +751,7 @@ impl TrajectoryIndexCoordinator {
         }
         state_guard.index = Some(index);
         state_guard.generation = None;
+        state_guard.recovery_flush_required = false;
         Ok(())
     }
 
@@ -3245,6 +3265,7 @@ mod tests {
         assert_eq!(snapshot.entries[0].id, "chat-1");
     }
 
+    #[serial_test::serial]
     #[tokio::test]
     async fn coordinator_listing_avoids_reads_and_scans_for_unchanged_directory() {
         let temp = tempfile::tempdir().unwrap();
@@ -3268,6 +3289,7 @@ mod tests {
         assert_eq!(counters.cache_hits, 1);
     }
 
+    #[serial_test::serial]
     #[tokio::test]
     async fn legacy_listing_avoids_reads_and_scans_for_unchanged_directory() {
         let temp = tempfile::tempdir().unwrap();
@@ -3354,6 +3376,7 @@ mod tests {
         assert_eq!(entries[0].id, "chat-1");
     }
 
+    #[serial_test::serial]
     #[tokio::test]
     async fn coordinator_scans_only_changed_directories_across_repeated_polls() {
         const DIRECTORY_COUNT: usize = 24;
@@ -3402,6 +3425,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[tokio::test]
     async fn listing_counters_attribute_callers() {
         let temp = tempfile::tempdir().unwrap();
@@ -3608,6 +3632,37 @@ mod tests {
         let persisted = read_trajectory_index(&dir).await.unwrap().unwrap();
         assert_eq!(persisted.entries.len(), 1);
         assert_eq!(persisted.skipped_files.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn coordinator_listing_repairs_a_corrupt_cached_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+        coordinator.flush_all().await.unwrap();
+        coordinator.list_entries(&dir, None).await.unwrap();
+
+        fs::write(trajectory_index_path(&dir), "corrupt")
+            .await
+            .unwrap();
+
+        let entries = coordinator.list_entries(&dir, None).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "chat-1");
+        assert_eq!(
+            read_trajectory_index(&dir)
+                .await
+                .unwrap()
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

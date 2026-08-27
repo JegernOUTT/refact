@@ -9620,6 +9620,14 @@ mod tests {
         .await
         .unwrap();
 
+        AppState::from_gcx(gcx.clone())
+            .await
+            .chat
+            .trajectory_index_coordinator
+            .flush_all()
+            .await
+            .unwrap();
+
         let root = dir.path().join(".refact").join("trajectories");
         assert!(
             !tokio::fs::try_exists(root.join(chat_id).join("index.json"))
@@ -9717,6 +9725,14 @@ mod tests {
         trace.root_chat_id = Some(root_id.to_string());
         trace.link_type = Some(internal_trace_link_type("title_generation"));
         save_trajectory_snapshot(gcx.clone(), trace).await.unwrap();
+
+        AppState::from_gcx(gcx.clone())
+            .await
+            .chat
+            .trajectory_index_coordinator
+            .flush_all()
+            .await
+            .unwrap();
 
         assert!(
             tokio::fs::try_exists(nested_trajectory_path(dir.path(), root_id, trace_id))
@@ -13470,7 +13486,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trajectory_list_rebuilds_corrupt_index_and_skips_index_json() {
+    async fn trajectory_list_rebuilds_corrupt_cached_index_and_skips_index_json() {
         let dir = tempfile::tempdir().unwrap();
         let (_gcx, app) = make_app_with_workspace(dir.path()).await;
         let root = dir.path().join(".refact").join("trajectories");
@@ -13482,6 +13498,14 @@ mod tests {
             "2026-01-01T00:00:00Z",
         )
         .await;
+
+        assert!(list_trajectories_page(app.clone(), 10, None, false)
+            .await
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.id == "indexed-chat"));
+
         tokio::fs::write(root.join("index.json"), "not-json")
             .await
             .unwrap();
