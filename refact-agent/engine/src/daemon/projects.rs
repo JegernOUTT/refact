@@ -736,7 +736,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn open_list_get_pin_forget_flow() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
@@ -888,7 +888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn forget_project_stops_running_worker() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;

@@ -790,7 +790,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn proxy_waits_for_existing_starting_worker_and_succeeds() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
@@ -825,7 +825,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn proxy_times_out_waiting_for_starting_worker() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
@@ -863,7 +863,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn proxy_surfaces_worker_spawn_failure() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;

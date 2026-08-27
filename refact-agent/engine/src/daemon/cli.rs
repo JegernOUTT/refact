@@ -2549,7 +2549,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn stop_daemon_missing_file_does_not_spawn() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -2566,7 +2566,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn stop_daemon_stale_file_does_not_spawn() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -2593,7 +2593,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn project_stop_and_restart_missing_daemon_do_not_spawn() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -2628,7 +2628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn run_with_io_json_error_uses_stdout_and_silent_stderr() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -2662,7 +2662,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn status_json_missing_daemon_json_is_passive_unreachable() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -2678,7 +2678,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn status_human_missing_daemon_json_is_passive_unreachable() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -2694,7 +2694,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn version_json_unreachable_daemon_is_valid_json() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -2725,7 +2725,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn stop_daemon_auth_enabled_live_daemon_shuts_down() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -2757,7 +2757,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn ps_projects_logs_events_status_roundtrip_live_daemon() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -2923,7 +2923,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     #[cfg_attr(
         windows,
         ignore = "Windows artifact runners can leave proxy worker unavailable"
@@ -2983,7 +2983,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn doctor_catches_dead_daemon_version_mismatch() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();

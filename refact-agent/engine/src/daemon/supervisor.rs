@@ -1889,7 +1889,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     fn worker_command_uses_supplied_executable_after_atomic_replacement() {
         let _worker_command = EnvGuard {
             keys: vec![(
@@ -1926,7 +1926,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn worker_command_sets_default_rust_log_filter_when_unset() {
         let _rust_log = RustLogGuard::unset();
         let dir = tempfile::tempdir().unwrap();
@@ -1961,7 +1961,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn worker_command_preserves_existing_rust_log_override() {
         let _rust_log = RustLogGuard::set("hyper=trace");
         let dir = tempfile::tempdir().unwrap();
@@ -2039,7 +2039,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     #[cfg_attr(
         windows,
         ignore = "Windows artifact runners can starve fake worker shutdown"
@@ -2087,7 +2087,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     #[cfg_attr(
         windows,
         ignore = "Windows artifact runners can starve fake worker shutdown"

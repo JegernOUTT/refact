@@ -1980,7 +1980,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     async fn daemon_proxy_path_trusts_ide_webview_origin_and_rejects_others() {
         use axum::extract::ConnectInfo;
         use axum::http::header;

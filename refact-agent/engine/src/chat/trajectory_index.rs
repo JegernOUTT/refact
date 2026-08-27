@@ -2674,7 +2674,7 @@ mod tests {
             .all(|entry| entry.file_name != TRAJECTORY_INDEX_FILE));
     }
 
-    #[serial_test::serial]
+    #[serial_test::serial(trajectory_perf)]
     #[tokio::test]
     async fn performance_diagnostics_cover_index_success_and_failure_boundaries() {
         let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
@@ -2711,7 +2711,7 @@ mod tests {
         assert!(events.iter().all(|event| event.path_hash.is_some()));
     }
 
-    #[serial_test::serial]
+    #[serial_test::serial(trajectory_perf)]
     #[tokio::test]
     async fn coordinator_performance_diagnostics_cover_load_reconcile_flush_and_enqueue() {
         let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
@@ -2756,7 +2756,7 @@ mod tests {
         }));
     }
 
-    #[serial_test::serial]
+    #[serial_test::serial(trajectory_perf)]
     #[tokio::test]
     async fn coordinator_cache_hit_records_a_counter_without_an_index_read() {
         let temp = tempfile::tempdir().unwrap();
@@ -2783,7 +2783,7 @@ mod tests {
         assert_eq!(events[0].item_count, Some(1));
     }
 
-    #[serial_test::serial]
+    #[serial_test::serial(trajectory_perf)]
     #[tokio::test]
     async fn coordinator_advisory_lock_wait_is_recorded_for_a_contended_flush() {
         let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
@@ -2814,7 +2814,7 @@ mod tests {
         drop(blocker_guard);
     }
 
-    #[serial_test::serial]
+    #[serial_test::serial(trajectory_perf)]
     #[tokio::test]
     async fn coordinator_diagnostics_are_inactive_without_a_recorder() {
         let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();

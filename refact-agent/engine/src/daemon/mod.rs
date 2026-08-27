@@ -799,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     fn default_log_filter_keeps_app_info_and_drops_http_trace_noise() {
         let _guard = RustLogGuard::unset();
 
@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(daemon)]
     fn rust_log_override_allows_noisy_debugging_when_requested() {
         let _guard = RustLogGuard::set("hyper=trace");
 
