@@ -1206,10 +1206,19 @@ impl ChatSession {
             Ok(json) => {
                 let broadcast_started_at = serialize_started_at.map(|_| Instant::now());
                 let size_bytes = serialize_started_at.map(|_| json.len() as u64);
-                let broadcast_outcome = self.event_tx.send(Arc::new(json));
-                if let (Some(serialize_started_at), Some(broadcast_started_at), Some(size_bytes)) =
-                    (serialize_started_at, broadcast_started_at, size_bytes)
-                {
+                let receiver_count = serialize_started_at.map(|_| self.event_tx.receiver_count());
+                let broadcast_result = self.event_tx.send(Arc::new(json));
+                if let (
+                    Some(serialize_started_at),
+                    Some(broadcast_started_at),
+                    Some(size_bytes),
+                    Some(receiver_count),
+                ) = (
+                    serialize_started_at,
+                    broadcast_started_at,
+                    size_bytes,
+                    receiver_count,
+                ) {
                     let serialize_us = serialize_started_at
                         .elapsed()
                         .as_micros()
@@ -1224,11 +1233,7 @@ impl ChatSession {
                         serialize_us,
                         broadcast_us,
                         size_bytes,
-                        if broadcast_outcome.is_ok() {
-                            PerfOutcome::Success
-                        } else {
-                            PerfOutcome::Failure
-                        },
+                        sse_broadcast_outcome(receiver_count, &broadcast_result),
                     );
                 }
             }
@@ -2807,11 +2812,25 @@ impl ChatSession {
     }
 }
 
+fn sse_broadcast_outcome(
+    receiver_count: usize,
+    result: &Result<usize, broadcast::error::SendError<Arc<String>>>,
+) -> PerfOutcome {
+    if result.is_ok() {
+        PerfOutcome::Success
+    } else if receiver_count == 0 {
+        PerfOutcome::Skipped
+    } else {
+        PerfOutcome::Failure
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use super::super::types::{ChatCommand, CommandRequest};
     use crate::chat::perf_diagnostics::{self, MemoryPerfSink, PerfClock, PerfRecorder};
+    use crate::chat::perf_telemetry::PerformanceTelemetry;
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -3356,6 +3375,70 @@ mod tests {
         assert_eq!(events[1].component, "sse.broadcast");
         assert_eq!(events[1].elapsed_us, 11);
         assert_eq!(events[1].size_bytes, None);
+    }
+
+    #[test]
+    fn perf_diagnostics_sse_broadcast_without_receivers_is_skipped() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, sink) = install_perf_recorder();
+        let mut session = make_session();
+
+        session.emit(ChatEvent::PauseCleared {});
+
+        let events = sink.events();
+        let broadcast = events
+            .iter()
+            .find(|event| event.component == PerfComponent::SseBroadcast.as_str())
+            .unwrap();
+        assert_eq!(broadcast.outcome, PerfOutcome::Skipped.as_str());
+
+        let telemetry = PerformanceTelemetry::new(true);
+        for event in &events {
+            assert!(telemetry.record(event));
+        }
+        let advancement = telemetry.snapshot().rollups.advancement;
+        assert_eq!(advancement.failure_count, 0);
+        assert_eq!(advancement.skipped_count, 1);
+    }
+
+    #[test]
+    fn perf_diagnostics_sse_broadcast_with_receiver_is_successful() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, sink) = install_perf_recorder();
+        let mut session = make_session();
+        let mut receiver = session.subscribe();
+
+        session.emit(ChatEvent::PauseCleared {});
+
+        assert!(receiver.try_recv().is_ok());
+        let broadcast = sink
+            .events()
+            .into_iter()
+            .find(|event| event.component == PerfComponent::SseBroadcast.as_str())
+            .unwrap();
+        assert_eq!(broadcast.outcome, PerfOutcome::Success.as_str());
+    }
+
+    #[test]
+    fn perf_diagnostics_sse_broadcast_after_receiver_disconnect_is_failure() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, sink) = install_perf_recorder();
+        let session = make_session();
+        let (sender, _) = broadcast::channel(1);
+        let receiver = sender.subscribe();
+        let receiver_count = sender.receiver_count();
+        drop(receiver);
+        let result = sender.send(Arc::new("event".to_string()));
+
+        assert!(result.is_err());
+        session.record_sse_timing(0, 0, 0, sse_broadcast_outcome(receiver_count, &result));
+
+        let broadcast = sink
+            .events()
+            .into_iter()
+            .find(|event| event.component == PerfComponent::SseBroadcast.as_str())
+            .unwrap();
+        assert_eq!(broadcast.outcome, PerfOutcome::Failure.as_str());
     }
 
     mod goal_budget {
