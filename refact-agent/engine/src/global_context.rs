@@ -1184,7 +1184,7 @@ pub mod tests {
             notification_events_tx: Some(tokio::sync::broadcast::channel(256).0),
             chat_sessions: crate::chat::create_sessions_map(),
             trajectory_index_coordinator: Arc::new(
-                crate::chat::trajectory_index::TrajectoryIndexCoordinator::new(),
+                crate::chat::trajectory_index::TrajectoryIndexCoordinator::new_with_local_listing_counters(),
             ),
             performance_telemetry: crate::chat::perf_diagnostics::process_telemetry(),
             voice_service: crate::voice::VoiceService::new(),

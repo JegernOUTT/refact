@@ -91,64 +91,116 @@ impl TrajectoryIndexListingCounterState {
             directory_scans: AtomicU64::new(0),
         }
     }
+
+    fn record_listing_caller(&self, caller: TrajectoryIndexListingCaller) {
+        self.calls_by_caller[caller as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_listing_cache_hit(&self) {
+        self.cache_hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_index_read(&self) {
+        self.index_reads.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_directory_scan(&self) {
+        self.directory_scans.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> TrajectoryIndexListingCounters {
+        TrajectoryIndexListingCounters {
+            calls_by_caller: TrajectoryIndexListingCaller::ALL
+                .iter()
+                .map(|caller| {
+                    (
+                        caller.as_str(),
+                        self.calls_by_caller[*caller as usize].load(Ordering::Relaxed),
+                    )
+                })
+                .collect(),
+            cache_hits: self.cache_hits.load(Ordering::Relaxed),
+            index_reads: self.index_reads.load(Ordering::Relaxed),
+            directory_scans: self.directory_scans.load(Ordering::Relaxed),
+        }
+    }
+
+    #[cfg(test)]
+    fn reset(&self) {
+        for counter in &self.calls_by_caller {
+            counter.store(0, Ordering::Relaxed);
+        }
+        self.cache_hits.store(0, Ordering::Relaxed);
+        self.index_reads.store(0, Ordering::Relaxed);
+        self.directory_scans.store(0, Ordering::Relaxed);
+    }
 }
 
 static TRAJECTORY_INDEX_LISTING_COUNTERS: std::sync::OnceLock<TrajectoryIndexListingCounterState> =
     std::sync::OnceLock::new();
 
+#[derive(Clone)]
+enum TrajectoryIndexListingCounterScope {
+    Global,
+    #[cfg(test)]
+    Local(Arc<TrajectoryIndexListingCounterState>),
+}
+
+static GLOBAL_TRAJECTORY_INDEX_LISTING_COUNTER_SCOPE: TrajectoryIndexListingCounterScope =
+    TrajectoryIndexListingCounterScope::Global;
+
 fn listing_counters() -> &'static TrajectoryIndexListingCounterState {
     TRAJECTORY_INDEX_LISTING_COUNTERS.get_or_init(TrajectoryIndexListingCounterState::new)
 }
 
-fn record_listing_caller(caller: TrajectoryIndexListingCaller) {
-    listing_counters().calls_by_caller[caller as usize].fetch_add(1, Ordering::Relaxed);
-}
+impl TrajectoryIndexListingCounterScope {
+    fn state(&self) -> &TrajectoryIndexListingCounterState {
+        match self {
+            Self::Global => listing_counters(),
+            #[cfg(test)]
+            Self::Local(counters) => counters,
+        }
+    }
 
-fn record_listing_cache_hit() {
-    listing_counters()
-        .cache_hits
-        .fetch_add(1, Ordering::Relaxed);
-}
+    fn record_listing_caller(&self, caller: TrajectoryIndexListingCaller) {
+        self.state().record_listing_caller(caller);
+    }
 
-fn record_index_read() {
-    listing_counters()
-        .index_reads
-        .fetch_add(1, Ordering::Relaxed);
-}
+    fn record_listing_cache_hit(&self) {
+        self.state().record_listing_cache_hit();
+    }
 
-fn record_directory_scan() {
-    listing_counters()
-        .directory_scans
-        .fetch_add(1, Ordering::Relaxed);
+    fn record_index_read(&self) {
+        self.state().record_index_read();
+    }
+
+    fn record_directory_scan(&self) {
+        self.state().record_directory_scan();
+    }
+
+    #[cfg(test)]
+    fn local() -> Self {
+        Self::Local(Arc::new(TrajectoryIndexListingCounterState::new()))
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> TrajectoryIndexListingCounters {
+        self.state().snapshot()
+    }
+
+    #[cfg(test)]
+    fn reset(&self) {
+        self.state().reset();
+    }
+
+    #[cfg(test)]
+    fn is_global(&self) -> bool {
+        matches!(self, Self::Global)
+    }
 }
 
 pub fn trajectory_index_listing_counters() -> TrajectoryIndexListingCounters {
-    let counters = listing_counters();
-    TrajectoryIndexListingCounters {
-        calls_by_caller: TrajectoryIndexListingCaller::ALL
-            .iter()
-            .map(|caller| {
-                (
-                    caller.as_str(),
-                    counters.calls_by_caller[*caller as usize].load(Ordering::Relaxed),
-                )
-            })
-            .collect(),
-        cache_hits: counters.cache_hits.load(Ordering::Relaxed),
-        index_reads: counters.index_reads.load(Ordering::Relaxed),
-        directory_scans: counters.directory_scans.load(Ordering::Relaxed),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn reset_trajectory_index_listing_counters() {
-    let counters = listing_counters();
-    for counter in &counters.calls_by_caller {
-        counter.store(0, Ordering::Relaxed);
-    }
-    counters.cache_hits.store(0, Ordering::Relaxed);
-    counters.index_reads.store(0, Ordering::Relaxed);
-    counters.directory_scans.store(0, Ordering::Relaxed);
+    listing_counters().snapshot()
 }
 
 pub fn trajectory_index_coordinator_rollout_enabled() -> bool {
@@ -403,6 +455,7 @@ pub struct TrajectoryIndexCoordinator {
     directories: Arc<AMutex<HashMap<PathBuf, Arc<AMutex<TrajectoryIndexDirectoryState>>>>>,
     lock_timeout: Duration,
     lock_retry: Duration,
+    listing_counter_scope: TrajectoryIndexListingCounterScope,
 }
 
 impl Default for TrajectoryIndexCoordinator {
@@ -450,6 +503,7 @@ impl TrajectoryIndexCoordinator {
             directories: Arc::new(AMutex::new(HashMap::new())),
             lock_timeout: INDEX_LOCK_TIMEOUT,
             lock_retry: INDEX_LOCK_RETRY,
+            listing_counter_scope: TrajectoryIndexListingCounterScope::Global,
         }
     }
 
@@ -459,7 +513,34 @@ impl TrajectoryIndexCoordinator {
             directories: Arc::new(AMutex::new(HashMap::new())),
             lock_timeout,
             lock_retry,
+            listing_counter_scope: TrajectoryIndexListingCounterScope::Global,
         }
+    }
+
+    #[cfg(test)]
+    fn with_listing_counter_scope(
+        listing_counter_scope: TrajectoryIndexListingCounterScope,
+    ) -> Self {
+        Self {
+            directories: Arc::new(AMutex::new(HashMap::new())),
+            lock_timeout: INDEX_LOCK_TIMEOUT,
+            lock_retry: INDEX_LOCK_RETRY,
+            listing_counter_scope,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_local_listing_counters() -> Self {
+        Self::with_listing_counter_scope(TrajectoryIndexListingCounterScope::local())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn listing_counters_for_test(&self) -> TrajectoryIndexListingCounters {
+        self.listing_counter_scope.snapshot()
+    }
+
+    fn record_listing_caller(&self, caller: TrajectoryIndexListingCaller) {
+        self.listing_counter_scope.record_listing_caller(caller);
     }
 
     async fn directory_state(
@@ -500,10 +581,15 @@ impl TrajectoryIndexCoordinator {
 
         let load_span = coordinator_span(PerfComponent::TrajectoryIndexCoordinatorLoad, dir);
         let index_read_span = coordinator_span(PerfComponent::TrajectoryIndexRead, dir);
+        let listing_counter_scope = self.listing_counter_scope.clone();
         let dir = dir.to_path_buf();
         let loaded = tokio::task::spawn_blocking(move || {
-            let result =
-                load_trajectory_index_for_coordinator_sync(&dir, source_hint, index_read_span);
+            let result = load_trajectory_index_for_coordinator_sync(
+                &dir,
+                source_hint,
+                index_read_span,
+                &listing_counter_scope,
+            );
             let item_count = result
                 .as_ref()
                 .ok()
@@ -603,9 +689,14 @@ impl TrajectoryIndexCoordinator {
         let dir = dir.to_path_buf();
         let reconcile_dir = dir.clone();
         let source_hint_for_reconcile = source_hint.clone();
+        let listing_counter_scope = self.listing_counter_scope.clone();
         let reconciled = tokio::task::spawn_blocking(move || {
-            let result =
-                reconcile_trajectory_index_sync(&reconcile_dir, index, source_hint_for_reconcile);
+            let result = reconcile_trajectory_index_sync(
+                &reconcile_dir,
+                index,
+                source_hint_for_reconcile,
+                &listing_counter_scope,
+            );
             let item_count = result
                 .as_ref()
                 .ok()
@@ -671,8 +762,10 @@ impl TrajectoryIndexCoordinator {
             None => false,
         };
         if !fresh {
-            let recovery_flush_required =
-                matches!(read_trajectory_index(dir).await, Ok(None) | Err(_));
+            let recovery_flush_required = matches!(
+                read_trajectory_index_with_counter_scope(dir, &self.listing_counter_scope).await,
+                Ok(None) | Err(_)
+            );
             let recovery_source_hint = source_hint.clone();
             let entries = self.reconcile(dir, source_hint).await?.entries;
             if recovery_flush_required {
@@ -687,7 +780,7 @@ impl TrajectoryIndexCoordinator {
             }
             return Ok(entries);
         }
-        record_listing_cache_hit();
+        self.listing_counter_scope.record_listing_cache_hit();
         record_coordinator_count(PerfComponent::TrajectoryIndexCacheHit);
         Ok(index.entries)
     }
@@ -713,6 +806,7 @@ impl TrajectoryIndexCoordinator {
         let index_read_span = coordinator_span(PerfComponent::TrajectoryIndexRead, &dir);
         let lock_wait_span = coordinator_span(PerfComponent::TrajectoryIndexLockWait, &dir);
         let index_write_span = coordinator_span(PerfComponent::TrajectoryIndexWrite, &dir);
+        let listing_counter_scope = self.listing_counter_scope.clone();
         let flushed_index = tokio::task::spawn_blocking(move || {
             let result = flush_trajectory_index_mutations_sync(
                 &dir,
@@ -723,6 +817,7 @@ impl TrajectoryIndexCoordinator {
                 lock_wait_span,
                 index_write_span,
                 reconcile_span,
+                &listing_counter_scope,
             );
             let item_count = result.as_ref().ok().map(|index| index.entries.len() as u64);
             finish_coordinator_span(
@@ -999,6 +1094,7 @@ fn load_trajectory_index_for_coordinator_sync(
     dir: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
     index_read_span: Option<perf_diagnostics::PerfSpan>,
+    listing_counter_scope: &TrajectoryIndexListingCounterScope,
 ) -> Result<CoordinatorLoadResult, String> {
     let index_read = read_trajectory_index_sync(dir);
     let item_count = index_read
@@ -1027,7 +1123,7 @@ fn load_trajectory_index_for_coordinator_sync(
         }
         Ok(None) | Err(_) => {
             let (entries, skipped_files) =
-                scan_trajectory_index_data_sync(dir, source_hint.clone())?;
+                scan_trajectory_index_data_sync(dir, source_hint.clone(), listing_counter_scope)?;
             let index = TrajectoryIndex {
                 schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
                 updated_at: Utc::now().to_rfc3339(),
@@ -1110,8 +1206,9 @@ fn reconcile_trajectory_index_sync(
     dir: &Path,
     index: TrajectoryIndex,
     source_hint: Option<TrajectorySourceIdentity>,
+    listing_counter_scope: &TrajectoryIndexListingCounterScope,
 ) -> Result<(TrajectoryIndex, bool), String> {
-    let disk_files = scan_trajectory_dir_files_sync(dir)?;
+    let disk_files = scan_trajectory_dir_files_sync(dir, listing_counter_scope)?;
     let skipped_by_file: HashMap<String, TrajectoryIndexSkippedFile> = index
         .skipped_files
         .iter()
@@ -1253,17 +1350,28 @@ fn flush_trajectory_index_mutations_sync(
     lock_wait_span: Option<perf_diagnostics::PerfSpan>,
     index_write_span: Option<perf_diagnostics::PerfSpan>,
     reconcile_span: Option<perf_diagnostics::PerfSpan>,
+    listing_counter_scope: &TrajectoryIndexListingCounterScope,
 ) -> Result<TrajectoryIndex, String> {
     std::fs::create_dir_all(dir)
         .map_err(|error| format!("Failed to create trajectory directory {:?}: {error}", dir))?;
     with_trajectory_index_file_lock(dir, lock_timeout, lock_retry, lock_wait_span, || {
-        let mut index =
-            load_trajectory_index_for_coordinator_sync(dir, None, index_read_span)?.index;
+        let mut index = load_trajectory_index_for_coordinator_sync(
+            dir,
+            None,
+            index_read_span,
+            listing_counter_scope,
+        )?
+        .index;
         let mut reconcile_span = reconcile_span;
         for pending in pending {
             match pending.mutation {
                 TrajectoryIndexMutation::Reconcile(source_hint) => {
-                    let reconciled = reconcile_trajectory_index_sync(dir, index, source_hint);
+                    let reconciled = reconcile_trajectory_index_sync(
+                        dir,
+                        index,
+                        source_hint,
+                        listing_counter_scope,
+                    );
                     let item_count = reconciled
                         .as_ref()
                         .ok()
@@ -1492,12 +1600,20 @@ pub fn entry_from_trajectory_value(
 }
 
 pub async fn read_trajectory_index(dir: &Path) -> Result<Option<TrajectoryIndex>, String> {
+    read_trajectory_index_with_counter_scope(dir, &GLOBAL_TRAJECTORY_INDEX_LISTING_COUNTER_SCOPE)
+        .await
+}
+
+async fn read_trajectory_index_with_counter_scope(
+    dir: &Path,
+    listing_counter_scope: &TrajectoryIndexListingCounterScope,
+) -> Result<Option<TrajectoryIndex>, String> {
     if !perf_diagnostics::is_enabled() {
-        return read_trajectory_index_inner(dir).await;
+        return read_trajectory_index_inner(dir, listing_counter_scope).await;
     }
     let path = trajectory_index_path(dir);
     let span = perf_diagnostics::span(PerfComponent::TrajectoryIndexRead, None, Some(&path));
-    let result = read_trajectory_index_inner(dir).await;
+    let result = read_trajectory_index_inner(dir, listing_counter_scope).await;
     span.finish(
         if result.is_ok() {
             PerfOutcome::Success
@@ -1516,8 +1632,11 @@ pub async fn read_trajectory_index(dir: &Path) -> Result<Option<TrajectoryIndex>
     result
 }
 
-async fn read_trajectory_index_inner(dir: &Path) -> Result<Option<TrajectoryIndex>, String> {
-    record_index_read();
+async fn read_trajectory_index_inner(
+    dir: &Path,
+    listing_counter_scope: &TrajectoryIndexListingCounterScope,
+) -> Result<Option<TrajectoryIndex>, String> {
+    listing_counter_scope.record_index_read();
     let path = trajectory_index_path(dir);
     let content = match fs::read_to_string(&path).await {
         Ok(content) => content,
@@ -1865,11 +1984,16 @@ pub async fn list_trajectory_entries_with_rollout_for(
     source_hint: Option<TrajectorySourceIdentity>,
     caller: TrajectoryIndexListingCaller,
 ) -> Result<Vec<TrajectoryIndexEntry>, String> {
-    record_listing_caller(caller);
+    coordinator.record_listing_caller(caller);
     if trajectory_index_coordinator_rollout_enabled() {
         coordinator.list_entries(dir, source_hint).await
     } else {
-        list_trajectory_entries_from_index_or_rebuild(dir, source_hint).await
+        list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
+            dir,
+            source_hint,
+            &coordinator.listing_counter_scope,
+        )
+        .await
     }
 }
 
@@ -1898,8 +2022,11 @@ struct DiskTrajectoryFile {
     file_modified_unix_ms: i64,
 }
 
-fn scan_trajectory_dir_files_sync(dir: &Path) -> Result<Vec<DiskTrajectoryFile>, String> {
-    record_directory_scan();
+fn scan_trajectory_dir_files_sync(
+    dir: &Path,
+    listing_counter_scope: &TrajectoryIndexListingCounterScope,
+) -> Result<Vec<DiskTrajectoryFile>, String> {
+    listing_counter_scope.record_directory_scan();
     let read_dir = match std::fs::read_dir(dir) {
         Ok(read_dir) => read_dir,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -2002,8 +2129,9 @@ fn read_and_index_single_trajectory_sync(
 fn scan_trajectory_index_data_sync(
     dir: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
+    listing_counter_scope: &TrajectoryIndexListingCounterScope,
 ) -> Result<(Vec<TrajectoryIndexEntry>, Vec<TrajectoryIndexSkippedFile>), String> {
-    let disk_files = scan_trajectory_dir_files_sync(dir)?;
+    let disk_files = scan_trajectory_dir_files_sync(dir, listing_counter_scope)?;
     let mut entries = Vec::new();
     let mut skipped_files = Vec::new();
     for disk in disk_files {
@@ -2023,8 +2151,11 @@ fn scan_trajectory_index_data_sync(
     Ok((dedupe_entries_by_id(entries), skipped_files))
 }
 
-async fn scan_trajectory_dir_files(dir: &Path) -> Result<Vec<DiskTrajectoryFile>, String> {
-    record_directory_scan();
+async fn scan_trajectory_dir_files(
+    dir: &Path,
+    listing_counter_scope: &TrajectoryIndexListingCounterScope,
+) -> Result<Vec<DiskTrajectoryFile>, String> {
+    listing_counter_scope.record_directory_scan();
     let dir = dir.to_path_buf();
     let dir_for_err = dir.clone();
     tokio::task::spawn_blocking(move || {
@@ -2180,7 +2311,8 @@ async fn scan_trajectory_index_data(
     dir: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<(Vec<TrajectoryIndexEntry>, Vec<TrajectoryIndexSkippedFile>), String> {
-    let disk_files = scan_trajectory_dir_files(dir).await?;
+    let disk_files =
+        scan_trajectory_dir_files(dir, &GLOBAL_TRAJECTORY_INDEX_LISTING_COUNTER_SCOPE).await?;
     let mut entries = Vec::new();
     let mut skipped_files = Vec::new();
     for disk in disk_files {
@@ -2261,6 +2393,19 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
     dir: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
 ) -> Result<Vec<TrajectoryIndexEntry>, String> {
+    list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
+        dir,
+        source_hint,
+        &GLOBAL_TRAJECTORY_INDEX_LISTING_COUNTER_SCOPE,
+    )
+    .await
+}
+
+async fn list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
+    dir: &Path,
+    source_hint: Option<TrajectorySourceIdentity>,
+    listing_counter_scope: &TrajectoryIndexListingCounterScope,
+) -> Result<Vec<TrajectoryIndexEntry>, String> {
     let cached = legacy_trajectory_index_cache()
         .lock()
         .await
@@ -2270,7 +2415,7 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
         if let Ok(true) =
             cached_index_is_fresh(dir, cached.index.clone(), cached.generation.clone()).await
         {
-            record_listing_cache_hit();
+            listing_counter_scope.record_listing_cache_hit();
             return Ok(cached.index.entries);
         }
     }
@@ -2288,10 +2433,10 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
     if let Some(lock_span) = lock_span {
         lock_span.finish(PerfOutcome::Success, None, None, None, None);
     }
-    let disk_files = scan_trajectory_dir_files(dir).await?;
+    let disk_files = scan_trajectory_dir_files(dir, listing_counter_scope).await?;
 
     let (existing_entries, existing_skipped, index_unreadable) =
-        match read_trajectory_index(dir).await {
+        match read_trajectory_index_with_counter_scope(dir, listing_counter_scope).await {
             Ok(Some(index)) => (index.entries, index.skipped_files, false),
             Ok(None) => (Vec::new(), Vec::new(), false),
             Err(_) => (Vec::new(), Vec::new(), true),
@@ -2375,7 +2520,9 @@ pub async fn list_trajectory_entries_from_index_or_rebuild(
         write_trajectory_index_atomic_owned(dir, index.clone()).await?;
         index
     } else {
-        let existing = read_trajectory_index(dir).await?.unwrap_or_default();
+        let existing = read_trajectory_index_with_counter_scope(dir, listing_counter_scope)
+            .await?
+            .unwrap_or_default();
         TrajectoryIndex {
             schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
             updated_at: existing.updated_at,
@@ -3265,13 +3412,14 @@ mod tests {
         assert_eq!(snapshot.entries[0].id, "chat-1");
     }
 
-    #[serial_test::serial]
     #[tokio::test]
     async fn coordinator_listing_avoids_reads_and_scans_for_unchanged_directory() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("trajectories");
         let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let coordinator = TrajectoryIndexCoordinator::new();
+        let listing_counter_scope = TrajectoryIndexListingCounterScope::local();
+        let coordinator =
+            TrajectoryIndexCoordinator::with_listing_counter_scope(listing_counter_scope.clone());
         coordinator
             .upsert(&dir, entry_for_path(&dir, &path).await)
             .await
@@ -3279,9 +3427,9 @@ mod tests {
         coordinator.flush_all().await.unwrap();
         coordinator.list_entries(&dir, None).await.unwrap();
 
-        reset_trajectory_index_listing_counters();
+        listing_counter_scope.reset();
         let entries = coordinator.list_entries(&dir, None).await.unwrap();
-        let counters = trajectory_index_listing_counters();
+        let counters = listing_counter_scope.snapshot();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(counters.index_reads, 0);
@@ -3289,21 +3437,29 @@ mod tests {
         assert_eq!(counters.cache_hits, 1);
     }
 
-    #[serial_test::serial]
     #[tokio::test]
     async fn legacy_listing_avoids_reads_and_scans_for_unchanged_directory() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("trajectories");
         write_trajectory(&dir, "chat-1", "One", "agent").await;
-        list_trajectory_entries_from_index_or_rebuild(&dir, None)
-            .await
-            .unwrap();
+        let listing_counter_scope = TrajectoryIndexListingCounterScope::local();
+        list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
+            &dir,
+            None,
+            &listing_counter_scope,
+        )
+        .await
+        .unwrap();
 
-        reset_trajectory_index_listing_counters();
-        let entries = list_trajectory_entries_from_index_or_rebuild(&dir, None)
-            .await
-            .unwrap();
-        let counters = trajectory_index_listing_counters();
+        listing_counter_scope.reset();
+        let entries = list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
+            &dir,
+            None,
+            &listing_counter_scope,
+        )
+        .await
+        .unwrap();
+        let counters = listing_counter_scope.snapshot();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(counters.index_reads, 0);
@@ -3376,14 +3532,15 @@ mod tests {
         assert_eq!(entries[0].id, "chat-1");
     }
 
-    #[serial_test::serial]
     #[tokio::test]
     async fn coordinator_scans_only_changed_directories_across_repeated_polls() {
         const DIRECTORY_COUNT: usize = 24;
         const POLL_COUNT: usize = 12;
 
         let temp = tempfile::tempdir().unwrap();
-        let coordinator = TrajectoryIndexCoordinator::new();
+        let listing_counter_scope = TrajectoryIndexListingCounterScope::local();
+        let coordinator =
+            TrajectoryIndexCoordinator::with_listing_counter_scope(listing_counter_scope.clone());
         let mut dirs = Vec::new();
         for number in 0..DIRECTORY_COUNT {
             let dir = temp.path().join(format!("trajectories-{number}"));
@@ -3392,13 +3549,13 @@ mod tests {
             dirs.push(dir);
         }
 
-        reset_trajectory_index_listing_counters();
+        listing_counter_scope.reset();
         for _ in 0..POLL_COUNT {
             for dir in &dirs {
                 assert_eq!(coordinator.list_entries(dir, None).await.unwrap().len(), 1);
             }
         }
-        let unchanged = trajectory_index_listing_counters();
+        let unchanged = listing_counter_scope.snapshot();
         assert_eq!(unchanged.directory_scans, 0);
         assert_eq!(
             unchanged.cache_hits,
@@ -3417,7 +3574,7 @@ mod tests {
         for dir in &dirs[1..] {
             assert_eq!(coordinator.list_entries(dir, None).await.unwrap().len(), 1);
         }
-        let changed = trajectory_index_listing_counters();
+        let changed = listing_counter_scope.snapshot();
         assert_eq!(changed.directory_scans, 1);
         assert_eq!(
             changed.cache_hits,
@@ -3425,15 +3582,19 @@ mod tests {
         );
     }
 
-    #[serial_test::serial]
     #[tokio::test]
     async fn listing_counters_attribute_callers() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("trajectories");
         write_trajectory(&dir, "chat-1", "One", "agent").await;
-        let coordinator = TrajectoryIndexCoordinator::new();
+        assert!(TrajectoryIndexCoordinator::new()
+            .listing_counter_scope
+            .is_global());
+        let listing_counter_scope = TrajectoryIndexListingCounterScope::local();
+        let coordinator =
+            TrajectoryIndexCoordinator::with_listing_counter_scope(listing_counter_scope.clone());
 
-        reset_trajectory_index_listing_counters();
+        listing_counter_scope.reset();
         list_trajectory_entries_with_rollout_for(
             &coordinator,
             &dir,
@@ -3450,7 +3611,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let counters = trajectory_index_listing_counters();
+        let counters = listing_counter_scope.snapshot();
 
         assert_eq!(
             counters

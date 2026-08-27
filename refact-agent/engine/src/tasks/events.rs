@@ -135,9 +135,8 @@ mod tests {
             planner_session_state: Some("stale".to_string()),
         };
 
-        crate::chat::trajectory_index::reset_trajectory_index_listing_counters();
-        enrich_task_with_session_state(gcx, &mut task).await;
-        let counters = crate::chat::trajectory_index::trajectory_index_listing_counters();
+        enrich_task_with_session_state(gcx.clone(), &mut task).await;
+        let counters = gcx.trajectory_index_coordinator.listing_counters_for_test();
 
         assert!(task.planner_session_state.is_none());
         assert_eq!(
