@@ -3176,7 +3176,7 @@ mod tests {
                 let _ = requests.send(read_request_headers(&mut stream));
                 let body = response.to_string();
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
                     body.len(), body
                 );
                 let _ = stream.write_all(response.as_bytes());
@@ -3270,7 +3270,9 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             sent.send(read_request_body(&mut stream)).unwrap();
             stream
-                .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                .write_all(
+                    b"HTTP/1.1 202 Accepted\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                )
                 .unwrap();
             stream.flush().unwrap();
         });
@@ -3935,7 +3937,9 @@ mod tests {
                 let body = read_request_body(&mut stream);
                 requests.send(body).unwrap();
                 stream
-                    .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                    .write_all(
+                        b"HTTP/1.1 202 Accepted\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                    )
                     .unwrap();
                 stream.flush().unwrap();
             }
