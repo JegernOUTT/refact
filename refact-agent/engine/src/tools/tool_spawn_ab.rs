@@ -392,6 +392,42 @@ async fn cleanup_ab_variant_with_timeout(
         }
     }
 
+    fn removal_is_contended(error: &std::io::Error) -> bool {
+        #[cfg(windows)]
+        {
+            const ERROR_SHARING_VIOLATION: i32 = 32;
+            const ERROR_LOCK_VIOLATION: i32 = 33;
+            const ERROR_ACCESS_DENIED: i32 = 5;
+            return matches!(
+                error.raw_os_error(),
+                Some(ERROR_SHARING_VIOLATION)
+                    | Some(ERROR_LOCK_VIOLATION)
+                    | Some(ERROR_ACCESS_DENIED)
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = error;
+            false
+        }
+    }
+
+    fn remove_worktree_dir_with_retry(path: &str) -> std::io::Result<()> {
+        let mut delay = std::time::Duration::from_millis(20);
+        for _ in 0..6 {
+            match std::fs::remove_dir_all(path) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) if removal_is_contended(&error) => {
+                    std::thread::sleep(delay);
+                    delay = (delay * 2).min(std::time::Duration::from_millis(400));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        std::fs::remove_dir_all(path)
+    }
+
     let worktree_removed = Command::new("git")
         .args(["worktree", "remove", &variant.worktree, "--force"])
         .current_dir(workspace_root)
@@ -399,7 +435,7 @@ async fn cleanup_ab_variant_with_timeout(
         .map(|output| output.status.success())
         .unwrap_or(false);
     if !worktree_removed && std::path::Path::new(&variant.worktree).exists() {
-        std::fs::remove_dir_all(&variant.worktree).map_err(|e| {
+        remove_worktree_dir_with_retry(&variant.worktree).map_err(|e| {
             format!(
                 "Failed to remove loser worktree '{}': {}",
                 variant.worktree, e
