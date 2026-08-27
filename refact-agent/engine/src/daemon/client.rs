@@ -774,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(daemon)]
     fn daemon_needs_upgrade_same_version_different_hash_honors_opt_out() {
         let previous = std::env::var_os(DAEMON_NO_UPGRADE_ENV);
         std::env::set_var(DAEMON_NO_UPGRADE_ENV, "1");
@@ -850,7 +850,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(daemon)]
     async fn auth_required_request_retries_once_after_daemon_json_token_refresh() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -923,7 +923,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(daemon)]
     async fn shutdown_retries_once_after_daemon_json_token_refresh() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -978,7 +978,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(daemon)]
     async fn auth_required_request_retries_at_most_once() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -1026,7 +1026,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(daemon)]
     async fn auth_required_request_does_not_retry_port_mismatch() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -1073,7 +1073,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(daemon)]
     async fn auth_required_request_does_not_retry_missing_daemon_json() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();
@@ -1185,7 +1185,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(daemon)]
     async fn ensure_daemon_running_finds_foreground_task_variant() {
         let cache_dir = tempfile::tempdir().unwrap();
         let config_dir = tempfile::tempdir().unwrap();

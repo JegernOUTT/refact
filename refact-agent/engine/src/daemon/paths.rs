@@ -110,7 +110,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(daemon)]
     fn daemon_dir_env_override_isolates_daemon_state_paths() {
         let tempdir = tempfile::tempdir().unwrap();
         let _guard = EnvVarGuard::set(DAEMON_DIR_ENV, tempdir.path());
@@ -131,7 +131,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(daemon)]
     fn daemon_dir_defaults_under_cache_root_without_override() {
         let cache = tempfile::tempdir().unwrap();
         let _cache_guard = EnvVarGuard::set("REFACT_DAEMON_CACHE_DIR", cache.path());
@@ -143,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(daemon)]
     fn empty_daemon_dir_env_falls_back_to_cache_root() {
         let cache = tempfile::tempdir().unwrap();
         let _cache_guard = EnvVarGuard::set("REFACT_DAEMON_CACHE_DIR", cache.path());

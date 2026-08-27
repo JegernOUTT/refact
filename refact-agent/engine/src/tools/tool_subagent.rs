@@ -779,7 +779,7 @@ mod tests {
         assert!(prompt.contains("configured `subagent` toolset"));
     }
 
-    #[serial]
+    #[serial(test_runner)]
     #[tokio::test]
     async fn wait_false_default_returns_background_agent_id_in_extra() {
         let ccx = test_context("parent-bg").await;
@@ -854,7 +854,7 @@ mod tests {
         assert_eq!(finished.config_name, "subagent");
     }
 
-    #[serial]
+    #[serial(test_runner)]
     #[tokio::test]
     async fn wait_true_returns_full_result_from_spawn_and_wait() {
         let ccx = test_context("parent-wait").await;
@@ -925,7 +925,7 @@ mod tests {
         );
     }
 
-    #[serial]
+    #[serial(test_runner)]
     #[tokio::test]
     async fn explicit_alias_tools_are_canonicalized_for_spawn_and_prompt() {
         let ccx = test_context("parent-alias-tools").await;

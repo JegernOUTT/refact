@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn idle_tick_stops_fake_worker_and_proxy_rewakes() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
@@ -432,7 +432,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn idle_tick_keeps_pinned_and_cron_pending_workers() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
@@ -478,7 +478,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn idle_revalidation_keeps_worker_that_becomes_active() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
@@ -510,7 +510,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn idle_snapshot_uses_worker_heartbeat_activity() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;

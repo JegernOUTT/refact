@@ -1364,7 +1364,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn run_streams_answer_against_fake_worker() {
         let Some(_env) = EnvGuard::set("ok") else {
             return;
@@ -1389,7 +1389,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn run_pause_required_deny_exits_three() {
         let Some(_env) = EnvGuard::set("pause") else {
             return;
@@ -1412,7 +1412,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn run_pause_required_auto_approves_and_json_summarizes() {
         let Some(_env) = EnvGuard::set("pause") else {
             return;
@@ -1437,7 +1437,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn run_json_stalled_stream_times_out_with_failure_contract() {
         let Some(_env) = EnvGuard::set("stall") else {
             return;

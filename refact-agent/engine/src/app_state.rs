@@ -1501,7 +1501,7 @@ mod tests {
         )
     }
 
-    #[serial]
+    #[serial(runtime_settings)]
     #[tokio::test]
     async fn tool_catalog_snapshot_single_flights_and_reuses_descriptors() {
         let _env = ToolCatalogSnapshotsEnvGuard::enable();
@@ -1530,7 +1530,7 @@ mod tests {
         assert_eq!(gcx.tool_catalog_cache.snapshot_count().await, 1);
     }
 
-    #[serial]
+    #[serial(runtime_settings)]
     #[tokio::test]
     async fn tool_catalog_snapshot_warm_acquisition_stays_below_two_milliseconds() {
         let _env = ToolCatalogSnapshotsEnvGuard::enable();
@@ -1554,7 +1554,7 @@ mod tests {
         assert!(samples[15] < std::time::Duration::from_millis(2));
     }
 
-    #[serial]
+    #[serial(runtime_settings)]
     #[tokio::test]
     async fn tool_catalog_generations_create_next_turn_snapshot_without_mutating_old_one() {
         let _env = ToolCatalogSnapshotsEnvGuard::enable();
@@ -1581,7 +1581,7 @@ mod tests {
         assert_eq!(third.index.tools[0].name, "fixture");
     }
 
-    #[serial]
+    #[serial(runtime_settings)]
     #[tokio::test]
     async fn tool_catalog_snapshot_cache_is_bounded_across_generations() {
         let _env = ToolCatalogSnapshotsEnvGuard::enable();
@@ -1603,7 +1603,7 @@ mod tests {
         assert_eq!(gcx.tool_catalog_cache.build_lock_count().await, 0);
     }
 
-    #[serial]
+    #[serial(runtime_settings)]
     #[tokio::test]
     async fn tool_catalog_key_isolates_mode_and_model_and_keeps_mutable_instances_fresh() {
         let _env = ToolCatalogSnapshotsEnvGuard::enable();
@@ -1636,7 +1636,7 @@ mod tests {
         );
     }
 
-    #[serial]
+    #[serial(runtime_settings)]
     #[tokio::test]
     async fn tool_catalog_key_isolates_execution_scopes() {
         let _env = ToolCatalogSnapshotsEnvGuard::enable();
@@ -1662,7 +1662,7 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &second));
     }
 
-    #[serial]
+    #[serial(runtime_settings)]
     #[tokio::test]
     async fn turn_tool_pool_unique_batch_uses_one_mutable_vector() {
         let _env = ToolCatalogSnapshotsEnvGuard::enable();
@@ -1695,7 +1695,7 @@ mod tests {
         assert_eq!(builds.load(Ordering::SeqCst), builds_after_pool);
     }
 
-    #[serial]
+    #[serial(runtime_settings)]
     #[tokio::test]
     async fn turn_tool_pool_reuses_one_instance_for_sequential_calls() {
         let _env = ToolCatalogSnapshotsEnvGuard::enable();
@@ -1734,7 +1734,7 @@ mod tests {
         assert_eq!(builds.load(Ordering::SeqCst), builds_after_pool);
     }
 
-    #[serial]
+    #[serial(runtime_settings)]
     #[tokio::test]
     async fn turn_tool_pool_returns_the_confirmation_instance_to_execution() {
         let _env = ToolCatalogSnapshotsEnvGuard::enable();
@@ -1784,7 +1784,7 @@ mod tests {
         );
     }
 
-    #[serial]
+    #[serial(runtime_settings)]
     #[tokio::test]
     async fn turn_tool_pool_same_name_parallelism_is_bounded_by_multiplicity() {
         let _env = ToolCatalogSnapshotsEnvGuard::enable();
@@ -1818,7 +1818,7 @@ mod tests {
         );
     }
 
-    #[serial]
+    #[serial(runtime_settings)]
     #[tokio::test]
     async fn turn_tool_pools_are_isolated_between_turns() {
         let _env = ToolCatalogSnapshotsEnvGuard::enable();
@@ -1840,7 +1840,7 @@ mod tests {
         assert_eq!(builds.load(Ordering::SeqCst), 3);
     }
 
-    #[serial]
+    #[serial(runtime_settings)]
     #[test]
     fn tool_catalog_snapshot_rollout_switch_defaults_on_and_keeps_the_cold_fallback_available() {
         assert!(

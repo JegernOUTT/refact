@@ -8144,7 +8144,7 @@ mod tests {
         assert!(!chat_b.trajectory_dirty);
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_commit_rejects_a_stale_snapshot_before_file_write() {
         let _lock = serial_test_guard();
@@ -8199,7 +8199,7 @@ mod tests {
         assert_eq!(content, vec!["older", "newer"]);
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_writer_enabled_checkpoints_coalesce_to_the_latest_session_snapshot() {
         let _lock = serial_test_guard();
@@ -8242,7 +8242,7 @@ mod tests {
         );
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_writer_disabled_checkpoint_saves_synchronously() {
         let _lock = serial_test_guard();
@@ -8276,7 +8276,7 @@ mod tests {
         assert_eq!(loaded.messages.len(), 1);
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_writer_background_required_intent_waits_for_its_commit() {
         let _lock = serial_test_guard();
@@ -8313,7 +8313,7 @@ mod tests {
         assert!(load_trajectory_for_chat(gcx, chat_id).await.is_some());
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_writer_paths_preserve_stale_required_and_shutdown_commits() {
         let _lock = serial_test_guard();
@@ -8380,7 +8380,7 @@ mod tests {
         }
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn required_writer_waits_for_a_checkpoint_and_commits_latest_version() {
         let _lock = serial_test_guard();
@@ -8657,7 +8657,7 @@ mod tests {
         assert_eq!(session.trajectory_committed_version, 30_000);
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_writer_failed_checkpoint_retries_before_a_required_commit() {
         let _lock = serial_test_guard();
@@ -8689,7 +8689,7 @@ mod tests {
                 if session_arc.lock().await.trajectory_save_error.is_some() {
                     return;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
@@ -8832,7 +8832,7 @@ mod tests {
         assert_eq!(writer.lock().await.error.as_deref(), Some(error.as_str()));
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_writer_registry_cleans_completed_and_source_isolated_entries() {
         let _lock = serial_test_guard();
@@ -9279,7 +9279,7 @@ mod tests {
         assert!(load_trajectory_for_chat(gcx, chat_id).await.is_some());
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn performance_diagnostics_cover_snapshot_save_boundaries_without_raw_id_or_path() {
         let _lock = serial_test_guard();
@@ -9337,7 +9337,7 @@ mod tests {
             .any(|event| { event.chat_id_hash.as_deref() == Some(expected_chat_hash.as_str()) }));
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn performance_diagnostics_record_failed_trajectory_commit() {
         let _lock = serial_test_guard();
@@ -9360,7 +9360,7 @@ mod tests {
         assert_eq!(events.len(), 1);
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_metadata_path_failure_records_one_serialize_failure() {
         let _lock = serial_test_guard();
@@ -9397,7 +9397,7 @@ mod tests {
         assert_eq!(serialize_events[0].outcome, "failure");
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_message_serialization_failure_preserves_existing_file() {
         let _lock = serial_test_guard();
@@ -10204,7 +10204,7 @@ mod tests {
         }
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn watcher_picks_up_external_edit_to_task_planner_trajectory() {
         let dir = tempfile::tempdir().unwrap();
@@ -10243,7 +10243,7 @@ mod tests {
         assert_eq!(event.title.as_deref(), Some("Planner Watch"));
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn watcher_ignores_non_trajectory_files_in_tasks_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -10292,7 +10292,7 @@ mod tests {
         assert!(should_dispatch_trajectory_path(&task_chat, &[task_root]));
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn watcher_picks_up_new_task_dir_created_after_startup() {
         let dir = tempfile::tempdir().unwrap();
@@ -10876,7 +10876,7 @@ mod tests {
                 {
                     return;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
@@ -10900,7 +10900,7 @@ mod tests {
                 {
                     return;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
         .await
@@ -20592,7 +20592,7 @@ mod tests {
         assert_eq!(leftovers, 0);
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_watcher_self_write_consumes_exact_fingerprint_once() {
         clear_all_trajectory_self_writes();
@@ -20611,7 +20611,7 @@ mod tests {
         clear_all_trajectory_self_writes();
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_watcher_self_write_does_not_consume_modified_or_deleted_files() {
         clear_all_trajectory_self_writes();
@@ -20638,7 +20638,7 @@ mod tests {
         clear_all_trajectory_self_writes();
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_watcher_self_write_respects_source_and_expires_records() {
         clear_all_trajectory_self_writes();
@@ -20674,7 +20674,7 @@ mod tests {
         clear_all_trajectory_self_writes();
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_watcher_self_write_consumes_remove_after_atomic_replacement() {
         clear_all_trajectory_self_writes();
@@ -20731,7 +20731,7 @@ mod tests {
         clear_all_trajectory_self_writes();
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_watcher_self_write_disable_restores_external_reload_path() {
         crate::runtime_settings::reset_for_test();
@@ -20792,7 +20792,7 @@ mod tests {
         clear_all_trajectory_self_writes();
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_watcher_self_write_cleanup_keeps_other_watcher_scope() {
         clear_all_trajectory_self_writes();
@@ -21351,7 +21351,7 @@ mod tests {
         );
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_get_handler_returns_404_for_missing_chat() {
         let dir = tempfile::tempdir().unwrap();
@@ -21364,7 +21364,7 @@ mod tests {
         assert_eq!(err.message, "Trajectory not found");
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_path_handler_returns_404_for_missing_chat() {
         let dir = tempfile::tempdir().unwrap();
@@ -21376,7 +21376,7 @@ mod tests {
         assert_eq!(err.status_code, StatusCode::NOT_FOUND);
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_path_handler_returns_400_for_invalid_id() {
         let dir = tempfile::tempdir().unwrap();
@@ -21387,7 +21387,7 @@ mod tests {
         assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_path_handler_returns_normal_trajectory_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -21410,7 +21410,7 @@ mod tests {
         assert_same_path_str(returned, &path);
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_path_handler_returns_nested_normal_trajectory_path_for_active_session() {
         let dir = tempfile::tempdir().unwrap();
@@ -21436,7 +21436,7 @@ mod tests {
         assert_same_path_str(payload["path"].as_str().unwrap(), &path);
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_path_handler_returns_buddy_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -21460,7 +21460,7 @@ mod tests {
         assert_same_path_str(payload["path"].as_str().unwrap(), &buddy_path);
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_path_handler_does_not_leak_other_source_for_active_buddy_session() {
         let dir = tempfile::tempdir().unwrap();
@@ -21496,7 +21496,7 @@ mod tests {
         assert!(tokio::fs::try_exists(&normal_path).await.unwrap());
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_path_handler_returns_buddy_path_when_active_buddy_session_has_buddy_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -21548,7 +21548,7 @@ mod tests {
         );
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_path_handler_rejects_malformed_json() {
         let dir = tempfile::tempdir().unwrap();
@@ -21570,7 +21570,7 @@ mod tests {
         assert_eq!(err.status_code, StatusCode::NOT_FOUND);
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_path_handler_rejects_id_mismatch() {
         let dir = tempfile::tempdir().unwrap();

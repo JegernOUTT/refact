@@ -48,6 +48,23 @@ cargo build --release
 
 Python integration tests (`tests/*.py`) require a running `refact-lsp` instance — don't run them as a quick check.
 
+**Performance tests are a separate category.** The `chat::perf_harness` benchmarks
+execute real workloads and measure wall-clock, CPU and IO. They sit behind the
+non-default `perf-tests` feature and are skipped by `cargo test` — they are slow,
+only meaningful single-threaded on an idle machine, and their CPU/IO counters are
+`cfg(target_os = "linux")`. Run them deliberately:
+
+```bash
+tools/dev/perf.sh            # all benchmarks
+tools/dev/perf.sh fanout     # only benchmarks matching "fanout"
+```
+
+CI runs them in the separate `Engine Performance` workflow (nightly, on
+`workflow_dispatch`, or on a PR labelled `engine-perf`) — never in the
+per-commit correctness gate. Do not add benchmarks to the default suite: a test
+that asserts a wall-clock bound or an exact byte count is measuring the machine,
+not the code, and will flake under parallel load.
+
 ### GUI (`refact-agent/gui/`)
 
 ```bash
@@ -98,6 +115,7 @@ slash commands (local, in `.refact/commands/`) orchestrate reusable scripts
 | `ci-status.sh <run-url\|id>` | GitHub Actions run status: per-job pass/fail + pinpointed failed steps |
 | `ci-logs.sh <run-url\|id> [N]` | Tail (default 300) of each **failed** job's log. Use this, not `gh run view --log-failed` (unreliable for reusable-workflow jobs) |
 | `release.sh <ver> <build\|plugins\|engine> [--push]` | Bump all manifests, commit, tag, optionally push |
+| `perf.sh [filter]` | Run the engine performance benchmarks (see Performance tests below) |
 | `setup-cache.sh [--status]` | Enable/inspect the shared sccache build cache |
 
 ### Slash commands (`.refact/commands/`, local/personal)

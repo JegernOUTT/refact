@@ -4311,6 +4311,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn percentile_math_uses_nearest_rank_at_tail_percentiles() {
         let samples = [10, 20, 30, 40, 50];
         assert_eq!(percentile_us(&samples, 0), 10);
@@ -4321,6 +4325,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn full_soak_process_metrics_use_baseline_delta_and_peak() {
         let metrics = process_metrics_from_snapshots(&[
             ProcessResourceSnapshot {
@@ -4353,6 +4361,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn full_soak_variant_order_alternates() {
         assert_eq!(full_soak_variant_order(0), [false, true]);
         assert_eq!(full_soak_variant_order(1), [true, false]);
@@ -4361,6 +4373,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn auto_enrichment_fixture_measures_real_fanout_lock_contention_and_privacy() {
         let report = run_auto_enrichment_ci_fixture().expect("auto enrichment fixture runs");
 
@@ -4390,6 +4406,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn auto_enrichment_fallback_measurement_stays_bounded_and_schema_validates() {
         let report = benchmark_runtime_builder()
             .enable_all()
@@ -4434,6 +4454,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn auto_enrichment_ten_thousand_file_fallback_reads_no_corpus_files() {
         let report = benchmark_runtime_builder()
             .enable_all()
@@ -4457,6 +4481,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn fanout_fixture_measures_high_rate_deltas_large_history_and_lag_recovery() {
         let report = run_fanout_benchmark().expect("fanout fixture should run");
 
@@ -4496,6 +4524,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn fixed_seed_workloads_are_repeatable() {
         let first = ConcurrentChatWorkload::fixed_matrix();
         let second = ConcurrentChatWorkload::fixed_matrix();
@@ -4507,6 +4539,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn fixed_tool_pool_workload_has_the_required_concurrency_and_catalog_size() {
         let workload = ToolPoolWorkload::fixed();
 
@@ -4525,6 +4561,10 @@ mod tests {
 
     #[serial_test::serial]
     #[test]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn tool_pool_fixture_compares_real_legacy_and_pooled_operations() {
         let report = run_tool_pool_ci_fixture().expect("tool pool fixture should run");
         let legacy = &report.variants[0];
@@ -4571,6 +4611,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn fixed_fixture_repeats_structural_counters_without_requiring_identical_wall_clock() {
         let first = run_ci_fixture().expect("first fixture run succeeds");
         let second = run_ci_fixture().expect("second fixture run succeeds");
@@ -4615,6 +4659,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn fixed_workload_matrix_covers_every_required_dimension() {
         assert!(workload_matrix_is_complete(
             &ConcurrentChatWorkload::fixed_matrix()
@@ -4623,6 +4671,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn ci_fixture_measures_real_saves_and_diagnostics() {
         let report = run_ci_fixture().expect("CI fixture should run");
         assert_eq!(report.variants.len(), 2);
@@ -4638,6 +4690,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn repeated_real_saves_scale_observed_save_and_diagnostic_counts() {
         let mut workload = ConcurrentChatWorkload::ci_fixture();
         workload.rapid_same_chat_checkpoints = 7;
@@ -4662,6 +4718,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn extra_real_operation_changes_measured_counters() {
         let report = run_ci_fixture().expect("CI fixture should run");
         let variant = &report.variants[0];
@@ -4672,6 +4732,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn report_compares_legacy_and_coalesced_writer_variants() {
         let tool_pool_workload = run_tool_pool_ci_fixture().expect("tool pool fixture should run");
         let report = ConcurrentChatBenchmarkReport {
@@ -4691,6 +4755,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn full_soak_ci_fixture_starts_required_subsystems() {
         let report = run_full_soak_ci_fixture().expect("full soak CI fixture should run");
 
@@ -4743,6 +4811,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn full_soak_stage_accounting_bounds_nested_wall_clock_stages() {
         let stages = FullSoakToolCallStageSample {
             session_extraction_history_clone_us: 3,
@@ -4761,6 +4833,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "perf-tests"),
+        ignore = "performance benchmark; run with --features perf-tests"
+    )]
     fn full_soak_report_schema_declares_matrix_and_disclosures() {
         let latency = LatencySummary::from_samples(&[1]).unwrap();
         let variant = FullSoakVariantBenchmarkReport {

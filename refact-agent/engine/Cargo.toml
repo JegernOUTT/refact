@@ -204,6 +204,7 @@ bench = false
 default = ["voice"]
 voice = ["refact-voice/voice"]
 bench = []
+perf-tests = []
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [build-dependencies]

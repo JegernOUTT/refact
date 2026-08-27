@@ -539,7 +539,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(runtime_settings)]
     async fn trajectory_settings_defaults_round_trip_and_persist() {
         crate::runtime_settings::reset_for_test();
         let app = trajectory_settings_app().await;
@@ -603,7 +603,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(runtime_settings)]
     async fn trajectory_settings_validation_preserves_previous_configuration() {
         crate::runtime_settings::reset_for_test();
         let app = trajectory_settings_app().await;
@@ -636,7 +636,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial]
+    #[serial(runtime_settings)]
     async fn trajectory_settings_live_values_apply_and_restart_values_wait() {
         crate::runtime_settings::reset_for_test();
         let app = trajectory_settings_app().await;
@@ -702,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(runtime_settings)]
     fn trajectory_settings_environment_rollout_override_wins() {
         let cases = [
             (

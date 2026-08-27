@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::file_filter::KNOWLEDGE_FOLDER_NAME;
-use crate::files_correction::get_project_dirs;
+use crate::files_correction::{canonicalize_normalized_path, get_project_dirs};
 use crate::app_state::AppState;
 use crate::git::operations::{
     GitCoChangePair, GitCommitClassification, GitCommitSummary, GitFileChangeStatus,
@@ -1209,7 +1209,7 @@ pub async fn propose_supersede_for_near_duplicate(
         .map(|dir| dir.join(KNOWLEDGE_FOLDER_NAME))
         .collect();
     knowledge_dirs.push(get_global_knowledge_dir(gcx.clone()).await);
-    let new_path = new_path.to_path_buf();
+    let new_path = canonicalize_normalized_path(new_path.to_path_buf());
     if !knowledge_dirs.iter().any(|dir| new_path.starts_with(dir)) {
         return None;
     }
@@ -1236,26 +1236,20 @@ pub async fn propose_supersede_for_near_duplicate(
         }
     }
     hits.sort_by(|a, b| a.distance.total_cmp(&b.distance));
-    let new_canon = tokio::fs::canonicalize(&new_path).await.ok();
     let mut hit = None;
     for rec in hits {
+        let rec_file_path = canonicalize_normalized_path(rec.file_path.clone());
         if rec.distance > NEAR_DUPLICATE_MAX_DISTANCE
-            || !is_memory_doc_path(&rec.file_path)
+            || !is_memory_doc_path(&rec_file_path)
             || !knowledge_dirs
                 .iter()
-                .any(|dir| rec.file_path.starts_with(dir))
-            || rec
-                .file_path
+                .any(|dir| rec_file_path.starts_with(dir))
+            || rec_file_path
                 .components()
                 .any(|c| c.as_os_str() == "trajectories")
-            || rec.file_path == new_path
+            || rec_file_path == new_path
         {
             continue;
-        }
-        if let Some(new_canon) = &new_canon {
-            if tokio::fs::canonicalize(&rec.file_path).await.ok().as_ref() == Some(new_canon) {
-                continue;
-            }
         }
         hit = Some(rec);
         break;

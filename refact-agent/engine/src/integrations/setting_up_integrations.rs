@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use tokio::fs as async_fs;
 use crate::custom_error::YamlError;
 use crate::global_context::GlobalContext;
-use crate::files_correction::any_glob_matches_path;
+use crate::files_correction::{any_glob_matches_path, canonicalize_normalized_path};
 use crate::integrations::running_integrations::load_integrations;
 // use crate::tools::tools_description::Tool;
 // use crate::yaml_configs::create_configs::{integrations_enabled_cfg, read_yaml_into_value};
@@ -425,14 +425,22 @@ pub async fn get_config_dirs(
         )
     };
 
-    let mut workspace_folders = workspace_folders_arc.lock().unwrap().clone();
+    let raw_workspace_folders = workspace_folders_arc.lock().unwrap().clone();
+    let mut workspace_folders = raw_workspace_folders
+        .into_iter()
+        .map(canonicalize_normalized_path)
+        .collect::<Vec<_>>();
     if let Some(current_project_path) = current_project_path {
         workspace_folders = workspace_folders
             .into_iter()
             .filter(|folder| current_project_path.starts_with(&folder))
             .collect::<Vec<_>>();
     }
-    let workspace_vcs_roots = workspace_vcs_roots_arc.lock().unwrap().clone();
+    let raw_workspace_vcs_roots = workspace_vcs_roots_arc.lock().unwrap().clone();
+    let workspace_vcs_roots = raw_workspace_vcs_roots
+        .into_iter()
+        .map(canonicalize_normalized_path)
+        .collect::<Vec<_>>();
 
     let mut config_dirs = Vec::new();
 

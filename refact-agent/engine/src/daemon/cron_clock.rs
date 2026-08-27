@@ -653,7 +653,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn tick_wakes_fake_worker_for_due_durable_task() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
@@ -698,7 +698,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn tick_recovers_crashed_worker_for_due_task() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
@@ -743,7 +743,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn tick_ignores_project_without_durable_tasks() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
@@ -779,7 +779,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn tick_records_pending_but_does_not_wake_when_scheduler_disabled() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;

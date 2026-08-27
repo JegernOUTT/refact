@@ -985,7 +985,7 @@ async fn background_completion_burst_pushes_every_notice_without_queue_growth() 
     }
 }
 
-#[serial]
+#[serial(test_runner)]
 #[tokio::test]
 async fn spawn_background_agent_returns_immediately_with_child_chat_id_and_emits_transitions() {
     let runner_started = Arc::new(tokio::sync::Notify::new());
@@ -1079,7 +1079,7 @@ async fn spawn_background_agent_returns_immediately_with_child_chat_id_and_emits
     assert_eq!(statuses, vec!["queued", "running", "completed"]);
 }
 
-#[serial]
+#[serial(test_runner)]
 #[tokio::test]
 async fn more_than_eight_background_agents_can_run_for_one_parent() {
     const AGENT_COUNT: usize = 12;
@@ -1129,7 +1129,7 @@ async fn more_than_eight_background_agents_can_run_for_one_parent() {
     }
 }
 
-#[serial]
+#[serial(test_runner)]
 #[tokio::test]
 async fn spawn_and_wait_returns_terminal_record_within_timeout() {
     let _runner = install_spawn_runner(Arc::new(AtomicBool::new(false)));
@@ -1160,7 +1160,7 @@ async fn spawn_and_wait_returns_terminal_record_within_timeout() {
     assert_eq!(persisted, completed);
 }
 
-#[serial]
+#[serial(test_runner)]
 #[tokio::test]
 async fn spawn_and_wait_times_out_when_runner_hangs() {
     tokio::time::pause();
@@ -1229,7 +1229,7 @@ async fn spawn_and_wait_timeout_returns_error() {
     assert!(err.contains("not found") || err.contains("missing"));
 }
 
-#[serial]
+#[serial(test_runner)]
 #[tokio::test]
 async fn spawn_with_empty_assistant_response_uses_no_text_summary() {
     let _runner =
@@ -1353,7 +1353,7 @@ async fn stub_spawn_runner(
     })
 }
 
-#[serial]
+#[serial(test_runner)]
 #[tokio::test]
 async fn background_agent_final_integration_spawn_push_list_cancel_and_restart() {
     let abort_seen = Arc::new(AtomicBool::new(false));

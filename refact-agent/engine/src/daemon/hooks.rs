@@ -567,7 +567,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn wake_resolves_body_project_wakes_worker_and_forwards() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
@@ -603,7 +603,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn named_agent_uses_mapping_defaults_and_x_refact_token() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;
@@ -651,7 +651,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[serial]
+    #[serial(daemon)]
     async fn agent_uses_default_project_when_body_omits_project() {
         let Some(_env) = EnvGuard::fake_worker() else {
             return;

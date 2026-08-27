@@ -1,0 +1,58 @@
+name: Engine Performance
+
+# The perf_harness benchmarks execute real workloads and measure wall-clock, CPU
+# and IO. They are excluded from the correctness gate by the `perf-tests`
+# feature and run here instead, single-threaded so the measurements mean
+# something. Linux only: the CPU and IO counters are cfg(target_os = "linux").
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * *"
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-perf-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: refact-agent/engine
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  engine-perf:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'engine-perf')
+    name: Engine performance benchmarks (Linux x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup update --no-self-update stable
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang mold lld
+
+      - name: Restore cached cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: refact-agent/engine -> target
+          key: ubuntu-engine-perf-cargo
+          shared-key: ubuntu-engine-perf-cargo
+          cache-bin: false
+
+      - name: Run engine performance benchmarks
+        run: cargo test -p refact-lsp --lib --features perf-tests -- chat::perf_harness --test-threads=1 --nocapture

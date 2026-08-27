@@ -827,7 +827,7 @@ mod tests {
         sink.events().iter().map(|event| event.component).collect()
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn same_turn_tool_diagnostics_cover_stages_without_confirmation_wait() {
         let (outcome, sink, _) = process_deterministic_tool_turn(
@@ -881,7 +881,7 @@ mod tests {
         }));
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn more_than_thirty_two_parallel_safe_tools_start_together() {
         const TOOL_COUNT: usize = 40;
@@ -967,7 +967,7 @@ mod tests {
         assert_eq!(resolved[0].function.name, initial.index.tools[0].name);
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn app_registry_runtime_starts_after_catalog_build() {
         let (outcome, sink, _) = process_deterministic_tool_turn(
@@ -999,7 +999,7 @@ mod tests {
         );
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn same_turn_tool_diagnostics_record_runtime_failure() {
         let (outcome, sink, _) = process_deterministic_tool_turn(
@@ -1021,7 +1021,7 @@ mod tests {
         assert_eq!(runtime_events[0].outcome, PerfOutcome::Failure.as_str());
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn same_turn_confirmation_pause_does_not_record_wait_time() {
         let (outcome, sink, _) = process_deterministic_tool_turn(
@@ -1042,7 +1042,7 @@ mod tests {
             .all(|component| *component != "tool.confirmation_wait"));
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn tool_call_timing_is_stamped_at_invocation_and_completion() {
         let before = tool_timestamp_ms().unwrap();
@@ -1071,7 +1071,7 @@ mod tests {
         assert!(completed_at_ms.saturating_sub(started_at_ms) >= 20);
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn sleep_tool_call_records_eight_second_duration() {
         let (outcome, _, session) = process_deterministic_tool_turn(
@@ -1334,7 +1334,7 @@ mod tests {
         assert_eq!(grep.function.name, "search_pattern");
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn test_resolve_tool_call_aliases_handles_mixed_cc_batch_per_call() {
         let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
@@ -1554,7 +1554,7 @@ mod tests {
         assert!(session.post_tool_side_effects.is_empty());
     }
 
-    #[serial]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn invalid_escalation_argument_is_still_denied() {
         let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
