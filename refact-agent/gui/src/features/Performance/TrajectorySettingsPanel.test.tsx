@@ -168,6 +168,41 @@ describe("TrajectorySettingsPanel", () => {
     ).toBeInTheDocument();
   });
 
+  it("preserves an unrendered server setting when saving an edited field", async () => {
+    let savedBody: unknown = null;
+    const response = settingsResponse();
+    const config = { ...response.config, some_future_engine_setting: 42 };
+    server.use(
+      http.get("*/v1/trajectory-settings", () =>
+        HttpResponse.json({
+          ...response,
+          config,
+          current: config,
+          defaults: { ...response.defaults, some_future_engine_setting: 42 },
+        }),
+      ),
+      http.post("*/v1/trajectory-settings", async ({ request }) => {
+        savedBody = await request.json();
+        return HttpResponse.json(response);
+      }),
+    );
+    const { user } = renderPanel();
+
+    const input = await screen.findByRole("spinbutton", {
+      name: "Session idle timeout secs",
+    });
+    await user.clear(input);
+    await user.type(input, "2400");
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
+
+    await waitFor(() =>
+      expect(savedBody).toEqual({
+        ...config,
+        session_idle_timeout_secs: 2400,
+      }),
+    );
+  });
+
   it("resets the draft to API-provided defaults", async () => {
     server.use(
       http.get("*/v1/trajectory-settings", () =>
