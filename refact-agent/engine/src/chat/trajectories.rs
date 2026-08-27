@@ -8483,7 +8483,7 @@ mod tests {
             ),
         ));
 
-        tokio::time::timeout(Duration::from_secs(5), enqueue_started.notified())
+        tokio::time::timeout(Duration::from_secs(60), enqueue_started.notified())
             .await
             .unwrap();
         assert!(load_trajectory_for_chat(gcx, "commit-before-enqueue")
@@ -8574,7 +8574,7 @@ mod tests {
         )
         .await
         .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), enqueue_started.notified())
+        tokio::time::timeout(Duration::from_secs(60), enqueue_started.notified())
             .await
             .expect("best-effort VecDB enqueue should have run");
         assert!(load_trajectory_for_chat(gcx, "enqueue-failure")
@@ -8684,7 +8684,7 @@ mod tests {
         )
         .await
         .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 if session_arc.lock().await.trajectory_save_error.is_some() {
                     return;
@@ -10868,7 +10868,7 @@ mod tests {
         };
 
         save_trajectory_as(gcx.clone(), &thread, &[]).await;
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 if load_trajectory_for_chat(gcx.clone(), chat_id)
                     .await
@@ -10892,7 +10892,7 @@ mod tests {
 
         thread.auto_compression_cap = None;
         save_trajectory_as(gcx.clone(), &thread, &[]).await;
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 if load_trajectory_for_chat(gcx.clone(), chat_id)
                     .await

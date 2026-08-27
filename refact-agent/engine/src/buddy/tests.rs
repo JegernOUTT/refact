@@ -9416,6 +9416,7 @@ fn investigation_opportunity_carries_real_diagnostic_ids() {
 }
 
 #[tokio::test]
+#[serial_test::serial(chat_reaction)]
 async fn maybe_enqueue_chat_reaction_emits_chat_scoped_runtime_event() {
     use super::chat_reactions::{AcceptedUserMessage, INSIGHT_LINES, maybe_enqueue_chat_reaction};
     use crate::buddy::types::BuddyBubblePolicy;
@@ -9455,6 +9456,7 @@ async fn maybe_enqueue_chat_reaction_emits_chat_scoped_runtime_event() {
 }
 
 #[tokio::test]
+#[serial_test::serial(chat_reaction)]
 async fn maybe_enqueue_chat_reaction_records_event_id_in_debug() {
     use super::chat_reactions::{AcceptedUserMessage, INSIGHT_LINES, maybe_enqueue_chat_reaction};
     use crate::buddy::types::BuddyBubblePolicy;
@@ -9517,6 +9519,7 @@ async fn maybe_enqueue_chat_reaction_records_event_id_in_debug() {
 }
 
 #[tokio::test]
+#[serial_test::serial(chat_reaction)]
 async fn maybe_enqueue_chat_reaction_records_not_queued_and_rolls_back_when_runtime_queue_drops_event(
 ) {
     use super::chat_reactions::{AcceptedUserMessage, maybe_enqueue_chat_reaction};
@@ -9664,6 +9667,7 @@ async fn chat_reaction_runtime_queue_jsonl_round_trips_frontend_fields() {
 }
 
 #[tokio::test]
+#[serial_test::serial(chat_reaction)]
 async fn maybe_enqueue_chat_reaction_emits_humor_for_bucketed_interaction() {
     use super::chat_reactions::{AcceptedUserMessage, HUMOR_LINES, maybe_enqueue_chat_reaction};
     use crate::call_validation::ChatContent;
@@ -9697,6 +9701,7 @@ async fn maybe_enqueue_chat_reaction_emits_humor_for_bucketed_interaction() {
 }
 
 #[tokio::test]
+#[serial_test::serial(chat_reaction)]
 async fn maybe_enqueue_chat_reaction_emits_ambient_for_generic_message() {
     use super::chat_reactions::{AcceptedUserMessage, AMBIENT_LINES, maybe_enqueue_chat_reaction};
     use crate::buddy::types::BuddyBubblePolicy;
@@ -10451,6 +10456,7 @@ async fn chat_reaction_generated_text_is_redacted_before_storage() {
 }
 
 #[tokio::test]
+#[serial_test::serial(chat_reaction)]
 async fn maybe_enqueue_chat_reaction_does_not_block_on_voice_service() {
     use super::chat_reactions::{AcceptedUserMessage, maybe_enqueue_chat_reaction};
     use crate::call_validation::ChatContent;
@@ -10517,6 +10523,7 @@ async fn maybe_enqueue_emits_when_message_observation_disabled() {
 }
 
 #[tokio::test]
+#[serial_test::serial(chat_reaction)]
 async fn maybe_enqueue_chat_reaction_emits_when_proactive_disabled() {
     use super::chat_reactions::{AcceptedUserMessage, maybe_enqueue_chat_reaction};
     use crate::call_validation::ChatContent;
@@ -10551,6 +10558,7 @@ async fn maybe_enqueue_chat_reaction_emits_when_proactive_disabled() {
 }
 
 #[tokio::test]
+#[serial_test::serial(chat_reaction)]
 async fn maybe_enqueue_chat_reaction_hard_settings_block_events() {
     use super::chat_reactions::{AcceptedUserMessage, maybe_enqueue_chat_reaction};
     use crate::call_validation::ChatContent;
@@ -11216,6 +11224,7 @@ fn runtime_event_coalesce_broadcasts_stored_id() {
 }
 
 #[tokio::test]
+#[serial_test::serial(chat_reaction)]
 async fn maybe_enqueue_chat_reaction_rolls_back_limiter_when_enqueue_skipped() {
     use super::chat_reactions::{AcceptedUserMessage, maybe_enqueue_chat_reaction};
     use crate::call_validation::ChatContent;
