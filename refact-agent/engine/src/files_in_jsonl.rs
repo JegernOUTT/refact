@@ -129,9 +129,10 @@ fn is_relevant_jsonl_event(event: &Event) -> bool {
     matches!(
         &event.kind,
         EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-    ) && event.paths.iter().any(|path| {
-        !crate::file_filter::is_transient_tmp_path(path)
-    })
+    ) && event
+        .paths
+        .iter()
+        .any(|path| !crate::file_filter::is_transient_tmp_path(path))
 }
 
 async fn handle_jsonl_event_if_changed(
@@ -197,12 +198,8 @@ pub async fn reload_if_jsonl_changes_background_task(gcx: Arc<GlobalContext>) {
             }
         }
         if pending_kind.is_some() {
-            handle_jsonl_event_if_changed(
-                gcx.clone(),
-                &files_jsonl_path,
-                &mut last_fingerprint,
-            )
-            .await;
+            handle_jsonl_event_if_changed(gcx.clone(), &files_jsonl_path, &mut last_fingerprint)
+                .await;
         }
     }
 }

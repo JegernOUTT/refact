@@ -52,10 +52,7 @@ pub async fn remove_browser_runtime(
 
 pub const RUNTIME_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
-async fn release_runtime_and_wait(
-    removed: Option<Arc<AMutex<BrowserRuntime>>>,
-    runtime_id: &str,
-) {
+async fn release_runtime_and_wait(removed: Option<Arc<AMutex<BrowserRuntime>>>, runtime_id: &str) {
     let Some(removed) = removed else {
         return;
     };
@@ -381,8 +378,8 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                 );
             }
 
-            let evict_idle = idle_expired
-                && (chat_id.is_none() || launch_options.evict_idle_attached);
+            let evict_idle =
+                idle_expired && (chat_id.is_none() || launch_options.evict_idle_attached);
             if evict_idle {
                 warn!(
                     "BrowserRuntime {} idle timeout ({:?}) for chat {:?}",

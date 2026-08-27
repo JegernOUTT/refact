@@ -79,7 +79,10 @@ pub fn registered_worktree_path_mappings(cache_dir: &Path) -> WorktreePathMappin
     cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(cache_dir.to_path_buf(), (Instant::now(), Arc::clone(&mappings)));
+        .insert(
+            cache_dir.to_path_buf(),
+            (Instant::now(), Arc::clone(&mappings)),
+        );
     mappings
 }
 

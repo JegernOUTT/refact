@@ -195,12 +195,9 @@ impl BrowserSettings {
             mask_passwords: launch.mask_passwords,
             extra_args: launch.extra_args.clone(),
             chromium_sandbox: launch.chromium_sandbox,
-            proxy: (!launch.proxy_server.is_empty()).then(|| {
-                refact_browser::BrowserProxyOptions {
-                    server: launch.proxy_server.clone(),
-                    bypass: (!launch.proxy_bypass.is_empty())
-                        .then(|| launch.proxy_bypass.clone()),
-                }
+            proxy: (!launch.proxy_server.is_empty()).then(|| refact_browser::BrowserProxyOptions {
+                server: launch.proxy_server.clone(),
+                bypass: (!launch.proxy_bypass.is_empty()).then(|| launch.proxy_bypass.clone()),
             }),
             downloads_dir: (!launch.downloads_dir.is_empty())
                 .then(|| PathBuf::from(launch.downloads_dir.clone())),
@@ -223,7 +220,9 @@ impl BrowserSettings {
             ("tablet", &self.viewport.tablet),
         ] {
             if viewport.width == 0 || viewport.height == 0 {
-                return Err(format!("viewport.{label} width and height must be at least 1"));
+                return Err(format!(
+                    "viewport.{label} width and height must be at least 1"
+                ));
             }
             if !(0.1..=8.0).contains(&viewport.scale_factor) {
                 return Err(format!(
@@ -250,12 +249,27 @@ impl BrowserSettings {
             );
         }
         let zero_capture = [
-            ("default_aria_snapshot_chars", self.capture.default_aria_snapshot_chars),
-            ("max_aria_snapshot_chars", self.capture.max_aria_snapshot_chars),
-            ("max_dom_snapshot_chars", self.capture.max_dom_snapshot_chars),
-            ("max_inline_snapshot_bytes", self.capture.max_inline_snapshot_bytes),
+            (
+                "default_aria_snapshot_chars",
+                self.capture.default_aria_snapshot_chars,
+            ),
+            (
+                "max_aria_snapshot_chars",
+                self.capture.max_aria_snapshot_chars,
+            ),
+            (
+                "max_dom_snapshot_chars",
+                self.capture.max_dom_snapshot_chars,
+            ),
+            (
+                "max_inline_snapshot_bytes",
+                self.capture.max_inline_snapshot_bytes,
+            ),
             ("max_extract_links", self.capture.max_extract_links),
-            ("max_extract_table_rows", self.capture.max_extract_table_rows),
+            (
+                "max_extract_table_rows",
+                self.capture.max_extract_table_rows,
+            ),
             ("default_all_texts", self.capture.default_all_texts),
         ];
         for (label, value) in zero_capture {
@@ -409,7 +423,10 @@ mod tests {
         assert_eq!(options.chromium_sandbox, defaults.chromium_sandbox);
         assert_eq!(options.ignore_https_errors, defaults.ignore_https_errors);
         assert_eq!(options.mask_passwords, defaults.mask_passwords);
-        assert_eq!(options.idle_timeout, Some(refact_browser::DEFAULT_IDLE_TIMEOUT));
+        assert_eq!(
+            options.idle_timeout,
+            Some(refact_browser::DEFAULT_IDLE_TIMEOUT)
+        );
     }
 
     #[test]
@@ -433,7 +450,10 @@ mod tests {
         let proxy = options.proxy.expect("proxy configured");
         assert_eq!(proxy.server, "http://127.0.0.1:8080");
         assert_eq!(proxy.bypass.as_deref(), Some("localhost"));
-        assert_eq!(options.chrome_path, Some(PathBuf::from("/usr/bin/chromium")));
+        assert_eq!(
+            options.chrome_path,
+            Some(PathBuf::from("/usr/bin/chromium"))
+        );
     }
 
     #[test]

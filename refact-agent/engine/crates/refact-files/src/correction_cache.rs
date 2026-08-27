@@ -105,7 +105,10 @@ impl PathTrie {
             let root_path_str = root_path.map(|p| p.to_string_lossy());
 
             components.clear();
-            components.extend(path.components().map(|comp| comp.as_os_str().to_string_lossy()));
+            components.extend(
+                path.components()
+                    .map(|comp| comp.as_os_str().to_string_lossy()),
+            );
 
             let mut node = &mut root;
             for i in (0..components.len()).rev() {

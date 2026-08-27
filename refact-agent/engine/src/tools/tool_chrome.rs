@@ -2337,7 +2337,10 @@ async fn session_open_tab(
                         settings_chrome.window_height.parse::<u32>(),
                     ) {
                         (Ok(width), Ok(height)) => (width, height),
-                        _ => (browser_viewport.desktop.width, browser_viewport.desktop.height),
+                        _ => (
+                            browser_viewport.desktop.width,
+                            browser_viewport.desktop.height,
+                        ),
                     };
                     let scale_factor = match settings_chrome.scale_factor.parse::<f64>() {
                         Ok(scale_factor) => scale_factor,
@@ -2351,7 +2354,10 @@ async fn session_open_tab(
                         settings_chrome.mobile_window_height.parse::<u32>(),
                     ) {
                         (Ok(width), Ok(height)) => (width, height),
-                        _ => (browser_viewport.mobile.width, browser_viewport.mobile.height),
+                        _ => (
+                            browser_viewport.mobile.width,
+                            browser_viewport.mobile.height,
+                        ),
                     };
                     let scale_factor = match settings_chrome.mobile_scale_factor.parse::<f64>() {
                         Ok(scale_factor) => scale_factor,
@@ -2365,7 +2371,10 @@ async fn session_open_tab(
                         settings_chrome.tablet_window_height.parse::<u32>(),
                     ) {
                         (Ok(width), Ok(height)) => (width, height),
-                        _ => (browser_viewport.tablet.width, browser_viewport.tablet.height),
+                        _ => (
+                            browser_viewport.tablet.width,
+                            browser_viewport.tablet.height,
+                        ),
                     };
                     let scale_factor = match settings_chrome.tablet_scale_factor.parse::<f64>() {
                         Ok(scale_factor) => scale_factor,

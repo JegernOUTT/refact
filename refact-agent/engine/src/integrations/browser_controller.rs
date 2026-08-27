@@ -359,7 +359,9 @@ impl<'a> BrowserActionDriver<'a> {
             locator_handler_firings,
             image_policy,
             precheck_deadline: Instant::now()
-                + timeout.min(Duration::from_millis(settings.timing.default_wait_timeout_ms)),
+                + timeout.min(Duration::from_millis(
+                    settings.timing.default_wait_timeout_ms,
+                )),
             resolved: None,
             locator_echo: None,
         }
@@ -4452,8 +4454,7 @@ fn execute_single_step(
                 handlers,
                 locator_handler_firings,
                 image_policy,
-                Instant::now()
-                    + Duration::from_millis(settings.timing.default_wait_timeout_ms),
+                Instant::now() + Duration::from_millis(settings.timing.default_wait_timeout_ms),
             ) {
                 return StepResult::failure(idx, "Locator handler checkpoint failed", error);
             }
@@ -5962,7 +5963,9 @@ fn resolve_drag_endpoint(
         locator_handler_firings: firings,
         image_policy,
         precheck_deadline: Instant::now()
-            + timeout.min(Duration::from_millis(settings.timing.default_wait_timeout_ms)),
+            + timeout.min(Duration::from_millis(
+                settings.timing.default_wait_timeout_ms,
+            )),
         resolved: None,
         position,
     };
@@ -7824,9 +7827,7 @@ fn step_extract_links(
     limit: Option<usize>,
 ) -> StepResult {
     let settings = browser_settings::current();
-    let effective_limit = limit
-        .unwrap_or(50)
-        .min(settings.capture.max_extract_links);
+    let effective_limit = limit.unwrap_or(50).min(settings.capture.max_extract_links);
     let js = browser_locators::js_extract_links(effective_limit);
     let result = match locator {
         Some(locator) => serde_json::to_value(locator)

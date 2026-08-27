@@ -131,6 +131,7 @@ use crate::http::routers::v1::worktrees::{
 mod ast;
 pub mod at_commands;
 pub mod at_tools;
+pub mod browser_settings;
 pub mod buddy;
 pub mod buddy_drafts;
 pub mod buddy_frontend_error;
@@ -175,7 +176,6 @@ mod project_configs;
 pub mod project_information;
 pub mod scheduler;
 mod settings_config;
-pub mod browser_settings;
 mod setup_status;
 mod shell_policy;
 pub mod sidebar;

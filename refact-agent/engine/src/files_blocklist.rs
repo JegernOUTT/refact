@@ -45,7 +45,9 @@ async fn indexing_file_stamps(paths: &[PathBuf]) -> Vec<IndexingFileStamp> {
         let metadata = fs::metadata(path).await.ok();
         stamps.push(IndexingFileStamp {
             path: path.clone(),
-            modified: metadata.as_ref().and_then(|metadata| metadata.modified().ok()),
+            modified: metadata
+                .as_ref()
+                .and_then(|metadata| metadata.modified().ok()),
             len: metadata.as_ref().map(|metadata| metadata.len()),
         });
     }

@@ -1045,8 +1045,10 @@ mod tests {
 
         let error = registry
             .dispatch_commands("tab-1", |_| {
-                Err("Unable to make method calls because underlying connection is closed"
-                    .to_string())
+                Err(
+                    "Unable to make method calls because underlying connection is closed"
+                        .to_string(),
+                )
             })
             .unwrap_err();
         assert!(crate::is_transport_dead_error(&error));
