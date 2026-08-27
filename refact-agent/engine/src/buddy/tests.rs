@@ -9793,6 +9793,7 @@ async fn wait_for_chat_reaction_debug_attempt(
     .unwrap_or_else(|_| panic!("chat reaction debug attempt {result} did not arrive"))
 }
 
+#[serial_test::serial(chat_reaction)]
 #[tokio::test]
 async fn chat_reaction_uses_voice_service_when_available() {
     use super::chat_reactions::{AcceptedUserMessage, maybe_enqueue_chat_reaction};
@@ -9830,6 +9831,7 @@ async fn chat_reaction_uses_voice_service_when_available() {
     );
 }
 
+#[serial_test::serial(chat_reaction)]
 #[tokio::test]
 async fn chat_reaction_empty_voice_response_falls_back_to_template() {
     use super::chat_reactions::{AcceptedUserMessage, INSIGHT_LINES, maybe_enqueue_chat_reaction};
@@ -10082,6 +10084,7 @@ async fn chat_activity_reaction_emits_after_normal_chat_activity_or_completion()
     assert!(renderer.intent_kinds().is_empty());
 }
 
+#[serial_test::serial(chat_reaction)]
 #[tokio::test]
 async fn chat_activity_reaction_does_not_emit_after_recent_insight() {
     use super::chat_reactions::{
@@ -10133,6 +10136,7 @@ async fn chat_activity_reaction_does_not_emit_after_recent_insight() {
     }));
 }
 
+#[serial_test::serial(chat_reaction)]
 #[tokio::test]
 async fn chat_activity_reaction_does_not_emit_after_recent_humor() {
     use super::chat_reactions::{
@@ -10184,6 +10188,7 @@ async fn chat_activity_reaction_does_not_emit_after_recent_humor() {
     }));
 }
 
+#[serial_test::serial(chat_reaction)]
 #[tokio::test]
 async fn chat_activity_reaction_does_not_emit_after_recent_ambient() {
     use super::chat_reactions::{
@@ -10236,6 +10241,7 @@ async fn chat_activity_reaction_does_not_emit_after_recent_ambient() {
     }));
 }
 
+#[serial_test::serial(chat_reaction)]
 #[tokio::test]
 async fn chat_activity_reaction_is_not_blocked_by_recent_bug_candidate() {
     use super::chat_reactions::{
@@ -10425,6 +10431,7 @@ async fn chat_activity_reaction_uses_safe_fallback_without_user_echo() {
     }
 }
 
+#[serial_test::serial(chat_reaction)]
 #[tokio::test]
 async fn chat_reaction_generated_text_is_redacted_before_storage() {
     use super::chat_reactions::{AcceptedUserMessage, maybe_enqueue_chat_reaction};
@@ -10491,6 +10498,7 @@ async fn maybe_enqueue_chat_reaction_does_not_block_on_voice_service() {
     assert_eq!(ev.speech_text.as_deref(), Some("slow insight"));
 }
 
+#[serial_test::serial(chat_reaction)]
 #[tokio::test]
 async fn maybe_enqueue_emits_when_message_observation_disabled() {
     use super::chat_reactions::{AcceptedUserMessage, maybe_enqueue_chat_reaction};
@@ -11301,6 +11309,7 @@ async fn maybe_enqueue_chat_reaction_rolls_back_limiter_when_enqueue_skipped() {
     assert_eq!(ev.speech_text.as_deref(), Some("second insight"));
 }
 
+#[serial_test::serial(chat_reaction)]
 #[tokio::test]
 async fn bug_reaction_not_blocked_by_humor_cooldown() {
     use super::chat_reactions::{AcceptedUserMessage, maybe_enqueue_chat_reaction};

@@ -8421,6 +8421,7 @@ mod tests {
         assert_eq!(loaded.messages.len(), 2);
     }
 
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn different_session_writers_commit_independently() {
         let workspace = tempfile::tempdir().unwrap();
@@ -8805,6 +8806,7 @@ mod tests {
         assert_eq!(saved["id"], "other-chat");
     }
 
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn trajectory_writer_failure_is_stored_and_reported_to_waiters() {
         let workspace = tempfile::tempdir().unwrap();
