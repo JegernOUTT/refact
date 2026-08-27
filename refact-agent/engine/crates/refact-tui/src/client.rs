@@ -4041,7 +4041,7 @@ mod tests {
             .open_project_with_retry_policy(
                 Path::new("/tmp/fixture"),
                 OpenProjectRetryPolicy {
-                    deadline: Duration::from_secs(5),
+                    deadline: Duration::from_secs(3600),
                     initial_backoff: Duration::from_millis(100),
                     max_backoff: Duration::from_millis(100),
                     max_attempts: 8,
@@ -4068,7 +4068,7 @@ mod tests {
             .open_project_with_retry_policy(
                 Path::new("/tmp/fixture"),
                 OpenProjectRetryPolicy {
-                    deadline: Duration::from_secs(30),
+                    deadline: Duration::from_secs(3600),
                     initial_backoff: Duration::from_millis(1),
                     max_backoff: Duration::from_millis(1),
                     max_attempts: 8,
@@ -4079,7 +4079,8 @@ mod tests {
         server.stop();
 
         assert!(
-            matches!(error, ClientError::WorkerNotReady(message) if message.contains("starting"))
+            matches!(&error, ClientError::WorkerNotReady(message) if message.contains("starting")),
+            "attempt limit should surface the starting state, got {error:?}"
         );
         assert_eq!(
             (0..8)
