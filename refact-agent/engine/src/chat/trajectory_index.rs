@@ -410,6 +410,39 @@ impl Default for TrajectoryIndexCoordinator {
     }
 }
 
+fn coordinator_span(component: PerfComponent, dir: &Path) -> Option<perf_diagnostics::PerfSpan> {
+    if !perf_diagnostics::is_enabled() {
+        return None;
+    }
+    let index_path = trajectory_index_path(dir);
+    Some(perf_diagnostics::span(component, None, Some(&index_path)))
+}
+
+fn finish_coordinator_span(
+    span: Option<perf_diagnostics::PerfSpan>,
+    outcome: PerfOutcome,
+    item_count: Option<u64>,
+) {
+    if let Some(span) = span {
+        span.finish(outcome, None, item_count, None, None);
+    }
+}
+
+fn record_coordinator_count(component: PerfComponent) {
+    if !perf_diagnostics::is_enabled() {
+        return;
+    }
+    perf_diagnostics::record(
+        component,
+        None,
+        PerfOutcome::Success,
+        0,
+        None,
+        Some(1),
+        None,
+    );
+}
+
 impl TrajectoryIndexCoordinator {
     pub fn new() -> Self {
         Self {
@@ -464,9 +497,26 @@ impl TrajectoryIndexCoordinator {
             return Ok(state);
         }
 
+        let load_span = coordinator_span(PerfComponent::TrajectoryIndexCoordinatorLoad, dir);
+        let index_read_span = coordinator_span(PerfComponent::TrajectoryIndexRead, dir);
         let dir = dir.to_path_buf();
         let loaded = tokio::task::spawn_blocking(move || {
-            load_trajectory_index_for_coordinator_sync(&dir, source_hint)
+            let result =
+                load_trajectory_index_for_coordinator_sync(&dir, source_hint, index_read_span);
+            let item_count = result
+                .as_ref()
+                .ok()
+                .map(|loaded| loaded.index.entries.len() as u64);
+            finish_coordinator_span(
+                load_span,
+                if result.is_ok() {
+                    PerfOutcome::Success
+                } else {
+                    PerfOutcome::Failure
+                },
+                item_count,
+            );
+            result
         })
         .await
         .map_err(|error| format!("Trajectory index coordinator load task failed: {error}"))??;
@@ -546,11 +596,28 @@ impl TrajectoryIndexCoordinator {
             .index
             .clone()
             .ok_or_else(|| "Trajectory index coordinator did not load an index".to_string())?;
+        let reconcile_span =
+            coordinator_span(PerfComponent::TrajectoryIndexCoordinatorReconcile, dir);
         let dir = dir.to_path_buf();
         let reconcile_dir = dir.clone();
         let source_hint_for_reconcile = source_hint.clone();
         let reconciled = tokio::task::spawn_blocking(move || {
-            reconcile_trajectory_index_sync(&reconcile_dir, index, source_hint_for_reconcile)
+            let result =
+                reconcile_trajectory_index_sync(&reconcile_dir, index, source_hint_for_reconcile);
+            let item_count = result
+                .as_ref()
+                .ok()
+                .map(|(index, _)| index.entries.len() as u64);
+            finish_coordinator_span(
+                reconcile_span,
+                if result.is_ok() {
+                    PerfOutcome::Success
+                } else {
+                    PerfOutcome::Failure
+                },
+                item_count,
+            );
+            result
         })
         .await
         .map_err(|error| {
@@ -602,6 +669,7 @@ impl TrajectoryIndexCoordinator {
             return Ok(self.reconcile(dir, source_hint).await?.entries);
         }
         record_listing_cache_hit();
+        record_coordinator_count(PerfComponent::TrajectoryIndexCacheHit);
         Ok(index.entries)
     }
 
@@ -617,8 +685,37 @@ impl TrajectoryIndexCoordinator {
         let dir = dir.to_path_buf();
         let lock_timeout = self.lock_timeout;
         let lock_retry = self.lock_retry;
+        let flush_span = coordinator_span(PerfComponent::TrajectoryIndexCoordinatorFlush, &dir);
+        let reconcile_span = pending
+            .iter()
+            .any(|pending| matches!(pending.mutation, TrajectoryIndexMutation::Reconcile(_)))
+            .then(|| coordinator_span(PerfComponent::TrajectoryIndexCoordinatorReconcile, &dir))
+            .flatten();
+        let index_read_span = coordinator_span(PerfComponent::TrajectoryIndexRead, &dir);
+        let lock_wait_span = coordinator_span(PerfComponent::TrajectoryIndexLockWait, &dir);
+        let index_write_span = coordinator_span(PerfComponent::TrajectoryIndexWrite, &dir);
         let flushed_index = tokio::task::spawn_blocking(move || {
-            flush_trajectory_index_mutations_sync(&dir, pending, lock_timeout, lock_retry)
+            let result = flush_trajectory_index_mutations_sync(
+                &dir,
+                pending,
+                lock_timeout,
+                lock_retry,
+                index_read_span,
+                lock_wait_span,
+                index_write_span,
+                reconcile_span,
+            );
+            let item_count = result.as_ref().ok().map(|index| index.entries.len() as u64);
+            finish_coordinator_span(
+                flush_span,
+                if result.is_ok() {
+                    PerfOutcome::Success
+                } else {
+                    PerfOutcome::Failure
+                },
+                item_count,
+            );
+            result
         })
         .await
         .map_err(|error| format!("Trajectory index coordinator flush task failed: {error}"))??;
@@ -674,6 +771,7 @@ fn push_pending_mutation(
         sequence: state.next_sequence,
         mutation,
     });
+    record_coordinator_count(PerfComponent::TrajectoryIndexEnqueue);
 }
 
 pub fn trajectory_index_path(dir: &Path) -> PathBuf {
@@ -880,8 +978,24 @@ async fn cached_index_is_fresh(
 fn load_trajectory_index_for_coordinator_sync(
     dir: &Path,
     source_hint: Option<TrajectorySourceIdentity>,
+    index_read_span: Option<perf_diagnostics::PerfSpan>,
 ) -> Result<CoordinatorLoadResult, String> {
-    match read_trajectory_index_sync(dir) {
+    let index_read = read_trajectory_index_sync(dir);
+    let item_count = index_read
+        .as_ref()
+        .ok()
+        .and_then(|index| index.as_ref())
+        .map(|index| index.entries.len() as u64);
+    finish_coordinator_span(
+        index_read_span,
+        if index_read.is_ok() {
+            PerfOutcome::Success
+        } else {
+            PerfOutcome::Failure
+        },
+        item_count,
+    );
+    match index_read {
         Ok(Some(index)) => {
             let generation = directory_generation_sync(dir, &index)?;
             Ok(CoordinatorLoadResult {
@@ -1063,31 +1177,44 @@ fn with_trajectory_index_file_lock<T>(
     dir: &Path,
     timeout: Duration,
     retry: Duration,
+    lock_wait_span: Option<perf_diagnostics::PerfSpan>,
     operation: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     let lock_path = dir.join(format!(".{TRAJECTORY_INDEX_FILE}.lock"));
-    let mut lock = crate::daemon::lock::open_lock(&lock_path).map_err(|error| {
+    let lock = crate::daemon::lock::open_lock(&lock_path).map_err(|error| {
         format!(
             "Failed to open trajectory index lock {:?}: {error}",
             lock_path
         )
-    })?;
+    });
+    let mut lock = match lock {
+        Ok(lock) => lock,
+        Err(error) => {
+            finish_coordinator_span(lock_wait_span, PerfOutcome::Failure, None);
+            return Err(error);
+        }
+    };
     let deadline = Instant::now() + timeout;
     loop {
         match crate::daemon::lock::try_lock(&mut lock) {
-            Ok(_guard) => return operation(),
+            Ok(_guard) => {
+                finish_coordinator_span(lock_wait_span, PerfOutcome::Success, None);
+                return operation();
+            }
             Err(error)
                 if crate::daemon::lock::is_already_locked(&error) && Instant::now() < deadline =>
             {
                 std::thread::sleep(retry);
             }
             Err(error) if crate::daemon::lock::is_already_locked(&error) => {
+                finish_coordinator_span(lock_wait_span, PerfOutcome::Failure, None);
                 return Err(format!(
                     "Timed out waiting for trajectory index lock {:?}",
                     lock_path
                 ));
             }
             Err(error) => {
+                finish_coordinator_span(lock_wait_span, PerfOutcome::Failure, None);
                 return Err(format!(
                     "Failed to acquire trajectory index lock {:?}: {error}",
                     lock_path
@@ -1102,20 +1229,51 @@ fn flush_trajectory_index_mutations_sync(
     pending: Vec<PendingTrajectoryIndexMutation>,
     lock_timeout: Duration,
     lock_retry: Duration,
+    index_read_span: Option<perf_diagnostics::PerfSpan>,
+    lock_wait_span: Option<perf_diagnostics::PerfSpan>,
+    index_write_span: Option<perf_diagnostics::PerfSpan>,
+    reconcile_span: Option<perf_diagnostics::PerfSpan>,
 ) -> Result<TrajectoryIndex, String> {
     std::fs::create_dir_all(dir)
         .map_err(|error| format!("Failed to create trajectory directory {:?}: {error}", dir))?;
-    with_trajectory_index_file_lock(dir, lock_timeout, lock_retry, || {
-        let mut index = load_trajectory_index_for_coordinator_sync(dir, None)?.index;
+    with_trajectory_index_file_lock(dir, lock_timeout, lock_retry, lock_wait_span, || {
+        let mut index =
+            load_trajectory_index_for_coordinator_sync(dir, None, index_read_span)?.index;
+        let mut reconcile_span = reconcile_span;
         for pending in pending {
             match pending.mutation {
                 TrajectoryIndexMutation::Reconcile(source_hint) => {
-                    index = reconcile_trajectory_index_sync(dir, index, source_hint)?.0;
+                    let reconciled = reconcile_trajectory_index_sync(dir, index, source_hint);
+                    let item_count = reconciled
+                        .as_ref()
+                        .ok()
+                        .map(|(index, _)| index.entries.len() as u64);
+                    finish_coordinator_span(
+                        reconcile_span.take(),
+                        if reconciled.is_ok() {
+                            PerfOutcome::Success
+                        } else {
+                            PerfOutcome::Failure
+                        },
+                        item_count,
+                    );
+                    index = reconciled?.0;
                 }
                 mutation => apply_mutation_to_index(&mut index, &mutation)?,
             }
         }
-        write_trajectory_index_atomic_sync(dir, &index)?;
+        let item_count = index.entries.len() as u64;
+        let write_result = write_trajectory_index_atomic_sync(dir, &index);
+        finish_coordinator_span(
+            index_write_span,
+            if write_result.is_ok() {
+                PerfOutcome::Success
+            } else {
+                PerfOutcome::Failure
+            },
+            Some(item_count),
+        );
+        write_result?;
         Ok(index)
     })
 }
@@ -2384,6 +2542,137 @@ mod tests {
         assert!(components.contains(&PerfComponent::TrajectoryIndexRebuild.as_str()));
         assert!(events.iter().any(|event| event.outcome == "failure"));
         assert!(events.iter().all(|event| event.path_hash.is_some()));
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn coordinator_performance_diagnostics_cover_load_reconcile_flush_and_enqueue() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, sink) = install_perf_recorder();
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path_1 = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path_1).await)
+            .await
+            .unwrap();
+        coordinator.list_entries(&dir, None).await.unwrap();
+
+        write_trajectory(&dir, "chat-2", "Two", "agent").await;
+        coordinator.reconcile(&dir, None).await.unwrap();
+        coordinator.flush_all().await.unwrap();
+
+        let events = sink.events();
+        let components: Vec<_> = events.iter().map(|event| event.component).collect();
+        for component in [
+            PerfComponent::TrajectoryIndexCoordinatorLoad,
+            PerfComponent::TrajectoryIndexCoordinatorReconcile,
+            PerfComponent::TrajectoryIndexCoordinatorFlush,
+            PerfComponent::TrajectoryIndexEnqueue,
+            PerfComponent::TrajectoryIndexRead,
+            PerfComponent::TrajectoryIndexLockWait,
+            PerfComponent::TrajectoryIndexWrite,
+        ] {
+            assert!(
+                components.contains(&component.as_str()),
+                "missing {component:?}"
+            );
+        }
+        assert!(events.iter().all(|event| {
+            event.path_hash.is_some()
+                || matches!(
+                    event.component,
+                    "trajectory.index_enqueue" | "trajectory.index_cache_hit"
+                )
+        }));
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn coordinator_cache_hit_records_a_counter_without_an_index_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+        coordinator.flush_all().await.unwrap();
+        coordinator.list_entries(&dir, None).await.unwrap();
+
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, sink) = install_perf_recorder();
+        assert_eq!(coordinator.list_entries(&dir, None).await.unwrap().len(), 1);
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].component,
+            PerfComponent::TrajectoryIndexCacheHit.as_str()
+        );
+        assert_eq!(events[0].item_count, Some(1));
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn coordinator_advisory_lock_wait_is_recorded_for_a_contended_flush() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let (_guard, sink) = install_perf_recorder();
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let blocker = crate::daemon::lock::open_lock(&dir.join(".index.json.lock")).unwrap();
+        let mut blocker = blocker;
+        let blocker_guard = crate::daemon::lock::try_lock(&mut blocker).unwrap();
+        let coordinator = TrajectoryIndexCoordinator::with_timing(
+            Duration::from_millis(25),
+            Duration::from_millis(5),
+        );
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+
+        assert!(coordinator.flush_all().await.is_err());
+
+        let events = sink.events();
+        assert!(events.iter().any(|event| {
+            event.component == PerfComponent::TrajectoryIndexLockWait.as_str()
+                && event.outcome == PerfOutcome::Failure.as_str()
+                && event.path_hash.is_some()
+        }));
+        drop(blocker_guard);
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn coordinator_diagnostics_are_inactive_without_a_recorder() {
+        let _lock = perf_diagnostics::PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let telemetry = perf_diagnostics::process_telemetry();
+        let was_enabled = telemetry.enabled();
+        telemetry.set_enabled(false);
+        telemetry.reset();
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        let coordinator = TrajectoryIndexCoordinator::new();
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+        coordinator.list_entries(&dir, None).await.unwrap();
+        coordinator.flush_all().await.unwrap();
+
+        assert!(telemetry
+            .snapshot()
+            .components
+            .iter()
+            .all(|component| component.sample_count == 0));
+        telemetry.set_enabled(was_enabled);
     }
 
     #[tokio::test]

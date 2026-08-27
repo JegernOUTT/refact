@@ -75,10 +75,15 @@ pub enum PerfComponent {
     EnrichmentInsertion,
     EnrichmentInsertionStale,
     EnrichmentPersistenceScheduling,
+    TrajectoryIndexCoordinatorLoad,
+    TrajectoryIndexCoordinatorReconcile,
+    TrajectoryIndexCoordinatorFlush,
+    TrajectoryIndexEnqueue,
+    TrajectoryIndexCacheHit,
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 60] = [
+    pub const ALL: [Self; 65] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -139,6 +144,11 @@ impl PerfComponent {
         Self::EnrichmentInsertion,
         Self::EnrichmentInsertionStale,
         Self::EnrichmentPersistenceScheduling,
+        Self::TrajectoryIndexCoordinatorLoad,
+        Self::TrajectoryIndexCoordinatorReconcile,
+        Self::TrajectoryIndexCoordinatorFlush,
+        Self::TrajectoryIndexEnqueue,
+        Self::TrajectoryIndexCacheHit,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -203,6 +213,11 @@ impl PerfComponent {
             Self::EnrichmentInsertion => "enrichment.insertion",
             Self::EnrichmentInsertionStale => "enrichment.insertion_stale",
             Self::EnrichmentPersistenceScheduling => "enrichment.persistence_scheduling",
+            Self::TrajectoryIndexCoordinatorLoad => "trajectory.index_coordinator_load",
+            Self::TrajectoryIndexCoordinatorReconcile => "trajectory.index_coordinator_reconcile",
+            Self::TrajectoryIndexCoordinatorFlush => "trajectory.index_coordinator_flush",
+            Self::TrajectoryIndexEnqueue => "trajectory.index_enqueue",
+            Self::TrajectoryIndexCacheHit => "trajectory.index_cache_hit",
         }
     }
 
@@ -948,6 +963,11 @@ mod tests {
             "enrichment.insertion",
             "enrichment.insertion_stale",
             "enrichment.persistence_scheduling",
+            "trajectory.index_coordinator_load",
+            "trajectory.index_coordinator_reconcile",
+            "trajectory.index_coordinator_flush",
+            "trajectory.index_enqueue",
+            "trajectory.index_cache_hit",
         ]
         .into_iter()
         .collect();
