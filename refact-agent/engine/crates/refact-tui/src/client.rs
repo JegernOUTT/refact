@@ -3161,28 +3161,34 @@ mod tests {
         let (stop, stopped) = mpsc::channel();
         let (requests, received) = mpsc::channel();
         let handle = thread::spawn(move || {
-            for response in responses {
-                let mut stream = loop {
-                    match listener.accept() {
-                        Ok((stream, _)) => break stream,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            if stopped.recv_timeout(Duration::from_millis(10)).is_ok() {
-                                return;
-                            }
+            let mut scripted = responses.into_iter();
+            loop {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if stopped.recv_timeout(Duration::from_millis(5)).is_ok() {
+                            return;
                         }
-                        Err(_) => return,
+                        continue;
                     }
+                    Err(_) => return,
                 };
-                let _ = requests.send(read_request_headers(&mut stream));
-                let body = response.to_string();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
-                    body.len(), body
-                );
+                let headers = read_request_headers(&mut stream);
+                let response = match scripted.next() {
+                    Some(body) => {
+                        let _ = requests.send(headers);
+                        let body = body.to_string();
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(), body
+                        )
+                    }
+                    None => "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                        .to_string(),
+                };
                 let _ = stream.write_all(response.as_bytes());
                 let _ = stream.flush();
             }
-            let _ = stopped.recv_timeout(Duration::from_millis(10));
         });
         (
             TestServer {
