@@ -563,6 +563,10 @@ pub fn attach_record(message: &mut ChatMessage, record: FileRecord) {
     merge_records(message, std::iter::once(record));
 }
 
+pub(crate) fn record_is_persistable(record: &FileRecord) -> bool {
+    record.zone != "normal" || matches!(record.attribution, Attribution::Declared)
+}
+
 pub fn merge_records(message: &mut ChatMessage, records: impl IntoIterator<Item = FileRecord>) {
     let mut privacy = message
         .extra
@@ -571,6 +575,9 @@ pub fn merge_records(message: &mut ChatMessage, records: impl IntoIterator<Item 
         .unwrap_or_default();
     let mut seen = privacy.files.iter().cloned().collect::<HashSet<_>>();
     for record in records {
+        if !record_is_persistable(&record) {
+            continue;
+        }
         if seen.insert(record.clone()) {
             privacy.files.push(record);
         }
@@ -590,7 +597,9 @@ pub fn records_to_carry(
         let mut seen = HashSet::with_capacity(indexed.len());
         indexed
             .into_iter()
-            .filter_map(|(_, record)| seen.insert(record.clone()).then_some(record))
+            .filter_map(|(_, record)| {
+                (record_is_persistable(&record) && seen.insert(record.clone())).then_some(record)
+            })
             .collect()
     })
 }
@@ -663,6 +672,7 @@ pub fn declared_file_records(
     let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
     let derived_zones = new_derived_privacy_zones();
     let mut records = Vec::new();
+    let mut seen = HashSet::new();
     for path in paths {
         let record = file_record_with(
             gcx,
@@ -672,7 +682,7 @@ pub fn declared_file_records(
             Attribution::Declared,
             &derived_zones,
         );
-        if !records.contains(&record) {
+        if seen.insert(record.clone()) {
             records.push(record);
         }
     }
@@ -695,6 +705,7 @@ fn observed_file_records_with_derived(
     let compiled = policy.compile().map_err(|error| error.to_string())?;
     let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
     let mut records = Vec::new();
+    let mut seen = HashSet::new();
     for path in paths {
         let record = file_record_with(
             gcx,
@@ -704,7 +715,7 @@ fn observed_file_records_with_derived(
             Attribution::Observed,
             derived_zones,
         );
-        if !records.contains(&record) {
+        if seen.insert(record.clone()) {
             records.push(record);
         }
     }
@@ -1170,9 +1181,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            other_session_message.extra["privacy"]["files"][0]["zone"],
-            "normal"
+        assert!(
+            other_session_message.extra.get("privacy").is_none(),
+            "a fresh session must not inherit the derived secret zone, so the read stays \
+             unguarded and its inert normal record is not persisted"
         );
         assert_eq!(
             other_session_message.content.content_text_only(),
@@ -1321,7 +1333,7 @@ mod tests {
 
     #[test]
     fn merge_records_deduplicates_large_input_in_first_seen_order() {
-        let expected = (0..5_000)
+        let all = (0..5_000)
             .map(|index| FileRecord {
                 path: format!("file-{index}.rs"),
                 zone: if index % 2 == 0 {
@@ -1332,7 +1344,12 @@ mod tests {
                 attribution: Attribution::Observed,
             })
             .collect::<Vec<_>>();
-        let records = expected
+        let expected = all
+            .iter()
+            .filter(|record| record.zone != "normal")
+            .cloned()
+            .collect::<Vec<_>>();
+        let records = all
             .iter()
             .cloned()
             .flat_map(|record| [record.clone(), record])
@@ -1376,6 +1393,115 @@ mod tests {
 
         let privacy: PrivacyRecord =
             serde_json::from_value(target.extra["privacy"].clone()).unwrap();
-        assert_eq!(privacy.files, vec![first, second, third]);
+        assert_eq!(privacy.files, vec![first, second]);
+        assert!(!privacy.files.contains(&third));
+    }
+
+    #[test]
+    fn merge_records_drops_inert_normal_observed_records() {
+        let observed_normal = FileRecord {
+            path: "/proj/.venv/lib/python3.11/site-packages/mod.py".to_string(),
+            zone: "normal".to_string(),
+            attribution: Attribution::Observed,
+        };
+        let mut message = ChatMessage::default();
+
+        merge_records(&mut message, [observed_normal]);
+
+        assert!(
+            message.extra.get("privacy").is_none(),
+            "normal+observed records are inert for the gate and must not be persisted"
+        );
+    }
+
+    #[test]
+    fn merge_records_keeps_every_guarded_record_regardless_of_attribution() {
+        let guarded = [
+            Attribution::Observed,
+            Attribution::Declared,
+            Attribution::Heuristic,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, attribution)| FileRecord {
+            path: format!("secret-{index}.env"),
+            zone: "secrets".to_string(),
+            attribution,
+        })
+        .collect::<Vec<_>>();
+        let mut message = ChatMessage::default();
+
+        merge_records(&mut message, guarded.clone());
+
+        let privacy: PrivacyRecord =
+            serde_json::from_value(message.extra["privacy"].clone()).unwrap();
+        assert_eq!(privacy.files, guarded);
+    }
+
+    #[test]
+    fn merge_records_keeps_blocked_zone_records() {
+        let blocked = FileRecord {
+            path: "/etc/shadow".to_string(),
+            zone: "blocked".to_string(),
+            attribution: Attribution::Observed,
+        };
+        let mut message = ChatMessage::default();
+
+        merge_records(&mut message, [blocked.clone()]);
+
+        let privacy: PrivacyRecord =
+            serde_json::from_value(message.extra["privacy"].clone()).unwrap();
+        assert_eq!(privacy.files, vec![blocked]);
+    }
+
+    #[test]
+    fn merge_records_keeps_effective_zone_records() {
+        let effective = FileRecord {
+            path: "derived.txt".to_string(),
+            zone: "effective:secrets+internal".to_string(),
+            attribution: Attribution::Observed,
+        };
+        let mut message = ChatMessage::default();
+
+        merge_records(&mut message, [effective.clone()]);
+
+        let privacy: PrivacyRecord =
+            serde_json::from_value(message.extra["privacy"].clone()).unwrap();
+        assert_eq!(privacy.files, vec![effective]);
+    }
+
+    #[test]
+    fn records_to_carry_does_not_amplify_normal_observed_records() {
+        let guarded = FileRecord {
+            path: ".env".to_string(),
+            zone: "secrets".to_string(),
+            attribution: Attribution::Observed,
+        };
+        let declared_normal = FileRecord {
+            path: "src/main.rs".to_string(),
+            zone: "normal".to_string(),
+            attribution: Attribution::Declared,
+        };
+        let mut source = ChatMessage::default();
+        merge_records(&mut source, [guarded.clone(), declared_normal.clone()]);
+        source.extra.insert(
+            "privacy".to_string(),
+            serde_json::to_value(PrivacyRecord {
+                files: vec![
+                    guarded.clone(),
+                    declared_normal.clone(),
+                    FileRecord {
+                        path: "/legacy/observed.rs".to_string(),
+                        zone: "normal".to_string(),
+                        attribution: Attribution::Observed,
+                    },
+                ],
+            })
+            .unwrap(),
+        );
+
+        let carried = records_to_carry(&[source]).unwrap();
+
+        assert_eq!(carried, vec![guarded, declared_normal]);
     }
 }

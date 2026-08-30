@@ -6999,7 +6999,7 @@ mod tests {
             privacy_file_record(".env", "secrets", refact_privacy::Attribution::Declared);
         let summarized = privacy_file_record(
             "src/lib.rs",
-            "normal",
+            "internal",
             refact_privacy::Attribution::Observed,
         );
         let source = vec![

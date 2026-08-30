@@ -174,8 +174,13 @@ mod tests {
             zone: "secrets".to_string(),
             attribution: Attribution::Declared,
         };
-        let normal = refact_privacy::FileRecord {
+        let internal = refact_privacy::FileRecord {
             path: "src/lib.rs".to_string(),
+            zone: "internal".to_string(),
+            attribution: Attribution::Observed,
+        };
+        let inert = refact_privacy::FileRecord {
+            path: "src/main.rs".to_string(),
             zone: "normal".to_string(),
             attribution: Attribution::Observed,
         };
@@ -183,7 +188,7 @@ mod tests {
         first.extra.insert(
             "privacy".to_string(),
             serde_json::to_value(PrivacyRecord {
-                files: vec![secret.clone(), normal.clone()],
+                files: vec![secret.clone(), internal.clone(), inert],
             })
             .unwrap(),
         );
@@ -198,7 +203,7 @@ mod tests {
 
         assert_eq!(
             source_records(&[first, second]).unwrap(),
-            vec![secret, normal]
+            vec![secret, internal]
         );
     }
 }
