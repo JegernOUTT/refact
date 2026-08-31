@@ -333,3 +333,4 @@ ui-audit-*.html
 /cockpit-*.png
 /final-*.png
 refact-agent/engine/e2e-*.txt
+node_modules
