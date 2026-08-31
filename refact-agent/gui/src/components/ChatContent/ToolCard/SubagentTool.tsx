@@ -8,6 +8,13 @@ interface SubagentArgs {
   expected_result?: string;
   tools?: string;
   max_steps?: string;
+  model_type?: string;
+  model_name?: string;
+  goal?: string;
+  plan?: string;
+  worktree?: string | boolean;
+  auto_merge?: boolean;
+  target_files?: string[];
 }
 
 interface SubagentToolProps {
@@ -46,6 +53,11 @@ export const SubagentTool: React.FC<SubagentToolProps> = ({ toolCall }) => {
     [
       args.tools && `tools: ${args.tools}`,
       args.max_steps && `max: ${args.max_steps}`,
+      args.model_type && `model type: ${args.model_type}`,
+      args.model_name && `model: ${args.model_name}`,
+      args.worktree && "worktree",
+      args.auto_merge && "auto merge",
+      args.target_files?.length && `files: ${args.target_files.length}`,
     ]
       .filter(Boolean)
       .join(" · ") || null;

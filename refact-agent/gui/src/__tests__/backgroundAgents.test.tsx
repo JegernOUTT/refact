@@ -360,12 +360,11 @@ describe("background agents", () => {
       root.questions?.[0],
       child.questions?.[1],
     ]);
-    expect(selectActiveBackgroundAgents(rootState, chatId).map((agent) => agent.agent_id)).toEqual([
-      "child",
-      "root",
-      "grandchild",
-      "orphan",
-    ]);
+    expect(
+      selectActiveBackgroundAgents(rootState, chatId).map(
+        (agent) => agent.agent_id,
+      ),
+    ).toEqual(["child", "root", "grandchild", "orphan"]);
   });
 
   test("selectors return null cost when no tree agent reports cost", () => {
@@ -601,11 +600,14 @@ describe("background agents", () => {
   test("BackgroundAgentCard renders status badge, title, target_files, and edited_files", () => {
     render(<BackgroundAgentCard agent={makeAgent()} />);
 
-    expect(screen.getByText("Running")).toBeInTheDocument();
+    expect(screen.getByTestId("background-agent-status-dot")).toHaveAttribute(
+      "aria-label",
+      "Background agent status: Running",
+    );
     expect(screen.getByText("Inspect the frogs")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "1 target files" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: "1 target files" }),
+    ).not.toBeInTheDocument();
   });
 
   test("BackgroundAgentCard renders error badge when error is set", () => {
@@ -615,8 +617,11 @@ describe("background agents", () => {
       />,
     );
 
-    expect(screen.getAllByText("Failed").length).toBeGreaterThan(0);
-    expect(screen.getByText("boom")).toBeInTheDocument();
+    expect(screen.getByTestId("background-agent-status-dot")).toHaveAttribute(
+      "aria-label",
+      "Background agent status: Failed",
+    );
+    expect(screen.queryByText("boom")).not.toBeInTheDocument();
   });
 
   test("BackgroundAgentCard renders conflict badge when conflict_summary is set", () => {
@@ -629,7 +634,7 @@ describe("background agents", () => {
       />,
     );
 
-    expect(screen.getByText("Conflicts")).toBeInTheDocument();
+    expect(screen.getByTestId("background-agent-card")).toBeInTheDocument();
   });
 
   test("ToolContent renders BackgroundAgentCard from flattened tool fields", () => {
@@ -644,11 +649,13 @@ describe("background agents", () => {
     ]);
 
     expect(screen.getByTestId("background-agent-card")).toBeInTheDocument();
-    expect(screen.getByText("Running")).toBeInTheDocument();
-    expect(screen.getByTitle("bgagent-flat")).toBeInTheDocument();
+    expect(screen.getByTestId("background-agent-status-dot")).toHaveAttribute(
+      "aria-label",
+      "Background agent status: Running",
+    );
     expect(
-      screen.getByRole("button", { name: "1 target files" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("button", { name: "Copy agent id" }),
+    ).not.toBeInTheDocument();
   });
 
   test("ToolContent keeps rendering BackgroundAgentCard from nested extra fallback", () => {
@@ -665,10 +672,68 @@ describe("background agents", () => {
     ]);
 
     expect(screen.getByTestId("background-agent-card")).toBeInTheDocument();
-    expect(screen.getByTitle("bgagent-extra")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "1 target files" }),
+      screen.getByRole("button", { name: "Expand background agent details" }),
     ).toBeInTheDocument();
+  });
+
+  test("ToolContent synthesizes introspection fields and supports legacy delegates", () => {
+    const delegateToolCall: ToolCall = {
+      ...subagentToolCall,
+      id: "call-delegate",
+      function: {
+        name: "delegate",
+        arguments: JSON.stringify({
+          task: "Inspect frogs",
+          expected_result: "frog facts",
+          model_type: "thinking",
+          model_name: "openai/gpt-5.6-terra",
+          goal: "Document frog behavior",
+          plan: "Read the frog files",
+          worktree: true,
+          auto_merge: true,
+          target_files: ["src/frog.ts"],
+        }),
+      },
+    };
+    renderToolContent(
+      [
+        makeToolResult({
+          tool_call_id: "call-delegate",
+          extra: {
+            background_agent_id: "bgagent-introspection",
+            background_agent_kind: "delegate",
+            background_agent_status: "running",
+            model: "openai/gpt-5.6-terra",
+            model_type: "thinking",
+            current_tool: "shell: cargo test",
+            goal_summary: "Document frog behavior",
+            plan_present: true,
+            worktree_branch: "refact/task/frogs",
+            merge_status: "pending",
+            pending_questions: 2,
+            tokens_used: 12_300,
+            cost_usd: 0.04,
+          },
+        }),
+      ],
+      {},
+      delegateToolCall,
+    );
+
+    expect(screen.getByTestId("background-agent-kind-delegate")).toBeVisible();
+    expect(screen.getByTestId("background-agent-model")).toHaveTextContent(
+      "thinking",
+    );
+    expect(
+      screen.getByTestId("background-agent-current-tool"),
+    ).toHaveTextContent("shell: cargo test");
+    expect(screen.getByTestId("background-agent-questions")).toHaveTextContent(
+      "❓2",
+    );
+    expect(screen.getByTestId("background-agent-merge")).toHaveTextContent(
+      "Pending",
+    );
   });
 
   test("BackgroundAgentUpdated state overrides the flattened placeholder card", () => {
@@ -693,9 +758,11 @@ describe("background agents", () => {
     );
 
     expect(screen.getByTestId("background-agent-card")).toBeInTheDocument();
-    expect(screen.getByText("Completed")).toBeInTheDocument();
     expect(screen.getByText("Updated frog report")).toBeInTheDocument();
-    expect(screen.getByText("Completed")).toBeInTheDocument();
+    expect(screen.getByTestId("background-agent-status-dot")).toHaveAttribute(
+      "aria-label",
+      "Background agent status: Completed",
+    );
   });
 
   test("flattened message_added event keeps background agent fields on selected tool result", () => {
@@ -739,6 +806,9 @@ describe("background agents", () => {
       />,
     );
 
+    await user.click(
+      screen.getByRole("button", { name: "Expand background agent details" }),
+    );
     await user.click(screen.getByRole("button", { name: "Open trajectory" }));
 
     expect(onOpenTrajectory).toHaveBeenCalledWith("child-chat");

@@ -103,6 +103,7 @@ export interface BackgroundAgentSummary {
   started_at: string | null;
   finished_at: string | null;
   change_seq: number;
+  model?: string | null;
   model_type?: string | null;
   current_tool?: string | null;
   goal_summary?: string | null;

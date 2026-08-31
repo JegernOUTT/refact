@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "../../utils/test-utils";
+import { fireEvent, render, screen } from "../../utils/test-utils";
 import { BackgroundAgentCard } from "./BackgroundAgentCard";
 import type { BackgroundAgentSummary } from "../../services/refact/types";
 
@@ -16,7 +16,7 @@ function makeAgent(
     kind: "delegate",
     status: "running",
     title: "Redesign the background agent card",
-    progress: null,
+    progress: "Updating components",
     step_count: 19,
     last_activity: new Date(Date.now() - 2 * 60_000).toISOString(),
     target_files: [
@@ -31,6 +31,30 @@ function makeAgent(
     started_at: ISO_TIMESTAMP,
     finished_at: null,
     change_seq: 3,
+    model: "openai/gpt-5.6-terra",
+    model_type: "thinking",
+    current_tool: "shell: cargo test --lib background_agent",
+    goal_summary: "Ship the compact expandable background-agent card",
+    plan_present: true,
+    worktree_branch: "refact/task/T-8/card",
+    merge_status: "pending",
+    pending_questions: 1,
+    questions: [
+      {
+        id: "question-1",
+        text: "Should the card start expanded?",
+        asked_at: ISO_TIMESTAMP,
+      },
+      {
+        id: "question-2",
+        text: "Can the branch be merged?",
+        answer: "Yes, once the GUI checks pass.",
+        asked_at: ISO_TIMESTAMP,
+        answered_at: ISO_TIMESTAMP,
+      },
+    ],
+    tokens_used: 12_300,
+    cost_usd: 0.04,
     ...overrides,
   };
 }
@@ -46,124 +70,51 @@ beforeEach(() => {
 });
 
 describe("BackgroundAgentCard", () => {
-  it("renders a delegate kind tile", () => {
+  it("renders the compact row by default with live status, model, tool, usage, questions, and merge", () => {
     render(<BackgroundAgentCard agent={makeAgent()} />);
 
+    expect(screen.getByTestId("background-agent-compact-row")).toBeVisible();
     expect(screen.getByTestId("background-agent-kind-delegate")).toBeVisible();
-    expect(
-      screen.queryByTestId("background-agent-kind-subagent"),
-    ).not.toBeInTheDocument();
-  });
-
-  it("renders a subagent kind tile", () => {
-    render(<BackgroundAgentCard agent={makeAgent({ kind: "subagent" })} />);
-
-    expect(screen.getByTestId("background-agent-kind-subagent")).toBeVisible();
-  });
-
-  it("humanizes the status chip instead of showing the raw enum", () => {
-    render(
-      <BackgroundAgentCard
-        agent={makeAgent({ status: "waiting_for_approval" })}
-      />,
+    expect(screen.getByTestId("background-agent-status-dot")).toHaveAttribute(
+      "aria-label",
+      "Background agent status: Running",
     );
-
-    const chip = screen.getByTestId("background-agent-status");
-    expect(chip).toHaveTextContent("Waiting for approval");
-    expect(chip.textContent).not.toContain("waiting_for_approval");
-  });
-
-  it("never renders a raw ISO timestamp and shows relative activity instead", () => {
-    const { container } = render(<BackgroundAgentCard agent={makeAgent()} />);
-
-    expect(container.textContent).not.toContain(ISO_TIMESTAMP);
-    expect(container.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
-    expect(screen.getByText("2m ago")).toBeVisible();
-  });
-
-  it("shows a single running step indicator without duplicating step counts", () => {
-    render(<BackgroundAgentCard agent={makeAgent()} />);
-
-    expect(screen.getByTestId("background-agent-progress")).toBeVisible();
-    expect(screen.getByText(/step 19/)).toBeVisible();
-    expect(screen.queryByText(/Steps: 19/)).not.toBeInTheDocument();
-  });
-
-  it("collapses files into a chip that expands to shortened paths with one prefix line", () => {
-    render(<BackgroundAgentCard agent={makeAgent()} />);
-
-    const toggle = screen.getByRole("button", { name: "2 target files" });
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByTestId("background-agent-model")).toHaveTextContent(
+      "thinking",
+    );
+    expect(screen.getByTestId("background-agent-model")).toHaveAttribute(
+      "title",
+      "openai/gpt-5.6-terra",
+    );
     expect(
-      screen.queryByText("BackgroundAgentCard.tsx"),
+      screen.getByTestId("background-agent-current-tool"),
+    ).toHaveTextContent("now: shell: cargo test --lib background_agent");
+    expect(screen.getByTestId("background-agent-usage")).toHaveTextContent(
+      "12.3k tok · $0.04",
+    );
+    expect(screen.getByTestId("background-agent-questions")).toHaveTextContent(
+      "❓1",
+    );
+    expect(screen.getByTestId("background-agent-merge")).toHaveTextContent(
+      "Pending",
+    );
+    expect(
+      screen.queryByTestId("background-agent-expanded-detail"),
     ).not.toBeInTheDocument();
+  });
 
-    fireEvent.click(toggle);
+  it("always starts collapsed even for running agents", () => {
+    render(<BackgroundAgentCard agent={makeAgent()} />);
 
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("BackgroundAgentCard.tsx")).toBeVisible();
-    expect(screen.getByText("BackgroundAgentCard.module.css")).toBeVisible();
     expect(
-      screen.getByText(
-        "…in refact-agent/gui/src/components/BackgroundAgentCard/",
-      ),
+      screen.getByRole("button", { name: "Expand background agent details" }),
     ).toBeVisible();
-  });
-
-  it("prefers edited files on terminal states", () => {
-    render(
-      <BackgroundAgentCard
-        agent={makeAgent({
-          status: "completed",
-          edited_files: ["src/a.ts"],
-        })}
-      />,
-    );
-
     expect(
-      screen.getByRole("button", { name: "1 edited files" }),
-    ).toBeInTheDocument();
-  });
-
-  it("copies the full agent id from the short-id chip", () => {
-    render(<BackgroundAgentCard agent={makeAgent()} />);
-
-    const chip = screen.getByRole("button", { name: "Copy agent id" });
-    expect(chip).toHaveTextContent("3344abcd");
-    expect(chip).toHaveAttribute("title", AGENT_ID);
-    expect(chip.textContent).not.toContain(AGENT_ID);
-
-    fireEvent.click(chip);
-
-    expect(writeText).toHaveBeenCalledWith(AGENT_ID);
-  });
-
-  it("renders a compact result line with chips when terminal", () => {
-    render(
-      <BackgroundAgentCard
-        agent={makeAgent({
-          status: "completed",
-          last_activity: null,
-          edited_files: ["src/a.ts", "src/b.ts"],
-          diff_summary: "+42 -7 across 2 files",
-          conflict_summary: "src/a.ts overlaps with delegate two",
-          result_summary: "Redesigned the card and updated the tests.",
-        })}
-      />,
-    );
-
-    expect(
-      screen.queryByTestId("background-agent-progress"),
+      screen.queryByTestId("background-agent-expanded-detail"),
     ).not.toBeInTheDocument();
-    expect(screen.getByText("2 edited")).toBeVisible();
-    expect(screen.getByText("+42 −7")).toBeVisible();
-    expect(screen.getByText("Conflicts")).toBeVisible();
-    expect(
-      screen.getByText("Redesigned the card and updated the tests."),
-    ).toBeVisible();
   });
 
-  it("opens the child trajectory from the footer button", () => {
+  it("expands to show goal, plan, branch, questions, files, activity, and trajectory", () => {
     const onOpenTrajectory = vi.fn();
     render(
       <BackgroundAgentCard
@@ -172,16 +123,129 @@ describe("BackgroundAgentCard", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Open trajectory" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand background agent details" }),
+    );
 
+    expect(
+      screen.getByTestId("background-agent-expanded-detail"),
+    ).toBeVisible();
+    expect(screen.getByText("🎯 Goal")).toHaveAttribute(
+      "title",
+      "Ship the compact expandable background-agent card",
+    );
+    expect(screen.getByText("📋 Plan")).toBeVisible();
+    expect(screen.getByText("refact/task/T-8/card")).toBeVisible();
+    expect(screen.getByText("Q&A")).toBeVisible();
+    expect(
+      screen.getByText("Q: Should the card start expanded?"),
+    ).toBeVisible();
+    expect(screen.getByText("Awaiting reply")).toBeVisible();
+    expect(screen.getByText("A: Yes, once the GUI checks pass.")).toBeVisible();
+    expect(
+      screen.getByText("now: shell: cargo test --lib background_agent"),
+    ).toBeVisible();
+    expect(screen.getByText("2m ago")).toBeVisible();
+
+    const files = screen.getByRole("button", { name: "2 target files" });
+    fireEvent.click(files);
+    expect(screen.getByText("BackgroundAgentCard.tsx")).toBeVisible();
+    expect(screen.getByText("BackgroundAgentCard.module.css")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open trajectory" }));
     expect(onOpenTrajectory).toHaveBeenCalledWith("child-chat");
   });
 
-  it("hides the trajectory button when there is no child chat", () => {
-    render(<BackgroundAgentCard agent={makeAgent({ child_chat_id: null })} />);
+  it("updates the live ticker when agent activity changes", () => {
+    const { rerender } = render(<BackgroundAgentCard agent={makeAgent()} />);
 
     expect(
-      screen.queryByRole("button", { name: "Open trajectory" }),
+      screen.getByTestId("background-agent-current-tool"),
+    ).toHaveTextContent("shell: cargo test --lib background_agent");
+
+    rerender(
+      <BackgroundAgentCard
+        agent={makeAgent({
+          current_tool: "shell: npm run test backgroundAgents",
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("background-agent-current-tool"),
+    ).toHaveTextContent("shell: npm run test backgroundAgents");
+  });
+
+  it("renders legacy delegates with the same compact layout", () => {
+    render(
+      <BackgroundAgentCard
+        agent={makeAgent({
+          model: null,
+          model_type: null,
+          current_tool: null,
+          pending_questions: undefined,
+          questions: undefined,
+          merge_status: null,
+        })}
+      />,
+    );
+
+    expect(screen.getByTestId("background-agent-kind-delegate")).toBeVisible();
+    expect(
+      screen.getByText("Redesign the background agent card"),
+    ).toBeVisible();
+    expect(
+      screen.queryByTestId("background-agent-model"),
     ).not.toBeInTheDocument();
+  });
+
+  it("renders the subagent kind icon", () => {
+    render(<BackgroundAgentCard agent={makeAgent({ kind: "subagent" })} />);
+
+    expect(screen.getByTestId("background-agent-kind-subagent")).toBeVisible();
+  });
+
+  it("preserves terminal result details and conflict tooltip after expansion", () => {
+    render(
+      <BackgroundAgentCard
+        agent={makeAgent({
+          status: "completed",
+          edited_files: ["src/a.ts", "src/b.ts"],
+          diff_summary: "+42 -7 across 2 files",
+          conflict_summary: "src/a.ts overlaps with delegate two",
+          merge_status: "conflict",
+          result_summary: "Redesigned the card and updated the tests.",
+        })}
+      />,
+    );
+
+    expect(screen.getByTestId("background-agent-merge")).toHaveAttribute(
+      "title",
+      "src/a.ts overlaps with delegate two",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand background agent details" }),
+    );
+    expect(screen.getByText("2 edited")).toBeVisible();
+    expect(screen.getByText("+42 −7")).toBeVisible();
+    expect(screen.getByText("Conflicts")).toBeVisible();
+    expect(
+      screen.getByText("Redesigned the card and updated the tests."),
+    ).toBeVisible();
+  });
+
+  it("never renders raw timestamps and copies the full agent id from the expanded detail", () => {
+    const { container } = render(<BackgroundAgentCard agent={makeAgent()} />);
+
+    expect(container.textContent).not.toContain(ISO_TIMESTAMP);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand background agent details" }),
+    );
+    const chip = screen.getByRole("button", { name: "Copy agent id" });
+    expect(chip).toHaveTextContent("3344abcd");
+    expect(chip).toHaveAttribute("title", AGENT_ID);
+
+    fireEvent.click(chip);
+    expect(writeText).toHaveBeenCalledWith(AGENT_ID);
   });
 });

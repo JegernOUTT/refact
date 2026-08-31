@@ -117,6 +117,7 @@ type BackgroundAgentSummaryWithDefaults = Omit<
   | "edited_files"
   | "step_count"
   | "change_seq"
+  | "model"
   | "model_type"
   | "current_tool"
   | "goal_summary"
@@ -132,6 +133,7 @@ type BackgroundAgentSummaryWithDefaults = Omit<
   edited_files?: unknown;
   step_count?: unknown;
   change_seq?: unknown;
+  model?: unknown;
   model_type?: unknown;
   current_tool?: unknown;
   goal_summary?: unknown;
@@ -167,6 +169,7 @@ type BackgroundAgentSummaryCamelCase = {
   startedAt: string | null;
   finishedAt: string | null;
   changeSeq?: number | null;
+  model?: string | null;
   modelType?: string | null;
   currentTool?: string | null;
   goalSummary?: string | null;
@@ -693,7 +696,9 @@ function isValidBackgroundAgent(
 }
 
 function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
+  return (
+    Array.isArray(value) && value.every((item) => typeof item === "string")
+  );
 }
 
 function normalizeNullableString(value: unknown): string | null | undefined {
@@ -723,9 +728,9 @@ function normalizeMergeStatus(
   return null;
 }
 
-function isAgentQuestion(value: unknown): value is NonNullable<
-  BackgroundAgentSummary["questions"]
->[number] {
+function isAgentQuestion(
+  value: unknown,
+): value is NonNullable<BackgroundAgentSummary["questions"]>[number] {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
@@ -736,7 +741,8 @@ function isAgentQuestion(value: unknown): value is NonNullable<
     (question.answer === undefined ||
       question.answer === null ||
       typeof question.answer === "string") &&
-    (question.asked_at === undefined || typeof question.asked_at === "string") &&
+    (question.asked_at === undefined ||
+      typeof question.asked_at === "string") &&
     (question.answered_at === undefined ||
       question.answered_at === null ||
       typeof question.answered_at === "string")
@@ -771,6 +777,7 @@ function safeAgent(agent: BackgroundAgentSummaryWire): BackgroundAgentSummary {
       started_at: agent.startedAt,
       finished_at: agent.finishedAt,
       change_seq: agent.changeSeq,
+      model: agent.model,
       model_type: agent.modelType,
       current_tool: agent.currentTool,
       goal_summary: agent.goalSummary,
@@ -809,6 +816,7 @@ function safeAgent(agent: BackgroundAgentSummaryWire): BackgroundAgentSummary {
       typeof agent.change_seq === "number" && Number.isFinite(agent.change_seq)
         ? Math.max(agent.change_seq, 0)
         : -1,
+    model: normalizeNullableString(agent.model),
     model_type: normalizeNullableString(agent.model_type),
     current_tool: normalizeNullableString(agent.current_tool),
     goal_summary: normalizeNullableString(agent.goal_summary),

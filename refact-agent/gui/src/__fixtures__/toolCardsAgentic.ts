@@ -140,6 +140,72 @@ export const DELEGATE_MESSAGES: ChatMessages = [
   },
 ];
 
+function copyAgentMessages(
+  source: ChatMessages,
+  extra: Record<string, unknown>,
+): ChatMessages {
+  return source.map((message) => {
+    if (message.role !== "tool") return message;
+    return {
+      ...message,
+      extra: { ...message.extra, ...extra },
+    };
+  });
+}
+
+export const RUNNING_WITH_CURRENT_TOOL_MESSAGES = copyAgentMessages(
+  SUBAGENT_MESSAGES,
+  {
+    background_agent_status: "running",
+    current_tool: "shell: cargo test --lib background_agent",
+    tokens_used: 12_300,
+    cost_usd: 0.04,
+  },
+);
+
+export const ISOLATED_MERGED_MESSAGES = copyAgentMessages(SUBAGENT_MESSAGES, {
+  merge_status: "merged",
+  worktree_branch: "refact/task/T-8/isolated",
+  edited_files: ["src/components/BackgroundAgentCard/BackgroundAgentCard.tsx"],
+});
+
+export const CONFLICT_MESSAGES = copyAgentMessages(DELEGATE_MESSAGES, {
+  merge_status: "conflict",
+  conflict_summary: "src/components/ChatContent/ToolsContent.tsx overlaps",
+});
+
+export const QUESTIONS_PENDING_MESSAGES = copyAgentMessages(DELEGATE_MESSAGES, {
+  pending_questions: 2,
+  questions: [
+    {
+      id: "pending-1",
+      text: "Should I preserve the old story names?",
+      asked_at: "2025-03-08T11:03:00.000Z",
+    },
+    {
+      id: "answered-1",
+      text: "Should the card start expanded?",
+      answer: "No, always compact first.",
+      asked_at: "2025-03-08T11:03:00.000Z",
+      answered_at: "2025-03-08T11:04:00.000Z",
+    },
+  ],
+});
+
+export const LEGACY_DELEGATE_MESSAGES = copyAgentMessages(DELEGATE_MESSAGES, {
+  model: null,
+  model_type: null,
+  current_tool: null,
+  goal_summary: null,
+  plan_present: false,
+  worktree_branch: null,
+  merge_status: null,
+  pending_questions: 0,
+  questions: [],
+  tokens_used: 0,
+  cost_usd: null,
+});
+
 export const SET_TASKS_MESSAGES: ChatMessages = [
   {
     role: "assistant",

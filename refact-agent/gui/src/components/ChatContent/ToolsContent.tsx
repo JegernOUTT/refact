@@ -227,8 +227,17 @@ type BackgroundAgentExtra = Partial<
     | "started_at"
     | "finished_at"
     | "change_seq"
+    | "model"
     | "model_type"
+    | "current_tool"
+    | "goal_summary"
+    | "plan_present"
     | "worktree_branch"
+    | "merge_status"
+    | "pending_questions"
+    | "questions"
+    | "tokens_used"
+    | "cost_usd"
   >
 > & {
   background_agent_id?: string;
@@ -279,6 +288,29 @@ function readNumberField(
   if (typeof direct === "number") return direct;
   const fromExtra = result?.extra?.[key];
   return typeof fromExtra === "number" ? fromExtra : null;
+}
+
+function readBooleanField(
+  result: ToolResult | undefined,
+  key: keyof BackgroundAgentExtra,
+): boolean | undefined {
+  const direct = readTopLevelBackgroundAgentValue(result, key);
+  if (typeof direct === "boolean") return direct;
+  const fromExtra = result?.extra?.[key];
+  return typeof fromExtra === "boolean" ? fromExtra : undefined;
+}
+
+function readMergeStatusField(
+  result: ToolResult | undefined,
+): BackgroundAgentSummary["merge_status"] {
+  const value = readStringField(result, "merge_status");
+  return value === "pending" ||
+    value === "merged" ||
+    value === "conflict" ||
+    value === "skipped" ||
+    value === "failed"
+    ? value
+    : null;
 }
 
 function readStringArrayField(
@@ -351,8 +383,18 @@ function backgroundAgentPlaceholder(
     started_at: readStringField(result, "started_at"),
     finished_at: readStringField(result, "finished_at"),
     change_seq: readNumberField(result, "change_seq") ?? 0,
+    model: readStringField(result, "model"),
     model_type: readStringField(result, "model_type"),
+    current_tool: readStringField(result, "current_tool"),
+    goal_summary: readStringField(result, "goal_summary"),
+    plan_present: readBooleanField(result, "plan_present"),
     worktree_branch: readStringField(result, "worktree_branch"),
+    merge_status: readMergeStatusField(result),
+    pending_questions:
+      readNumberField(result, "pending_questions") ?? undefined,
+    questions: [],
+    tokens_used: readNumberField(result, "tokens_used") ?? 0,
+    cost_usd: readNumberField(result, "cost_usd"),
   } satisfies BackgroundAgentSummary;
 }
 
@@ -380,6 +422,7 @@ function decorateBackgroundAgentTool(
     <BackgroundAgentCard
       key={`background-agent-${agent.agent_id}`}
       agent={agent}
+      compactDefault
       onOpenTrajectory={
         agent.child_chat_id
           ? (childChatId) => onOpenTrajectory(agent, childChatId)
@@ -914,38 +957,10 @@ function processToolCalls(
     );
   }
 
-  if (headName === "subagent") {
+  if (headName === "subagent" || headName === "delegate") {
     const elem = (
       <NewSubagentTool
-        key={`subagent-tool-${processed.length}`}
-        toolCall={normalizedHead}
-      />
-    );
-    const decoratedElem = decorateBackgroundAgentTool(
-      elem,
-      headName,
-      result,
-      backgroundAgents,
-      onOpenTrajectory,
-    );
-    return processToolCalls(
-      tail,
-      toolResults,
-      features,
-      [...processed, decoratedElem],
-      contextFilesByToolId,
-      diffsByToolId,
-      activeToolCallId,
-      backgroundAgents,
-      onOpenTrajectory,
-      threadId,
-    );
-  }
-
-  if (headName === "delegate") {
-    const elem = (
-      <GenericTool
-        key={`delegate-tool-${head.id ?? processed.length}`}
+        key={`background-agent-tool-${headName}-${processed.length}`}
         toolCall={normalizedHead}
       />
     );
