@@ -1,23 +1,31 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, TimeDelta, Utc};
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 use uuid::Uuid;
 
 use crate::storage;
 use crate::types::{
-    AgentCompletion, AgentListFilter, BackgroundAgent, BgAgentKind, BgAgentStatus,
+    AgentCompletion, AgentListFilter, AgentQuestion, BackgroundAgent, BgAgentKind, BgAgentStatus,
     CreateAgentRequest,
 };
+
+#[derive(Debug, Clone)]
+pub struct InboxMessage {
+    pub from: String,
+    pub text: String,
+    pub queued_at: DateTime<Utc>,
+}
 
 #[derive(Clone)]
 pub struct AgentRuntime {
     pub abort_flag: Arc<AtomicBool>,
     pub notify: Arc<Notify>,
+    pub inbox: Arc<Mutex<Vec<InboxMessage>>>,
 }
 
 pub struct BackgroundAgentRegistry {
@@ -46,10 +54,6 @@ impl BackgroundAgentRegistry {
     ) -> Result<(BackgroundAgent, Arc<AtomicBool>, Arc<Notify>), String> {
         let now = Utc::now();
         let agent_id = format!("bgagent-{}", Uuid::new_v4());
-        let target_files = match req.kind {
-            BgAgentKind::Subagent => Vec::new(),
-            BgAgentKind::Delegate => req.target_files,
-        };
         let record = BackgroundAgent {
             schema_version: 1,
             agent_id: agent_id.clone(),
@@ -61,7 +65,7 @@ impl BackgroundAgentRegistry {
             config_name: req.config_name,
             title: req.title,
             prompt: req.prompt,
-            target_files,
+            target_files: req.target_files,
             status: BgAgentStatus::Queued,
             progress: None,
             step_count: 0,
@@ -76,6 +80,16 @@ impl BackgroundAgentRegistry {
             completion_pushed_at: None,
             deferred_at: None,
             model: req.model,
+            model_type: req.model_type,
+            current_tool: None,
+            goal_summary: req.goal_summary,
+            plan_present: req.plan_present,
+            worktree_id: req.worktree_id,
+            worktree_branch: req.worktree_branch,
+            merge_status: None,
+            questions: Vec::new(),
+            tokens_used: 0,
+            cost_usd: None,
             created_at: now,
             started_at: None,
             finished_at: None,
@@ -84,6 +98,7 @@ impl BackgroundAgentRegistry {
         };
         let abort_flag = Arc::new(AtomicBool::new(false));
         let notify = Arc::new(Notify::new());
+        let inbox = Arc::new(Mutex::new(Vec::new()));
         {
             let mut records = self.records.write().await;
             storage::save_record(&self.storage_root, &record).await?;
@@ -96,6 +111,7 @@ impl BackgroundAgentRegistry {
                 AgentRuntime {
                     abort_flag: abort_flag.clone(),
                     notify: notify.clone(),
+                    inbox,
                 },
             );
         }
@@ -128,6 +144,97 @@ impl BackgroundAgentRegistry {
             record.progress = Some(progress);
             record.step_count = step_count;
             record.last_activity = last_activity;
+        })
+        .await
+    }
+
+    pub async fn update_activity(
+        &self,
+        agent_id: &str,
+        progress: Option<String>,
+        step_count: Option<u32>,
+        current_tool: Option<Option<String>>,
+    ) -> Result<BackgroundAgent, String> {
+        self.update_record(agent_id, |record, _| {
+            if let Some(progress) = progress {
+                record.progress = Some(progress);
+            }
+            if let Some(step_count) = step_count {
+                record.step_count = step_count;
+            }
+            if let Some(current_tool) = current_tool {
+                record.current_tool = current_tool;
+            }
+        })
+        .await
+    }
+
+    pub async fn add_usage(
+        &self,
+        agent_id: &str,
+        tokens_delta: u64,
+        cost_delta_usd: Option<f64>,
+    ) -> Result<BackgroundAgent, String> {
+        self.update_record(agent_id, |record, _| {
+            record.tokens_used = record.tokens_used.saturating_add(tokens_delta);
+            if let Some(cost_delta_usd) = cost_delta_usd {
+                record.cost_usd = Some(record.cost_usd.unwrap_or_default() + cost_delta_usd);
+            }
+        })
+        .await
+    }
+
+    pub async fn set_merge_status(
+        &self,
+        agent_id: &str,
+        status: &str,
+    ) -> Result<BackgroundAgent, String> {
+        let status = status.to_string();
+        self.update_record(agent_id, |record, _| {
+            record.merge_status = Some(status);
+        })
+        .await
+    }
+
+    pub async fn add_question(
+        &self,
+        agent_id: &str,
+        text: String,
+    ) -> Result<(BackgroundAgent, String), String> {
+        let question_id = Uuid::new_v4().simple().to_string()[..8].to_string();
+        let updated = self
+            .update_record(agent_id, |record, now| {
+                record.questions.push(AgentQuestion {
+                    id: question_id.clone(),
+                    text,
+                    asked_at: now,
+                    answer: None,
+                    answered_at: None,
+                });
+            })
+            .await?;
+        Ok((updated, question_id))
+    }
+
+    pub async fn answer_question(
+        &self,
+        agent_id: &str,
+        question_id: &str,
+        answer: String,
+    ) -> Result<BackgroundAgent, String> {
+        let question_id = question_id.to_string();
+        self.update_record_result(agent_id, |record, now| {
+            let question = record
+                .questions
+                .iter_mut()
+                .find(|question| question.id == question_id)
+                .ok_or_else(|| "question not found".to_string())?;
+            if question.answer.is_some() {
+                return Err("question already answered".to_string());
+            }
+            question.answer = Some(answer);
+            question.answered_at = Some(now);
+            Ok(())
         })
         .await
     }
@@ -385,6 +492,37 @@ impl BackgroundAgentRegistry {
         records
     }
 
+    pub async fn list_descendants(&self, agent_id: &str) -> Vec<BackgroundAgent> {
+        let records = self.records.read().await;
+        let Some(root) = records.get(agent_id) else {
+            return Vec::new();
+        };
+        let Some(child_chat_id) = root.child_chat_id.clone() else {
+            return Vec::new();
+        };
+        let mut pending_chat_ids = VecDeque::from([child_chat_id]);
+        let mut descendants = Vec::new();
+        while let Some(parent_chat_id) = pending_chat_ids.pop_front() {
+            let mut children: Vec<BackgroundAgent> = records
+                .values()
+                .filter(|record| record.parent_chat_id == parent_chat_id)
+                .cloned()
+                .collect();
+            children.sort_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then(a.agent_id.cmp(&b.agent_id))
+            });
+            for child in children {
+                if let Some(child_chat_id) = child.child_chat_id.clone() {
+                    pending_chat_ids.push_back(child_chat_id);
+                }
+                descendants.push(child);
+            }
+        }
+        descendants
+    }
+
     pub async fn list_with_completion_message_id(&self, ids: &[&str]) -> Vec<BackgroundAgent> {
         let wanted: HashSet<&str> = ids.iter().copied().collect();
         let mut records: Vec<BackgroundAgent> = self
@@ -519,6 +657,23 @@ impl BackgroundAgentRegistry {
             .map(|runtime| runtime.abort_flag.clone())
     }
 
+    pub async fn inbox_for(&self, agent_id: &str) -> Option<Arc<Mutex<Vec<InboxMessage>>>> {
+        self.runtime
+            .read()
+            .await
+            .get(agent_id)
+            .map(|runtime| runtime.inbox.clone())
+    }
+
+    pub async fn push_inbox(&self, agent_id: &str, msg: InboxMessage) -> Result<(), String> {
+        let inbox = self
+            .inbox_for(agent_id)
+            .await
+            .ok_or_else(|| "agent is not running in this process".to_string())?;
+        inbox.lock().await.push(msg);
+        Ok(())
+    }
+
     pub async fn overlap_warning(
         &self,
         parent_chat_id: &str,
@@ -578,6 +733,34 @@ impl BackgroundAgentRegistry {
             let mut updated = current;
             let now = Utc::now();
             update(&mut updated, now);
+            touch_record(&mut updated, now);
+            storage::save_record(&self.storage_root, &updated).await?;
+            records.insert(agent_id.to_string(), updated.clone());
+            updated
+        };
+        if let Some(notify) = self.notify_for(agent_id).await {
+            notify.notify_waiters();
+        }
+        Ok(updated)
+    }
+
+    async fn update_record_result<F>(
+        &self,
+        agent_id: &str,
+        update: F,
+    ) -> Result<BackgroundAgent, String>
+    where
+        F: FnOnce(&mut BackgroundAgent, DateTime<Utc>) -> Result<(), String>,
+    {
+        let updated = {
+            let mut records = self.records.write().await;
+            let current = records
+                .get(agent_id)
+                .cloned()
+                .ok_or_else(|| "agent not found".to_string())?;
+            let mut updated = current;
+            let now = Utc::now();
+            update(&mut updated, now)?;
             touch_record(&mut updated, now);
             storage::save_record(&self.storage_root, &updated).await?;
             records.insert(agent_id.to_string(), updated.clone());

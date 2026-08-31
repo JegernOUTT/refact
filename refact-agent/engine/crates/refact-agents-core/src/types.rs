@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-pub use refact_chat_api::BackgroundAgentSummary;
+pub use refact_chat_api::{AgentQuestionSummary, BackgroundAgentSummary};
 use serde::{Deserialize, Serialize};
 
 pub const NO_TEXT_RESULT_SUMMARY: &str =
@@ -11,6 +11,7 @@ pub const NO_TEXT_RESULT_SUMMARY: &str =
 #[serde(rename_all = "snake_case")]
 pub enum BgAgentKind {
     Subagent,
+    #[doc = "Legacy persisted-record variant; new unified agents use Subagent."]
     Delegate,
 }
 
@@ -57,6 +58,15 @@ impl BgAgentStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentQuestion {
+    pub id: String,
+    pub text: String,
+    pub asked_at: DateTime<Utc>,
+    pub answer: Option<String>,
+    pub answered_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BackgroundAgent {
     pub schema_version: u32,
     pub agent_id: String,
@@ -84,6 +94,26 @@ pub struct BackgroundAgent {
     #[serde(default)]
     pub deferred_at: Option<DateTime<Utc>>,
     pub model: String,
+    #[serde(default)]
+    pub model_type: Option<String>,
+    #[serde(default)]
+    pub current_tool: Option<String>,
+    #[serde(default)]
+    pub goal_summary: Option<String>,
+    #[serde(default)]
+    pub plan_present: bool,
+    #[serde(default)]
+    pub worktree_id: Option<String>,
+    #[serde(default)]
+    pub worktree_branch: Option<String>,
+    #[serde(default)]
+    pub merge_status: Option<String>,
+    #[serde(default)]
+    pub questions: Vec<AgentQuestion>,
+    #[serde(default)]
+    pub tokens_used: u64,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -112,6 +142,31 @@ impl From<&BackgroundAgent> for BackgroundAgentSummary {
             started_at: record.started_at.as_ref().map(DateTime::to_rfc3339),
             finished_at: record.finished_at.as_ref().map(DateTime::to_rfc3339),
             change_seq: record.change_seq,
+            model: record.model.clone(),
+            model_type: record.model_type.clone(),
+            current_tool: record.current_tool.clone(),
+            goal_summary: record.goal_summary.clone(),
+            plan_present: record.plan_present,
+            worktree_branch: record.worktree_branch.clone(),
+            merge_status: record.merge_status.clone(),
+            pending_questions: record
+                .questions
+                .iter()
+                .filter(|question| question.answer.is_none())
+                .count() as u32,
+            tokens_used: record.tokens_used,
+            cost_usd: record.cost_usd,
+            questions: record
+                .questions
+                .iter()
+                .map(|question| AgentQuestionSummary {
+                    id: question.id.clone(),
+                    text: question.text.clone(),
+                    answer: question.answer.clone(),
+                    asked_at: question.asked_at,
+                    answered_at: question.answered_at,
+                })
+                .collect(),
         }
     }
 }
@@ -127,6 +182,11 @@ pub struct CreateAgentRequest {
     pub prompt: String,
     pub target_files: Vec<String>,
     pub model: String,
+    pub model_type: Option<String>,
+    pub goal_summary: Option<String>,
+    pub plan_present: bool,
+    pub worktree_id: Option<String>,
+    pub worktree_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

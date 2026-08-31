@@ -5395,6 +5395,7 @@ mod tests {
             started_at: None,
             finished_at: Some("2026-05-28T00:00:00Z".into()),
             change_seq: 7,
+            ..BackgroundAgentSummary::default()
         };
         session
             .background_agents
@@ -5432,6 +5433,7 @@ mod tests {
             started_at: None,
             finished_at: Some("2026-05-28T00:00:00Z".into()),
             change_seq: 7,
+            ..BackgroundAgentSummary::default()
         };
         let stale_running = BackgroundAgentSummary {
             status: "running".into(),
@@ -5470,6 +5472,7 @@ mod tests {
             started_at: None,
             finished_at: None,
             change_seq: 7,
+            ..BackgroundAgentSummary::default()
         };
         let stale_running = BackgroundAgentSummary {
             progress: Some("Queued".into()),

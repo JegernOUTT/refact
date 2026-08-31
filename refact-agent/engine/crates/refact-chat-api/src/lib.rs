@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -577,6 +578,16 @@ pub struct PauseReason {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct AgentQuestionSummary {
+    pub id: String,
+    pub text: String,
+    pub answer: Option<String>,
+    pub asked_at: DateTime<Utc>,
+    pub answered_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct BackgroundAgentSummary {
     pub agent_id: String,
     pub parent_chat_id: String,
@@ -596,6 +607,28 @@ pub struct BackgroundAgentSummary {
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub change_seq: u64,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub model_type: Option<String>,
+    #[serde(default)]
+    pub current_tool: Option<String>,
+    #[serde(default)]
+    pub goal_summary: Option<String>,
+    #[serde(default)]
+    pub plan_present: bool,
+    #[serde(default)]
+    pub worktree_branch: Option<String>,
+    #[serde(default)]
+    pub merge_status: Option<String>,
+    #[serde(default)]
+    pub pending_questions: u32,
+    #[serde(default)]
+    pub tokens_used: u64,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub questions: Vec<AgentQuestionSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1110,6 +1143,17 @@ mod tests {
             started_at: Some("2026-05-27T00:00:00Z".to_string()),
             finished_at: None,
             change_seq: 7,
+            model: "test-model".to_string(),
+            model_type: Some("thinking".to_string()),
+            current_tool: Some("cat: src/frog.rs".to_string()),
+            goal_summary: Some("Patch the frog pond".to_string()),
+            plan_present: true,
+            worktree_branch: Some("refact/subagent/frogs".to_string()),
+            merge_status: Some("pending".to_string()),
+            pending_questions: 0,
+            tokens_used: 123,
+            cost_usd: Some(0.42),
+            questions: Vec::new(),
         }
     }
 

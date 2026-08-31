@@ -885,6 +885,11 @@ mod tests {
             prompt: format!("Prompt for {title}"),
             target_files: vec!["src/frog.rs".to_string()],
             model: "test-model".to_string(),
+            model_type: None,
+            goal_summary: None,
+            plan_present: false,
+            worktree_id: None,
+            worktree_branch: None,
         }
     }
 

@@ -60,6 +60,7 @@ mod tests {
             started_at: Some("2026-05-27T00:00:00Z".to_string()),
             finished_at: None,
             change_seq: 7,
+            ..BackgroundAgentSummary::default()
         }
     }
 
@@ -74,6 +75,11 @@ mod tests {
             prompt: format!("prompt for {title}"),
             target_files: vec![format!("{title}.rs")],
             model: "test-model".to_string(),
+            model_type: None,
+            goal_summary: None,
+            plan_present: false,
+            worktree_id: None,
+            worktree_branch: None,
         }
     }
 

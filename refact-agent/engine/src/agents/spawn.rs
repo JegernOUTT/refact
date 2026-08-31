@@ -235,6 +235,11 @@ pub async fn spawn_background_agent(
             prompt: req.prompt.clone(),
             target_files: req.target_files.clone(),
             model: req.model.clone(),
+            model_type: None,
+            goal_summary: None,
+            plan_present: false,
+            worktree_id: None,
+            worktree_branch: None,
         })
         .await?;
     emit_background_agent_update(app.clone(), &record).await;
@@ -612,6 +617,16 @@ fn fallback_failed_record(agent_id: String, req: SpawnRequest, error: String) ->
         completion_pushed_at: None,
         deferred_at: None,
         model: req.model,
+        model_type: None,
+        current_tool: None,
+        goal_summary: None,
+        plan_present: false,
+        worktree_id: None,
+        worktree_branch: None,
+        merge_status: None,
+        questions: Vec::new(),
+        tokens_used: 0,
+        cost_usd: None,
         created_at: now,
         started_at: None,
         finished_at: Some(now),

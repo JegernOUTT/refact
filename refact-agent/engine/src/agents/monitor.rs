@@ -108,6 +108,11 @@ mod tests {
                 prompt: "prompt".to_string(),
                 target_files: vec![],
                 model: "model".to_string(),
+                model_type: None,
+                goal_summary: None,
+                plan_present: false,
+                worktree_id: None,
+                worktree_branch: None,
             })
             .await
             .unwrap();
@@ -166,6 +171,11 @@ mod tests {
                 prompt: "prompt".to_string(),
                 target_files: vec![],
                 model: "model".to_string(),
+                model_type: None,
+                goal_summary: None,
+                plan_present: false,
+                worktree_id: None,
+                worktree_branch: None,
             })
             .await
             .unwrap();

@@ -685,6 +685,11 @@ async fn fake_background_spawn(
             prompt: req.prompt.clone(),
             target_files: req.target_files.clone(),
             model: req.model.clone(),
+            model_type: None,
+            goal_summary: None,
+            plan_present: false,
+            worktree_id: None,
+            worktree_branch: None,
         })
         .await?;
     let child_chat_id = "subchat-test".to_string();
@@ -723,6 +728,11 @@ async fn fake_wait_spawn(
             prompt: req.prompt.clone(),
             target_files: req.target_files.clone(),
             model: req.model.clone(),
+            model_type: None,
+            goal_summary: None,
+            plan_present: false,
+            worktree_id: None,
+            worktree_branch: None,
         })
         .await?;
     app.agents
@@ -957,6 +967,11 @@ mod tests {
                 prompt: "prompt".to_string(),
                 target_files: vec!["src/auth/retry.ts".to_string()],
                 model: "test-model".to_string(),
+                model_type: None,
+                goal_summary: None,
+                plan_present: false,
+                worktree_id: None,
+                worktree_branch: None,
             })
             .await
             .unwrap();

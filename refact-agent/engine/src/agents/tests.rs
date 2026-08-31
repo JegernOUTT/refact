@@ -7,7 +7,7 @@ use chrono::{TimeDelta, Utc};
 use serde_json::json;
 use tempfile::tempdir;
 
-use crate::agents::registry::{normalize_path_for_overlap, BackgroundAgentRegistry};
+use crate::agents::registry::{normalize_path_for_overlap, BackgroundAgentRegistry, InboxMessage};
 use crate::agents::storage::{load_all, save_record};
 use crate::agents::types::{
     AgentCompletion, AgentListFilter, BackgroundAgent, BgAgentKind, BgAgentStatus,
@@ -35,6 +35,11 @@ fn create_request(parent_chat_id: &str, kind: BgAgentKind) -> CreateAgentRequest
         prompt: "Find the frog problem".to_string(),
         target_files: vec!["src/frog.rs".to_string()],
         model: "test-model".to_string(),
+        model_type: Some("thinking".to_string()),
+        goal_summary: Some("Fix the frog problem".to_string()),
+        plan_present: true,
+        worktree_id: Some("worktree-frog".to_string()),
+        worktree_branch: Some("refact/subagent/frog".to_string()),
     }
 }
 
@@ -140,11 +145,46 @@ async fn create_returns_queued_unique_persisted_records() {
 }
 
 #[tokio::test]
-async fn subagent_create_discards_target_files() {
+async fn subagent_create_retains_target_files() {
     let (_temp, registry) = registry().await;
     let record = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
 
-    assert!(record.target_files.is_empty());
+    assert_eq!(record.target_files, vec!["src/frog.rs"]);
+}
+
+#[tokio::test]
+async fn legacy_record_without_introspection_fields_deserializes() {
+    let (_temp, registry) = registry().await;
+    let record = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
+    let mut legacy = serde_json::to_value(record).expect("serialize record");
+    let object = legacy.as_object_mut().expect("record object");
+    for key in [
+        "model_type",
+        "current_tool",
+        "goal_summary",
+        "plan_present",
+        "worktree_id",
+        "worktree_branch",
+        "merge_status",
+        "questions",
+        "tokens_used",
+        "cost_usd",
+    ] {
+        object.remove(key);
+    }
+
+    let parsed: BackgroundAgent = serde_json::from_value(legacy).expect("deserialize legacy");
+
+    assert_eq!(parsed.model_type, None);
+    assert_eq!(parsed.current_tool, None);
+    assert_eq!(parsed.goal_summary, None);
+    assert!(!parsed.plan_present);
+    assert_eq!(parsed.worktree_id, None);
+    assert_eq!(parsed.worktree_branch, None);
+    assert_eq!(parsed.merge_status, None);
+    assert!(parsed.questions.is_empty());
+    assert_eq!(parsed.tokens_used, 0);
+    assert_eq!(parsed.cost_usd, None);
 }
 
 #[tokio::test]
@@ -184,6 +224,204 @@ async fn update_progress_bumps_step_count_and_sets_last_activity() {
     assert_eq!(updated.step_count, 7);
     assert_eq!(updated.last_activity.as_deref(), Some("cat"));
     assert_eq!(updated.change_seq, record.change_seq + 1);
+}
+
+#[tokio::test]
+async fn update_activity_changes_only_requested_fields() {
+    let (_temp, registry) = registry().await;
+    let record = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
+
+    let first = registry
+        .update_activity(
+            &record.agent_id,
+            Some("reading files".to_string()),
+            Some(7),
+            Some(Some("cat: src/frog.rs".to_string())),
+        )
+        .await
+        .expect("first activity update");
+    let second = registry
+        .update_activity(&record.agent_id, None, None, Some(None))
+        .await
+        .expect("clear tool");
+
+    assert_eq!(first.progress.as_deref(), Some("reading files"));
+    assert_eq!(first.step_count, 7);
+    assert_eq!(first.current_tool.as_deref(), Some("cat: src/frog.rs"));
+    assert_eq!(second.progress, first.progress);
+    assert_eq!(second.step_count, first.step_count);
+    assert_eq!(second.current_tool, None);
+    assert_eq!(second.change_seq, first.change_seq + 1);
+}
+
+#[tokio::test]
+async fn usage_question_and_inbox_lifecycle_persist_and_notify() {
+    let (_temp, registry) = registry().await;
+    let record = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
+
+    registry
+        .add_usage(&record.agent_id, 10, Some(0.25))
+        .await
+        .expect("first usage");
+    let usage = registry
+        .add_usage(&record.agent_id, 5, None)
+        .await
+        .expect("second usage");
+    let (questioned, question_id) = registry
+        .add_question(&record.agent_id, "Can I edit the pond?".to_string())
+        .await
+        .expect("add question");
+    let answered = registry
+        .answer_question(&record.agent_id, &question_id, "Yes".to_string())
+        .await
+        .expect("answer question");
+    let duplicate = registry
+        .answer_question(&record.agent_id, &question_id, "Again".to_string())
+        .await
+        .expect_err("duplicate answer fails");
+
+    assert_eq!(usage.tokens_used, 15);
+    assert_eq!(usage.cost_usd, Some(0.25));
+    assert_eq!(question_id.len(), 8);
+    assert_eq!(questioned.questions.len(), 1);
+    assert_eq!(answered.questions[0].answer.as_deref(), Some("Yes"));
+    assert!(answered.questions[0].answered_at.is_some());
+    assert_eq!(duplicate, "question already answered");
+
+    let inbox = registry.inbox_for(&record.agent_id).await.expect("inbox");
+    registry
+        .push_inbox(
+            &record.agent_id,
+            InboxMessage {
+                from: "parent".to_string(),
+                text: "Please prioritize tests".to_string(),
+                queued_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("push inbox");
+    let messages = inbox.lock().await;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].from, "parent");
+    drop(messages);
+    let missing = registry
+        .push_inbox(
+            "missing",
+            InboxMessage {
+                from: "parent".to_string(),
+                text: "hello".to_string(),
+                queued_at: Utc::now(),
+            },
+        )
+        .await
+        .expect_err("missing runtime errors");
+    assert_eq!(missing, "agent is not running in this process");
+}
+
+#[tokio::test]
+async fn list_descendants_walks_two_levels() {
+    let (_temp, registry) = registry().await;
+    let root = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
+    let root = registry
+        .mark_running(&root.agent_id, "child-chat-1".to_string())
+        .await
+        .expect("root running");
+    let child = create_agent(&registry, "child-chat-1", BgAgentKind::Subagent).await;
+    let child = registry
+        .mark_running(&child.agent_id, "child-chat-2".to_string())
+        .await
+        .expect("child running");
+    let grandchild = create_agent(&registry, "child-chat-2", BgAgentKind::Subagent).await;
+
+    let descendants = registry.list_descendants(&root.agent_id).await;
+
+    assert_eq!(
+        descendants
+            .iter()
+            .map(|record| record.agent_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![child.agent_id.as_str(), grandchild.agent_id.as_str()]
+    );
+}
+
+#[test]
+fn summary_maps_introspection_and_question_state() {
+    let now = Utc::now();
+    let record = BackgroundAgent {
+        schema_version: 1,
+        agent_id: "agent".to_string(),
+        parent_chat_id: "parent".to_string(),
+        parent_root_chat_id: None,
+        parent_tool_call_id: None,
+        child_chat_id: Some("child".to_string()),
+        kind: BgAgentKind::Subagent,
+        config_name: "subagent".to_string(),
+        title: "Fix frogs".to_string(),
+        prompt: "Fix frogs".to_string(),
+        target_files: vec!["src/frog.rs".to_string()],
+        status: BgAgentStatus::Running,
+        progress: Some("testing".to_string()),
+        step_count: 3,
+        last_activity: None,
+        result_summary: None,
+        result_payload_path: None,
+        error: None,
+        edited_files: Vec::new(),
+        diff_summary: None,
+        conflict_summary: None,
+        completion_message_id: None,
+        completion_pushed_at: None,
+        deferred_at: None,
+        model: "model".to_string(),
+        model_type: Some("thinking".to_string()),
+        current_tool: Some("cargo test".to_string()),
+        goal_summary: Some("Fix all frogs".to_string()),
+        plan_present: true,
+        worktree_id: Some("worktree".to_string()),
+        worktree_branch: Some("refact/subagent/frogs".to_string()),
+        merge_status: Some("pending".to_string()),
+        questions: vec![
+            crate::agents::types::AgentQuestion {
+                id: "11111111".to_string(),
+                text: "Question one".to_string(),
+                asked_at: now,
+                answer: None,
+                answered_at: None,
+            },
+            crate::agents::types::AgentQuestion {
+                id: "22222222".to_string(),
+                text: "Question two".to_string(),
+                asked_at: now,
+                answer: Some("Answer".to_string()),
+                answered_at: Some(now),
+            },
+        ],
+        tokens_used: 123,
+        cost_usd: Some(0.42),
+        created_at: now,
+        started_at: Some(now),
+        finished_at: None,
+        last_update_at: now,
+        change_seq: 4,
+    };
+
+    let summary = crate::agents::types::BackgroundAgentSummary::from(&record);
+
+    assert_eq!(summary.model, "model");
+    assert_eq!(summary.model_type.as_deref(), Some("thinking"));
+    assert_eq!(summary.current_tool.as_deref(), Some("cargo test"));
+    assert_eq!(summary.goal_summary.as_deref(), Some("Fix all frogs"));
+    assert!(summary.plan_present);
+    assert_eq!(
+        summary.worktree_branch.as_deref(),
+        Some("refact/subagent/frogs")
+    );
+    assert_eq!(summary.merge_status.as_deref(), Some("pending"));
+    assert_eq!(summary.pending_questions, 1);
+    assert_eq!(summary.tokens_used, 123);
+    assert_eq!(summary.cost_usd, Some(0.42));
+    assert_eq!(summary.questions.len(), 2);
+    assert_eq!(summary.questions[1].answer.as_deref(), Some("Answer"));
 }
 
 #[tokio::test]
