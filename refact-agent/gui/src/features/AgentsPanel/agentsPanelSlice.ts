@@ -3,7 +3,7 @@ import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 export type AgentsPanelTab = "active" | "all";
 
 export type AgentsPanelState = {
-  openByChat: Record<string, boolean | undefined>;
+  openByChat: Record<string, boolean>;
   tab: AgentsPanelTab;
   userClosedByChat: Record<string, boolean>;
   userOpenedByChat: Record<string, boolean>;
@@ -61,10 +61,9 @@ export const selectAgentsPanelOpen = (
   state: AgentsPanelRootState,
   chatId: string,
 ) => {
-  const openByChat = state.agentsPanel.openByChat;
-  return Object.prototype.hasOwnProperty.call(openByChat, chatId)
-    ? openByChat[chatId]
-    : false;
+  const openByChat: Partial<Record<string, boolean>> =
+    state.agentsPanel.openByChat;
+  return openByChat[chatId] ?? false;
 };
 
 export const selectAgentsPanelTab = (state: AgentsPanelRootState) =>
@@ -74,20 +73,18 @@ export const selectAgentsPanelUserClosed = (
   state: AgentsPanelRootState,
   chatId: string,
 ) => {
-  const userClosedByChat = state.agentsPanel.userClosedByChat;
-  return Object.prototype.hasOwnProperty.call(userClosedByChat, chatId)
-    ? userClosedByChat[chatId]
-    : false;
+  const userClosedByChat: Partial<Record<string, boolean>> =
+    state.agentsPanel.userClosedByChat;
+  return userClosedByChat[chatId] ?? false;
 };
 
 export const selectAgentsPanelUserOpened = (
   state: AgentsPanelRootState,
   chatId: string,
 ) => {
-  const userOpenedByChat = state.agentsPanel.userOpenedByChat;
-  return Object.prototype.hasOwnProperty.call(userOpenedByChat, chatId)
-    ? userOpenedByChat[chatId]
-    : false;
+  const userOpenedByChat: Partial<Record<string, boolean>> =
+    state.agentsPanel.userOpenedByChat;
+  return userOpenedByChat[chatId] ?? false;
 };
 
 export default agentsPanelSlice.reducer;

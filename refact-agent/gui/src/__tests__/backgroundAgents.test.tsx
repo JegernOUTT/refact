@@ -18,6 +18,7 @@ import {
 } from "../features/Chat/Thread/selectors";
 import type { Chat, ChatThreadRuntime } from "../features/Chat/Thread/types";
 import {
+  normalizeBackgroundAgentSummary,
   subscribeToChatEvents,
   type ChatEventEnvelope,
 } from "../services/refact/chatSubscription";
@@ -431,6 +432,44 @@ describe("background agents", () => {
 
     expect(state.threads[chatId]?.background_agents).toEqual({
       [completed.agent_id]: completed,
+    });
+  });
+
+  test("reducer ignores an unknown-sequence update after a known update", () => {
+    const existing = makeAgent({ change_seq: 1, progress: "Known update" });
+    const unknownSequence = normalizeBackgroundAgentSummary({
+      agent_id: existing.agent_id,
+      parent_chat_id: chatId,
+      child_chat_id: null,
+      kind: "subagent",
+      status: "running",
+      title: "Unknown update",
+      progress: "Unknown update",
+      last_activity: null,
+      diff_summary: null,
+      conflict_summary: null,
+      result_summary: null,
+      error: null,
+      started_at: null,
+      finished_at: null,
+    });
+    const initial = makeState();
+    const runtime = initial.threads[chatId];
+    if (!runtime) throw new Error("missing runtime");
+    runtime.background_agents = { [existing.agent_id]: existing };
+
+    const state = chatReducer(
+      initial,
+      applyChatEvent({
+        chat_id: chatId,
+        seq: "1",
+        type: "background_agent_updated",
+        agent: unknownSequence,
+      }),
+    );
+
+    expect(state.threads[chatId]?.background_agents).toEqual({
+      [existing.agent_id]: existing,
     });
   });
 

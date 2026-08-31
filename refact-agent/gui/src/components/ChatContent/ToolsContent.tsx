@@ -387,7 +387,7 @@ function backgroundAgentPlaceholder(
     model_type: readStringField(result, "model_type"),
     current_tool: readStringField(result, "current_tool"),
     goal_summary: readStringField(result, "goal_summary"),
-    plan_present: readBooleanField(result, "plan_present"),
+    plan_present: readBooleanField(result, "plan_present") ?? false,
     worktree_branch: readStringField(result, "worktree_branch"),
     merge_status: readMergeStatusField(result),
     pending_questions:

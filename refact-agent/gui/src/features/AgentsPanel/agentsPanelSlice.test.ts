@@ -38,6 +38,9 @@ describe("agentsPanelSlice", () => {
     state = agentsPanelSlice.reducer(state, tabChanged("all"));
 
     expect(selectAgentsPanelOpen({ agentsPanel: state }, "chat-1")).toBe(true);
+    expect(selectAgentsPanelOpen({ agentsPanel: state }, "unknown-chat")).toBe(
+      false,
+    );
     expect(selectAgentsPanelTab({ agentsPanel: state })).toBe("all");
   });
 

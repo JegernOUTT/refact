@@ -128,6 +128,7 @@ type BackgroundAgentSummaryWithDefaults = Omit<
   | "questions"
   | "tokens_used"
   | "cost_usd"
+  | "title"
 > & {
   target_files?: unknown;
   edited_files?: unknown;
@@ -144,6 +145,7 @@ type BackgroundAgentSummaryWithDefaults = Omit<
   questions?: unknown;
   tokens_used?: unknown;
   cost_usd?: unknown;
+  title?: unknown;
 };
 
 export type BackgroundAgentSummaryWire =
@@ -156,7 +158,7 @@ type BackgroundAgentSummaryCamelCase = {
   childChatId: string | null;
   kind: BackgroundAgentSummary["kind"];
   status: BackgroundAgentSummary["status"];
-  title: string;
+  title?: unknown;
   progress: string | null;
   stepCount?: number | null;
   lastActivity: string | null;
@@ -684,15 +686,23 @@ function normalizeBackgroundAgentFields(obj: EventEnvelope): void {
   }
 }
 
-function isValidBackgroundAgent(
+export function isValidBackgroundAgent(
   agent: unknown,
 ): agent is BackgroundAgentSummaryWire {
   if (agent === null || typeof agent !== "object") return false;
   const fields = agent as Record<string, unknown>;
   if (typeof fields.kind !== "string") return false;
   if (typeof fields.status !== "string") return false;
-  if ("agent_id" in fields) return typeof fields.agent_id === "string";
-  return typeof fields.agentId === "string";
+  if ("agent_id" in fields) {
+    return (
+      typeof fields.agent_id === "string" &&
+      typeof fields.parent_chat_id === "string"
+    );
+  }
+  return (
+    typeof fields.agentId === "string" &&
+    typeof fields.parentChatId === "string"
+  );
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -706,9 +716,23 @@ function normalizeNullableString(value: unknown): string | null | undefined {
   return undefined;
 }
 
-function normalizeNonNegativeNumber(value: unknown): number | undefined {
+function isOptionalString(value: unknown): value is string | undefined {
+  return value === undefined || typeof value === "string";
+}
+
+function isOptionalNullableString(
+  value: unknown,
+): value is string | null | undefined {
+  return value === undefined || value === null || typeof value === "string";
+}
+
+function normalizeNonNegativeNumber(
+  value: unknown,
+  integer = false,
+): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
-  return Math.max(value, 0);
+  const normalized = Math.min(Math.max(value, 0), Number.MAX_SAFE_INTEGER);
+  return integer ? Math.floor(normalized) : normalized;
 }
 
 function normalizeMergeStatus(
@@ -728,32 +752,47 @@ function normalizeMergeStatus(
   return null;
 }
 
-function isAgentQuestion(
+function normalizeQuestion(
   value: unknown,
-): value is NonNullable<BackgroundAgentSummary["questions"]>[number] {
+): NonNullable<BackgroundAgentSummary["questions"]>[number] | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
+    return undefined;
   }
   const question = value as Record<string, unknown>;
-  return (
-    typeof question.id === "string" &&
-    typeof question.text === "string" &&
-    (question.answer === undefined ||
-      question.answer === null ||
-      typeof question.answer === "string") &&
-    (question.asked_at === undefined ||
-      typeof question.asked_at === "string") &&
-    (question.answered_at === undefined ||
-      question.answered_at === null ||
-      typeof question.answered_at === "string")
-  );
+  if (typeof question.id !== "string" || typeof question.text !== "string") {
+    return undefined;
+  }
+
+  const askedAt =
+    question.asked_at === undefined ? question.askedAt : question.asked_at;
+  const answeredAt =
+    question.answered_at === undefined
+      ? question.answeredAt
+      : question.answered_at;
+  if (!isOptionalNullableString(question.answer)) return undefined;
+  if (!isOptionalString(askedAt)) return undefined;
+  if (!isOptionalNullableString(answeredAt)) {
+    return undefined;
+  }
+
+  return {
+    id: question.id,
+    text: question.text,
+    ...(question.answer === undefined ? {} : { answer: question.answer }),
+    ...(askedAt === undefined ? {} : { asked_at: askedAt }),
+    ...(answeredAt === undefined ? {} : { answered_at: answeredAt }),
+  };
 }
 
 function normalizeQuestions(
   value: unknown,
 ): BackgroundAgentSummary["questions"] {
   if (value === undefined) return undefined;
-  return Array.isArray(value) && value.every(isAgentQuestion) ? value : [];
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((question) => {
+    const normalized = normalizeQuestion(question);
+    return normalized === undefined ? [] : [normalized];
+  });
 }
 
 function safeAgent(agent: BackgroundAgentSummaryWire): BackgroundAgentSummary {
@@ -797,36 +836,34 @@ function safeAgent(agent: BackgroundAgentSummaryWire): BackgroundAgentSummary {
     child_chat_id: agent.child_chat_id,
     kind: agent.kind,
     status: agent.status,
-    title: agent.title,
-    progress: agent.progress,
-    step_count:
-      typeof agent.step_count === "number" && Number.isFinite(agent.step_count)
-        ? Math.max(agent.step_count, 0)
-        : 0,
-    last_activity: agent.last_activity,
+    title: typeof agent.title === "string" ? agent.title : "",
+    progress: normalizeNullableString(agent.progress) ?? null,
+    step_count: normalizeNonNegativeNumber(agent.step_count, true) ?? 0,
+    last_activity: normalizeNullableString(agent.last_activity) ?? null,
     target_files: isStringArray(agent.target_files) ? agent.target_files : [],
     edited_files: isStringArray(agent.edited_files) ? agent.edited_files : [],
-    diff_summary: agent.diff_summary,
-    conflict_summary: agent.conflict_summary,
-    result_summary: agent.result_summary,
-    error: agent.error,
-    started_at: agent.started_at,
-    finished_at: agent.finished_at,
-    change_seq:
-      typeof agent.change_seq === "number" && Number.isFinite(agent.change_seq)
-        ? Math.max(agent.change_seq, 0)
-        : -1,
+    diff_summary: normalizeNullableString(agent.diff_summary) ?? null,
+    conflict_summary: normalizeNullableString(agent.conflict_summary) ?? null,
+    result_summary: normalizeNullableString(agent.result_summary) ?? null,
+    error: normalizeNullableString(agent.error) ?? null,
+    started_at: normalizeNullableString(agent.started_at) ?? null,
+    finished_at: normalizeNullableString(agent.finished_at) ?? null,
+    // Unknown sequences default to 0, so they cannot replace known positive updates.
+    change_seq: normalizeNonNegativeNumber(agent.change_seq, true) ?? 0,
     model: normalizeNullableString(agent.model),
     model_type: normalizeNullableString(agent.model_type),
     current_tool: normalizeNullableString(agent.current_tool),
     goal_summary: normalizeNullableString(agent.goal_summary),
     plan_present:
-      typeof agent.plan_present === "boolean" ? agent.plan_present : undefined,
+      typeof agent.plan_present === "boolean" ? agent.plan_present : false,
     worktree_branch: normalizeNullableString(agent.worktree_branch),
     merge_status: normalizeMergeStatus(agent.merge_status),
-    pending_questions: normalizeNonNegativeNumber(agent.pending_questions),
+    pending_questions: normalizeNonNegativeNumber(
+      agent.pending_questions,
+      true,
+    ),
     questions: normalizeQuestions(agent.questions),
-    tokens_used: normalizeNonNegativeNumber(agent.tokens_used),
+    tokens_used: normalizeNonNegativeNumber(agent.tokens_used, true),
     cost_usd:
       agent.cost_usd === null
         ? null

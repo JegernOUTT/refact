@@ -62,12 +62,13 @@ describe("backgroundAgentsApi", () => {
     const listRequest = requestAt(fetchMock, 0);
     expect(listRequest.method).toBe("GET");
     expect(new URL(listRequest.url).pathname).toBe("/v1/background-agents");
-    expect(new URL(listRequest.url).searchParams.get("chat_id")).toBe("chat one");
+    expect(new URL(listRequest.url).searchParams.get("chat_id")).toBe(
+      "chat one",
+    );
 
     const cancel = store.dispatch(
       backgroundAgentsApi.endpoints.cancelBackgroundAgent.initiate({
         agentId: "agent/1",
-        reason: "No longer needed",
       }),
     );
     await cancel;
@@ -78,7 +79,6 @@ describe("backgroundAgentsApi", () => {
     );
     await expect(cancelRequest.clone().json()).resolves.toEqual({
       subtree: true,
-      reason: "No longer needed",
     });
 
     const message = store.dispatch(
@@ -96,5 +96,68 @@ describe("backgroundAgentsApi", () => {
     await expect(messageRequest.clone().json()).resolves.toEqual({
       text: "Please prioritize the tests.",
     });
+  });
+
+  test("normalizes camelCase REST agents and filters invalid entries", async () => {
+    const fetchMock = vi.fn<FetchLike>();
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse([
+        {
+          agentId: "agent-1",
+          parentChatId: "parent-1",
+          childChatId: null,
+          kind: "subagent",
+          status: "running",
+          model: "openai/gpt-5.6-terra",
+          questions: [
+            {
+              id: "question-1",
+              text: "Continue?",
+              askedAt: "2026-01-01T00:00:00Z",
+            },
+          ],
+        },
+        { agentId: "missing-parent", kind: "subagent", status: "running" },
+      ]),
+    );
+    const store = createTestStore({ host: "ide", lspPort: 8123, apiKey: null });
+
+    await expect(
+      store
+        .dispatch(
+          backgroundAgentsApi.endpoints.getBackgroundAgents.initiate("chat-1"),
+        )
+        .unwrap(),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        agent_id: "agent-1",
+        parent_chat_id: "parent-1",
+        model: "openai/gpt-5.6-terra",
+        plan_present: false,
+        questions: [
+          {
+            id: "question-1",
+            text: "Continue?",
+            asked_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      }),
+    ]);
+  });
+
+  test("returns a custom error for a non-array REST response", async () => {
+    const fetchMock = vi.fn<FetchLike>();
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ agents: [] }));
+    const store = createTestStore({ host: "ide", lspPort: 8123, apiKey: null });
+
+    await expect(
+      store
+        .dispatch(
+          backgroundAgentsApi.endpoints.getBackgroundAgents.initiate("chat-1"),
+        )
+        .unwrap(),
+    ).rejects.toMatchObject({ status: "CUSTOM_ERROR" });
   });
 });
