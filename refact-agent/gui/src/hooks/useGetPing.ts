@@ -6,6 +6,7 @@ import { useAppSelector } from "./useAppSelector";
 import { useAppDispatch } from "./useAppDispatch";
 import { setBackendStatus } from "../features/Connection";
 import { hasUsableEngineEndpoint } from "../services/refact/apiUrl";
+import { useIsDocumentVisible } from "./useIsDocumentVisible";
 
 const POLL_INTERVAL_HEALTHY = 5000;
 const POLL_INTERVAL_ERROR = 2000;
@@ -13,6 +14,7 @@ const POLL_INTERVAL_ERROR = 2000;
 export const useGetPing = () => {
   const dispatch = useAppDispatch();
   const config = useAppSelector(selectConfig);
+  const visible = useIsDocumentVisible();
   const currentHost = config.host;
   const currentDev = config.dev;
   const currentEngineServed = config.engineServed;
@@ -34,7 +36,7 @@ export const useGetPing = () => {
       lspUrl: currentLspUrl,
     },
     {
-      pollingInterval,
+      pollingInterval: visible ? pollingInterval : 0,
       refetchOnMountOrArgChange: true,
       skip: !canPing,
     },

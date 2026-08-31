@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use refact_core::model_caps::ModelCapabilities;
-use refact_core::models_dev::{load_models_dev_snapshot_catalog, ModelsDevCatalog};
+use refact_core::models_dev::{
+    load_models_dev_snapshot_catalog, models_dev_snapshot_catalog, ModelsDevCatalog,
+};
 use refact_core::llm_types::WireFormat;
 use crate::config::resolve_env_var;
 use crate::models_dev_provider::{
@@ -257,14 +259,15 @@ available:
     }
 
     fn build_runtime(&self) -> Result<ProviderRuntime, String> {
-        let catalog = match load_models_dev_snapshot_catalog() {
+        let fallback = ModelsDevCatalog::new();
+        let catalog = match models_dev_snapshot_catalog() {
             Ok(catalog) => catalog,
             Err(e) => {
                 tracing::warn!("Doubao: failed to load models.dev catalog: {e}");
-                ModelsDevCatalog::new()
+                &fallback
             }
         };
-        self.build_runtime_from_catalog(&catalog)
+        self.build_runtime_from_catalog(catalog)
     }
 
     fn has_credentials(&self) -> bool {

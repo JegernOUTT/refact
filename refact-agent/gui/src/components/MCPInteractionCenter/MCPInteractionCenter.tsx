@@ -7,6 +7,7 @@ import {
   type MCPInteraction,
   type MCPInteractionAction,
 } from "../../services/refact/mcpInteractions";
+import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import { useOpenUrl } from "../../hooks/useOpenUrl";
 import { Badge, Button, Dialog, Flex, Icon, Surface, Text } from "../ui";
 import { ElicitationForm } from "./ElicitationForm";
@@ -39,8 +40,9 @@ function getInteractionLabel(interaction: MCPInteraction) {
 }
 
 export function MCPInteractionCenter() {
+  const visible = useIsDocumentVisible();
   const { data } = useListMcpInteractionsQuery(undefined, {
-    pollingInterval: 3000,
+    pollingInterval: visible ? 3000 : 0,
   });
   const [respond, { isLoading }] = useRespondMcpInteractionMutation();
   const openUrl = useOpenUrl();

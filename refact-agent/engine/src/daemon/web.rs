@@ -15,8 +15,8 @@ use crate::daemon::projects::ProjectEntry;
 use crate::daemon::state::{now_ms, DaemonState};
 use crate::daemon::supervisor::{WorkerInfo, WorkerState};
 use crate::http::routers::gui::{
-    asset_response, html_response, missing_gui_index_html, text_response, ChatGuiAsset,
-    ASSET_PREFIX, INDEX_PATH,
+    asset_response, embedded_asset_response, html_response, missing_gui_index_html, text_response,
+    ChatGuiAsset, ASSET_PREFIX, INDEX_PATH,
 };
 use crate::http::{gui_public_origin_candidates, GuiPublicOriginCandidates};
 
@@ -142,7 +142,10 @@ pub(crate) async fn handle_project_gui_index(
     }
 }
 
-pub(crate) async fn handle_daemon_gui_asset(AxumPath(path): AxumPath<String>) -> impl IntoResponse {
+pub(crate) async fn handle_daemon_gui_asset(
+    AxumPath(path): AxumPath<String>,
+    request_headers: HeaderMap,
+) -> impl IntoResponse {
     if invalid_asset_path(&path) {
         return text_response(
             StatusCode::BAD_REQUEST,
@@ -152,7 +155,7 @@ pub(crate) async fn handle_daemon_gui_asset(AxumPath(path): AxumPath<String>) ->
 
     let embedded_path = format!("{ASSET_PREFIX}{path}");
     match ChatGuiAsset::get(&embedded_path) {
-        Some(asset) => asset_response(&embedded_path, asset.data, StatusCode::OK),
+        Some(asset) => embedded_asset_response(&embedded_path, asset, &request_headers),
         None => text_response(
             StatusCode::NOT_FOUND,
             format!("GUI asset not found: {path}"),
@@ -1161,7 +1164,7 @@ mod tests {
 
     #[tokio::test]
     async fn daemon_asset_route_rejects_invalid_path() {
-        let response = handle_daemon_gui_asset(AxumPath("../secret".to_string()))
+        let response = handle_daemon_gui_asset(AxumPath("../secret".to_string()), HeaderMap::new())
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);

@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use refact_core::model_caps::ModelCapabilities;
-use refact_core::models_dev::{load_models_dev_snapshot_catalog, ModelsDevCatalog};
+use refact_core::models_dev::{
+    load_models_dev_snapshot_catalog, models_dev_snapshot_catalog, ModelsDevCatalog,
+};
 use refact_core::llm_types::WireFormat;
 use crate::config::resolve_env_var;
 use crate::models_dev_provider::{
@@ -189,8 +191,10 @@ available:
     }
 
     fn build_runtime(&self) -> Result<ProviderRuntime, String> {
-        let catalog = load_models_dev_snapshot_catalog()?;
-        self.build_runtime_from_catalog(&catalog)
+        let catalog = models_dev_snapshot_catalog()
+            .as_ref()
+            .map_err(Clone::clone)?;
+        self.build_runtime_from_catalog(catalog)
     }
 
     fn has_credentials(&self) -> bool {

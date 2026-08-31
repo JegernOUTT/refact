@@ -8,6 +8,7 @@ import {
   StatusBadge,
 } from "../../components/ui";
 import type { SettingsListEditorItem } from "../../components/ui";
+import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import {
   useGetIndexingSettingsQuery,
   useSaveIndexingSettingsMutation,
@@ -44,8 +45,9 @@ function statusTone(state: string): "success" | "danger" | "accent" | "muted" {
 }
 
 function IndexingStatus() {
+  const visible = useIsDocumentVisible();
   const { data, error, isLoading } = useGetRagStatusQuery(undefined, {
-    pollingInterval: 3000,
+    pollingInterval: visible ? 3000 : 0,
   });
   const vecErrors = data?.vecdb
     ? Object.entries(data.vecdb.vecdb_errors).filter(([, count]) => count > 0)

@@ -7,6 +7,7 @@ import {
   useEventsBusForIDE,
 } from "../../hooks";
 import { useAppearance } from "../../hooks/useAppearance";
+import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import {
   selectConfig,
   selectThemeMode,
@@ -69,6 +70,7 @@ export const GeneralSettingsSection: React.FC = () => {
   const themeMode = useAppSelector(selectThemeMode);
   const { openHotKeys, openSettings } = useEventsBusForIDE();
   const { appearance } = useAppearance();
+  const visible = useIsDocumentVisible();
 
   const {
     data: projectInformation,
@@ -89,7 +91,7 @@ export const GeneralSettingsSection: React.FC = () => {
   const [skillsSaveError, setSkillsSaveError] = useState<string | null>(null);
   const { data: ragStatus, isError: isRagStatusError } = useGetRagStatusQuery(
     undefined,
-    { pollingInterval: 5000 },
+    { pollingInterval: visible ? 5000 : 0 },
   );
 
   const handleAppearanceChange = useCallback(

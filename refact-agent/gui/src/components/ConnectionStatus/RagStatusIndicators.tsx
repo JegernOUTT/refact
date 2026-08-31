@@ -1,6 +1,7 @@
 import React from "react";
 
 import { useAppSelector } from "../../hooks/useAppSelector";
+import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import { selectConfig } from "../../features/Config/configSlice";
 import { hasUsableEngineEndpoint } from "../../services/refact/apiUrl";
 import { useGetRagStatusQuery } from "../../services/refact/ragStatus";
@@ -69,10 +70,11 @@ function formatCodegraphErrorTooltip(
 
 export const RagStatusIndicators: React.FC = () => {
   const config = useAppSelector(selectConfig);
+  const visible = useIsDocumentVisible();
   const enabled = hasUsableEngineEndpoint(config);
   const { data, error, isError, refetch } = useGetRagStatusQuery(undefined, {
     skip: !enabled,
-    pollingInterval: 5000,
+    pollingInterval: visible ? 5000 : 0,
   });
 
   if (!enabled || (!data && !isError)) return null;

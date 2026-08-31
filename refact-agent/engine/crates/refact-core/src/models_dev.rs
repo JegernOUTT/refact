@@ -31,6 +31,7 @@ const REQUIRED_ZAI_PROVIDER_ALIASES: &[&str] = &["zai", "zhipuai"];
 static MODELS_DEV_CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MODELS_DEV_CACHE_WRITE_MUTEX: OnceLock<AMutex<()>> = OnceLock::new();
 static REASONING_CONTROL_RULES: OnceLock<Vec<ReasoningControlRule>> = OnceLock::new();
+static MODELS_DEV_SNAPSHOT_CATALOG: OnceLock<Result<ModelsDevCatalog, String>> = OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize)]
 struct ReasoningControlRule {
@@ -297,7 +298,13 @@ fn parse_required_project_catalog_json(
 }
 
 pub fn load_models_dev_snapshot_catalog() -> Result<ModelsDevCatalog, String> {
-    parse_required_project_catalog_json(MODELS_DEV_SNAPSHOT, "Bundled models.dev snapshot")
+    models_dev_snapshot_catalog().clone()
+}
+
+pub fn models_dev_snapshot_catalog() -> &'static Result<ModelsDevCatalog, String> {
+    MODELS_DEV_SNAPSHOT_CATALOG.get_or_init(|| {
+        parse_required_project_catalog_json(MODELS_DEV_SNAPSHOT, "Bundled models.dev snapshot")
+    })
 }
 
 pub fn models_dev_cache_path(cache_dir: &Path) -> PathBuf {
@@ -1341,6 +1348,31 @@ mod tests {
         assert_eq!(
             controls.reasoning_effort_options,
             effort(&["minimal", "low", "medium", "high", "xhigh"])
+        );
+    }
+
+    #[test]
+    fn snapshot_catalog_is_parsed_once_and_shared() {
+        let first = models_dev_snapshot_catalog();
+        let second = models_dev_snapshot_catalog();
+        assert!(std::ptr::eq(first, second));
+
+        let catalog = first.as_ref().expect("bundled snapshot parses");
+        assert!(!catalog.is_empty());
+        validate_required_project_providers(catalog).expect("bundled snapshot is complete");
+    }
+
+    #[test]
+    fn snapshot_catalog_clones_match_the_shared_parse() {
+        let shared = models_dev_snapshot_catalog()
+            .as_ref()
+            .expect("bundled snapshot parses");
+        let owned = load_models_dev_snapshot_catalog().expect("bundled snapshot parses");
+
+        assert_eq!(&owned, shared);
+        assert_eq!(
+            load_models_dev_snapshot_catalog().expect("bundled snapshot parses"),
+            owned
         );
     }
 
