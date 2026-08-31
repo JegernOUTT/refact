@@ -31,6 +31,7 @@ import { setInformation } from "../Errors/informationSlice";
 import styles from "./AgentsPanel.module.css";
 
 export type AgentTreeNodeProps = {
+  chatId: string;
   node: AgentTreeNodeModel;
   depth?: number;
   onNavigate?: (chatId: string) => void;
@@ -74,6 +75,7 @@ function errorText(error: unknown): string {
 }
 
 export function AgentTreeNode({
+  chatId,
   node,
   depth = 0,
   onNavigate,
@@ -114,7 +116,11 @@ export function AgentTreeNode({
 
   const handleCancel = async () => {
     try {
-      await cancelAgent({ agentId: agent.agent_id, subtree: true }).unwrap();
+      await cancelAgent({
+        agentId: agent.agent_id,
+        chatId,
+        subtree: true,
+      }).unwrap();
       dispatch(
         setInformation("Cancellation requested for this agent subtree."),
       );
@@ -127,7 +133,7 @@ export function AgentTreeNode({
     const text = message.trim();
     if (!text) return;
     try {
-      await messageAgent({ agentId: agent.agent_id, text }).unwrap();
+      await messageAgent({ agentId: agent.agent_id, chatId, text }).unwrap();
       setMessage("");
       setMessageOpen(false);
       dispatch(setInformation("Message sent to agent."));
@@ -347,6 +353,7 @@ export function AgentTreeNode({
         <ul className={styles.children}>
           {children.map((child) => (
             <AgentTreeNode
+              chatId={chatId}
               key={child.agent.agent_id}
               depth={depth + 1}
               node={child}

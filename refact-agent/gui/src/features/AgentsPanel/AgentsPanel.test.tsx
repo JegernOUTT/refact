@@ -105,8 +105,13 @@ describe("AgentsPanel", () => {
 
   test("navigates, posts a message, copies agent details, and confirms cancellation", async () => {
     const onNavigate = vi.fn();
+    let cancelBody: unknown;
     let messageBody: unknown;
     server.use(
+      http.post("*/v1/background-agents/worker/cancel", async ({ request }) => {
+        cancelBody = await request.json();
+        return HttpResponse.json({});
+      }),
       http.post(
         "*/v1/background-agents/worker/message",
         async ({ request }) => {
@@ -143,12 +148,18 @@ describe("AgentsPanel", () => {
     );
     await user.click(screen.getByLabelText("Send message"));
     await waitFor(() => {
-      expect(messageBody).toEqual({ text: "Please check tests" });
+      expect(messageBody).toEqual({
+        chat_id: chatId,
+        text: "Please check tests",
+      });
     });
     await user.click(screen.getByLabelText("Message Worker"));
     await user.click(screen.getByLabelText("Cancel Worker"));
     expect(screen.getByText("Cancel this agent subtree?")).toBeInTheDocument();
-    expect(screen.getByText("Cancel subtree")).toBeInTheDocument();
+    await user.click(screen.getByText("Cancel subtree"));
+    await waitFor(() => {
+      expect(cancelBody).toEqual({ chat_id: chatId, subtree: true });
+    });
   });
 
   test("uses a drawer when requested", () => {

@@ -155,6 +155,7 @@ function AgentsPanelContents({
           <ul className={styles.tree}>
             {visibleTree.map((node) => (
               <AgentTreeNode
+                chatId={chatId}
                 key={node.agent.agent_id}
                 node={node}
                 onNavigate={onNavigate}

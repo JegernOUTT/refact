@@ -69,6 +69,7 @@ describe("backgroundAgentsApi", () => {
     const cancel = store.dispatch(
       backgroundAgentsApi.endpoints.cancelBackgroundAgent.initiate({
         agentId: "agent/1",
+        chatId: "chat one",
       }),
     );
     await cancel;
@@ -78,12 +79,14 @@ describe("backgroundAgentsApi", () => {
       "/v1/background-agents/agent%2F1/cancel",
     );
     await expect(cancelRequest.clone().json()).resolves.toEqual({
+      chat_id: "chat one",
       subtree: true,
     });
 
     const message = store.dispatch(
       backgroundAgentsApi.endpoints.messageBackgroundAgent.initiate({
         agentId: "agent-1",
+        chatId: "chat one",
         text: "Please prioritize the tests.",
       }),
     );
@@ -94,6 +97,7 @@ describe("backgroundAgentsApi", () => {
       "/v1/background-agents/agent-1/message",
     );
     await expect(messageRequest.clone().json()).resolves.toEqual({
+      chat_id: "chat one",
       text: "Please prioritize the tests.",
     });
   });

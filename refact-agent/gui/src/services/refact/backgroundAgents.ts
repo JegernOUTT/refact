@@ -10,11 +10,13 @@ import type { BackgroundAgentSummary } from "./types";
 
 export type CancelBackgroundAgentRequest = {
   agentId: string;
+  chatId: string;
   subtree?: boolean;
 };
 
 export type MessageBackgroundAgentRequest = {
   agentId: string;
+  chatId: string;
   text: string;
 };
 
@@ -62,7 +64,12 @@ export const backgroundAgentsApi = createApi({
       unknown,
       CancelBackgroundAgentRequest
     >({
-      queryFn: async ({ agentId, subtree = true }, api, _opts, baseQuery) => {
+      queryFn: async (
+        { agentId, chatId, subtree = true },
+        api,
+        _opts,
+        baseQuery,
+      ) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
           url: buildApiUrlFromState(
@@ -70,7 +77,7 @@ export const backgroundAgentsApi = createApi({
             `/v1/background-agents/${encodeURIComponent(agentId)}/cancel`,
           ),
           method: "POST",
-          body: { subtree },
+          body: { chat_id: chatId, subtree },
         });
         if (result.error) return { error: result.error };
         return { data: result.data };
@@ -81,7 +88,7 @@ export const backgroundAgentsApi = createApi({
       unknown,
       MessageBackgroundAgentRequest
     >({
-      queryFn: async ({ agentId, text }, api, _opts, baseQuery) => {
+      queryFn: async ({ agentId, chatId, text }, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
         const result = await baseQuery({
           url: buildApiUrlFromState(
@@ -89,7 +96,7 @@ export const backgroundAgentsApi = createApi({
             `/v1/background-agents/${encodeURIComponent(agentId)}/message`,
           ),
           method: "POST",
-          body: { text },
+          body: { chat_id: chatId, text },
         });
         if (result.error) return { error: result.error };
         return { data: result.data };

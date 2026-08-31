@@ -156,6 +156,35 @@ describe("BackgroundAgentCard", () => {
     expect(onOpenTrajectory).toHaveBeenCalledWith("child-chat");
   });
 
+  it("hides the trajectory button without a child chat", () => {
+    render(
+      <BackgroundAgentCard
+        agent={makeAgent({ child_chat_id: null })}
+        onOpenTrajectory={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand background agent details" }),
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Open trajectory" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the running step indicator once in expanded details", () => {
+    render(<BackgroundAgentCard agent={makeAgent()} />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand background agent details" }),
+    );
+
+    expect(screen.getByTestId("background-agent-progress")).toBeVisible();
+    expect(screen.getAllByText(/step 19/i)).toHaveLength(1);
+    expect(screen.queryByText(/Steps: 19/)).not.toBeInTheDocument();
+  });
+
   it("updates the live ticker when agent activity changes", () => {
     const { rerender } = render(<BackgroundAgentCard agent={makeAgent()} />);
 
