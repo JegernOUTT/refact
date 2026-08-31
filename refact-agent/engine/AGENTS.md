@@ -348,7 +348,7 @@ New chats use a per-conversation folder under `.refact/trajectories/`, with one 
   index.json                  one global index for every displayable chat
   <root_chat_id>/
     <root_chat_id>.json       the root chat itself
-    <child_chat_id>.json      subagent / delegate / review agent / internal trace
+    <child_chat_id>.json      subagent / review agent / internal trace (legacy delegate records may remain)
   <legacy_id>.json            pre-existing flat files, still read and written in place
 ```
 
@@ -381,6 +381,29 @@ OpenAI conversion lives in `src/llm/adapters/openai_chat.rs` (`convert_messages_
 Tool trait: `tool_execute(&mut self, ccx, tool_call_id, args) -> Result<(bool, Vec<ContextEnum>)>`.
 
 `AtCommandsContext` provides: global_context, chat_id, n_ctx, abort_flag, messages, current_model, task_meta, subchat depth/channels, postprocess params.
+
+### Background subagents and coordination
+
+`subagent` is the only tool that creates new background agents. It always starts a stateful child
+trajectory and returns immediately; completion is pushed to the parent. Omitting `tools` preserves the
+child's inherit-all policy; an explicit comma-separated list is validated against the registered tool
+catalog. `model_name` selects a concrete configured chat model and takes precedence over `model_type`,
+whose valid slots are `default`, `light`, `thinking`, `buddy`, `model_2`, and `task_planner`.
+
+The optional `goal` accepts a string or `{content, criteria?, budget?}` object; use
+`goal.budget.max_turns` to bound child steps. `plan` installs the child's plan. `target_files` communicates
+expected edit targets and is compared with active peers for collision warnings. `worktree` is `inherit` by
+default or `isolated`; isolated worktrees default `auto_merge` to true and retain conflict state for the
+parent to inspect. The old `delegate` tool is not registered; legacy delegate records remain supported for
+deserialization and display.
+
+The interaction surface is `agents_overview`, `agent_message`, and child-only `progress_report`.
+`agents_overview` renders the root-scoped agent tree with active work and questions.
+`agent_message` sends to a child or descendant, or uses `to: "parent"` for a note or a tracked question
+with `expects_reply`; a parent answers a question with its `reply_to` id. `progress_report` publishes a
+child's concise status line. Existing lifecycle tools are `agent_list`, `agent_status`, `agent_wait`,
+`agent_result`, and `agent_cancel` (which cancels descendants by default). Agent records and their live
+introspection fields are emitted through snapshots and `background_agent_updated` SSE events.
 
 ### CodeGraph tools
 
@@ -1024,4 +1047,4 @@ All foreground, background, service, and PTY exec spawns apply `EXEC_ENV_DEFAULT
 - **User**: `~/.config/refact/` (default_privacy.yaml, providers.d/*.yaml)
 - **Cache**: `~/.cache/refact/` (shadow repos, logs, integrations, `codegraph/` SQLite stores)
 - **Project**: `.refact/` (trajectories/, knowledge/, tasks/, integrations/, `project_information.yaml` — schema_version 1, toggles + size caps for the `system_info` / `environment_instructions` / `detected_environments` / `git_info` / `project_tree` / `instruction_files` / `project_configs` / `memories` sections surfaced to the model)
-- **System prompts**: `yaml_configs/defaults/` — modes (built-in modes in `modes/`, plus project-setup wizard modes like `setup`, `setup_skills`, `setup_agents_md`, `setup_mcp`, `setup_commands`, `setup_subagents`, `setup_modes`, `setup_hooks`, `setup_knowledge`), subagents, toolbox commands. Magic vars: `%ARGS%`, `%CODE_SELECTION%`, `%WORKSPACE_INFO%`, `%PROJECT_TREE%`.
+- **System prompts**: `yaml_configs/defaults/` — modes (built-in modes in `modes/`, plus project-setup wizard modes like `setup`, `setup_skills`, `setup_agents_md`, `setup_mcp`, `setup_commands`, `setup_subagents`, `setup_modes`, `setup_hooks`, `setup_knowledge`), subagents, toolbox commands. Magic vars: `%ARGS%`, `%CODE_SELECTION%`, `%WORKSPACE_INFO%`, `%PROJECT_TREE%`, `%MODELS_INFO%`. The latter expands, when the `models_info` project-information section is enabled, to model slots, catalog capabilities, privacy zones, and provider-to-MCP access.

@@ -215,6 +215,15 @@ taxonomy: `component/*`, `type/*`, `P0-critical`/`P1-important`/`P2-nice`,
 - **Engine ↔ IDE**: LSP protocol (tower-lsp) for completions/code-lens, plus HTTP for chat and tools.
 - **IDE ↔ GUI**: `postMessage` bridge (VSCode `acquireVsCodeApi`, JetBrains `postIntellijMessage`). Events: file context, theme, tool calls.
 
+### Background subagents
+
+`subagent` is the unified background-only tool for stateful child trajectories. It returns a child
+trajectory immediately, auto-pushes completion, and inherits all parent tools when `tools` is omitted.
+Callers can select `model_type` or `model_name`, install a goal (whose budget controls child steps) and
+plan, provide `target_files` collision hints, or request an isolated worktree with optional auto-merge.
+Use the registered agent interaction and lifecycle tools documented in the engine guide; new work must not
+use the retired `delegate` tool. Legacy delegate records remain displayable for trajectory compatibility.
+
 ### Hidden Plan Roles
 
 - `set_plan` installs one hidden base `plan` only, using exactly one of inline `content` or an absolute `.md` `path`; never call it twice in one chat.
@@ -259,7 +268,7 @@ taxonomy: `component/*`, `type/*`, `P0-critical`/`P1-important`/`P2-nice`,
 | User config | `~/.config/refact/` | `default_privacy.yaml`, `providers.d/*.yaml` |
 | Cache | `~/.cache/refact/` | Shadow repos, logs, telemetry, integrations |
 | Project | `.refact/` | `trajectories/`, `knowledge/`, `tasks/`, `integrations.d/` |
-| System prompts | `refact-agent/engine/yaml_configs/defaults/` | Modes, subagents, toolbox commands |
+| System prompts | `refact-agent/engine/yaml_configs/defaults/` | Modes, subagents, toolbox commands; `%MODELS_INFO%` expands to the configured model/access snapshot when enabled |
 
 ### AGENTS.md Scoping Rules
 

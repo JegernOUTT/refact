@@ -35,6 +35,7 @@ src/
 │   ├── Config/       # Global settings + FeatureMenu
 │   ├── Connection/   # SSE connection status
 │   ├── Customization/# Agent modes, subagent forms, tool parameter editor
+│   ├── AgentsPanel/  # Live background-agent tree, messaging, cancellation
 │   ├── FIM/          # Fill-in-Middle debug
 │   ├── History/      # Chat history
 │   ├── Integrations/ # Integration config
@@ -92,6 +93,7 @@ User sends → POST /v1/chats/{chatId}/commands {type: "user_message", content}
 | `pause_required/cleared`        | Tool confirmation                                             |
 | `ide_tool_required`             | IDE tool execution needed                                     |
 | `subchat_update`                | Nested chat update                                            |
+| `background_agent_updated`      | Live background-agent summary update                          |
 | `queue_updated`                 | Command queue changed                                         |
 | `ack`                           | Command acknowledgment                                        |
 
@@ -253,12 +255,21 @@ Status semantics mirror the backend: `active=true` means this chat owns the goal
 
 ### ToolsContent (src/components/ChatContent/ToolsContent.tsx)
 
-Largest component (~1900 lines). Dispatches a `ToolCall` list to the right specialized `ToolCard` via a `processToolCalls` switch on `normalizeToolName(toolCall.function.name)`. Covers file ops (`cat`, `tree`, `search_pattern`, `search_semantic`, `search_symbol_definition`, `mv`, `rm`, `add_workspace_folder`), shells (`shell`, `shell_service`, `process_*`), agentic tools (`subagent`, `delegate`, `code_review`, `tasks_set`, `task_done`, `sleep`, `agent_done`, `final_report`), knowledge (`knowledge`, `search_trajectories`, `get_trajectory_context`, `create_knowledge`), web (`web`, `web_search`), editing (`patch_*` raw-text-doc family, `text_edit`), Chrome/browser (`ask_questions`, `chrome_*`), and the OpenAI Responses tool family (`audio`, `web_search_call`, `file_search_call`, `code_interpreter_call`, `computer_call*`, `image_generation_call`, `mcp_call`, `mcp_list_tools`, `refusal`). Falls back to `GenericTool` for anything unhandled.
+Largest component (~1900 lines). Dispatches a `ToolCall` list to the right specialized `ToolCard` via a `processToolCalls` switch on `normalizeToolName(toolCall.function.name)`. Covers file ops (`cat`, `tree`, `search_pattern`, `search_semantic`, `search_symbol_definition`, `mv`, `rm`, `add_workspace_folder`), shells (`shell`, `shell_service`, `process_*`), agentic tools (`subagent`, `code_review`, `tasks_set`, `task_done`, `sleep`, `agent_done`, `final_report`), knowledge (`knowledge`, `search_trajectories`, `get_trajectory_context`, `create_knowledge`), web (`web`, `web_search`), editing (`patch_*` raw-text-doc family, `text_edit`), Chrome/browser (`ask_questions`, `chrome_*`), and the OpenAI Responses tool family (`audio`, `web_search_call`, `file_search_call`, `code_interpreter_call`, `computer_call*`, `image_generation_call`, `mcp_call`, `mcp_list_tools`, `refusal`). Falls back to `GenericTool` for anything unhandled.
 
-- Subagent/delegate results are decorated with a `BackgroundAgentCard` built from `BackgroundAgentSummary` (kind, status, progress, edited/target files, diff/conflict/result summaries).
+- New background work is created with `subagent`. Its results are decorated with a `BackgroundAgentCard` built from `BackgroundAgentSummary`, showing status, selected model, current tool, goal/plan, worktree/merge state, questions, usage, and edit/result summaries. Legacy delegate calls and records are normalized into the same card only for compatibility.
 - Multimodal results (`MultiModalToolResult` with image content) are rendered by `MultiModalToolContent` and surface inline image previews via `DialogImage`.
 - Per-tool-group collapsible state is persisted in `CollapsibleStore` (`useStoredOpen`); the `ToolUsageSummary` header shows call counts, the latest subchat step (`step: text` progress entries), and attached-file chips.
 - Background-agent trajectory links dispatch `createChatWithId` + `switchToThread` so opening a child chat routes the user into the right tab.
+
+### Background-agent state and panel
+
+Snapshots and `background_agent_updated` events normalize into each thread's `background_agents` map;
+newer `change_seq` wins, with terminal state breaking equal-sequence ties. `AgentsPanel` combines that live
+state with `GET /v1/background-agents?chat_id=...`, renders the recursive tree with Active/All filters and
+aggregate usage, and exposes trajectory navigation, messages, and confirmed subtree cancellation. The
+compact chat card and panel preserve legacy `delegate` kinds for stored historical records, but the GUI
+must present `subagent` as the sole current spawn tool.
 
 **Tool status**: ⏳ thinking · ✅ success · ❌ error · ☁️ server (`srvtoolu_*` prefix)
 
