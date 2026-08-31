@@ -17,6 +17,7 @@ use crate::call_validation::{
 use crate::global_context::{GlobalContext, try_load_caps_quickly_if_not_present};
 use crate::scratchpad_abstract::HasTokenizerAndEot;
 use crate::chat::prepare::{prepare_chat_passthrough, ChatPrepareOptions};
+use crate::chat::internal_roles::{event, EventSubkind};
 use crate::llm::params::CacheControl;
 use crate::chat::stream_core::{
     run_llm_stream, StreamRunParams, ChoiceFinal, StreamCollector, normalize_tool_call,
@@ -66,6 +67,32 @@ fn should_compact_context_limit_error(
 
 fn subchat_retries_allowed(config: &SubchatConfig) -> bool {
     config.tool_name != "segment_summarize"
+}
+
+pub(crate) async fn drain_background_agent_inbox(
+    ccx: &Arc<AMutex<AtCommandsContext>>,
+    messages: &mut Vec<ChatMessage>,
+) {
+    let (app, agent_id) = {
+        let ccx = ccx.lock().await;
+        (ccx.app.clone(), ccx.background_agent_id.clone())
+    };
+    let Some(agent_id) = agent_id else {
+        return;
+    };
+    for message in app.agents.drain_inbox(&agent_id).await {
+        let sender = match message.from.as_str() {
+            "user" => "[message from user]".to_string(),
+            "parent" => "[message from parent]".to_string(),
+            from => format!("[notice from sibling {from}]"),
+        };
+        messages.push(event(
+            EventSubkind::SystemNotice,
+            "agents.inbox",
+            json!({ "from": message.from, "queued_at": message.queued_at }),
+            format!("{sender}\n{}", message.text),
+        ));
+    }
 }
 
 async fn emit_parent_compaction_diagnostics(
@@ -374,6 +401,7 @@ pub struct SubchatConfig {
     pub parent_tool_call_id: Option<String>,
     pub parent_subchat_tx: Option<Arc<AMutex<mpsc::UnboundedSender<Value>>>>,
     pub abort_flag: Option<Arc<AtomicBool>>,
+    pub background_agent_id: Option<String>,
     pub subchat_depth: usize,
     pub final_step_force_answer: bool,
     pub buddy_meta: Option<crate::buddy::types::BuddyThreadMeta>,
@@ -1171,6 +1199,7 @@ pub async fn resolve_subchat_config_with_parent(
         parent_tool_call_id,
         parent_subchat_tx,
         abort_flag,
+        background_agent_id: None,
         subchat_depth,
         final_step_force_answer: false,
         buddy_meta: None,
@@ -1296,6 +1325,7 @@ pub async fn resolve_subchat_config_with_explicit_params(
         parent_tool_call_id,
         parent_subchat_tx,
         abort_flag,
+        background_agent_id: None,
         subchat_depth,
         final_step_force_answer: false,
         buddy_meta: None,
@@ -1579,6 +1609,7 @@ pub async fn run_subchat(
     ));
 
     ccx.lock().await.subchat_depth = config.subchat_depth;
+    ccx.lock().await.background_agent_id = config.background_agent_id.clone();
 
     if let Some(ref parent_tx) = config.parent_subchat_tx {
         ccx.lock().await.subchat_tx = parent_tx.clone();
@@ -1892,6 +1923,8 @@ async fn run_subchat_loop(
             return Err("Aborted".to_string());
         }
         emit_subchat_progress(config, SubchatProgress::Step(step + 1));
+        drain_background_agent_inbox(&ccx, &mut messages).await;
+        persist_subchat_progress(&ccx, config, progress, &messages).await;
 
         let results = loop {
             match subchat_single_internal(
@@ -1991,6 +2024,7 @@ async fn run_subchat_loop(
         is_aborted(&config.abort_flag),
         has_final_answer(&messages),
     ) {
+        drain_background_agent_inbox(&ccx, &mut messages).await;
         messages = run_forced_final_answer_turn(
             ccx.clone(),
             config,
@@ -2103,6 +2137,8 @@ async fn run_subchat_with_wrap_up(
         }
 
         emit_subchat_progress(config, SubchatProgress::Step(step_n + 1));
+        drain_background_agent_inbox(&ccx, &mut messages).await;
+        persist_subchat_progress(&ccx, config, progress, &messages).await;
 
         if has_final_answer(&messages) {
             break;
@@ -2242,6 +2278,7 @@ async fn run_subchat_with_wrap_up(
     persist_subchat_progress(&ccx, config, progress, &messages).await;
 
     messages.push(ChatMessage::new("user".to_string(), wrap_up.prompt.clone()));
+    drain_background_agent_inbox(&ccx, &mut messages).await;
     record_subchat_progress(progress, &messages);
 
     let final_results = loop {
@@ -3113,6 +3150,7 @@ mod subchat_tests {
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
+            background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
             buddy_meta: None,
@@ -3710,6 +3748,7 @@ mod subchat_tests {
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
+            background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
             buddy_meta: None,
@@ -3761,6 +3800,7 @@ mod subchat_tests {
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
+            background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
             buddy_meta: None,
@@ -3818,6 +3858,7 @@ mod subchat_tests {
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
+            background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
             buddy_meta: None,
@@ -4059,6 +4100,7 @@ mod subchat_tests {
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
+            background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
             buddy_meta: None,

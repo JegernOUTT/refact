@@ -127,10 +127,15 @@ use crate::http::routers::v1::worktrees::{
     handle_v1_worktrees_list, handle_v1_worktrees_merge, handle_v1_worktrees_open,
     handle_v1_worktrees_summary,
 };
+use crate::http::routers::v1::background_agents::{
+    handle_v1_background_agents_cancel, handle_v1_background_agents_get,
+    handle_v1_background_agents_message,
+};
 
 mod ast;
 pub mod at_commands;
 pub mod at_tools;
+mod background_agents;
 pub mod browser_settings;
 pub mod buddy;
 pub mod buddy_drafts;
@@ -375,6 +380,15 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route("/worktrees/:id/diff", get(handle_v1_worktrees_diff))
         .route("/worktrees/:id/merge", post(handle_v1_worktrees_merge))
         .route("/worktrees/:id/open", post(handle_v1_worktrees_open))
+        .route("/background-agents", get(handle_v1_background_agents_get))
+        .route(
+            "/background-agents/:agent_id/cancel",
+            post(handle_v1_background_agents_cancel),
+        )
+        .route(
+            "/background-agents/:agent_id/message",
+            post(handle_v1_background_agents_message),
+        )
         .route("/chat-modes", get(handle_v1_chat_modes))
         .route(
             "/customization/registry",

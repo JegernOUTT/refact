@@ -135,13 +135,23 @@ fn agent_result_schema() -> Value {
 }
 
 fn agent_cancel_schema() -> Value {
-    agent_id_schema(serde_json::Map::from_iter([(
-        "reason".to_string(),
-        json!({
-            "type": "string",
-            "description": "Optional cancellation reason"
-        }),
-    )]))
+    agent_id_schema(serde_json::Map::from_iter([
+        (
+            "reason".to_string(),
+            json!({
+                "type": "string",
+                "description": "Optional cancellation reason"
+            }),
+        ),
+        (
+            "subtree".to_string(),
+            json!({
+                "type": "boolean",
+                "default": true,
+                "description": "Cancel descendants too. Default: true"
+            }),
+        ),
+    ]))
 }
 
 fn parse_required_string(args: &HashMap<String, Value>, key: &str) -> Result<String, String> {
@@ -397,15 +407,17 @@ fn format_agent_last_activity(record: &BackgroundAgent) -> String {
 fn format_agent_table(rows: &[BackgroundAgent]) -> String {
     let now = Utc::now();
     let mut result = String::from("# Background Agents\n\n");
-    result.push_str("| ID | Kind | Status | Title | Age | Last activity |\n");
-    result.push_str("|---|---|---|---|---|---|\n");
+    result.push_str("| ID | Kind | Status | Title | Tool | Tokens | Age | Last activity |\n");
+    result.push_str("|---|---|---|---|---|---|---|---|\n");
     for row in rows {
         result.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} |\n",
             markdown_cell(&row.agent_id, 80),
             kind_label(row.kind),
             format_status_chip(row.status),
             markdown_cell(&row.title, 80),
+            markdown_cell(row.current_tool.as_deref().unwrap_or("-"), 60),
+            row.tokens_used,
             human_age(row.created_at, now),
             markdown_cell(&format_agent_last_activity(row), 80),
         ));
@@ -471,6 +483,37 @@ fn format_agent_status_block(record: &BackgroundAgent) -> String {
         .unwrap_or_else(|| "not started".to_string());
     result.push_str(&format!("- Started: {started}\n"));
     result.push_str(&format!("- Step count: {}\n", record.step_count));
+    format_optional_line(&mut result, "Current tool", record.current_tool.as_deref());
+    format_optional_line(&mut result, "Model type", record.model_type.as_deref());
+    result.push_str(&format!("- Model: {}\n", record.model));
+    format_optional_line(
+        &mut result,
+        "Worktree branch",
+        record.worktree_branch.as_deref(),
+    );
+    format_optional_line(&mut result, "Merge status", record.merge_status.as_deref());
+    format_optional_line(&mut result, "Goal", record.goal_summary.as_deref());
+    result.push_str(&format!("- Tokens: {}\n", record.tokens_used));
+    if let Some(cost) = record.cost_usd {
+        result.push_str(&format!("- Cost: ${cost:.4}\n"));
+    }
+    if !record.questions.is_empty() {
+        let questions = record
+            .questions
+            .iter()
+            .map(|question| match &question.answer {
+                Some(answer) => {
+                    format!("{}: answered ({})", question.id, truncate_chars(answer, 80))
+                }
+                None => format!(
+                    "{}: pending ({})",
+                    question.id,
+                    truncate_chars(&question.text, 80)
+                ),
+            })
+            .collect::<Vec<_>>();
+        format_list_line(&mut result, "Questions", &questions);
+    }
     result.push_str(&format!(
         "- Last activity: {}\n",
         record.last_activity.as_deref().unwrap_or("-")
@@ -554,6 +597,37 @@ async fn format_agent_result(
     ));
     result.push_str(&format!("- Agent ID: {}\n", record.agent_id));
     result.push_str(&format!("- Kind: {}\n", kind_label(record.kind)));
+    format_optional_line(&mut result, "Current tool", record.current_tool.as_deref());
+    result.push_str(&format!("- Model: {}\n", record.model));
+    format_optional_line(&mut result, "Model type", record.model_type.as_deref());
+    format_optional_line(
+        &mut result,
+        "Worktree branch",
+        record.worktree_branch.as_deref(),
+    );
+    format_optional_line(&mut result, "Merge status", record.merge_status.as_deref());
+    format_optional_line(&mut result, "Goal", record.goal_summary.as_deref());
+    result.push_str(&format!("- Tokens: {}\n", record.tokens_used));
+    if let Some(cost) = record.cost_usd {
+        result.push_str(&format!("- Cost: ${cost:.4}\n"));
+    }
+    if !record.questions.is_empty() {
+        let questions = record
+            .questions
+            .iter()
+            .map(|question| match &question.answer {
+                Some(answer) => {
+                    format!("{}: answered ({})", question.id, truncate_chars(answer, 80))
+                }
+                None => format!(
+                    "{}: pending ({})",
+                    question.id,
+                    truncate_chars(&question.text, 80)
+                ),
+            })
+            .collect::<Vec<_>>();
+        format_list_line(&mut result, "Questions", &questions);
+    }
     if let Some(child_chat_id) = &record.child_chat_id {
         result.push_str(&format!(
             "- Child trajectory: [view](refact://chat/{child_chat_id})\n"
@@ -820,13 +894,21 @@ impl Tool for ToolAgentCancel {
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let agent_id = parse_required_string(args, "agent_id")?;
         let reason = parse_optional_string(args, "reason");
+        let subtree = parse_optional_bool(args, "subtree", true)?;
         let (app, parent_chat_id) = background_agent_context(&ccx).await;
         let current = app
             .agents
             .get(&parent_chat_id, &agent_id)
             .await
             .map_err(|error| map_registry_error(&agent_id, error))?;
-        if current.status.is_terminal() {
+        let subtree_has_running_descendant = subtree
+            && app
+                .agents
+                .list_descendants(&agent_id)
+                .await
+                .iter()
+                .any(|record| !record.status.is_terminal());
+        if current.status.is_terminal() && !subtree_has_running_descendant {
             return Ok(tool_message(
                 tool_call_id,
                 format!(
@@ -837,13 +919,20 @@ impl Tool for ToolAgentCancel {
         }
         let updated = app
             .agents
-            .cancel(&parent_chat_id, &agent_id, reason)
+            .cancel_subtree(&parent_chat_id, &agent_id, subtree, reason)
             .await
             .map_err(|error| map_registry_error(&agent_id, error))?;
-        crate::agents::spawn::emit_background_agent_update(app, &updated).await;
+        for record in &updated {
+            crate::agents::spawn::emit_background_agent_update(app.clone(), record).await;
+        }
+        let cancelled = updated
+            .iter()
+            .map(|record| record.agent_id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         Ok(tool_message(
             tool_call_id,
-            format!("✓ Cancel requested for {agent_id}. Status is now cancelled."),
+            format!("✓ Cancel requested for: {cancelled}."),
         ))
     }
 
@@ -987,7 +1076,9 @@ mod tests {
         );
 
         assert!(output.contains("# Background Agents"));
-        assert!(output.contains("| ID | Kind | Status | Title | Age | Last activity |"));
+        assert!(
+            output.contains("| ID | Kind | Status | Title | Tool | Tokens | Age | Last activity |")
+        );
         assert!(output.contains(&running.agent_id));
         assert!(output.contains("delegate"));
         assert!(output.contains("🟢 running"));
@@ -1085,7 +1176,7 @@ mod tests {
             .unwrap(),
         );
 
-        assert!(output.contains("✓ Cancel requested for bgagent-"));
+        assert!(output.contains("✓ Cancel requested for: bgagent-"));
     }
 
     #[tokio::test]
@@ -1452,6 +1543,55 @@ mod tests {
             envelope["agent"]["status"],
             BgAgentStatus::Cancelled.as_str()
         );
+    }
+
+    #[tokio::test]
+    async fn agent_cancel_subtree_cancels_descendants() {
+        let (_temp, app, ccx) = test_context(PARENT).await;
+        let (parent, parent_abort, _) = app
+            .agents
+            .create(create_request(PARENT, BgAgentKind::Subagent, "Parent"))
+            .await
+            .unwrap();
+        app.agents
+            .mark_running(&parent.agent_id, "child-chat".to_string())
+            .await
+            .unwrap();
+        let (child, child_abort, _) = app
+            .agents
+            .create(create_request("child-chat", BgAgentKind::Subagent, "Child"))
+            .await
+            .unwrap();
+        app.agents
+            .mark_running(&child.agent_id, "grandchild-chat".to_string())
+            .await
+            .unwrap();
+
+        let output = output_text(
+            ToolAgentCancel {
+                config_path: String::new(),
+            }
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &args(&[("agent_id", json!(parent.agent_id.clone()))]),
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert!(parent_abort.load(Ordering::SeqCst));
+        assert!(child_abort.load(Ordering::SeqCst));
+        assert_eq!(
+            app.agents.get_any(&parent.agent_id).await.unwrap().status,
+            BgAgentStatus::Cancelled
+        );
+        assert_eq!(
+            app.agents.get_any(&child.agent_id).await.unwrap().status,
+            BgAgentStatus::Cancelled
+        );
+        assert!(output.contains(&parent.agent_id));
+        assert!(output.contains(&child.agent_id));
     }
 
     #[test]

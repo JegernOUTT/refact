@@ -1748,6 +1748,7 @@ async fn summarize_segment_text(
         parent_tool_call_id: None,
         parent_subchat_tx: None,
         abort_flag,
+        background_agent_id: None,
         subchat_depth: 0,
         final_step_force_answer: false,
         buddy_meta: None,

@@ -713,6 +713,32 @@ impl BackgroundAgentRegistry {
         self.mark_cancelled(agent_id, reason).await
     }
 
+    pub async fn cancel_subtree(
+        &self,
+        parent_chat_id: &str,
+        agent_id: &str,
+        subtree: bool,
+        reason: Option<String>,
+    ) -> Result<Vec<BackgroundAgent>, String> {
+        let root = self.get(parent_chat_id, agent_id).await?;
+        let mut records = vec![root];
+        if subtree {
+            records.extend(self.list_descendants(agent_id).await);
+        }
+        let mut updated = Vec::with_capacity(records.len());
+        for record in records {
+            if record.status.is_terminal() {
+                updated.push(record);
+                continue;
+            }
+            updated.push(
+                self.cancel(&record.parent_chat_id, &record.agent_id, reason.clone())
+                    .await?,
+            );
+        }
+        Ok(updated)
+    }
+
     pub async fn abort_flag(&self, agent_id: &str) -> Option<Arc<AtomicBool>> {
         self.runtime
             .read()
@@ -750,6 +776,14 @@ impl BackgroundAgentRegistry {
         }
         inbox.push(msg);
         Ok(())
+    }
+
+    pub async fn drain_inbox(&self, agent_id: &str) -> Vec<InboxMessage> {
+        let Some(inbox) = self.inbox_for(agent_id).await else {
+            return Vec::new();
+        };
+        let drained = std::mem::take(&mut *inbox.lock().await);
+        drained
     }
 
     pub async fn overlap_warning(

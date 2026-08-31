@@ -24,6 +24,7 @@ mod tool_activate_skill;
 mod tool_add_workspace_folder;
 mod tool_agent_chat_summary;
 mod tool_agent_diff;
+pub mod tool_agent_interact;
 mod tool_agent_lifecycle;
 mod tool_agent_planner_qna;
 mod tool_agent_pulse;

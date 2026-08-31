@@ -2500,6 +2500,7 @@ async fn run_task_briefing_subchat(
                     parent_tool_call_id: None,
                     parent_subchat_tx: None,
                     abort_flag: None,
+                    background_agent_id: None,
                     subchat_depth: 0,
                     final_step_force_answer: false,
                     buddy_meta: None,

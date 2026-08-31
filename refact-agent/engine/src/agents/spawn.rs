@@ -197,6 +197,7 @@ pub async fn spawn_background_agent(
             parent_tool_call_id: parent_tool_call_id.clone(),
             parent_subchat_tx: parent_subchat_tx.clone(),
             abort_flag: None,
+            background_agent_id: None,
             subchat_depth: subchat_depth + 1,
             final_step_force_answer: false,
             buddy_meta: None,
@@ -387,6 +388,7 @@ async fn run_spawned_agent(
     spawned_worktree: Option<SpawnedWorktree>,
 ) -> BackgroundAgent {
     config.abort_flag = Some(abort_flag);
+    config.background_agent_id = Some(agent_id.clone());
     config.final_step_force_answer = true;
     {
         let progress_app = app.clone();
