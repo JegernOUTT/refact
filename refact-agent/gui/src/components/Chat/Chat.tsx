@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Bot } from "lucide-react";
 import { ChatForm, ChatFormProps } from "../ChatForm";
 import { ChatContent } from "../ChatContent";
 import { Flex, Button, Card, Container } from "@radix-ui/themes";
@@ -9,9 +10,12 @@ import { useChatActions } from "../../hooks/useChatActions";
 import { type Config } from "../../features/Config/configSlice";
 import {
   enableSend,
+  selectActiveBackgroundAgents,
+  selectBackgroundAgentsByThread,
   selectIsStreamingById,
   selectPreventSendById,
   selectIsBuddyChat,
+  switchToThread,
   useThreadId,
 } from "../../features/Chat/Thread";
 import { BuddyChatCompanion } from "../../features/Buddy";
@@ -37,6 +41,15 @@ import {
   selectWorkspaceDock,
 } from "../../features/Workspace/workspaceSlice";
 import { useBottomDockClearance } from "./useBottomDockClearance";
+import { AgentsPanel } from "../../features/AgentsPanel";
+import {
+  autoOpenRequested,
+  panelAutoClosed,
+  panelOpened,
+  selectAgentsPanelOpen,
+  selectAgentsPanelUserOpened,
+} from "../../features/AgentsPanel/agentsPanelSlice";
+import { useMediaQuery } from "../ui";
 
 export type ChatProps = {
   host: Config["host"];
@@ -56,6 +69,20 @@ export const Chat: React.FC<ChatProps> = ({
 
   const [isViewingRawJSON, setIsViewingRawJSON] = useState(false);
   const chatId = useThreadId();
+  const isNarrow = useMediaQuery("(max-width: 719px)");
+  const panelOpen = useAppSelector((state) =>
+    selectAgentsPanelOpen(state, chatId),
+  );
+  const panelUserOpened = useAppSelector((state) =>
+    selectAgentsPanelUserOpened(state, chatId),
+  );
+  const agents = useAppSelector((state) =>
+    selectBackgroundAgentsByThread(state, chatId),
+  );
+  const activeAgents = useAppSelector((state) =>
+    selectActiveBackgroundAgents(state, chatId),
+  );
+  const previousRunningCount = useRef<number | null>(null);
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
   );
@@ -88,6 +115,39 @@ export const Chat: React.FC<ChatProps> = ({
       dispatch(unregisterVisibleChatMount({ chatId }));
     };
   }, [dispatch, chatId]);
+
+  useEffect(() => {
+    const previous = previousRunningCount.current;
+    const running = activeAgents.length;
+    previousRunningCount.current = running;
+
+    if (previous === 0 && running > 0 && !isNarrow) {
+      dispatch(autoOpenRequested(chatId));
+    }
+    if (
+      previous !== null &&
+      previous > 0 &&
+      running === 0 &&
+      !panelUserOpened
+    ) {
+      dispatch(panelAutoClosed(chatId));
+    }
+  }, [activeAgents.length, chatId, dispatch, isNarrow, panelUserOpened]);
+
+  const handleToggleAgents = useCallback(() => {
+    if (panelOpen) {
+      dispatch(panelAutoClosed(chatId));
+    } else {
+      dispatch(panelOpened(chatId));
+    }
+  }, [chatId, dispatch, panelOpen]);
+
+  const handleAgentNavigation = useCallback(
+    (childChatId: string) => {
+      dispatch(switchToThread({ id: childChatId }));
+    },
+    [dispatch],
+  );
 
   const preventSend = useAppSelector((state) =>
     selectPreventSendById(state, chatId),
@@ -126,7 +186,7 @@ export const Chat: React.FC<ChatProps> = ({
   return (
     <DropzoneProvider asChild>
       <Flex
-        className={styles.chatRoot}
+        className={styles.chatShell}
         style={{
           ...style,
           minHeight: 0,
@@ -135,77 +195,104 @@ export const Chat: React.FC<ChatProps> = ({
           height: "100%",
           overflow: "hidden",
         }}
-        direction="column"
-        flexGrow="1"
-        width="100%"
-        px="1"
       >
         <Flex
+          className={styles.chatRoot}
           direction="column"
-          className={styles.transcriptArea}
-          style={{
-            flex: "1 1 auto",
-            minHeight: 0,
-            minWidth: 0,
-            maxWidth: "100%",
-            overflow: "hidden",
-          }}
+          flexGrow="1"
+          width="100%"
+          px="1"
         >
-          <ChatContent
-            onRetry={handleRetry}
-            onStopStreaming={handleAbort}
-            onRetryGeneration={handleRetryGeneration}
-          />
-        </Flex>
+          {Object.keys(agents).length > 0 && (
+            <button
+              aria-expanded={panelOpen}
+              className={styles.agentsToggle}
+              type="button"
+              onClick={handleToggleAgents}
+            >
+              <Bot aria-hidden="true" size={16} />
+              <span>Agents</span>
+              {activeAgents.length > 0 && (
+                <span className={styles.agentsBadge}>
+                  {activeAgents.length}
+                </span>
+              )}
+            </button>
+          )}
+          <Flex
+            direction="column"
+            className={styles.transcriptArea}
+            style={{
+              flex: "1 1 auto",
+              minHeight: 0,
+              minWidth: 0,
+              maxWidth: "100%",
+              overflow: "hidden",
+            }}
+          >
+            <ChatContent
+              onRetry={handleRetry}
+              onStopStreaming={handleAbort}
+              onRetryGeneration={handleRetryGeneration}
+            />
+          </Flex>
 
-        <Flex
-          ref={bottomDockRef}
-          direction="column"
-          className={styles.bottomDock}
-        >
-          <Container>
-            <SkillsIndicator chatId={chatId} />
-          </Container>
-
-          {!isBuddyChat && shouldCheckpointsPopupBeShown && <Checkpoints />}
-
-          {browserOversizeInfo && (
+          <Flex
+            ref={bottomDockRef}
+            direction="column"
+            className={styles.bottomDock}
+          >
             <Container>
-              <BrowserContextGuard chatId={chatId} />
+              <SkillsIndicator chatId={chatId} />
             </Container>
-          )}
 
-          {!isStreaming && preventSend && unCalledTools && (
-            <Flex py="4">
-              <Card className={styles.dockPanel} style={{ width: "100%" }}>
-                <Flex direction="column" align="center" gap="2" width="100%">
-                  Chat was interrupted with uncalled tools calls.
-                  <Button onClick={onEnableSend}>Resume</Button>
-                </Flex>
-              </Card>
-            </Flex>
-          )}
+            {!isBuddyChat && shouldCheckpointsPopupBeShown && <Checkpoints />}
 
-          <Container>
-            <div className={styles.dockColumn}>
-              {!isBuddyChat && <BuddyChatCompanion chatId={chatId} />}
-              {showTerminalWorkbench ? (
-                <div className={styles.terminalWorkbench}>
-                  <TerminalPanel chatId={chatId} />
+            {browserOversizeInfo && (
+              <Container>
+                <BrowserContextGuard chatId={chatId} />
+              </Container>
+            )}
+
+            {!isStreaming && preventSend && unCalledTools && (
+              <Flex py="4">
+                <Card className={styles.dockPanel} style={{ width: "100%" }}>
+                  <Flex direction="column" align="center" gap="2" width="100%">
+                    Chat was interrupted with uncalled tools calls.
+                    <Button onClick={onEnableSend}>Resume</Button>
+                  </Flex>
+                </Card>
+              </Flex>
+            )}
+
+            <Container>
+              <div className={styles.dockColumn}>
+                {!isBuddyChat && <BuddyChatCompanion chatId={chatId} />}
+                {showTerminalWorkbench ? (
+                  <div className={styles.terminalWorkbench}>
+                    <TerminalPanel chatId={chatId} />
+                  </div>
+                ) : null}
+                <div className={styles.dockGroup}>
+                  <TaskProgressWidget />
+                  <ChatForm
+                    key={chatId}
+                    embedded
+                    onSubmit={handleSubmit}
+                    onClose={maybeSendToSidebar}
+                  />
                 </div>
-              ) : null}
-              <div className={styles.dockGroup}>
-                <TaskProgressWidget />
-                <ChatForm
-                  key={chatId}
-                  embedded
-                  onSubmit={handleSubmit}
-                  onClose={maybeSendToSidebar}
-                />
               </div>
-            </div>
-          </Container>
+            </Container>
+          </Flex>
         </Flex>
+        {panelOpen && (
+          <AgentsPanel
+            chatId={chatId}
+            narrow={isNarrow}
+            onNavigate={handleAgentNavigation}
+          />
+        )}
       </Flex>
     </DropzoneProvider>
   );

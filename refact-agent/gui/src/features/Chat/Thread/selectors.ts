@@ -250,7 +250,7 @@ export type AgentTreeNode = {
   children: AgentTreeNode[];
 };
 
-function buildBackgroundAgentsTree(
+export function buildBackgroundAgentsTree(
   agents: Record<string, BackgroundAgentSummary>,
   threadId: string,
 ): AgentTreeNode[] {
@@ -289,12 +289,20 @@ function buildBackgroundAgentsTree(
 }
 
 export const selectBackgroundAgentsTree = createSelector(
-  [selectBackgroundAgentsByThread, (_state: RootState, threadId: string) => threadId],
+  [
+    selectBackgroundAgentsByThread,
+    (_state: RootState, threadId: string) => threadId,
+  ],
   buildBackgroundAgentsTree,
 );
 
-function flattenBackgroundAgentTree(nodes: AgentTreeNode[]): BackgroundAgentSummary[] {
-  return nodes.flatMap((node) => [node.agent, ...flattenBackgroundAgentTree(node.children)]);
+export function flattenBackgroundAgentTree(
+  nodes: AgentTreeNode[],
+): BackgroundAgentSummary[] {
+  return nodes.flatMap((node) => [
+    node.agent,
+    ...flattenBackgroundAgentTree(node.children),
+  ]);
 }
 
 export type AgentsAggregateUsage = {
@@ -329,7 +337,8 @@ export const selectPendingAgentQuestions = createSelector(
   [selectBackgroundAgentsTree],
   (tree): AgentQuestion[] =>
     flattenBackgroundAgentTree(tree).flatMap(
-      (agent) => agent.questions?.filter((question) => question.answer == null) ?? [],
+      (agent) =>
+        agent.questions?.filter((question) => question.answer == null) ?? [],
     ),
 );
 

@@ -6,12 +6,14 @@ export type AgentsPanelState = {
   openByChat: Record<string, boolean | undefined>;
   tab: AgentsPanelTab;
   userClosedByChat: Record<string, boolean>;
+  userOpenedByChat: Record<string, boolean>;
 };
 
 const initialState: AgentsPanelState = {
   openByChat: {},
   tab: "active",
   userClosedByChat: {},
+  userOpenedByChat: {},
 };
 
 export const agentsPanelSlice = createSlice({
@@ -22,6 +24,7 @@ export const agentsPanelSlice = createSlice({
     panelOpened: (state, action: PayloadAction<string>) => {
       state.openByChat[action.payload] = true;
       state.userClosedByChat[action.payload] = false;
+      state.userOpenedByChat[action.payload] = true;
     },
     panelClosed: (state, action: PayloadAction<string>) => {
       state.openByChat[action.payload] = false;
@@ -33,13 +36,22 @@ export const agentsPanelSlice = createSlice({
     autoOpenRequested: (state, action: PayloadAction<string>) => {
       if (!state.userClosedByChat[action.payload]) {
         state.openByChat[action.payload] = true;
+        state.userOpenedByChat[action.payload] = false;
       }
+    },
+    panelAutoClosed: (state, action: PayloadAction<string>) => {
+      state.openByChat[action.payload] = false;
     },
   },
 });
 
-export const { panelOpened, panelClosed, tabChanged, autoOpenRequested } =
-  agentsPanelSlice.actions;
+export const {
+  panelOpened,
+  panelClosed,
+  tabChanged,
+  autoOpenRequested,
+  panelAutoClosed,
+} = agentsPanelSlice.actions;
 
 type AgentsPanelRootState = {
   agentsPanel: AgentsPanelState;
@@ -65,6 +77,16 @@ export const selectAgentsPanelUserClosed = (
   const userClosedByChat = state.agentsPanel.userClosedByChat;
   return Object.prototype.hasOwnProperty.call(userClosedByChat, chatId)
     ? userClosedByChat[chatId]
+    : false;
+};
+
+export const selectAgentsPanelUserOpened = (
+  state: AgentsPanelRootState,
+  chatId: string,
+) => {
+  const userOpenedByChat = state.agentsPanel.userOpenedByChat;
+  return Object.prototype.hasOwnProperty.call(userOpenedByChat, chatId)
+    ? userOpenedByChat[chatId]
     : false;
 };
 
