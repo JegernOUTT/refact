@@ -5,4 +5,7 @@ pub mod spawn;
 pub use refact_agents_core::{registry, storage, types};
 
 #[cfg(test)]
+mod spawn_lifecycle_tests;
+
+#[cfg(test)]
 mod tests;
