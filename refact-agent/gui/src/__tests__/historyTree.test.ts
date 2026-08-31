@@ -385,4 +385,87 @@ describe("buildHistoryTree", () => {
       expect(result[0].id).toBe("a");
     });
   });
+
+  describe("orphaned subchats", () => {
+    it("should not surface a parentless subagent chat as a root", () => {
+      const chats = {
+        a: createItem("a"),
+        b: createItem("b", { title: "Subchat", link_type: "subagent" }),
+      };
+      const result = buildHistoryTree(chats);
+
+      expect(result.map((r) => r.id).sort()).toEqual(["a"]);
+    });
+
+    it("should not surface parentless delegate / gather_files / review_agent chats as roots", () => {
+      const chats = {
+        a: createItem("a"),
+        b: createItem("b", { title: "Subchat", link_type: "delegate" }),
+        c: createItem("c", {
+          title: "Subchat",
+          link_type: "gather_files",
+        }),
+        d: createItem("d", {
+          title: "Subchat",
+          link_type: "review_agent",
+        }),
+      };
+      const result = buildHistoryTree(chats);
+
+      expect(result.map((r) => r.id).sort()).toEqual(["a"]);
+    });
+
+    it("should drop internal trace chats entirely", () => {
+      const chats = {
+        a: createItem("a"),
+        b: createItem("b", {
+          title: "Subchat",
+          link_type: "internal:memo_extraction",
+        }),
+        c: createItem("c", {
+          title: "Subchat",
+          link_type: "internal:verifier",
+        }),
+      };
+      const result = buildHistoryTree(chats);
+
+      expect(result.map((r) => r.id).sort()).toEqual(["a"]);
+      expect(result[0].children).toHaveLength(0);
+      expect(result[0].bubbleChildren).toHaveLength(0);
+    });
+
+    it("should drop internal trace chats even when they have a parent", () => {
+      const chats = {
+        a: createItem("a"),
+        b: createItem("b", {
+          parent_id: "a",
+          link_type: "internal:title_generation",
+        }),
+      };
+      const result = buildHistoryTree(chats);
+
+      expect(result.map((r) => r.id).sort()).toEqual(["a"]);
+      expect(result[0].bubbleChildren).toHaveLength(0);
+      expect(result[0].children).toHaveLength(0);
+    });
+
+    it("should still treat main link types without a resolvable parent as roots", () => {
+      const chats = {
+        a: createItem("a", { parent_id: "missing", link_type: "handoff" }),
+      };
+      const result = buildHistoryTree(chats);
+
+      expect(result.map((r) => r.id).sort()).toEqual(["a"]);
+    });
+
+    it("should still treat plain chats with no link metadata as roots", () => {
+      const chats = {
+        a: createItem("a"),
+        b: createItem("b"),
+      };
+      const result = buildHistoryTree(chats);
+
+      expect(result.map((r) => r.id).sort()).toEqual(["a", "b"]);
+    });
+  });
 });

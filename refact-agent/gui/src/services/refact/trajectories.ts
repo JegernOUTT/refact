@@ -207,7 +207,8 @@ export const trajectoriesApi = createApi({
     listAllTrajectories: builder.query<TrajectoryMeta[], undefined>({
       queryFn: async (_args, api, _opts, baseQuery) => {
         const state = api.getState() as RootState;
-        const url = buildApiUrlFromState(state, "/v1/trajectories/all");
+        const params = new URLSearchParams({ displayable_only: "true" });
+        const url = buildApiUrlFromState(state, "/v1/trajectories/all", params);
         const result = await baseQuery({ url });
         if (result.error) return { error: result.error };
         return { data: result.data as TrajectoryMeta[] };

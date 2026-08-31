@@ -680,7 +680,9 @@ pub fn trajectory_event_is_displayable_chat(event: &TrajectoryEvent) -> bool {
     if is_internal_trace_link_type(event.link_type.as_deref()) {
         return false;
     }
-    if event.parent_id.is_some() && !trajectory_list_main_link_type(event.link_type.as_deref()) {
+    if (event.link_type.is_some() || event.parent_id.is_some())
+        && !trajectory_list_main_link_type(event.link_type.as_deref())
+    {
         return false;
     }
 
@@ -700,7 +702,7 @@ pub(crate) fn trajectory_list_data_is_displayable_chat(data: &TrajectoryListData
     if is_internal_trace_link_type(link_type) {
         return false;
     }
-    if parent_id.is_some() && !trajectory_list_main_link_type(link_type) {
+    if (link_type.is_some() || parent_id.is_some()) && !trajectory_list_main_link_type(link_type) {
         return false;
     }
 
@@ -6787,6 +6789,12 @@ pub struct TrajectoriesListQuery {
     pub displayable_only: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct TrajectoriesAllQuery {
+    #[serde(default)]
+    pub displayable_only: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct PaginatedTrajectories {
     pub items: Vec<TrajectoryMeta>,
@@ -7389,7 +7397,10 @@ pub async fn handle_v1_trajectories_list(
         .unwrap())
 }
 
-pub async fn list_all_trajectories_meta(app: AppState) -> Result<Vec<TrajectoryMeta>, String> {
+pub async fn list_all_trajectories_meta(
+    app: AppState,
+    displayable_only: bool,
+) -> Result<Vec<TrajectoryMeta>, String> {
     let gcx = app.gcx.clone();
     let mut result: Vec<TrajectoryMeta> = Vec::new();
     let mut seen_ids = std::collections::HashSet::new();
@@ -7420,6 +7431,9 @@ pub async fn list_all_trajectories_meta(app: AppState) -> Result<Vec<TrajectoryM
             if matches!(entry.source, trajectory_index::TrajectoryIndexSource::Buddy) {
                 continue;
             }
+            if displayable_only && !entry.displayable_chat {
+                continue;
+            }
             if seen_ids.insert(entry.id.clone()) {
                 let mut meta = trajectory_index::meta_from_entry(&trajectories_dir, &entry);
                 if let Some(worktree) = meta.worktree.clone() {
@@ -7447,8 +7461,9 @@ pub async fn list_all_trajectories_meta(app: AppState) -> Result<Vec<TrajectoryM
 
 pub async fn handle_v1_trajectories_all(
     State(app): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<TrajectoriesAllQuery>,
 ) -> Result<Response<Body>, ScratchError> {
-    let result = list_all_trajectories_meta(app)
+    let result = list_all_trajectories_meta(app, params.displayable_only)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Response::builder()
@@ -10517,6 +10532,89 @@ mod tests {
         assert!(!page.has_more);
     }
 
+    #[tokio::test]
+    async fn all_trajectories_displayable_only_filters_subchats_without_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_gcx, app) = make_app_with_workspace(dir.path()).await;
+        let root = dir.path().join(".refact");
+
+        write_trajectory_file(
+            &root.join("trajectories").join("project-chat.json"),
+            "project-chat",
+            "Project Chat",
+            "2024-01-01T00:00:05Z",
+        )
+        .await;
+
+        let linked_path = root.join("trajectories").join("subchat-linked.json");
+        let mut linked = sample_trajectory("subchat-linked", "Subchat", "2024-01-01T00:00:04Z");
+        linked["parent_id"] = json!("project-chat");
+        linked["link_type"] = json!("subagent");
+        tokio::fs::create_dir_all(linked_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&linked_path, serde_json::to_string(&linked).unwrap())
+            .await
+            .unwrap();
+
+        let orphan_path = root.join("trajectories").join("subchat-orphan.json");
+        let mut orphan = sample_trajectory("subchat-orphan", "Subchat", "2024-01-01T00:00:03Z");
+        orphan["link_type"] = json!("subagent");
+        tokio::fs::write(&orphan_path, serde_json::to_string(&orphan).unwrap())
+            .await
+            .unwrap();
+
+        let handoff_path = root.join("trajectories").join("handoff-chat.json");
+        let mut handoff = sample_trajectory("handoff-chat", "Handoff Chat", "2024-01-01T00:00:02Z");
+        handoff["parent_id"] = json!("project-chat");
+        handoff["link_type"] = json!("handoff");
+        tokio::fs::write(&handoff_path, serde_json::to_string(&handoff).unwrap())
+            .await
+            .unwrap();
+
+        let listed = list_all_trajectories_meta(app.clone(), true).await.unwrap();
+        let ids: std::collections::HashSet<_> =
+            listed.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            std::collections::HashSet::from(["project-chat", "handoff-chat"])
+        );
+
+        let unfiltered = list_all_trajectories_meta(app, false).await.unwrap();
+        let unfiltered_ids: std::collections::HashSet<_> =
+            unfiltered.iter().map(|item| item.id.as_str()).collect();
+        assert!(
+            unfiltered_ids.contains("subchat-orphan") && unfiltered_ids.contains("subchat-linked"),
+            "displayable_only=false must keep returning every trajectory"
+        );
+    }
+
+    #[test]
+    fn subagentic_link_types_are_hidden_without_a_parent_id() {
+        let orphan_subchat = |link_type: &str| -> TrajectoryListData {
+            TrajectoryListData {
+                id: "subchat-orphan".to_string(),
+                updated_at: "2024-01-01T00:00:00Z".to_string(),
+                mode: Some("agent".to_string()),
+                extra: serde_json::from_value(json!({ "link_type": link_type })).unwrap(),
+            }
+        };
+
+        for link_type in ["subagent", "delegate", "gather_files", "review_agent"] {
+            assert!(
+                !trajectory_list_data_is_displayable_chat(&orphan_subchat(link_type)),
+                "{link_type} without parent_id must stay hidden"
+            );
+        }
+
+        for link_type in ["handoff", "mode_transition", "branch"] {
+            assert!(
+                trajectory_list_data_is_displayable_chat(&orphan_subchat(link_type)),
+                "{link_type} must remain visible"
+            );
+        }
+    }
+
     #[test]
     fn displayable_chat_predicates_follow_mode_not_task_scope() {
         let review = TrajectoryListData {
@@ -11424,7 +11522,9 @@ mod tests {
             "2024-01-01T00:00:01Z",
         )
         .await;
-        let listed_without_session = list_all_trajectories_meta(app.clone()).await.unwrap();
+        let listed_without_session = list_all_trajectories_meta(app.clone(), false)
+            .await
+            .unwrap();
         let item_without_session = listed_without_session
             .iter()
             .find(|item| item.id == chat_id)
@@ -11448,7 +11548,7 @@ mod tests {
             .await
             .insert(chat_id.to_string(), session_arc);
 
-        let listed = list_all_trajectories_meta(app).await.unwrap();
+        let listed = list_all_trajectories_meta(app, false).await.unwrap();
         let item = listed
             .iter()
             .find(|item| item.id == chat_id)
@@ -11493,7 +11593,7 @@ mod tests {
             .await
             .insert(chat_id.to_string(), session_arc);
 
-        let listed = list_all_trajectories_meta(app).await.unwrap();
+        let listed = list_all_trajectories_meta(app, false).await.unwrap();
         let item = listed.iter().find(|item| item.id == chat_id).unwrap();
 
         assert_eq!(item.session_state.as_deref(), Some("generating"));
@@ -11541,7 +11641,7 @@ mod tests {
             .await
             .insert(chat_id.to_string(), session_arc);
 
-        let listed = list_all_trajectories_meta(app).await.unwrap();
+        let listed = list_all_trajectories_meta(app, false).await.unwrap();
         let item = listed.iter().find(|item| item.id == chat_id).unwrap();
 
         assert_eq!(item.session_state, None);
@@ -11590,7 +11690,7 @@ mod tests {
             .await
             .insert(chat_id.to_string(), session_arc);
 
-        let listed = list_all_trajectories_meta(app).await.unwrap();
+        let listed = list_all_trajectories_meta(app, false).await.unwrap();
         let item = listed.iter().find(|item| item.id == chat_id).unwrap();
 
         assert_eq!(item.task_id.as_deref(), Some("task-list-active-normal"));
@@ -11642,7 +11742,7 @@ mod tests {
             .await
             .insert(chat_id.to_string(), session_arc);
 
-        let listed = list_all_trajectories_meta(app).await.unwrap();
+        let listed = list_all_trajectories_meta(app, false).await.unwrap();
         let item = listed.iter().find(|item| item.id == chat_id).unwrap();
 
         assert_eq!(item.session_state.as_deref(), Some("generating"));
@@ -13867,7 +13967,7 @@ mod tests {
         )
         .await;
 
-        let listed = list_all_trajectories_meta(app).await.unwrap();
+        let listed = list_all_trajectories_meta(app, false).await.unwrap();
         let ids: std::collections::HashSet<_> =
             listed.iter().map(|item| item.id.as_str()).collect();
 
@@ -18273,7 +18373,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(loaded.thread.worktree, Some(worktree.clone()));
-        let listed = list_all_trajectories_meta(app).await.unwrap();
+        let listed = list_all_trajectories_meta(app, false).await.unwrap();
         let listed_worktree = listed
             .iter()
             .find(|item| item.id == chat_id)
@@ -20949,7 +21049,7 @@ mod tests {
             .await
             .unwrap();
         assert!(loaded.thread.worktree.is_none());
-        let listed = list_all_trajectories_meta(app).await.unwrap();
+        let listed = list_all_trajectories_meta(app, false).await.unwrap();
         let listed_worktree = listed
             .iter()
             .find(|item| item.id == "untrusted-wt-chat")

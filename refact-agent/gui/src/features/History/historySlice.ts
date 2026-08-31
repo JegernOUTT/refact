@@ -78,13 +78,19 @@ export function isBuddyChatLike(
 }
 
 const MAIN_CHAT_LINK_TYPES = new Set(["handoff", "mode_transition", "branch"]);
+const INTERNAL_TRACE_LINK_PREFIX = "internal:";
+
+export function isInternalTraceChatLike(
+  x: Partial<Pick<ChatHistoryItem, "link_type">>,
+): boolean {
+  return Boolean(x.link_type?.startsWith(INTERNAL_TRACE_LINK_PREFIX));
+}
 
 export function isSubagenticChatLike(
   x: Partial<Pick<ChatHistoryItem, "parent_id" | "link_type">>,
 ): boolean {
-  return Boolean(
-    x.parent_id && x.link_type && !MAIN_CHAT_LINK_TYPES.has(x.link_type),
-  );
+  if (!x.link_type) return false;
+  return !MAIN_CHAT_LINK_TYPES.has(x.link_type);
 }
 
 export type HistoryMeta = Pick<
@@ -122,7 +128,12 @@ export function buildHistoryTree(
   chats: Record<string, ChatHistoryItem>,
 ): HistoryTreeNode[] {
   const nodes = Object.values(chats)
-    .filter((x) => !isTaskChatLike(x) && !isBuddyChatLike(x))
+    .filter(
+      (x) =>
+        !isTaskChatLike(x) &&
+        !isBuddyChatLike(x) &&
+        !isInternalTraceChatLike(x),
+    )
     .map((x) => ({
       ...x,
       children: [] as HistoryTreeNode[],
@@ -718,7 +729,13 @@ export const historySlice = createSlice({
 
     getHistory: (state): ChatHistoryItem[] =>
       Object.values(state.chats)
-        .filter((item) => !isTaskChatLike(item) && !isBuddyChatLike(item))
+        .filter(
+          (item) =>
+            !isTaskChatLike(item) &&
+            !isBuddyChatLike(item) &&
+            !isInternalTraceChatLike(item) &&
+            !isSubagenticChatLike(item),
+        )
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
 
     getHistoryTree: (state): HistoryTreeNode[] => buildHistoryTree(state.chats),
