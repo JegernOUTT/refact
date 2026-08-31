@@ -113,15 +113,38 @@ export type RuntimeState = {
 
 type BackgroundAgentSummaryWithDefaults = Omit<
   BackgroundAgentSummary,
-  "target_files" | "edited_files" | "step_count" | "change_seq"
+  | "target_files"
+  | "edited_files"
+  | "step_count"
+  | "change_seq"
+  | "model_type"
+  | "current_tool"
+  | "goal_summary"
+  | "plan_present"
+  | "worktree_branch"
+  | "merge_status"
+  | "pending_questions"
+  | "questions"
+  | "tokens_used"
+  | "cost_usd"
 > & {
-  target_files?: string[] | null;
-  edited_files?: string[] | null;
-  step_count?: number | null;
-  change_seq?: number | null;
+  target_files?: unknown;
+  edited_files?: unknown;
+  step_count?: unknown;
+  change_seq?: unknown;
+  model_type?: unknown;
+  current_tool?: unknown;
+  goal_summary?: unknown;
+  plan_present?: unknown;
+  worktree_branch?: unknown;
+  merge_status?: unknown;
+  pending_questions?: unknown;
+  questions?: unknown;
+  tokens_used?: unknown;
+  cost_usd?: unknown;
 };
 
-type BackgroundAgentSummaryWire =
+export type BackgroundAgentSummaryWire =
   | BackgroundAgentSummaryWithDefaults
   | BackgroundAgentSummaryCamelCase;
 
@@ -144,6 +167,16 @@ type BackgroundAgentSummaryCamelCase = {
   startedAt: string | null;
   finishedAt: string | null;
   changeSeq?: number | null;
+  modelType?: string | null;
+  currentTool?: string | null;
+  goalSummary?: string | null;
+  planPresent?: boolean;
+  worktreeBranch?: string | null;
+  mergeStatus?: string | null;
+  pendingQuestions?: number;
+  questions?: unknown;
+  tokensUsed?: number;
+  costUsd?: number | null;
 };
 
 export type DeltaOp =
@@ -659,6 +692,64 @@ function isValidBackgroundAgent(
   return typeof fields.agentId === "string";
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function normalizeNullableString(value: unknown): string | null | undefined {
+  if (typeof value === "string" || value === null) return value;
+  return undefined;
+}
+
+function normalizeNonNegativeNumber(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return Math.max(value, 0);
+}
+
+function normalizeMergeStatus(
+  value: unknown,
+): BackgroundAgentSummary["merge_status"] {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (
+    value === "pending" ||
+    value === "merged" ||
+    value === "conflict" ||
+    value === "skipped" ||
+    value === "failed"
+  ) {
+    return value;
+  }
+  return null;
+}
+
+function isAgentQuestion(value: unknown): value is NonNullable<
+  BackgroundAgentSummary["questions"]
+>[number] {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const question = value as Record<string, unknown>;
+  return (
+    typeof question.id === "string" &&
+    typeof question.text === "string" &&
+    (question.answer === undefined ||
+      question.answer === null ||
+      typeof question.answer === "string") &&
+    (question.asked_at === undefined || typeof question.asked_at === "string") &&
+    (question.answered_at === undefined ||
+      question.answered_at === null ||
+      typeof question.answered_at === "string")
+  );
+}
+
+function normalizeQuestions(
+  value: unknown,
+): BackgroundAgentSummary["questions"] {
+  if (value === undefined) return undefined;
+  return Array.isArray(value) && value.every(isAgentQuestion) ? value : [];
+}
+
 function safeAgent(agent: BackgroundAgentSummaryWire): BackgroundAgentSummary {
   if (!("agent_id" in agent)) {
     return safeAgent({
@@ -680,19 +771,62 @@ function safeAgent(agent: BackgroundAgentSummaryWire): BackgroundAgentSummary {
       started_at: agent.startedAt,
       finished_at: agent.finishedAt,
       change_seq: agent.changeSeq,
+      model_type: agent.modelType,
+      current_tool: agent.currentTool,
+      goal_summary: agent.goalSummary,
+      plan_present: agent.planPresent,
+      worktree_branch: agent.worktreeBranch,
+      merge_status: agent.mergeStatus,
+      pending_questions: agent.pendingQuestions,
+      questions: agent.questions,
+      tokens_used: agent.tokensUsed,
+      cost_usd: agent.costUsd,
     });
   }
 
   return {
-    ...agent,
-    target_files: agent.target_files ?? [],
-    edited_files: agent.edited_files ?? [],
-    step_count: agent.step_count ?? 0,
-    change_seq: agent.change_seq ?? -1,
+    agent_id: agent.agent_id,
+    parent_chat_id: agent.parent_chat_id,
+    child_chat_id: agent.child_chat_id,
+    kind: agent.kind,
+    status: agent.status,
+    title: agent.title,
+    progress: agent.progress,
+    step_count:
+      typeof agent.step_count === "number" && Number.isFinite(agent.step_count)
+        ? Math.max(agent.step_count, 0)
+        : 0,
+    last_activity: agent.last_activity,
+    target_files: isStringArray(agent.target_files) ? agent.target_files : [],
+    edited_files: isStringArray(agent.edited_files) ? agent.edited_files : [],
+    diff_summary: agent.diff_summary,
+    conflict_summary: agent.conflict_summary,
+    result_summary: agent.result_summary,
+    error: agent.error,
+    started_at: agent.started_at,
+    finished_at: agent.finished_at,
+    change_seq:
+      typeof agent.change_seq === "number" && Number.isFinite(agent.change_seq)
+        ? Math.max(agent.change_seq, 0)
+        : -1,
+    model_type: normalizeNullableString(agent.model_type),
+    current_tool: normalizeNullableString(agent.current_tool),
+    goal_summary: normalizeNullableString(agent.goal_summary),
+    plan_present:
+      typeof agent.plan_present === "boolean" ? agent.plan_present : undefined,
+    worktree_branch: normalizeNullableString(agent.worktree_branch),
+    merge_status: normalizeMergeStatus(agent.merge_status),
+    pending_questions: normalizeNonNegativeNumber(agent.pending_questions),
+    questions: normalizeQuestions(agent.questions),
+    tokens_used: normalizeNonNegativeNumber(agent.tokens_used),
+    cost_usd:
+      agent.cost_usd === null
+        ? null
+        : normalizeNonNegativeNumber(agent.cost_usd),
   };
 }
 
-function normalizeBackgroundAgentSummary(
+export function normalizeBackgroundAgentSummary(
   agent: BackgroundAgentSummaryWire,
 ): BackgroundAgentSummary {
   return safeAgent(agent);

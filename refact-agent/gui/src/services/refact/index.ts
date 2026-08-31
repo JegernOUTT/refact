@@ -22,6 +22,7 @@ export * from "./trajectories";
 export * from "./trajectory";
 export * from "./chatSubscription";
 export * from "./chatCommands";
+export * from "./backgroundAgents";
 export * from "./tasks";
 export * from "./taskMemoriesApi";
 export * from "./taskDocumentsApi";

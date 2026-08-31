@@ -49,6 +49,21 @@ export type ToolUsage = {
 
 export type BackgroundAgentKind = "subagent" | "delegate";
 
+export type BackgroundAgentMergeStatus =
+  | "pending"
+  | "merged"
+  | "conflict"
+  | "skipped"
+  | "failed";
+
+export type AgentQuestion = {
+  id: string;
+  text: string;
+  answer?: string | null;
+  asked_at?: string;
+  answered_at?: string | null;
+};
+
 export type BackgroundAgentStatus =
   | "queued"
   | "running"
@@ -64,6 +79,9 @@ export interface BackgroundAgentToolFields {
   child_chat_id?: string;
   background_agent_status?: string;
   target_files?: string[];
+  model?: string;
+  model_type?: string;
+  worktree_branch?: string;
 }
 
 export interface BackgroundAgentSummary {
@@ -85,6 +103,16 @@ export interface BackgroundAgentSummary {
   started_at: string | null;
   finished_at: string | null;
   change_seq: number;
+  model_type?: string | null;
+  current_tool?: string | null;
+  goal_summary?: string | null;
+  plan_present?: boolean;
+  worktree_branch?: string | null;
+  merge_status?: BackgroundAgentMergeStatus | null;
+  pending_questions?: number;
+  questions?: AgentQuestion[];
+  tokens_used?: number;
+  cost_usd?: number | null;
 }
 
 function isToolCall(call: unknown): call is ToolCall {

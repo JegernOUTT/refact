@@ -8,8 +8,12 @@ import {
 } from "../features/Chat/Thread/actions";
 import { chatReducer } from "../features/Chat/Thread/reducer";
 import {
+  selectActiveBackgroundAgents,
+  selectAgentsAggregateUsage,
   selectBackgroundAgent,
   selectBackgroundAgentsByThread,
+  selectBackgroundAgentsTree,
+  selectPendingAgentQuestions,
   selectToolResultById,
 } from "../features/Chat/Thread/selectors";
 import type { Chat, ChatThreadRuntime } from "../features/Chat/Thread/types";
@@ -64,6 +68,16 @@ function makeAgent(
     started_at: null,
     finished_at: null,
     change_seq: 1,
+    model_type: null,
+    current_tool: null,
+    goal_summary: null,
+    plan_present: false,
+    worktree_branch: null,
+    merge_status: null,
+    pending_questions: 0,
+    questions: [],
+    tokens_used: 0,
+    cost_usd: null,
     ...overrides,
   };
 }
@@ -242,6 +256,131 @@ describe("background agents", () => {
   });
 
   test("reducer replaces duplicate agent_id with latest update", () => {
+    const first = makeAgent({
+      current_tool: "cat",
+      questions: [],
+      change_seq: 1,
+    });
+    const latest = makeAgent({
+      current_tool: "search_pattern",
+      model_type: "thinking",
+      pending_questions: 1,
+      questions: [{ id: "q-1", text: "Continue?" }],
+      tokens_used: 42,
+      cost_usd: 0.5,
+      change_seq: 2,
+    });
+    let state = chatReducer(
+      makeState(),
+      applyChatEvent({
+        chat_id: chatId,
+        seq: "1",
+        type: "background_agent_updated",
+        agent: first,
+      }),
+    );
+    state = chatReducer(
+      state,
+      applyChatEvent({
+        chat_id: chatId,
+        seq: "2",
+        type: "background_agent_updated",
+        agent: latest,
+      }),
+    );
+
+    expect(state.threads[chatId]?.background_agents[latest.agent_id]).toEqual(
+      latest,
+    );
+  });
+
+  test("selectors build a cycle-safe three-level tree and aggregate its usage", () => {
+    const root = makeAgent({
+      agent_id: "root",
+      child_chat_id: "child-1",
+      last_activity: "2026-01-01T00:00:00Z",
+      tokens_used: 10,
+      cost_usd: 0.1,
+      questions: [{ id: "root-question", text: "Need input?" }],
+    });
+    const child = makeAgent({
+      agent_id: "child",
+      parent_chat_id: "child-1",
+      child_chat_id: "child-2",
+      last_activity: "2026-01-02T00:00:00Z",
+      tokens_used: 20,
+      cost_usd: 0.2,
+      questions: [
+        { id: "answered", text: "Done?", answer: "Yes" },
+        { id: "child-question", text: "Proceed?", answer: null },
+      ],
+    });
+    const grandchild = makeAgent({
+      agent_id: "grandchild",
+      parent_chat_id: "child-2",
+      child_chat_id: "child-1",
+      tokens_used: 30,
+      cost_usd: null,
+      status: "queued",
+    });
+    const orphan = makeAgent({
+      agent_id: "orphan",
+      parent_chat_id: "missing",
+      tokens_used: 100,
+      cost_usd: 1,
+    });
+    const state = makeState();
+    const runtime = state.threads[chatId];
+    if (!runtime) throw new Error("missing runtime");
+    runtime.background_agents = {
+      root,
+      child,
+      grandchild,
+      orphan,
+    };
+    const rootState = { chat: state } as SelectorRootState;
+
+    expect(selectBackgroundAgentsTree(rootState, chatId)).toEqual([
+      {
+        agent: root,
+        children: [
+          {
+            agent: child,
+            children: [{ agent: grandchild, children: [] }],
+          },
+        ],
+      },
+    ]);
+    expect(selectAgentsAggregateUsage(rootState, chatId)).toEqual({
+      tokensTotal: 60,
+      costTotal: 0.30000000000000004,
+      runningCount: 2,
+    });
+    expect(selectPendingAgentQuestions(rootState, chatId)).toEqual([
+      root.questions?.[0],
+      child.questions?.[1],
+    ]);
+    expect(selectActiveBackgroundAgents(rootState, chatId).map((agent) => agent.agent_id)).toEqual([
+      "child",
+      "root",
+      "grandchild",
+      "orphan",
+    ]);
+  });
+
+  test("selectors return null cost when no tree agent reports cost", () => {
+    const agent = makeAgent({ cost_usd: null, tokens_used: 8 });
+    const state = makeState();
+    const runtime = state.threads[chatId];
+    if (!runtime) throw new Error("missing runtime");
+    runtime.background_agents = { [agent.agent_id]: agent };
+
+    expect(
+      selectAgentsAggregateUsage({ chat: state } as SelectorRootState, chatId),
+    ).toEqual({ tokensTotal: 8, costTotal: null, runningCount: 1 });
+  });
+
+  test("reducer replaces duplicate agent_id with latest status update", () => {
     const first = makeAgent({ progress: "Queued", change_seq: 1 });
     const latest = makeAgent({
       progress: "Done",

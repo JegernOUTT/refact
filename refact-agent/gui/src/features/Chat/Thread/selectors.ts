@@ -31,7 +31,10 @@ import {
 } from "./types";
 import type { SessionState } from "../../../utils/sessionStatus";
 import type { WorktreeMeta } from "../../../services/refact/worktrees";
-import type { BackgroundAgentSummary } from "../../../services/refact/types";
+import type {
+  AgentQuestion,
+  BackgroundAgentSummary,
+} from "../../../services/refact/types";
 import type {
   CompressionPhase,
   CompressionReason,
@@ -206,6 +209,129 @@ export const selectBackgroundAgent = (
   agentId: string,
 ): BackgroundAgentSummary | undefined =>
   state.chat.threads[threadId]?.background_agents[agentId];
+
+function isTerminalBackgroundAgent(agent: BackgroundAgentSummary): boolean {
+  return (
+    agent.status === "completed" ||
+    agent.status === "failed" ||
+    agent.status === "cancelled" ||
+    agent.status === "interrupted"
+  );
+}
+
+function compareBackgroundAgentActivity(
+  left: BackgroundAgentSummary,
+  right: BackgroundAgentSummary,
+): number {
+  const leftActivity = left.last_activity ?? "";
+  const rightActivity = right.last_activity ?? "";
+  const leftTimestamp = Date.parse(leftActivity);
+  const rightTimestamp = Date.parse(rightActivity);
+  const leftHasTimestamp = !Number.isNaN(leftTimestamp);
+  const rightHasTimestamp = !Number.isNaN(rightTimestamp);
+  if (leftHasTimestamp && rightHasTimestamp) {
+    return rightTimestamp - leftTimestamp;
+  }
+  if (leftHasTimestamp) return -1;
+  if (rightHasTimestamp) return 1;
+  return left.agent_id.localeCompare(right.agent_id);
+}
+
+export const selectActiveBackgroundAgents = createSelector(
+  [selectBackgroundAgentsByThread],
+  (agents): BackgroundAgentSummary[] =>
+    Object.values(agents)
+      .filter((agent) => !isTerminalBackgroundAgent(agent))
+      .sort(compareBackgroundAgentActivity),
+);
+
+export type AgentTreeNode = {
+  agent: BackgroundAgentSummary;
+  children: AgentTreeNode[];
+};
+
+function buildBackgroundAgentsTree(
+  agents: Record<string, BackgroundAgentSummary>,
+  threadId: string,
+): AgentTreeNode[] {
+  const allAgents = Object.values(agents);
+  const roots = allAgents.filter((agent) => agent.parent_chat_id === threadId);
+  const rootIds = new Set(roots.map((agent) => agent.agent_id));
+  const usedAgentIds = new Set(rootIds);
+
+  const buildNode = (
+    agent: BackgroundAgentSummary,
+    ancestorIds: ReadonlySet<string>,
+  ): AgentTreeNode => {
+    const nextAncestors = new Set(ancestorIds);
+    nextAncestors.add(agent.agent_id);
+    const children: AgentTreeNode[] = [];
+
+    if (agent.child_chat_id) {
+      for (const child of allAgents) {
+        if (
+          child.parent_chat_id !== agent.child_chat_id ||
+          rootIds.has(child.agent_id) ||
+          usedAgentIds.has(child.agent_id) ||
+          nextAncestors.has(child.agent_id)
+        ) {
+          continue;
+        }
+        usedAgentIds.add(child.agent_id);
+        children.push(buildNode(child, nextAncestors));
+      }
+    }
+
+    return { agent, children };
+  };
+
+  return roots.map((root) => buildNode(root, new Set()));
+}
+
+export const selectBackgroundAgentsTree = createSelector(
+  [selectBackgroundAgentsByThread, (_state: RootState, threadId: string) => threadId],
+  buildBackgroundAgentsTree,
+);
+
+function flattenBackgroundAgentTree(nodes: AgentTreeNode[]): BackgroundAgentSummary[] {
+  return nodes.flatMap((node) => [node.agent, ...flattenBackgroundAgentTree(node.children)]);
+}
+
+export type AgentsAggregateUsage = {
+  tokensTotal: number;
+  costTotal: number | null;
+  runningCount: number;
+};
+
+export const selectAgentsAggregateUsage = createSelector(
+  [selectBackgroundAgentsTree],
+  (tree): AgentsAggregateUsage => {
+    const agents = flattenBackgroundAgentTree(tree);
+    let tokensTotal = 0;
+    let costTotal = 0;
+    let hasCost = false;
+    let runningCount = 0;
+
+    for (const agent of agents) {
+      tokensTotal += agent.tokens_used ?? 0;
+      if (agent.cost_usd !== undefined && agent.cost_usd !== null) {
+        costTotal += agent.cost_usd;
+        hasCost = true;
+      }
+      if (agent.status === "running") runningCount += 1;
+    }
+
+    return { tokensTotal, costTotal: hasCost ? costTotal : null, runningCount };
+  },
+);
+
+export const selectPendingAgentQuestions = createSelector(
+  [selectBackgroundAgentsTree],
+  (tree): AgentQuestion[] =>
+    flattenBackgroundAgentTree(tree).flatMap(
+      (agent) => agent.questions?.filter((question) => question.answer == null) ?? [],
+    ),
+);
 
 export const selectThread = (state: RootState) =>
   selectThreadById(state, state.chat.current_thread_id);

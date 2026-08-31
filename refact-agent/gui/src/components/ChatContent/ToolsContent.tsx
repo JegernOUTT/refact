@@ -227,6 +227,8 @@ type BackgroundAgentExtra = Partial<
     | "started_at"
     | "finished_at"
     | "change_seq"
+    | "model_type"
+    | "worktree_branch"
   >
 > & {
   background_agent_id?: string;
@@ -349,6 +351,8 @@ function backgroundAgentPlaceholder(
     started_at: readStringField(result, "started_at"),
     finished_at: readStringField(result, "finished_at"),
     change_seq: readNumberField(result, "change_seq") ?? 0,
+    model_type: readStringField(result, "model_type"),
+    worktree_branch: readStringField(result, "worktree_branch"),
   } satisfies BackgroundAgentSummary;
 }
 

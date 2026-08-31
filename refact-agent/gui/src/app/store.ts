@@ -37,6 +37,7 @@ import {
   indexingSettingsApi,
   performanceApi,
   skillsSettingsApi,
+  backgroundAgentsApi,
 } from "../services/refact";
 import { daemonApi } from "../services/refact/daemon";
 import { chatModesApi } from "../services/refact/chatModes";
@@ -99,6 +100,7 @@ import { filesPanelSlice } from "../features/Workspace/FilesPanel/filesPanelSlic
 import { gitPanelSlice } from "../features/Workspace/GitPanel/gitPanelSlice";
 import { privacyApi } from "../services/refact/privacy";
 import { shellPolicyApi } from "../services/refact/shellPolicy";
+import { agentsPanelSlice } from "../features/AgentsPanel/agentsPanelSlice";
 
 const tipOfTheDayPersistConfig = {
   key: "totd",
@@ -169,6 +171,7 @@ const rootReducer = combineSlices(
     [browserSettingsApi.reducerPath]: browserSettingsApi.reducer,
     [performanceApi.reducerPath]: performanceApi.reducer,
     [skillsSettingsApi.reducerPath]: skillsSettingsApi.reducer,
+    [backgroundAgentsApi.reducerPath]: backgroundAgentsApi.reducer,
   },
   historySlice,
   buddySlice,
@@ -191,6 +194,7 @@ const rootReducer = combineSlices(
   dashboardSlice,
   filesPanelSlice,
   gitPanelSlice,
+  agentsPanelSlice,
 );
 
 const rootPersistConfig = {
@@ -314,6 +318,7 @@ export function setUpStore(preloadedState?: Partial<RootState>) {
           browserSettingsApi.middleware,
           performanceApi.middleware,
           skillsSettingsApi.middleware,
+          backgroundAgentsApi.middleware,
         )
         .prepend(historyMiddleware.middleware)
         .prepend(listenerMiddleware.middleware);
