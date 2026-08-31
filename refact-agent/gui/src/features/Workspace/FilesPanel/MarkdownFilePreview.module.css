@@ -1,0 +1,14 @@
+.preview {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--rf-space-3);
+  background: var(--rf-bg);
+}
+
+.content {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}

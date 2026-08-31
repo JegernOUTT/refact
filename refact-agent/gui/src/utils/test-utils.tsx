@@ -165,11 +165,14 @@ export const repeat = (n: number) =>
   Array.from({ length: n }).map((_d, i) => i + 1);
 
 export function stubIntersectionObserver() {
-  const mockIntersectionObserver = vi.fn();
-  mockIntersectionObserver.mockReturnValue({
-    observe: () => null,
-    unobserve: () => null,
-    disconnect: () => null,
-  });
+  const mockIntersectionObserver = vi.fn(() => ({
+    observe: vi.fn(),
+    unobserve: vi.fn(),
+    disconnect: vi.fn(),
+    takeRecords: vi.fn(() => []),
+    root: null,
+    rootMargin: "",
+    thresholds: [],
+  }));
   vi.stubGlobal("IntersectionObserver", mockIntersectionObserver);
 }

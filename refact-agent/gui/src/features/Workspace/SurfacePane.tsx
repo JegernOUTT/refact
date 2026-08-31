@@ -62,7 +62,7 @@ export function SurfacePane({ surfaceKey }: SurfacePaneProps) {
           className={classNames(styles.surfacePane, styles.fileSurface)}
           data-surface-key={surfaceKey}
         >
-          <FileViewer path={parsed.id} />
+          <FileViewer key={parsed.id} path={parsed.id} />
         </div>
       );
     }

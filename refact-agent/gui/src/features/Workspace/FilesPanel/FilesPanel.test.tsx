@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 
+import { EditorView } from "@codemirror/view";
 import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -116,6 +117,14 @@ const readResponse = (overrides: Record<string, unknown> = {}) => ({
   mtime_ms: 1,
   ...overrides,
 });
+
+const setEditorContent = (editor: HTMLElement, content: string) => {
+  const editorView = EditorView.findFromDOM(editor);
+  if (!editorView) throw new Error("CodeMirror view not found for editor");
+  editorView.dispatch({
+    changes: { from: 0, to: editorView.state.doc.length, insert: content },
+  });
+};
 
 describe("FilesPanel", () => {
   beforeEach(() => {
@@ -484,11 +493,13 @@ describe("FilesPanel", () => {
     });
     view.store.dispatch(openFileInFilesPanel({ path: filePath, line: 2 }));
 
-    expect(await screen.findByText("const second = 2;")).toBeVisible();
-    expect(document.querySelector('[data-target-line="true"]')).toHaveAttribute(
-      "data-line-number",
-      "2",
-    );
+    const targetLine = await waitFor(() => {
+      const element = document.querySelector('[data-target-line="true"]');
+      expect(element).not.toBeNull();
+      return element as HTMLElement;
+    });
+    expect(targetLine).toHaveAttribute("data-line-number", "2");
+    expect(targetLine).toHaveTextContent("const second = 2;");
     expect(
       screen.getByRole("navigation", { name: "File path" }),
     ).toHaveTextContent("workspace/src/main.ts");
@@ -601,7 +612,7 @@ describe("FilesPanel", () => {
     const editor = await screen.findByRole("textbox", {
       name: /Edit main\.ts/,
     });
-    fireEvent.change(editor, { target: { value: "edited\n" } });
+    setEditorContent(editor, "edited\n");
     await view.user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
@@ -628,15 +639,145 @@ describe("FilesPanel", () => {
     const editor = await screen.findByRole("textbox", {
       name: /Edit main\.ts/,
     });
-    fireEvent.change(editor, { target: { value: "edited\n" } });
+    setEditorContent(editor, "edited\n");
     await view.user.click(screen.getByRole("button", { name: "Save" }));
 
     expect(
       await screen.findByText(/changed on disk since it was loaded/),
     ).toBeVisible();
-    expect(screen.getByRole("textbox", { name: /Edit main\.ts/ })).toHaveValue(
-      "edited\n",
+
+    expect(
+      EditorView.findFromDOM(
+        screen.getByRole("textbox", { name: /Edit main\.ts/ }),
+      )?.state.doc.toString(),
+    ).toBe("edited\n");
+
+    await view.user.click(screen.getByRole("button", { name: "Reload" }));
+    expect(await screen.findByText("Discard changes?")).toBeVisible();
+    expect(
+      screen.getByRole("textbox", { name: /Edit main\.ts/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("enters edit mode when the code view is double-clicked", async () => {
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/read", () => HttpResponse.json(readResponse())),
     );
+    const view = render(<FileViewer path={filePath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: filePath }));
+
+    const line = await waitFor(() => {
+      const element = document.querySelector('[data-line-number="2"]');
+      expect(element).not.toBeNull();
+      return element as HTMLElement;
+    });
+    expect(
+      screen.queryByRole("textbox", { name: /Edit main\.ts/ }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.dblClick(line);
+
+    expect(
+      await screen.findByRole("textbox", { name: /Edit main\.ts/ }),
+    ).toBeVisible();
+  });
+
+  it("renders markdown as a preview and edits the raw source on double click", async () => {
+    const markdownPath = `${sourcePath}/notes.md`;
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json(
+          readResponse({
+            path: markdownPath,
+            content: "# Heading\n\nSome prose.\n",
+            language: "markdown",
+          }),
+        ),
+      ),
+    );
+    const view = render(<FileViewer path={markdownPath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: markdownPath }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Heading" }),
+    ).toBeVisible();
+
+    fireEvent.dblClick(screen.getByText("Some prose."));
+
+    expect(
+      await screen.findByRole("textbox", { name: /Edit notes\.md/ }),
+    ).toBeVisible();
+  });
+
+  it("toggles markdown between the rendered preview and the source", async () => {
+    const markdownPath = `${sourcePath}/notes.md`;
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json(
+          readResponse({
+            path: markdownPath,
+            content: "# Heading\n\nSome prose.\n",
+            language: "markdown",
+          }),
+        ),
+      ),
+    );
+    const view = render(<FileViewer path={markdownPath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: markdownPath }));
+
+    expect(await screen.findByLabelText("Markdown preview")).toBeVisible();
+
+    await view.user.click(
+      screen.getByRole("button", { name: "Show Markdown source" }),
+    );
+
+    expect(screen.queryByLabelText("Markdown preview")).not.toBeInTheDocument();
+    expect(
+      await screen.findByLabelText(/notes\.md file contents/),
+    ).toBeInTheDocument();
+  });
+
+  it("confirms before discarding unsaved edits and cancels cleanly when untouched", async () => {
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/read", () => HttpResponse.json(readResponse())),
+    );
+    const view = render(<FileViewer path={filePath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: filePath }));
+
+    await view.user.click(
+      await screen.findByRole("button", { name: "Edit this file" }),
+    );
+    await view.user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByText("Discard changes?")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: /Edit main\.ts/ }),
+    ).not.toBeInTheDocument();
+
+    await view.user.click(
+      await screen.findByRole("button", { name: "Edit this file" }),
+    );
+    const editor = await screen.findByRole("textbox", {
+      name: /Edit main\.ts/,
+    });
+    setEditorContent(editor, "changed\n");
+
+    await view.user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByText("Discard changes?")).toBeVisible();
+
+    await view.user.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(screen.queryByText("Discard changes?")).not.toBeInTheDocument();
+
+    await view.user.click(screen.getByRole("button", { name: "Cancel" }));
+    await view.user.click(
+      await screen.findByRole("button", { name: "Discard" }),
+    );
+    expect(
+      screen.queryByRole("textbox", { name: /Edit main\.ts/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("locks editing while edits are playing back", async () => {
@@ -668,6 +809,39 @@ describe("FilesPanel", () => {
     expect(
       screen.getByRole("button", { name: "Pause edit playback" }),
     ).toBeVisible();
+
+    const playingLine = document.querySelector('[data-line-number="1"]');
+    expect(playingLine).not.toBeNull();
+    fireEvent.dblClick(playingLine as HTMLElement);
+    expect(
+      screen.queryByRole("textbox", { name: /Edit main\.ts/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not enter edit mode on double click when the file is not editable", async () => {
+    server.use(
+      rootHandler(),
+      http.get("*/v1/files/read", () =>
+        HttpResponse.json(readResponse({ truncated: true })),
+      ),
+    );
+    const view = render(<FileViewer path={filePath} />);
+    view.store.dispatch(openFileInFilesPanel({ path: filePath }));
+
+    const line = await waitFor(() => {
+      const element = document.querySelector('[data-line-number="1"]');
+      expect(element).not.toBeNull();
+      return element as HTMLElement;
+    });
+
+    fireEvent.dblClick(line);
+
+    expect(
+      screen.queryByRole("textbox", { name: /Edit main\.ts/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Edit this file" }),
+    ).toBeDisabled();
   });
 
   it("collapses removed lines and reveals added lines for the playing step", async () => {
@@ -825,10 +999,9 @@ describe("FilesPanel", () => {
     );
 
     expect(await screen.findByText("new")).toBeVisible();
-    expect(screen.getByText("new").closest('[role="row"]')).toHaveAttribute(
-      "data-live-change",
-      "true",
-    );
+    expect(
+      screen.getByText("new").closest("[data-line-number]"),
+    ).toHaveAttribute("data-live-change", "true");
     expect(readRequests).toBeGreaterThan(1);
   });
 
@@ -883,7 +1056,7 @@ describe("FilesPanel", () => {
 
   it("keeps the reduced-motion rule for live change highlights", () => {
     const css = readFileSync(
-      "src/features/Workspace/FilesPanel/FilesPanel.module.css",
+      "src/features/Workspace/FilesPanel/CodeMirrorEditor.module.css",
       "utf8",
     );
     expect(css).toMatch(

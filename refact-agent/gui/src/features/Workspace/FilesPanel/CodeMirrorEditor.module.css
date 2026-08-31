@@ -1,0 +1,87 @@
+.host {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--rf-bg);
+}
+
+.host [data-target-line="true"] {
+  background: var(--rf-color-accent-soft);
+  box-shadow: inset var(--rf-focus-ring-w) 0 0 var(--rf-color-accent);
+}
+
+.host [data-live-change="true"] {
+  background: var(--rf-color-accent-soft);
+  box-shadow: inset var(--rf-focus-ring-w) 0 0 var(--rf-color-success);
+}
+
+.removedLine {
+  padding: 0 var(--rf-space-3);
+  overflow: hidden;
+  color: var(--rf-color-faint);
+  white-space: pre;
+  text-decoration: line-through;
+  background: color-mix(in srgb, var(--rf-color-danger) 14%, transparent);
+  box-shadow: inset var(--rf-focus-ring-w) 0 0 var(--rf-color-danger);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
+    var(--rf-font-mono);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .host [data-live-change="true"] {
+    animation: rf-live-edit-reveal calc(var(--rf-dur-slow) * 5)
+      var(--rf-ease-standard) both;
+  }
+
+  .removedLine[data-live-removed="true"] {
+    animation: rf-live-edit-collapse calc(var(--rf-dur-slow) * 4)
+      var(--rf-ease-standard) both;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .host [data-live-change="true"] {
+    animation: none;
+  }
+
+  .removedLine[data-live-removed="true"] {
+    display: none;
+  }
+}
+
+@keyframes rf-live-edit-reveal {
+  from {
+    opacity: var(--rf-motion-opacity-soft);
+    transform: translateY(calc(-1 * var(--rf-motion-distance-xs)));
+  }
+
+  30% {
+    opacity: var(--rf-motion-opacity-visible);
+    transform: translateY(var(--rf-motion-distance-none));
+  }
+
+  to {
+    background: transparent;
+    box-shadow: inset 0 0 0 transparent;
+    opacity: var(--rf-motion-opacity-visible);
+    transform: translateY(var(--rf-motion-distance-none));
+  }
+}
+
+@keyframes rf-live-edit-collapse {
+  from {
+    max-height: calc(var(--rf-text-2) * var(--rf-line));
+    opacity: var(--rf-motion-opacity-visible);
+  }
+
+  60% {
+    max-height: calc(var(--rf-text-2) * var(--rf-line));
+    opacity: var(--rf-motion-opacity-soft);
+  }
+
+  to {
+    max-height: 0;
+    opacity: 0;
+  }
+}

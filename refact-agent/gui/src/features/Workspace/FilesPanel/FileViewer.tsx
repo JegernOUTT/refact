@@ -1,5 +1,6 @@
-import { Copy, FileQuestion, Pencil, RotateCw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import type { EditorView } from "@codemirror/view";
+import { Code2, Copy, Eye, FileQuestion, Pencil, RotateCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   Button,
@@ -25,6 +26,7 @@ import {
   setDockOpen,
   setDockSection,
 } from "../workspaceSlice";
+import { CodeMirrorEditor } from "./CodeMirrorEditor";
 import { EditPlayerControls } from "./EditPlayerControls";
 import {
   expandDirectory,
@@ -41,8 +43,8 @@ import {
   isAccessDenied,
   isPrivacyBlocked,
 } from "./filesPanelErrors";
-import { HighlightedFile } from "./HighlightedFile";
 import { changedLineNumbers } from "./liveFileModel";
+import { MarkdownFilePreview } from "./MarkdownFilePreview";
 import styles from "./FilesPanel.module.css";
 
 type Breadcrumb = {
@@ -50,8 +52,11 @@ type Breadcrumb = {
   path: string;
 };
 
+type DiscardIntent = "cancel" | "reload" | null;
+
 const EMPTY_ROOTS: string[] = [];
 const EMPTY_CHUNKS: DiffChunk[] = [];
+const MARKDOWN_LANGUAGES = new Set(["markdown", "md", "mdx"]);
 
 const normalizeBreadcrumbPath = (path: string): string => {
   const normalized = path.replace(/\\/g, "/");
@@ -120,6 +125,10 @@ export function FileViewer({ path }: { path: string }) {
   const activeStep = useAppSelector(selectActiveEditPlayerStep);
   const playbackStep = activeStep?.path === path ? activeStep : undefined;
   const [draft, setDraft] = useState<string | null>(null);
+  const [pendingCaret, setPendingCaret] = useState<number | null>(null);
+  const [showSource, setShowSource] = useState(false);
+  const [discardIntent, setDiscardIntent] = useState<DiscardIntent>(null);
+  const viewRef = useRef<EditorView | null>(null);
   const [writeFile, writeState] = useWriteFileMutation();
   const target = storedTarget ?? { path };
   const { data, error, isFetching, refetch } = useReadFileQuery({
@@ -135,6 +144,13 @@ export function FileViewer({ path }: { path: string }) {
   const unavailable =
     liveUpdate?.operation === "remove" || liveUpdate?.operation === "rename";
   const displayedContent = unavailable ? null : data?.content ?? null;
+  const displayedByteLength = useMemo(
+    () =>
+      displayedContent === null
+        ? 0
+        : new TextEncoder().encode(displayedContent).length,
+    [displayedContent],
+  );
   const revealChunks = useMemo(
     () => playbackStep?.chunks ?? liveUpdate?.chunks ?? EMPTY_CHUNKS,
     [liveUpdate, playbackStep],
@@ -156,21 +172,86 @@ export function FileViewer({ path }: { path: string }) {
     data.line_end === null &&
     !unavailable;
   const editing = draft !== null;
+  const isDirty = editing && draft !== (data?.content ?? "");
+  const isMarkdown = MARKDOWN_LANGUAGES.has(
+    (data?.language ?? "").toLowerCase(),
+  );
+  const showPreview = isMarkdown && !editing && !showSource;
   const conflicted =
     (writeState.error as { status?: number } | undefined)?.status === 409;
+  const basename = pathBasename(target.path);
 
   useEffect(() => {
-    if (!target.line || !data) return;
-    const timer = window.setTimeout(() => {
-      document
-        .getElementById("files-panel-target-line")
-        ?.scrollIntoView({ block: "center" });
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [data, target.line]);
+    setDraft(null);
+    setPendingCaret(null);
+    setShowSource(false);
+    setDiscardIntent(null);
+    viewRef.current = null;
+  }, [path]);
+
+  useEffect(() => {
+    if (!editing) return;
+    const view = viewRef.current;
+    if (!view) return;
+    view.focus();
+    if (pendingCaret === null) return;
+    const anchor = Math.max(0, Math.min(pendingCaret, view.state.doc.length));
+    view.dispatch({ selection: { anchor } });
+    setPendingCaret(null);
+  }, [editing, pendingCaret]);
+
+  const handleReady = useCallback((view: EditorView) => {
+    viewRef.current = view;
+  }, []);
+
+  const requestEdit = useCallback(
+    (offset: number | null) => {
+      if (!editable || isPlaying) return;
+      setDraft(data.content);
+      setPendingCaret(offset);
+      setDiscardIntent(null);
+    },
+    [data?.content, editable, isPlaying],
+  );
+
+  const cancelEdit = useCallback(() => {
+    setDraft(null);
+    setPendingCaret(null);
+    setDiscardIntent(null);
+  }, []);
+
+  const requestCancel = useCallback(() => {
+    if (isDirty) {
+      setDiscardIntent("cancel");
+      return;
+    }
+    cancelEdit();
+  }, [cancelEdit, isDirty]);
+
+  const reloadFromDisk = useCallback(() => {
+    cancelEdit();
+    void refetch();
+  }, [cancelEdit, refetch]);
+
+  const requestReload = useCallback(() => {
+    if (isDirty) {
+      setDiscardIntent("reload");
+      return;
+    }
+    reloadFromDisk();
+  }, [isDirty, reloadFromDisk]);
+
+  const confirmDiscard = useCallback(() => {
+    if (discardIntent === "reload") {
+      reloadFromDisk();
+      return;
+    }
+    cancelEdit();
+  }, [cancelEdit, discardIntent, reloadFromDisk]);
 
   const saveDraft = useCallback(async () => {
     if (draft === null || !data) return;
+    if (!editable || isPlaying || writeState.isLoading) return;
     const result = await writeFile({
       path,
       content: draft,
@@ -178,9 +259,20 @@ export function FileViewer({ path }: { path: string }) {
     });
     if ("data" in result) {
       setDraft(null);
+      setPendingCaret(null);
+      setDiscardIntent(null);
       void refetch();
     }
-  }, [data, draft, path, refetch, writeFile]);
+  }, [
+    data,
+    draft,
+    editable,
+    isPlaying,
+    path,
+    refetch,
+    writeFile,
+    writeState.isLoading,
+  ]);
 
   const openBreadcrumb = useCallback(
     (crumb: Breadcrumb, index: number) => {
@@ -230,37 +322,72 @@ export function FileViewer({ path }: { path: string }) {
         </nav>
         <EditPlayerControls />
         {editing ? (
-          <div className={styles.editorActions}>
-            <Button
-              disabled={isPlaying || writeState.isLoading}
-              onClick={() => void saveDraft()}
-              size="sm"
-            >
-              {writeState.isLoading ? "Saving" : "Save"}
-            </Button>
-            <Button onClick={() => setDraft(null)} size="sm" variant="plain">
-              Cancel
-            </Button>
-          </div>
+          discardIntent !== null ? (
+            <div className={styles.editorActions}>
+              <span className={styles.discardPrompt} role="alert">
+                Discard changes?
+              </span>
+              <Button onClick={confirmDiscard} size="sm" variant="plain">
+                Discard
+              </Button>
+              <Button onClick={() => setDiscardIntent(null)} size="sm">
+                Keep editing
+              </Button>
+            </div>
+          ) : (
+            <div className={styles.editorActions}>
+              <Button
+                disabled={isPlaying || writeState.isLoading}
+                onClick={() => void saveDraft()}
+                size="sm"
+              >
+                {writeState.isLoading ? "Saving" : "Save"}
+              </Button>
+              <Button onClick={requestCancel} size="sm" variant="plain">
+                Cancel
+              </Button>
+            </div>
+          )
         ) : (
-          <Tooltip
-            content={
-              isPlaying
-                ? "Editing is locked while edits are playing"
-                : editable
-                  ? "Edit this file"
-                  : "This file cannot be edited here"
-            }
-          >
-            <IconButton
-              aria-label="Edit this file"
-              disabled={!editable || isPlaying}
-              icon={Pencil}
-              onClick={() => setDraft(data?.content ?? "")}
-              size="sm"
-              variant="plain"
-            />
-          </Tooltip>
+          <>
+            {isMarkdown ? (
+              <Tooltip
+                content={
+                  showSource ? "Show rendered Markdown" : "Show Markdown source"
+                }
+              >
+                <IconButton
+                  aria-label={
+                    showSource
+                      ? "Show rendered Markdown"
+                      : "Show Markdown source"
+                  }
+                  icon={showSource ? Eye : Code2}
+                  onClick={() => setShowSource((previous) => !previous)}
+                  size="sm"
+                  variant="plain"
+                />
+              </Tooltip>
+            ) : null}
+            <Tooltip
+              content={
+                isPlaying
+                  ? "Editing is locked while edits are playing"
+                  : editable
+                    ? "Edit this file"
+                    : "This file cannot be edited here"
+              }
+            >
+              <IconButton
+                aria-label="Edit this file"
+                disabled={!editable || isPlaying}
+                icon={Pencil}
+                onClick={() => requestEdit(null)}
+                size="sm"
+                variant="plain"
+              />
+            </Tooltip>
+          </>
         )}
         <Tooltip content="Copy file path">
           <IconButton
@@ -286,10 +413,7 @@ export function FileViewer({ path }: { path: string }) {
           variant="full"
         />
       ) : isFetching && !data ? (
-        <LoadingState
-          label={`Loading ${pathBasename(target.path)}`}
-          variant="full"
-        />
+        <LoadingState label={`Loading ${basename}`} variant="full" />
       ) : error && displayedContent === null ? (
         <ErrorState
           description={unreadableDescription}
@@ -309,16 +433,14 @@ export function FileViewer({ path }: { path: string }) {
         <EmptyState
           icon={FileQuestion}
           title="Binary file"
-          description={`${pathBasename(
-            target.path,
-          )} is binary and cannot be previewed (${data.size.toLocaleString()} bytes).`}
+          description={`${basename} is binary and cannot be previewed (${data.size.toLocaleString()} bytes).`}
           variant="full"
         />
       ) : displayedContent !== null ? (
         <>
           <div className={styles.fileMeta}>
             <span>{data?.language ?? "Plain text"}</span>
-            <span>{displayedContent.length.toLocaleString()} bytes</span>
+            <span>{displayedByteLength.toLocaleString()} bytes</span>
           </div>
           {data?.truncated ? (
             <div className={styles.truncatedBanner} role="status">
@@ -328,39 +450,41 @@ export function FileViewer({ path }: { path: string }) {
           {conflicted ? (
             <div className={styles.conflictBanner} role="alert">
               This file changed on disk since it was loaded.
-              <Button
-                onClick={() => {
-                  setDraft(null);
-                  void refetch();
-                }}
-                size="sm"
-                variant="plain"
-              >
+              <Button onClick={requestReload} size="sm" variant="plain">
                 Reload
               </Button>
             </div>
           ) : null}
-          {editing ? (
-            <textarea
-              aria-label={`Edit ${pathBasename(target.path)}`}
-              className={styles.editor}
-              onChange={(event) => setDraft(event.target.value)}
-              readOnly={isPlaying}
-              spellCheck={false}
-              value={draft}
+          {showPreview ? (
+            <MarkdownFilePreview
+              content={displayedContent}
+              onRequestEdit={
+                editable && !isPlaying ? () => requestEdit(null) : undefined
+              }
             />
           ) : (
-            <div className={`${styles.codeScroll} scrollX`}>
-              <HighlightedFile
-                content={displayedContent}
-                changedLines={changedLines}
-                changeRevision={changeRevision}
-                language={data?.language ?? null}
-                lineStart={data ? lineStart : 1}
-                removedChunks={revealChunks}
-                targetLine={target.line}
-              />
-            </div>
+            <CodeMirrorEditor
+              ariaLabel={
+                editing ? `Edit ${basename}` : `${basename} file contents`
+              }
+              changedLines={changedLines}
+              changeRevision={changeRevision}
+              language={data?.language ?? null}
+              lineStart={data ? lineStart : 1}
+              onCancel={editing ? requestCancel : undefined}
+              onChange={editing ? setDraft : undefined}
+              onReady={handleReady}
+              onRequestEdit={(offset) => requestEdit(offset)}
+              onSave={
+                editing && !isPlaying && !writeState.isLoading
+                  ? () => void saveDraft()
+                  : undefined
+              }
+              readOnly={!editing || isPlaying}
+              removedChunks={revealChunks}
+              targetLine={target.line}
+              value={editing ? draft : displayedContent}
+            />
           )}
         </>
       ) : null}
