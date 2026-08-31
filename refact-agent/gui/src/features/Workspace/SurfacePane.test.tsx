@@ -1,7 +1,7 @@
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { render, screen } from "../../utils/test-utils";
+import { render, screen, waitFor } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
 import * as ChatModule from "../Chat/Chat";
 import * as DesignModule from "../Design";
@@ -78,8 +78,10 @@ describe("SurfacePane", () => {
 
     render(<SurfacePane surfaceKey={surfaceKey} />);
 
-    expect(await screen.findByText("const value = 1;")).toBeInTheDocument();
-    expect(screen.getByLabelText("File viewer")).toBeInTheDocument();
+    const viewer = await screen.findByLabelText("File viewer");
+    await waitFor(() =>
+      expect(viewer.textContent).toContain("const value = 1;"),
+    );
     expect(
       document.querySelector(`[data-surface-key="${surfaceKey}"]`),
     ).toBeInTheDocument();
