@@ -3229,8 +3229,29 @@ mod tests {
                 Err(_) => break,
             }
         }
+        let headers = String::from_utf8_lossy(&request).to_string();
+        if let Some(header_end) = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|position| position + 4)
+        {
+            let content_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            let mut remaining = content_length.saturating_sub(request.len() - header_end);
+            while remaining > 0 {
+                match stream.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => remaining = remaining.saturating_sub(read),
+                    Err(_) => break,
+                }
+            }
+        }
         let _ = stream.set_read_timeout(None);
-        String::from_utf8_lossy(&request).to_string()
+        headers
     }
 
     fn read_request_body(stream: &mut std::net::TcpStream) -> Vec<u8> {
