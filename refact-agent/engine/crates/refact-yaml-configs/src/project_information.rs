@@ -58,6 +58,8 @@ pub struct ProjectInformationSections {
     #[serde(default)]
     pub system_info: SectionConfig,
     #[serde(default)]
+    pub models_info: SectionConfig,
+    #[serde(default)]
     pub environment_instructions: SectionConfig,
     #[serde(default)]
     pub detected_environments: SectionConfig,
@@ -77,6 +79,10 @@ impl Default for ProjectInformationSections {
     fn default() -> Self {
         Self {
             system_info: SectionConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            models_info: SectionConfig {
                 enabled: true,
                 ..Default::default()
             },

@@ -203,6 +203,152 @@ fn truncate_to_chars(s: &str, max_chars: usize) -> String {
     }
 }
 
+const MAX_MODELS_INFO_CHAT_MODELS: usize = 30;
+
+fn models_info_model_details(model: &crate::caps::ChatModelRecord) -> String {
+    let reasoning = model
+        .reasoning_type_string()
+        .map(|kind| format!(", reasoning {kind}"))
+        .unwrap_or_default();
+    let context = if model.base.n_ctx >= 1000 && model.base.n_ctx % 1000 == 0 {
+        format!("{}k", model.base.n_ctx / 1000)
+    } else {
+        model.base.n_ctx.to_string()
+    };
+    format!(
+        "ctx {context}, tools {}, agent {}{reasoning}",
+        if model.supports_tools { "✓" } else { "✗" },
+        if model.supports_agent { "✓" } else { "✗" },
+    )
+}
+
+fn models_info_snapshot_from(
+    caps: Option<&crate::caps::CodeAssistantCaps>,
+    policy: &refact_privacy::PrivacyPolicy,
+) -> String {
+    let mut lines = vec!["## Models & Access Snapshot".to_string()];
+    lines.push("### Model types (slots)".to_string());
+    match caps {
+        Some(caps) => {
+            let slots = [
+                ("default", caps.defaults.chat_default_model.as_str()),
+                ("light", caps.defaults.chat_light_model.as_str()),
+                ("thinking", caps.defaults.chat_thinking_model.as_str()),
+                ("buddy", caps.defaults.chat_buddy_model.as_str()),
+                ("model_2", caps.defaults.chat_model_2.as_str()),
+                (
+                    "task_planner",
+                    caps.defaults.task_planner_agent_model.as_str(),
+                ),
+            ];
+            let mut rendered_slots = Vec::new();
+            for (slot, model_id) in slots {
+                let model_id = model_id.trim();
+                if model_id.is_empty() {
+                    continue;
+                }
+                let details = caps
+                    .chat_models
+                    .get(model_id)
+                    .map(|model| format!(" ({})", models_info_model_details(model)))
+                    .unwrap_or_default();
+                rendered_slots.push(format!("- {slot} → {model_id}{details}"));
+            }
+            if rendered_slots.is_empty() {
+                lines.push("- (no model type slots configured)".to_string());
+            } else {
+                lines.extend(rendered_slots);
+            }
+
+            lines.push("### Available chat models".to_string());
+            if caps.chat_models.is_empty() {
+                lines.push("- (no chat models configured)".to_string());
+            } else {
+                for (model_id, model) in caps.chat_models.iter().take(MAX_MODELS_INFO_CHAT_MODELS) {
+                    lines.push(format!(
+                        "- {model_id} — {}",
+                        models_info_model_details(model)
+                    ));
+                }
+                let remaining = caps
+                    .chat_models
+                    .len()
+                    .saturating_sub(MAX_MODELS_INFO_CHAT_MODELS);
+                if remaining > 0 {
+                    lines.push(format!("- +{remaining} more"));
+                }
+            }
+        }
+        None => {
+            lines.push("- (models unavailable — caps not loaded)".to_string());
+            lines.push("### Available chat models".to_string());
+            lines.push("- (models unavailable — caps not loaded)".to_string());
+        }
+    }
+
+    lines.push("### Privacy & access".to_string());
+    let zones = policy
+        .zones
+        .iter()
+        .filter(|zone| !zone.send_to.iter().any(|destination| destination == "*"))
+        .map(|zone| {
+            let mut destinations = zone.send_to.clone();
+            destinations.sort();
+            let destinations = if destinations.is_empty() {
+                "no destinations".to_string()
+            } else {
+                destinations.join(", ")
+            };
+            format!("{} → {destinations}", zone.name)
+        })
+        .collect::<Vec<_>>();
+    let zones = if zones.is_empty() {
+        "no restricted zones configured".to_string()
+    } else {
+        zones.join("; ")
+    };
+    lines.push(format!("- Privacy zones: {zones}"));
+
+    if policy.tool_access.providers.is_empty() {
+        lines.push("- MCP access per provider: no MCP restrictions".to_string());
+    } else {
+        let providers = policy
+            .tool_access
+            .providers
+            .iter()
+            .map(|(provider, access)| {
+                let mut servers = access.mcp.clone();
+                servers.sort();
+                let servers = if servers.iter().any(|server| server == "*") {
+                    "all servers".to_string()
+                } else if servers.is_empty() {
+                    "no servers".to_string()
+                } else {
+                    servers.join(", ")
+                };
+                format!("{provider} → {servers}")
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        lines.push(format!("- MCP access per provider: {providers}"));
+    }
+    lines.push(format!(
+        "- Subagent reports declassify: {}",
+        if policy.subagents.report_declassifies {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
+    lines.join("\n")
+}
+
+async fn models_info_snapshot(app: &AppState) -> String {
+    let caps = app.gcx.caps_state.read().await.caps.clone();
+    let policy = app.gcx.privacy_policy_load.read().unwrap().policy.clone();
+    models_info_snapshot_from(caps.as_deref(), &policy)
+}
+
 pub async fn system_prompt_add_extra_instructions(
     app: AppState,
     system_prompt: String,
@@ -237,6 +383,18 @@ pub async fn system_prompt_add_extra_instructions(
             system_prompt = system_prompt.replace("%SYSTEM_INFO%", &content);
         } else {
             system_prompt = system_prompt.replace("%SYSTEM_INFO%", "");
+        }
+    }
+
+    if system_prompt.contains("%MODELS_INFO%") {
+        if include_project_info && config.sections.models_info.enabled {
+            let mut models_info = models_info_snapshot(&app).await;
+            if let Some(max_chars) = config.sections.models_info.max_chars {
+                models_info = truncate_to_chars(&models_info, max_chars);
+            }
+            system_prompt = system_prompt.replace("%MODELS_INFO%", &models_info);
+        } else {
+            system_prompt = system_prompt.replace("%MODELS_INFO%", "");
         }
     }
 
@@ -512,9 +670,15 @@ mod tests {
     use super::*;
     use refact_buddy_core::runtime_queue::RuntimeQueue;
     use refact_buddy_core::settings::BuddySettings;
+    use refact_privacy::{
+        PolicyLoad, PrivacyPolicy, ProviderToolAccess, SubagentPolicy, ToolAccess, Zone,
+    };
     use crate::call_validation::{ChatContent, ChatMeta};
+    use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
     use crate::tasks::types::{BoardCard, TaskBoard};
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use tokio::sync::broadcast;
 
     struct ModePromptCase {
@@ -753,6 +917,200 @@ mod tests {
             .map(|file| file.file_content.as_str())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn models_info_test_model(
+        id: &str,
+        n_ctx: usize,
+        supports_tools: bool,
+        supports_agent: bool,
+    ) -> Arc<ChatModelRecord> {
+        Arc::new(ChatModelRecord {
+            base: BaseModelRecord {
+                id: id.to_string(),
+                name: id.to_string(),
+                n_ctx,
+                ..Default::default()
+            },
+            supports_tools,
+            supports_agent,
+            reasoning_effort_options: Some(vec!["high".to_string()]),
+            ..Default::default()
+        })
+    }
+
+    async fn models_info_test_app() -> (tempfile::TempDir, AppState) {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx).await;
+        (temp, app)
+    }
+
+    async fn set_models_info_config(root: &Path, enabled: bool, max_chars: Option<usize>) {
+        let max_chars = max_chars
+            .map(|max_chars| format!("\n    max_chars: {max_chars}"))
+            .unwrap_or_default();
+        let config = format!(
+            "enabled: true\nsections:\n  models_info:\n    enabled: {enabled}{max_chars}\n"
+        );
+        let config_dir = root.join(".refact");
+        tokio::fs::create_dir_all(&config_dir).await.unwrap();
+        tokio::fs::write(config_dir.join("project_information.yaml"), config)
+            .await
+            .unwrap();
+    }
+
+    async fn install_models_info_caps(app: &AppState) {
+        let mut caps = CodeAssistantCaps::default();
+        let default = "anthropic/claude-sonnet-4.5";
+        let light = "openai/gpt-5-mini";
+        caps.chat_models.insert(
+            default.to_string(),
+            models_info_test_model(default, 200_000, true, true),
+        );
+        caps.chat_models.insert(
+            light.to_string(),
+            models_info_test_model(light, 128_000, false, true),
+        );
+        caps.defaults.chat_default_model = default.to_string();
+        caps.defaults.chat_light_model = light.to_string();
+        caps.defaults.chat_thinking_model = default.to_string();
+        caps.defaults.chat_buddy_model = light.to_string();
+        caps.defaults.chat_model_2 = default.to_string();
+        caps.defaults.task_planner_agent_model = light.to_string();
+        app.gcx.caps_state.write().await.caps = Some(Arc::new(caps));
+    }
+
+    fn install_models_info_policy(app: &AppState) {
+        *app.gcx.privacy_policy_load.write().unwrap() = PolicyLoad {
+            policy: Arc::new(PrivacyPolicy {
+                zones: vec![
+                    Zone {
+                        name: "secrets".to_string(),
+                        send_to: vec!["anthropic".to_string(), "openai".to_string()],
+                        ..Default::default()
+                    },
+                    Zone {
+                        name: "normal".to_string(),
+                        send_to: vec!["*".to_string()],
+                        ..Default::default()
+                    },
+                ],
+                subagents: SubagentPolicy {
+                    report_declassifies: false,
+                },
+                tool_access: ToolAccess {
+                    providers: BTreeMap::from([
+                        (
+                            "openai".to_string(),
+                            ProviderToolAccess {
+                                mcp: vec!["github".to_string(), "postgres".to_string()],
+                            },
+                        ),
+                        (
+                            "anthropic".to_string(),
+                            ProviderToolAccess {
+                                mcp: vec!["*".to_string()],
+                            },
+                        ),
+                    ]),
+                },
+                ..Default::default()
+            }),
+            error: None,
+            source_paths: Vec::new(),
+        };
+    }
+
+    #[tokio::test]
+    async fn models_info_snapshot_renders_slots_models_and_privacy_access() {
+        let (_temp, app) = models_info_test_app().await;
+        install_models_info_caps(&app).await;
+        install_models_info_policy(&app);
+
+        let snapshot = models_info_snapshot(&app).await;
+
+        assert!(snapshot.contains("## Models & Access Snapshot"));
+        assert!(snapshot.contains("### Model types (slots)"));
+        assert!(snapshot.contains("- default → anthropic/claude-sonnet-4.5 (ctx 200k, tools ✓, agent ✓, reasoning effort)"));
+        assert!(snapshot.contains(
+            "- light → openai/gpt-5-mini (ctx 128k, tools ✗, agent ✓, reasoning effort)"
+        ));
+        assert!(snapshot.contains("- model_2 → anthropic/claude-sonnet-4.5"));
+        assert!(snapshot.contains("- task_planner → openai/gpt-5-mini"));
+        assert!(snapshot.contains("### Available chat models"));
+        assert!(snapshot.contains(
+            "- anthropic/claude-sonnet-4.5 — ctx 200k, tools ✓, agent ✓, reasoning effort"
+        ));
+        assert!(snapshot.contains("### Privacy & access"));
+        assert!(snapshot.contains("- Privacy zones: secrets → anthropic, openai"));
+        assert!(snapshot.contains(
+            "MCP access per provider: anthropic → all servers; openai → github, postgres"
+        ));
+        assert!(snapshot.contains("- Subagent reports declassify: no"));
+    }
+
+    #[tokio::test]
+    async fn models_info_snapshot_handles_missing_and_empty_caps() {
+        let (_temp, app) = models_info_test_app().await;
+
+        let missing = models_info_snapshot(&app).await;
+        assert!(missing.contains("(models unavailable — caps not loaded)"));
+        assert!(missing.contains("no restricted zones configured"));
+        assert!(missing.contains("no MCP restrictions"));
+        assert!(missing.contains("Subagent reports declassify: yes"));
+
+        app.gcx.caps_state.write().await.caps = Some(Arc::new(CodeAssistantCaps::default()));
+        let empty = models_info_snapshot(&app).await;
+        assert!(empty.contains("(no model type slots configured)"));
+        assert!(empty.contains("(no chat models configured)"));
+    }
+
+    #[tokio::test]
+    async fn models_info_macro_is_removed_when_section_is_disabled() {
+        let (temp, app) = models_info_test_app().await;
+        install_models_info_caps(&app).await;
+        set_models_info_config(temp.path(), false, None).await;
+
+        let rendered = system_prompt_add_extra_instructions(
+            app,
+            "Before\n%MODELS_INFO%\nAfter".to_string(),
+            HashSet::new(),
+            &ChatMeta {
+                include_project_info: true,
+                ..Default::default()
+            },
+            &None,
+            "agent",
+        )
+        .await;
+
+        assert_eq!(rendered, "Before\n\nAfter");
+    }
+
+    #[tokio::test]
+    async fn models_info_macro_obeys_max_chars() {
+        let (temp, app) = models_info_test_app().await;
+        install_models_info_caps(&app).await;
+        set_models_info_config(temp.path(), true, Some(25)).await;
+        let expected = truncate_to_chars(&models_info_snapshot(&app).await, 25);
+
+        let rendered = system_prompt_add_extra_instructions(
+            app,
+            "%MODELS_INFO%".to_string(),
+            HashSet::new(),
+            &ChatMeta {
+                include_project_info: true,
+                ..Default::default()
+            },
+            &None,
+            "agent",
+        )
+        .await;
+
+        assert_eq!(rendered, expected);
+        assert!(rendered.ends_with("[TRUNCATED]"));
     }
 
     #[tokio::test]
