@@ -1398,6 +1398,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn default_mode_prompts_include_models_info_and_no_delegate_tool_policy() {
+        let modes_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates")
+            .join("refact-yaml-configs")
+            .join("src")
+            .join("defaults")
+            .join("modes");
+        let mut failures = Vec::new();
+        let mut checked_modes = 0usize;
+        for entry in std::fs::read_dir(&modes_dir).expect("failed to read default modes dir") {
+            let path = entry.expect("failed to read modes dir entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("yaml") {
+                continue;
+            }
+            let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+            let value: serde_yaml::Value = serde_yaml::from_str(&raw)
+                .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
+            checked_modes += 1;
+            if !value
+                .get("prompt")
+                .and_then(|value| value.as_str())
+                .is_some_and(|prompt| prompt.contains("%MODELS_INFO%"))
+            {
+                failures.push(format!("{file_name}: missing %MODELS_INFO% in prompt"));
+            }
+            if value
+                .get("tools")
+                .and_then(|value| value.as_sequence())
+                .is_some_and(|tools| tools.iter().any(|tool| tool.as_str() == Some("delegate")))
+            {
+                failures.push(format!("{file_name}: tools includes delegate"));
+            }
+            if value
+                .get("tool_confirm")
+                .and_then(|value| value.get("rules"))
+                .and_then(|value| value.as_sequence())
+                .is_some_and(|rules| {
+                    rules.iter().any(|rule| {
+                        rule.get("match").and_then(|value| value.as_str()) == Some("delegate")
+                    })
+                })
+            {
+                failures.push(format!("{file_name}: tool_confirm includes delegate"));
+            }
+        }
+        assert!(
+            checked_modes > 10,
+            "expected to check most default modes, only found {checked_modes}"
+        );
+        assert!(
+            failures.is_empty(),
+            "default mode prompt/tool policy regressions: {failures:?}"
+        );
+    }
+
     #[tokio::test]
     async fn yaml_configs_design_workflows_load_and_reference_registered_tools() {
         let gcx = task_prompt_contract_gcx().await;

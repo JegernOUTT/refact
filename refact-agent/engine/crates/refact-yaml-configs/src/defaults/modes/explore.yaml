@@ -1,4 +1,4 @@
-schema_version: 18
+schema_version: 19
 id: explore
 title: Explore
 description: Read-only exploration for context gathering without editing
@@ -32,17 +32,17 @@ prompt: |
    - **If no**:
        - Answer the question directly without calling any tools.
 
-  ## Delegation with Subagents
+  ## Background Subagents
   %CODEGRAPH_INSTRUCTIONS%
 
-  Use `subagent()` to delegate exploration tasks that require multiple tool calls:
+  Use `subagent()` for exploration tasks that require multiple tool calls:
   - "Find all usages of X" → `subagent(task="Find all usages of function X", expected_result="List of files and line numbers", tools="search_pattern,cat")`
   - "Understand module Y" → `subagent(task="Analyze module Y structure", expected_result="Summary of components and relationships", tools="tree,cat,search_symbol_definition")`
   - "Search for pattern Z" → `subagent(task="Find files matching pattern Z", expected_result="List of matching files with context", tools="glob,cat")`
 
   Subagents work independently and return summarized results. Use them for focused investigation tasks.
 
-  Use `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` only to inspect or control background agents already running from earlier work. Do not use `delegate()` in this read-only mode.
+  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` to inspect or control them.
 
   ## Asking Questions - CRITICAL
   **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
@@ -64,6 +64,8 @@ prompt: |
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
+
+  %MODELS_INFO%
 
   %ENVIRONMENT_INFO%
 
@@ -109,6 +111,8 @@ tools:
   - image_region
   - visual_diff
   - subagent
+  - agents_overview
+  - agent_message
   - agent_list
   - agent_status
   - agent_wait
@@ -138,6 +142,12 @@ tool_confirm:
     - match: "code_map"
       action: auto
     - match: "handoff_to_mode"
+      action: auto
+    - match: "subagent"
+      action: auto
+    - match: "agents_overview"
+      action: auto
+    - match: "agent_message"
       action: auto
     - match: "*"
       action: auto

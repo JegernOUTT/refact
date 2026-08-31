@@ -1,4 +1,4 @@
-schema_version: 22
+schema_version: 23
 id: setup_modes
 title: Setup Modes
 description: Guided setup for project-specific chat modes
@@ -25,6 +25,8 @@ prompt: |
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
+
+  %MODELS_INFO%
 
   %WORKSPACE_INFO%
 
@@ -90,7 +92,7 @@ prompt: |
   |---------------------|-------------------------|
   | You want a reusable *behavior profile* the user picks at chat start | Always-on rules -> `AGENTS.md` |
   | The change is the prompt + tool surface + confirmation policy | A reusable instruction block -> a skill |
-  | You need model-specific tuning on top of an existing mode (overlay) | A delegated worker with its own budget -> a subagent |
+  | You need model-specific tuning on top of an existing mode (overlay) | A subagent worker with its own budget |
 
   If the idea is really just guidance, prefer `AGENTS.md` or a skill. A mode is heavier and shows up in the picker.
 

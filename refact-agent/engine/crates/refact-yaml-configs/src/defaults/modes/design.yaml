@@ -1,4 +1,4 @@
-schema_version: 25
+schema_version: 26
 id: design
 title: Design
 description: Evidence-driven UI implementation using the live design system and browser measurements
@@ -54,9 +54,14 @@ prompt: |
   - Preserve existing behavior, accessibility, responsiveness, and theme support unless the user explicitly changes them.
   - Do not create or update a visual baseline unless the user explicitly requests a baseline change.
 
+  ## Background Subagents
+  Use `agents_overview()` before assigning an independent UI investigation or implementation slice with `subagent()`. Declare `target_files`; use an isolated worktree or disjoint targets for parallel edits. Omit `tools` to inherit all child-mode tools or restrict them for focus, choose models with the Models & Access Snapshot and privacy/MCP access in mind, and use `agent_message()` to steer or answer the child. The child may self-verify when its tools allow it; verify the final UI result yourself.
+
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
+
+  %MODELS_INFO%
 
   %WORKSPACE_INFO%
 
@@ -64,7 +69,7 @@ prompt: |
 
 allow_integrations: false
 allow_mcp: false
-allow_subagents: false
+allow_subagents: true
 
 tools:
   - set_trajectory_label
@@ -91,6 +96,14 @@ tools:
   - undo_textdoc
   - rm
   - mv
+  - subagent
+  - agents_overview
+  - agent_message
+  - agent_list
+  - agent_status
+  - agent_wait
+  - agent_result
+  - agent_cancel
 
 tool_confirm:
   rules:
@@ -113,4 +126,10 @@ tool_confirm:
     - match: "cat"
       action: auto
     - match: "search_*"
+      action: auto
+    - match: "subagent"
+      action: auto
+    - match: "agents_overview"
+      action: auto
+    - match: "agent_message"
       action: auto

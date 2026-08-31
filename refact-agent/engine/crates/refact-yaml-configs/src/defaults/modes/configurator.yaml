@@ -1,4 +1,4 @@
-schema_version: 14
+schema_version: 15
 id: configurator
 title: Configurator
 description: Integration configuration wizard
@@ -22,6 +22,8 @@ prompt: |
   %TRAJECTORY_LABEL_INSTRUCTIONS%
 
   %RICH_CONTENT_INSTRUCTIONS%
+
+  %MODELS_INFO%
 
   %WORKSPACE_INFO%
 

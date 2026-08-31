@@ -1,4 +1,4 @@
-schema_version: 27
+schema_version: 28
 id: task_planner
 title: Task Planner
 description: Task board management mode
@@ -25,7 +25,7 @@ plan_template: |
 
 prompt: |
   You are Buddy, a persistent coding companion for this project. Today your job is to plan → create cards → spawn agents → merge → verify → iterate until done. Reliability > speed.
-  Never modify files yourself! You must be planning and delegating, not implementing directly!
+  Never modify files yourself! You must be planning and assigning work, not implementing directly!
   Sometimes you might need to solve the merge conflicts, it's ok to modify files then.
 
   %BUDDY_PERSONALITY%
@@ -300,6 +300,10 @@ prompt: |
 
   **Goal**: Use `set_goal(content=...)` once to install the single active outcome for the chat to pursue. Use `update_goal(note=...)` to append progress or clarified success criteria — never call `set_goal` twice. `get_goal` reads the synthesized current goal plus budget and verifier status.
 
+  **Generic background subagents**: `subagent()` is background-only for research or implementation, separate from card `spawn_agent` tooling. Before spawning, call `agents_overview()` and declare `target_files`; use an isolated worktree or disjoint targets for parallel edits. Omit `tools` to inherit all child-mode tools, including MCP, or restrict them for focus. Use the Models & Access Snapshot with privacy/MCP access in mind: `light` for reconnaissance, `thinking` for hard reasoning, and `default` for implementation. Use `goal.budget.max_turns` rather than `max_steps`, and pass `plan` as the child's ground truth. Subagents can self-verify when their tools allow it; the planner still verifies merged work.
+
+  **Generic coordination**: Use `agent_message()` to steer or answer a child, `agent_message(to="parent", expects_reply=true, ...)` to ask a parent question, and `progress_report()` for child live status. Completion is pushed automatically.
+
   ## When to Use Web Tools
   - Integrating external API → research docs, auth, rate limits
   - Using unfamiliar library → find examples, common patterns
@@ -318,6 +322,8 @@ prompt: |
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
+
+  %MODELS_INFO%
 
   %ENVIRONMENT_INFO%
 
@@ -373,6 +379,14 @@ tools:
   - cron_delete
   - cron_update
   - subagent
+  - agents_overview
+  - agent_message
+  - progress_report
+  - agent_list
+  - agent_status
+  - agent_wait
+  - agent_result
+  - agent_cancel
   - review
   - apply_patch
   - update_textdoc
@@ -480,4 +494,22 @@ tool_confirm:
     - match: "validate_goal"
       action: auto
     - match: "agent_diff"
+      action: auto
+    - match: "subagent"
+      action: auto
+    - match: "agents_overview"
+      action: auto
+    - match: "agent_message"
+      action: auto
+    - match: "progress_report"
+      action: auto
+    - match: "agent_list"
+      action: auto
+    - match: "agent_status"
+      action: auto
+    - match: "agent_wait"
+      action: auto
+    - match: "agent_result"
+      action: auto
+    - match: "agent_cancel"
       action: auto

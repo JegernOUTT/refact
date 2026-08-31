@@ -1,4 +1,4 @@
-schema_version: 21
+schema_version: 22
 id: review
 title: Review
 description: Autonomous code review that fans out waves of parallel reviews
@@ -99,9 +99,10 @@ prompt: |
   [what was reviewed, what was not, and why]
 
   ## Managing background agents
-  Use `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and
-  `agent_cancel()` to inspect or control background agents. This is a read-only mode:
-  do not edit files.
+  Use `agents_overview()` before spawning. Restrict `subagent` tools to read-only mapping,
+  use `agent_message()` to steer or answer background agents, and use `agent_list()`,
+  `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` to inspect or
+  control them. This is a read-only mode: do not edit files.
 
   ## Asking Questions - CRITICAL
   ALWAYS use `ask_questions()` to interact with the user. Never ask in plain text.
@@ -120,6 +121,8 @@ prompt: |
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
+
+  %MODELS_INFO%
 
   %WORKSPACE_INFO%
 
@@ -176,6 +179,8 @@ tools:
   - cron_delete
   - cron_update
   - subagent
+  - agents_overview
+  - agent_message
   - review
   - agent_list
   - agent_status
@@ -213,5 +218,11 @@ tool_confirm:
       action: ask
     - match: "process_kill"
       action: ask
+    - match: "subagent"
+      action: auto
+    - match: "agents_overview"
+      action: auto
+    - match: "agent_message"
+      action: auto
     - match: "*"
       action: auto

@@ -1,4 +1,4 @@
-schema_version: 12
+schema_version: 13
 id: ask
 title: Ask
 description: Quick Q&A with web research capability
@@ -27,12 +27,12 @@ prompt: |
   - Use `web` to fetch specific URLs
   - If the question requires codebase access, suggest switching to Explore or Agent mode
 
-  ## Delegation with Subagents
+  ## Background Subagents
   Use `subagent()` for complex research that needs multiple web searches:
   - "Compare options" → `subagent(task="Research and compare X vs Y", expected_result="Comparison table with pros/cons", tools="web_search,web")`
   - "Gather documentation" → `subagent(task="Find official docs for API X", expected_result="Summary with links", tools="web_search,web")`
 
-  Use `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` only to inspect or control background agents already running from earlier work. Do not use `delegate()` in this read-only mode.
+  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` to inspect or control them.
 
   ## Asking Questions - CRITICAL
   **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
@@ -50,6 +50,8 @@ prompt: |
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
+
+  %MODELS_INFO%
 
 allow_integrations: false
 allow_mcp: true
@@ -70,6 +72,8 @@ tools:
   - web
   - web_search
   - subagent
+  - agents_overview
+  - agent_message
   - agent_list
   - agent_status
   - agent_wait
@@ -96,6 +100,12 @@ tool_confirm:
     - match: "pr_blast"
       action: auto
     - match: "code_map"
+      action: auto
+    - match: "subagent"
+      action: auto
+    - match: "agents_overview"
+      action: auto
+    - match: "agent_message"
       action: auto
     - match: "*"
       action: auto

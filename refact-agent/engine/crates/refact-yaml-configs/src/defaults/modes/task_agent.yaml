@@ -1,4 +1,4 @@
-schema_version: 25
+schema_version: 26
 id: task_agent
 title: Task Agent
 description: Execute single task card
@@ -201,6 +201,10 @@ prompt: |
 
   **Scheduler**: `cron_create` schedules recurring or one-shot prompts (session or durable). `cron_list`/`cron_update`/`cron_delete` manage jobs.
 
+  **Background subagents**: Use `subagent()` for a focused research or implementation slice when it will keep this card scoped. Check `agents_overview()` before spawning, declare `target_files`, and choose isolated worktrees or disjoint targets for parallel edits. Omit `tools` to inherit all child-mode tools, or restrict them for focus. Use the Models & Access Snapshot to choose `light` for reconnaissance, `thinking` for hard reasoning, or `default` for implementation with privacy/MCP access in mind. Use `goal.budget.max_turns` for step control and `plan` as the child's ground truth. The child can self-verify when its tools allow it; you still run this card's required verification.
+
+  **Coordination**: Use `agent_message()` to steer or answer a child, `agent_message(to="parent", expects_reply=true, ...)` to ask a parent question, and `progress_report()` to publish child progress. Completion is pushed automatically.
+
   %AGENT_WORKTREE%
 
   %TRAJECTORY_LABEL_INSTRUCTIONS%
@@ -208,6 +212,8 @@ prompt: |
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
+
+  %MODELS_INFO%
 
 allow_integrations: true
 allow_mcp: true
@@ -242,6 +248,15 @@ tools:
   - undo_textdoc
   - rm
   - mv
+  - subagent
+  - agents_overview
+  - agent_message
+  - progress_report
+  - agent_list
+  - agent_status
+  - agent_wait
+  - agent_result
+  - agent_cancel
   - agent_finish
   - task_mem_save
   - task_mem_search
@@ -292,6 +307,24 @@ tool_confirm:
     - match: "code_map"
       action: auto
     - match: "cron_update"
+      action: auto
+    - match: "subagent"
+      action: auto
+    - match: "agents_overview"
+      action: auto
+    - match: "agent_message"
+      action: auto
+    - match: "progress_report"
+      action: auto
+    - match: "agent_list"
+      action: auto
+    - match: "agent_status"
+      action: auto
+    - match: "agent_wait"
+      action: auto
+    - match: "agent_result"
+      action: auto
+    - match: "agent_cancel"
       action: auto
     - match: "*"
       action: auto

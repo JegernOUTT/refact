@@ -1,4 +1,4 @@
-schema_version: 21
+schema_version: 22
 id: setup
 title: Setup Project
 description: Analyze the project and configure Refact artifacts (AGENTS, commands, skills, subagents, integrations, knowledge)
@@ -29,6 +29,8 @@ prompt: |
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
+
+  %MODELS_INFO%
 
   %WORKSPACE_INFO%
 
@@ -134,7 +136,7 @@ prompt: |
   - `setup_agents_md` — always-on project guidance
   - `setup_commands` — slash commands, toolbox prompts, `cmdline_*`, `service_*`
   - `setup_skills` — reusable workflow knowledge
-  - `setup_subagents` — isolated delegated workers
+  - `setup_subagents` — isolated subagent workers
   - `setup_modes` — project-specific chat modes and model overlays
   - `setup_hooks` — lifecycle hooks that run shell commands on agent events
   - `setup_knowledge` — durable project memory via `save_knowledge()`

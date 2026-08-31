@@ -1,4 +1,4 @@
-schema_version: 6
+schema_version: 7
 id: brainstorming
 title: Brainstorming
 description: Turn rough ideas into approved designs before planning or implementation
@@ -60,7 +60,7 @@ prompt: |
 
   If diagrams, mockups, flows, or comparisons would make the conversation clearer, use rich rendered content (`mermaid`, `svg`, or `html`) after asking whether the user wants a visual companion. Use visuals only when they clarify design decisions.
 
-  ## Delegation
+  ## Background Subagents
 
   %CODEGRAPH_INSTRUCTIONS%
 
@@ -69,7 +69,7 @@ prompt: |
   - Past decisions: `subagent(task="Find past work and knowledge about this area", expected_result="Relevant decisions and risks", tools="search_trajectories,get_trajectory_context,knowledge")`
   - External research: `subagent(task="Research API/library constraints", expected_result="Actionable constraints with sources", tools="web_search,web")`
 
-  Use `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` only to inspect or control background agents already running from earlier work. Do not use `delegate()` in this read-only mode.
+  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` to inspect or control them.
 
   ## Asking Questions - CRITICAL
 
@@ -98,6 +98,8 @@ prompt: |
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
+
+  %MODELS_INFO%
 
   %WORKSPACE_INFO%
 
@@ -141,6 +143,8 @@ tools:
   - image_region
   - visual_diff
   - subagent
+  - agents_overview
+  - agent_message
   - agent_list
   - agent_status
   - agent_wait
@@ -170,6 +174,12 @@ tool_confirm:
     - match: "pr_blast"
       action: auto
     - match: "code_map"
+      action: auto
+    - match: "subagent"
+      action: auto
+    - match: "agents_overview"
+      action: auto
+    - match: "agent_message"
       action: auto
     - match: "*"
       action: auto

@@ -1,4 +1,4 @@
-schema_version: 21
+schema_version: 22
 id: setup_agents_md
 title: Setup AGENTS.md
 description: Guided creation or update of AGENTS.md project instructions
@@ -24,6 +24,8 @@ prompt: |
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
+
+  %MODELS_INFO%
 
   %WORKSPACE_INFO%
 
@@ -70,7 +72,7 @@ prompt: |
 
   Do **not** put these in `AGENTS.md` when a better artifact exists:
   - recurring workflows better encoded as **skills**
-  - isolated delegated workers better encoded as **subagents**
+  - isolated workers better encoded as **subagents**
   - chat triggers better encoded as **slash commands**
   - external integrations better encoded in `.refact/integrations.d/`
   - long, evolving implementation plans better kept in a living plan/progress doc
@@ -217,6 +219,8 @@ tools:
   - update_textdoc_regex
   - undo_textdoc
   - subagent
+  - agents_overview
+  - agent_message
   - tasks_set
   - task_done
   - ask_questions
@@ -260,6 +264,10 @@ tool_confirm:
       action: auto
     - match: "subagent"
       action: ask
+    - match: "agents_overview"
+      action: auto
+    - match: "agent_message"
+      action: auto
     - match: "tasks_set"
       action: auto
     - match: "task_done"

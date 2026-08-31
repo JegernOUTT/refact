@@ -1,4 +1,4 @@
-schema_version: 21
+schema_version: 22
 id: setup_commands
 title: Setup Commands
 description: Create project-specific slash commands, toolbox prompts, and cmdline/service configs
@@ -24,6 +24,8 @@ prompt: |
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
+
+  %MODELS_INFO%
 
   %WORKSPACE_INFO%
 
@@ -182,6 +184,8 @@ tools:
   - update_textdoc_regex
   - undo_textdoc
   - subagent
+  - agents_overview
+  - agent_message
   - tasks_set
   - task_done
   - ask_questions
@@ -225,6 +229,10 @@ tool_confirm:
       action: auto
     - match: "subagent"
       action: ask
+    - match: "agents_overview"
+      action: auto
+    - match: "agent_message"
+      action: auto
     - match: "tasks_set"
       action: auto
     - match: "task_done"

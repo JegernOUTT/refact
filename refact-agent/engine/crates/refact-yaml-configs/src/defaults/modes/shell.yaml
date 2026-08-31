@@ -1,4 +1,4 @@
-schema_version: 13
+schema_version: 14
 id: shell
 title: Shell
 description: Execute shell commands for system tasks
@@ -48,6 +48,8 @@ prompt: |
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
+
+  %MODELS_INFO%
 
   %SHELL_INSTRUCTIONS%
 

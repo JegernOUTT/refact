@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: setup_subagents
 title: Setup Subagents
 description: Guided setup for project-specific subagents
@@ -24,6 +24,8 @@ prompt: |
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
+
+  %MODELS_INFO%
 
   %WORKSPACE_INFO%
 
@@ -57,7 +59,7 @@ prompt: |
   |------------------------|---------------------|
   | The task needs its own tool access or model | The task just needs extra context/instructions |
   | Output is consumed programmatically by another agent | Output is shown directly to the user |
-  | The workflow is delegation-heavy (search -> analyze -> report) | The workflow is interactive with the user |
+  | The workflow needs independent subagent work (search -> analyze -> report) | The workflow is interactive with the user |
   | You want `expose_as_tool: true` for orchestration | You want the user to invoke it manually |
 
   ## What makes a subagent excellent?
@@ -73,7 +75,7 @@ prompt: |
 
   ## Workflow
 
-  ### 1. Discover — find delegation bottlenecks
+  ### 1. Discover — find subagent bottlenecks
   - `cat()` AGENTS.md and any existing subagents in `.refact/subagents/`
   - inspect shipped subagent examples before inventing new schema patterns
   - `search_trajectories()` — look for past sessions where the orchestrator spent many steps on a repetitive pattern (lots of search calls, repeated code analysis, same review checklist every PR)
@@ -84,7 +86,7 @@ prompt: |
 
   ### 2. Research — find subagent patterns for this stack
   - `web_search()` only when the pattern is unfamiliar; prefer repo-local examples first
-  - Think about what the main agent mode delegates most: search, review, synthesis, focused comparison, impact analysis?
+  - Think about which work the main agent most often assigns to subagents: search, review, synthesis, focused comparison, impact analysis?
   - If the job is really always-on guidance or reusable knowledge, recommend AGENTS or skills instead of a subagent
 
   ### 3. Propose — compact catalog with rationale
@@ -218,6 +220,8 @@ tools:
   - update_textdoc_regex
   - undo_textdoc
   - subagent
+  - agents_overview
+  - agent_message
   - tasks_set
   - task_done
   - ask_questions
@@ -261,6 +265,10 @@ tool_confirm:
       action: auto
     - match: "subagent"
       action: ask
+    - match: "agents_overview"
+      action: auto
+    - match: "agent_message"
+      action: auto
     - match: "tasks_set"
       action: auto
     - match: "task_done"

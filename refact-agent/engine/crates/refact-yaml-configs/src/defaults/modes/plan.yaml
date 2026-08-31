@@ -1,4 +1,4 @@
-schema_version: 19
+schema_version: 20
 id: plan
 title: Plan
 description: Turn approved designs or requirements into precise implementation plans
@@ -146,14 +146,14 @@ prompt: |
   - `knowledge` - search project insights
   - `web`, `web_search` - verify external APIs, patterns, or current docs
 
-  ## Delegation with Subagents
+  ## Background Subagents
 
   Use `subagent()` for read-only research in parallel:
   - Existing patterns: `subagent(task="Find how X is implemented elsewhere", expected_result="Files, APIs, conventions", tools="search_pattern,cat,search_semantic")`
   - Past decisions: `subagent(task="Find past decisions about X", expected_result="Relevant decisions and rationale", tools="search_trajectories,get_trajectory_context,knowledge")`
   - External constraints: `subagent(task="Research current docs for X", expected_result="Constraints, examples, sources", tools="web_search,web")`
 
-  Use `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` only to inspect or control background agents already running from earlier work. Do not use `delegate()` in this read-only mode.
+  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` to inspect or control them.
 
   ## Asking Questions - CRITICAL
 
@@ -173,6 +173,8 @@ prompt: |
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
+
+  %MODELS_INFO%
 
   %WORKSPACE_INFO%
 
@@ -216,6 +218,8 @@ tools:
   - image_region
   - visual_diff
   - subagent
+  - agents_overview
+  - agent_message
   - agent_list
   - agent_status
   - agent_wait
@@ -245,6 +249,12 @@ tool_confirm:
     - match: "pr_blast"
       action: auto
     - match: "code_map"
+      action: auto
+    - match: "subagent"
+      action: auto
+    - match: "agents_overview"
+      action: auto
+    - match: "agent_message"
       action: auto
     - match: "*"
       action: auto

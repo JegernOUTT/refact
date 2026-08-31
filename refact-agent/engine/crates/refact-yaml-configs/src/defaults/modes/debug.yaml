@@ -1,4 +1,4 @@
-schema_version: 21
+schema_version: 22
 id: debug
 title: Debug
 description: Systematic bug diagnosis and root cause analysis
@@ -52,7 +52,7 @@ prompt: |
   **Evidence**: [what confirms this]
   **Fix Approach**: [how to resolve]
 
-  ## Delegation with Subagents
+  ## Background Subagents
   %CODEGRAPH_INSTRUCTIONS%
 
   Use `subagent()` to parallelize investigation:
@@ -60,7 +60,7 @@ prompt: |
   - "Find similar bugs" → `subagent(task="Search for similar error handling patterns", expected_result="List of related code patterns", tools="search_pattern,cat,search_trajectories")`
   - "Check dependencies" → `subagent(task="Analyze dependencies of module X", expected_result="Dependency graph and potential issues", tools="tree,cat,search_pattern")`
 
-  Use `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` only to inspect or control background agents already running from earlier work. Do not use `delegate()` in this read-only mode.
+  Use `agents_overview()` before spawning and restrict `tools` to read-only capabilities for research. Use `agent_message()` to steer or answer background agents, and `agent_list()`, `agent_status()`, `agent_wait()`, `agent_result()`, and `agent_cancel()` to inspect or control them.
 
   ## Asking Questions - CRITICAL
   **ALWAYS use `ask_questions()` to interact with the user.** Never ask questions in plain text - use the tool.
@@ -84,6 +84,8 @@ prompt: |
   %RICH_CONTENT_INSTRUCTIONS%
 
   %SYSTEM_INFO%
+
+  %MODELS_INFO%
 
   %WORKSPACE_INFO%
 
@@ -140,6 +142,8 @@ tools:
   - cron_delete
   - cron_update
   - subagent
+  - agents_overview
+  - agent_message
   - agent_list
   - agent_status
   - agent_wait
@@ -176,5 +180,11 @@ tool_confirm:
       action: ask
     - match: "process_kill"
       action: ask
+    - match: "subagent"
+      action: auto
+    - match: "agents_overview"
+      action: auto
+    - match: "agent_message"
+      action: auto
     - match: "*"
       action: auto
