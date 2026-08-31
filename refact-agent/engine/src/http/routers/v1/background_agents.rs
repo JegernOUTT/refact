@@ -17,6 +17,8 @@ pub struct BackgroundAgentsQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct CancelRequest {
+    #[serde(default)]
+    pub chat_id: Option<String>,
     #[serde(default = "default_subtree")]
     pub subtree: bool,
     #[serde(default)]
@@ -25,6 +27,8 @@ pub struct CancelRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct MessageRequest {
+    #[serde(default)]
+    pub chat_id: Option<String>,
     pub text: String,
 }
 
@@ -45,6 +49,29 @@ fn api_error(status: StatusCode, error: impl Into<String>) -> (StatusCode, Json<
             },
         })),
     )
+}
+
+fn belongs_to_chat(record: &BackgroundAgent, chat_id: &str) -> bool {
+    record.parent_chat_id == chat_id || record.parent_root_chat_id.as_deref() == Some(chat_id)
+}
+
+fn verify_optional_chat_ownership(
+    record: &BackgroundAgent,
+    chat_id: Option<&str>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let Some(chat_id) = chat_id.filter(|chat_id| !chat_id.trim().is_empty()) else {
+        // TODO: require chat_id after GUI T-15 sends it for every request.
+        tracing::warn!(agent_id = %record.agent_id, "background agent request omitted chat_id");
+        return Ok(());
+    };
+    if belongs_to_chat(record, chat_id) {
+        Ok(())
+    } else {
+        Err(api_error(
+            StatusCode::FORBIDDEN,
+            "Background agent does not belong to this chat",
+        ))
+    }
 }
 
 async fn root_chat_id(app: &AppState, chat_id: &str) -> String {
@@ -85,6 +112,7 @@ pub async fn handle_v1_background_agents_cancel(
         .get_any(&agent_id)
         .await
         .map_err(|_| api_error(StatusCode::NOT_FOUND, "Background agent not found"))?;
+    verify_optional_chat_ownership(&record, request.chat_id.as_deref())?;
     let cancelled = app
         .agents
         .cancel_subtree(
@@ -125,6 +153,7 @@ pub async fn handle_v1_background_agents_message(
         .get_any(&agent_id)
         .await
         .map_err(|_| api_error(StatusCode::NOT_FOUND, "Background agent not found"))?;
+    verify_optional_chat_ownership(&record, request.chat_id.as_deref())?;
     if record.status.is_terminal() {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -275,5 +304,42 @@ mod tests {
         );
         assert!(child_abort.load(std::sync::atomic::Ordering::SeqCst));
         assert!(grandchild_abort.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn message_and_cancel_enforce_present_chat_ownership() {
+        let app = app().await;
+        let (agent, _, _) = app
+            .agents
+            .create(create_request("root", "child"))
+            .await
+            .unwrap();
+
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            format!("/v1/background-agents/{}/message", agent.agent_id),
+            json!({ "chat_id": "other", "text": "hello" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            format!("/v1/background-agents/{}/cancel", agent.agent_id),
+            json!({ "chat_id": "other" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _) = request(
+            app,
+            "POST",
+            format!("/v1/background-agents/{}/message", agent.agent_id),
+            json!({ "chat_id": "root", "text": "hello" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
     }
 }

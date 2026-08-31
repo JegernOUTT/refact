@@ -1591,9 +1591,13 @@ pub async fn run_subchat(
         )
         .await;
     }
+    let app = AppState::from_gcx(gcx.clone()).await;
+    if config.stateful {
+        install_stateful_subchat_session(&app, &chat_id, &config, &messages).await;
+    }
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new_with_abort(
-            AppState::from_gcx(gcx.clone()).await,
+            app,
             config.n_ctx,
             1,
             false,
@@ -1698,6 +1702,29 @@ pub async fn run_subchat(
         metering,
         chat_id: if config.stateful { Some(chat_id) } else { None },
     })
+}
+
+pub(crate) async fn install_stateful_subchat_session(
+    app: &AppState,
+    chat_id: &str,
+    config: &SubchatConfig,
+    messages: &[ChatMessage],
+) {
+    let mut sessions = app.chat.sessions.write().await;
+    if sessions.contains_key(chat_id) {
+        return;
+    }
+    let thread = stateful_thread_from_config(chat_id, config);
+    let session = crate::chat::types::ChatSession::new_with_trajectory(
+        chat_id.to_string(),
+        messages.to_vec(),
+        thread,
+        chrono::Utc::now().to_rfc3339(),
+        None,
+        Vec::new(),
+        None,
+    );
+    sessions.insert(chat_id.to_string(), Arc::new(AMutex::new(session)));
 }
 
 pub async fn run_subchat_once(

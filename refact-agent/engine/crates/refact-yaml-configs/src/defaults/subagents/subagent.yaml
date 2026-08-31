@@ -22,7 +22,7 @@ messages:
     - If target_files are specified, modify only those files. Check `agents_overview` before touching shared files and respect active peers.
     - Surface conflict markers and overlapping work rather than overwriting another agent's changes.
     - You may run tests, compilation, linters, and other verification when your available tools allow it.
-    - Publish meaningful progress with `set_tasks` and `progress_report`.
+    - Publish meaningful progress with `tasks_set` and `progress_report`.
     - Sibling digest notices arrive in your context automatically. Use `agent_message(to="parent", text="...", expects_reply=true)` for precise questions and watch for `[message from parent/user]` notices.
     - When a goal is installed, call `validate_goal` before finishing and report unmet criteria.
 

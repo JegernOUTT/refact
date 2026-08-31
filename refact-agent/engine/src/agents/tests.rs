@@ -641,6 +641,28 @@ async fn cancelled_agent_ignores_late_mark_failed() {
 }
 
 #[tokio::test]
+async fn cancelled_agent_ignores_late_running_and_waiting_transitions() {
+    let (_temp, registry) = registry().await;
+    let record = create_agent(&registry, "parent", BgAgentKind::Delegate).await;
+    let cancelled = registry
+        .mark_cancelled(&record.agent_id, Some("stop".to_string()))
+        .await
+        .expect("cancelled");
+
+    let running = registry
+        .mark_running(&record.agent_id, "child-late".to_string())
+        .await
+        .expect("late running");
+    let waiting = registry
+        .mark_waiting_for_approval(&record.agent_id)
+        .await
+        .expect("late waiting");
+
+    assert_eq!(running, cancelled);
+    assert_eq!(waiting, cancelled);
+}
+
+#[tokio::test]
 async fn mark_completed_on_completed_is_no_op() {
     let (_temp, registry) = registry().await;
     let record = create_agent(&registry, "parent", BgAgentKind::Delegate).await;
@@ -1312,6 +1334,35 @@ async fn spawn_background_agent_returns_immediately_with_child_chat_id_and_emits
     }
 
     assert_eq!(statuses, vec!["queued", "running", "completed"]);
+}
+
+#[tokio::test]
+async fn background_agent_updates_reach_parent_and_root_sessions() {
+    let (_gcx, app, parent_session) = app_with_parent_session("child-parent").await;
+    let root_session = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
+        "root-parent".to_string(),
+    )));
+    app.chat
+        .sessions
+        .write()
+        .await
+        .insert("root-parent".to_string(), root_session.clone());
+    let mut request = create_request("child-parent", BgAgentKind::Subagent);
+    request.parent_root_chat_id = Some("root-parent".to_string());
+    let (record, _, _) = app.agents.create(request).await.expect("create");
+
+    crate::agents::spawn::emit_background_agent_update(app, &record).await;
+
+    assert!(parent_session
+        .lock()
+        .await
+        .background_agents
+        .contains_key(&record.agent_id));
+    assert!(root_session
+        .lock()
+        .await
+        .background_agents
+        .contains_key(&record.agent_id));
 }
 
 #[serial(test_runner)]

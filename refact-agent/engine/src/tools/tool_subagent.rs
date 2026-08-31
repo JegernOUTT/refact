@@ -15,11 +15,11 @@ use crate::chat::types::{GoalBudget, GoalCriterion};
 use crate::global_context::try_load_caps_quickly_if_not_present;
 use crate::postprocessing::pp_command_output::OutputFilter;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
-use crate::tools::tools_list::get_available_tools;
+use crate::tools::tools_list::{get_available_tools, get_tools_for_mode};
 use crate::yaml_configs::customization_registry::get_subagent_config;
 
 pub const SUBAGENT_FORCE_TOOLS: &[&str] = &[
-    "set_tasks",
+    "tasks_set",
     "progress_report",
     "agents_overview",
     "agent_message",
@@ -132,7 +132,7 @@ impl Tool for ToolSubagent {
         let available_tools = available_tools(gcx.clone()).await;
         let spawn_tools = match args.tools.as_ref() {
             Some(requested) => Some(normalize_explicit_tools(requested, &available_tools)?),
-            None => None,
+            None => inherit_parent_tools(&app, gcx.clone(), &parent_chat_id, &current_model).await,
         };
         let (model, model_type) = resolve_model(
             gcx.clone(),
@@ -364,6 +364,30 @@ async fn available_tools(gcx: Arc<crate::global_context::GlobalContext>) -> Hash
     names
 }
 
+async fn inherit_parent_tools(
+    app: &crate::app_state::AppState,
+    gcx: Arc<crate::global_context::GlobalContext>,
+    parent_chat_id: &str,
+    model: &str,
+) -> Option<Vec<String>> {
+    let session = {
+        let sessions = app.chat.sessions.read().await;
+        sessions.get(parent_chat_id)?.clone()
+    };
+    let parent_mode = session.lock().await.thread.mode.clone();
+    let mut tools = get_tools_for_mode(gcx, &parent_mode, Some(model))
+        .await
+        .into_iter()
+        .map(|tool| tool.tool_description().name)
+        .collect::<Vec<_>>();
+    for tool in SUBAGENT_FORCE_TOOLS {
+        if !tools.iter().any(|candidate| candidate == tool) {
+            tools.push((*tool).to_string());
+        }
+    }
+    Some(tools)
+}
+
 fn canonical_tool_name(tool: &str) -> String {
     let normalized = tool.trim().to_ascii_lowercase();
     let normalized =
@@ -441,7 +465,10 @@ async fn resolve_model(
     } else {
         parent_model.to_string()
     };
-    let selected_type = model_type.map(str::to_string);
+    let selected_type = model_name
+        .is_none()
+        .then(|| model_type.map(str::to_string))
+        .flatten();
     let model = crate::caps::resolve_chat_model(caps, &model_id)
         .map_err(|error| format!("model `{model_id}` is not available: {error}"))?;
     Ok((model.base.id.clone(), selected_type))
@@ -533,7 +560,7 @@ fn build_subagent_prompt(
         prompt.push('\n');
     }
     prompt.push_str(&format!("# Active peers\n{peers}\n\n"));
-    prompt.push_str("# Constraints\n- Work independently in this background trajectory.\n- You MAY run tests, compilation, lint, or other verification when your tools allow it.\n- Publish progress with `set_tasks` and `progress_report`.\n- Sibling digest notices arrive in your context automatically; coordinate with `agents_overview` and `agent_message`.\n");
+    prompt.push_str("# Constraints\n- Work independently in this background trajectory.\n- You MAY run tests, compilation, lint, or other verification when your tools allow it.\n- Publish progress with `tasks_set` and `progress_report`.\n- Sibling digest notices arrive in your context automatically; coordinate with `agents_overview` and `agent_message`.\n");
     if goal_installed {
         prompt.push_str("- An installed goal is ground truth. You MUST call `validate_goal` before finishing and report any unmet criteria.\n");
     }
@@ -764,7 +791,7 @@ mod tests {
         let available = HashSet::from([
             "apply_patch".to_string(),
             "search_pattern".to_string(),
-            "set_tasks".to_string(),
+            "tasks_set".to_string(),
             "validate_goal".to_string(),
         ]);
         let tools = normalize_explicit_tools(
@@ -775,6 +802,20 @@ mod tests {
         assert_eq!(&tools[..2], ["apply_patch", "search_pattern"]);
         for required in SUBAGENT_FORCE_TOOLS {
             assert!(tools.contains(&required.to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn force_tools_are_registered() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let registered = get_available_tools(gcx)
+            .await
+            .into_iter()
+            .map(|tool| tool.tool_description().name)
+            .collect::<HashSet<_>>();
+
+        for tool in SUBAGENT_FORCE_TOOLS {
+            assert!(registered.contains(*tool), "{tool} must be registered");
         }
     }
 
@@ -842,7 +883,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(model, "test/light");
-        assert_eq!(selected.as_deref(), Some("thinking"));
+        assert_eq!(selected, None);
     }
 
     #[tokio::test]
@@ -946,5 +987,64 @@ mod tests {
             .content
             .content_text_only()
             .contains("refact://chat/subchat-"));
+    }
+
+    #[serial(test_runner)]
+    #[tokio::test]
+    async fn omitted_tools_inherit_parent_mode_tools_and_force_tools() {
+        let ccx = test_context("restricted-parent").await;
+        let app = ccx.lock().await.app.clone();
+        let parent_session = Arc::new(AMutex::new(crate::chat::types::ChatSession::new(
+            "restricted-parent".to_string(),
+        )));
+        parent_session.lock().await.thread.mode = "NO_TOOLS".to_string();
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert("restricted-parent".to_string(), parent_session);
+        let expected =
+            inherit_parent_tools(&app, app.gcx.clone(), "restricted-parent", "test/default")
+                .await
+                .expect("parent mode tools");
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let captured_runner = captured.clone();
+        let _runner =
+            crate::agents::spawn::install_test_runner(Arc::new(move |_gcx, messages, config| {
+                *captured_runner.lock().unwrap() = Some(config.tools);
+                Box::pin(async move {
+                    Ok(SubchatResult {
+                        messages,
+                        metering: Map::new(),
+                        chat_id: Some("ignored".to_string()),
+                    })
+                })
+            }));
+        let mut tool = ToolSubagent {
+            config_path: String::new(),
+        };
+        tool.tool_execute(ccx, &"call".to_string(), &args())
+            .await
+            .unwrap();
+        let record = app
+            .agents
+            .list_all()
+            .await
+            .into_iter()
+            .find(|record| record.title.starts_with("Subagent:"))
+            .expect("spawned agent");
+        app.agents
+            .wait(
+                "restricted-parent",
+                &record.agent_id,
+                Duration::from_secs(2),
+            )
+            .await
+            .expect("agent completion");
+
+        assert!(matches!(
+            captured.lock().unwrap().clone(),
+            Some(ToolsPolicy::Only(tools)) if tools == expected
+        ));
     }
 }

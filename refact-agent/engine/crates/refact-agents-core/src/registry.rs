@@ -127,15 +127,25 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         child_chat_id: String,
     ) -> Result<BackgroundAgent, String> {
-        self.update_record(agent_id, |record, now| {
-            record.status = BgAgentStatus::Running;
-            record.child_chat_id = Some(child_chat_id);
-            record.started_at = Some(now);
-            record.finished_at = None;
-            record.error = None;
-            Ok(())
-        })
-        .await
+        let mut records = self.records.write().await;
+        let current = records
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| "agent not found".to_string())?;
+        if current.status.is_terminal() {
+            return Ok(current);
+        }
+        let mut updated = current;
+        let now = Utc::now();
+        updated.status = BgAgentStatus::Running;
+        updated.child_chat_id = Some(child_chat_id);
+        updated.started_at = Some(now);
+        updated.finished_at = None;
+        updated.error = None;
+        touch_record(&mut updated, now);
+        storage::save_record(&self.storage_root, &updated).await?;
+        records.insert(agent_id.to_string(), updated.clone());
+        Ok(updated)
     }
 
     pub async fn update_progress(
@@ -198,18 +208,7 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         status: &str,
     ) -> Result<BackgroundAgent, String> {
-        if !matches!(
-            status,
-            "pending" | "merged" | "conflict" | "skipped" | "failed"
-        ) {
-            return Err("invalid merge status".to_string());
-        }
-        let status = status.to_string();
-        self.update_record(agent_id, |record, _| {
-            record.merge_status = Some(status);
-            Ok(())
-        })
-        .await
+        self.set_merge_outcome(agent_id, status, None, None).await
     }
 
     pub async fn set_merge_outcome(
@@ -219,6 +218,12 @@ impl BackgroundAgentRegistry {
         conflict_summary: Option<String>,
         error: Option<String>,
     ) -> Result<BackgroundAgent, String> {
+        if !matches!(
+            status,
+            "pending" | "merged" | "conflict" | "skipped" | "failed"
+        ) {
+            return Err("invalid merge status".to_string());
+        }
         let status = status.to_string();
         self.update_record(agent_id, |record, _| {
             record.merge_status = Some(status);
@@ -430,11 +435,21 @@ impl BackgroundAgentRegistry {
         &self,
         agent_id: &str,
     ) -> Result<BackgroundAgent, String> {
-        self.update_record(agent_id, |record, _| {
-            record.status = BgAgentStatus::WaitingForApproval;
-            Ok(())
-        })
-        .await
+        let mut records = self.records.write().await;
+        let current = records
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| "agent not found".to_string())?;
+        if current.status.is_terminal() {
+            return Ok(current);
+        }
+        let mut updated = current;
+        let now = Utc::now();
+        updated.status = BgAgentStatus::WaitingForApproval;
+        touch_record(&mut updated, now);
+        storage::save_record(&self.storage_root, &updated).await?;
+        records.insert(agent_id.to_string(), updated.clone());
+        Ok(updated)
     }
 
     pub async fn set_completion_message_id(
@@ -782,8 +797,8 @@ impl BackgroundAgentRegistry {
         let Some(inbox) = self.inbox_for(agent_id).await else {
             return Vec::new();
         };
-        let drained = std::mem::take(&mut *inbox.lock().await);
-        drained
+        let mut inbox = inbox.lock().await;
+        std::mem::take(&mut *inbox)
     }
 
     pub async fn overlap_warning(
@@ -1112,6 +1127,13 @@ mod tests {
         assert_eq!(
             registry
                 .set_merge_status(&record.agent_id, "weird")
+                .await
+                .unwrap_err(),
+            "invalid merge status"
+        );
+        assert_eq!(
+            registry
+                .set_merge_outcome(&record.agent_id, "weird", None, None)
                 .await
                 .unwrap_err(),
             "invalid merge status"

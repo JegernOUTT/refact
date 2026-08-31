@@ -11,7 +11,7 @@ pub const NO_TEXT_RESULT_SUMMARY: &str =
 #[serde(rename_all = "snake_case")]
 pub enum BgAgentKind {
     Subagent,
-    #[doc = "Legacy persisted-record variant; new unified agents use Subagent."]
+    /// Legacy persisted-record variant; new unified agents use Subagent.
     Delegate,
 }
 

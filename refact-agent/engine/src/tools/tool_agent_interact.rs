@@ -328,31 +328,30 @@ impl Tool for ToolAgentMessage {
                 );
             };
             let caller = app.agents.get_any(&agent_id).await?;
+            let parent_notice_chat_id = parent_notice_chat_id(&app, &caller).await;
             if expects_reply {
                 let (updated, question_id) =
                     app.agents.add_question(&agent_id, text.clone()).await?;
                 crate::agents::spawn::emit_background_agent_update(app.clone(), &updated).await;
-                crate::agents::push::push_notice_to_chat(
-                    app,
-                    &caller.parent_chat_id,
-                    format!(
-                        "[subagent question] agent {agent_id} asks: {text} — answer with agent_message(to=\"{agent_id}\", reply_to=\"{question_id}\", text=...)"
-                    ),
-                )
-                .await?;
+                if let Some(parent_notice_chat_id) = parent_notice_chat_id {
+                    crate::agents::push::push_notice_to_chat(
+                        app,
+                        &parent_notice_chat_id,
+                        format!(
+                            "[subagent question] agent {agent_id} asks: {text} — answer with agent_message(to=\"{agent_id}\", reply_to=\"{question_id}\", text=...)"
+                        ),
+                    )
+                    .await?;
+                }
                 return Ok(output(
                     tool_call_id,
                     format!("Question {question_id} sent to parent."),
                 ));
             }
-            let parent_session_exists = {
-                let sessions = app.chat.sessions.read().await;
-                sessions.contains_key(&caller.parent_chat_id)
-            };
-            if parent_session_exists {
+            if let Some(parent_notice_chat_id) = parent_notice_chat_id {
                 crate::agents::push::push_notice_to_chat(
                     app.clone(),
-                    &caller.parent_chat_id,
+                    &parent_notice_chat_id,
                     format!("[subagent note] agent {agent_id}: {text}"),
                 )
                 .await?;
@@ -405,13 +404,24 @@ impl Tool for ToolAgentMessage {
                 },
             )
             .await?;
-        crate::agents::spawn::emit_background_agent_update(app, &target).await;
         Ok(output(tool_call_id, format!("Message queued for {to}.")))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
         vec![]
     }
+}
+
+async fn parent_notice_chat_id(app: &AppState, caller: &BackgroundAgent) -> Option<String> {
+    let sessions = app.chat.sessions.read().await;
+    if sessions.contains_key(&caller.parent_chat_id) {
+        return Some(caller.parent_chat_id.clone());
+    }
+    caller
+        .parent_root_chat_id
+        .as_ref()
+        .filter(|chat_id| sessions.contains_key(chat_id.as_str()))
+        .cloned()
 }
 
 #[async_trait]

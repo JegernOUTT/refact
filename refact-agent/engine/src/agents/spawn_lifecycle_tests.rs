@@ -249,6 +249,51 @@ async fn isolated_auto_merge_merges_changes_and_cleans_worktree() {
 
 #[serial(test_runner)]
 #[tokio::test]
+async fn nested_isolated_auto_merge_runs_inside_parent_worktree() {
+    let fixture = repo_fixture().await;
+    let service =
+        WorktreeService::new(fixture.cache.clone(), fixture.source.clone()).expect("service");
+    let parent = service
+        .create_worktree(crate::worktrees::types::CreateWorktreeRequest {
+            branch: Some("refact/subagent/parent".to_string()),
+            base_branch: Some("work".to_string()),
+            chat_id: Some("parent-worktree".to_string()),
+            kind: Some("subagent".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("create parent worktree");
+    let parent_worktree = parent.worktree.meta;
+    let _runner =
+        crate::agents::spawn::install_test_runner(Arc::new(move |_gcx, messages, config| {
+            Box::pin(async move {
+                let worktree = config.worktree.as_ref().expect("isolated worktree");
+                std::fs::write(worktree.root.join("nested-agent-change.txt"), "merged\n")
+                    .expect("write nested isolated change");
+                Ok(completed_result(messages, config))
+            })
+        }));
+    let mut request = spawn_request("parent-nested-auto-merge", BgAgentKind::Subagent);
+    request.parent_worktree = Some(parent_worktree.clone());
+    request.worktree_mode = SpawnWorktreeMode::Isolated { auto_merge: true };
+
+    let completed = await_completion(
+        crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request)
+            .await
+            .expect("spawn nested agent"),
+    )
+    .await;
+
+    assert_eq!(completed.merge_status.as_deref(), Some("merged"));
+    assert_eq!(
+        std::fs::read_to_string(parent_worktree.root.join("nested-agent-change.txt")).unwrap(),
+        "merged\n"
+    );
+    assert!(!fixture.source.join("nested-agent-change.txt").exists());
+}
+
+#[serial(test_runner)]
+#[tokio::test]
 async fn isolated_auto_merge_conflict_preserves_worktree_and_summary() {
     let fixture = repo_fixture().await;
     let source = fixture.source.clone();
@@ -538,6 +583,46 @@ async fn goal_seed_and_projection_survive_trajectory_reload() {
     assert_eq!(goal.content, "Ship lifecycle coverage");
     assert_eq!(goal.budget.max_turns, Some(3));
     assert_eq!(goal.criteria[0].id, "C1");
+}
+
+#[serial(test_runner)]
+#[tokio::test]
+async fn stateful_spawn_installs_goal_session_before_runner_executes() {
+    let session_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let session_ready_runner = session_ready.clone();
+    let fixture = repo_fixture().await;
+    let gcx = fixture.app.gcx.clone();
+    let _runner =
+        crate::agents::spawn::install_test_runner(Arc::new(move |_gcx, messages, config| {
+            let gcx = gcx.clone();
+            let session_ready = session_ready_runner.clone();
+            Box::pin(async move {
+                let chat_id = config.chat_id.as_deref().expect("stateful child chat id");
+                let session = gcx.chat_sessions.read().await.get(chat_id).cloned();
+                let has_goal = match session {
+                    Some(session) => session.lock().await.goal.is_some(),
+                    None => false,
+                };
+                session_ready.store(has_goal, std::sync::atomic::Ordering::SeqCst);
+                Ok(completed_result(messages, config))
+            })
+        }));
+    let mut request = spawn_request("parent-goal-session", BgAgentKind::Subagent);
+    request.goal = Some(SpawnGoal {
+        content: "Install the goal projection".to_string(),
+        criteria: Vec::new(),
+        budget: None,
+    });
+
+    let completed = await_completion(
+        crate::agents::spawn::spawn_background_agent(fixture.app.clone(), request)
+            .await
+            .expect("spawn goal agent"),
+    )
+    .await;
+
+    assert_eq!(completed.status, BgAgentStatus::Completed);
+    assert!(session_ready.load(std::sync::atomic::Ordering::SeqCst));
 }
 
 #[serial(test_runner)]
