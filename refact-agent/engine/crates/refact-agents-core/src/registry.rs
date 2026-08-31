@@ -210,6 +210,30 @@ impl BackgroundAgentRegistry {
         .await
     }
 
+    pub async fn set_merge_outcome(
+        &self,
+        agent_id: &str,
+        status: &str,
+        conflict_summary: Option<String>,
+        error: Option<String>,
+    ) -> Result<BackgroundAgent, String> {
+        let status = status.to_string();
+        self.update_record(agent_id, |record, _| {
+            record.merge_status = Some(status);
+            if let Some(conflict_summary) = conflict_summary {
+                record.conflict_summary = Some(conflict_summary);
+            }
+            if let Some(error) = error {
+                record.error = Some(match record.error.take() {
+                    Some(existing) => format!("{}\n{}", existing, error),
+                    None => error,
+                });
+            }
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn add_question(
         &self,
         agent_id: &str,
@@ -625,6 +649,15 @@ impl BackgroundAgentRegistry {
     ) -> Result<BackgroundAgent, String> {
         let records = self.records.read().await;
         scoped_record(&records, parent_chat_id, agent_id)
+    }
+
+    pub async fn get_any(&self, agent_id: &str) -> Result<BackgroundAgent, String> {
+        self.records
+            .read()
+            .await
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| "agent not found".to_string())
     }
 
     pub async fn wait(

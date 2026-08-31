@@ -1,7 +1,7 @@
 use chrono::{TimeDelta, Utc};
 use uuid::Uuid;
 
-use crate::agents::types::{BackgroundAgent, BgAgentKind, BgAgentStatus};
+use crate::agents::types::{BackgroundAgent, BgAgentStatus};
 use crate::app_state::AppState;
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::process_command_queue;
@@ -39,27 +39,75 @@ pub async fn push_completion_to_parent(
         return Ok(());
     }
 
+    match enqueue_notice(
+        app.clone(),
+        &record.parent_chat_id,
+        build_completion_event(record),
+    )
+    .await?
+    {
+        NoticeEnqueue::Added(message_id) => {
+            app.agents
+                .set_completion_message_id(&record.agent_id, message_id)
+                .await?;
+        }
+        NoticeEnqueue::Missing | NoticeEnqueue::Closed => {
+            app.agents
+                .set_completion_message_id(&record.agent_id, "pending".to_string())
+                .await?;
+        }
+        NoticeEnqueue::Full => {
+            app.agents
+                .set_completion_message_id(&record.agent_id, "deferred".to_string())
+                .await?;
+        }
+        NoticeEnqueue::Duplicate => {}
+    }
+    Ok(())
+}
+
+pub async fn push_notice_to_chat(app: AppState, chat_id: &str, text: String) -> Result<(), String> {
+    let _ = enqueue_notice(
+        app,
+        chat_id,
+        event(
+            EventSubkind::SystemNotice,
+            "agents.notice",
+            serde_json::json!({}),
+            text,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+enum NoticeEnqueue {
+    Added(String),
+    Missing,
+    Closed,
+    Full,
+    Duplicate,
+}
+
+async fn enqueue_notice(
+    app: AppState,
+    chat_id: &str,
+    mut notice: refact_core::chat_types::ChatMessage,
+) -> Result<NoticeEnqueue, String> {
     let session_arc = {
         let sessions = app.chat.sessions.read().await;
-        sessions.get(&record.parent_chat_id).cloned()
+        sessions.get(chat_id).cloned()
     };
     let Some(session_arc) = session_arc else {
-        app.agents
-            .set_completion_message_id(&record.agent_id, "pending".to_string())
-            .await?;
-        return Ok(());
+        return Ok(NoticeEnqueue::Missing);
     };
 
     let message_id = Uuid::new_v4().to_string();
-    let mut notice = build_completion_event(record);
     notice.message_id = message_id.clone();
     let processor_flag = {
         let mut session = session_arc.lock().await;
         if session.closed {
-            app.agents
-                .set_completion_message_id(&record.agent_id, "pending".to_string())
-                .await?;
-            return Ok(());
+            return Ok(NoticeEnqueue::Closed);
         }
         match session.enqueue_priority_command(CommandRequest {
             client_request_id: format!("background-agent-finished-{message_id}"),
@@ -67,26 +115,17 @@ pub async fn push_completion_to_parent(
             command: ChatCommand::Regenerate {},
         }) {
             EnqueueCommandOutcome::Accepted => session.add_message(notice),
-            EnqueueCommandOutcome::Duplicate => return Ok(()),
-            EnqueueCommandOutcome::Full => {
-                app.agents
-                    .set_completion_message_id(&record.agent_id, "deferred".to_string())
-                    .await?;
-                return Ok(());
-            }
+            EnqueueCommandOutcome::Duplicate => return Ok(NoticeEnqueue::Duplicate),
+            EnqueueCommandOutcome::Full => return Ok(NoticeEnqueue::Full),
         }
         session.queue_processor_running.clone()
     };
-
-    app.agents
-        .set_completion_message_id(&record.agent_id, message_id)
-        .await?;
 
     if !processor_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
         tokio::spawn(process_command_queue(app, session_arc, processor_flag));
     }
 
-    Ok(())
+    Ok(NoticeEnqueue::Added(message_id))
 }
 
 pub async fn flush_pending_pushes_for_parent(
@@ -153,10 +192,16 @@ fn build_completion_event(record: &BackgroundAgent) -> refact_core::chat_types::
             "config_name": record.config_name,
             "target_files": record.target_files,
             "model": record.model,
+            "model_type": record.model_type,
+            "goal_present": record.goal_summary.is_some(),
             "child_chat_id": record.child_chat_id,
             "edited_files": edited_files,
             "diff_summary": diff_summary,
             "conflict_summary": conflict_summary,
+            "worktree_branch": record.worktree_branch,
+            "merge_status": record.merge_status,
+            "tokens_used": record.tokens_used,
+            "cost_usd": record.cost_usd,
             "created_at": record.created_at,
             "last_update_at": record.last_update_at,
         }),
@@ -168,12 +213,8 @@ fn build_completion_event(record: &BackgroundAgent) -> refact_core::chat_types::
 }
 
 fn build_push_message(record: &BackgroundAgent) -> String {
-    let noun = match record.kind {
-        BgAgentKind::Subagent => "subagent",
-        BgAgentKind::Delegate => "delegate",
-    };
     let mut lines = vec![
-        format!("[background {} finished]", noun),
+        "[background subagent finished]".to_string(),
         format!("agent_id: {}", record.agent_id),
         format!("status: {}", record.status.as_str()),
         format!("title: {}", record.title),
@@ -188,7 +229,7 @@ fn build_push_message(record: &BackgroundAgent) -> String {
         lines.extend(record.target_files.iter().map(|file| format!("- {}", file)));
         lines.push(String::new());
     }
-    if record.kind == BgAgentKind::Delegate && !record.edited_files.is_empty() {
+    if !record.edited_files.is_empty() {
         lines.push("Edited files:".to_string());
         lines.extend(
             cap_file_list(&record.edited_files, MAX_EVENT_EDITED_FILES)
@@ -197,6 +238,21 @@ fn build_push_message(record: &BackgroundAgent) -> String {
         );
         lines.push(String::new());
     }
+
+    if let Some(branch) = record.worktree_branch.as_deref() {
+        lines.push(format!("worktree_branch: {}", branch));
+    }
+    if let Some(merge_status) = record.merge_status.as_deref() {
+        lines.push(format!("merge_status: {}", merge_status));
+    }
+    lines.push(format!("tokens_used: {}", record.tokens_used));
+    if let Some(cost_usd) = record.cost_usd {
+        lines.push(format!("cost_usd: {:.6}", cost_usd));
+    }
+    if record.goal_summary.is_some() {
+        lines.push("goal: present".to_string());
+    }
+    lines.push(String::new());
 
     if let Some(child_chat_id) = &record.child_chat_id {
         lines.push(format!(
@@ -298,21 +354,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delegate_push_message_includes_edited_files() {
+    async fn legacy_delegate_push_message_uses_unified_noun_and_includes_edited_files() {
         let record = completed_record(BgAgentKind::Delegate).await;
         let message = build_push_message(&record);
-        assert!(message.contains("[background delegate finished]"));
+        assert!(message.contains("[background subagent finished]"));
         assert!(message.contains("Edited files:"));
         assert!(message.contains("src/auth/retry.ts"));
         assert!(message.contains("Open the child trajectory: [view](refact://chat/child)"));
     }
 
     #[tokio::test]
-    async fn subagent_push_message_drops_edited_files() {
+    async fn subagent_push_message_includes_edited_files() {
         let record = completed_record(BgAgentKind::Subagent).await;
         let message = build_push_message(&record);
         assert!(message.contains("[background subagent finished]"));
-        assert!(!message.contains("Edited files:"));
+        assert!(message.contains("Edited files:"));
         assert!(message.contains("Open the child trajectory: [view](refact://chat/child)"));
     }
 

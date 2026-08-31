@@ -315,7 +315,7 @@ async fn usage_question_and_inbox_lifecycle_persist_and_notify() {
         )
         .await
         .expect_err("missing runtime errors");
-    assert_eq!(missing, "agent is not running in this process");
+    assert_eq!(missing, "agent not found");
 }
 
 #[tokio::test]
@@ -1121,7 +1121,7 @@ async fn push_completion_to_parent_is_idempotent() {
     assert!(notice
         .content
         .content_text_only()
-        .contains("[background delegate finished]"));
+        .contains("[background subagent finished]"));
     let event = notice.extra.get("event").unwrap();
     assert_eq!(event["subkind"], json!("system_notice"));
     assert_eq!(event["source"], json!("agents.spawn"));
@@ -1454,6 +1454,10 @@ async fn spawn_and_wait_timeout_returns_error() {
         target_files: vec![],
         max_steps: 1,
         model: "model".to_string(),
+        model_type: None,
+        goal: None,
+        plan: None,
+        worktree_mode: crate::agents::spawn::SpawnWorktreeMode::Inherit,
         parent_subchat_tx: None,
         parent_worktree: None,
         parent_task_meta: None,
@@ -1512,12 +1516,80 @@ fn delegate_spawn_request(
         target_files: vec![target_file.to_string()],
         max_steps: 1,
         model: "model".to_string(),
+        model_type: None,
+        goal: None,
+        plan: None,
+        worktree_mode: crate::agents::spawn::SpawnWorktreeMode::Inherit,
         parent_subchat_tx: None,
         parent_worktree: None,
         parent_task_meta: None,
         subchat_depth: 0,
         notify_parent: crate::agents::spawn::NotifyParent::Auto,
     }
+}
+
+#[serial(test_runner)]
+#[tokio::test]
+async fn spawn_seed_installs_hidden_plan_goal_and_caps_steps() {
+    let observed = Arc::new(tokio::sync::Mutex::new(None));
+    let _runner = {
+        let observed = observed.clone();
+        crate::agents::spawn::install_test_runner(Arc::new(move |_gcx, messages, config| {
+            let observed = observed.clone();
+            Box::pin(async move {
+                *observed.lock().await = Some((messages.clone(), config.max_steps));
+                let mut messages = messages;
+                messages.push(ChatMessage::new(
+                    "assistant".to_string(),
+                    "done".to_string(),
+                ));
+                Ok(SubchatResult {
+                    messages,
+                    metering: serde_json::Map::new(),
+                    chat_id: config.chat_id,
+                })
+            })
+        }))
+    };
+    let (_gcx, app, _session) = app_with_parent_session("parent-hidden-goal").await;
+    let mut req = delegate_spawn_request("parent-hidden-goal", "src/frog.rs");
+    req.max_steps = 10;
+    req.plan = Some("Plan body".to_string());
+    req.goal = Some(crate::agents::spawn::SpawnGoal {
+        content: "Goal body".to_string(),
+        criteria: vec![crate::chat::types::GoalCriterion {
+            id: "C1".to_string(),
+            text: "Criterion".to_string(),
+            verify_hint: None,
+        }],
+        budget: Some(crate::chat::types::GoalBudget {
+            max_turns: Some(2),
+            ..Default::default()
+        }),
+    });
+    req.notify_parent = crate::agents::spawn::NotifyParent::Silent;
+
+    let completed = crate::agents::spawn::spawn_and_wait(app, req, Some(Duration::from_secs(2)))
+        .await
+        .expect("spawn completed");
+    let (messages, max_steps) = observed.lock().await.take().expect("runner observed seed");
+
+    assert_eq!(completed.goal_summary.as_deref(), Some("Goal body"));
+    assert!(completed.plan_present);
+    assert_eq!(max_steps, 2);
+    let plan = messages
+        .iter()
+        .find(|message| message.role == "plan")
+        .unwrap();
+    assert_eq!(plan.extra["plan"]["mode"], "agent");
+    assert_eq!(plan.extra["plan"]["version"], 1);
+    let goal = messages
+        .iter()
+        .find(|message| message.role == "goal")
+        .unwrap();
+    assert_eq!(goal.extra["goal"]["active"], true);
+    assert_eq!(goal.extra["goal"]["budget"]["max_turns"], 2);
+    assert_eq!(goal.extra["goal"]["criteria"][0]["id"], "C1");
 }
 
 fn agents_spawn_system_notices(session: &ChatSession) -> Vec<&ChatMessage> {

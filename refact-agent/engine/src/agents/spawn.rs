@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::pin::Pin;
 use std::process::Command;
@@ -10,6 +10,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex as AMutex, mpsc::UnboundedSender, oneshot};
 use uuid::Uuid;
 
+use crate::agents::registry::InboxMessage;
 use crate::agents::types::{
     AgentCompletion, BackgroundAgent, BgAgentKind, CreateAgentRequest, NO_TEXT_RESULT_SUMMARY,
 };
@@ -17,10 +18,15 @@ use crate::app_state::AppState;
 use crate::at_commands::at_commands::MAX_SUBCHAT_DEPTH;
 use crate::call_validation::{ChatContent, ChatMessage};
 use crate::chat::internal_roles::{event, EventSubkind};
-use crate::chat::types::{ChatEvent, TaskMeta};
+use crate::chat::types::{ChatEvent, GoalBudget, GoalCriterion, TaskMeta};
 use crate::global_context::GlobalContext;
-use crate::subchat::{SubchatConfig, SubchatResult, resolve_subchat_config_with_parent};
-use crate::worktrees::types::WorktreeMeta;
+use crate::subchat::{
+    SubchatConfig, SubchatProgress, SubchatResult, resolve_subchat_config_with_parent,
+};
+use crate::worktrees::service::WorktreeService;
+use crate::worktrees::types::{
+    CreateWorktreeRequest, MergeWorktreeRequest, WorktreeMergeStrategy, WorktreeMeta,
+};
 
 const MAX_DIFF_SUMMARY_PATHSPECS: usize = 100;
 
@@ -74,11 +80,39 @@ pub struct SpawnRequest {
     pub target_files: Vec<String>,
     pub max_steps: usize,
     pub model: String,
+    pub model_type: Option<String>,
+    pub goal: Option<SpawnGoal>,
+    pub plan: Option<String>,
+    pub worktree_mode: SpawnWorktreeMode,
     pub parent_subchat_tx: Option<Arc<AMutex<UnboundedSender<Value>>>>,
     pub parent_worktree: Option<WorktreeMeta>,
     pub parent_task_meta: Option<TaskMeta>,
     pub subchat_depth: usize,
     pub notify_parent: NotifyParent,
+}
+
+#[derive(Clone)]
+pub struct SpawnGoal {
+    pub content: String,
+    pub criteria: Vec<GoalCriterion>,
+    pub budget: Option<GoalBudget>,
+}
+
+#[derive(Clone, Default)]
+pub enum SpawnWorktreeMode {
+    #[default]
+    Inherit,
+    Isolated {
+        auto_merge: bool,
+    },
+}
+
+#[derive(Clone)]
+struct SpawnedWorktree {
+    meta: WorktreeMeta,
+    base_branch: Option<String>,
+    source_workspace_root: PathBuf,
+    auto_merge: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -93,29 +127,6 @@ pub struct SpawnHandle {
     pub completion_rx: oneshot::Receiver<BackgroundAgent>,
 }
 
-fn tools_for_kind(kind: BgAgentKind) -> Option<Vec<String>> {
-    match kind {
-        BgAgentKind::Subagent => None,
-        BgAgentKind::Delegate => Some(vec![
-            "tree".to_string(),
-            "cat".to_string(),
-            "search_pattern".to_string(),
-            "search_symbol_definition".to_string(),
-            "search_semantic".to_string(),
-            "knowledge".to_string(),
-            "apply_patch".to_string(),
-            "create_textdoc".to_string(),
-            "update_textdoc".to_string(),
-            "update_textdoc_anchored".to_string(),
-            "update_textdoc_by_lines".to_string(),
-            "update_textdoc_regex".to_string(),
-            "undo_textdoc".to_string(),
-            "mv".to_string(),
-            "tasks_set".to_string(),
-        ]),
-    }
-}
-
 pub async fn spawn_background_agent(
     app: AppState,
     req: SpawnRequest,
@@ -126,22 +137,40 @@ pub async fn spawn_background_agent(
             MAX_SUBCHAT_DEPTH
         ));
     }
-    let child_chat_id = format!("subchat-{}", Uuid::new_v4());
+    let child_uuid = Uuid::new_v4();
+    let child_chat_id = format!("subchat-{}", child_uuid);
     let config_name = req.config_name.clone();
     let config_title = req.title.clone();
     let parent_chat_id = req.parent_chat_id.clone();
     let link_type = req.kind.as_str().to_string();
     let parent_root_chat_id = req.parent_root_chat_id.clone();
     let parent_task_meta = req.parent_task_meta.clone();
-    let parent_worktree = req.parent_worktree.clone();
+    let spawned_worktree = create_spawn_worktree(
+        app.clone(),
+        &req.worktree_mode,
+        req.parent_worktree.as_ref(),
+        &child_chat_id,
+        &child_uuid,
+    )
+    .await?;
+    let effective_worktree = spawned_worktree
+        .as_ref()
+        .map(|worktree| worktree.meta.clone())
+        .or_else(|| req.parent_worktree.clone());
     let parent_tool_call_id = req.parent_tool_call_id.clone();
     let parent_subchat_tx = req.parent_subchat_tx.clone();
-    let max_steps = req.max_steps;
-    let tools = req.tools.clone().or_else(|| tools_for_kind(req.kind));
+    let max_steps = req
+        .goal
+        .as_ref()
+        .and_then(|goal| goal.budget.as_ref())
+        .and_then(|budget| budget.max_turns)
+        .map(|max_turns| req.max_steps.min(max_turns as usize))
+        .unwrap_or(req.max_steps);
+    let tools = req.tools.clone();
     let subchat_depth = req.subchat_depth;
     #[cfg(test)]
-    let config = if config_name == "test_spawn" {
-        SubchatConfig {
+    let config_result = if config_name == "test_spawn" {
+        Ok(SubchatConfig {
             tool_name: config_name.clone(),
             stateful: true,
             autonomous_no_confirm: false,
@@ -155,7 +184,7 @@ pub async fn spawn_background_agent(
             prepend_system_prompt: false,
             wrap_up: None,
             task_meta: parent_task_meta.clone(),
-            worktree: parent_worktree.clone(),
+            worktree: effective_worktree.clone(),
             model: req.model.clone(),
             mode: "agent".to_string(),
             n_ctx: 4096,
@@ -174,7 +203,7 @@ pub async fn spawn_background_agent(
                 Some(&parent_chat_id),
                 parent_root_chat_id.as_deref(),
             ),
-        }
+        })
     } else {
         resolve_subchat_config_with_parent(
             app.gcx.clone(),
@@ -191,16 +220,16 @@ pub async fn spawn_background_agent(
             None,
             "agent".to_string(),
             parent_task_meta,
-            parent_worktree,
+            effective_worktree.clone(),
             parent_tool_call_id,
             parent_subchat_tx,
             None,
             subchat_depth + 1,
         )
-        .await?
+        .await
     };
     #[cfg(not(test))]
-    let config = resolve_subchat_config_with_parent(
+    let config_result = resolve_subchat_config_with_parent(
         app.gcx.clone(),
         &config_name,
         true,
@@ -215,15 +244,39 @@ pub async fn spawn_background_agent(
         None,
         "agent".to_string(),
         parent_task_meta,
-        parent_worktree,
+        effective_worktree.clone(),
         parent_tool_call_id,
         parent_subchat_tx,
         None,
         subchat_depth + 1,
     )
-    .await?;
+    .await;
 
-    let (record, abort_flag, _) = app
+    let config = match config_result {
+        Ok(config) => config,
+        Err(error) => {
+            cleanup_spawn_worktree(app.clone(), spawned_worktree.as_ref()).await;
+            return Err(error);
+        }
+    };
+
+    let messages = match build_messages(
+        app.clone(),
+        &req.config_name,
+        &req.prompt,
+        req.plan.as_deref(),
+        req.goal.as_ref(),
+    )
+    .await
+    {
+        Ok(messages) => messages,
+        Err(error) => {
+            cleanup_spawn_worktree(app.clone(), spawned_worktree.as_ref()).await;
+            return Err(error);
+        }
+    };
+
+    let (record, abort_flag, _) = match app
         .agents
         .create(CreateAgentRequest {
             parent_chat_id: req.parent_chat_id.clone(),
@@ -235,20 +288,42 @@ pub async fn spawn_background_agent(
             prompt: req.prompt.clone(),
             target_files: req.target_files.clone(),
             model: req.model.clone(),
-            model_type: None,
-            goal_summary: None,
-            plan_present: false,
-            worktree_id: None,
-            worktree_branch: None,
+            model_type: req.model_type.clone(),
+            goal_summary: req.goal.as_ref().map(|goal| goal.content.clone()),
+            plan_present: req.plan.is_some(),
+            worktree_id: effective_worktree
+                .as_ref()
+                .map(|worktree| worktree.id.clone()),
+            worktree_branch: effective_worktree
+                .as_ref()
+                .and_then(|worktree| worktree.branch.clone()),
         })
-        .await?;
+        .await
+    {
+        Ok(created) => created,
+        Err(error) => {
+            cleanup_spawn_worktree(app.clone(), spawned_worktree.as_ref()).await;
+            return Err(error);
+        }
+    };
     emit_background_agent_update(app.clone(), &record).await;
 
-    let messages = build_messages(app.clone(), &req.config_name, &req.prompt).await?;
     let agent_id = record.agent_id.clone();
     let handle_agent_id = agent_id.clone();
     let handle_child_chat_id = child_chat_id.clone();
     let (completion_tx, completion_rx) = oneshot::channel();
+
+    push_sibling_notice(
+        &app,
+        &record.agent_id,
+        &req,
+        format!(
+            "▸ sibling started: {} targeting {}",
+            record.title,
+            format_notice_files(&record.target_files),
+        ),
+    )
+    .await;
 
     tokio::spawn(async move {
         let final_record = run_spawned_agent(
@@ -259,6 +334,7 @@ pub async fn spawn_background_agent(
             agent_id,
             child_chat_id,
             abort_flag,
+            spawned_worktree,
         )
         .await;
         let _ = completion_tx.send(final_record);
@@ -297,26 +373,58 @@ async fn run_spawned_agent(
     agent_id: String,
     child_chat_id: String,
     abort_flag: Arc<AtomicBool>,
+    spawned_worktree: Option<SpawnedWorktree>,
 ) -> BackgroundAgent {
     config.abort_flag = Some(abort_flag);
     config.final_step_force_answer = true;
     {
         let progress_app = app.clone();
         let progress_agent_id = agent_id.clone();
-        config.step_progress = Some(Arc::new(move |step: usize| {
+        config.step_progress = Some(Arc::new(move |progress| {
             let app = progress_app.clone();
             let agent_id = progress_agent_id.clone();
             tokio::spawn(async move {
-                if let Ok(record) = app
-                    .agents
-                    .update_progress(
-                        &agent_id,
-                        format!("step {}", step),
-                        step as u32,
-                        Some(chrono::Utc::now().to_rfc3339()),
-                    )
-                    .await
-                {
+                let updated = match progress {
+                    SubchatProgress::Step(step) => {
+                        app.agents
+                            .update_activity(
+                                &agent_id,
+                                Some(format!("step {}", step)),
+                                Some(step as u32),
+                                None,
+                            )
+                            .await
+                    }
+                    SubchatProgress::ToolStarted { name, arg_preview } => {
+                        app.agents
+                            .update_activity(
+                                &agent_id,
+                                None,
+                                None,
+                                Some(Some(match arg_preview {
+                                    Some(preview) => format!("{}: {}", name, preview),
+                                    None => name,
+                                })),
+                            )
+                            .await
+                    }
+                    SubchatProgress::ToolsFinished => {
+                        app.agents
+                            .update_activity(&agent_id, None, None, Some(None))
+                            .await
+                    }
+                    SubchatProgress::Usage {
+                        tokens_delta,
+                        model_id,
+                    } => {
+                        let cost_delta =
+                            estimate_usage_cost(&app.gcx, &model_id, tokens_delta).await;
+                        app.agents
+                            .add_usage(&agent_id, tokens_delta, cost_delta)
+                            .await
+                    }
+                };
+                if let Ok(record) = updated {
                     emit_background_agent_update(app.clone(), &record).await;
                 }
             });
@@ -330,11 +438,11 @@ async fn run_spawned_agent(
         emit_background_agent_update(app.clone(), record).await;
     }
 
-    let dirty_baseline = if req.kind == BgAgentKind::Delegate {
-        collect_worktree_dirty_files(req.parent_worktree.as_ref()).await
-    } else {
-        std::collections::HashSet::new()
-    };
+    let scope_worktree = spawned_worktree
+        .as_ref()
+        .map(|worktree| &worktree.meta)
+        .or(req.parent_worktree.as_ref());
+    let dirty_baseline = collect_worktree_dirty_files(scope_worktree).await;
 
     let result = run_background_subchat(app.gcx.clone(), messages, config).await;
     let final_record = match result {
@@ -348,16 +456,7 @@ async fn run_spawned_agent(
                 .filter(|text| !text.trim().is_empty())
                 .unwrap_or_else(|| NO_TEXT_RESULT_SUMMARY.to_string());
             let (edited_files, diff_summary, conflict_summary) =
-                if req.kind == BgAgentKind::Delegate {
-                    collect_delegate_changes(
-                        req.parent_worktree.as_ref(),
-                        &dirty_baseline,
-                        &req.target_files,
-                    )
-                    .await
-                } else {
-                    (Vec::new(), None, None)
-                };
+                collect_workspace_changes(scope_worktree, &dirty_baseline, &req.target_files).await;
             app.agents
                 .mark_completed(
                     &agent_id,
@@ -377,16 +476,37 @@ async fn run_spawned_agent(
         Err(error) => app.agents.mark_failed(&agent_id, error).await,
     };
 
-    match final_record {
+    let final_record = match final_record {
         Ok(record) => {
+            let record = if record.status == crate::agents::types::BgAgentStatus::Completed {
+                finalize_spawn_worktree(app.clone(), &agent_id, &req.title, spawned_worktree)
+                    .await
+                    .unwrap_or(record)
+            } else {
+                record
+            };
             emit_background_agent_update(app.clone(), &record).await;
             if req.notify_parent == NotifyParent::Auto {
-                let _ = crate::agents::push::push_completion_to_parent(app, &record).await;
+                let _ = crate::agents::push::push_completion_to_parent(app.clone(), &record).await;
             }
             record
         }
-        Err(error) => fallback_failed_record(agent_id, req, error),
-    }
+        Err(error) => fallback_failed_record(agent_id, req.clone(), error),
+    };
+
+    push_sibling_notice(
+        &app,
+        &final_record.agent_id,
+        &req,
+        format!(
+            "✓ sibling finished: {} — {}, edited {}",
+            final_record.title,
+            final_record.status.as_str(),
+            format_notice_files(&final_record.edited_files),
+        ),
+    )
+    .await;
+    final_record
 }
 
 async fn run_background_subchat(
@@ -412,10 +532,12 @@ async fn build_messages(
     app: AppState,
     config_name: &str,
     prompt: &str,
+    plan: Option<&str>,
+    goal: Option<&SpawnGoal>,
 ) -> Result<Vec<ChatMessage>, String> {
     #[cfg(test)]
     if config_name == "test_spawn" {
-        return Ok(vec![
+        let mut messages = vec![
             ChatMessage::new("system".to_string(), "test system".to_string()),
             event(
                 EventSubkind::SystemNotice,
@@ -426,7 +548,9 @@ async fn build_messages(
                 }),
                 prompt.to_string(),
             ),
-        ]);
+        ];
+        append_goal_and_plan_messages(&mut messages, plan, goal);
+        return Ok(messages);
     }
     let subagent_config = crate::yaml_configs::customization_registry::get_subagent_config(
         app.gcx.clone(),
@@ -441,7 +565,7 @@ async fn build_messages(
             config_name
         )
     })?;
-    Ok(vec![
+    let mut messages = vec![
         ChatMessage {
             role: "system".to_string(),
             content: ChatContent::SimpleText(system_prompt),
@@ -455,7 +579,256 @@ async fn build_messages(
             }),
             prompt.to_string(),
         ),
-    ])
+    ];
+    append_goal_and_plan_messages(&mut messages, plan, goal);
+    Ok(messages)
+}
+
+fn append_goal_and_plan_messages(
+    messages: &mut Vec<ChatMessage>,
+    plan: Option<&str>,
+    goal: Option<&SpawnGoal>,
+) {
+    if let Some(plan) = plan {
+        messages.push(crate::chat::internal_roles::plan("agent", 1, plan, None));
+    }
+    if let Some(goal) = goal {
+        let mut goal_message = crate::chat::internal_roles::goal(
+            "agent",
+            1,
+            &goal.content,
+            None,
+            true,
+            goal.budget.clone().unwrap_or_default(),
+        );
+        if !goal.criteria.is_empty() {
+            if let Some(meta) = goal_message
+                .extra
+                .get_mut("goal")
+                .and_then(|value| value.as_object_mut())
+            {
+                meta.insert("criteria".to_string(), serde_json::json!(goal.criteria));
+            }
+        }
+        messages.push(goal_message);
+    }
+}
+
+async fn create_spawn_worktree(
+    app: AppState,
+    mode: &SpawnWorktreeMode,
+    parent_worktree: Option<&WorktreeMeta>,
+    child_chat_id: &str,
+    child_uuid: &Uuid,
+) -> Result<Option<SpawnedWorktree>, String> {
+    let SpawnWorktreeMode::Isolated { auto_merge } = mode else {
+        return Ok(None);
+    };
+    let source_workspace_root = match parent_worktree {
+        Some(parent) => parent.source_workspace_root.clone(),
+        None => crate::files_correction::get_active_project_path(app.gcx.clone())
+            .await
+            .ok_or_else(|| "No active project folder found for isolated subagent".to_string())?,
+    };
+    let (base_branch, base_commit) = match parent_worktree {
+        Some(parent) => {
+            let root = parent.root.clone();
+            let base_branch = parent.branch.clone();
+            let base_commit = tokio::task::spawn_blocking(move || {
+                let repo = crate::worktrees::git::discover_repo(&root)?;
+                crate::worktrees::git::head_commit(&repo).map(Some)
+            })
+            .await
+            .map_err(|error| format!("Failed to inspect nested subagent base: {}", error))??;
+            (base_branch, base_commit)
+        }
+        None => {
+            let source = source_workspace_root.clone();
+            tokio::task::spawn_blocking(move || {
+                let repo = crate::worktrees::git::discover_repo(&source)?;
+                Ok::<_, String>((
+                    crate::worktrees::git::current_branch(&repo),
+                    Some(crate::worktrees::git::head_commit(&repo)?),
+                ))
+            })
+            .await
+            .map_err(|error| format!("Failed to inspect isolated subagent base: {}", error))??
+        }
+    };
+    let service =
+        WorktreeService::new_async(app.gcx.cache_dir.clone(), source_workspace_root.clone())
+            .await?;
+    let child_short = child_uuid.simple().to_string()[..8].to_string();
+    let created = service
+        .create_worktree(CreateWorktreeRequest {
+            source_workspace_root: Some(source_workspace_root.to_string_lossy().to_string()),
+            branch: Some(format!("refact/subagent/{}", child_short)),
+            base_branch: base_branch.clone(),
+            base_commit,
+            chat_id: Some(child_chat_id.to_string()),
+            kind: Some("subagent".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    Ok(Some(SpawnedWorktree {
+        meta: created.worktree.meta,
+        base_branch,
+        source_workspace_root,
+        auto_merge: *auto_merge,
+    }))
+}
+
+async fn cleanup_spawn_worktree(app: AppState, spawned: Option<&SpawnedWorktree>) {
+    let Some(spawned) = spawned else {
+        return;
+    };
+    match WorktreeService::new_async(
+        app.gcx.cache_dir.clone(),
+        spawned.source_workspace_root.clone(),
+    )
+    .await
+    {
+        Ok(service) => {
+            if let Err(error) = service.delete_worktree(&spawned.meta.id, true, true).await {
+                tracing::warn!(
+                    "Failed to clean up isolated subagent worktree '{}': {}",
+                    spawned.meta.id,
+                    error
+                );
+            }
+        }
+        Err(error) => tracing::warn!(
+            "Failed to construct worktree service for cleanup: {}",
+            error
+        ),
+    }
+}
+
+async fn finalize_spawn_worktree(
+    app: AppState,
+    agent_id: &str,
+    title: &str,
+    spawned: Option<SpawnedWorktree>,
+) -> Result<BackgroundAgent, String> {
+    let Some(spawned) = spawned else {
+        return app.agents.get_any(agent_id).await;
+    };
+    if !spawned.auto_merge {
+        return app.agents.set_merge_status(agent_id, "skipped").await;
+    }
+    let pending = app.agents.set_merge_status(agent_id, "pending").await?;
+    emit_background_agent_update(app.clone(), &pending).await;
+    let service =
+        WorktreeService::new_async(app.gcx.cache_dir.clone(), spawned.source_workspace_root)
+            .await?;
+    let result = service
+        .merge_worktree(
+            &spawned.meta.id,
+            MergeWorktreeRequest {
+                strategy: WorktreeMergeStrategy::Squash,
+                delete_after_merge: true,
+                include_uncommitted: true,
+                target_branch: spawned.base_branch,
+                commit_message: Some(format!("subagent: {}", title)),
+                generate_commit_message: false,
+            },
+        )
+        .await;
+    match result {
+        Ok(result) if result.merged || result.status == "nothing_to_merge" => {
+            app.agents.set_merge_status(agent_id, "merged").await
+        }
+        Ok(result) if result.status == "conflict" => {
+            let conflict_summary = result.conflict.map(|conflict| {
+                format!(
+                    "{}{}",
+                    conflict.instructions,
+                    if conflict.files.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", conflict.files.join(", "))
+                    }
+                )
+            });
+            app.agents
+                .set_merge_outcome(agent_id, "conflict", conflict_summary, None)
+                .await
+        }
+        Ok(result) => {
+            app.agents
+                .set_merge_outcome(
+                    agent_id,
+                    "failed",
+                    None,
+                    Some(format!("Auto-merge failed: {}", result.status)),
+                )
+                .await
+        }
+        Err(error) => {
+            app.agents
+                .set_merge_outcome(
+                    agent_id,
+                    "failed",
+                    None,
+                    Some(format!("Auto-merge failed: {}", error)),
+                )
+                .await
+        }
+    }
+}
+
+async fn estimate_usage_cost(
+    gcx: &Arc<GlobalContext>,
+    model_id: &str,
+    tokens_delta: u64,
+) -> Option<f64> {
+    let pricing = crate::providers::pricing::lookup_model_pricing(gcx, model_id).await?;
+    let usage = crate::call_validation::ChatUsage {
+        total_tokens: tokens_delta as usize,
+        completion_tokens: tokens_delta as usize,
+        ..Default::default()
+    };
+    crate::providers::pricing::compute_cost(&usage, &pricing).map(|cost| cost.total_usd)
+}
+
+async fn push_sibling_notice(app: &AppState, agent_id: &str, req: &SpawnRequest, text: String) {
+    let root_chat_id = req
+        .parent_root_chat_id
+        .as_deref()
+        .unwrap_or(req.parent_chat_id.as_str());
+    for sibling in app.agents.list_all().await.into_iter().filter(|record| {
+        record.agent_id != agent_id
+            && !record.status.is_terminal()
+            && (record.parent_root_chat_id.as_deref() == Some(root_chat_id)
+                || record.parent_chat_id == root_chat_id)
+    }) {
+        if let Err(error) = app
+            .agents
+            .push_inbox(
+                &sibling.agent_id,
+                InboxMessage {
+                    from: agent_id.to_string(),
+                    text: text.clone(),
+                    queued_at: chrono::Utc::now(),
+                },
+            )
+            .await
+        {
+            tracing::debug!(
+                "Failed to send sibling notice to '{}': {}",
+                sibling.agent_id,
+                error
+            );
+        }
+    }
+}
+
+fn format_notice_files(files: &[String]) -> String {
+    if files.is_empty() {
+        "-".to_string()
+    } else {
+        files.join(", ")
+    }
 }
 
 pub async fn emit_background_agent_update(app: AppState, record: &BackgroundAgent) {
@@ -500,7 +873,7 @@ async fn collect_worktree_dirty_files(
         .unwrap_or_default()
 }
 
-async fn collect_delegate_changes(
+async fn collect_workspace_changes(
     worktree: Option<&WorktreeMeta>,
     dirty_baseline: &std::collections::HashSet<String>,
     target_files: &[String],

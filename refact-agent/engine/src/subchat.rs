@@ -377,8 +377,22 @@ pub struct SubchatConfig {
     pub subchat_depth: usize,
     pub final_step_force_answer: bool,
     pub buddy_meta: Option<crate::buddy::types::BuddyThreadMeta>,
-    pub step_progress: Option<Arc<dyn Fn(usize) + Send + Sync>>,
+    pub step_progress: Option<Arc<dyn Fn(SubchatProgress) + Send + Sync>>,
     pub trace_parent: TraceParent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubchatProgress {
+    Step(usize),
+    ToolStarted {
+        name: String,
+        arg_preview: Option<String>,
+    },
+    ToolsFinished,
+    Usage {
+        tokens_delta: u64,
+        model_id: String,
+    },
 }
 
 fn should_stream_thinking_progress(tool_name: &str) -> bool {
@@ -1417,9 +1431,9 @@ fn subchat_trajectory_commit_intent(phase: SubchatTrajectoryCommitPhase) -> Traj
     }
 }
 
-type SubchatProgress = Arc<StdMutex<Vec<ChatMessage>>>;
+type SubchatProgressMessages = Arc<StdMutex<Vec<ChatMessage>>>;
 
-fn record_subchat_progress(progress: &SubchatProgress, messages: &[ChatMessage]) {
+fn record_subchat_progress(progress: &SubchatProgressMessages, messages: &[ChatMessage]) {
     let mut slot = match progress.lock() {
         Ok(slot) => slot,
         Err(poisoned) => poisoned.into_inner(),
@@ -1430,7 +1444,7 @@ fn record_subchat_progress(progress: &SubchatProgress, messages: &[ChatMessage])
 async fn persist_subchat_progress(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     config: &SubchatConfig,
-    progress: &SubchatProgress,
+    progress: &SubchatProgressMessages,
     messages: &[ChatMessage],
 ) {
     record_subchat_progress(progress, messages);
@@ -1458,7 +1472,7 @@ async fn persist_subchat_progress(
     }
 }
 
-fn take_subchat_progress(progress: &SubchatProgress) -> Vec<ChatMessage> {
+fn take_subchat_progress(progress: &SubchatProgressMessages) -> Vec<ChatMessage> {
     match progress.lock() {
         Ok(slot) => slot.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),
@@ -1469,7 +1483,7 @@ async fn save_failed_subchat_trajectory(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
     config: &SubchatConfig,
-    progress: &SubchatProgress,
+    progress: &SubchatProgressMessages,
     error: &str,
 ) {
     if !should_persist_subchat_trajectory(config) {
@@ -1572,7 +1586,7 @@ pub async fn run_subchat(
 
     let mut _usage = ChatUsage::default();
 
-    let progress_messages: SubchatProgress = Arc::new(StdMutex::new(messages.clone()));
+    let progress_messages: SubchatProgressMessages = Arc::new(StdMutex::new(messages.clone()));
 
     let current_messages_result = if let Some(ref wrap_up) = config.wrap_up {
         Box::pin(run_subchat_with_wrap_up(
@@ -1758,6 +1772,15 @@ mod progress_collector_tests {
         }
         assert!(s.is_char_boundary(s.len()));
     }
+
+    #[test]
+    fn tool_arg_preview_uses_first_safe_scalar_and_sanitizes_whitespace() {
+        assert_eq!(
+            super::tool_arg_preview(r#"{"token":"hidden","path":"a\n b"}"#),
+            Some("a b".to_string())
+        );
+        assert_eq!(super::tool_arg_preview(r#"{"password":"hidden"}"#), None);
+    }
 }
 
 #[cfg(test)]
@@ -1860,7 +1883,7 @@ async fn run_subchat_loop(
     mut messages: Vec<ChatMessage>,
     tools_policy: &ToolsPolicy,
     usage: &mut ChatUsage,
-    progress: &SubchatProgress,
+    progress: &SubchatProgressMessages,
 ) -> Result<Vec<ChatMessage>, String> {
     let mut context_limit_compact_count = 0usize;
     let mut empty_choice_retry_count = 0usize;
@@ -1868,9 +1891,7 @@ async fn run_subchat_loop(
         if is_aborted(&config.abort_flag) {
             return Err("Aborted".to_string());
         }
-        if let Some(step_progress) = &config.step_progress {
-            step_progress(step + 1);
-        }
+        emit_subchat_progress(config, SubchatProgress::Step(step + 1));
 
         let results = loop {
             match subchat_single_internal(
@@ -1937,6 +1958,7 @@ async fn run_subchat_loop(
         };
 
         update_usage_from_messages(usage, &results);
+        emit_usage_progress(config, &results);
         messages = results.into_iter().next().unwrap_or(messages);
         persist_subchat_progress(&ccx, config, progress, &messages).await;
 
@@ -1954,6 +1976,7 @@ async fn run_subchat_loop(
             config.max_steps,
             config.parent_tool_call_id.clone(),
             config.autonomous_no_confirm,
+            config.step_progress.clone(),
         )
         .await?;
         persist_subchat_progress(&ccx, config, progress, &messages).await;
@@ -2057,6 +2080,7 @@ async fn run_forced_final_answer_turn(
     };
 
     update_usage_from_messages(usage, &results);
+    emit_usage_progress(config, &results);
     Ok(results.into_iter().next().unwrap_or(messages))
 }
 
@@ -2067,7 +2091,7 @@ async fn run_subchat_with_wrap_up(
     tools_policy: &ToolsPolicy,
     wrap_up: &WrapUpConfig,
     usage: &mut ChatUsage,
-    progress: &SubchatProgress,
+    progress: &SubchatProgressMessages,
 ) -> Result<Vec<ChatMessage>, String> {
     let mut step_n = 0;
     let mut context_limit_compact_count = 0usize;
@@ -2077,6 +2101,8 @@ async fn run_subchat_with_wrap_up(
         if is_aborted(&config.abort_flag) {
             return Err("Aborted".to_string());
         }
+
+        emit_subchat_progress(config, SubchatProgress::Step(step_n + 1));
 
         if has_final_answer(&messages) {
             break;
@@ -2170,6 +2196,7 @@ async fn run_subchat_with_wrap_up(
         };
 
         update_usage_from_messages(usage, &results);
+        emit_usage_progress(config, &results);
         messages = results.into_iter().next().unwrap_or(messages);
         persist_subchat_progress(&ccx, config, progress, &messages).await;
 
@@ -2183,6 +2210,7 @@ async fn run_subchat_with_wrap_up(
             config.max_steps,
             config.parent_tool_call_id.clone(),
             config.autonomous_no_confirm,
+            config.step_progress.clone(),
         )
         .await?;
         persist_subchat_progress(&ccx, config, progress, &messages).await;
@@ -2208,6 +2236,7 @@ async fn run_subchat_with_wrap_up(
         config.max_steps,
         config.parent_tool_call_id.clone(),
         config.autonomous_no_confirm,
+        config.step_progress.clone(),
     )
     .await?;
     persist_subchat_progress(&ccx, config, progress, &messages).await;
@@ -2269,6 +2298,7 @@ async fn run_subchat_with_wrap_up(
         }
     };
     update_usage_from_messages(usage, &final_results);
+    emit_usage_progress(config, &final_results);
 
     Ok(final_results.into_iter().next().unwrap_or_default())
 }
@@ -2286,6 +2316,55 @@ fn truncate_args(s: &str, max: usize) -> String {
     format!("{}…", &s[..boundary])
 }
 
+fn emit_subchat_progress(config: &SubchatConfig, progress: SubchatProgress) {
+    if let Some(callback) = &config.step_progress {
+        callback(progress);
+    }
+}
+
+fn emit_usage_progress(config: &SubchatConfig, results: &[Vec<ChatMessage>]) {
+    let tokens_delta = results
+        .first()
+        .and_then(|messages| messages.last())
+        .and_then(|message| message.usage.as_ref())
+        .map(|usage| usage.total_tokens as u64)
+        .unwrap_or_default();
+    if tokens_delta > 0 {
+        emit_subchat_progress(
+            config,
+            SubchatProgress::Usage {
+                tokens_delta,
+                model_id: config.model.clone(),
+            },
+        );
+    }
+}
+
+fn tool_arg_preview(arguments: &str) -> Option<String> {
+    static SECRET_ARG_NAME: OnceLock<regex::Regex> = OnceLock::new();
+    let value: Value = serde_json::from_str(arguments).ok()?;
+    let object = value.as_object()?;
+    for (key, value) in object {
+        if SECRET_ARG_NAME
+            .get_or_init(|| regex::Regex::new("(?i)key|token|secret|password").unwrap())
+            .is_match(key)
+        {
+            continue;
+        }
+        let scalar = match value {
+            Value::String(value) => value.clone(),
+            Value::Number(value) => value.to_string(),
+            Value::Bool(value) => value.to_string(),
+            _ => continue,
+        };
+        let preview = scalar.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !preview.is_empty() {
+            return Some(truncate_args(&preview, 40));
+        }
+    }
+    None
+}
+
 async fn execute_pending_tool_calls(
     ccx: Arc<AMutex<AtCommandsContext>>,
     model_id: &str,
@@ -2296,6 +2375,7 @@ async fn execute_pending_tool_calls(
     max_steps: usize,
     tx_toolid_mb: Option<String>,
     autonomous_no_confirm: bool,
+    step_progress: Option<Arc<dyn Fn(SubchatProgress) + Send + Sync>>,
 ) -> Result<Vec<ChatMessage>, String> {
     let (gcx, n_ctx, task_meta, worktree) = {
         let cgcx = ccx.lock().await;
@@ -2317,6 +2397,15 @@ async fn execute_pending_tool_calls(
     };
     let tool_calls =
         resolve_tool_call_aliases(app.clone(), tool_calls, mode_id, Some(model_id)).await;
+
+    for tool_call in &tool_calls {
+        if let Some(callback) = &step_progress {
+            callback(SubchatProgress::ToolStarted {
+                name: tool_call.function.name.clone(),
+                arg_preview: tool_arg_preview(&tool_call.function.arguments),
+            });
+        }
+    }
 
     let mut allowed: Vec<ChatToolCall> = vec![];
     let mut denied_msgs: Vec<ChatMessage> = vec![];
@@ -2381,6 +2470,10 @@ async fn execute_pending_tool_calls(
         ExecuteToolsOptions::default(),
     )
     .await;
+
+    if let Some(callback) = &step_progress {
+        callback(SubchatProgress::ToolsFinished);
+    }
 
     for tc in &tool_calls {
         let answered = denied_msgs
