@@ -210,8 +210,8 @@ fn models_info_model_details(model: &crate::caps::ChatModelRecord) -> String {
         .reasoning_type_string()
         .map(|kind| format!(", reasoning {kind}"))
         .unwrap_or_default();
-    let context = if model.base.n_ctx >= 1000 && model.base.n_ctx % 1000 == 0 {
-        format!("{}k", model.base.n_ctx / 1000)
+    let context = if model.base.n_ctx >= 10_000 {
+        format!("{}k", (model.base.n_ctx + 500) / 1000)
     } else {
         model.base.n_ctx.to_string()
     };
@@ -225,6 +225,7 @@ fn models_info_model_details(model: &crate::caps::ChatModelRecord) -> String {
 fn models_info_snapshot_from(
     caps: Option<&crate::caps::CodeAssistantCaps>,
     policy: &refact_privacy::PrivacyPolicy,
+    privacy_policy_load_failed: bool,
 ) -> String {
     let mut lines = vec!["## Models & Access Snapshot".to_string()];
     lines.push("### Model types (slots)".to_string());
@@ -251,7 +252,7 @@ fn models_info_snapshot_from(
                     .chat_models
                     .get(model_id)
                     .map(|model| format!(" ({})", models_info_model_details(model)))
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| " (not in catalog)".to_string());
                 rendered_slots.push(format!("- {slot} → {model_id}{details}"));
             }
             if rendered_slots.is_empty() {
@@ -281,12 +282,21 @@ fn models_info_snapshot_from(
         }
         None => {
             lines.push("- (models unavailable — caps not loaded)".to_string());
-            lines.push("### Available chat models".to_string());
-            lines.push("- (models unavailable — caps not loaded)".to_string());
         }
     }
 
     lines.push("### Privacy & access".to_string());
+    if privacy_policy_load_failed {
+        lines.push(
+            "- Privacy policy: (load failed — treating as restrictive; check config)".to_string(),
+        );
+    }
+    if !policy.blocked.is_empty() {
+        lines.push(format!(
+            "- Blocked patterns: {} configured (never sent anywhere)",
+            policy.blocked.len()
+        ));
+    }
     let zones = policy
         .zones
         .iter()
@@ -343,10 +353,14 @@ fn models_info_snapshot_from(
     lines.join("\n")
 }
 
-async fn models_info_snapshot(app: &AppState) -> String {
+pub(crate) async fn models_info_snapshot(app: &AppState) -> String {
     let caps = app.gcx.caps_state.read().await.caps.clone();
-    let policy = app.gcx.privacy_policy_load.read().unwrap().policy.clone();
-    models_info_snapshot_from(caps.as_deref(), &policy)
+    let policy_load = app.gcx.privacy_policy_load.read().unwrap().clone();
+    models_info_snapshot_from(
+        caps.as_deref(),
+        &policy_load.policy,
+        policy_load.error.is_some(),
+    )
 }
 
 pub async fn system_prompt_add_extra_instructions(
@@ -1052,11 +1066,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn models_info_snapshot_renders_privacy_and_catalog_gaps() {
+        let (_temp, app) = models_info_test_app().await;
+        install_models_info_caps(&app).await;
+        {
+            let mut caps = app.gcx.caps_state.write().await;
+            let mut updated = caps.caps.as_deref().unwrap().clone();
+            updated.defaults.chat_buddy_model = "missing-model".to_string();
+            updated.chat_models.insert(
+                "small-context".to_string(),
+                models_info_test_model("small-context", 9_999, true, true),
+            );
+            updated.chat_models.insert(
+                "rounded-context".to_string(),
+                models_info_test_model("rounded-context", 131_072, true, true),
+            );
+            caps.caps = Some(Arc::new(updated));
+        }
+        let mut policy = PrivacyPolicy::default();
+        policy.blocked = vec!["secret".to_string(), "token".to_string()];
+        *app.gcx.privacy_policy_load.write().unwrap() = PolicyLoad {
+            policy: Arc::new(policy),
+            error: Some("bad config".to_string()),
+            source_paths: Vec::new(),
+        };
+
+        let snapshot = models_info_snapshot(&app).await;
+
+        assert!(snapshot.contains("- buddy → missing-model (not in catalog)"));
+        assert!(snapshot.contains("ctx 9999"));
+        assert!(snapshot.contains("ctx 131k"));
+        assert!(snapshot.contains("- Blocked patterns: 2 configured (never sent anywhere)"));
+        assert!(snapshot
+            .contains("- Privacy policy: (load failed — treating as restrictive; check config)"));
+    }
+
+    #[tokio::test]
     async fn models_info_snapshot_handles_missing_and_empty_caps() {
         let (_temp, app) = models_info_test_app().await;
 
         let missing = models_info_snapshot(&app).await;
-        assert!(missing.contains("(models unavailable — caps not loaded)"));
+        assert_eq!(
+            missing
+                .matches("(models unavailable — caps not loaded)")
+                .count(),
+            1
+        );
         assert!(missing.contains("no restricted zones configured"));
         assert!(missing.contains("no MCP restrictions"));
         assert!(missing.contains("Subagent reports declassify: yes"));

@@ -160,6 +160,23 @@ pub async fn handle_v1_project_information_preview(
         });
     }
 
+    if config.sections.models_info.enabled {
+        let raw_content = crate::chat::prompts::models_info_snapshot(&app).await;
+        let max_chars = config.sections.models_info.max_chars.unwrap_or(6000);
+        let tr = truncate_to_chars(&raw_content, max_chars);
+        blocks.push(ProjectInfoBlock {
+            id: "models_info".into(),
+            section: "models_info".into(),
+            title: "Models & Access".into(),
+            path: None,
+            char_count: tr.char_count,
+            original_char_count: tr.truncated.then_some(tr.original_char_count),
+            content: tr.content,
+            truncated: tr.truncated,
+            enabled: true,
+        });
+    }
+
     if config.sections.environment_instructions.enabled {
         let raw_content = generate_environment_instructions(&environments);
         let max_chars = config
@@ -424,4 +441,39 @@ pub async fn handle_v1_project_information_preview(
         blocks,
         warnings,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn preview_includes_models_info_block() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let workspace = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx).await;
+        let mut config = ProjectInformationConfig::default();
+        config.sections.system_info.enabled = false;
+        config.sections.environment_instructions.enabled = false;
+        config.sections.detected_environments.enabled = false;
+        config.sections.git_info.enabled = false;
+        config.sections.project_tree.enabled = false;
+        config.sections.instruction_files.enabled = false;
+        config.sections.project_configs.enabled = false;
+        config.sections.memories.enabled = false;
+
+        let response = handle_v1_project_information_preview(State(app), axum::Json(config))
+            .await
+            .unwrap()
+            .0;
+
+        assert_eq!(response.blocks.len(), 1);
+        let block = &response.blocks[0];
+        assert_eq!(block.id, "models_info");
+        assert_eq!(block.section, "models_info");
+        assert_eq!(block.title, "Models & Access");
+        assert!(block.content.contains("## Models & Access Snapshot"));
+    }
 }

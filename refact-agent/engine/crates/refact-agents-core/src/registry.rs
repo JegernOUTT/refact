@@ -14,6 +14,8 @@ use crate::types::{
     CreateAgentRequest,
 };
 
+const MAX_INBOX_MESSAGES: usize = 100;
+
 #[derive(Debug, Clone)]
 pub struct InboxMessage {
     pub from: String,
@@ -129,6 +131,7 @@ impl BackgroundAgentRegistry {
             record.started_at = Some(now);
             record.finished_at = None;
             record.error = None;
+            Ok(())
         })
         .await
     }
@@ -144,6 +147,7 @@ impl BackgroundAgentRegistry {
             record.progress = Some(progress);
             record.step_count = step_count;
             record.last_activity = last_activity;
+            Ok(())
         })
         .await
     }
@@ -155,7 +159,7 @@ impl BackgroundAgentRegistry {
         step_count: Option<u32>,
         current_tool: Option<Option<String>>,
     ) -> Result<BackgroundAgent, String> {
-        self.update_record(agent_id, |record, _| {
+        self.update_record(agent_id, |record, now| {
             if let Some(progress) = progress {
                 record.progress = Some(progress);
             }
@@ -165,6 +169,8 @@ impl BackgroundAgentRegistry {
             if let Some(current_tool) = current_tool {
                 record.current_tool = current_tool;
             }
+            record.last_activity = Some(now.to_rfc3339());
+            Ok(())
         })
         .await
     }
@@ -180,6 +186,7 @@ impl BackgroundAgentRegistry {
             if let Some(cost_delta_usd) = cost_delta_usd {
                 record.cost_usd = Some(record.cost_usd.unwrap_or_default() + cost_delta_usd);
             }
+            Ok(())
         })
         .await
     }
@@ -189,9 +196,16 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         status: &str,
     ) -> Result<BackgroundAgent, String> {
+        if !matches!(
+            status,
+            "pending" | "merged" | "conflict" | "skipped" | "failed"
+        ) {
+            return Err("invalid merge status".to_string());
+        }
         let status = status.to_string();
         self.update_record(agent_id, |record, _| {
             record.merge_status = Some(status);
+            Ok(())
         })
         .await
     }
@@ -211,6 +225,7 @@ impl BackgroundAgentRegistry {
                     answer: None,
                     answered_at: None,
                 });
+                Ok(())
             })
             .await?;
         Ok((updated, question_id))
@@ -223,7 +238,7 @@ impl BackgroundAgentRegistry {
         answer: String,
     ) -> Result<BackgroundAgent, String> {
         let question_id = question_id.to_string();
-        self.update_record_result(agent_id, |record, now| {
+        self.update_record(agent_id, |record, now| {
             let question = record
                 .questions
                 .iter_mut()
@@ -291,6 +306,7 @@ impl BackgroundAgentRegistry {
         if let Some(notify) = self.notify_for(agent_id).await {
             notify.notify_waiters();
         }
+        self.retire_runtime(agent_id).await;
         Ok(updated)
     }
 
@@ -325,6 +341,7 @@ impl BackgroundAgentRegistry {
         if let Some(notify) = self.notify_for(agent_id).await {
             notify.notify_waiters();
         }
+        self.retire_runtime(agent_id).await;
         Ok(updated)
     }
 
@@ -362,6 +379,7 @@ impl BackgroundAgentRegistry {
         if let Some(notify) = self.notify_for(agent_id).await {
             notify.notify_waiters();
         }
+        self.retire_runtime(agent_id).await;
         Ok(updated)
     }
 
@@ -370,12 +388,16 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         reason: String,
     ) -> Result<BackgroundAgent, String> {
-        self.update_record(agent_id, |record, now| {
-            record.status = BgAgentStatus::Interrupted;
-            record.error = Some(reason);
-            record.finished_at = Some(now);
-        })
-        .await
+        let updated = self
+            .update_record(agent_id, |record, now| {
+                record.status = BgAgentStatus::Interrupted;
+                record.error = Some(reason);
+                record.finished_at = Some(now);
+                Ok(())
+            })
+            .await?;
+        self.retire_runtime(agent_id).await;
+        Ok(updated)
     }
 
     pub async fn mark_waiting_for_approval(
@@ -384,6 +406,7 @@ impl BackgroundAgentRegistry {
     ) -> Result<BackgroundAgent, String> {
         self.update_record(agent_id, |record, _| {
             record.status = BgAgentStatus::WaitingForApproval;
+            Ok(())
         })
         .await
     }
@@ -501,11 +524,17 @@ impl BackgroundAgentRegistry {
             return Vec::new();
         };
         let mut pending_chat_ids = VecDeque::from([child_chat_id]);
+        let mut visited_chat_ids = HashSet::new();
+        let mut visited_agent_ids = HashSet::from([agent_id.to_string()]);
         let mut descendants = Vec::new();
         while let Some(parent_chat_id) = pending_chat_ids.pop_front() {
+            if !visited_chat_ids.insert(parent_chat_id.clone()) {
+                continue;
+            }
             let mut children: Vec<BackgroundAgent> = records
                 .values()
                 .filter(|record| record.parent_chat_id == parent_chat_id)
+                .filter(|record| visited_agent_ids.insert(record.agent_id.clone()))
                 .cloned()
                 .collect();
             children.sort_by(|a, b| {
@@ -666,11 +695,25 @@ impl BackgroundAgentRegistry {
     }
 
     pub async fn push_inbox(&self, agent_id: &str, msg: InboxMessage) -> Result<(), String> {
+        let record = self
+            .records
+            .read()
+            .await
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| "agent not found".to_string())?;
+        if record.status.is_terminal() {
+            return Err("agent already finished".to_string());
+        }
         let inbox = self
             .inbox_for(agent_id)
             .await
             .ok_or_else(|| "agent is not running in this process".to_string())?;
-        inbox.lock().await.push(msg);
+        let mut inbox = inbox.lock().await;
+        if inbox.len() >= MAX_INBOX_MESSAGES {
+            inbox.remove(0);
+        }
+        inbox.push(msg);
         Ok(())
     }
 
@@ -722,34 +765,6 @@ impl BackgroundAgentRegistry {
 
     async fn update_record<F>(&self, agent_id: &str, update: F) -> Result<BackgroundAgent, String>
     where
-        F: FnOnce(&mut BackgroundAgent, DateTime<Utc>),
-    {
-        let updated = {
-            let mut records = self.records.write().await;
-            let current = records
-                .get(agent_id)
-                .cloned()
-                .ok_or_else(|| "agent not found".to_string())?;
-            let mut updated = current;
-            let now = Utc::now();
-            update(&mut updated, now);
-            touch_record(&mut updated, now);
-            storage::save_record(&self.storage_root, &updated).await?;
-            records.insert(agent_id.to_string(), updated.clone());
-            updated
-        };
-        if let Some(notify) = self.notify_for(agent_id).await {
-            notify.notify_waiters();
-        }
-        Ok(updated)
-    }
-
-    async fn update_record_result<F>(
-        &self,
-        agent_id: &str,
-        update: F,
-    ) -> Result<BackgroundAgent, String>
-    where
         F: FnOnce(&mut BackgroundAgent, DateTime<Utc>) -> Result<(), String>,
     {
         let updated = {
@@ -778,6 +793,10 @@ impl BackgroundAgentRegistry {
             .await
             .get(agent_id)
             .map(|runtime| runtime.notify.clone())
+    }
+
+    async fn retire_runtime(&self, agent_id: &str) {
+        self.runtime.write().await.remove(agent_id);
     }
 }
 
@@ -882,4 +901,154 @@ async fn reconcile_interrupted(
         storage::save_record(storage_root, &record).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn registry() -> (tempfile::TempDir, Arc<BackgroundAgentRegistry>) {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = BackgroundAgentRegistry::new(temp.path().join("agents"))
+            .await
+            .unwrap();
+        (temp, registry)
+    }
+
+    fn request(parent_chat_id: &str) -> CreateAgentRequest {
+        CreateAgentRequest {
+            parent_chat_id: parent_chat_id.to_string(),
+            parent_root_chat_id: None,
+            parent_tool_call_id: None,
+            kind: BgAgentKind::Subagent,
+            config_name: "test".to_string(),
+            title: "Test agent".to_string(),
+            prompt: "Test prompt".to_string(),
+            target_files: Vec::new(),
+            model: "test-model".to_string(),
+            model_type: None,
+            goal_summary: None,
+            plan_present: false,
+            worktree_id: None,
+            worktree_branch: None,
+        }
+    }
+
+    fn inbox_message(text: impl Into<String>) -> InboxMessage {
+        InboxMessage {
+            from: "sibling".to_string(),
+            text: text.into(),
+            queued_at: Utc::now(),
+        }
+    }
+
+    fn completion() -> AgentCompletion {
+        AgentCompletion {
+            result_summary: "done".to_string(),
+            edited_files: Vec::new(),
+            diff_summary: None,
+            conflict_summary: None,
+            child_chat_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn list_descendants_stops_at_agent_and_chat_cycles() {
+        let (_temp, registry) = registry().await;
+        let (root, _, _) = registry.create(request("chat-a")).await.unwrap();
+        registry
+            .mark_running(&root.agent_id, "chat-b".to_string())
+            .await
+            .unwrap();
+        let (child, _, _) = registry.create(request("chat-b")).await.unwrap();
+        registry
+            .mark_running(&child.agent_id, "chat-a".to_string())
+            .await
+            .unwrap();
+
+        let descendants = registry.list_descendants(&root.agent_id).await;
+
+        assert_eq!(descendants.len(), 1);
+        assert_eq!(descendants[0].agent_id, child.agent_id);
+    }
+
+    #[tokio::test]
+    async fn update_activity_refreshes_last_activity() {
+        let (_temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+
+        let updated = registry
+            .update_activity(&record.agent_id, None, None, None)
+            .await
+            .unwrap();
+
+        assert!(updated.last_activity.is_some());
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(updated.last_activity.as_deref().unwrap()).is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_inbox_accepts_messages_and_terminal_agents_reject_them() {
+        let (_temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+
+        registry
+            .push_inbox(&record.agent_id, inbox_message("queued"))
+            .await
+            .unwrap();
+        registry
+            .mark_completed(&record.agent_id, completion())
+            .await
+            .unwrap();
+
+        assert!(registry.inbox_for(&record.agent_id).await.is_none());
+        assert_eq!(
+            registry
+                .push_inbox(&record.agent_id, inbox_message("late"))
+                .await
+                .unwrap_err(),
+            "agent already finished"
+        );
+        assert_eq!(
+            registry
+                .push_inbox("missing", inbox_message("missing"))
+                .await
+                .unwrap_err(),
+            "agent not found"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbox_drops_oldest_message_after_capacity() {
+        let (_temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+
+        for index in 0..=MAX_INBOX_MESSAGES {
+            registry
+                .push_inbox(&record.agent_id, inbox_message(index.to_string()))
+                .await
+                .unwrap();
+        }
+
+        let inbox = registry.inbox_for(&record.agent_id).await.unwrap();
+        let inbox = inbox.lock().await;
+        assert_eq!(inbox.len(), MAX_INBOX_MESSAGES);
+        assert_eq!(inbox.first().unwrap().text, "1");
+        assert_eq!(inbox.last().unwrap().text, MAX_INBOX_MESSAGES.to_string());
+    }
+
+    #[tokio::test]
+    async fn set_merge_status_rejects_unknown_statuses() {
+        let (_temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+
+        assert_eq!(
+            registry
+                .set_merge_status(&record.agent_id, "weird")
+                .await
+                .unwrap_err(),
+            "invalid merge status"
+        );
+    }
 }

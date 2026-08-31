@@ -84,6 +84,7 @@ impl Default for ProjectInformationSections {
             },
             models_info: SectionConfig {
                 enabled: true,
+                max_chars: Some(6000),
                 ..Default::default()
             },
             environment_instructions: SectionConfig {
@@ -442,6 +443,7 @@ mod tests {
         assert_eq!(config.schema_version, 1);
 
         assert!(config.sections.system_info.enabled);
+        assert_eq!(config.sections.models_info.max_chars, Some(6000));
         assert!(config.sections.git_info.enabled);
         assert_eq!(config.sections.git_info.max_chars, Some(6000));
 

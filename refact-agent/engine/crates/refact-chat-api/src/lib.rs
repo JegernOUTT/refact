@@ -587,6 +587,7 @@ pub struct AgentQuestionSummary {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+/// The engine serializes this public wire record in camelCase; GUI state normalizes it on receipt.
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundAgentSummary {
     pub agent_id: String,
@@ -1810,6 +1811,7 @@ mod tests {
         assert_eq!(value["chat_id"], "parent-chat");
         assert_eq!(value["seq"], 11);
         assert_eq!(value["agent"]["agentId"], "bgagent-1");
+        assert_eq!(value["agent"]["model"], "test-model");
 
         let parsed: ChatEvent = serde_json::from_str(&json).unwrap();
         match parsed {
