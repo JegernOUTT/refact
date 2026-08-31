@@ -30,7 +30,6 @@ pub async fn load_registry_from_dir(dir: &Path) -> ProjectRegistry {
 
 const BUILTIN_SUBAGENT_TOOL_IDS: &[&str] = &[
     "subagent",
-    "delegate",
     "agent_list",
     "agent_status",
     "agent_wait",
@@ -662,7 +661,6 @@ mod tests {
     fn runtime_required_subagent_ids() -> Vec<&'static str> {
         vec![
             "subagent",
-            "delegate_with_editing",
             "review_agents",
             "commit_message",
             "title_generation",
@@ -1279,50 +1277,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_delegate_with_editing_loads_cleanly() {
-        let registry = load_default_registry_for_tests();
-        assert!(registry.errors.is_empty(), "{:?}", registry.errors);
-
-        let delegate = registry
-            .subagents
-            .get("delegate_with_editing")
-            .expect("delegate_with_editing subagent should load");
-        assert_eq!(delegate.id, "delegate_with_editing");
-        assert_eq!(delegate.schema_version, 4);
-        assert_eq!(delegate.title, "Delegate with Editing");
-        assert_eq!(delegate.expose_as_tool, false);
-        assert_eq!(delegate.has_code, true);
-        assert!(delegate
-            .messages
-            .system_prompt
-            .as_deref()
-            .unwrap_or_default()
-            .contains("target_files"));
-        assert_eq!(
-            delegate.tools,
-            vec![
-                "tree".to_string(),
-                "cat".to_string(),
-                "glob".to_string(),
-                "search_pattern".to_string(),
-                "search_symbol_definition".to_string(),
-                "search_semantic".to_string(),
-                "knowledge".to_string(),
-                "apply_patch".to_string(),
-                "create_textdoc".to_string(),
-                "update_textdoc".to_string(),
-                "update_textdoc_anchored".to_string(),
-                "update_textdoc_by_lines".to_string(),
-                "update_textdoc_regex".to_string(),
-                "undo_textdoc".to_string(),
-                "mv".to_string(),
-                "tasks_set".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_default_subagent_is_read_only_and_not_yaml_tool_exposed() {
+    fn test_default_subagent_is_unified_and_not_yaml_tool_exposed() {
         let registry = load_default_registry_for_tests();
         assert!(registry.errors.is_empty(), "{:?}", registry.errors);
 
@@ -1330,50 +1285,22 @@ mod tests {
             .subagents
             .get("subagent")
             .expect("subagent should load");
+        assert_eq!(subagent.schema_version, 7);
         assert!(!subagent.expose_as_tool);
-        assert!(subagent.description.contains("read-only"));
+        assert!(subagent.description.contains("background"));
         assert!(subagent
             .messages
             .system_prompt
             .as_deref()
             .unwrap_or_default()
-            .contains("cannot modify files"));
-        assert_eq!(
-            subagent.tools,
-            vec![
-                "tree".to_string(),
-                "cat".to_string(),
-                "glob".to_string(),
-                "search_pattern".to_string(),
-                "search_symbol_definition".to_string(),
-                "search_semantic".to_string(),
-                "codegraph_overview".to_string(),
-                "code_health".to_string(),
-                "git_risk".to_string(),
-                "code_why".to_string(),
-                "code_duplication".to_string(),
-                "dead_code".to_string(),
-                "security_scan".to_string(),
-                "pr_blast".to_string(),
-                "code_map".to_string(),
-                "knowledge".to_string(),
-                "search_trajectories".to_string(),
-                "get_trajectory_context".to_string(),
-                "web".to_string(),
-                "web_search".to_string(),
-                "shell".to_string(),
-                "compress_chat_probe".to_string(),
-                "compress_chat_apply".to_string(),
-                "tasks_set".to_string(),
-            ]
-        );
+            .contains("validate_goal"));
+        assert!(subagent.tools.contains(&"apply_patch".to_string()));
     }
 
     #[test]
     fn test_builtin_subagent_tool_ids_are_not_exposed_as_config_tools() {
         for id in [
             "subagent",
-            "delegate",
             "agent_list",
             "agent_status",
             "agent_wait",

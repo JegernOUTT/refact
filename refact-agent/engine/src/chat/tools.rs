@@ -371,7 +371,6 @@ const TOOL_RESULT_TRUNCATION_EXEMPT_TOOLS: &[&str] = &[
     "review",
     "code_review",
     "subagent",
-    "delegate",
     "agent_wait",
     "agent_result",
 ];
@@ -1409,7 +1408,6 @@ mod tests {
     fn test_tool_result_truncation_exempt_tools() {
         assert!(is_tool_result_truncation_exempt("code_review"));
         assert!(is_tool_result_truncation_exempt("subagent"));
-        assert!(is_tool_result_truncation_exempt("delegate"));
         assert!(is_tool_result_truncation_exempt("agent_wait"));
         assert!(is_tool_result_truncation_exempt("agent_result"));
         assert!(!is_tool_result_truncation_exempt("cat"));

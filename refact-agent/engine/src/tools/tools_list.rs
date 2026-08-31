@@ -415,9 +415,6 @@ async fn get_builtin_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         Box::new(crate::tools::tool_subagent::ToolSubagent {
             config_path: config_path.clone(),
         }),
-        Box::new(crate::tools::tool_delegate::ToolDelegate {
-            config_path: config_path.clone(),
-        }),
         Box::new(crate::tools::tool_tasks::ToolTasksSet {
             config_path: config_path.clone(),
         }),

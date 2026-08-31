@@ -609,7 +609,6 @@ fn first_changed_boundary(before: &[ChatMessage], after: &[ChatMessage]) -> Opti
 pub const TOOLS_TO_PRESERVE: &[&str] = &[
     "subagent",
     "delegate",
-    "delegate_with_editing",
     "code_review",
     "code_review_gather_files",
     "review",

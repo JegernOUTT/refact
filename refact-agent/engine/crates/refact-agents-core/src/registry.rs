@@ -10,9 +10,11 @@ use uuid::Uuid;
 
 use crate::storage;
 use crate::types::{
-    AgentCompletion, AgentListFilter, AgentQuestion, BackgroundAgent, BgAgentKind, BgAgentStatus,
+    AgentCompletion, AgentListFilter, AgentQuestion, BackgroundAgent, BgAgentStatus,
     CreateAgentRequest,
 };
+#[cfg(test)]
+use crate::types::BgAgentKind;
 
 const MAX_INBOX_MESSAGES: usize = 100;
 
@@ -765,10 +767,7 @@ impl BackgroundAgentRegistry {
         let records = self.records.read().await;
         let mut overlaps = Vec::new();
         for record in records.values() {
-            if record.parent_chat_id != parent_chat_id
-                || record.kind != BgAgentKind::Delegate
-                || record.status.is_terminal()
-            {
+            if record.parent_chat_id != parent_chat_id || record.status.is_terminal() {
                 continue;
             }
             let shared: Vec<String> = record
@@ -790,7 +789,7 @@ impl BackgroundAgentRegistry {
             None
         } else {
             Some(format!(
-                "Running delegate target file overlap detected: {}",
+                "Running subagent target file overlap detected: {}",
                 overlaps.join("; ")
             ))
         }

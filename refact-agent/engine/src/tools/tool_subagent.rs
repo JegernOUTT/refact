@@ -1,54 +1,56 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex as AMutex;
 
 use crate::agents::spawn::{
-    NotifyParent, SpawnHandle, SpawnRequest, spawn_and_wait, spawn_background_agent,
+    NotifyParent, SpawnGoal, SpawnRequest, SpawnWorktreeMode, spawn_background_agent,
 };
-use crate::agents::types::{BackgroundAgent, BgAgentKind};
+use crate::agents::types::BgAgentKind;
 use crate::at_commands::at_commands::{AtCommandsContext, MAX_SUBCHAT_DEPTH};
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
+use crate::chat::types::{GoalBudget, GoalCriterion};
+use crate::global_context::try_load_caps_quickly_if_not_present;
 use crate::postprocessing::pp_command_output::OutputFilter;
-use crate::tools::tools_description::{
-    Tool, ToolDesc, ToolSource, ToolSourceType, json_schema_from_params,
-};
+use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
+use crate::tools::tools_list::get_available_tools;
 use crate::yaml_configs::customization_registry::get_subagent_config;
 
-const ALLOWED_FOR_SUBAGENT: &[&str] = &[
-    "cat",
-    "tree",
-    "search_pattern",
-    "glob",
-    "search_symbol_definition",
-    "search_semantic",
-    "codegraph_overview",
-    "code_health",
-    "git_risk",
-    "code_why",
-    "code_duplication",
-    "dead_code",
-    "security_scan",
-    "pr_blast",
-    "code_map",
-    "knowledge",
-    "search_trajectories",
-    "get_trajectory_context",
-    "web",
-    "web_search",
-    "shell",
-    "tasks_set",
-    "compress_chat_probe",
-    "compress_chat_apply",
-    "subagent_finish",
+pub const SUBAGENT_FORCE_TOOLS: &[&str] = &[
+    "set_tasks",
+    "progress_report",
+    "agents_overview",
+    "agent_message",
+    "validate_goal",
+];
+
+const MODEL_TYPES: &[&str] = &[
+    "default",
+    "light",
+    "thinking",
+    "buddy",
+    "model_2",
+    "task_planner",
 ];
 
 #[derive(Clone)]
 pub struct ToolSubagent {
     pub config_path: String,
+}
+
+#[derive(Clone)]
+struct SubagentArgs {
+    task: String,
+    expected_result: String,
+    target_files: Vec<String>,
+    tools: Option<Vec<String>>,
+    model_type: Option<String>,
+    model_name: Option<String>,
+    goal: Option<SpawnGoal>,
+    plan: Option<String>,
+    worktree_mode: SpawnWorktreeMode,
 }
 
 #[async_trait]
@@ -63,33 +65,23 @@ impl Tool for ToolSubagent {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Spawn a non-editing research subagent that works independently. Background by default; pass wait=true to block until it finishes. Use this for investigation, code exploration, shell-backed inspection, and analysis. For implementation/editing tasks use `delegate()`.".to_string(),
-            input_schema: json_schema_from_params(
-                &[
-                    (
-                        "task",
-                        "string",
-                        "What the subagent should investigate. Be specific about scope and goal.",
-                    ),
-                    (
-                        "expected_result",
-                        "string",
-                        "What a successful finding looks like (e.g. 'list of files calling X with line numbers').",
-                    ),
-                    (
-                        "tools",
-                        "string",
-                        "Optional comma-separated analysis tools (e.g. 'cat,tree,search_pattern,shell'). Empty means use the configured `subagent` toolset.",
-                    ),
-                    ("max_steps", "string", "Step budget (default 50, max 50)."),
-                    (
-                        "wait",
-                        "string",
-                        "If 'true', block until the subagent finishes and return its full result. Default 'false' (background).",
-                    ),
-                ],
-                &["task", "expected_result"],
-            ),
+            description: "Spawn a background-only, stateful child trajectory for research or implementation. The child inherits all parent-chat tools by default, can select a configured model or named model, and may receive a goal with a step budget, plan, target files, and an isolated worktree that auto-merges by default. A trajectory link is returned immediately and completion is auto-pushed. Use `agents_overview` and `agent_message` to coordinate with peers.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Focused instructions for the background subagent."},
+                    "expected_result": {"type": "string", "description": "Concrete outcome the subagent should deliver."},
+                    "target_files": {"type": "array", "items": {"type": "string"}, "description": "Optional expected edit targets. When set, the child may edit only these files."},
+                    "tools": {"type": "string", "description": "Optional comma-separated tool names. Omit to inherit all parent-chat tools."},
+                    "model_type": {"type": "string", "enum": MODEL_TYPES, "description": "Configured model slot. Ignored when model_name is supplied."},
+                    "model_name": {"type": "string", "description": "Concrete chat model id. Takes precedence over model_type."},
+                    "goal": {"description": "Optional string or object {content, criteria?, budget?}; use goal.budget.max_turns for a step limit."},
+                    "plan": {"type": "string", "description": "Optional installed plan; it is ground truth for the child."},
+                    "worktree": {"type": "string", "enum": ["inherit", "isolated"], "default": "inherit", "description": "Use the parent worktree or create an isolated worktree."},
+                    "auto_merge": {"type": "boolean", "default": true, "description": "Only for worktree=isolated. Squash-merge completion automatically."}
+                },
+                "required": ["task", "expected_result"]
+            }),
             output_schema: None,
             annotations: None,
         }
@@ -101,18 +93,13 @@ impl Tool for ToolSubagent {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let task = parse_required_string(args, "task")?;
-        let expected_result = parse_required_string(args, "expected_result")?;
-        let tools_arg = parse_optional_csv(args, "tools")?;
-        let max_steps = parse_max_steps(args)?;
-        let wait = parse_optional_bool(args, "wait", false)?;
-
+        let args = parse_subagent_args(args)?;
         let (
             gcx,
+            app,
             parent_chat_id,
             parent_root_chat_id,
             parent_subchat_tx,
-            _parent_abort_flag,
             subchat_depth,
             parent_task_meta,
             parent_worktree,
@@ -121,10 +108,10 @@ impl Tool for ToolSubagent {
             let ccx_lock = ccx.lock().await;
             (
                 ccx_lock.app.gcx.clone(),
+                ccx_lock.app.clone(),
                 ccx_lock.chat_id.clone(),
                 ccx_lock.root_chat_id.clone(),
                 ccx_lock.subchat_tx.clone(),
-                ccx_lock.abort_flag.clone(),
                 ccx_lock.subchat_depth,
                 ccx_lock.task_meta.clone(),
                 ccx_lock.execution_scope_worktree(),
@@ -132,76 +119,71 @@ impl Tool for ToolSubagent {
             )
         };
 
-        let configured_tools = get_subagent_config(gcx.clone(), "subagent", None)
-            .await
-            .ok_or_else(|| "subagent config 'subagent' not found".to_string())?
-            .tools;
-        let spawn_tools = if let Some(tools) = &tools_arg {
-            Some(normalize_read_only_tools(tools, &configured_tools)?)
-        } else {
-            Some(configured_tools)
-        };
-        let prompt_tools = tools_arg
-            .as_ref()
-            .map(|_| spawn_tools.clone().unwrap_or_default());
-
         if subchat_depth >= MAX_SUBCHAT_DEPTH.saturating_sub(1) {
             return Err(format!(
                 "subchat depth limit ({MAX_SUBCHAT_DEPTH}) exceeded"
             ));
         }
 
+        let config = get_subagent_config(gcx.clone(), "subagent", None)
+            .await
+            .ok_or_else(|| "subagent config 'subagent' not found".to_string())?;
+        let max_steps = config.subchat.max_steps.unwrap_or(60).max(1);
+        let available_tools = available_tools(gcx.clone()).await;
+        let spawn_tools = match args.tools.as_ref() {
+            Some(requested) => Some(normalize_explicit_tools(requested, &available_tools)?),
+            None => None,
+        };
+        let (model, model_type) = resolve_model(
+            gcx.clone(),
+            args.model_name.as_deref(),
+            args.model_type.as_deref(),
+            &current_model,
+        )
+        .await?;
+        let peer_snapshot = peer_snapshot(&app, &parent_root_chat_id, &args.target_files).await;
+        let prompt = build_subagent_prompt(
+            &args.task,
+            &args.expected_result,
+            &args.target_files,
+            &peer_snapshot,
+            args.goal.is_some(),
+        );
         let req = SpawnRequest {
             kind: BgAgentKind::Subagent,
             parent_chat_id: parent_chat_id.clone(),
             parent_root_chat_id: Some(parent_root_chat_id),
             parent_tool_call_id: Some(tool_call_id.clone()),
             config_name: "subagent".to_string(),
-            title: short_title("Subagent", &task),
-            prompt: build_subagent_prompt(&task, &expected_result, &prompt_tools, max_steps),
+            title: short_title("Subagent", &args.task),
+            prompt,
             tools: spawn_tools,
-            target_files: vec![],
+            target_files: args.target_files.clone(),
             max_steps,
-            model: current_model,
-            model_type: None,
-            goal: None,
-            plan: None,
-            worktree_mode: crate::agents::spawn::SpawnWorktreeMode::Inherit,
+            model: model.clone(),
+            model_type: model_type.clone(),
+            goal: args.goal,
+            plan: args.plan,
+            worktree_mode: args.worktree_mode,
             parent_subchat_tx: Some(parent_subchat_tx),
             parent_worktree,
             parent_task_meta,
             subchat_depth,
             notify_parent: NotifyParent::Auto,
         };
-
-        let app = crate::app_state::AppState::from_gcx(gcx).await;
-        if wait {
-            let req_silent = SpawnRequest {
-                notify_parent: NotifyParent::Silent,
-                ..req
-            };
-            let record =
-                spawn_and_wait(app, req_silent, Some(Duration::from_secs(30 * 60))).await?;
-            Ok((
-                false,
-                vec![build_foreground_tool_result(
-                    &record,
-                    &parent_chat_id,
-                    tool_call_id,
-                )],
-            ))
-        } else {
-            let handle = spawn_background_agent(app, req).await?;
-            Ok((
-                false,
-                vec![build_background_start_tool_result(
-                    &handle,
-                    &task,
-                    &parent_chat_id,
-                    tool_call_id,
-                )],
-            ))
-        }
+        let handle = spawn_background_agent(app, req).await?;
+        Ok((
+            false,
+            vec![build_background_start_tool_result(
+                &handle,
+                &args.task,
+                &parent_chat_id,
+                &model,
+                model_type.as_deref(),
+                &peer_snapshot,
+                tool_call_id,
+            )],
+        ))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
@@ -209,10 +191,72 @@ impl Tool for ToolSubagent {
     }
 }
 
+fn parse_subagent_args(args: &HashMap<String, Value>) -> Result<SubagentArgs, String> {
+    let task = parse_required_string(args, "task")?;
+    let expected_result = parse_required_string(args, "expected_result")?;
+    let target_files = parse_target_files(args)?;
+    let tools = parse_optional_csv(args, "tools")?;
+    let model_type = parse_optional_string(args, "model_type")?;
+    if let Some(model_type) = &model_type {
+        if !MODEL_TYPES.contains(&model_type.as_str()) {
+            return Err(format!(
+                "argument `model_type` must be one of: {}",
+                MODEL_TYPES.join(", ")
+            ));
+        }
+    }
+    let model_name = parse_optional_string(args, "model_name")?;
+    let goal = parse_goal(args)?;
+    let plan = parse_optional_string(args, "plan")?;
+    let worktree =
+        parse_optional_string(args, "worktree")?.unwrap_or_else(|| "inherit".to_string());
+    let auto_merge_present =
+        args.contains_key("auto_merge") && !args.get("auto_merge").is_some_and(Value::is_null);
+    let worktree_mode = match worktree.as_str() {
+        "inherit" => {
+            if auto_merge_present {
+                return Err(
+                    "argument `auto_merge` is only valid when `worktree` is `isolated`".to_string(),
+                );
+            }
+            SpawnWorktreeMode::Inherit
+        }
+        "isolated" => SpawnWorktreeMode::Isolated {
+            auto_merge: parse_optional_bool(args, "auto_merge", true)?,
+        },
+        _ => return Err("argument `worktree` must be `inherit` or `isolated`".to_string()),
+    };
+    Ok(SubagentArgs {
+        task,
+        expected_result,
+        target_files,
+        tools,
+        model_type,
+        model_name,
+        goal,
+        plan,
+        worktree_mode,
+    })
+}
+
 fn parse_required_string(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {
     match args.get(name) {
         Some(Value::String(value)) if !value.trim().is_empty() => Ok(value.trim().to_string()),
         Some(Value::String(_)) | None => Err(format!("Missing argument `{name}`")),
+        Some(value) => Err(format!(
+            "argument `{name}` must be a non-empty string: {value:?}"
+        )),
+    }
+}
+
+fn parse_optional_string(
+    args: &HashMap<String, Value>,
+    name: &str,
+) -> Result<Option<String>, String> {
+    match args.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value.trim().is_empty() => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.trim().to_string())),
         Some(value) => Err(format!("argument `{name}` must be a string: {value:?}")),
     }
 }
@@ -221,49 +265,37 @@ fn parse_optional_csv(
     args: &HashMap<String, Value>,
     name: &str,
 ) -> Result<Option<Vec<String>>, String> {
-    match args.get(name) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => {
-            let tools = value
-                .split(',')
-                .map(str::trim)
-                .filter(|tool| !tool.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>();
-            if tools.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(tools))
-            }
-        }
-        Some(value) => Err(format!("argument `{name}` must be a string: {value:?}")),
-    }
+    let Some(value) = parse_optional_string(args, name)? else {
+        return Ok(None);
+    };
+    let tools = value
+        .split(',')
+        .map(str::trim)
+        .filter(|tool| !tool.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    Ok((!tools.is_empty()).then_some(tools))
 }
 
-fn parse_optional_usize(
-    args: &HashMap<String, Value>,
-    name: &str,
-    default: usize,
-) -> Result<usize, String> {
-    match args.get(name) {
-        None | Some(Value::Null) => Ok(default),
-        Some(Value::String(value)) if value.trim().is_empty() => Ok(default),
-        Some(Value::String(value)) => value
-            .trim()
-            .parse::<usize>()
-            .map_err(|_| format!("argument `{name}` must be a positive integer")),
-        Some(Value::Number(value)) => value
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or_else(|| format!("argument `{name}` must be a positive integer")),
+fn parse_target_files(args: &HashMap<String, Value>) -> Result<Vec<String>, String> {
+    match args.get("target_files") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                Value::String(path) if !path.trim().is_empty() => Ok(path.trim().to_string()),
+                Value::String(_) => {
+                    Err("argument `target_files` contains an empty string".to_string())
+                }
+                other => Err(format!(
+                    "argument `target_files` contains a non-string value: {other:?}"
+                )),
+            })
+            .collect(),
         Some(value) => Err(format!(
-            "argument `{name}` must be a positive integer: {value:?}"
+            "argument `target_files` must be an array of strings: {value:?}"
         )),
     }
-}
-
-fn parse_max_steps(args: &HashMap<String, Value>) -> Result<usize, String> {
-    Ok(parse_optional_usize(args, "max_steps", 50)?.clamp(1, 50))
 }
 
 fn parse_optional_bool(
@@ -273,91 +305,328 @@ fn parse_optional_bool(
 ) -> Result<bool, String> {
     match args.get(name) {
         None | Some(Value::Null) => Ok(default),
-        Some(Value::String(value)) if value.trim().is_empty() => Ok(default),
-        Some(value) => refact_tool_api::coerce_bool(value).ok_or_else(|| match value {
-            Value::String(_) => format!("argument `{name}` must be true or false"),
-            _ => format!("argument `{name}` must be true or false: {value:?}"),
-        }),
+        Some(value) => refact_tool_api::coerce_bool(value)
+            .ok_or_else(|| format!("argument `{name}` must be true or false: {value:?}")),
     }
 }
 
-fn normalize_read_only_tools(
-    tools: &[String],
-    configured_tools: &[String],
-) -> Result<Vec<String>, String> {
-    let mut normalized_tools = Vec::new();
-    let mut seen = HashSet::new();
-    for tool in tools {
-        let canonical = canonical_subagent_tool(tool);
-        if !is_allowed_for_subagent(&canonical)
-            || !is_configured_for_subagent(&canonical, configured_tools)
-        {
-            let bad = tool.trim();
-            let bad = if bad.is_empty() { tool.as_str() } else { bad };
-            return Err(format!(
-                "Tool '{}' is not in the allowed set for subagents ({}). Use delegate() for implementation/editing.",
-                bad,
-                format_allowed_tools(configured_tools)
-            ));
+fn parse_goal(args: &HashMap<String, Value>) -> Result<Option<SpawnGoal>, String> {
+    let Some(value) = args.get("goal") else {
+        return Ok(None);
+    };
+    match value {
+        Value::Null => Ok(None),
+        Value::String(content) if !content.trim().is_empty() => Ok(Some(SpawnGoal {
+            content: content.trim().to_string(),
+            criteria: Vec::new(),
+            budget: None,
+        })),
+        Value::String(_) => Err("argument `goal` must not be empty".to_string()),
+        Value::Object(object) => {
+            let content = object
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|content| !content.is_empty())
+                .ok_or_else(|| "argument `goal.content` must be a non-empty string".to_string())?
+                .to_string();
+            let criteria = match object.get("criteria") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(value) => serde_json::from_value::<Vec<GoalCriterion>>(value.clone())
+                    .map_err(|error| format!("argument `goal.criteria` is malformed: {error}"))?,
+            };
+            let budget = match object.get("budget") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(
+                    serde_json::from_value::<GoalBudget>(value.clone())
+                        .map_err(|error| format!("argument `goal.budget` is malformed: {error}"))?,
+                ),
+            };
+            Ok(Some(SpawnGoal {
+                content,
+                criteria,
+                budget,
+            }))
         }
-        if seen.insert(canonical.clone()) {
-            normalized_tools.push(canonical);
-        }
+        other => Err(format!(
+            "argument `goal` must be a string or object: {other:?}"
+        )),
     }
-    Ok(normalized_tools)
 }
 
-#[cfg(test)]
-fn validate_read_only_tools(tools: &[String], configured_tools: &[String]) -> Result<(), String> {
-    normalize_read_only_tools(tools, configured_tools).map(|_| ())
+async fn available_tools(gcx: Arc<crate::global_context::GlobalContext>) -> HashSet<String> {
+    let mut names = get_available_tools(gcx)
+        .await
+        .into_iter()
+        .map(|tool| tool.tool_description().name)
+        .collect::<HashSet<_>>();
+    names.extend(SUBAGENT_FORCE_TOOLS.iter().map(|tool| (*tool).to_string()));
+    names
 }
 
-fn canonical_subagent_tool(tool: &str) -> String {
-    let mut normalized = tool.trim().to_ascii_lowercase();
-    if normalized.starts_with(crate::llm::adapters::claude_code_compat::MCP_TOOL_PREFIX) {
-        normalized = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&normalized);
-    }
+fn canonical_tool_name(tool: &str) -> String {
+    let normalized = tool.trim().to_ascii_lowercase();
+    let normalized =
+        if normalized.starts_with(crate::llm::adapters::claude_code_compat::MCP_TOOL_PREFIX) {
+            crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(&normalized)
+        } else {
+            normalized
+        };
     if normalized == "grep" {
         return "search_pattern".to_string();
     }
-    if normalized == "glob" {
-        return "glob".to_string();
-    }
     crate::llm::adapters::claude_code_compat::CC_TOOL_RENAMES
         .iter()
-        .find_map(|(original, renamed)| {
-            if *renamed == normalized.as_str() {
-                Some((*original).to_string())
-            } else {
-                None
-            }
-        })
+        .find_map(|(original, renamed)| (*renamed == normalized).then(|| (*original).to_string()))
         .unwrap_or(normalized)
 }
 
-fn is_allowed_for_subagent(tool: &str) -> bool {
-    let normalized = canonical_subagent_tool(tool);
-    ALLOWED_FOR_SUBAGENT.contains(&normalized.as_str())
+fn normalize_explicit_tools(
+    requested: &[String],
+    available: &HashSet<String>,
+) -> Result<Vec<String>, String> {
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+    for tool in requested {
+        let canonical = canonical_tool_name(tool);
+        if !available.contains(&canonical) {
+            let mut names = available.iter().cloned().collect::<Vec<_>>();
+            names.sort();
+            return Err(format!(
+                "Unknown tool `{}`. Available tools: {}",
+                tool.trim(),
+                names.join(", ")
+            ));
+        }
+        if seen.insert(canonical.clone()) {
+            result.push(canonical);
+        }
+    }
+    for tool in SUBAGENT_FORCE_TOOLS {
+        if seen.insert((*tool).to_string()) {
+            result.push((*tool).to_string());
+        }
+    }
+    Ok(result)
 }
 
-fn is_configured_for_subagent(tool: &str, configured_tools: &[String]) -> bool {
-    let normalized = canonical_subagent_tool(tool);
-    configured_tools
-        .iter()
-        .any(|configured| canonical_subagent_tool(configured) == normalized)
+async fn resolve_model(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    model_name: Option<&str>,
+    model_type: Option<&str>,
+    parent_model: &str,
+) -> Result<(String, Option<String>), String> {
+    let caps = try_load_caps_quickly_if_not_present(gcx, 0)
+        .await
+        .map_err(|error| format!("failed to load caps: {error:?}"))?;
+    let model_id = if let Some(model_name) = model_name {
+        model_name.to_string()
+    } else if let Some(model_type) = model_type {
+        let slot = match model_type {
+            "default" => &caps.defaults.chat_default_model,
+            "light" => &caps.defaults.chat_light_model,
+            "thinking" => &caps.defaults.chat_thinking_model,
+            "buddy" => &caps.defaults.chat_buddy_model,
+            "model_2" => &caps.defaults.chat_model_2,
+            "task_planner" => &caps.defaults.task_planner_agent_model,
+            _ => unreachable!("model type validated before resolution"),
+        };
+        if slot.trim().is_empty() {
+            return Err(format!(
+                "model_type `{model_type}` is not configured. Configured model slots: {}",
+                configured_model_slots(&caps)
+            ));
+        }
+        slot.clone()
+    } else {
+        parent_model.to_string()
+    };
+    let selected_type = model_type.map(str::to_string);
+    let model = crate::caps::resolve_chat_model(caps, &model_id)
+        .map_err(|error| format!("model `{model_id}` is not available: {error}"))?;
+    Ok((model.base.id.clone(), selected_type))
 }
 
-fn format_allowed_tools(configured_tools: &[String]) -> String {
-    ALLOWED_FOR_SUBAGENT
+fn configured_model_slots(caps: &crate::caps::CodeAssistantCaps) -> String {
+    [
+        ("default", &caps.defaults.chat_default_model),
+        ("light", &caps.defaults.chat_light_model),
+        ("thinking", &caps.defaults.chat_thinking_model),
+        ("buddy", &caps.defaults.chat_buddy_model),
+        ("model_2", &caps.defaults.chat_model_2),
+        ("task_planner", &caps.defaults.task_planner_agent_model),
+    ]
+    .into_iter()
+    .filter(|(_, model)| !model.trim().is_empty())
+    .map(|(name, model)| format!("{name}={model}"))
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
+async fn peer_snapshot(
+    app: &crate::app_state::AppState,
+    root_chat_id: &str,
+    target_files: &[String],
+) -> String {
+    let requested = target_files
         .iter()
-        .copied()
-        .filter(|tool| is_configured_for_subagent(tool, configured_tools))
-        .collect::<Vec<_>>()
-        .join(", ")
+        .map(|path| crate::agents::registry::normalize_path_for_overlap(path))
+        .collect::<HashSet<_>>();
+    let peers = app
+        .agents
+        .list_all()
+        .await
+        .into_iter()
+        .filter(|record| {
+            !record.status.is_terminal()
+                && (record.parent_root_chat_id.as_deref() == Some(root_chat_id)
+                    || record.parent_chat_id == root_chat_id)
+        })
+        .collect::<Vec<_>>();
+    if peers.is_empty() {
+        return "(no active peers)".to_string();
+    }
+    let mut lines = Vec::new();
+    for peer in peers {
+        lines.push(format!(
+            "- {} — status: {}; target_files: {}; current_tool: {}",
+            peer.title,
+            peer.status.as_str(),
+            files_label(&peer.target_files),
+            peer.current_tool.unwrap_or_else(|| "-".to_string()),
+        ));
+        let overlaps = peer
+            .target_files
+            .iter()
+            .filter(|path| {
+                requested.contains(&crate::agents::registry::normalize_path_for_overlap(path))
+            })
+            .collect::<Vec<_>>();
+        if !overlaps.is_empty() {
+            lines.push(format!(
+                "  ⚠ Overlap warning: {} targets {}",
+                peer.title,
+                overlaps
+                    .into_iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn build_subagent_prompt(
+    task: &str,
+    expected_result: &str,
+    target_files: &[String],
+    peers: &str,
+    goal_installed: bool,
+) -> String {
+    let mut prompt = format!("# Your Task\n{task}\n\n# Expected Result\n{expected_result}\n\n");
+    if !target_files.is_empty() {
+        prompt.push_str("# Target Files\nONLY edit files in this list:\n");
+        for path in target_files {
+            prompt.push_str(&format!("- {path}\n"));
+        }
+        prompt.push('\n');
+    }
+    prompt.push_str(&format!("# Active peers\n{peers}\n\n"));
+    prompt.push_str("# Constraints\n- Work independently in this background trajectory.\n- You MAY run tests, compilation, lint, or other verification when your tools allow it.\n- Publish progress with `set_tasks` and `progress_report`.\n- Sibling digest notices arrive in your context automatically; coordinate with `agents_overview` and `agent_message`.\n");
+    if goal_installed {
+        prompt.push_str("- An installed goal is ground truth. You MUST call `validate_goal` before finishing and report any unmet criteria.\n");
+    }
+    prompt.push_str("- End with: `Status: DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED`, then Findings, Changes, Evidence, Concerns, and Next action.\n");
+    prompt
+}
+
+fn build_background_start_tool_result(
+    handle: &crate::agents::spawn::SpawnHandle,
+    task: &str,
+    parent_chat_id: &str,
+    model: &str,
+    model_type: Option<&str>,
+    peers: &str,
+    tool_call_id: &str,
+) -> ContextEnum {
+    let mut lines = vec![
+        format!(
+            "✓ Started background subagent: {}",
+            truncate_chars(task, 60)
+        ),
+        format!("- agent_id: {}", handle.agent_id),
+        "- status: running".to_string(),
+        format!("- child_chat_id: {}", handle.child_chat_id),
+        format!("- model: {model}"),
+    ];
+    if let Some(model_type) = model_type {
+        lines.push(format!("- model_type: {model_type}"));
+    }
+    if let Some(branch) = &handle.worktree_branch {
+        lines.push(format!("- worktree_branch: {branch}"));
+        lines.push(format!(
+            "- auto_merge: {}",
+            handle.auto_merge.unwrap_or(false)
+        ));
+    }
+    lines.extend([
+        String::new(),
+        format!(
+            "Open the child trajectory: [view](refact://chat/{})",
+            handle.child_chat_id
+        ),
+        String::new(),
+        "The completion will be pushed back into this chat automatically.".to_string(),
+    ]);
+    if peers.contains("⚠ Overlap warning") {
+        lines.extend([
+            String::new(),
+            "Peer overlap warnings:".to_string(),
+            peers.to_string(),
+        ]);
+    }
+    tool_message(
+        lines.join("\n"),
+        tool_call_id,
+        Map::from_iter([
+            ("background_agent_id".to_string(), json!(handle.agent_id)),
+            ("background_agent_kind".to_string(), json!("subagent")),
+            ("background_agent_status".to_string(), json!("running")),
+            ("child_chat_id".to_string(), json!(handle.child_chat_id)),
+            ("model".to_string(), json!(model)),
+            ("model_type".to_string(), json!(model_type)),
+            ("worktree_branch".to_string(), json!(handle.worktree_branch)),
+            ("auto_merge".to_string(), json!(handle.auto_merge)),
+            (
+                "background_agent_parent_chat_id".to_string(),
+                json!(parent_chat_id),
+            ),
+        ]),
+    )
+}
+
+fn tool_message(content: String, tool_call_id: &str, extra: Map<String, Value>) -> ContextEnum {
+    ContextEnum::ChatMessage(ChatMessage {
+        role: "tool".to_string(),
+        content: ChatContent::SimpleText(content),
+        tool_call_id: tool_call_id.to_string(),
+        preserve: Some(true),
+        extra,
+        output_filter: Some(OutputFilter::no_limits()),
+        ..Default::default()
+    })
+}
+
+fn files_label(files: &[String]) -> String {
+    if files.is_empty() {
+        "-".to_string()
+    } else {
+        files.join(", ")
+    }
 }
 
 fn short_title(prefix: &str, task: &str) -> String {
-    let task = task.trim();
     let truncated = truncate_chars(task, 50);
     if task.chars().count() > 50 {
         format!("{prefix}: {truncated}…")
@@ -366,260 +635,67 @@ fn short_title(prefix: &str, task: &str) -> String {
     }
 }
 
-fn build_subagent_prompt(
-    task: &str,
-    expected_result: &str,
-    tools: &Option<Vec<String>>,
-    max_steps: usize,
-) -> String {
-    let tools_list = tools
-        .as_ref()
-        .filter(|tools| !tools.is_empty())
-        .map(|tools| tools.join(", "))
-        .unwrap_or_else(|| "configured `subagent` toolset".to_string());
-    format!(
-        r#"# Your Task
-{task}
-
-# Expected Result
-{expected_result}
-
-# Allowed Tools
-{tools_list}
-
-# Constraints
-- Maximum steps: {max_steps}
-- Read-only: do NOT attempt to modify files
-- Do not quote guarded file contents verbatim in the final report
-- Use `tasks_set` to publish progress
-- End with the Status report described in your system prompt"#
-    )
-}
-
-fn build_background_start_tool_result(
-    handle: &SpawnHandle,
-    task: &str,
-    parent_chat_id: &str,
-    tool_call_id: &String,
-) -> ContextEnum {
-    let task_preview = truncate_chars_with_ellipsis(task, 60);
-    let content = format!(
-        "✓ Started background subagent: {task_preview}\n- agent_id: {agent_id}\n- status: running\n- child_chat_id: {child_chat_id}\n\nOpen the child trajectory: [view](refact://chat/{child_chat_id})\n\nThe completion will be pushed back into this chat automatically. Use `agent_status`, `agent_wait`, or `agent_result` if you need to follow up sooner.",
-        agent_id = handle.agent_id,
-        child_chat_id = handle.child_chat_id,
-    );
-    tool_message(
-        content,
-        tool_call_id,
-        background_agent_extra(
-            &handle.agent_id,
-            Some(&handle.child_chat_id),
-            "running",
-            Some(parent_chat_id),
-            false,
-            &[],
-        ),
-    )
-}
-
-fn build_foreground_tool_result(
-    record: &BackgroundAgent,
-    parent_chat_id: &str,
-    tool_call_id: &String,
-) -> ContextEnum {
-    let status = record.status.as_str();
-    let child_chat_id = record.child_chat_id.as_deref().unwrap_or_default();
-    let result = record
-        .result_summary
-        .as_deref()
-        .filter(|result| !result.trim().is_empty())
-        .or(record.error.as_deref())
-        .unwrap_or("Subagent finished without a result summary.");
-    let link = if child_chat_id.is_empty() {
-        String::new()
-    } else {
-        format!("\nOpen the child trajectory: [view](refact://chat/{child_chat_id})\n")
-    };
-    let content = format!(
-        "# Subagent Result\n\n- agent_id: {agent_id}\n- status: {status}\n- child_chat_id: {child_chat_id}\n{link}\n## Result\n\n{result}",
-        agent_id = record.agent_id,
-    );
-    tool_message(
-        content,
-        tool_call_id,
-        background_agent_extra(
-            &record.agent_id,
-            record.child_chat_id.as_deref(),
-            status,
-            Some(parent_chat_id),
-            record.result_summary.is_some() || record.error.is_some(),
-            &record.edited_files,
-        ),
-    )
-}
-
-fn tool_message(content: String, tool_call_id: &String, extra: Map<String, Value>) -> ContextEnum {
-    ContextEnum::ChatMessage(ChatMessage {
-        role: "tool".to_string(),
-        content: ChatContent::SimpleText(content),
-        tool_call_id: tool_call_id.clone(),
-        preserve: Some(true),
-        extra,
-        output_filter: Some(OutputFilter::no_limits()),
-        ..Default::default()
-    })
-}
-
-fn background_agent_extra(
-    agent_id: &str,
-    child_chat_id: Option<&str>,
-    status: &str,
-    parent_chat_id: Option<&str>,
-    result_available: bool,
-    edited_files: &[String],
-) -> Map<String, Value> {
-    Map::from_iter([
-        ("background_agent_id".to_string(), json!(agent_id)),
-        ("background_agent_kind".to_string(), json!("subagent")),
-        ("child_chat_id".to_string(), json!(child_chat_id)),
-        ("background_agent_status".to_string(), json!(status)),
-        (
-            "background_agent_parent_chat_id".to_string(),
-            json!(parent_chat_id),
-        ),
-        (
-            "background_agent_result_available".to_string(),
-            json!(result_available),
-        ),
-        ("background_agent_conflict".to_string(), json!(false)),
-        ("edited_files".to_string(), json!(edited_files)),
-    ])
-}
-
 fn truncate_chars(text: &str, max_chars: usize) -> String {
-    text.chars().take(max_chars).collect()
-}
-
-fn truncate_chars_with_ellipsis(text: &str, max_chars: usize) -> String {
-    let truncated = truncate_chars(text.trim(), max_chars);
-    if text.trim().chars().count() > max_chars {
-        format!("{truncated}…")
-    } else {
-        truncated
-    }
+    text.trim().chars().take(max_chars).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use crate::app_state::AppState;
-    use crate::call_validation::ChatMessage;
     use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
     use crate::subchat::{SubchatResult, ToolsPolicy};
     use serial_test::serial;
 
-    fn args_with(task: &str, expected_result: &str) -> HashMap<String, Value> {
-        HashMap::from_iter([
-            ("task".to_string(), json!(task)),
-            ("expected_result".to_string(), json!(expected_result)),
+    fn args() -> HashMap<String, Value> {
+        HashMap::from([
+            ("task".to_string(), json!("Implement frog support")),
+            ("expected_result".to_string(), json!("Frogs are supported")),
         ])
     }
 
-    fn single_message(contexts: Vec<ContextEnum>) -> ChatMessage {
-        match contexts.into_iter().next().expect("tool message") {
-            ContextEnum::ChatMessage(message) => message,
-            ContextEnum::ContextFile(_) => panic!("expected chat message"),
-        }
-    }
-
-    fn message_text(message: &ChatMessage) -> String {
-        message.content.content_text_only()
-    }
-
-    fn configured_read_only_tools() -> Vec<String> {
-        [
-            "tree",
-            "cat",
-            "glob",
-            "search_pattern",
-            "search_symbol_definition",
-            "search_semantic",
-            "codegraph_overview",
-            "code_health",
-            "git_risk",
-            "code_why",
-            "code_duplication",
-            "dead_code",
-            "security_scan",
-            "pr_blast",
-            "code_map",
-            "knowledge",
-            "search_trajectories",
-            "get_trajectory_context",
-            "web",
-            "web_search",
-            "shell",
-            "compress_chat_probe",
-            "compress_chat_apply",
-            "tasks_set",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
-    }
-
-    #[test]
-    fn configured_tools_are_all_allowed_and_error_list_is_exact() {
-        let configured_tools = configured_read_only_tools();
-
-        for tool in &configured_tools {
-            assert!(is_allowed_for_subagent(tool), "{tool} should be allowed");
-        }
-        assert_eq!(
-            format_allowed_tools(&configured_tools),
-            concat!(
-                "cat, tree, search_pattern, glob, search_symbol_definition, search_semantic, ",
-                "codegraph_overview, code_health, git_risk, code_why, code_duplication, ",
-                "dead_code, security_scan, pr_blast, code_map, knowledge, search_trajectories, ",
-                "get_trajectory_context, web, ",
-                "web_search, shell, tasks_set, compress_chat_probe, compress_chat_apply"
-            )
-        );
-    }
-
     async fn install_test_caps(gcx: Arc<crate::global_context::GlobalContext>) {
-        let model_id = "test/light".to_string();
         let mut caps = CodeAssistantCaps::default();
-        caps.chat_models.insert(
-            model_id.clone(),
-            Arc::new(ChatModelRecord {
-                base: BaseModelRecord {
-                    id: model_id.clone(),
-                    name: model_id.clone(),
-                    n_ctx: 200_000,
-                    endpoint: "https://example.com/v1/chat/completions".to_string(),
+        for slot in [
+            "default",
+            "light",
+            "thinking",
+            "buddy",
+            "model_2",
+            "task_planner",
+        ] {
+            let model_id = format!("test/{slot}");
+            caps.chat_models.insert(
+                model_id.clone(),
+                Arc::new(ChatModelRecord {
+                    base: BaseModelRecord {
+                        id: model_id.clone(),
+                        name: model_id.clone(),
+                        n_ctx: 200_000,
+                        endpoint: "https://example.com/v1/chat/completions".to_string(),
+                        ..Default::default()
+                    },
+                    supports_tools: true,
+                    supports_agent: true,
+                    max_output_tokens: Some(16_000),
                     ..Default::default()
-                },
-                supports_tools: true,
-                supports_agent: true,
-                max_output_tokens: Some(16_000),
-                ..Default::default()
-            }),
-        );
-        caps.defaults.chat_default_model = model_id.clone();
-        caps.defaults.chat_light_model = model_id.clone();
-        caps.defaults.chat_thinking_model = model_id;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            .saturating_add(60);
+                }),
+            );
+        }
+        caps.defaults.chat_default_model = "test/default".to_string();
+        caps.defaults.chat_light_model = "test/light".to_string();
+        caps.defaults.chat_thinking_model = "test/thinking".to_string();
+        caps.defaults.chat_buddy_model = "test/buddy".to_string();
+        caps.defaults.chat_model_2 = "test/model_2".to_string();
+        caps.defaults.task_planner_agent_model = "test/task_planner".to_string();
         let mut caps_state = gcx.caps_state.write().await;
         caps_state.caps = Some(Arc::new(caps));
-        caps_state.last_attempted_ts = now;
+        caps_state.last_attempted_ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
     }
 
     async fn test_context(parent_chat_id: &str) -> Arc<AMutex<AtCommandsContext>> {
@@ -634,8 +710,8 @@ mod tests {
                 false,
                 vec![],
                 parent_chat_id.to_string(),
-                None,
-                "parent/model".to_string(),
+                Some("root-chat".to_string()),
+                "test/default".to_string(),
                 None,
                 None,
             )
@@ -643,161 +719,190 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn delegate_tool_is_rejected_with_delegate_guidance() {
-        let configured_tools = configured_read_only_tools();
-        let error = validate_read_only_tools(&["delegate".to_string()], &configured_tools)
-            .expect_err("delegate should be rejected");
-
-        assert!(error.contains("Tool 'delegate'"));
-        assert!(error.contains("Use delegate() for implementation/editing."));
-        assert!(error.contains(&format!("({})", format_allowed_tools(&configured_tools))));
-        assert!(error.contains("cat, tree, search_pattern"));
+    fn message(contexts: Vec<ContextEnum>) -> ChatMessage {
+        match contexts.into_iter().next().expect("tool message") {
+            ContextEnum::ChatMessage(message) => message,
+            _ => panic!("expected chat message"),
+        }
     }
 
     #[test]
-    fn future_editing_tool_is_rejected() {
-        let configured_tools = configured_read_only_tools();
+    fn schema_is_background_only() {
+        let schema = ToolSubagent {
+            config_path: String::new(),
+        }
+        .tool_description()
+        .input_schema;
+        let properties = schema["properties"].as_object().unwrap();
+        for absent in ["wait", "max_steps", "notify_parent"] {
+            assert!(
+                !properties.contains_key(absent),
+                "{absent} must not be exposed"
+            );
+        }
+        for present in [
+            "task",
+            "expected_result",
+            "target_files",
+            "tools",
+            "model_type",
+            "model_name",
+            "goal",
+            "plan",
+            "worktree",
+            "auto_merge",
+        ] {
+            assert!(
+                properties.contains_key(present),
+                "{present} must be exposed"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_tools_accept_editing_aliases_and_force_tools() {
+        let available = HashSet::from([
+            "apply_patch".to_string(),
+            "search_pattern".to_string(),
+            "set_tasks".to_string(),
+            "validate_goal".to_string(),
+        ]);
+        let tools = normalize_explicit_tools(
+            &["t_apply".to_string(), "regex_search".to_string()],
+            &available,
+        )
+        .unwrap();
+        assert_eq!(&tools[..2], ["apply_patch", "search_pattern"]);
+        for required in SUBAGENT_FORCE_TOOLS {
+            assert!(tools.contains(&required.to_string()));
+        }
+    }
+
+    #[test]
+    fn unknown_tool_lists_registry_tools() {
         let error =
-            validate_read_only_tools(&["future_editing_tool".to_string()], &configured_tools)
-                .expect_err("unknown editing tool should be rejected");
-
-        assert!(error.contains("Tool 'future_editing_tool'"));
-        assert!(error.contains("not in the allowed set for subagents"));
-        assert!(error.contains(&format_allowed_tools(&configured_tools)));
+            normalize_explicit_tools(&["wat".to_string()], &HashSet::from(["cat".to_string()]))
+                .unwrap_err();
+        assert!(error.contains("Unknown tool `wat`"));
+        assert!(error.contains("cat"));
     }
 
     #[test]
-    fn editing_tool_is_rejected() {
-        let configured_tools = configured_read_only_tools();
-        let error = validate_read_only_tools(&["apply_patch".to_string()], &configured_tools)
-            .expect_err("editing tool should be rejected");
+    fn goal_string_and_object_parse() {
+        let mut string = args();
+        string.insert("goal".to_string(), json!("Ship frogs"));
+        let parsed = parse_subagent_args(&string).unwrap();
+        assert_eq!(parsed.goal.unwrap().content, "Ship frogs");
 
-        assert!(error.contains("Tool 'apply_patch'"));
-        assert!(error.contains("Use delegate() for implementation/editing."));
+        let mut object = args();
+        object.insert(
+            "goal".to_string(),
+            json!({
+                "content": "Ship frogs",
+                "criteria": [{"id": "C1", "text": "tests", "verify_hint": "cargo test"}],
+                "budget": {"max_turns": 3, "max_tokens": 200}
+            }),
+        );
+        let parsed = parse_subagent_args(&object).unwrap();
+        let goal = parsed.goal.unwrap();
+        assert_eq!(goal.criteria[0].id, "C1");
+        assert_eq!(goal.budget.unwrap().max_turns, Some(3));
     }
 
     #[test]
-    fn cat_tool_is_accepted_when_configured() {
-        let configured_tools = configured_read_only_tools();
-
-        assert!(validate_read_only_tools(&["cat".to_string()], &configured_tools).is_ok());
+    fn worktree_auto_merge_validation() {
+        let parsed = parse_subagent_args(&args()).unwrap();
+        assert!(matches!(parsed.worktree_mode, SpawnWorktreeMode::Inherit));
+        let mut isolated = args();
+        isolated.insert("worktree".to_string(), json!("isolated"));
+        assert!(matches!(
+            parse_subagent_args(&isolated).unwrap().worktree_mode,
+            SpawnWorktreeMode::Isolated { auto_merge: true }
+        ));
+        let mut inherited = args();
+        inherited.insert("auto_merge".to_string(), json!(true));
+        assert!(matches!(
+            parse_subagent_args(&inherited),
+            Err(error) if error.contains("only valid")
+        ));
     }
 
-    #[test]
-    fn shell_tool_is_accepted_when_configured() {
-        let configured_tools = configured_read_only_tools();
-
-        assert!(validate_read_only_tools(&["shell".to_string()], &configured_tools).is_ok());
+    #[tokio::test]
+    async fn all_model_type_slots_resolve_and_model_name_wins() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        install_test_caps(gcx.clone()).await;
+        for model_type in MODEL_TYPES {
+            let (model, selected) = resolve_model(gcx.clone(), None, Some(model_type), "parent")
+                .await
+                .unwrap();
+            assert_eq!(model, format!("test/{model_type}"));
+            assert_eq!(selected.as_deref(), Some(*model_type));
+        }
+        let (model, selected) = resolve_model(gcx, Some("test/light"), Some("thinking"), "parent")
+            .await
+            .unwrap();
+        assert_eq!(model, "test/light");
+        assert_eq!(selected.as_deref(), Some("thinking"));
     }
 
-    #[test]
-    fn history_and_codegraph_tools_are_accepted_when_configured() {
-        let configured_tools = configured_read_only_tools();
-
-        assert_eq!(
-            normalize_read_only_tools(
-                &[
-                    "hist_search".to_string(),
-                    "hist_get".to_string(),
-                    "codegraph_overview".to_string(),
-                    "code_health".to_string(),
-                    "git_risk".to_string(),
-                    "code_why".to_string(),
-                    "code_duplication".to_string(),
-                    "security_scan".to_string(),
-                    "pr_blast".to_string(),
-                    "code_map".to_string(),
-                ],
-                &configured_tools,
-            )
-            .unwrap(),
-            vec![
-                "search_trajectories".to_string(),
-                "get_trajectory_context".to_string(),
-                "codegraph_overview".to_string(),
-                "code_health".to_string(),
-                "git_risk".to_string(),
-                "code_why".to_string(),
-                "code_duplication".to_string(),
-                "security_scan".to_string(),
-                "pr_blast".to_string(),
-                "code_map".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn cc_alias_tool_names_are_accepted_and_canonicalized() {
-        let configured_tools = configured_read_only_tools();
-
-        assert_eq!(
-            normalize_read_only_tools(&["regex_search".to_string()], &configured_tools).unwrap(),
-            vec!["search_pattern".to_string()]
-        );
-        assert_eq!(
-            normalize_read_only_tools(&["t_regex_search".to_string()], &configured_tools).unwrap(),
-            vec!["search_pattern".to_string()]
-        );
-        assert_eq!(
-            normalize_read_only_tools(&["t_set_tasks".to_string()], &configured_tools).unwrap(),
-            vec!["tasks_set".to_string()]
-        );
-        assert_eq!(
-            normalize_read_only_tools(&["set_tasks".to_string()], &configured_tools).unwrap(),
-            vec!["tasks_set".to_string()]
-        );
-        assert_eq!(
-            normalize_read_only_tools(&["Grep".to_string()], &configured_tools).unwrap(),
-            vec!["search_pattern".to_string()]
-        );
-        assert_eq!(
-            normalize_read_only_tools(&["Glob".to_string()], &configured_tools).unwrap(),
-            vec!["glob".to_string()]
-        );
-    }
-
-    #[test]
-    fn duplicate_aliases_collapse_to_single_canonical_tool() {
-        let configured_tools = configured_read_only_tools();
-
-        assert_eq!(
-            normalize_read_only_tools(
-                &["search_pattern".to_string(), "regex_search".to_string()],
-                &configured_tools,
-            )
-            .unwrap(),
-            vec!["search_pattern".to_string()]
-        );
-    }
-
-    #[test]
-    fn tools_empty_uses_default_toolset_without_rejection() {
-        let args = HashMap::from_iter([("tools".to_string(), json!("  ,  "))]);
-        let tools = parse_optional_csv(&args, "tools").unwrap();
-        assert_eq!(tools, None);
-        let configured_tools = configured_read_only_tools();
-        let spawn_tools = tools.clone().or_else(|| Some(configured_tools.clone()));
-        assert_eq!(spawn_tools, Some(configured_tools));
-        let prompt = build_subagent_prompt("look", "facts", &tools, 15);
-        assert!(prompt.contains("configured `subagent` toolset"));
+    #[tokio::test]
+    async fn empty_model_slot_is_a_hard_error() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        install_test_caps(gcx.clone()).await;
+        let mut caps = (*gcx.caps_state.read().await.caps.as_ref().unwrap())
+            .as_ref()
+            .clone();
+        caps.defaults.chat_buddy_model.clear();
+        gcx.caps_state.write().await.caps = Some(Arc::new(caps));
+        let error = resolve_model(gcx, None, Some("buddy"), "parent")
+            .await
+            .unwrap_err();
+        assert!(error.contains("not configured"));
+        assert!(error.contains("Configured model slots"));
     }
 
     #[serial(test_runner)]
     #[tokio::test]
-    async fn wait_false_default_returns_background_agent_id_in_extra() {
-        let ccx = test_context("parent-bg").await;
+    async fn omitted_tools_spawn_with_all_tools_and_peer_prompt() {
+        let ccx = test_context("parent").await;
         let app = ccx.lock().await.app.clone();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-        let release_rx = Arc::new(StdMutex::new(Some(release_rx)));
-        let runner_rx = release_rx.clone();
+        let (peer, _, _) = app
+            .agents
+            .create(crate::agents::types::CreateAgentRequest {
+                parent_chat_id: "parent".to_string(),
+                parent_root_chat_id: Some("root-chat".to_string()),
+                parent_tool_call_id: None,
+                kind: BgAgentKind::Subagent,
+                config_name: "subagent".to_string(),
+                title: "Peer frog task".to_string(),
+                prompt: String::new(),
+                target_files: vec!["src/frog.rs".to_string()],
+                model: "test/default".to_string(),
+                model_type: None,
+                goal_summary: None,
+                plan_present: false,
+                worktree_id: None,
+                worktree_branch: None,
+            })
+            .await
+            .unwrap();
+        app.agents
+            .mark_running(&peer.agent_id, "child-peer".to_string())
+            .await
+            .unwrap();
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let captured_runner = captured.clone();
         let _runner = crate::agents::spawn::install_test_runner(Arc::new(
-            move |_gcx, mut messages, _config| {
-                let release_rx = runner_rx.lock().unwrap().take();
+            move |_gcx, mut messages, config| {
+                *captured_runner.lock().unwrap() = Some((
+                    config.tools,
+                    messages
+                        .iter()
+                        .map(|message| message.content.content_text_only())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ));
                 Box::pin(async move {
-                    if let Some(release_rx) = release_rx {
-                        let _ = release_rx.await;
-                    }
                     messages.push(ChatMessage::new(
                         "assistant".to_string(),
                         "done".to_string(),
@@ -810,214 +915,36 @@ mod tests {
                 })
             },
         ));
+        let mut args = args();
+        args.insert("target_files".to_string(), json!(["src/frog.rs"]));
         let mut tool = ToolSubagent {
-            config_path: "builtin_tools.yaml".to_string(),
+            config_path: String::new(),
         };
-        let tool_call_id = "call-bg".to_string();
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            tool.tool_execute(
-                ccx.clone(),
-                &tool_call_id,
-                &args_with("inspect frogs", "frog facts"),
-            ),
-        )
-        .await
-        .expect("wait=false should return before the subagent finishes")
-        .unwrap();
-        let message = single_message(result.1);
-        let agent_id = message
-            .extra
-            .get("background_agent_id")
-            .and_then(Value::as_str)
-            .expect("agent id")
-            .to_string();
-        assert!(agent_id.starts_with("bgagent-"));
-        assert_eq!(
-            message
-                .extra
-                .get("background_agent_status")
-                .and_then(Value::as_str),
-            Some("running")
-        );
-        assert_eq!(
-            message
-                .extra
-                .get("background_agent_kind")
-                .and_then(Value::as_str),
-            Some("subagent")
-        );
-        assert!(message_text(&message).contains("✓ Started background subagent"));
-        assert!(message_text(&message).contains("refact://chat/subchat-"));
-        let _ = release_tx.send(());
-        let finished = app
+        let (_, contexts) = tool
+            .tool_execute(ccx, &"call".to_string(), &args)
+            .await
+            .unwrap();
+        let result = app
             .agents
-            .wait("parent-bg", &agent_id, Duration::from_secs(2))
+            .list_all()
+            .await
+            .into_iter()
+            .find(|record| record.title.starts_with("Subagent:"))
+            .unwrap();
+        app.agents
+            .wait("parent", &result.agent_id, Duration::from_secs(2))
             .await
             .unwrap();
-        assert_eq!(finished.config_name, "subagent");
-    }
-
-    #[serial(test_runner)]
-    #[tokio::test]
-    async fn wait_true_returns_full_result_from_spawn_and_wait() {
-        let ccx = test_context("parent-wait").await;
-        let captured_max_steps = Arc::new(StdMutex::new(None));
-        let captured_config_name = Arc::new(StdMutex::new(None));
-        let captured_tools = Arc::new(StdMutex::new(None));
-        let runner_steps = captured_max_steps.clone();
-        let runner_config = captured_config_name.clone();
-        let runner_tools = captured_tools.clone();
-        let _runner = crate::agents::spawn::install_test_runner(Arc::new(
-            move |_gcx, mut messages, config| {
-                *runner_steps.lock().unwrap() = Some(config.max_steps);
-                *runner_config.lock().unwrap() = Some(config.tool_name.clone());
-                *runner_tools.lock().unwrap() = Some(match config.tools {
-                    ToolsPolicy::All => vec!["ALL".to_string()],
-                    ToolsPolicy::None => vec![],
-                    ToolsPolicy::Only(tools) => tools,
-                });
-                Box::pin(async move {
-                    messages.push(ChatMessage::new(
-                        "assistant".to_string(),
-                        "full wait result".to_string(),
-                    ));
-                    Ok(SubchatResult {
-                        messages,
-                        metering: Map::new(),
-                        chat_id: Some("ignored".to_string()),
-                    })
-                })
-            },
-        ));
-        let mut args = args_with("inspect wait path", "complete answer");
-        args.insert("wait".to_string(), json!("true"));
-        args.insert("max_steps".to_string(), json!("7"));
-        let mut tool = ToolSubagent {
-            config_path: "builtin_tools.yaml".to_string(),
-        };
-        let (_, contexts) = tool
-            .tool_execute(ccx, &"call-wait".to_string(), &args)
-            .await
-            .unwrap();
-        let message = single_message(contexts);
-        let text = message_text(&message);
-        assert!(text.contains("# Subagent Result"));
-        assert!(text.contains("full wait result"));
-        assert!(text.contains("refact://chat/subchat-"));
-        assert_eq!(
-            message
-                .extra
-                .get("background_agent_status")
-                .and_then(Value::as_str),
-            Some("completed")
-        );
+        let (tools, prompt) = captured.lock().unwrap().clone().unwrap();
+        assert!(matches!(tools, ToolsPolicy::All));
+        assert!(prompt.contains("# Active peers"));
+        assert!(prompt.contains("Peer frog task"));
+        assert!(prompt.contains("Overlap warning"));
+        let message = message(contexts);
+        assert_eq!(message.extra["model"], "test/default");
         assert!(message
-            .extra
-            .get("background_agent_id")
-            .and_then(Value::as_str)
-            .unwrap()
-            .starts_with("bgagent-"));
-        assert_eq!(*captured_max_steps.lock().unwrap(), Some(7));
-        assert_eq!(
-            captured_config_name.lock().unwrap().as_deref(),
-            Some("subagent")
-        );
-        assert_eq!(
-            *captured_tools.lock().unwrap(),
-            Some(configured_read_only_tools())
-        );
-    }
-
-    #[serial(test_runner)]
-    #[tokio::test]
-    async fn explicit_alias_tools_are_canonicalized_for_spawn_and_prompt() {
-        let ccx = test_context("parent-alias-tools").await;
-        let captured_tools = Arc::new(StdMutex::new(None));
-        let captured_prompt = Arc::new(StdMutex::new(None));
-        let runner_tools = captured_tools.clone();
-        let runner_prompt = captured_prompt.clone();
-        let _runner = crate::agents::spawn::install_test_runner(Arc::new(
-            move |_gcx, mut messages, config| {
-                *runner_prompt.lock().unwrap() = Some(
-                    messages
-                        .iter()
-                        .map(|message| message.content.content_text_only())
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                );
-                *runner_tools.lock().unwrap() = Some(match config.tools {
-                    ToolsPolicy::All => vec!["ALL".to_string()],
-                    ToolsPolicy::None => vec![],
-                    ToolsPolicy::Only(tools) => tools,
-                });
-                Box::pin(async move {
-                    messages.push(ChatMessage::new(
-                        "assistant".to_string(),
-                        "alias wait result".to_string(),
-                    ));
-                    Ok(SubchatResult {
-                        messages,
-                        metering: Map::new(),
-                        chat_id: Some("ignored".to_string()),
-                    })
-                })
-            },
-        ));
-        let mut args = args_with("inspect alias path", "complete answer");
-        args.insert("wait".to_string(), json!("true"));
-        args.insert("tools".to_string(), json!("regex_search,t_set_tasks"));
-        let mut tool = ToolSubagent {
-            config_path: "builtin_tools.yaml".to_string(),
-        };
-
-        let (_, contexts) = tool
-            .tool_execute(ccx, &"call-alias".to_string(), &args)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            *captured_tools.lock().unwrap(),
-            Some(vec!["search_pattern".to_string(), "tasks_set".to_string()])
-        );
-        let prompt = captured_prompt.lock().unwrap().clone().unwrap_or_default();
-        assert!(prompt.contains("search_pattern, tasks_set"));
-        assert!(!prompt.contains("regex_search,t_set_tasks"));
-        let message = single_message(contexts);
-        let text = message_text(&message);
-        assert!(text.contains("alias wait result"));
-    }
-
-    #[test]
-    fn max_steps_clamps_to_supported_range() {
-        let low = HashMap::from_iter([("max_steps".to_string(), json!(0))]);
-        let high = HashMap::from_iter([("max_steps".to_string(), json!(999))]);
-        let default = HashMap::new();
-        assert_eq!(parse_max_steps(&low).unwrap(), 1);
-        assert_eq!(parse_max_steps(&high).unwrap(), 50);
-        assert_eq!(parse_max_steps(&default).unwrap(), 50);
-    }
-
-    #[test]
-    fn missing_task_or_expected_result_returns_clear_error() {
-        let empty = HashMap::new();
-        assert_eq!(
-            parse_required_string(&empty, "task").unwrap_err(),
-            "Missing argument `task`"
-        );
-        let task_only = HashMap::from_iter([("task".to_string(), json!("look"))]);
-        assert_eq!(
-            parse_required_string(&task_only, "expected_result").unwrap_err(),
-            "Missing argument `expected_result`"
-        );
-    }
-
-    #[test]
-    fn title_truncation_uses_prefix_and_fifty_task_chars() {
-        let long_task = "a".repeat(60);
-        assert_eq!(
-            short_title("Subagent", &long_task),
-            format!("Subagent: {}…", "a".repeat(50))
-        );
+            .content
+            .content_text_only()
+            .contains("refact://chat/subchat-"));
     }
 }

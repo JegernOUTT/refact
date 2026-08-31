@@ -44,7 +44,6 @@ pub(crate) mod tool_cron_create;
 mod tool_cron_delete;
 mod tool_cron_list;
 mod tool_cron_update;
-pub mod tool_delegate;
 mod tool_design_system;
 mod tool_get_goal;
 mod tool_get_plan;

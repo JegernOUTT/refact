@@ -10600,7 +10600,7 @@ mod tests {
             }
         };
 
-        for link_type in ["subagent", "delegate", "gather_files", "review_agent"] {
+        for link_type in ["subagent", "gather_files", "review_agent"] {
             assert!(
                 !trajectory_list_data_is_displayable_chat(&orphan_subchat(link_type)),
                 "{link_type} without parent_id must stay hidden"

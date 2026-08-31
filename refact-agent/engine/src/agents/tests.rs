@@ -27,10 +27,7 @@ fn create_request(parent_chat_id: &str, kind: BgAgentKind) -> CreateAgentRequest
         parent_root_chat_id: Some("root-chat".to_string()),
         parent_tool_call_id: Some("tool-call".to_string()),
         kind,
-        config_name: match kind {
-            BgAgentKind::Subagent => "subagent".to_string(),
-            BgAgentKind::Delegate => "delegate_with_editing".to_string(),
-        },
+        config_name: "subagent".to_string(),
         title: "Investigate frogs".to_string(),
         prompt: "Find the frog problem".to_string(),
         target_files: vec!["src/frog.rs".to_string()],
@@ -1251,7 +1248,7 @@ async fn spawn_background_agent_returns_immediately_with_child_chat_id_and_emits
     };
     let (_gcx, app, session_arc) = app_with_parent_session("parent-spawn-immediate").await;
     let mut rx = session_arc.lock().await.subscribe();
-    let mut req = delegate_spawn_request("parent-spawn-immediate", "src/frog.rs");
+    let mut req = subagent_spawn_request("parent-spawn-immediate", "src/frog.rs");
     req.notify_parent = crate::agents::spawn::NotifyParent::Silent;
 
     let handle = tokio::time::timeout(
@@ -1345,7 +1342,7 @@ async fn more_than_eight_background_agents_can_run_for_one_parent() {
 
     for index in 0..AGENT_COUNT {
         let mut request =
-            delegate_spawn_request("parent-unbounded-spawn", &format!("src/frog-{index}.rs"));
+            subagent_spawn_request("parent-unbounded-spawn", &format!("src/frog-{index}.rs"));
         request.notify_parent = crate::agents::spawn::NotifyParent::Silent;
         handles.push(
             crate::agents::spawn::spawn_background_agent(app.clone(), request)
@@ -1372,7 +1369,7 @@ async fn more_than_eight_background_agents_can_run_for_one_parent() {
 async fn spawn_and_wait_returns_terminal_record_within_timeout() {
     let _runner = install_spawn_runner(Arc::new(AtomicBool::new(false)));
     let (_gcx, app, _session_arc) = app_with_parent_session("parent-wait-terminal").await;
-    let mut req = delegate_spawn_request("parent-wait-terminal", "src/frog.rs");
+    let mut req = subagent_spawn_request("parent-wait-terminal", "src/frog.rs");
     req.notify_parent = crate::agents::spawn::NotifyParent::Silent;
 
     let completed =
@@ -1414,7 +1411,7 @@ async fn spawn_and_wait_times_out_when_runner_hangs() {
         }))
     };
     let (_gcx, app, _session_arc) = app_with_parent_session("parent-wait-timeout").await;
-    let mut req = delegate_spawn_request("parent-wait-timeout", "src/frog.rs");
+    let mut req = subagent_spawn_request("parent-wait-timeout", "src/frog.rs");
     req.notify_parent = crate::agents::spawn::NotifyParent::Silent;
     let wait_task = tokio::spawn(crate::agents::spawn::spawn_and_wait(
         app.clone(),
@@ -1486,7 +1483,7 @@ async fn spawn_with_empty_assistant_response_uses_no_text_summary() {
             })
         }));
     let (_gcx, app, _session_arc) = app_with_parent_session("parent-empty-summary").await;
-    let mut req = delegate_spawn_request("parent-empty-summary", "src/frog.rs");
+    let mut req = subagent_spawn_request("parent-empty-summary", "src/frog.rs");
     req.notify_parent = crate::agents::spawn::NotifyParent::Silent;
 
     let completed = crate::agents::spawn::spawn_and_wait(app, req, Some(Duration::from_secs(2)))
@@ -1500,12 +1497,12 @@ async fn spawn_with_empty_assistant_response_uses_no_text_summary() {
     );
 }
 
-fn delegate_spawn_request(
+fn subagent_spawn_request(
     parent_chat_id: &str,
     target_file: &str,
 ) -> crate::agents::spawn::SpawnRequest {
     crate::agents::spawn::SpawnRequest {
-        kind: BgAgentKind::Delegate,
+        kind: BgAgentKind::Subagent,
         parent_chat_id: parent_chat_id.to_string(),
         parent_root_chat_id: Some(parent_chat_id.to_string()),
         parent_tool_call_id: None,
@@ -1552,7 +1549,7 @@ async fn spawn_seed_installs_hidden_plan_goal_and_caps_steps() {
         }))
     };
     let (_gcx, app, _session) = app_with_parent_session("parent-hidden-goal").await;
-    let mut req = delegate_spawn_request("parent-hidden-goal", "src/frog.rs");
+    let mut req = subagent_spawn_request("parent-hidden-goal", "src/frog.rs");
     req.max_steps = 10;
     req.plan = Some("Plan body".to_string());
     req.goal = Some(crate::agents::spawn::SpawnGoal {
@@ -1677,7 +1674,7 @@ async fn background_agent_final_integration_spawn_push_list_cancel_and_restart()
 
     let first = crate::agents::spawn::spawn_background_agent(
         app.clone(),
-        delegate_spawn_request("parent-final", "src/frog.rs"),
+        subagent_spawn_request("parent-final", "src/frog.rs"),
     )
     .await
     .expect("first spawn");
@@ -1690,7 +1687,7 @@ async fn background_agent_final_integration_spawn_push_list_cancel_and_restart()
 
     let second = crate::agents::spawn::spawn_background_agent(
         app.clone(),
-        delegate_spawn_request("parent-final", "src/frog.rs"),
+        subagent_spawn_request("parent-final", "src/frog.rs"),
     )
     .await
     .expect("second spawn");
@@ -1714,7 +1711,7 @@ async fn background_agent_final_integration_spawn_push_list_cancel_and_restart()
         .iter()
         .all(|record| record.status == BgAgentStatus::Completed));
 
-    let mut cancel_req = delegate_spawn_request("parent-final", "src/toad.rs");
+    let mut cancel_req = subagent_spawn_request("parent-final", "src/toad.rs");
     cancel_req.title = "Cancel me".to_string();
     cancel_req.prompt = "wait until cancelled".to_string();
     cancel_req.notify_parent = crate::agents::spawn::NotifyParent::Silent;

@@ -124,6 +124,8 @@ pub enum NotifyParent {
 pub struct SpawnHandle {
     pub agent_id: String,
     pub child_chat_id: String,
+    pub worktree_branch: Option<String>,
+    pub auto_merge: Option<bool>,
     pub completion_rx: oneshot::Receiver<BackgroundAgent>,
 }
 
@@ -252,13 +254,14 @@ pub async fn spawn_background_agent(
     )
     .await;
 
-    let config = match config_result {
+    let mut config = match config_result {
         Ok(config) => config,
         Err(error) => {
             cleanup_spawn_worktree(app.clone(), spawned_worktree.as_ref()).await;
             return Err(error);
         }
     };
+    config.model = req.model.clone();
 
     let messages = match build_messages(
         app.clone(),
@@ -311,6 +314,12 @@ pub async fn spawn_background_agent(
     let agent_id = record.agent_id.clone();
     let handle_agent_id = agent_id.clone();
     let handle_child_chat_id = child_chat_id.clone();
+    let handle_worktree_branch = spawned_worktree
+        .as_ref()
+        .and_then(|worktree| worktree.meta.branch.clone());
+    let handle_auto_merge = spawned_worktree
+        .as_ref()
+        .map(|worktree| worktree.auto_merge);
     let (completion_tx, completion_rx) = oneshot::channel();
 
     push_sibling_notice(
@@ -343,6 +352,8 @@ pub async fn spawn_background_agent(
     Ok(SpawnHandle {
         agent_id: handle_agent_id,
         child_chat_id: handle_child_chat_id,
+        worktree_branch: handle_worktree_branch,
+        auto_merge: handle_auto_merge,
         completion_rx,
     })
 }

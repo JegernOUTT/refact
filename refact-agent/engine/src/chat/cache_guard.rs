@@ -2132,7 +2132,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_guard_disabled_for_subagentic_child_threads() {
-        for link_type in ["subagent", "delegate", "buddy", "task_agent"] {
+        for link_type in ["subagent", "buddy", "task_agent"] {
             let app = app_with_cache_priced_model("test/model-with-cache").await;
             let session = session_with_link_type(link_type);
 
