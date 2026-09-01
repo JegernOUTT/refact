@@ -33,6 +33,7 @@ const STDIN_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const STDIN_WRITE_TIMEOUT: Duration = Duration::from_millis(50);
 
 pub type ProcessCompletionTx = broadcast::Sender<ProcessCompletionEvent>;
+pub type ProcessSpawnTx = broadcast::Sender<ProcessSpawnEvent>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessCompletionEvent {
@@ -43,6 +44,17 @@ pub struct ProcessCompletionEvent {
     pub duration_ms: Option<u64>,
     pub short_description: String,
     pub mode: ExecMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessSpawnEvent {
+    pub process_id: ExecProcessId,
+    pub chat_id: String,
+    pub command_preview: String,
+    pub mode: ExecMode,
+    pub tty: bool,
+    pub status: ExecStatus,
+    pub started_at_ms: u64,
 }
 
 pub(crate) enum ExecProcessCommand {
@@ -175,6 +187,20 @@ fn process_completion_event(snapshot: &ExecProcessSnapshot) -> Option<ProcessCom
         duration_ms,
         short_description: snapshot.meta.short_description.clone(),
         mode: snapshot.meta.mode.clone(),
+    })
+}
+
+fn process_spawn_event(snapshot: &ExecProcessSnapshot) -> Option<ProcessSpawnEvent> {
+    let chat_id = snapshot.meta.owner.chat_id.clone()?;
+    let started_at_ms = snapshot.meta.started_at_ms?;
+    Some(ProcessSpawnEvent {
+        process_id: snapshot.meta.process_id.clone(),
+        chat_id,
+        command_preview: snapshot.meta.short_description.clone(),
+        mode: snapshot.meta.mode.clone(),
+        tty: snapshot.meta.tty,
+        status: snapshot.status.clone(),
+        started_at_ms,
     })
 }
 
@@ -412,6 +438,7 @@ struct ExecRemoveTarget {
 pub struct ExecRegistry {
     records: Arc<Mutex<HashMap<ExecProcessId, ExecProcessRecord>>>,
     completion_tx: ProcessCompletionTx,
+    spawn_tx: ProcessSpawnTx,
     output_tx: broadcast::Sender<ExecOutputChunk>,
     monitor_tasks: Arc<Mutex<JoinSet<()>>>,
 }
@@ -419,10 +446,12 @@ pub struct ExecRegistry {
 impl Default for ExecRegistry {
     fn default() -> Self {
         let (completion_tx, _) = broadcast::channel(PROCESS_COMPLETION_CHANNEL_CAPACITY);
+        let (spawn_tx, _) = broadcast::channel(PROCESS_COMPLETION_CHANNEL_CAPACITY);
         let (output_tx, _) = broadcast::channel(PROCESS_OUTPUT_CHANNEL_CAPACITY);
         Self {
             records: Arc::new(Mutex::new(HashMap::new())),
             completion_tx,
+            spawn_tx,
             output_tx,
             monitor_tasks: Arc::new(Mutex::new(JoinSet::new())),
         }
@@ -438,12 +467,22 @@ impl ExecRegistry {
         self.completion_tx.subscribe()
     }
 
+    pub fn subscribe_spawn(&self) -> broadcast::Receiver<ProcessSpawnEvent> {
+        self.spawn_tx.subscribe()
+    }
+
     pub fn subscribe_output(&self) -> broadcast::Receiver<ExecOutputChunk> {
         self.output_tx.subscribe()
     }
 
     pub fn completion_tx(&self) -> ProcessCompletionTx {
         self.completion_tx.clone()
+    }
+
+    pub fn notify_spawn(&self, snapshot: &ExecProcessSnapshot) {
+        if let Some(event) = process_spawn_event(snapshot) {
+            let _ = self.spawn_tx.send(event);
+        }
     }
 
     pub(crate) async fn track_monitor_task<F>(&self, task: F)
@@ -2136,6 +2175,54 @@ mod tests {
         assert!(event.duration_ms.is_some());
         assert_eq!(event.short_description, "notify background");
         assert_eq!(event.mode, ExecMode::Background);
+    }
+
+    #[tokio::test]
+    async fn process_spawn_broadcasts_chat_owned_running_snapshot() {
+        let registry = ExecRegistry::new();
+        let mut rx = registry.subscribe_spawn();
+        let snapshot = registry
+            .register(
+                meta("exec_spawn_notify", ExecMode::Background, "sleep 1")
+                    .with_chat_id("chat-spawn-notify")
+                    .with_short_description("spawn notification".to_string())
+                    .with_tty(true),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+        let started = registry
+            .mark_started(&snapshot.meta.process_id)
+            .await
+            .unwrap();
+        registry.notify_spawn(&started);
+
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.process_id, snapshot.meta.process_id);
+        assert_eq!(event.chat_id, "chat-spawn-notify");
+        assert_eq!(event.command_preview, "spawn notification");
+        assert_eq!(event.mode, ExecMode::Background);
+        assert!(event.tty);
+        assert_eq!(event.status, ExecStatus::Running);
+        assert_eq!(event.started_at_ms, started.meta.started_at_ms.unwrap());
+    }
+
+    #[tokio::test]
+    async fn process_spawn_does_not_broadcast_without_chat_id() {
+        let registry = ExecRegistry::new();
+        let mut rx = registry.subscribe_spawn();
+        let snapshot = registry
+            .register(
+                meta("exec_spawn_no_chat", ExecMode::Background, "sleep 1"),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+        let started = registry
+            .mark_started(&snapshot.meta.process_id)
+            .await
+            .unwrap();
+        registry.notify_spawn(&started);
+
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

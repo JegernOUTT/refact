@@ -42,7 +42,9 @@ use crate::worktrees::scope::ExecutionScope;
 
 const PROCESS_TRANSCRIPT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DISK_READ_MAX_BYTES: usize = 1024 * 1024;
-const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-terminal (PTY). Enables interactive stdin via process_write_stdin and merges stdout+stderr into a single combined stream. Defeats some pipe-only output buffering. Defaults to false.";
+const TOOL_PTY_ROWS: u16 = 32;
+const TOOL_PTY_COLS: u16 = 120;
+const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-terminal (PTY). Enables interactive stdin via process_write_stdin and merges stdout+stderr into a single combined stream. Defeats some pipe-only output buffering. Defaults to true.";
 
 static PATH_ENRICHMENT_CACHE: LazyLock<
     Mutex<HashMap<(String, u64, u64), crate::exec::path_enrichment::CollectedPathEnrichment>>,
@@ -206,7 +208,7 @@ impl Tool for ToolProcessStart {
             }
         }
         let short_description = sanitize_short_description(&parsed.description);
-        let tty = parsed.tty.unwrap_or(false);
+        let tty = parsed.tty.unwrap_or(true);
         let owner = ExecOwnerMeta {
             chat_id: Some(chat_id.clone()),
             tool_call_id: Some(tool_call_id.clone()),
@@ -247,7 +249,11 @@ impl Tool for ToolProcessStart {
             .with_transcript_limit(PROCESS_TRANSCRIPT_MAX_BYTES)
             .with_short_description(short_description)
             .with_tty(tty)
-            .with_observe(observe);
+            .with_observe(observe)
+            .with_chat_spawn_notification();
+        if tty {
+            request = request.with_pty_size(TOOL_PTY_ROWS, TOOL_PTY_COLS);
+        }
         if let Some(startup_wait) = parsed.startup_wait {
             request = request.with_startup_wait(startup_wait);
         }
@@ -317,7 +323,7 @@ impl Tool for ToolProcessStart {
             source: source(&self.config_path),
             experimental: false,
             allow_parallel: false,
-            description: "Start a runtime-owned background or service process and return its process ID, initial status, output cursor, and metadata. Set tty=true only when a command needs PTY behavior: it enables interactive stdin and reduces pipe buffering, but merges stdout and stderr into one combined stream.".to_string(),
+            description: "Start a runtime-owned background or service process and return its process ID, initial status, output cursor, and metadata. Processes use a pseudo-terminal (PTY) by default, enabling interactive stdin and combining stdout and stderr into a single stream. Set tty=false to use separate pipe streams.".to_string(),
             input_schema: process_start_input_schema(),
             output_schema: None,
             annotations: None,
@@ -1026,7 +1032,7 @@ fn process_start_input_schema() -> Value {
     );
     schema["properties"]["tty"] = json!({
         "type": "boolean",
-        "default": false,
+        "default": true,
         "description": TTY_DESCRIPTION,
     });
     schema["properties"]["needs_confirmation"] = json!({
@@ -1217,7 +1223,7 @@ fn parse_optional_bool(args: &HashMap<String, Value>, name: &str) -> Result<Opti
         Some(value) => refact_tool_api::coerce_bool(value)
             .map(Some)
             .ok_or_else(|| format!("argument `{name}` is not a boolean: {value:?}")),
-        None => Ok(Some(false)),
+        None => Ok(None),
     }
 }
 
@@ -2059,7 +2065,7 @@ mod tests {
         );
         assert_eq!(
             start_desc.input_schema["properties"]["tty"]["default"],
-            false
+            true
         );
         assert_eq!(
             start_desc.input_schema["properties"]["tty"]["description"],
@@ -2069,7 +2075,9 @@ mod tests {
             start_desc.input_schema["properties"]["escalate"]["properties"]["mode"]["enum"],
             json!(["workspace_write", "full_access"])
         );
-        assert!(start_desc.description.contains("merges stdout and stderr"));
+        assert!(start_desc
+            .description
+            .contains("combining stdout and stderr"));
         assert!(required_names(
             ToolProcessList {
                 config_path: String::new(),
@@ -2151,7 +2159,9 @@ mod tests {
             "Run background gremlin"
         );
         assert_eq!(exec(&message)["status"], "running");
-        assert_eq!(exec(&message)["tty"], false);
+        assert_eq!(exec(&message)["tty"], true);
+        let snapshot = gcx.exec_registry.get(&process_id).await.unwrap();
+        assert!(snapshot.meta.tty);
         wait_for_output(gcx.clone(), &process_id, "ready").await;
 
         let mut list = ToolProcessList {
@@ -2225,6 +2235,73 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_start_defaults_to_120_by_32_pty_for_background_and_service() {
+        let (gcx, ccx) = test_ccx().await;
+        let mut start = ToolProcessStart {
+            config_path: String::new(),
+        };
+
+        let background = run_tool(
+            &mut start,
+            ccx.clone(),
+            make_args_map(vec![
+                ("command", json!("stty size; sleep 30")),
+                ("description", json!("Report background terminal size")),
+            ]),
+        )
+        .await
+        .unwrap();
+        let background_id = process_id(&background);
+        wait_for_output(gcx.clone(), &background_id, "32 120").await;
+        assert_eq!(exec(&background)["tty"], true);
+        gcx.exec_registry.kill(&background_id).await.unwrap();
+
+        let service = run_tool(
+            &mut start,
+            ccx,
+            make_args_map(vec![
+                ("command", json!("stty size; sleep 30")),
+                ("description", json!("Report service terminal size")),
+                ("mode", json!("service")),
+                ("service_name", json!("pty-size")),
+            ]),
+        )
+        .await
+        .unwrap();
+        let service_id = process_id(&service);
+        wait_for_output(gcx.clone(), &service_id, "32 120").await;
+        assert_eq!(exec(&service)["tty"], true);
+        gcx.exec_registry.kill(&service_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn process_start_explicit_tty_false_uses_pipes() {
+        let (gcx, ccx) = test_ccx().await;
+        let mut start = ToolProcessStart {
+            config_path: String::new(),
+        };
+        let message = run_tool(
+            &mut start,
+            ccx,
+            make_args_map(vec![
+                ("command", json!(long_running_command("pipe-ready"))),
+                ("description", json!("Run background process through pipes")),
+                ("tty", json!(false)),
+            ]),
+        )
+        .await
+        .unwrap();
+        let process_id = process_id(&message);
+        let snapshot = gcx.exec_registry.get(&process_id).await.unwrap();
+
+        assert_eq!(exec(&message)["tty"], false);
+        assert!(!snapshot.meta.tty);
+        assert_eq!(snapshot.meta.mode, ExecMode::Background);
+        gcx.exec_registry.kill(&process_id).await.unwrap();
+    }
+
     #[tokio::test]
     async fn tool_process_start_service_mode_tracks_service_name() {
         let (_gcx, ccx) = test_ccx().await;
@@ -2257,6 +2334,8 @@ mod tests {
         );
         assert_eq!(exec(&message)["mode"], "service");
         assert_eq!(exec(&message)["service_name"], "api");
+        assert_eq!(exec(&message)["tty"], true);
+        assert!(_gcx.exec_registry.get(&process_id).await.unwrap().meta.tty);
 
         let mut list = ToolProcessList {
             config_path: String::new(),

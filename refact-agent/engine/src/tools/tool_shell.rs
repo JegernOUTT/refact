@@ -57,7 +57,9 @@ pub struct ToolShell {
 
 const MAX_SHELL_TIMEOUT_SECS: u64 = 3600;
 const SHELL_TRANSCRIPT_MAX_BYTES: usize = 2 * 1024 * 1024;
-const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-terminal (PTY). Enables interactive stdin via process_write_stdin and merges stdout+stderr into a single combined stream. Defeats some pipe-only output buffering. Defaults to false.";
+const TOOL_PTY_ROWS: u16 = 32;
+const TOOL_PTY_COLS: u16 = 120;
+const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-terminal (PTY). Enables interactive stdin via process_write_stdin and merges stdout+stderr into a single combined stream. Defeats some pipe-only output buffering. Defaults to false for foreground commands and true for background commands.";
 const RUN_IN_BACKGROUND_DESCRIPTION: &str = "Set to true to run this command in the background. Returns immediately with a process_id. Use process_read or process_wait to retrieve output later. You will receive a process_completed event when the process exits. Do not use '&' at the end of the command.";
 const SHELL_PROGRESS_MAX_CHARS_PER_STREAM: usize = 4 * 1024;
 const SHELL_PROGRESS_MIN_INTERVAL_MS: u64 = 250;
@@ -137,7 +139,7 @@ impl Tool for ToolShell {
             service_name: None,
             workspace,
         };
-        let tty = parsed.tty.unwrap_or(false);
+        let tty = parsed.tty.unwrap_or(parsed.run_in_background);
         let (progress_tx, progress_task) = if parsed.run_in_background {
             (None, None)
         } else {
@@ -193,7 +195,11 @@ impl Tool for ToolShell {
             .with_transcript_limit(SHELL_TRANSCRIPT_MAX_BYTES)
             .with_short_description(short_description)
             .with_tty(tty)
-            .with_observe(observe);
+            .with_observe(observe)
+            .with_chat_spawn_notification();
+        if tty {
+            request = request.with_pty_size(TOOL_PTY_ROWS, TOOL_PTY_COLS);
+        }
         if !parsed.run_in_background {
             request = request
                 .with_timeout(Duration::from_secs(timeout))
@@ -354,7 +360,7 @@ impl Tool for ToolShell {
             },
             experimental: false,
             allow_parallel: false,
-            description: "Execute a single command, using the \"sh\" on unix-like systems and \"powershell.exe\" on windows. Use it for one-time tasks like dependencies installation. Don't call this unless you have to. Not suitable for regular work because it requires a confirmation at each step. Output is compressed by default - use output_filter and output_limit parameters to see specific parts if needed. Set run_in_background=true for long-running commands you will inspect later with process_read or process_wait. Set tty=true only when a command needs PTY behavior: it enables interactive stdin and reduces pipe buffering, but merges stdout and stderr into one combined stream. The timeout parameter only applies to foreground commands (run_in_background=false); supplying timeout with run_in_background=true is an error — use process_wait or process_kill instead. In worktree-scoped chats, the default cwd and explicit workdir are enforced to the active worktree or privacy-permitted outside paths; OS confinement follows the terminal security mode. Note: sudo commands cannot be run - if you need elevated privileges, ask the user to run them directly.".to_string(),
+            description: "Execute a single command, using the \"sh\" on unix-like systems and \"powershell.exe\" on windows. Use it for one-time tasks like dependencies installation. Don't call this unless you have to. Not suitable for regular work because it requires a confirmation at each step. Output is compressed by default - use output_filter and output_limit parameters to see specific parts if needed. Set run_in_background=true for long-running commands you will inspect later with process_read or process_wait. Foreground commands default to pipe streams, while background commands default to a pseudo-terminal (PTY) with interactive stdin and a combined stdout/stderr stream; explicit tty overrides either default. The timeout parameter only applies to foreground commands (run_in_background=false); supplying timeout with run_in_background=true is an error — use process_wait or process_kill instead. In worktree-scoped chats, the default cwd and explicit workdir are enforced to the active worktree or privacy-permitted outside paths; OS confinement follows the terminal security mode. Note: sudo commands cannot be run - if you need elevated privileges, ask the user to run them directly.".to_string(),
             input_schema: shell_input_schema(),
             output_schema: None,
             annotations: None,
@@ -853,7 +859,7 @@ async fn parse_args_with_filter(
             refact_tool_api::coerce_bool(value)
                 .ok_or_else(|| format!("argument `tty` is not a boolean: {value:?}"))?,
         ),
-        None => Some(false),
+        None => None,
     };
     if let Some(value) = args.get("needs_confirmation") {
         refact_tool_api::coerce_bool(value)
@@ -1226,7 +1232,7 @@ mod tests {
             desc.input_schema["properties"]["run_in_background"]["description"],
             RUN_IN_BACKGROUND_DESCRIPTION
         );
-        assert!(desc.description.contains("merges stdout and stderr"));
+        assert!(desc.description.contains("combined stdout/stderr stream"));
         assert!(desc.description.contains("run_in_background=true"));
         assert_eq!(
             desc.input_schema["properties"]["escalate"]["properties"]["mode"]["enum"],
@@ -1390,6 +1396,7 @@ mod tests {
         );
         assert_eq!(exec(&message)["mode"], "background");
         assert_eq!(exec(&message)["status"], "running");
+        assert_eq!(exec(&message)["tty"], true);
         assert!(exec(&message)["timeout_secs"].is_null());
 
         gcx.exec_registry.kill(&process_id).await.unwrap();
@@ -1466,6 +1473,31 @@ mod tests {
         assert!(text(&read_message).contains("background-ready"));
         assert_eq!(exec(&read_message)["process_id"], process_id.as_str());
 
+        gcx.exec_registry.kill(&process_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn background_shell_explicit_tty_false_uses_pipes() {
+        let (gcx, ccx) = ccx_with_gcx_and_abort(None).await;
+        let mut shell = ToolShell::default();
+        let (_, messages) = shell
+            .tool_execute(
+                ccx,
+                &"shell".to_string(),
+                &args(vec![
+                    ("command", json!(background_sleep_command())),
+                    ("description", json!("Run background shell through pipes")),
+                    ("run_in_background", json!(true)),
+                    ("tty", json!(false)),
+                ]),
+            )
+            .await
+            .unwrap();
+        let message = only_chat_message(messages);
+        let process_id = process_id(&message);
+
+        assert_eq!(exec(&message)["tty"], false);
+        assert!(!gcx.exec_registry.get(&process_id).await.unwrap().meta.tty);
         gcx.exec_registry.kill(&process_id).await.unwrap();
     }
 

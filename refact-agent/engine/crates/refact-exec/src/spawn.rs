@@ -928,6 +928,9 @@ impl ExecRegistry {
         ))
         .await;
         let snapshot = self.mark_started(&process_id).await?;
+        if request.notify_chat_on_spawn {
+            self.notify_spawn(&snapshot);
+        }
         if matches!(request.mode, ExecMode::Foreground) {
             #[cfg(target_os = "linux")]
             let observation = observation.finish(true).await;
@@ -1047,6 +1050,9 @@ impl ExecRegistry {
         ))
         .await;
         let snapshot = self.mark_started(&process_id).await?;
+        if request.notify_chat_on_spawn {
+            self.notify_spawn(&snapshot);
+        }
         if matches!(request.mode, ExecMode::Foreground) {
             return Ok(ExecSpawnResult::new(
                 self.wait(&process_id).await?,
@@ -2120,6 +2126,34 @@ mod tests {
         .expect("monitor should finish after control channel closes");
 
         assert_eq!(snapshot.status, ExecStatus::Killed);
+    }
+
+    #[tokio::test]
+    async fn chat_owned_spawn_notification_emits_after_process_starts() {
+        let registry = ExecRegistry::new();
+        let mut rx = registry.subscribe_spawn();
+        let request = ExecSpawnRequest::background(shell_script(if cfg!(windows) {
+            "Start-Sleep -Seconds 30"
+        } else {
+            "sleep 30"
+        }))
+        .with_owner(crate::types::ExecOwnerMeta {
+            chat_id: Some("chat-spawn-bridge".to_string()),
+            ..crate::types::ExecOwnerMeta::default()
+        })
+        .with_short_description("Bridge spawn".to_string())
+        .with_chat_spawn_notification();
+        let result = registry.spawn(request).await.unwrap();
+        let event = rx.recv().await.unwrap();
+
+        assert_eq!(event.process_id, result.snapshot.meta.process_id);
+        assert_eq!(event.chat_id, "chat-spawn-bridge");
+        assert_eq!(event.command_preview, "Bridge spawn");
+        assert_eq!(event.status, ExecStatus::Running);
+        registry
+            .kill(&result.snapshot.meta.process_id)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

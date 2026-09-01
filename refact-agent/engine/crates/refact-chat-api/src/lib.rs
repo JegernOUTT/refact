@@ -650,6 +650,11 @@ pub enum ChatEvent {
         seq: u64,
         agent: BackgroundAgentSummary,
     },
+    ExecProcessSpawned {
+        chat_id: String,
+        seq: u64,
+        process: ExecProcessSpawn,
+    },
     ThreadUpdated {
         #[serde(flatten)]
         params: serde_json::Value,
@@ -773,6 +778,17 @@ pub enum ChatEvent {
     BrowserToolbarAction {
         action: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecProcessSpawn {
+    pub process_id: String,
+    pub command_preview: String,
+    pub mode: String,
+    pub tty: bool,
+    pub status: String,
+    pub started_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1936,6 +1952,51 @@ mod tests {
                 assert_eq!(mode, "background");
             }
             other => panic!("expected process completed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_chat_event_exec_process_spawned_serde() {
+        let event = ChatEvent::ExecProcessSpawned {
+            chat_id: "chat-spawn".to_string(),
+            seq: 9,
+            process: ExecProcessSpawn {
+                process_id: "exec_spawn".to_string(),
+                command_preview: "Start dev server".to_string(),
+                mode: "background".to_string(),
+                tty: true,
+                status: "running".to_string(),
+                started_at: 123,
+            },
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "exec_process_spawned");
+        assert_eq!(json["chat_id"], "chat-spawn");
+        assert_eq!(json["seq"], 9);
+        assert_eq!(json["process"]["processId"], "exec_spawn");
+        assert_eq!(json["process"]["commandPreview"], "Start dev server");
+        assert_eq!(json["process"]["mode"], "background");
+        assert_eq!(json["process"]["tty"], true);
+        assert_eq!(json["process"]["status"], "running");
+        assert_eq!(json["process"]["startedAt"], 123);
+
+        let parsed: ChatEvent = serde_json::from_value(json).unwrap();
+        match parsed {
+            ChatEvent::ExecProcessSpawned {
+                chat_id,
+                seq,
+                process,
+            } => {
+                assert_eq!(chat_id, "chat-spawn");
+                assert_eq!(seq, 9);
+                assert_eq!(process.process_id, "exec_spawn");
+                assert_eq!(process.command_preview, "Start dev server");
+                assert_eq!(process.mode, "background");
+                assert!(process.tty);
+                assert_eq!(process.status, "running");
+                assert_eq!(process.started_at, 123);
+            }
+            other => panic!("expected exec process spawned, got {other:?}"),
         }
     }
 

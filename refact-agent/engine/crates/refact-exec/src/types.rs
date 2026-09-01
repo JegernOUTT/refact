@@ -306,6 +306,7 @@ pub struct ExecSpawnRequest {
     pub short_description: Option<String>,
     pub abort_flag: Option<Arc<AtomicBool>>,
     pub output_progress_tx: Option<tokio::sync::mpsc::UnboundedSender<ExecOutputChunk>>,
+    pub notify_chat_on_spawn: bool,
 }
 
 impl ExecSpawnRequest {
@@ -334,6 +335,7 @@ impl ExecSpawnRequest {
             short_description: None,
             abort_flag: None,
             output_progress_tx: None,
+            notify_chat_on_spawn: false,
         }
     }
 
@@ -458,6 +460,11 @@ impl ExecSpawnRequest {
         output_progress_tx: tokio::sync::mpsc::UnboundedSender<ExecOutputChunk>,
     ) -> Self {
         self.output_progress_tx = Some(output_progress_tx);
+        self
+    }
+
+    pub fn with_chat_spawn_notification(mut self) -> Self {
+        self.notify_chat_on_spawn = true;
         self
     }
 }

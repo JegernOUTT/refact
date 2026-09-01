@@ -4,7 +4,7 @@ pub(crate) mod path_enrichment;
 pub use refact_exec::{pty, registry, spawn, spill, transcript, types};
 pub use refact_exec::{
     ExecRegistry, ExecShutdownCleanupSummary, ExecSpawnResult, ProcessCompletionEvent,
-    ProcessCompletionTx,
+    ProcessCompletionTx, ProcessSpawnEvent, ProcessSpawnTx,
 };
 pub use refact_exec::{ExecRawOutput, ExecRawRead, ExecTranscript};
 pub use refact_exec::{

@@ -9,22 +9,30 @@ use tokio::task::JoinHandle;
 use crate::call_validation::ChatMessage;
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::types::{ChatCommand, ChatEvent, ChatSession, CommandRequest, EnqueueCommandOutcome};
-use crate::exec::{ExecStatus, ProcessCompletionEvent};
+use crate::exec::{ExecStatus, ProcessCompletionEvent, ProcessSpawnEvent};
 use crate::global_context::SharedGlobalContext;
 
 pub fn spawn_notification_subscriber(gcx: SharedGlobalContext) -> JoinHandle<()> {
-    let mut rx = gcx.exec_registry.subscribe_completion();
+    let mut completion_rx = gcx.exec_registry.subscribe_completion();
+    let mut spawn_rx = gcx.exec_registry.subscribe_spawn();
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = wait_for_shutdown(gcx.clone()) => break,
-                event = rx.recv() => match event {
+                event = completion_rx.recv() => match event {
                     Ok(event) => handle_process_completion(gcx.clone(), event).await,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
                         tracing::warn!("process completion notification subscriber lagged by {count} event(s)");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
+                },
+                event = spawn_rx.recv() => match event {
+                    Ok(event) => handle_process_spawn(gcx.clone(), event).await,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        tracing::warn!("process spawn notification subscriber lagged by {count} event(s)");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
             }
         }
     })
@@ -34,6 +42,33 @@ async fn wait_for_shutdown(gcx: SharedGlobalContext) {
     while !gcx.shutdown_flag.load(Ordering::Relaxed) {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+pub(crate) async fn handle_process_spawn(gcx: SharedGlobalContext, event: ProcessSpawnEvent) {
+    let session_arc = {
+        let sessions = gcx.chat_sessions.read().await;
+        sessions.get(&event.chat_id).cloned()
+    };
+    let Some(session_arc) = session_arc else {
+        return;
+    };
+    let mut session = session_arc.lock().await;
+    if session.closed {
+        return;
+    }
+    let seq = session.event_seq.saturating_add(1);
+    session.emit(ChatEvent::ExecProcessSpawned {
+        chat_id: event.chat_id,
+        seq,
+        process: refact_chat_api::ExecProcessSpawn {
+            process_id: event.process_id.to_string(),
+            command_preview: event.command_preview,
+            mode: event.mode.to_string(),
+            tty: event.tty,
+            status: status_label(&event.status).to_string(),
+            started_at: event.started_at_ms,
+        },
+    });
 }
 
 pub(crate) async fn handle_process_completion(
@@ -453,6 +488,82 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         assert!(find_process_completed(&session).await.is_none());
+        subscriber.abort();
+    }
+
+    #[tokio::test]
+    async fn chat_owned_process_spawn_emits_sse_event() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let subscriber = spawn_notification_subscriber(gcx.clone());
+        let chat_id = "chat-owned-process-spawn";
+        let session = test_session(&gcx, chat_id).await;
+        let mut events = session.lock().await.subscribe();
+        tokio::task::yield_now().await;
+
+        let result = gcx
+            .exec_registry
+            .spawn(
+                ExecSpawnRequest::background(sleep_command("30"))
+                    .with_owner(owner(chat_id))
+                    .with_short_description("Live terminal".to_string())
+                    .with_tty(true)
+                    .with_chat_spawn_notification(),
+            )
+            .await
+            .unwrap();
+
+        let raw = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let raw = events.recv().await.unwrap();
+                let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                if value["type"] == "exec_process_spawned" {
+                    return value;
+                }
+            }
+        })
+        .await
+        .expect("process spawn event was not emitted");
+        assert_eq!(raw["chat_id"], chat_id);
+        assert!(raw["seq"].is_number());
+        assert_eq!(
+            raw["process"]["processId"],
+            result.snapshot.meta.process_id.to_string()
+        );
+        assert_eq!(raw["process"]["commandPreview"], "Live terminal");
+        assert_eq!(raw["process"]["mode"], "background");
+        assert_eq!(raw["process"]["tty"], true);
+        assert_eq!(raw["process"]["status"], "running");
+        assert!(raw["process"]["startedAt"].as_u64().is_some());
+        gcx.exec_registry
+            .kill(&result.snapshot.meta.process_id)
+            .await
+            .unwrap();
+        subscriber.abort();
+    }
+
+    #[tokio::test]
+    async fn chatless_process_spawn_does_not_emit_sse_event() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let subscriber = spawn_notification_subscriber(gcx.clone());
+        let session = test_session(&gcx, "chatless-process-spawn").await;
+        let mut events = session.lock().await.subscribe();
+        tokio::task::yield_now().await;
+
+        let result = gcx
+            .exec_registry
+            .spawn(ExecSpawnRequest::background(sleep_command("30")).with_chat_spawn_notification())
+            .await
+            .unwrap();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), events.recv())
+                .await
+                .is_err()
+        );
+        gcx.exec_registry
+            .kill(&result.snapshot.meta.process_id)
+            .await
+            .unwrap();
         subscriber.abort();
     }
 
