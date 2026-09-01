@@ -50,9 +50,7 @@ function AgentsPanelContents({
 }: Omit<AgentsPanelProps, "narrow">) {
   const dispatch = useAppDispatch();
   const tab = useAppSelector(selectAgentsPanelTab);
-  const agentPool = useAppSelector((state) =>
-    selectBackgroundAgentPool(state),
-  );
+  const agentPool = useAppSelector((state) => selectBackgroundAgentPool(state));
   const activeAgents = useAppSelector((state) =>
     selectActiveBackgroundAgents(state, chatId),
   );

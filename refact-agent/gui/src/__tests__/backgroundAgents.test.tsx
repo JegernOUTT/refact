@@ -355,7 +355,13 @@ describe("background agents", () => {
     const rootState = { chat: state } as SelectorRootState;
 
     expect(Object.keys(selectBackgroundAgentPool(rootState))).toEqual(
-      expect.arrayContaining(["root", "child", "grandchild", "orphan", "unrelated"]),
+      expect.arrayContaining([
+        "root",
+        "child",
+        "grandchild",
+        "orphan",
+        "unrelated",
+      ]),
     );
     expect(selectBackgroundAgentsTree(rootState, chatId)).toEqual([
       {
@@ -377,11 +383,11 @@ describe("background agents", () => {
       root.questions?.[0],
       child.questions?.[1],
     ]);
-    expect(selectActiveBackgroundAgents(rootState, chatId).map((agent) => agent.agent_id)).toEqual([
-      "child",
-      "root",
-      "grandchild",
-    ]);
+    expect(
+      selectActiveBackgroundAgents(rootState, chatId).map(
+        (agent) => agent.agent_id,
+      ),
+    ).toEqual(["child", "root", "grandchild"]);
   });
 
   test("selectors return null cost when no tree agent reports cost", () => {

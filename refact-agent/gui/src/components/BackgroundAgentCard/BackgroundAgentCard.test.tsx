@@ -279,9 +279,9 @@ describe("BackgroundAgentCard", () => {
     expect(screen.getByTestId("background-agent-usage")).not.toHaveTextContent(
       "$",
     );
-    expect(screen.getByTestId("background-agent-status-dot").className).not.toContain(
-      "statusDotPulse",
-    );
+    expect(
+      screen.getByTestId("background-agent-status-dot").className,
+    ).not.toContain("statusDotPulse");
 
     fireEvent.click(
       screen.getByRole("button", { name: "Expand background agent details" }),
