@@ -29,7 +29,6 @@ import { useAppSelector } from "../../hooks/useAppSelector";
 import {
   selectIsStreamingById,
   selectIsWaitingById,
-  selectBackgroundAgentsByThread,
   selectManyDiffMessageByThreadAndIds,
   selectManyToolResultsByThreadAndIds,
   selectToolResultByThreadAndId,
@@ -402,7 +401,7 @@ function decorateBackgroundAgentTool(
   elem: React.ReactNode,
   toolName: string | undefined,
   result: ToolResult | undefined,
-  backgroundAgents: Partial<Record<string, BackgroundAgentSummary>>,
+  threadId: string | undefined,
   onOpenTrajectory: (
     agent: BackgroundAgentSummary,
     childChatId: string,
@@ -411,8 +410,7 @@ function decorateBackgroundAgentTool(
   if (!isBackgroundAgentTool(toolName)) return elem;
   const agentId = getBackgroundAgentId(result);
   if (!result || !agentId) return elem;
-  const agent =
-    backgroundAgents[agentId] ?? backgroundAgentPlaceholder(result, toolName);
+  const agent = backgroundAgentPlaceholder(result, toolName);
   if (!agent) return elem;
   // The card carries every fact the raw "✓ Started background delegate…" tool
   // result spells out (id, target files, status, steps), so rendering both
@@ -422,12 +420,10 @@ function decorateBackgroundAgentTool(
     <BackgroundAgentCard
       key={`background-agent-${agent.agent_id}`}
       agent={agent}
+      agentId={agentId}
+      threadId={threadId}
       compactDefault
-      onOpenTrajectory={
-        agent.child_chat_id
-          ? (childChatId) => onOpenTrajectory(agent, childChatId)
-          : undefined
-      }
+      onOpenAgentTrajectory={onOpenTrajectory}
     />
   );
 }
@@ -639,7 +635,7 @@ export type ToolContentProps = {
   threadId?: string;
 };
 
-export const ToolContent: React.FC<ToolContentProps> = ({
+const _ToolContent: React.FC<ToolContentProps> = ({
   toolCalls,
   contextFilesByToolId,
   diffsByToolId,
@@ -650,9 +646,6 @@ export const ToolContent: React.FC<ToolContentProps> = ({
   const contextThreadId = useThreadId();
   const toolThreadId = threadId ?? contextThreadId;
   const features = useAppSelector(selectFeatures);
-  const backgroundAgents = useAppSelector((state) =>
-    selectBackgroundAgentsByThread(state, toolThreadId),
-  );
   const handleOpenTrajectory = useCallback(
     (agent: BackgroundAgentSummary, childChatId: string) => {
       dispatch(
@@ -696,13 +689,14 @@ export const ToolContent: React.FC<ToolContentProps> = ({
         contextFilesByToolId,
         diffsByToolId,
         activeToolCallId,
-        backgroundAgents,
         handleOpenTrajectory,
         toolThreadId,
       )}
     </ChatThreadProvider>
   );
 };
+
+export const ToolContent = React.memo(_ToolContent);
 
 function processToolCalls(
   toolCalls: ToolCall[],
@@ -712,7 +706,6 @@ function processToolCalls(
   contextFilesByToolId: Record<string, ChatContextFile[]> = {},
   diffsByToolId: Record<string, DiffChunk[]> = {},
   activeToolCallId?: string,
-  backgroundAgents: Record<string, BackgroundAgentSummary> = {},
   onOpenTrajectory: (
     agent: BackgroundAgentSummary,
     childChatId: string,
@@ -751,7 +744,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -773,7 +765,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -795,7 +786,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -818,7 +808,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -841,7 +830,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -864,7 +852,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -887,7 +874,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -909,7 +895,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -930,7 +915,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -951,7 +935,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -968,7 +951,7 @@ function processToolCalls(
       elem,
       headName,
       result,
-      backgroundAgents,
+      threadId,
       onOpenTrajectory,
     );
     return processToolCalls(
@@ -979,7 +962,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1000,7 +982,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1023,7 +1004,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1046,7 +1026,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1069,7 +1048,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1092,7 +1070,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1107,7 +1084,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1130,7 +1106,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1153,7 +1128,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1176,7 +1150,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1199,7 +1172,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1223,7 +1195,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1246,7 +1217,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1267,7 +1237,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1288,7 +1257,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1309,7 +1277,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1330,7 +1297,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1352,7 +1318,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1381,7 +1346,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1402,7 +1366,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1423,7 +1386,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1530,7 +1492,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1557,7 +1518,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1579,7 +1539,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1600,7 +1559,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1622,7 +1580,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1662,7 +1619,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1683,7 +1639,6 @@ function processToolCalls(
       contextFilesByToolId,
       diffsByToolId,
       activeToolCallId,
-      backgroundAgents,
       onOpenTrajectory,
       threadId,
     );
@@ -1703,7 +1658,6 @@ function processToolCalls(
     contextFilesByToolId,
     diffsByToolId,
     activeToolCallId,
-    backgroundAgents,
     onOpenTrajectory,
     threadId,
   );

@@ -15,7 +15,10 @@ import remarkGfm from "remark-gfm";
 import "katex/dist/katex.min.css";
 import type { PluggableList } from "unified";
 import { useLinksFromLsp } from "../../hooks/useLinksFromLsp";
-import { maskIncompleteSpecialCodeFences } from "./renderUtils";
+import {
+  maskIncompleteSpecialCodeFences,
+  normalizeLatexDelimiters,
+} from "./renderUtils";
 import { DialogImage } from "../DialogImage";
 
 const REMARK_PLUGINS: PluggableList = [remarkBreaks, remarkMath, remarkGfm];
@@ -247,10 +250,14 @@ const _Markdown: React.FC<MarkdownProps> = ({
     onCopyClick,
     isStreaming,
   ]);
-  const renderedChildren =
-    isStreaming && typeof children === "string"
-      ? maskIncompleteSpecialCodeFences(children)
+  const normalizedChildren =
+    typeof children === "string"
+      ? normalizeLatexDelimiters(children)
       : children;
+  const renderedChildren =
+    isStreaming && typeof normalizedChildren === "string"
+      ? maskIncompleteSpecialCodeFences(normalizedChildren)
+      : normalizedChildren;
 
   return (
     <ReactMarkdown

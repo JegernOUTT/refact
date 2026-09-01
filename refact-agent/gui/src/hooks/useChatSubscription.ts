@@ -24,6 +24,8 @@ import {
   streamDeltaFlushDelayMs,
   streamDeltaTextUnits,
   subchatFlushDelayMs,
+  backgroundAgentFlushDelayMs,
+  isImmediateBackgroundAgentUpdate,
 } from "./chatStreamBatching";
 
 const DEBUG =
@@ -142,6 +144,13 @@ export function useChatSubscription(
     ChatEventEnvelope,
     { type: "subchat_update" }
   > | null>(null);
+  const backgroundAgentFlushRef = useRef<FlushHandle | null>(null);
+  const pendingBackgroundAgentUpdatesRef = useRef<
+    Map<
+      string,
+      Extract<ChatEventEnvelope, { type: "background_agent_updated" }>
+    >
+  >(new Map());
   const streamedBytesRef = useRef(0);
   const pendingBytesRef = useRef(0);
   const connectingRef = useRef(false);
@@ -163,6 +172,23 @@ export function useChatSubscription(
       subchatFlushRef.current = null;
     }
   }, []);
+
+  const clearBackgroundAgentFlush = useCallback(() => {
+    const handle = backgroundAgentFlushRef.current;
+    if (handle != null) {
+      cancelScheduledFlush(handle);
+      backgroundAgentFlushRef.current = null;
+    }
+  }, []);
+
+  const flushPendingBackgroundAgentUpdates = useCallback(() => {
+    const pending = [...pendingBackgroundAgentUpdatesRef.current.values()];
+    pendingBackgroundAgentUpdatesRef.current.clear();
+    for (const envelope of pending) {
+      dispatch(applyChatEvent(envelope));
+      callbacksRef.current.onEvent?.(envelope);
+    }
+  }, [dispatch]);
 
   const flushPendingStreamDelta = useCallback(() => {
     const pending = pendingStreamDeltaRef.current;
@@ -218,6 +244,42 @@ export function useChatSubscription(
       id: setTimeout(flush, subchatFlushDelayMs(true)),
     };
   }, [flushPendingSubchatUpdate]);
+
+  const scheduleBackgroundAgentFlush = useCallback(() => {
+    if (backgroundAgentFlushRef.current != null) return;
+    backgroundAgentFlushRef.current = {
+      type: "timeout",
+      id: setTimeout(() => {
+        backgroundAgentFlushRef.current = null;
+        flushPendingBackgroundAgentUpdates();
+      }, backgroundAgentFlushDelayMs(true)),
+    };
+  }, [flushPendingBackgroundAgentUpdates]);
+
+  const enqueueBackgroundAgentUpdate = useCallback(
+    (
+      envelope: Extract<
+        ChatEventEnvelope,
+        { type: "background_agent_updated" }
+      >,
+    ) => {
+      pendingBackgroundAgentUpdatesRef.current.set(
+        envelope.agent.agent_id,
+        envelope,
+      );
+      if (isImmediateBackgroundAgentUpdate(envelope.agent)) {
+        clearBackgroundAgentFlush();
+        flushPendingBackgroundAgentUpdates();
+      } else {
+        scheduleBackgroundAgentFlush();
+      }
+    },
+    [
+      clearBackgroundAgentFlush,
+      flushPendingBackgroundAgentUpdates,
+      scheduleBackgroundAgentFlush,
+    ],
+  );
 
   const enqueueStreamDelta = useCallback(
     (envelope: Extract<ChatEventEnvelope, { type: "stream_delta" }>) => {
@@ -292,8 +354,10 @@ export function useChatSubscription(
     }
     clearStreamDeltaFlush();
     clearSubchatFlush();
+    clearBackgroundAgentFlush();
     pendingStreamDeltaRef.current = null;
     pendingSubchatUpdateRef.current = null;
+    pendingBackgroundAgentUpdatesRef.current.clear();
     streamedBytesRef.current = 0;
     pendingBytesRef.current = 0;
     if (unsubscribeRef.current) {
@@ -301,7 +365,7 @@ export function useChatSubscription(
       unsubscribeRef.current = null;
     }
     connectingRef.current = false;
-  }, [clearStreamDeltaFlush, clearSubchatFlush]);
+  }, [clearStreamDeltaFlush, clearSubchatFlush, clearBackgroundAgentFlush]);
 
   const markSseError = useCallback(
     (err: Error) => {
@@ -373,6 +437,8 @@ export function useChatSubscription(
                 }
                 flushPendingStreamDelta();
                 flushPendingSubchatUpdate();
+                clearBackgroundAgentFlush();
+                flushPendingBackgroundAgentUpdates();
                 cleanup();
                 setStatus("disconnected");
                 scheduleReconnect(0);
@@ -386,7 +452,12 @@ export function useChatSubscription(
             } else if (envelope.type === "subchat_update") {
               flushPendingStreamDelta();
               enqueueSubchatUpdate(envelope);
+            } else if (envelope.type === "background_agent_updated") {
+              flushPendingStreamDelta();
+              enqueueBackgroundAgentUpdate(envelope);
             } else {
+              clearBackgroundAgentFlush();
+              flushPendingBackgroundAgentUpdates();
               clearSubchatFlush();
               flushPendingSubchatUpdate();
               flushPendingStreamDelta();
@@ -418,6 +489,8 @@ export function useChatSubscription(
           flushPendingStreamDelta();
           clearSubchatFlush();
           flushPendingSubchatUpdate();
+          clearBackgroundAgentFlush();
+          flushPendingBackgroundAgentUpdates();
           connectingRef.current = false;
           setStatus("disconnected");
           callbacksRef.current.onDisconnected?.();
@@ -428,6 +501,8 @@ export function useChatSubscription(
           flushPendingStreamDelta();
           clearSubchatFlush();
           flushPendingSubchatUpdate();
+          clearBackgroundAgentFlush();
+          flushPendingBackgroundAgentUpdates();
           markSseError(err);
           connectingRef.current = false;
           setStatus("disconnected");
@@ -447,9 +522,12 @@ export function useChatSubscription(
     subscriptionConfig,
     cleanup,
     clearSubchatFlush,
+    clearBackgroundAgentFlush,
+    enqueueBackgroundAgentUpdate,
     enqueueSubchatUpdate,
     enqueueStreamDelta,
     flushPendingSubchatUpdate,
+    flushPendingBackgroundAgentUpdates,
     flushPendingStreamDelta,
     markSseError,
     dispatch,

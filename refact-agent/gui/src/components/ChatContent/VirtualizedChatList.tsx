@@ -27,6 +27,7 @@ const DEFAULT_ITEM_HEIGHT = 240;
 const VIRTUOSO_MIN_OVERSCAN_ITEM_COUNT = { top: 20, bottom: 20 };
 const VIRTUOSO_OVERSCAN = { main: 400, reverse: 400 };
 const FOLLOW_BUTTON_DISTANCE_THRESHOLD_PX = 200;
+const PIN_TO_BOTTOM_TOLERANCE_PX = 20;
 
 function canScrollInWheelDirection(
   element: HTMLElement,
@@ -169,6 +170,7 @@ export function VirtualizedChatList<T extends { key: string }>({
     if (!autoFollowRef.current || userScrolledUpRef.current) return;
     const scroller = scrollerRef.current;
     if (!scroller) return;
+    if (distanceFromBottomRef.current > PIN_TO_BOTTOM_TOLERANCE_PX) return;
     suppressPassiveScrollUntilRef.current =
       performance.now() + PASSIVE_SCROLL_GRACE_MS;
     scroller.scrollTop = scroller.scrollHeight;

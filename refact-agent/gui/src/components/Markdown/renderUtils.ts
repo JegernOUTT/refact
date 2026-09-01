@@ -279,6 +279,182 @@ ${resizeScript}
 </html>`;
 }
 
+type ProtectedMarkdownRange = { start: number; end: number };
+
+function backtickRunLength(text: string, start: number): number {
+  let end = start;
+  while (text[end] === "`") end++;
+  return end - start;
+}
+
+function findClosingBacktickRun(
+  text: string,
+  start: number,
+  runLength: number,
+): number {
+  let index = start;
+  while (index < text.length) {
+    const next = text.indexOf("`", index);
+    if (next < 0) return -1;
+    const length = backtickRunLength(text, next);
+    if (length === runLength) return next + length;
+    index = next + length;
+  }
+  return -1;
+}
+
+function protectedMarkdownRanges(markdown: string): ProtectedMarkdownRange[] {
+  const ranges: ProtectedMarkdownRange[] = [];
+  let index = 0;
+  let lineStart = true;
+
+  while (index < markdown.length) {
+    if (lineStart) {
+      const lineEnd = markdown.indexOf("\n", index);
+      const lineBoundary = lineEnd < 0 ? markdown.length : lineEnd;
+      const line = markdown.slice(index, lineBoundary).replace(/\r$/, "");
+      const opening = /^( {0,3})(`{3,}|~{3,})/.exec(line);
+      if (opening) {
+        const fenceStart = index;
+        const fenceCharacter = opening[2][0];
+        const fenceLength = opening[2].length;
+        let closingEnd = markdown.length;
+        let nextLineStart = lineEnd < 0 ? markdown.length : lineEnd + 1;
+
+        while (nextLineStart < markdown.length) {
+          const nextLineEnd = markdown.indexOf("\n", nextLineStart);
+          const nextBoundary = nextLineEnd < 0 ? markdown.length : nextLineEnd;
+          const nextLine = markdown
+            .slice(nextLineStart, nextBoundary)
+            .replace(/\r$/, "");
+          const closingPattern = new RegExp(
+            `^ {0,3}${fenceCharacter}{${fenceLength},}\\s*$`,
+          );
+          if (closingPattern.test(nextLine)) {
+            closingEnd = nextLineEnd < 0 ? markdown.length : nextLineEnd + 1;
+            break;
+          }
+          nextLineStart = nextLineEnd < 0 ? markdown.length : nextLineEnd + 1;
+        }
+
+        ranges.push({ start: fenceStart, end: closingEnd });
+        index = closingEnd;
+        lineStart = index === 0 || markdown[index - 1] === "\n";
+        continue;
+      }
+    }
+
+    if (markdown[index] === "`") {
+      const runLength = backtickRunLength(markdown, index);
+      const closingEnd = findClosingBacktickRun(
+        markdown,
+        index + runLength,
+        runLength,
+      );
+      if (closingEnd >= 0) {
+        ranges.push({ start: index, end: closingEnd });
+        index = closingEnd;
+        lineStart = false;
+        continue;
+      }
+      index += runLength;
+      lineStart = false;
+      continue;
+    }
+
+    lineStart = markdown[index] === "\n";
+    index++;
+  }
+
+  return ranges;
+}
+
+function isActiveLatexDelimiter(text: string, index: number): boolean {
+  let precedingBackslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === "\\"; cursor--) {
+    precedingBackslashes++;
+  }
+  return precedingBackslashes % 2 === 0;
+}
+
+function findLatexCloser(
+  text: string,
+  start: number,
+  closer: "\\)" | "\\]",
+): number {
+  let index = text.indexOf(closer, start);
+  while (index >= 0 && !isActiveLatexDelimiter(text, index)) {
+    index = text.indexOf(closer, index + closer.length);
+  }
+  return index;
+}
+
+function displayMathReplacement(
+  text: string,
+  openerIndex: number,
+  closerIndex: number,
+): string {
+  const body = text.slice(openerIndex + 2, closerIndex);
+  const before =
+    openerIndex === 0 || text[openerIndex - 1] === "\n" ? "" : "\n";
+  const bodyStart =
+    body.startsWith("\n") || body.startsWith("\r\n") ? "" : "\n";
+  const bodyEnd = body.endsWith("\n") ? "" : "\n";
+  const after =
+    closerIndex + 2 === text.length || text[closerIndex + 2] === "\n"
+      ? ""
+      : "\n";
+  return `${before}$$${bodyStart}${body}${bodyEnd}$$${after}`;
+}
+
+function normalizeLatexInPlainText(text: string): string {
+  let result = "";
+  let index = 0;
+
+  while (index < text.length) {
+    const isInlineOpener =
+      text.startsWith("\\(", index) && isActiveLatexDelimiter(text, index);
+    const isDisplayOpener =
+      text.startsWith("\\[", index) && isActiveLatexDelimiter(text, index);
+    if (!isInlineOpener && !isDisplayOpener) {
+      result += text[index];
+      index++;
+      continue;
+    }
+
+    const closer = isInlineOpener ? "\\)" : "\\]";
+    const closerIndex = findLatexCloser(text, index + 2, closer);
+    if (closerIndex < 0) {
+      result += text.slice(index, index + 2);
+      index += 2;
+      continue;
+    }
+
+    if (isInlineOpener) {
+      result += `$${text.slice(index + 2, closerIndex)}$`;
+    } else {
+      result += displayMathReplacement(text, index, closerIndex);
+    }
+    index = closerIndex + 2;
+  }
+
+  return result;
+}
+
+export function normalizeLatexDelimiters(markdown: string): string {
+  const ranges = protectedMarkdownRanges(markdown);
+  let result = "";
+  let index = 0;
+
+  for (const range of ranges) {
+    result += normalizeLatexInPlainText(markdown.slice(index, range.start));
+    result += markdown.slice(range.start, range.end);
+    index = range.end;
+  }
+
+  return result + normalizeLatexInPlainText(markdown.slice(index));
+}
+
 // Masks incomplete special code fences (mermaid/svg/html) while a message is
 // still streaming so heavyweight renderers never see partial fence bodies.
 export function maskIncompleteSpecialCodeFences(text: string): string {

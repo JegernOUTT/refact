@@ -12,11 +12,19 @@ import type {
   BackgroundAgentMergeStatus,
   BackgroundAgentSummary,
 } from "../../services/refact/types";
+import { useAppSelector } from "../../hooks/useAppSelector";
+import { selectBackgroundAgent } from "../../features/Chat/Thread/selectors";
 
 export interface BackgroundAgentCardProps {
   agent: BackgroundAgentSummary;
+  threadId?: string;
+  agentId?: string;
   compactDefault?: boolean;
   onOpenTrajectory?: (childChatId: string) => void;
+  onOpenAgentTrajectory?: (
+    agent: BackgroundAgentSummary,
+    childChatId: string,
+  ) => void;
 }
 
 type Tone = "accent" | "success" | "danger" | "warning" | "muted";
@@ -466,11 +474,18 @@ const ExpandedDetail: React.FC<{
   );
 };
 
-export const BackgroundAgentCard: React.FC<BackgroundAgentCardProps> = ({
+const _BackgroundAgentCard: React.FC<BackgroundAgentCardProps> = ({
   agent,
+  threadId,
+  agentId,
   compactDefault = true,
   onOpenTrajectory,
+  onOpenAgentTrajectory,
 }) => {
+  const subscribedAgent = useAppSelector((state) =>
+    selectBackgroundAgent(state, threadId ?? "", agentId ?? agent.agent_id),
+  );
+  const displayedAgent = subscribedAgent ?? agent;
   const [expanded, setExpanded] = useState(!compactDefault);
   const [filesOpen, setFilesOpen] = useState(false);
   const filesPanelId = useId();
@@ -478,6 +493,16 @@ export const BackgroundAgentCard: React.FC<BackgroundAgentCardProps> = ({
   const handleToggleFiles = useCallback(() => {
     setFilesOpen((open) => !open);
   }, []);
+  const handleOpenTrajectory = useCallback(
+    (childChatId: string) => {
+      if (onOpenAgentTrajectory) {
+        onOpenAgentTrajectory(displayedAgent, childChatId);
+      } else {
+        onOpenTrajectory?.(childChatId);
+      }
+    },
+    [displayedAgent, onOpenAgentTrajectory, onOpenTrajectory],
+  );
 
   return (
     <Collapsible.Root open={expanded} onOpenChange={setExpanded}>
@@ -496,19 +521,21 @@ export const BackgroundAgentCard: React.FC<BackgroundAgentCardProps> = ({
                 : "Expand background agent details"
             }
           >
-            <CompactRow agent={agent} expanded={expanded} />
+            <CompactRow agent={displayedAgent} expanded={expanded} />
           </button>
         </Collapsible.Trigger>
         <Collapsible.Content className={styles.content}>
           <ExpandedDetail
-            agent={agent}
+            agent={displayedAgent}
             filesOpen={filesOpen}
             filesPanelId={filesPanelId}
             onToggleFiles={handleToggleFiles}
-            onOpenTrajectory={onOpenTrajectory}
+            onOpenTrajectory={handleOpenTrajectory}
           />
         </Collapsible.Content>
       </div>
     </Collapsible.Root>
   );
 };
+
+export const BackgroundAgentCard = React.memo(_BackgroundAgentCard);

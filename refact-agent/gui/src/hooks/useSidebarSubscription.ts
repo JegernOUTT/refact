@@ -20,7 +20,7 @@ import type {
 import {
   hydrateHistoryFromMeta,
   replaceSnapshotHistory,
-  deleteChatById,
+  chatRemovedRemotely,
   updateChatMetaById,
   setHistoryLoading,
   setHistoryLoadError,
@@ -272,7 +272,7 @@ export function useSidebarSubscription() {
   const processTrajectoryEvent = useCallback(
     (event: TrajectoryEvent) => {
       if (event.type === "deleted") {
-        dispatch(deleteChatById(event.id));
+        dispatch(chatRemovedRemotely(event.id));
         dispatch(closeThread({ id: event.id, force: true }));
         return;
       }

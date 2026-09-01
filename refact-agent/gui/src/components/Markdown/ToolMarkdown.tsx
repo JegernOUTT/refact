@@ -8,6 +8,7 @@ import { ShikiCodeBlock, type ShikiCodeBlockProps } from "./ShikiCodeBlock";
 import toolStyles from "./ToolMarkdown.module.css";
 import "katex/dist/katex.min.css";
 import classNames from "classnames";
+import { normalizeLatexDelimiters } from "./renderUtils";
 
 export type ToolMarkdownProps = Pick<
   React.ComponentProps<typeof ReactMarkdown>,
@@ -143,7 +144,9 @@ export const ToolMarkdown: React.FC<ToolMarkdownProps> = ({
       unwrapDisallowed={unwrapDisallowed}
       components={components}
     >
-      {children}
+      {typeof children === "string"
+        ? normalizeLatexDelimiters(children)
+        : children}
     </ReactMarkdown>
   );
 };

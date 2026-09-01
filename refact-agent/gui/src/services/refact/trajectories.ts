@@ -260,7 +260,9 @@ export const trajectoriesApi = createApi({
           url,
           method: "DELETE",
         });
-        if (result.error) return { error: result.error };
+        if (result.error && result.error.status !== 404) {
+          return { error: result.error };
+        }
         return { data: undefined };
       },
       invalidatesTags: ["Trajectory"],

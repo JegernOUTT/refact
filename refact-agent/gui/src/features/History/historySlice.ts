@@ -513,6 +513,11 @@ export const historySlice = createSlice({
       state.chats = rest;
     },
 
+    chatRemovedRemotely: (state, action: PayloadAction<string>) => {
+      const { [action.payload]: _, ...rest } = state.chats;
+      state.chats = rest;
+    },
+
     restoreChatEntry: (state, action: PayloadAction<ChatHistoryItem>) => {
       if (!(action.payload.id in state.chats)) {
         state.chats[action.payload.id] = action.payload;
@@ -751,6 +756,7 @@ export const {
   replaceSnapshotHistory,
   setPagination,
   deleteChatById,
+  chatRemovedRemotely,
   restoreChatEntry,
   upsertChatStub,
   updateChatTitleById,
@@ -825,28 +831,29 @@ startHistoryListening({
   },
 });
 
+const deleteRequestsInFlight = new Set<string>();
+
 startHistoryListening({
   actionCreator: deleteChatById,
   effect: async (action, listenerApi) => {
-    const originalChats = listenerApi.getOriginalState().history.chats;
-    const deletedChat =
-      action.payload in originalChats
-        ? originalChats[action.payload]
-        : undefined;
+    const id = action.payload;
+    if (deleteRequestsInFlight.has(id)) return;
+
+    const deletedChat = getChatById(listenerApi.getOriginalState(), id);
+
+    deleteRequestsInFlight.add(id);
     try {
       await listenerApi
-        .dispatch(
-          trajectoriesApi.endpoints.deleteTrajectory.initiate(action.payload),
-        )
+        .dispatch(trajectoriesApi.endpoints.deleteTrajectory.initiate(id))
         .unwrap();
     } catch {
       listenerApi.dispatch(
         setError("Failed to delete chat on the server — the list may resync."),
       );
-      if (deletedChat) {
-        listenerApi.dispatch(restoreChatEntry(deletedChat));
-      }
+      if (deletedChat) listenerApi.dispatch(restoreChatEntry(deletedChat));
       listenerApi.dispatch(trajectoriesApi.util.invalidateTags(["Trajectory"]));
+    } finally {
+      deleteRequestsInFlight.delete(id);
     }
   },
 });

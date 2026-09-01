@@ -4,6 +4,8 @@ import {
   streamDeltaFlushDelayMs,
   streamDeltaTextUnits,
   subchatFlushDelayMs,
+  backgroundAgentFlushDelayMs,
+  isImmediateBackgroundAgentUpdate,
 } from "./chatStreamBatching";
 
 describe("chat stream batching policy", () => {
@@ -39,5 +41,21 @@ describe("chat stream batching policy", () => {
 
   it("retains the bounded pending stream cap", () => {
     expect(MAX_BUFFERED_STREAM_TEXT_UNITS).toBe(2_000_000);
+  });
+
+  it("uses the existing stream cadence and identifies urgent agent updates", () => {
+    expect(backgroundAgentFlushDelayMs(true)).toBe(125);
+    expect(backgroundAgentFlushDelayMs(false)).toBe(750);
+    expect(
+      isImmediateBackgroundAgentUpdate({ status: "running" } as never),
+    ).toBe(false);
+    expect(
+      isImmediateBackgroundAgentUpdate({ status: "completed" } as never),
+    ).toBe(true);
+    expect(
+      isImmediateBackgroundAgentUpdate({
+        status: "waiting_for_approval",
+      } as never),
+    ).toBe(true);
   });
 });

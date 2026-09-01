@@ -3,10 +3,59 @@ import {
   clampPan,
   makeCrispSvg,
   maskIncompleteSpecialCodeFences,
+  normalizeLatexDelimiters,
   parseSvgMeta,
   stripExternalRefs,
   wrapArtifactHtml,
 } from "./renderUtils";
+
+describe("normalizeLatexDelimiters", () => {
+  test("leaves dollar-delimited math unchanged", () => {
+    expect(normalizeLatexDelimiters("Inline $x$ remains.")).toBe(
+      "Inline $x$ remains.",
+    );
+    expect(normalizeLatexDelimiters("$$\nx^2\n$$")).toBe("$$\nx^2\n$$");
+  });
+
+  test("normalizes inline LaTeX delimiters", () => {
+    expect(normalizeLatexDelimiters("\\(z_{\\mathrm{detail}}\\)")).toBe(
+      "$z_{\\mathrm{detail}}$",
+    );
+  });
+
+  test("normalizes multiline display LaTeX delimiters", () => {
+    const input = "Before\\[ \\frac{1}{K}\n\\sum_{m}p_m \\]after";
+    expect(normalizeLatexDelimiters(input)).toBe(
+      "Before\n$$\n \\frac{1}{K}\n\\sum_{m}p_m \n$$\nafter",
+    );
+  });
+
+  test("leaves LaTeX delimiters inside fenced code unchanged", () => {
+    const backtickFence = "```latex\n\\(x\\)\n\\[y\\]\n```";
+    const tildeFence = "~~~latex\n\\(x\\)\n\\[y\\]\n~~~";
+    expect(normalizeLatexDelimiters(backtickFence)).toBe(backtickFence);
+    expect(normalizeLatexDelimiters(tildeFence)).toBe(tildeFence);
+  });
+
+  test("leaves LaTeX delimiters inside inline code unchanged", () => {
+    const input = "`\\(x\\)` and ``\\[y\\] with ` inside``";
+    expect(normalizeLatexDelimiters(input)).toBe(input);
+  });
+
+  test("leaves unmatched LaTeX delimiters unchanged", () => {
+    expect(normalizeLatexDelimiters("Streaming \\(x")).toBe("Streaming \\(x");
+    expect(normalizeLatexDelimiters("Streaming \\[\nx")).toBe(
+      "Streaming \\[\nx",
+    );
+  });
+
+  test("normalizes multiple formulas in one document", () => {
+    const input = "First \\(x\\), then \\[y\\], finally \\(z\\).";
+    expect(normalizeLatexDelimiters(input)).toBe(
+      "First $x$, then \n$$\ny\n$$\n, finally $z$.",
+    );
+  });
+});
 
 describe("maskIncompleteSpecialCodeFences", () => {
   test("masks an unterminated mermaid fence to a safe language", () => {

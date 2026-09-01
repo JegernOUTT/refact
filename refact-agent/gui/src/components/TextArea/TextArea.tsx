@@ -28,6 +28,10 @@ export const TextArea = React.forwardRef<HTMLTextAreaElement, TextAreaProps>(
   ({ onTextAreaHeightChange, value, onKeyDown, onChange, ...props }, ref) => {
     const [callChange, setCallChange] = React.useState(true);
     const innerRef = useRef<HTMLTextAreaElement>(null);
+    const resizeFrameRef = useRef<number | null>(null);
+    const appliedHeightRef = useRef<number | null>(null);
+    const measuredScrollHeightRef = useRef<number | null>(null);
+    const measuredValueLengthRef = useRef(0);
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
     useImperativeHandle(ref, () => innerRef.current!, []);
     const undoRedo = useUndoRedo(value);
@@ -66,14 +70,47 @@ export const TextArea = React.forwardRef<HTMLTextAreaElement, TextAreaProps>(
     );
 
     useEffect(() => {
-      if (innerRef.current) {
-        innerRef.current.style.height = "1px";
-        innerRef.current.style.height =
-          2 + innerRef.current.scrollHeight + "px";
-        onTextAreaHeightChange &&
-          onTextAreaHeightChange(innerRef.current.scrollHeight);
+      if (resizeFrameRef.current !== null) {
+        cancelAnimationFrame(resizeFrameRef.current);
       }
-    }, [innerRef.current?.value, value, onTextAreaHeightChange]);
+
+      resizeFrameRef.current = requestAnimationFrame(() => {
+        resizeFrameRef.current = null;
+        const textArea = innerRef.current;
+        if (!textArea) return;
+
+        const valueLength = String(value ?? "").length;
+        const visibleScrollHeight = textArea.scrollHeight;
+        if (
+          measuredScrollHeightRef.current === visibleScrollHeight &&
+          valueLength >= measuredValueLengthRef.current
+        ) {
+          measuredValueLengthRef.current = valueLength;
+          onTextAreaHeightChange?.(visibleScrollHeight);
+          return;
+        }
+
+        textArea.style.height = "1px";
+        const scrollHeight = textArea.scrollHeight;
+        const height = scrollHeight + 2;
+        if (appliedHeightRef.current !== height) {
+          textArea.style.height = `${height}px`;
+          appliedHeightRef.current = height;
+        } else {
+          textArea.style.height = `${appliedHeightRef.current}px`;
+        }
+        measuredScrollHeightRef.current = scrollHeight;
+        measuredValueLengthRef.current = valueLength;
+        onTextAreaHeightChange?.(scrollHeight);
+      });
+
+      return () => {
+        if (resizeFrameRef.current !== null) {
+          cancelAnimationFrame(resizeFrameRef.current);
+          resizeFrameRef.current = null;
+        }
+      };
+    }, [value, onTextAreaHeightChange]);
 
     useEffect(() => {
       if (value !== undoRedo.state) {

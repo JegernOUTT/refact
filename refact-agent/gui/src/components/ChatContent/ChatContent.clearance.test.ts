@@ -19,7 +19,7 @@ function rule(css: string, selector: string): string {
 }
 
 describe("chat bottom dock clearance styles", () => {
-  it("uses one measured variable for transcript and floating consumers", () => {
+  it("reserves the measured dock height exactly once", () => {
     // The transcript viewport ends at the dock's top edge: the clearance is
     // reserved once, as margin on .transcriptArea, so the scrollbar stops at
     // the composer instead of running behind the glass. The in-scroller
@@ -36,14 +36,24 @@ describe("chat bottom dock clearance styles", () => {
     expect(rule(contentCss, ".composerClearance")).not.toContain(
       "--rf-composer-clearance",
     );
-    expect(rule(contentCss, ".floatingLinks")).toContain(
-      "bottom: var(--rf-composer-clearance, 0px)",
+  });
+
+  it("does not re-add the clearance to consumers inside the transcript", () => {
+    expect(rule(contentCss, ".floatingLinks")).not.toContain(
+      "--rf-composer-clearance",
+    );
+    expect(rule(contentCss, ".floatingLinks")).toContain("bottom: 0");
+    expect(rule(contentCss, ".queuedMessagesContainer")).not.toContain(
+      "--rf-composer-clearance",
     );
     expect(rule(contentCss, ".queuedMessagesContainer")).toContain(
-      "bottom: calc(var(--rf-composer-clearance, 0px) + var(--rf-space-2))",
+      "bottom: var(--rf-space-2)",
+    );
+    expect(rule(followButtonCss, ".root")).not.toContain(
+      "--rf-composer-clearance",
     );
     expect(rule(followButtonCss, ".root")).toContain(
-      "bottom: calc(var(--rf-composer-clearance, 0px) + var(--rf-space-4))",
+      "bottom: var(--rf-space-4)",
     );
   });
 

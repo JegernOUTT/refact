@@ -1,12 +1,16 @@
 import getCaretCoordinates from "textarea-caret";
 
+const MAX_TRIGGER_SCAN_CHARS = 256;
+
 export function getTriggerOffset(
   element: HTMLTextAreaElement,
   triggers: string[],
 ) {
   const { value, selectionStart } = element;
-  for (let i = selectionStart; i >= 0; i--) {
+  const scanStart = Math.max(0, selectionStart - MAX_TRIGGER_SCAN_CHARS);
+  for (let i = selectionStart; i >= scanStart; i--) {
     const char = value[i];
+    if (char === "\n") return -1;
     if (char && triggers.includes(char)) {
       return i;
     }

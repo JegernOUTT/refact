@@ -1,4 +1,5 @@
 import type { DeltaOp } from "../services/refact/chatSubscription";
+import type { BackgroundAgentSummary } from "../services/refact/types";
 
 export const MAX_MERGED_DELTA_OPS = 256;
 export const MAX_BUFFERED_STREAM_TEXT_UNITS = 2_000_000;
@@ -36,4 +37,14 @@ export function streamDeltaFlushDelayMs(
 
 export function subchatFlushDelayMs(isActive: boolean): number {
   return isActive ? ACTIVE_SUBCHAT_FLUSH_MS : BACKGROUND_SUBCHAT_FLUSH_MS;
+}
+
+export function backgroundAgentFlushDelayMs(isActive: boolean): number {
+  return subchatFlushDelayMs(isActive);
+}
+
+export function isImmediateBackgroundAgentUpdate(
+  agent: BackgroundAgentSummary,
+): boolean {
+  return agent.status !== "running" && agent.status !== "queued";
 }
