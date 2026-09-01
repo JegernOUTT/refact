@@ -41,7 +41,7 @@
 .compactRow {
   display: flex;
   align-items: center;
-  gap: var(--rf-space-2);
+  gap: var(--rf-row-gap);
   min-width: 0;
 }
 
@@ -63,15 +63,16 @@
 }
 
 .title {
-  flex: 1 1 auto;
+  flex: 2 1 auto;
   min-width: 0;
+  display: -webkit-box;
   overflow: hidden;
   color: var(--rf-color-fg);
   font-size: var(--rf-text-2);
   font-weight: var(--rf-weight-semibold);
   line-height: var(--rf-line-2);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .modelChip,
@@ -98,6 +99,7 @@
 
 .currentTool {
   display: flex;
+  align-items: baseline;
   gap: var(--rf-space-1);
 }
 

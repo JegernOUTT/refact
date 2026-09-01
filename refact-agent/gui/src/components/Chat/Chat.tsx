@@ -10,8 +10,9 @@ import { useChatActions } from "../../hooks/useChatActions";
 import { type Config } from "../../features/Config/configSlice";
 import {
   enableSend,
+  flattenBackgroundAgentTree,
   selectActiveBackgroundAgents,
-  selectBackgroundAgentsByThread,
+  selectBackgroundAgentsTree,
   selectIsStreamingById,
   selectPreventSendById,
   selectIsBuddyChat,
@@ -76,9 +77,10 @@ export const Chat: React.FC<ChatProps> = ({
   const panelUserOpened = useAppSelector((state) =>
     selectAgentsPanelUserOpened(state, chatId),
   );
-  const agents = useAppSelector((state) =>
-    selectBackgroundAgentsByThread(state, chatId),
+  const agentTree = useAppSelector((state) =>
+    selectBackgroundAgentsTree(state, chatId),
   );
+  const agents = flattenBackgroundAgentTree(agentTree);
   const activeAgents = useAppSelector((state) =>
     selectActiveBackgroundAgents(state, chatId),
   );
@@ -196,6 +198,13 @@ export const Chat: React.FC<ChatProps> = ({
           overflow: "hidden",
         }}
       >
+        {panelOpen && (
+          <AgentsPanel
+            chatId={chatId}
+            narrow={isNarrow}
+            onNavigate={handleAgentNavigation}
+          />
+        )}
         <Flex
           className={styles.chatRoot}
           direction="column"
@@ -203,7 +212,7 @@ export const Chat: React.FC<ChatProps> = ({
           width="100%"
           px="1"
         >
-          {Object.keys(agents).length > 0 && (
+          {agents.length > 0 && (
             <button
               aria-expanded={panelOpen}
               className={styles.agentsToggle}
@@ -286,13 +295,6 @@ export const Chat: React.FC<ChatProps> = ({
             </Container>
           </Flex>
         </Flex>
-        {panelOpen && (
-          <AgentsPanel
-            chatId={chatId}
-            narrow={isNarrow}
-            onNavigate={handleAgentNavigation}
-          />
-        )}
       </Flex>
     </DropzoneProvider>
   );

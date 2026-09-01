@@ -205,6 +205,14 @@ describe("Dropdown navigation", () => {
 });
 
 describe("Toolbar single workspace tab row", () => {
+  it("does not render the standalone Agents toolbar badge", () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "chat", id: "chat-1" });
+
+    expect(view.container.querySelector('[class*="agentsBadge"]')).toBeNull();
+    expect(screen.queryByRole("button", { name: /agents/i })).toBeNull();
+  });
+
   it.each(["web", "ide", "vscode", "jetbrains"] as const)(
     "renders and toggles workspace panels on the %s host",
     async (host) => {

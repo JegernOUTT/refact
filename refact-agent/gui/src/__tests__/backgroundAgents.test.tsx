@@ -13,6 +13,7 @@ import {
   selectBackgroundAgent,
   selectBackgroundAgentsByThread,
   selectBackgroundAgentsTree,
+  selectBackgroundAgentPool,
   selectPendingAgentQuestions,
   selectToolResultById,
 } from "../features/Chat/Thread/selectors";
@@ -295,7 +296,7 @@ describe("background agents", () => {
     );
   });
 
-  test("selectors build a cycle-safe three-level tree and aggregate its usage", () => {
+  test("selectors scope a cycle-safe three-level tree to the current chat", () => {
     const root = makeAgent({
       agent_id: "root",
       child_chat_id: "child-1",
@@ -330,7 +331,19 @@ describe("background agents", () => {
       tokens_used: 100,
       cost_usd: 1,
     });
+    const unrelated = makeAgent({
+      agent_id: "unrelated",
+      parent_chat_id: "other-root",
+      child_chat_id: "other-child",
+      tokens_used: 1000,
+      cost_usd: 5,
+    });
     const state = makeState();
+    state.threads["other-root"] = makeRuntime("other-root");
+    state.threads["other-root"] = {
+      ...makeRuntime("other-root"),
+      background_agents: { unrelated },
+    };
     const runtime = state.threads[chatId];
     if (!runtime) throw new Error("missing runtime");
     runtime.background_agents = {
@@ -341,6 +354,9 @@ describe("background agents", () => {
     };
     const rootState = { chat: state } as SelectorRootState;
 
+    expect(Object.keys(selectBackgroundAgentPool(rootState))).toEqual(
+      expect.arrayContaining(["root", "child", "grandchild", "orphan", "unrelated"]),
+    );
     expect(selectBackgroundAgentsTree(rootState, chatId)).toEqual([
       {
         agent: root,
@@ -361,11 +377,11 @@ describe("background agents", () => {
       root.questions?.[0],
       child.questions?.[1],
     ]);
-    expect(
-      selectActiveBackgroundAgents(rootState, chatId).map(
-        (agent) => agent.agent_id,
-      ),
-    ).toEqual(["child", "root", "grandchild", "orphan"]);
+    expect(selectActiveBackgroundAgents(rootState, chatId).map((agent) => agent.agent_id)).toEqual([
+      "child",
+      "root",
+      "grandchild",
+    ]);
   });
 
   test("selectors return null cost when no tree agent reports cost", () => {

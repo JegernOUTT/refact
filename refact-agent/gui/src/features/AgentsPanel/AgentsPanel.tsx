@@ -14,11 +14,11 @@ import {
   type BackgroundAgentSummary,
 } from "../../services/refact";
 import {
+  aggregateBackgroundAgentUsage,
   buildBackgroundAgentsTree,
   flattenBackgroundAgentTree,
   selectActiveBackgroundAgents,
-  selectAgentsAggregateUsage,
-  selectBackgroundAgentsByThread,
+  selectBackgroundAgentPool,
 } from "../Chat/Thread";
 import {
   panelClosed,
@@ -40,7 +40,7 @@ function formatTokens(tokens: number): string {
 }
 
 function formatCost(cost: number | null): string | null {
-  if (cost === null) return null;
+  if (cost === null || !Number.isFinite(cost) || cost <= 0) return null;
   return `$${cost.toFixed(cost < 0.01 ? 4 : 2)}`;
 }
 
@@ -50,14 +50,11 @@ function AgentsPanelContents({
 }: Omit<AgentsPanelProps, "narrow">) {
   const dispatch = useAppDispatch();
   const tab = useAppSelector(selectAgentsPanelTab);
-  const agents = useAppSelector((state) =>
-    selectBackgroundAgentsByThread(state, chatId),
+  const agentPool = useAppSelector((state) =>
+    selectBackgroundAgentPool(state),
   );
   const activeAgents = useAppSelector((state) =>
     selectActiveBackgroundAgents(state, chatId),
-  );
-  const aggregate = useAppSelector((state) =>
-    selectAgentsAggregateUsage(state, chatId),
   );
   const { data: fetchedAgents } = useGetBackgroundAgentsQuery(chatId, {
     pollingInterval: 30_000,
@@ -66,7 +63,7 @@ function AgentsPanelContents({
 
   const combinedAgents = useMemo(
     () => ({
-      ...agents,
+      ...agentPool,
       ...(fetchedAgents ?? []).reduce<Record<string, BackgroundAgentSummary>>(
         (result, agent) => {
           result[agent.agent_id] = agent;
@@ -75,7 +72,7 @@ function AgentsPanelContents({
         {},
       ),
     }),
-    [agents, fetchedAgents],
+    [agentPool, fetchedAgents],
   );
   const tree = useMemo(
     () => buildBackgroundAgentsTree(combinedAgents, chatId),
@@ -94,6 +91,9 @@ function AgentsPanelContents({
     return filter(tree);
   }, [activeAgents, tab, tree]);
   const visibleCount = flattenBackgroundAgentTree(visibleTree).length;
+  const aggregate = aggregateBackgroundAgentUsage(
+    flattenBackgroundAgentTree(tree),
+  );
   const cost = formatCost(aggregate.costTotal);
 
   return (
@@ -128,7 +128,7 @@ function AgentsPanelContents({
             { value: "active", label: `Active (${activeAgents.length})` },
             {
               value: "all",
-              label: `All (${Object.keys(combinedAgents).length})`,
+              label: `All (${flattenBackgroundAgentTree(tree).length})`,
             },
           ]}
           size="sm"
@@ -185,7 +185,7 @@ export function AgentsPanel({
           className={styles.drawerContent}
           maxWidth="min(360px, calc(100vw - var(--rf-space-6)))"
           scrollable={false}
-          side="right"
+          side="left"
         >
           <AgentsPanelContents chatId={chatId} onNavigate={onNavigate} />
         </Sheet.Content>

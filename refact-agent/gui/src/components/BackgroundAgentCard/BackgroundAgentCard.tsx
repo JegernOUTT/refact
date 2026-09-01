@@ -112,7 +112,10 @@ function pendingQuestions(agent: BackgroundAgentSummary): number {
 
 function formatUsage(agent: BackgroundAgentSummary): string | null {
   const hasTokens = (agent.tokens_used ?? 0) > 0;
-  const hasCost = agent.cost_usd !== null && agent.cost_usd !== undefined;
+  const hasCost =
+    typeof agent.cost_usd === "number" &&
+    Number.isFinite(agent.cost_usd) &&
+    agent.cost_usd > 0;
   if (!hasTokens && !hasCost) return null;
   const parts: string[] = [];
   if (hasTokens) {
@@ -120,7 +123,9 @@ function formatUsage(agent: BackgroundAgentSummary): string | null {
       `${formatTokenCount(agent.tokens_used ?? 0).replace("K", "k")} tok`,
     );
   }
-  if (hasCost) parts.push(`$${(agent.cost_usd ?? 0).toFixed(2)}`);
+  if (hasCost && typeof agent.cost_usd === "number") {
+    parts.push(`$${agent.cost_usd.toFixed(2)}`);
+  }
   return parts.join(" · ");
 }
 
@@ -146,7 +151,8 @@ const CompactRow: React.FC<{
   agent: BackgroundAgentSummary;
   expanded: boolean;
 }> = ({ agent, expanded }) => {
-  const isRunning = agent.status === "running";
+  const isTerminal = TERMINAL_STATUSES.has(agent.status);
+  const isRunning = !isTerminal && agent.status === "running";
   const modelLabel = agent.model_type ?? agent.model;
   const modelTitle = agent.model ?? agent.model_type ?? undefined;
   const usage = formatUsage(agent);
@@ -200,7 +206,7 @@ const CompactRow: React.FC<{
           {modelLabel}
         </Badge>
       )}
-      {agent.current_tool && (
+      {!isTerminal && agent.current_tool && (
         <span
           className={styles.currentTool}
           data-testid="background-agent-current-tool"
@@ -305,7 +311,7 @@ const ExpandedDetail: React.FC<{
       data-testid="background-agent-expanded-detail"
     >
       <div className={styles.detailMeta}>
-        {agent.current_tool && (
+        {!isTerminal && agent.current_tool && (
           <span className={styles.detailNow}>now: {agent.current_tool}</span>
         )}
         {relativeActivity && (

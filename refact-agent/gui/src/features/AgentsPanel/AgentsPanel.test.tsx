@@ -103,7 +103,7 @@ describe("AgentsPanel", () => {
     expect(screen.getByText("Finished agent")).toBeInTheDocument();
   });
 
-  test("navigates, posts a message, copies agent details, and confirms cancellation", async () => {
+  test("navigates from a row, posts a message, copies agent details, and confirms cancellation", async () => {
     const onNavigate = vi.fn();
     let cancelBody: unknown;
     let messageBody: unknown;
@@ -131,7 +131,7 @@ describe("AgentsPanel", () => {
       },
     );
 
-    await user.click(screen.getByRole("button", { name: "Worker" }));
+    await user.click(screen.getByTestId("agent-row-worker"));
     expect(onNavigate).toHaveBeenCalledWith("worker-chat");
     await user.click(screen.getByLabelText("Copy agent ID"));
     expect(
@@ -168,5 +168,26 @@ describe("AgentsPanel", () => {
     });
 
     expect(document.querySelector('[role="dialog"]')).toBeInTheDocument();
+    expect(document.querySelector('[role="dialog"]')?.className).toContain(
+      "left",
+    );
+  });
+
+  test("hides terminal tool state and costs without a positive finite value", async () => {
+    const done = agent("done", chatId, "done-chat", {
+      status: "completed",
+      current_tool: "shell",
+      cost_usd: 0,
+      title: "Finished agent",
+    });
+    const { user } = render(<AgentsPanel chatId={chatId} />, {
+      preloadedState: panelState([done]),
+    });
+
+    await user.click(screen.getByRole("radio", { name: /all/i }));
+    expect(screen.queryByText("shell")).not.toBeInTheDocument();
+    expect(screen.getByTestId("agents-aggregate-usage")).not.toHaveTextContent(
+      "$",
+    );
   });
 });

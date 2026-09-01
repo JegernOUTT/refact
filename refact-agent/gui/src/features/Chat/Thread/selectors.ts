@@ -237,14 +237,6 @@ function compareBackgroundAgentActivity(
   return left.agent_id.localeCompare(right.agent_id);
 }
 
-export const selectActiveBackgroundAgents = createSelector(
-  [selectBackgroundAgentsByThread],
-  (agents): BackgroundAgentSummary[] =>
-    Object.values(agents)
-      .filter((agent) => !isTerminalBackgroundAgent(agent))
-      .sort(compareBackgroundAgentActivity),
-);
-
 export type AgentTreeNode = {
   agent: BackgroundAgentSummary;
   children: AgentTreeNode[];
@@ -288,9 +280,37 @@ export function buildBackgroundAgentsTree(
   return roots.map((root) => buildNode(root, new Set()));
 }
 
+function shouldKeepBackgroundAgent(
+  existing: BackgroundAgentSummary | undefined,
+  incoming: BackgroundAgentSummary,
+): boolean {
+  if (!existing || incoming.change_seq > existing.change_seq) return true;
+  return (
+    incoming.change_seq === existing.change_seq &&
+    isTerminalBackgroundAgent(incoming) &&
+    !isTerminalBackgroundAgent(existing)
+  );
+}
+
+export const selectBackgroundAgentPool = createSelector(
+  [selectAllThreads],
+  (threads): Record<string, BackgroundAgentSummary> => {
+    const agents: Record<string, BackgroundAgentSummary> = {};
+    for (const runtime of Object.values(threads)) {
+      if (!runtime) continue;
+      for (const agent of Object.values(runtime.background_agents)) {
+        if (shouldKeepBackgroundAgent(agents[agent.agent_id], agent)) {
+          agents[agent.agent_id] = agent;
+        }
+      }
+    }
+    return agents;
+  },
+);
+
 export const selectBackgroundAgentsTree = createSelector(
   [
-    selectBackgroundAgentsByThread,
+    selectBackgroundAgentPool,
     (_state: RootState, threadId: string) => threadId,
   ],
   buildBackgroundAgentsTree,
@@ -305,32 +325,48 @@ export function flattenBackgroundAgentTree(
   ]);
 }
 
+export const selectActiveBackgroundAgents = createSelector(
+  [selectBackgroundAgentsTree],
+  (tree): BackgroundAgentSummary[] =>
+    flattenBackgroundAgentTree(tree)
+      .filter((agent) => !isTerminalBackgroundAgent(agent))
+      .sort(compareBackgroundAgentActivity),
+);
+
 export type AgentsAggregateUsage = {
   tokensTotal: number;
   costTotal: number | null;
   runningCount: number;
 };
 
+export function aggregateBackgroundAgentUsage(
+  agents: BackgroundAgentSummary[],
+): AgentsAggregateUsage {
+  let tokensTotal = 0;
+  let costTotal = 0;
+  let hasCost = false;
+  let runningCount = 0;
+
+  for (const agent of agents) {
+    tokensTotal += agent.tokens_used ?? 0;
+    if (
+      typeof agent.cost_usd === "number" &&
+      Number.isFinite(agent.cost_usd) &&
+      agent.cost_usd > 0
+    ) {
+      costTotal += agent.cost_usd;
+      hasCost = true;
+    }
+    if (agent.status === "running") runningCount += 1;
+  }
+
+  return { tokensTotal, costTotal: hasCost ? costTotal : null, runningCount };
+}
+
 export const selectAgentsAggregateUsage = createSelector(
   [selectBackgroundAgentsTree],
-  (tree): AgentsAggregateUsage => {
-    const agents = flattenBackgroundAgentTree(tree);
-    let tokensTotal = 0;
-    let costTotal = 0;
-    let hasCost = false;
-    let runningCount = 0;
-
-    for (const agent of agents) {
-      tokensTotal += agent.tokens_used ?? 0;
-      if (agent.cost_usd !== undefined && agent.cost_usd !== null) {
-        costTotal += agent.cost_usd;
-        hasCost = true;
-      }
-      if (agent.status === "running") runningCount += 1;
-    }
-
-    return { tokensTotal, costTotal: hasCost ? costTotal : null, runningCount };
-  },
+  (tree): AgentsAggregateUsage =>
+    aggregateBackgroundAgentUsage(flattenBackgroundAgentTree(tree)),
 );
 
 export const selectPendingAgentQuestions = createSelector(

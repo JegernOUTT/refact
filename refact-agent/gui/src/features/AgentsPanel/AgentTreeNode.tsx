@@ -58,7 +58,14 @@ function formatTokens(tokens: number | undefined): string {
 }
 
 function formatCost(cost: number | null | undefined): string | null {
-  if (cost === null || cost === undefined) return null;
+  if (
+    cost === null ||
+    cost === undefined ||
+    !Number.isFinite(cost) ||
+    cost <= 0
+  ) {
+    return null;
+  }
   return `$${cost.toFixed(cost < 0.01 ? 4 : 2)}`;
 }
 
@@ -144,7 +151,11 @@ export function AgentTreeNode({
 
   return (
     <li className={styles.node} data-depth={depth}>
-      <div className={styles.nodeRow}>
+      <div
+        className={styles.nodeRow}
+        data-testid={`agent-row-${agent.agent_id}`}
+        onClick={navigate}
+      >
         <span className={styles.treeGuide} aria-hidden="true" />
         {hasChildren ? (
           <IconButton
@@ -154,14 +165,17 @@ export function AgentTreeNode({
             icon={expanded ? ChevronDown : ChevronRight}
             size="sm"
             variant="plain"
-            onClick={() => setExpanded((value) => !value)}
+            onClick={(event) => {
+              event.stopPropagation();
+              setExpanded((value) => !value);
+            }}
           />
         ) : (
           <span className={styles.expandSpacer} aria-hidden="true" />
         )}
         <StatusDot
           aria-label={agent.status}
-          pulse={agent.status === "running"}
+          pulse={!terminal && agent.status === "running"}
           size="small"
           status={statusFor(agent)}
         />
@@ -169,7 +183,9 @@ export function AgentTreeNode({
           type="button"
           className={styles.nodeTitle}
           disabled={!agent.child_chat_id}
-          onClick={navigate}
+          onClick={() => {
+            navigate();
+          }}
         >
           {agent.title || agent.agent_id}
         </button>
@@ -202,7 +218,10 @@ export function AgentTreeNode({
                 icon={MessageSquare}
                 size="sm"
                 variant="plain"
-                onClick={() => setMessageOpen((value) => !value)}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setMessageOpen((value) => !value);
+                }}
               />
             </Tooltip>
           )}
@@ -212,7 +231,10 @@ export function AgentTreeNode({
               icon={copied === "id" ? Check : Copy}
               size="sm"
               variant="plain"
-              onClick={() => handleCopy("id", agent.agent_id)}
+              onClick={(event) => {
+                event.stopPropagation();
+                handleCopy("id", agent.agent_id);
+              }}
             />
           </Tooltip>
           {agent.worktree_branch && (
@@ -222,9 +244,10 @@ export function AgentTreeNode({
                 icon={copied === "branch" ? Check : Copy}
                 size="sm"
                 variant="plain"
-                onClick={() =>
-                  handleCopy("branch", agent.worktree_branch ?? "")
-                }
+                onClick={(event) => {
+                  event.stopPropagation();
+                  handleCopy("branch", agent.worktree_branch ?? "");
+                }}
               />
             </Tooltip>
           )}
@@ -235,6 +258,7 @@ export function AgentTreeNode({
                   aria-label={`Cancel ${agent.title}`}
                   disabled={cancelState.isLoading}
                   icon={CircleStop}
+                  onClick={(event) => event.stopPropagation()}
                   size="sm"
                   variant="danger"
                 />
@@ -265,7 +289,7 @@ export function AgentTreeNode({
           )}
         </div>
       </div>
-      {agent.current_tool && (
+      {!terminal && agent.current_tool && (
         <div className={styles.toolTicker} title={agent.current_tool}>
           {agent.current_tool}
         </div>

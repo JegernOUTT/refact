@@ -74,31 +74,9 @@
 }
 
 .workspacePanelsButton[aria-pressed="true"],
-.liveEditsButton[aria-pressed="true"],
-.agentsButton[aria-pressed="true"] {
+.liveEditsButton[aria-pressed="true"] {
   color: var(--rf-color-accent);
   background: var(--rf-color-accent-soft);
-}
-
-.agentsButtonWrap {
-  position: relative;
-  display: inline-flex;
-}
-
-.agentsBadge {
-  position: absolute;
-  top: calc(-1 * var(--rf-space-1));
-  right: calc(-1 * var(--rf-space-1));
-  display: grid;
-  min-width: var(--rf-space-4);
-  min-height: var(--rf-space-4);
-  place-items: center;
-  padding: 0 var(--rf-space-2xs);
-  color: var(--rf-color-accent-fg);
-  background: var(--rf-color-accent);
-  border-radius: var(--rf-radius-pill);
-  font: var(--rf-weight-semibold) var(--rf-text-1) / 1 var(--rf-font-ui);
-  pointer-events: none;
 }
 
 .toolbarDivider {

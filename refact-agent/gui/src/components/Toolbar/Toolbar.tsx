@@ -1,7 +1,6 @@
 import { Dropdown, DropdownNavigationOptions } from "./Dropdown";
 import {
   CheckSquare,
-  Bot,
   FileDiff,
   Home,
   Moon,
@@ -17,18 +16,11 @@ import { newChatAction } from "../../events";
 import {
   clearThreadPauseReasons,
   closeThread,
-  selectActiveBackgroundAgents,
-  selectBackgroundAgentsByThread,
   selectAllThreads,
   selectChatId,
   setThreadConfirmationStatus,
   switchToThread,
 } from "../../features/Chat/Thread";
-import {
-  panelAutoClosed,
-  panelOpened,
-  selectAgentsPanelOpen,
-} from "../../features/AgentsPanel/agentsPanelSlice";
 import { popBackTo, push, selectPages } from "../../features/Pages/pagesSlice";
 import { openTask, selectOpenTasksFromRoot } from "../../features/Tasks";
 import { selectCapabilities } from "../../features/Config/configSlice";
@@ -223,15 +215,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     activeTab.type === "chat"
       ? activeTab.id
       : focusedWorkspaceChatId ?? currentChatId;
-  const toolbarAgents = useAppSelector((state) =>
-    selectBackgroundAgentsByThread(state, toolbarChatId),
-  );
-  const toolbarActiveAgents = useAppSelector((state) =>
-    selectActiveBackgroundAgents(state, toolbarChatId),
-  );
-  const agentsPanelOpen = useAppSelector((state) =>
-    selectAgentsPanelOpen(state, toolbarChatId),
-  );
   const shouldCleanToolbarChat =
     activeTab.type === "chat" || focusedWorkspaceChatId !== null;
   const showTabBar =
@@ -350,14 +333,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     );
   }, [dispatch, focusedWorkspaceChatId, liveEdits]);
 
-  const onToggleAgentsPanel = useCallback(() => {
-    if (agentsPanelOpen) {
-      dispatch(panelAutoClosed(toolbarChatId));
-    } else {
-      dispatch(panelOpened(toolbarChatId));
-    }
-  }, [agentsPanelOpen, dispatch, toolbarChatId]);
-
   return (
     <div className={styles.toolbar}>
       <div className={styles.toolbarSection}>
@@ -384,26 +359,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
             onClick={onToggleLiveEdits}
             pressed={liveEdits}
           />
-        ) : null}
-        {Object.keys(toolbarAgents).length > 0 ? (
-          <span className={styles.agentsButtonWrap}>
-            <ToolbarIconButton
-              label={`Agents${
-                toolbarActiveAgents.length > 0
-                  ? ` (${toolbarActiveAgents.length} running)`
-                  : ""
-              }`}
-              className={styles.agentsButton}
-              icon={Bot}
-              onClick={onToggleAgentsPanel}
-              pressed={agentsPanelOpen}
-            />
-            {toolbarActiveAgents.length > 0 ? (
-              <span className={styles.agentsBadge}>
-                {toolbarActiveAgents.length}
-              </span>
-            ) : null}
-          </span>
         ) : null}
       </div>
 

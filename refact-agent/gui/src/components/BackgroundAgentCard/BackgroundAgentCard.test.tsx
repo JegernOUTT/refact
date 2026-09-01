@@ -263,6 +263,32 @@ describe("BackgroundAgentCard", () => {
     ).toBeVisible();
   });
 
+  it("hides live tool state and zero cost for terminal agents", () => {
+    render(
+      <BackgroundAgentCard
+        agent={makeAgent({ status: "completed", cost_usd: 0 })}
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("background-agent-current-tool"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("background-agent-usage")).toHaveTextContent(
+      "12.3k tok",
+    );
+    expect(screen.getByTestId("background-agent-usage")).not.toHaveTextContent(
+      "$",
+    );
+    expect(screen.getByTestId("background-agent-status-dot").className).not.toContain(
+      "statusDotPulse",
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Expand background agent details" }),
+    );
+    expect(screen.queryByText(/^now:/)).not.toBeInTheDocument();
+  });
+
   it("never renders raw timestamps and copies the full agent id from the expanded detail", () => {
     const { container } = render(<BackgroundAgentCard agent={makeAgent()} />);
 
