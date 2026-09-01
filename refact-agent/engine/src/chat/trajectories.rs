@@ -9147,6 +9147,7 @@ mod tests {
     }
 
     #[serial(trajectory_perf)]
+    #[serial(trajectory_perf)]
     #[tokio::test]
     async fn detached_trajectory_writer_drains_newer_snapshot_after_a_failed_write() {
         let _lock = serial_test_guard();
@@ -11311,6 +11312,7 @@ mod tests {
         assert_eq!(loaded.thread.auto_compression_cap, Some(64_000));
     }
 
+    #[serial(trajectory_perf)]
     #[serial(trajectory_perf)]
     #[tokio::test]
     async fn save_trajectory_as_is_durable_with_the_detached_writer() {
