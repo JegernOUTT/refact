@@ -3414,7 +3414,7 @@ pub async fn save_trajectory_as(
     thread: &ThreadParams,
     messages: &[ChatMessage],
 ) {
-    save_trajectory_as_with_intent(gcx, thread, messages, TrajectoryCommitIntent::Checkpoint).await;
+    save_trajectory_as_with_intent(gcx, thread, messages, TrajectoryCommitIntent::Required).await;
 }
 
 pub async fn save_trajectory_as_with_intent(
@@ -3509,6 +3509,7 @@ struct DetachedTrajectoryWriterState {
     committed_version: u64,
     in_flight: bool,
     error: Option<String>,
+    error_version: u64,
     notify: Arc<Notify>,
     write_cache: Arc<AMutex<DetachedTrajectoryWriteCache>>,
 }
@@ -3651,6 +3652,7 @@ impl Default for DetachedTrajectoryWriterState {
             committed_version: 0,
             in_flight: false,
             error: None,
+            error_version: 0,
             notify: Arc::new(Notify::new()),
             write_cache: Arc::new(AMutex::new(Default::default())),
         }
@@ -3778,7 +3780,6 @@ async fn schedule_detached_trajectory_writer(
         state.requested_version = state.requested_version.saturating_add(1);
         let target_version = state.requested_version;
         state.pending = Some((target_version, snapshot));
-        state.error = None;
         if !state.in_flight {
             state.in_flight = true;
             let writer = writer.clone();
@@ -3811,11 +3812,16 @@ async fn run_detached_trajectory_writer(
             (version, snapshot, state.write_cache.clone())
         };
         let result = save_trajectory_snapshot_inner(gcx.clone(), snapshot, Some(write_cache)).await;
+        #[cfg(test)]
+        if result.is_err() {
+            wait_for_test_detached_trajectory_writer_failure().await;
+        }
         let mut state = writer.lock().await;
         match result {
             Ok(()) => {
                 state.committed_version = state.committed_version.max(version);
                 state.error = None;
+                state.error_version = 0;
                 state.notify.notify_waiters();
             }
             Err(error) => {
@@ -3824,8 +3830,18 @@ async fn run_detached_trajectory_writer(
                     version, error
                 );
                 state.error = Some(error);
-                state.in_flight = false;
+                state.error_version = version;
                 state.notify.notify_waiters();
+                if state
+                    .pending
+                    .as_ref()
+                    .is_some_and(|(pending_version, _)| *pending_version > version)
+                {
+                    drop(state);
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
+                state.in_flight = false;
                 return;
             }
         }
@@ -3842,7 +3858,13 @@ async fn wait_for_detached_trajectory_commit(
             if state.committed_version >= target_version {
                 return Ok(());
             }
-            if let Some(error) = state.error.clone() {
+            if state.error_version >= target_version {
+                let error = state.error.clone().unwrap_or_else(|| {
+                    format!(
+                        "Detached trajectory writer failed at version {}",
+                        state.error_version
+                    )
+                });
                 return Err(error);
             }
             state.notify.clone().notified_owned()
@@ -3873,6 +3895,32 @@ fn set_test_message_serialization_failure(message_id: Option<String>) {
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
         .expect("test serialization failure lock poisoned") = message_id;
+}
+
+#[cfg(test)]
+static TEST_DETACHED_TRAJECTORY_WRITER_FAILURE_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn set_test_detached_trajectory_writer_failure_hook(hook: Option<(Arc<Notify>, Arc<Notify>)>) {
+    *TEST_DETACHED_TRAJECTORY_WRITER_FAILURE_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("detached trajectory writer failure hook lock poisoned") = hook;
+}
+
+#[cfg(test)]
+async fn wait_for_test_detached_trajectory_writer_failure() {
+    let hook = TEST_DETACHED_TRAJECTORY_WRITER_FAILURE_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("detached trajectory writer failure hook lock poisoned")
+        .clone();
+    if let Some((failed, release)) = hook {
+        failed.notify_one();
+        release.notified().await;
+    }
 }
 
 async fn save_trajectory_snapshot_inner(
@@ -5719,7 +5767,6 @@ async fn collect_task_trajectory_sources_under_path(
     if !is_under_task_root(path, task_roots) {
         return Vec::new();
     }
-
     let mut sources = Vec::new();
     let mut pending = vec![path.to_path_buf()];
     while let Some(path) = pending.pop() {
@@ -5747,6 +5794,56 @@ async fn collect_task_trajectory_sources_under_path(
         }
     }
     sources
+}
+
+async fn collect_trajectory_sources_under_path(
+    path: &Path,
+    task_roots: &[PathBuf],
+) -> Vec<(String, TrajectorySourceIdentity, PathBuf)> {
+    if is_under_task_root(path, task_roots) {
+        return collect_task_trajectory_sources_under_path(path, task_roots).await;
+    }
+
+    let mut sources = Vec::new();
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        if should_dispatch_trajectory_path(&path, task_roots) {
+            if let Some(chat_id) = path.file_stem().and_then(|stem| stem.to_str()) {
+                sources.push((chat_id.to_string(), TrajectorySourceIdentity::Normal, path));
+            }
+            continue;
+        }
+        if !is_real_dir(&path).await {
+            continue;
+        }
+        let mut entries = match fs::read_dir(&path).await {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            pending.push(entry.path());
+        }
+    }
+    sources
+}
+
+fn schedule_trajectory_watcher_overflow_recovery(
+    pending_scans: &mut std::collections::HashMap<PathBuf, Instant>,
+    dropped_events: &AtomicUsize,
+    watched_roots: &[PathBuf],
+) {
+    let dropped = dropped_events.swap(0, Ordering::Relaxed);
+    if dropped == 0 {
+        return;
+    }
+    warn!(
+        "Trajectory watcher dropped {} events; scheduling a recovery scan",
+        dropped
+    );
+    let now = Instant::now();
+    for root in watched_roots {
+        pending_scans.insert(root.clone(), now);
+    }
 }
 
 type TrajectoryPendingKey = (String, TrajectorySourceIdentity);
@@ -5860,6 +5957,7 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
         .filter_map(Result::ok)
         .map(|root| dunce::simplified(&root).to_path_buf())
         .collect::<Vec<_>>();
+        let recovery_roots = watched_roots.clone();
         let _self_write_cleanup = TrajectorySelfWriteScope { watched_roots };
 
         let tx_clone = tx.clone();
@@ -5970,6 +6068,12 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
                 }
             }
 
+            schedule_trajectory_watcher_overflow_recovery(
+                &mut pending_scans,
+                &dropped_events,
+                &recovery_roots,
+            );
+
             let now = Instant::now();
             let ready_scans: Vec<PathBuf> = pending_scans
                 .iter()
@@ -5980,7 +6084,7 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
             for path in ready_scans {
                 pending_scans.remove(&path);
                 for (chat_id, source, trajectory_path) in
-                    collect_task_trajectory_sources_under_path(&path, &task_roots).await
+                    collect_trajectory_sources_under_path(&path, &task_roots).await
                 {
                     insert_pending_trajectory_change(
                         &mut pending,
@@ -9044,6 +9148,65 @@ mod tests {
 
     #[serial(trajectory_perf)]
     #[tokio::test]
+    async fn detached_trajectory_writer_drains_newer_snapshot_after_a_failed_write() {
+        let _lock = serial_test_guard();
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "detached-writer-drains-newer";
+        let mut failed = test_snapshot(
+            chat_id,
+            "Failed",
+            vec![ChatMessage::new("user".to_string(), "failed".to_string())],
+        );
+        failed.messages[0].message_id = "detached-writer-drains-newer-failed".to_string();
+        let newer = test_snapshot(
+            chat_id,
+            "Newer",
+            vec![ChatMessage::new("user".to_string(), "newer".to_string())],
+        );
+        let writer = Arc::new(AMutex::new(DetachedTrajectoryWriterState {
+            pending: Some((1, failed.clone())),
+            requested_version: 1,
+            in_flight: true,
+            ..Default::default()
+        }));
+        let failure_seen = Arc::new(Notify::new());
+        let release_failure = Arc::new(Notify::new());
+        set_test_detached_trajectory_writer_failure_hook(Some((
+            failure_seen.clone(),
+            release_failure.clone(),
+        )));
+        set_test_message_serialization_failure(Some(failed.messages[0].message_id.clone()));
+        let failure_seen_wait = failure_seen.notified();
+        let task = tokio::spawn(run_detached_trajectory_writer(gcx.clone(), writer.clone()));
+
+        tokio::time::timeout(Duration::from_secs(5), failure_seen_wait)
+            .await
+            .expect("failed write should pause before recording its outcome");
+        set_test_message_serialization_failure(None);
+        {
+            let mut state = writer.lock().await;
+            state.requested_version = 2;
+            state.pending = Some((2, newer));
+        }
+        release_failure.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("writer should drain the newer snapshot")
+            .unwrap();
+        set_test_detached_trajectory_writer_failure_hook(None);
+
+        let state = writer.lock().await;
+        assert_eq!(state.committed_version, 2);
+        assert_eq!(state.error, None);
+        assert!(!state.in_flight);
+        drop(state);
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(loaded.messages[0].content.content_text_only(), "newer");
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
     async fn trajectory_writer_registry_cleans_completed_and_source_isolated_entries() {
         let _lock = serial_test_guard();
         let _writer = TrajectoryWriterRolloutGuard::set(true);
@@ -11146,6 +11309,37 @@ mod tests {
         let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
         assert!(loaded.messages.is_empty());
         assert_eq!(loaded.thread.auto_compression_cap, Some(64_000));
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn save_trajectory_as_is_durable_with_the_detached_writer() {
+        let _lock = serial_test_guard();
+        let _writer = TrajectoryWriterRolloutGuard::set(true);
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let thread = ThreadParams {
+            id: "save-trajectory-as-durable".to_string(),
+            title: "Durable direct save".to_string(),
+            ..Default::default()
+        };
+
+        save_trajectory_as(
+            gcx.clone(),
+            &thread,
+            &[ChatMessage::new(
+                "user".to_string(),
+                "persisted".to_string(),
+            )],
+        )
+        .await;
+
+        let loaded = load_trajectory_for_chat(gcx, &thread.id).await;
+        assert!(loaded.is_some());
+        assert_eq!(
+            loaded.unwrap().messages[0].content.content_text_only(),
+            "persisted"
+        );
     }
 
     #[tokio::test]
@@ -16257,6 +16451,25 @@ mod tests {
             )
         );
         assert_eq!(sources[0].2, path);
+    }
+
+    #[test]
+    fn watcher_overflow_schedules_recovery_scans_and_resets_drop_counter() {
+        let normal_root = PathBuf::from("normal-trajectories");
+        let task_root = PathBuf::from("task-trajectories");
+        let dropped_events = AtomicUsize::new(3);
+        let mut pending_scans = std::collections::HashMap::new();
+
+        schedule_trajectory_watcher_overflow_recovery(
+            &mut pending_scans,
+            &dropped_events,
+            &[normal_root.clone(), task_root.clone()],
+        );
+
+        assert_eq!(dropped_events.load(Ordering::Relaxed), 0);
+        assert_eq!(pending_scans.len(), 2);
+        assert!(pending_scans.contains_key(&normal_root));
+        assert!(pending_scans.contains_key(&task_root));
     }
 
     #[test]
