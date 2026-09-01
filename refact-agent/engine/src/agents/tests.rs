@@ -294,6 +294,92 @@ async fn terminal_transitions_clear_current_tool() {
 }
 
 #[tokio::test]
+async fn terminal_agents_ignore_late_activity_and_progress_updates() {
+    let (_temp, registry) = registry().await;
+    let activity_record = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
+    let progress_record = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
+
+    let completed = registry
+        .mark_completed(&activity_record.agent_id, completion("child-activity"))
+        .await
+        .expect("complete activity record");
+    let late_activity = registry
+        .update_activity(
+            &activity_record.agent_id,
+            Some("late activity".to_string()),
+            Some(7),
+            Some(Some("shell: cargo test".to_string())),
+        )
+        .await
+        .expect("late activity is ignored");
+
+    let failed = registry
+        .mark_failed(&progress_record.agent_id, "failed".to_string())
+        .await
+        .expect("fail progress record");
+    let late_progress = registry
+        .update_progress(
+            &progress_record.agent_id,
+            "late progress".to_string(),
+            8,
+            Some("shell".to_string()),
+        )
+        .await
+        .expect("late progress is ignored");
+
+    assert_eq!(late_activity, completed);
+    assert_eq!(late_activity.current_tool, None);
+    assert_eq!(late_progress, failed);
+    assert_eq!(late_progress.current_tool, None);
+}
+
+#[tokio::test]
+async fn mark_interrupted_preserves_first_terminal_transition() {
+    let (_temp, registry) = registry().await;
+    let record = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
+    let completed = registry
+        .mark_completed(&record.agent_id, completion("child-completed"))
+        .await
+        .expect("complete");
+
+    let interrupted = registry
+        .mark_interrupted(&record.agent_id, "late interruption".to_string())
+        .await
+        .expect("late interruption is ignored");
+
+    assert_eq!(interrupted, completed);
+    assert_eq!(interrupted.status, BgAgentStatus::Completed);
+}
+
+#[tokio::test]
+async fn find_agent_id_by_child_chat_id_returns_only_the_matched_id() {
+    let (_temp, registry) = registry().await;
+    let first = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
+    let second = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
+    registry
+        .mark_running(&first.agent_id, "subchat-first".to_string())
+        .await
+        .expect("start first");
+    registry
+        .mark_running(&second.agent_id, "subchat-second".to_string())
+        .await
+        .expect("start second");
+
+    assert_eq!(
+        registry
+            .find_agent_id_by_child_chat_id("subchat-second")
+            .await,
+        Some(second.agent_id)
+    );
+    assert_eq!(
+        registry
+            .find_agent_id_by_child_chat_id("subchat-missing")
+            .await,
+        None
+    );
+}
+
+#[tokio::test]
 async fn usage_question_and_inbox_lifecycle_persist_and_notify() {
     let (_temp, registry) = registry().await;
     let record = create_agent(&registry, "parent", BgAgentKind::Subagent).await;

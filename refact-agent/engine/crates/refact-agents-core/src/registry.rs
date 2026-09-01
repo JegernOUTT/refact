@@ -155,7 +155,7 @@ impl BackgroundAgentRegistry {
         step_count: u32,
         last_activity: Option<String>,
     ) -> Result<BackgroundAgent, String> {
-        self.update_record(agent_id, |record, _| {
+        self.update_active_record(agent_id, |record, _| {
             record.progress = Some(progress);
             record.step_count = step_count;
             record.last_activity = last_activity;
@@ -171,7 +171,7 @@ impl BackgroundAgentRegistry {
         step_count: Option<u32>,
         current_tool: Option<Option<String>>,
     ) -> Result<BackgroundAgent, String> {
-        self.update_record(agent_id, |record, now| {
+        self.update_active_record(agent_id, |record, now| {
             if let Some(progress) = progress {
                 record.progress = Some(progress);
             }
@@ -422,15 +422,29 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         reason: String,
     ) -> Result<BackgroundAgent, String> {
-        let updated = self
-            .update_record(agent_id, |record, now| {
-                record.status = BgAgentStatus::Interrupted;
-                record.error = Some(reason);
-                record.current_tool = None;
-                record.finished_at = Some(now);
-                Ok(())
-            })
-            .await?;
+        let updated = {
+            let mut records = self.records.write().await;
+            let current = records
+                .get(agent_id)
+                .cloned()
+                .ok_or_else(|| "agent not found".to_string())?;
+            if current.status.is_terminal() {
+                return Ok(current);
+            }
+            let mut updated = current;
+            let now = Utc::now();
+            updated.status = BgAgentStatus::Interrupted;
+            updated.error = Some(reason);
+            updated.current_tool = None;
+            updated.finished_at = Some(now);
+            touch_record(&mut updated, now);
+            storage::save_record(&self.storage_root, &updated).await?;
+            records.insert(agent_id.to_string(), updated.clone());
+            updated
+        };
+        if let Some(notify) = self.notify_for(agent_id).await {
+            notify.notify_waiters();
+        }
         self.retire_runtime(agent_id).await;
         Ok(updated)
     }
@@ -558,6 +572,15 @@ impl BackgroundAgentRegistry {
                 .then(a.agent_id.cmp(&b.agent_id))
         });
         records
+    }
+
+    pub async fn find_agent_id_by_child_chat_id(&self, chat_id: &str) -> Option<String> {
+        self.records
+            .read()
+            .await
+            .values()
+            .find(|record| record.child_chat_id.as_deref() == Some(chat_id))
+            .map(|record| record.agent_id.clone())
     }
 
     pub async fn list_descendants(&self, agent_id: &str) -> Vec<BackgroundAgent> {
@@ -858,6 +881,37 @@ impl BackgroundAgentRegistry {
                 .get(agent_id)
                 .cloned()
                 .ok_or_else(|| "agent not found".to_string())?;
+            let mut updated = current;
+            let now = Utc::now();
+            update(&mut updated, now)?;
+            touch_record(&mut updated, now);
+            storage::save_record(&self.storage_root, &updated).await?;
+            records.insert(agent_id.to_string(), updated.clone());
+            updated
+        };
+        if let Some(notify) = self.notify_for(agent_id).await {
+            notify.notify_waiters();
+        }
+        Ok(updated)
+    }
+
+    async fn update_active_record<F>(
+        &self,
+        agent_id: &str,
+        update: F,
+    ) -> Result<BackgroundAgent, String>
+    where
+        F: FnOnce(&mut BackgroundAgent, DateTime<Utc>) -> Result<(), String>,
+    {
+        let updated = {
+            let mut records = self.records.write().await;
+            let current = records
+                .get(agent_id)
+                .cloned()
+                .ok_or_else(|| "agent not found".to_string())?;
+            if current.status.is_terminal() {
+                return Ok(current);
+            }
             let mut updated = current;
             let now = Utc::now();
             update(&mut updated, now)?;

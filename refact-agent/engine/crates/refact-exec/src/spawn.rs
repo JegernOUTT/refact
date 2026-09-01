@@ -913,6 +913,10 @@ impl ExecRegistry {
             stderr,
             request.output_progress_tx.clone(),
         );
+        let snapshot = self.mark_started(&process_id).await?;
+        if request.notify_chat_on_spawn {
+            self.notify_spawn(&snapshot);
+        }
         self.track_monitor_task(monitor_process(
             self.clone(),
             process_id.clone(),
@@ -927,10 +931,6 @@ impl ExecRegistry {
             stderr_task,
         ))
         .await;
-        let snapshot = self.mark_started(&process_id).await?;
-        if request.notify_chat_on_spawn {
-            self.notify_spawn(&snapshot);
-        }
         if matches!(request.mode, ExecMode::Foreground) {
             #[cfg(target_os = "linux")]
             let observation = observation.finish(true).await;
@@ -1035,6 +1035,10 @@ impl ExecRegistry {
             request.output_progress_tx.clone(),
         );
         let stderr_task = AbortOnDropTask(tokio::spawn(async {}));
+        let snapshot = self.mark_started(&process_id).await?;
+        if request.notify_chat_on_spawn {
+            self.notify_spawn(&snapshot);
+        }
         self.track_monitor_task(monitor_process(
             self.clone(),
             process_id.clone(),
@@ -1049,10 +1053,6 @@ impl ExecRegistry {
             stderr_task,
         ))
         .await;
-        let snapshot = self.mark_started(&process_id).await?;
-        if request.notify_chat_on_spawn {
-            self.notify_spawn(&snapshot);
-        }
         if matches!(request.mode, ExecMode::Foreground) {
             return Ok(ExecSpawnResult::new(
                 self.wait(&process_id).await?,
@@ -2154,6 +2154,56 @@ mod tests {
             .kill(&result.snapshot.meta.process_id)
             .await
             .unwrap();
+    }
+
+    async fn assert_instant_chat_owned_process_broadcast_order(tty: bool) {
+        let registry = ExecRegistry::new();
+        let mut lifecycle = registry.subscribe_lifecycle();
+        let command = if cfg!(windows) { "exit 0" } else { "true" };
+        let result = registry
+            .spawn(
+                ExecSpawnRequest::background(shell_script(command))
+                    .with_tty(tty)
+                    .with_owner(crate::types::ExecOwnerMeta {
+                        chat_id: Some("chat-spawn-order".to_string()),
+                        ..crate::types::ExecOwnerMeta::default()
+                    })
+                    .with_chat_spawn_notification(),
+            )
+            .await
+            .unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), lifecycle.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(1), lifecycle.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            [first, second],
+            [
+                crate::registry::ProcessLifecycleEvent::Spawn,
+                crate::registry::ProcessLifecycleEvent::Completion,
+            ]
+        );
+        registry
+            .wait(&result.snapshot.meta.process_id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn instant_pipe_process_broadcasts_spawn_before_completion() {
+        assert_instant_chat_owned_process_broadcast_order(false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn instant_pty_process_broadcasts_spawn_before_completion() {
+        assert_instant_chat_owned_process_broadcast_order(true).await;
     }
 
     #[tokio::test]

@@ -161,28 +161,17 @@ impl AtCommandsContext {
         let effective_root = root_chat_id.unwrap_or_else(|| chat_id.clone());
         let global_context = app.gcx.clone();
         let session = app.chat.sessions.read().await.get(&chat_id).cloned();
-        let (derived_privacy_zones, needs_agent_lookup) = match session {
+        let derived_privacy_zones = match session {
             Some(session) => {
                 let session = session.lock().await;
-                (
-                    session.derived_privacy_zones.clone(),
-                    session.thread.parent_id.is_some(),
-                )
+                session.derived_privacy_zones.clone()
             }
-            None => (
-                Arc::new(StdRwLock::new(HashMap::new())),
-                chat_id.starts_with("subchat-"),
-            ),
+            None => Arc::new(StdRwLock::new(HashMap::new())),
         };
-        let background_agent_id = if !needs_agent_lookup {
+        let background_agent_id = if !chat_id.starts_with("subchat-") {
             None
         } else {
-            app.agents
-                .list_all()
-                .await
-                .into_iter()
-                .find(|record| record.child_chat_id.as_deref() == Some(chat_id.as_str()))
-                .map(|record| record.agent_id)
+            app.agents.find_agent_id_by_child_chat_id(&chat_id).await
         };
         AtCommandsContext {
             global_context,

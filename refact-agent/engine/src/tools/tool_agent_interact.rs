@@ -789,6 +789,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unloaded_subchat_context_restores_background_agent_identity() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let child = create(&app, "parent", "child").await;
+        app.agents
+            .mark_running(&child.agent_id, "subchat-unloaded-child".to_string())
+            .await
+            .unwrap();
+
+        let ccx = AtCommandsContext::new_from_app(
+            app,
+            4096,
+            20,
+            false,
+            vec![],
+            "subchat-unloaded-child".to_string(),
+            Some("parent".to_string()),
+            "test/model".to_string(),
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            ccx.background_agent_id.as_deref(),
+            Some(child.agent_id.as_str())
+        );
+    }
+
+    #[tokio::test]
     async fn stateful_child_session_restores_identity_for_parent_tools() {
         let workspace = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -877,6 +907,17 @@ mod tests {
             "subchat-child-chat",
         )
         .await;
+        app.chat
+            .sessions
+            .read()
+            .await
+            .get("subchat-child-chat")
+            .cloned()
+            .unwrap()
+            .lock()
+            .await
+            .thread
+            .parent_id = None;
 
         let ccx = Arc::new(AMutex::new(
             AtCommandsContext::new_from_app(

@@ -35,6 +35,13 @@ const STDIN_WRITE_TIMEOUT: Duration = Duration::from_millis(50);
 pub type ProcessCompletionTx = broadcast::Sender<ProcessCompletionEvent>;
 pub type ProcessSpawnTx = broadcast::Sender<ProcessSpawnEvent>;
 
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessLifecycleEvent {
+    Spawn,
+    Completion,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessCompletionEvent {
     pub process_id: ExecProcessId,
@@ -439,6 +446,8 @@ pub struct ExecRegistry {
     records: Arc<Mutex<HashMap<ExecProcessId, ExecProcessRecord>>>,
     completion_tx: ProcessCompletionTx,
     spawn_tx: ProcessSpawnTx,
+    #[cfg(test)]
+    lifecycle_tx: broadcast::Sender<ProcessLifecycleEvent>,
     output_tx: broadcast::Sender<ExecOutputChunk>,
     monitor_tasks: Arc<Mutex<JoinSet<()>>>,
 }
@@ -447,11 +456,15 @@ impl Default for ExecRegistry {
     fn default() -> Self {
         let (completion_tx, _) = broadcast::channel(PROCESS_COMPLETION_CHANNEL_CAPACITY);
         let (spawn_tx, _) = broadcast::channel(PROCESS_COMPLETION_CHANNEL_CAPACITY);
+        #[cfg(test)]
+        let (lifecycle_tx, _) = broadcast::channel(PROCESS_COMPLETION_CHANNEL_CAPACITY);
         let (output_tx, _) = broadcast::channel(PROCESS_OUTPUT_CHANNEL_CAPACITY);
         Self {
             records: Arc::new(Mutex::new(HashMap::new())),
             completion_tx,
             spawn_tx,
+            #[cfg(test)]
+            lifecycle_tx,
             output_tx,
             monitor_tasks: Arc::new(Mutex::new(JoinSet::new())),
         }
@@ -471,6 +484,11 @@ impl ExecRegistry {
         self.spawn_tx.subscribe()
     }
 
+    #[cfg(test)]
+    pub(crate) fn subscribe_lifecycle(&self) -> broadcast::Receiver<ProcessLifecycleEvent> {
+        self.lifecycle_tx.subscribe()
+    }
+
     pub fn subscribe_output(&self) -> broadcast::Receiver<ExecOutputChunk> {
         self.output_tx.subscribe()
     }
@@ -481,6 +499,8 @@ impl ExecRegistry {
 
     pub fn notify_spawn(&self, snapshot: &ExecProcessSnapshot) {
         if let Some(event) = process_spawn_event(snapshot) {
+            #[cfg(test)]
+            let _ = self.lifecycle_tx.send(ProcessLifecycleEvent::Spawn);
             let _ = self.spawn_tx.send(event);
         }
     }
@@ -1002,6 +1022,8 @@ impl ExecRegistry {
         };
         drop(records);
         if let Some(event) = completion_event {
+            #[cfg(test)]
+            let _ = self.lifecycle_tx.send(ProcessLifecycleEvent::Completion);
             let _ = self.completion_tx.send(event);
         }
         if let Some(terminal) = terminal {
