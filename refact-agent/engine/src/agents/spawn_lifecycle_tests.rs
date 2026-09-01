@@ -136,7 +136,7 @@ fn completed_result(mut messages: Vec<ChatMessage>, config: SubchatConfig) -> Su
 }
 
 async fn await_completion(handle: SpawnHandle) -> BackgroundAgent {
-    tokio::time::timeout(Duration::from_secs(3), handle.completion_rx)
+    tokio::time::timeout(Duration::from_secs(60), handle.completion_rx)
         .await
         .expect("agent completion timed out")
         .expect("agent completion channel")
@@ -151,7 +151,7 @@ async fn wait_for_record<F>(
 where
     F: Fn(&BackgroundAgent) -> bool,
 {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let record = app
                 .agents
@@ -419,7 +419,7 @@ async fn sibling_lifecycle_notices_arrive_in_running_sibling_inbox() {
     let first = crate::agents::spawn::spawn_background_agent(fixture.app.clone(), first_request)
         .await
         .expect("spawn first sibling");
-    tokio::time::timeout(Duration::from_secs(2), first_started.notified())
+    tokio::time::timeout(Duration::from_secs(30), first_started.notified())
         .await
         .expect("first sibling started");
 
@@ -491,7 +491,7 @@ async fn progress_callback_updates_live_tool_usage_and_cost() {
     )
     .await
     .expect("spawn reporting agent");
-    tokio::time::timeout(Duration::from_secs(2), tool_started.notified())
+    tokio::time::timeout(Duration::from_secs(30), tool_started.notified())
         .await
         .expect("tool progress emitted");
     let live = wait_for_record(

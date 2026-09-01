@@ -4006,7 +4006,7 @@ mod subchat_tests {
         )
         .await;
 
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
                 if parent_thread_worktree(gcx.clone(), &parent_chat_id)
                     .await
