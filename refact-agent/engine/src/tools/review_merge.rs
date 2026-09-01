@@ -12,6 +12,12 @@ const MAX_EVIDENCE_PER_FINDING: usize = 8;
 const NEAR_RANGE_LINES: u32 = 5;
 const HOT_CHURN_PERCENTILE: f64 = 0.85;
 const HOT_FAN_IN: usize = 8;
+/// Two claims about the same file collapse when this much of their significant
+/// vocabulary overlaps, even from different categories and distant line regions.
+const CLAIM_SIMILARITY_THRESHOLD: f64 = 0.5;
+/// Marker recording a line range folded into a survivor, so the rendered finding can
+/// still list every place the same claim was reported.
+pub(crate) const DEDUP_LOCATION_PREFIX: &str = "deduped_at:";
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FileRiskFacts {
     pub churn_percentile: f64,
@@ -135,8 +141,49 @@ fn ranges_are_near(left: &ReviewFinding, right: &ReviewFinding) -> bool {
         && right.line1 <= left.line2.saturating_add(NEAR_RANGE_LINES)
 }
 
+fn same_file(left: &str, right: &str) -> bool {
+    let left = normalize_path(left);
+    let right = normalize_path(right);
+    left == right || left.ends_with(&format!("/{right}")) || right.ends_with(&format!("/{left}"))
+}
+
+const CLAIM_STOPWORDS: &[&str] = &[
+    "the", "this", "that", "these", "those", "and", "but", "for", "not", "are", "was", "were",
+    "with", "from", "into", "when", "which", "while", "have", "has", "had", "its", "it's", "can",
+    "will", "should", "would", "may", "might", "does", "did", "here", "there", "than", "then",
+    "also", "only", "any", "all", "some", "because", "code", "issue", "problem", "bug",
+];
+
+fn significant_tokens(claim: &str) -> std::collections::BTreeSet<String> {
+    claim
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .map(|token| token.to_ascii_lowercase())
+        .filter(|token| token.len() > 2 && !CLAIM_STOPWORDS.contains(&token.as_str()))
+        .collect()
+}
+
+/// Same defect described twice by different agents rarely lands on the same line
+/// region or category, so exact-category plus +/-5 lines let one bug be reported many
+/// times. Overlapping significant vocabulary catches those restatements.
+fn claims_are_equivalent(left: &str, right: &str) -> bool {
+    let left = significant_tokens(left);
+    let right = significant_tokens(right);
+    let overlap = left.intersection(&right).count();
+    if overlap < 2 {
+        return false;
+    }
+    let smaller = left.len().min(right.len());
+    smaller > 0 && (overlap as f64 / smaller as f64) >= CLAIM_SIMILARITY_THRESHOLD
+}
+
 fn are_duplicates(left: &ReviewFinding, right: &ReviewFinding) -> bool {
-    left.file == right.file && left.category == right.category && ranges_are_near(left, right)
+    if !same_file(&left.file, &right.file) {
+        return false;
+    }
+    if left.category == right.category && ranges_are_near(left, right) {
+        return true;
+    }
+    claims_are_equivalent(&left.claim, &right.claim)
 }
 
 fn has_execution_evidence(finding: &ReviewFinding) -> bool {
@@ -240,6 +287,21 @@ fn merge_clusters(findings: Vec<ReviewFinding>, enrichment: &RiskEnrichment) -> 
             let marker = format!("deduped_from:{}", member.id);
             if !survivor.checks_performed.contains(&marker) {
                 survivor.checks_performed.push(marker);
+            }
+            if member.line1 < survivor.line1 || member.line2 > survivor.line2 {
+                let location = format!(
+                    "{DEDUP_LOCATION_PREFIX}{}:{}-{}",
+                    member.file, member.line1, member.line2
+                );
+                if !survivor.checks_performed.contains(&location) {
+                    survivor.checks_performed.push(location);
+                }
+            }
+            if survivor.impact.is_none() {
+                survivor.impact = member.impact.clone();
+            }
+            if survivor.remediation.is_none() {
+                survivor.remediation = member.remediation.clone();
             }
         }
 
@@ -384,6 +446,7 @@ mod tests {
                 files_reviewed: vec!["src/lib.rs".to_string()],
                 focus: None,
                 diff_base: None,
+                expansion: None,
             },
             findings,
             checks_performed: vec![],

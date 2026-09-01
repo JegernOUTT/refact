@@ -738,6 +738,7 @@ mod tests {
                 files_reviewed: vec!["src/lib.rs".to_string()],
                 focus: None,
                 diff_base: None,
+                expansion: None,
             },
             findings: vec![
                 finding(

@@ -275,6 +275,9 @@ pub struct ReviewSwarmConfig {
     pub max_parallel: usize,
     pub idle_timeout_secs: u64,
     pub exec_idle_timeout_secs: u64,
+    /// Whole-review wall clock. Waves that exceed it return the agents that finished
+    /// instead of blocking on the stragglers, and the report says it is degraded.
+    pub review_deadline_secs: u64,
     pub static_enrichment_prompt: Option<String>,
     pub gather: GatherSection,
     pub verifier: VerifierSection,
@@ -300,6 +303,7 @@ impl Default for ReviewSwarmConfig {
             max_parallel: 10,
             idle_timeout_secs: 240,
             exec_idle_timeout_secs: 1800,
+            review_deadline_secs: 2700,
             static_enrichment_prompt: None,
             gather: Default::default(),
             verifier: Default::default(),
@@ -522,6 +526,7 @@ mod tests {
         assert_eq!(cfg.gather.max_files, 60);
         assert_eq!(cfg.idle_timeout_secs, 240);
         assert_eq!(cfg.exec_idle_timeout_secs, 1800);
+        assert_eq!(cfg.review_deadline_secs, 2700);
         assert!(cfg.static_enrichment_prompt.is_none());
         assert!(cfg.s1_security.agent.enabled);
         assert_eq!(cfg.s1_security.agent.model_slot, ModelSlot::Light);

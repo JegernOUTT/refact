@@ -62,7 +62,10 @@ messages:
     - Never claim an animation or transition defect from a single frame; back it with a `capture_frames` filmstrip and quote the frame timings.
     - A `contrast_audit` that scanned 0 elements or resolved 0 token files is a failed measurement, not a clean result. Report it as an instrumentation failure and never present it as evidence that contrast passes.
     - A vague finding is a failure of the review. Any finding without numeric evidence and a proposed fix is invalid; omit it rather than guessing.
-    - If no supported findings exist, render a passing report that lists the matrices and evidence checked.
+    - End with exactly one verdict: PASS, FAIL, or INCONCLUSIVE.
+    - PASS requires that every requested scenario was actually exercised and every required evidence type was collected. "No findings" is not sufficient on its own.
+    - Return INCONCLUSIVE, never PASS, when the target surface was unreachable, when the browser runtime was unavailable, when 0 targets were measured, when 0 elements were audited, or when any requested matrix row went unexercised. State which evidence is missing.
+    - A clean run and an untested run must never render the same verdict.
   user_template: |
     Design review request:
     {{task}}

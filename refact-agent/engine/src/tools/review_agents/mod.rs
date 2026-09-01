@@ -166,7 +166,7 @@ impl AgentOutcome {
     ) -> Self {
         let mut outcome = Self::base(agent, AgentRunStatus::Ran, None);
         outcome.run.model = model;
-        outcome.run.candidates = candidates;
+        outcome.run.candidates = candidates.max(findings.len());
         outcome.run.survived = findings.len();
         outcome.run.duration_ms = now_ms().saturating_sub(started_ms);
         outcome.findings = findings;
@@ -245,25 +245,52 @@ pub(crate) fn monitor_ctx(
     (monitored, activity, forwarder)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn watched(
     label: String,
     semaphore: Arc<Semaphore>,
     idle_timeout_secs: u64,
+    deadline: Option<tokio::time::Instant>,
     activity: Arc<AtomicU64>,
     forwarder: tokio::task::JoinHandle<()>,
     idle_fallback: Option<AgentOutcome>,
     fut: BoxedOutcome,
 ) -> BoxedOutcome {
-    watched_with_params(
-        label,
-        semaphore,
-        idle_timeout_secs.max(MIN_IDLE_TIMEOUT_SECS) * 1000,
-        WATCHDOG_POLL_SECS * 1000,
-        activity,
-        forwarder,
-        idle_fallback,
-        fut,
+    deadlined(
+        label.clone(),
+        deadline,
+        watched_with_params(
+            label,
+            semaphore,
+            idle_timeout_secs.max(MIN_IDLE_TIMEOUT_SECS) * 1000,
+            WATCHDOG_POLL_SECS * 1000,
+            activity,
+            forwarder,
+            idle_fallback,
+            fut,
+        ),
     )
+}
+
+/// A whole-review wall clock: without it a single stuck agent blocks `join_all` and the
+/// tool returns nothing at all instead of the findings the other agents produced.
+pub(crate) fn deadlined(
+    label: String,
+    deadline: Option<tokio::time::Instant>,
+    fut: BoxedOutcome,
+) -> BoxedOutcome {
+    let Some(deadline) = deadline else {
+        return fut;
+    };
+    Box::pin(async move {
+        let started = now_ms();
+        tokio::select! {
+            outcome = fut => outcome,
+            _ = tokio::time::sleep_until(deadline) => {
+                AgentOutcome::failed(&label, "review_deadline_exceeded", started)
+            }
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -393,6 +420,9 @@ pub async fn run_review_swarm(
 ) -> SwarmResult {
     let mut collector = Collector::new();
     let swarm = &cfg.swarm;
+    let deadline = (swarm.review_deadline_secs > 0).then(|| {
+        tokio::time::Instant::now() + Duration::from_secs(swarm.review_deadline_secs.max(60))
+    });
 
     let (s6, s1, s2, s3, s4, s5) = tokio::join!(
         async {
@@ -526,6 +556,7 @@ pub async fn run_review_swarm(
             label,
             semaphore.clone(),
             swarm.idle_timeout_secs,
+            deadline,
             activity,
             forwarder,
             Some(idle_fallback),
@@ -600,6 +631,7 @@ pub async fn run_review_swarm(
                 label,
                 semaphore.clone(),
                 swarm.idle_timeout_secs,
+                deadline,
                 activity,
                 forwarder,
                 None,
@@ -658,6 +690,7 @@ pub async fn run_review_swarm(
             label,
             semaphore.clone(),
             swarm.idle_timeout_secs,
+            deadline,
             activity,
             forwarder,
             None,
@@ -715,6 +748,7 @@ pub async fn run_review_swarm(
                         label,
                         semaphore.clone(),
                         swarm.exec_idle_timeout_secs,
+                        deadline,
                         activity,
                         forwarder,
                         None,
@@ -769,6 +803,7 @@ pub async fn run_review_swarm(
                         label,
                         semaphore.clone(),
                         swarm.exec_idle_timeout_secs,
+                        deadline,
                         activity,
                         forwarder,
                         None,

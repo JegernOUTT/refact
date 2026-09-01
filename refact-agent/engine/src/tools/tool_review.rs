@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -16,12 +16,12 @@ use crate::tools::review_agents::config::{
 };
 use crate::tools::review_agents::{run_review_swarm, AgentCtx, SwarmResult};
 use crate::tools::review_evidence::{apply_command_evidence, collect_mechanical_results};
-use crate::tools::review_merge::{finalize_review_report, stable_finding_id};
+use crate::tools::review_merge::{finalize_review_report, stable_finding_id, DEDUP_LOCATION_PREFIX};
 use crate::tools::review_scope::{build_review_scope_with_max_files, ReviewScope};
 use crate::tools::review_types::{
-    AgentRunReport, AgentRunStatus, MechanicalResult, RankTier, ReviewDepth, ReviewFinding,
-    ReviewPipelineMetadata, ReviewReport, ReviewScopeSummary, ReviewSeverity, ReviewStage,
-    ReviewStageStatus, VerificationStatus,
+    evidence_kinds, AgentRunReport, AgentRunStatus, MechanicalResult, RankTier, ReviewDepth,
+    ReviewFinding, ReviewPipelineMetadata, ReviewReport, ReviewScopeSummary, ReviewSeverity,
+    ReviewStage, ReviewStageStatus, ScopeExpansion, ScopeMode, VerificationStatus,
 };
 use crate::tools::review_verify::verification_status_label;
 use crate::tools::subagent_phases::{
@@ -108,12 +108,22 @@ fn apply_refutations(findings: &mut [ReviewFinding], refuted: &[String]) -> usiz
     applied
 }
 
+fn count_out_of_scope_rejections(checks: &[String]) -> usize {
+    checks
+        .iter()
+        .filter(|check| check.ends_with(":file_not_in_scope"))
+        .count()
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_review_pipeline(
     gcx: Arc<GlobalContext>,
     ccx: Arc<AMutex<AtCommandsContext>>,
     scope: ReviewScope,
     cfg: Arc<ReviewAgentsConfig>,
     depth: ReviewDepth,
+    scope_mode: ScopeMode,
+    requested_files: usize,
     external_messages: Vec<ChatMessage>,
     tool_call_id: String,
     metering: &mut serde_json::Map<String, Value>,
@@ -148,10 +158,17 @@ async fn run_review_pipeline(
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
+    let reviewed_files = filenames.len();
     let scope_summary = ReviewScopeSummary {
         files_reviewed: filenames,
         focus: scope.focus.clone(),
         diff_base: scope.diff_base.clone(),
+        expansion: Some(ScopeExpansion {
+            mode: scope_mode.as_str().to_string(),
+            requested_files,
+            reviewed_files,
+            rejected_out_of_scope: 0,
+        }),
     };
 
     if let Some(result) = mechanical.as_ref() {
@@ -177,6 +194,11 @@ async fn run_review_pipeline(
     .await;
 
     crate::tools::review_verify::merge_metering(metering, swarm.metering);
+
+    let mut scope_summary = scope_summary;
+    if let Some(expansion) = scope_summary.expansion.as_mut() {
+        expansion.rejected_out_of_scope = count_out_of_scope_rejections(&swarm.checks);
+    }
 
     let mut report = ReviewReport {
         scope: scope_summary,
@@ -238,28 +260,96 @@ fn finding_location(finding: &ReviewFinding) -> String {
     format!("{}:{}-{}", finding.file, finding.line1, finding.line2)
 }
 
+/// Extra line ranges folded into a survivor by deduplication, rendered next to the
+/// primary location so a collapsed cluster still lists every place it was seen.
+fn extra_line_references(finding: &ReviewFinding) -> Vec<String> {
+    finding
+        .checks_performed
+        .iter()
+        .filter_map(|check| check.strip_prefix(DEDUP_LOCATION_PREFIX))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Evidence strength shown next to each finding. Nothing here is executed unless the
+/// finding actually carries execution or command output.
+fn evidence_kind_label(finding: &ReviewFinding) -> &'static str {
+    let has = |kind: &str| finding.evidence.iter().any(|item| item.kind == kind);
+    if has(evidence_kinds::EXECUTION_OUTPUT) || has(evidence_kinds::MUTATION_PROBE) {
+        return "execution-output";
+    }
+    if has(evidence_kinds::COMMAND_OUTPUT) {
+        return "command-output";
+    }
+    if has(evidence_kinds::CONSOLE_LOG) || has(evidence_kinds::SCREENSHOT) {
+        return "browser-capture";
+    }
+    if has(evidence_kinds::DIFF_HUNK) {
+        return "diff-hunk";
+    }
+    if has(evidence_kinds::EXCERPT) || has(evidence_kinds::SYMBOL) {
+        return "source-excerpt";
+    }
+    if has(evidence_kinds::STATIC_FACT) || has(evidence_kinds::CHECK) {
+        return "static-fact";
+    }
+    "no-evidence"
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct TierCounts {
+    pub execution_reproduced: usize,
+    pub cross_model_corroborated: usize,
+    pub model_verified: usize,
+    pub needs_human_validation: usize,
+    pub unreviewed: usize,
+    pub downgraded: usize,
+}
+
+impl TierCounts {
+    pub(crate) fn total(&self) -> usize {
+        self.execution_reproduced
+            + self.cross_model_corroborated
+            + self.model_verified
+            + self.needs_human_validation
+            + self.unreviewed
+            + self.downgraded
+    }
+}
+
+/// Counts are derived from the exact finding list that gets rendered, so the header
+/// can never disagree with the body.
+pub(crate) fn tier_counts(findings: &[ReviewFinding]) -> TierCounts {
+    let mut counts = TierCounts::default();
+    for finding in findings {
+        match finding.rank_tier {
+            RankTier::ExecutionReproduced => counts.execution_reproduced += 1,
+            RankTier::Corroborated => counts.cross_model_corroborated += 1,
+            RankTier::Verified => counts.model_verified += 1,
+            RankTier::NeedsHumanValidation => counts.needs_human_validation += 1,
+            RankTier::Unverified => counts.unreviewed += 1,
+            RankTier::Downgraded => counts.downgraded += 1,
+        }
+    }
+    counts
+}
+
 fn review_verdict(report: &ReviewReport) -> String {
     if report.findings.is_empty() {
-        return "No verified findings.".to_string();
+        return "No findings retained.".to_string();
     }
-    let reproduced = report
-        .findings
-        .iter()
-        .filter(|finding| finding.rank_tier == RankTier::ExecutionReproduced)
-        .count();
-    let corroborated = report
-        .findings
-        .iter()
-        .filter(|finding| finding.rank_tier == RankTier::Corroborated)
-        .count();
-    let verified = report
-        .findings
-        .iter()
-        .filter(|finding| finding.rank_tier == RankTier::Verified)
-        .count();
+    let counts = tier_counts(&report.findings);
     format!(
-        "Review retained {} finding(s): {reproduced} execution-reproduced, {corroborated} corroborated, {verified} verified.",
-        report.findings.len()
+        "Review retained {} finding(s): {} execution-reproduced, {} cross-model-corroborated, {} model-verified, {} needs-human-validation, {} unreviewed, {} downgraded.",
+        counts.total(),
+        counts.execution_reproduced,
+        counts.cross_model_corroborated,
+        counts.model_verified,
+        counts.needs_human_validation,
+        counts.unreviewed,
+        counts.downgraded,
     )
 }
 
@@ -271,30 +361,59 @@ fn agent_status_label(status: &AgentRunStatus) -> &'static str {
     }
 }
 
-fn render_agent_coverage(agents: &[AgentRunReport]) -> String {
-    if agents.is_empty() {
+pub(crate) fn agent_is_degraded(agent: &AgentRunReport) -> bool {
+    if agent.status == AgentRunStatus::Failed {
+        return true;
+    }
+    agent
+        .reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("idle_timeout") || reason.contains("review_deadline"))
+}
+
+/// A degraded review must announce that it is degraded: timed-out and failed agents
+/// go into the summary, not into a coverage table nobody reads.
+fn render_degraded_agents(agents: &[AgentRunReport]) -> String {
+    let degraded = agents
+        .iter()
+        .filter(|agent| agent_is_degraded(agent))
+        .collect::<Vec<_>>();
+    if degraded.is_empty() {
         return String::new();
     }
-    let mut output = String::from(
-        "\n\n## Agent coverage\n\n| agent | model | status | reason | candidates | survived | steps | ms |\n|---|---|---|---|---|---|---|---|",
+    let mut output = format!(
+        "\n\n## Degraded coverage\n\nDEGRADED REVIEW: {} agent(s) did not complete; this report is partial and absence of findings is not evidence of absence.",
+        degraded.len()
     );
-    for row in agents {
+    for agent in degraded {
         output.push_str(&format!(
-            "\n| {} | {} | {} | {} | {} | {} | {} | {} |",
-            markdown_cell(&row.agent),
-            markdown_cell(row.model.as_deref().unwrap_or("—")),
-            agent_status_label(&row.status),
-            markdown_cell(row.reason.as_deref().unwrap_or("—")),
-            row.candidates,
-            row.survived,
-            row.steps.map(|s| s.to_string()).unwrap_or("—".to_string()),
-            row.duration_ms,
+            "\n- {} ({}): {}",
+            markdown_cell(&agent.agent),
+            agent_status_label(&agent.status),
+            markdown_cell(agent.reason.as_deref().unwrap_or("no reason recorded")),
         ));
     }
     output
 }
 
-fn render_review_markdown(report: &ReviewReport) -> Result<String, serde_json::Error> {
+fn render_scope_expansion(scope: &ReviewScopeSummary) -> String {
+    let Some(expansion) = scope.expansion.as_ref() else {
+        return String::new();
+    };
+    let mut output = format!(
+        "\n- Scope mode: {} (scope widened from {} requested to {} files)",
+        expansion.mode, expansion.requested_files, expansion.reviewed_files
+    );
+    if expansion.rejected_out_of_scope > 0 {
+        output.push_str(&format!(
+            "\n- Rejected out of scope: {} finding(s)",
+            expansion.rejected_out_of_scope
+        ));
+    }
+    output
+}
+
+fn render_review_markdown(report: &ReviewReport) -> String {
     let focus = report.scope.focus.as_deref().unwrap_or("not specified");
     let diff_base = report.scope.diff_base.as_deref().unwrap_or("not specified");
     let depth = report.pipeline.depth.as_deref().unwrap_or("normal");
@@ -304,13 +423,15 @@ fn render_review_markdown(report: &ReviewReport) -> Result<String, serde_json::E
         review_verdict(report)
     };
     let mut output = format!(
-        "## Review summary\n\n- Depth: {}\n- Scope: {} files\n- Focus: {}\n- Diff base: {}\n\n{}",
+        "## Review summary\n\n- Depth: {}\n- Scope: {} files\n- Focus: {}\n- Diff base: {}",
         depth,
         report.scope.files_reviewed.len(),
         markdown_cell(focus),
         markdown_cell(diff_base),
-        verdict
     );
+    output.push_str(&render_scope_expansion(&report.scope));
+    output.push_str("\n\n");
+    output.push_str(&verdict);
     if let Some(intent) = report.assumed_intent.as_deref() {
         output.push_str(&format!("\n\nAssumed intent: {}", markdown_cell(intent)));
     }
@@ -336,17 +457,25 @@ fn render_review_markdown(report: &ReviewReport) -> Result<String, serde_json::E
         if findings.is_empty() {
             continue;
         }
-        output.push_str(&format!("\n\n### {}", tier.label()));
+        output.push_str(&format!("\n\n### {} ({})", tier.label(), findings.len()));
         for finding in findings {
             output.push_str(&format!(
-                "\n\n- [{}] {} — {} ({}, {}, {:.2})",
+                "\n\n- [{}] {} — {} ({}, {}, evidence: {}, {:.2})",
                 finding.id,
                 markdown_cell(&finding_location(finding)),
                 markdown_cell(&finding.claim),
                 severity_label(&finding.severity),
                 verification_status_label(&finding.verification_status),
+                evidence_kind_label(finding),
                 finding.confidence,
             ));
+            let extra_lines = extra_line_references(finding);
+            if !extra_lines.is_empty() {
+                output.push_str(&format!(
+                    "\n  - Also at: {}",
+                    markdown_cell(&extra_lines.join(", "))
+                ));
+            }
             if !finding.sources.is_empty() {
                 output.push_str(&format!(
                     "\n  - Sources: {}",
@@ -368,25 +497,28 @@ fn render_review_markdown(report: &ReviewReport) -> Result<String, serde_json::E
         output.push_str("\n\nNo findings.");
     }
 
-    output.push_str(&render_agent_coverage(&report.pipeline.agents));
-
-    output.push_str("\n\n## Checks performed");
-    if report.checks_performed.is_empty() {
-        output.push_str("\n\n- None recorded");
-    } else {
-        for check in &report.checks_performed {
-            output.push_str(&format!("\n\n- {}", markdown_cell(check)));
-        }
-    }
-
-    output.push_str("\n\n```json\n");
-    output.push_str(&serde_json::to_string_pretty(report)?);
-    output.push_str("\n```");
-    Ok(output)
+    output.push_str(&render_degraded_agents(&report.pipeline.agents));
+    output.push_str(
+        "\n\nPer-agent coverage, checks performed, and the machine-readable `ReviewReport` are attached to this tool result's metadata; they are not repeated here.",
+    );
+    output
 }
 
-fn gather_user_instruction() -> &'static str {
-    "Based on the conversation above, identify every file relevant to the review. Cast a wide net \u{2014} more related files is better."
+fn gather_user_instruction(mode: ScopeMode) -> &'static str {
+    match mode {
+        ScopeMode::Strict => "Based on the conversation above, identify the files relevant to the review. Stay inside the requested paths and add only files a concrete dependency edge forces you to read.",
+        ScopeMode::Adjacent => "Based on the conversation above, identify every file relevant to the review. Start from the requested paths and add their direct callers, callees, tests, and configuration.",
+        ScopeMode::Broad => "Based on the conversation above, identify every file relevant to the review. Cast a wide net \u{2014} more related files is better; anything you name will be in scope for findings.",
+    }
+}
+
+fn scope_max_files(mode: ScopeMode, configured: usize, requested: usize) -> usize {
+    let configured = configured.max(1);
+    match mode {
+        ScopeMode::Strict => requested.max(1).min(configured),
+        ScopeMode::Adjacent => configured.min(requested.saturating_mul(4).max(8)),
+        ScopeMode::Broad => configured,
+    }
 }
 
 #[async_trait]
@@ -401,7 +533,7 @@ impl Tool for ToolCodeReview {
             },
             experimental: false,
             allow_parallel: true,
-            description: "Perform a thorough multi-agent code review. Optionally pass `what_to_check` (focus/scope), `files` (initial guess of relevant paths \u{2014} the reviewer starts there and finds more), and `depth` (normal = static analyzer agents with codebase-search enrichment, cross-model reviewer ensembles, repo-context and research agents; deep = + test-execution and browser agents). The Markdown result ends with a fenced JSON block containing the full machine-parseable ReviewReport.".to_string(),
+            description: "Perform a thorough multi-agent code review. Optionally pass `what_to_check` (focus/scope), `files` (initial guess of relevant paths \u{2014} the reviewer starts there and finds more), `depth` (normal = static analyzer agents with codebase-search enrichment, cross-model reviewer ensembles, repo-context and research agents; deep = + test-execution and browser agents), and `scope_mode` (how far outside `files` the reviewer may wander). The Markdown result reports findings by evidence tier; the full machine-parseable ReviewReport is attached to the tool result metadata.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -418,6 +550,11 @@ impl Tool for ToolCodeReview {
                         "type": "string",
                         "enum": ["normal", "deep"],
                         "description": "Optional. Which agent families run. Defaults to the configured default depth (normal); deep adds test-execution and browser agents."
+                    },
+                    "scope_mode": {
+                        "type": "string",
+                        "enum": ["strict", "adjacent", "broad"],
+                        "description": "Optional. How far outside `files` the reviewer may wander: strict stays inside the requested paths, adjacent adds direct callers/callees/tests, broad (default) casts a wide net. Every review reports how much the scope widened."
                     }
                 },
                 "required": [],
@@ -448,6 +585,14 @@ impl Tool for ToolCodeReview {
                     .ok_or_else(|| format!("invalid depth '{value}', expected: normal, deep"))?,
             ),
             _ => None,
+        };
+        let scope_mode = match args.get("scope_mode").and_then(Value::as_str) {
+            Some(value) if !value.trim().is_empty() => {
+                ScopeMode::parse(value).ok_or_else(|| {
+                    format!("invalid scope_mode '{value}', expected: strict, adjacent, broad")
+                })?
+            }
+            _ => ScopeMode::default(),
         };
         let seed_files: Vec<String> = args
             .get("files")
@@ -494,11 +639,14 @@ impl Tool for ToolCodeReview {
             .filter(|p| !p.trim().is_empty())
             .ok_or("gather system_prompt not configured for review_agents")?;
         let gather_model = slot_model_id(gcx.clone(), gather_section.model_slot).await?;
+        let requested_files = requested_seed_files.len();
+        let max_files =
+            scope_max_files(scope_mode, gather_section.max_files.max(1), requested_files);
         let gather_params = GatherFilesParams {
             default_subagent_id: "review_gather",
             title: "Review: Gathering Files",
             default_system_prompt: "",
-            user_instruction: gather_user_instruction(),
+            user_instruction: gather_user_instruction(scope_mode),
             focus: what_to_check.clone(),
             seed_files,
         };
@@ -511,7 +659,7 @@ impl Tool for ToolCodeReview {
                 .unwrap_or_else(|| DEFAULT_GATHER_RETRY_PROMPT.to_string()),
             tools: gather_section.tools.clone(),
             max_steps: gather_section.max_steps.max(1),
-            max_files: gather_section.max_files.max(1),
+            max_files,
             runner: GatherRunner::Explicit {
                 spec: gather_spec(gather_section, gather_model),
             },
@@ -533,7 +681,7 @@ impl Tool for ToolCodeReview {
             requested_seed_files,
             what_to_check,
             &cfg.base_params,
-            gather_section.max_files.max(1),
+            max_files,
         )
         .await;
 
@@ -551,13 +699,19 @@ impl Tool for ToolCodeReview {
             scope,
             cfg.clone(),
             depth,
+            scope_mode,
+            requested_files,
             external_messages,
             tool_call_id.clone(),
             &mut metering,
         )
         .await?;
-        let final_message = render_review_markdown(&report)
-            .map_err(|error| format!("failed to serialize code review report: {error}"))?;
+        let final_message = render_review_markdown(&report);
+        metering.insert(
+            "review_report".to_string(),
+            serde_json::to_value(&report)
+                .map_err(|error| format!("failed to serialize code review report: {error}"))?,
+        );
         let (review_refs, review_refs_truncated) = review_refs(
             &report,
             &crate::files_correction::get_project_dirs(gcx.clone()).await,
@@ -645,6 +799,7 @@ mod tests {
             files_reviewed: vec!["src/lib.rs".to_string()],
             focus: None,
             diff_base: None,
+            expansion: None,
         }
     }
 
@@ -728,7 +883,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_review_render_markdown_groups_by_tier_and_includes_coverage() {
+    fn tool_review_render_markdown_groups_by_tier_and_points_at_metadata() {
         let mut finding = sample_finding();
         finding.rank_tier = RankTier::Corroborated;
         finding.sources = vec!["l1_diff@chat".to_string(), "s1_security".to_string()];
@@ -756,21 +911,26 @@ mod tests {
             },
         };
 
-        let markdown = render_review_markdown(&report).unwrap();
+        let markdown = render_review_markdown(&report);
 
         assert!(markdown.starts_with("## Review summary"));
         assert!(markdown.contains("- Depth: normal"));
         assert!(markdown.contains("Assumed intent: Fix the parser."));
-        assert!(markdown.contains("## Findings\n\n### corroborated"));
+        assert!(markdown.contains("## Findings\n\n### corroborated (1)"));
         assert!(markdown.contains(
-            "[rf-1234abcd] src/lib.rs:4-6 — The branch \\| drops errors. (high, unverified, 0.80)"
+            "[rf-1234abcd] src/lib.rs:4-6 — The branch \\| drops errors. (high, unreviewed, evidence: source-excerpt, 0.80)"
         ));
         assert!(markdown.contains("Sources: l1_diff@chat, s1_security"));
-        assert!(markdown.contains("## Agent coverage"));
-        assert!(markdown.contains("| l1_diff@chat | some-model | ran | — | 3 | 1 | 1 | 900 |"));
         assert!(markdown.contains("Impact: Errors are hidden."));
         assert!(markdown.contains("Remediation: Return the error."));
-        assert!(markdown.contains("## Checks performed\n\n- excerpt_ok"));
+        // Per-agent coverage, checks performed and the machine-readable report moved out
+        // of the model-visible markdown and into the tool result metadata.
+        assert!(!markdown.contains("## Agent coverage"));
+        assert!(!markdown.contains("## Checks performed"));
+        assert!(!markdown.contains("```json"));
+        assert!(markdown.contains(
+            "the machine-readable `ReviewReport` are attached to this tool result's metadata"
+        ));
     }
 
     #[test]
@@ -791,14 +951,19 @@ mod tests {
             &crate::tools::review_merge::RiskEnrichment::default(),
         );
 
-        let markdown = render_review_markdown(&report).unwrap();
+        let markdown = render_review_markdown(&report);
 
         assert!(markdown.contains("- Depth: normal"));
         assert!(markdown.contains("- Scope: 1 files"));
         assert!(markdown.contains("Reviewed 1 file. Checks performed: verifier_rejected:2."));
-        let json_start = markdown.rfind("```json\n").unwrap() + "```json\n".len();
-        let json_end = markdown.rfind("\n```").unwrap();
-        let parsed: ReviewReport = serde_json::from_str(&markdown[json_start..json_end]).unwrap();
+        assert!(markdown.contains("No findings."));
+        assert!(!markdown.contains("```json"));
+
+        // The machine-readable report is no longer appended to the markdown; it is
+        // serialized into `metering["review_report"]`, so the roundtrip is asserted
+        // against that same serialization.
+        let metering_value = serde_json::to_value(&report).unwrap();
+        let parsed: ReviewReport = serde_json::from_value(metering_value).unwrap();
         assert_eq!(parsed, report);
     }
 

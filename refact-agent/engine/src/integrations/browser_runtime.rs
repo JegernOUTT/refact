@@ -39,15 +39,135 @@ pub async fn register_browser_runtime(
     runtime_id
 }
 
+pub const PROCESS_TERM_GRACE: Duration = Duration::from_millis(1500);
+
+pub fn pid_is_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+fn terminate_process(pid: u32) {
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        let deadline = std::time::Instant::now() + PROCESS_TERM_GRACE;
+        while std::time::Instant::now() < deadline {
+            if !pid_is_alive(pid) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
+    }
+}
+
+fn process_cmdline(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        Some(
+            raw.split(|byte| *byte == 0)
+                .map(String::from_utf8_lossy)
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+fn process_owns_profile(pid: u32, profile_dir: &Path) -> bool {
+    let Some(cmdline) = process_cmdline(pid) else {
+        return false;
+    };
+    cmdline.contains(&*profile_dir.to_string_lossy())
+}
+
+fn shutdown_runtime_process(pid: Option<u32>, profile_dir: &Path, delete_profile: bool) {
+    if let Some(pid) = pid.filter(|pid| pid_is_alive(*pid)) {
+        terminate_process(pid);
+    }
+    if let Some(lock_pid) = profile_lock_is_live(profile_dir) {
+        terminate_process(lock_pid);
+    }
+    if !delete_profile {
+        return;
+    }
+    if profile_lock_is_live(profile_dir).is_some() {
+        warn!(
+            "Not deleting browser profile {}: it is still locked by a live process",
+            profile_dir.display()
+        );
+        return;
+    }
+    if let Err(error) = std::fs::remove_dir_all(profile_dir) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            warn!(
+                "Failed to delete browser profile {}: {}",
+                profile_dir.display(),
+                error
+            );
+        }
+    }
+}
+
+async fn take_browser_runtime(
+    app: &crate::app_state::AppState,
+    runtime_id: &str,
+    delete_profile: bool,
+) -> Option<Arc<AMutex<BrowserRuntime>>> {
+    let removed = app
+        .integrations
+        .browser_runtimes
+        .lock()
+        .await
+        .remove(runtime_id)?;
+    let (pid, profile_dir) = {
+        let rt = removed.lock().await;
+        (rt.browser.get_process_id(), rt.profile_dir.clone())
+    };
+    let runtime_id = runtime_id.to_string();
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        shutdown_runtime_process(pid, &profile_dir, delete_profile)
+    })
+    .await
+    {
+        warn!("Browser shutdown task for runtime {runtime_id} failed: {error}");
+    }
+    Some(removed)
+}
+
 pub async fn remove_browser_runtime(
     app: crate::app_state::AppState,
     runtime_id: &str,
 ) -> Option<Arc<AMutex<BrowserRuntime>>> {
-    app.integrations
-        .browser_runtimes
-        .lock()
-        .await
-        .remove(runtime_id)
+    take_browser_runtime(&app, runtime_id, false).await
+}
+
+pub async fn discard_browser_runtime(
+    app: crate::app_state::AppState,
+    runtime_id: &str,
+) -> Option<Arc<AMutex<BrowserRuntime>>> {
+    take_browser_runtime(&app, runtime_id, true).await
 }
 
 pub const RUNTIME_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -80,39 +200,200 @@ fn profile_lock_pid(profile_dir: &Path) -> Option<u32> {
     pid.parse::<u32>().ok()
 }
 
-fn profile_lock_is_live(profile_dir: &Path) -> Option<u32> {
+pub fn profile_lock_is_live(profile_dir: &Path) -> Option<u32> {
     let pid = profile_lock_pid(profile_dir)?;
+    if pid == 0 || !pid_is_alive(pid) {
+        return None;
+    }
+    process_owns_profile(pid, profile_dir).then_some(pid)
+}
+
+pub const STALE_PROFILE_MIN_AGE: Duration = Duration::from_secs(600);
+pub const STALE_PROFILE_SWEEP_LIMIT: usize = 256;
+
+fn live_chrome_profile_dirs() -> Option<Vec<String>> {
     #[cfg(target_os = "linux")]
     {
-        Path::new(&format!("/proc/{pid}")).exists().then_some(pid)
+        let mut dirs = Vec::new();
+        for entry in std::fs::read_dir("/proc").ok()? {
+            let Ok(entry) = entry else { continue };
+            let Some(pid) = entry
+                .file_name()
+                .to_string_lossy()
+                .parse::<u32>()
+                .ok()
+                .filter(|pid| *pid > 0)
+            else {
+                continue;
+            };
+            let Some(cmdline) = process_cmdline(pid) else {
+                continue;
+            };
+            for arg in cmdline.split_whitespace() {
+                if let Some(dir) = arg.strip_prefix("--user-data-dir=") {
+                    dirs.push(dir.to_string());
+                }
+            }
+        }
+        Some(dirs)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = pid;
         None
     }
 }
 
-fn describe_launch_failure(error: &str, profile_dir: &Path) -> String {
-    if !error.contains("no available ports") {
-        return error.to_string();
+pub fn sweep_stale_browser_profiles(cache_dir: &Path) -> usize {
+    let Some(live_dirs) = live_chrome_profile_dirs() else {
+        return 0;
+    };
+    let root = cache_dir.join("browser_profiles");
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        if removed >= STALE_PROFILE_SWEEP_LIMIT {
+            break;
+        }
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("subchat-") || !path.is_dir() {
+            continue;
+        }
+        let path_str = path.to_string_lossy().to_string();
+        if live_dirs.iter().any(|dir| dir == &path_str) {
+            continue;
+        }
+        if profile_lock_is_live(&path).is_some() {
+            continue;
+        }
+        let recently_used = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .map(|modified| {
+                modified
+                    .elapsed()
+                    .map(|age| age < STALE_PROFILE_MIN_AGE)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true);
+        if recently_used {
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {
+                removed += 1;
+                info!("Removed stale browser profile {}", path.display());
+            }
+            Err(error) => warn!(
+                "Failed to remove stale browser profile {}: {}",
+                path.display(),
+                error
+            ),
+        }
     }
+    removed
+}
+
+pub fn describe_launch_failure(error: &str, profile_dir: &Path) -> String {
     match profile_lock_is_live(profile_dir) {
         Some(pid) => format!(
-            "{error} (Chrome never reported a debugging URL: profile {} is still locked by \
-             live process {pid}; the previous browser did not exit)",
+            "{error} — the real blocker is that profile {} is still locked by live Chrome \
+             process {pid}; the previous browser never exited (any port-exhaustion wording \
+             comes from the Chrome launcher and is misleading)",
             profile_dir.display()
         ),
-        None => format!(
-            "{error} (Chrome never reported a debugging URL after 11 launch attempts; \
-             this usually means Chrome exited immediately rather than that ports are exhausted)"
+        None if error.contains("no available ports") => format!(
+            "{error} — the real blocker is that Chrome exited before reporting a debugging \
+             URL after the launcher retried; ports are not exhausted (profile {})",
+            profile_dir.display()
         ),
+        None => format!("{error} (profile {})", profile_dir.display()),
     }
 }
 
-pub async fn find_runtime_by_chat_id(
+#[derive(Debug, Clone, Default)]
+pub struct ChatRuntimeLookup {
+    pub chat_id: String,
+    pub root_chat_id: Option<String>,
+    pub background_agent_id: Option<String>,
+}
+
+impl ChatRuntimeLookup {
+    pub fn for_chat(chat_id: &str) -> Self {
+        Self {
+            chat_id: chat_id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn ordered_ids(&self) -> Vec<String> {
+        let mut ids = vec![self.chat_id.clone()];
+        for extra in [
+            self.root_chat_id.as_deref(),
+            self.background_agent_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !extra.is_empty() && !ids.iter().any(|id| id == extra) {
+                ids.push(extra.to_string());
+            }
+        }
+        ids
+    }
+
+    fn owned_by_ancestor(&self, owner: &str) -> bool {
+        self.ordered_ids().iter().any(|id| id == owner)
+            || (!owner.is_empty() && self.chat_id.starts_with(owner))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeOwner {
+    pub runtime_id: String,
+    pub attached_chat_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSelection {
+    pub runtime_id: String,
+    pub adopted: bool,
+}
+
+pub fn select_runtime_for_chat(
+    owners: &[RuntimeOwner],
+    lookup: &ChatRuntimeLookup,
+) -> Option<RuntimeSelection> {
+    for id in lookup.ordered_ids() {
+        if let Some(owner) = owners
+            .iter()
+            .find(|owner| owner.attached_chat_id.as_deref() == Some(id.as_str()))
+        {
+            return Some(RuntimeSelection {
+                runtime_id: owner.runtime_id.clone(),
+                adopted: id != lookup.chat_id,
+            });
+        }
+    }
+    let only = match owners {
+        [only] => only,
+        _ => return None,
+    };
+    let adoptable = match only.attached_chat_id.as_deref() {
+        None => true,
+        Some(owner) => owner.is_empty() || lookup.owned_by_ancestor(owner),
+    };
+    adoptable.then(|| RuntimeSelection {
+        runtime_id: only.runtime_id.clone(),
+        adopted: true,
+    })
+}
+
+pub async fn find_runtime_for_chat(
     app: crate::app_state::AppState,
-    chat_id: &str,
+    lookup: &ChatRuntimeLookup,
 ) -> Option<(String, Arc<AMutex<BrowserRuntime>>)> {
     let runtime_arcs: Vec<(String, Arc<AMutex<BrowserRuntime>>)> = {
         let browser_runtimes = app.integrations.browser_runtimes.clone();
@@ -122,13 +403,29 @@ pub async fn find_runtime_by_chat_id(
             .map(|(rid, arc)| (rid.clone(), arc.clone()))
             .collect()
     };
-    for (rid, arc) in runtime_arcs {
+    let mut owners = Vec::with_capacity(runtime_arcs.len());
+    for (rid, arc) in &runtime_arcs {
         let rt = arc.lock().await;
-        if rt.attached_chat_id.as_deref() == Some(chat_id) {
-            return Some((rid, arc.clone()));
-        }
+        owners.push(RuntimeOwner {
+            runtime_id: rid.clone(),
+            attached_chat_id: rt.attached_chat_id.clone(),
+        });
     }
-    None
+    let selection = select_runtime_for_chat(&owners, lookup)?;
+    let (rid, arc) = runtime_arcs
+        .into_iter()
+        .find(|(rid, _)| *rid == selection.runtime_id)?;
+    if selection.adopted {
+        arc.lock().await.reattach(&lookup.chat_id);
+    }
+    Some((rid, arc))
+}
+
+pub async fn find_runtime_by_chat_id(
+    app: crate::app_state::AppState,
+    chat_id: &str,
+) -> Option<(String, Arc<AMutex<BrowserRuntime>>)> {
+    find_runtime_for_chat(app, &ChatRuntimeLookup::for_chat(chat_id)).await
 }
 
 #[allow(dead_code)]
@@ -313,6 +610,12 @@ struct RuntimeHealth {
 }
 
 pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
+    let cache_dir = app.gcx.cache_dir.clone();
+    match tokio::task::spawn_blocking(move || sweep_stale_browser_profiles(&cache_dir)).await {
+        Ok(removed) if removed > 0 => info!("Swept {removed} stale browser profile dirs"),
+        Ok(_) => {}
+        Err(error) => warn!("Stale browser profile sweep failed: {error}"),
+    }
     loop {
         let monitor_interval = browser_settings::current().monitor_interval();
         let shutdown_flag = app.runtime.shutdown_flag.clone();
@@ -333,7 +636,7 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
             browser_runtimes.keys().cloned().collect()
         };
 
-        let mut to_remove = Vec::new();
+        let mut to_remove: Vec<(String, bool)> = Vec::new();
         let mut to_relaunch: Vec<RuntimeRecoveryPlan> = Vec::new();
         for rid in &runtime_ids {
             let runtime_arc = {
@@ -385,7 +688,7 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                     "BrowserRuntime {} idle timeout ({:?}) for chat {:?}",
                     rid, idle_timeout, chat_id
                 );
-                to_remove.push(rid.clone());
+                to_remove.push((rid.clone(), true));
                 continue;
             }
 
@@ -397,13 +700,17 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
                         profile_dir,
                         launch_options,
                     }),
-                    None => to_remove.push(rid.clone()),
+                    None => to_remove.push((rid.clone(), true)),
                 }
             }
         }
 
-        for rid in to_remove {
-            remove_browser_runtime(app.clone(), &rid).await;
+        for (rid, delete_profile) in to_remove {
+            if delete_profile {
+                discard_browser_runtime(app.clone(), &rid).await;
+            } else {
+                remove_browser_runtime(app.clone(), &rid).await;
+            }
         }
 
         for plan in to_relaunch {
@@ -462,7 +769,7 @@ mod tests {
         );
         assert!(monitor.contains("if !still_connected {"));
         assert!(monitor.contains("Some(chat_id) => to_relaunch.push(RuntimeRecoveryPlan {"));
-        assert!(monitor.contains("None => to_remove.push(rid.clone()),"));
+        assert!(monitor.contains("None => to_remove.push((rid.clone(), true)),"));
         assert!(monitor.contains("relaunch_runtime_for_chat("));
         assert!(
             monitor.contains("tokio::task::block_in_place(|| {"),
@@ -592,6 +899,168 @@ mod tests {
             unhealthy.contains("remove_browser_runtime("),
             "dead runtime is not evicted before re-resolving it by chat id"
         );
+    }
+
+    fn owner(runtime_id: &str, attached: Option<&str>) -> RuntimeOwner {
+        RuntimeOwner {
+            runtime_id: runtime_id.to_string(),
+            attached_chat_id: attached.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn exact_chat_id_match_wins_over_every_fallback() {
+        let owners = vec![
+            owner("rt-root", Some("root-chat")),
+            owner("rt-exact", Some("subchat-1")),
+        ];
+        let lookup = ChatRuntimeLookup {
+            chat_id: "subchat-1".to_string(),
+            root_chat_id: Some("root-chat".to_string()),
+            background_agent_id: Some("bgagent-1".to_string()),
+        };
+        let selection = select_runtime_for_chat(&owners, &lookup).unwrap();
+        assert_eq!(selection.runtime_id, "rt-exact");
+        assert!(!selection.adopted);
+    }
+
+    #[test]
+    fn root_chat_id_is_tried_before_background_agent_id() {
+        let owners = vec![
+            owner("rt-agent", Some("bgagent-1")),
+            owner("rt-root", Some("root-chat")),
+        ];
+        let lookup = ChatRuntimeLookup {
+            chat_id: "subchat-new".to_string(),
+            root_chat_id: Some("root-chat".to_string()),
+            background_agent_id: Some("bgagent-1".to_string()),
+        };
+        let selection = select_runtime_for_chat(&owners, &lookup).unwrap();
+        assert_eq!(selection.runtime_id, "rt-root");
+        assert!(selection.adopted);
+    }
+
+    #[test]
+    fn background_agent_id_is_the_last_named_fallback() {
+        let owners = vec![owner("rt-agent", Some("bgagent-1"))];
+        let lookup = ChatRuntimeLookup {
+            chat_id: "subchat-new".to_string(),
+            root_chat_id: Some("root-chat".to_string()),
+            background_agent_id: Some("bgagent-1".to_string()),
+        };
+        let selection = select_runtime_for_chat(&owners, &lookup).unwrap();
+        assert_eq!(selection.runtime_id, "rt-agent");
+        assert!(selection.adopted);
+    }
+
+    #[test]
+    fn a_sole_unclaimed_runtime_is_adopted() {
+        let owners = vec![owner("rt-free", None)];
+        let lookup = ChatRuntimeLookup::for_chat("subchat-new");
+        let selection = select_runtime_for_chat(&owners, &lookup).unwrap();
+        assert_eq!(selection.runtime_id, "rt-free");
+        assert!(selection.adopted);
+    }
+
+    #[test]
+    fn a_sole_runtime_owned_by_a_stranger_is_not_adopted() {
+        let owners = vec![owner("rt-other", Some("some-other-chat"))];
+        let lookup = ChatRuntimeLookup::for_chat("subchat-new");
+        assert_eq!(select_runtime_for_chat(&owners, &lookup), None);
+    }
+
+    #[test]
+    fn ambiguous_runtimes_are_never_adopted() {
+        let owners = vec![owner("rt-a", None), owner("rt-b", None)];
+        let lookup = ChatRuntimeLookup {
+            chat_id: "subchat-new".to_string(),
+            root_chat_id: Some("root-chat".to_string()),
+            background_agent_id: Some("bgagent-1".to_string()),
+        };
+        assert_eq!(select_runtime_for_chat(&owners, &lookup), None);
+    }
+
+    #[test]
+    fn profile_lock_is_not_live_for_a_dead_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let dead_pid = 4_294_000_001u32;
+        assert!(!pid_is_alive(dead_pid));
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            format!("hostname-{dead_pid}"),
+            dir.path().join("SingletonLock"),
+        )
+        .unwrap();
+        assert_eq!(profile_lock_pid(dir.path()), Some(dead_pid));
+        assert_eq!(profile_lock_is_live(dir.path()), None);
+    }
+
+    #[test]
+    fn profile_lock_is_not_live_for_an_unparseable_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("garbage", dir.path().join("SingletonLock")).unwrap();
+        assert_eq!(profile_lock_is_live(dir.path()), None);
+    }
+
+    #[test]
+    fn profile_lock_is_not_live_when_the_pid_is_not_the_profile_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let own_pid = std::process::id();
+        assert!(pid_is_alive(own_pid));
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            format!("hostname-{own_pid}"),
+            dir.path().join("SingletonLock"),
+        )
+        .unwrap();
+        assert_eq!(profile_lock_is_live(dir.path()), None);
+    }
+
+    #[test]
+    fn launch_failure_text_never_blames_ports_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let described =
+            describe_launch_failure("no available ports between 8000 and 9000", dir.path());
+        assert!(described.contains("Chrome exited before reporting a debugging"));
+        assert!(described.contains("ports are not exhausted"));
+    }
+
+    #[test]
+    fn stale_sweep_keeps_recent_and_non_subchat_profiles() {
+        let cache = tempfile::tempdir().unwrap();
+        let root = cache.path().join("browser_profiles");
+        let recent = root.join("subchat-recent");
+        let keep = root.join("chat-keep");
+        std::fs::create_dir_all(&recent).unwrap();
+        std::fs::create_dir_all(&keep).unwrap();
+        assert_eq!(sweep_stale_browser_profiles(cache.path()), 0);
+        assert!(recent.exists());
+        assert!(keep.exists());
+    }
+
+    #[test]
+    fn runtime_removal_kills_chrome_and_can_delete_the_profile() {
+        let source = include_str!("browser_runtime.rs");
+        let helper = source
+            .split_once("fn shutdown_runtime_process(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(helper.contains("terminate_process(pid)"));
+        assert!(helper.contains("std::fs::remove_dir_all(profile_dir)"));
+
+        let terminate = source
+            .split_once("fn terminate_process(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        assert!(terminate.contains("libc::SIGTERM"));
+        assert!(terminate.contains("libc::SIGKILL"));
     }
 
     #[test]

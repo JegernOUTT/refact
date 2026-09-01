@@ -307,6 +307,50 @@ fn url_pattern_schema() -> serde_json::Value {
     })
 }
 
+/// Compact per-action REQUIRED-field manifest rendered from [`BrowserStep::ACTION_FIELDS`],
+/// the same table the deserializer contract is pinned to. Only required fields are listed:
+/// they are the ones a caller cannot guess, and the full optional/alias table would blow the
+/// tool-contract token budget. The optional fields and aliases live in `chrome_help.md`,
+/// reachable through the `help` action.
+fn browser_action_field_manifest(actions: &[&str]) -> String {
+    let mut entries = Vec::new();
+    let mut no_required_actions = Vec::new();
+    for (action, required, _optional, _aliases) in
+        crate::integrations::browser_models::BrowserStep::ACTION_FIELDS.iter()
+    {
+        if !actions.contains(action) {
+            continue;
+        }
+        if required.is_empty() {
+            no_required_actions.push(*action);
+        } else {
+            entries.push(format!("{action}: {}", required.join(" ")));
+        }
+    }
+    if !no_required_actions.is_empty() {
+        entries.push(format!(
+            "no required fields: {}",
+            no_required_actions.join(" ")
+        ));
+    }
+    entries.join("; ")
+}
+
+/// Every field name any action accepts, so the flat property bag can never advertise a
+/// field the deserializer rejects for every action.
+fn browser_contract_field_names() -> std::collections::BTreeSet<&'static str> {
+    crate::integrations::browser_models::BrowserStep::ACTION_FIELDS
+        .iter()
+        .flat_map(|(_, required, optional, aliases)| {
+            required
+                .iter()
+                .chain(optional.iter())
+                .chain(aliases.iter())
+                .copied()
+        })
+        .collect()
+}
+
 fn browser_step_schema_with_actions(
     actions: &[&str],
     include_locator_handler: bool,
@@ -316,7 +360,10 @@ fn browser_step_schema_with_actions(
         "action".to_string(),
         serde_json::json!({
             "type": "string",
-            "description": "Browser action in snake_case",
+            "description": format!(
+                "Browser action in snake_case. Each action accepts ONLY its own fields; anything else is rejected. Required fields per action (optional fields and aliases are in the `help` action's documentation): {}",
+                browser_action_field_manifest(actions)
+            ),
             "enum": actions
         }),
     );
@@ -956,6 +1003,10 @@ fn browser_step_schema_with_actions(
     if include_locator_handler {
         properties.insert("handler".to_string(), handler_schema());
     }
+    // The flat property bag is hand-written, so drop anything no action actually accepts:
+    // advertising a field the deserializer rejects for every action is a contract lie.
+    let contract_fields = browser_contract_field_names();
+    properties.retain(|name, _| name == "action" || contract_fields.contains(name.as_str()));
     serde_json::json!({
         "type": "object",
         "required": ["action"],
@@ -1236,6 +1287,7 @@ impl Tool for ToolChrome {
         let mut multimodal_els = vec![];
         let mut typed_content: Option<Vec<MultimodalElement>> = None;
         let mut browser_extra = None;
+        let mut tool_failed = false;
 
         if let Some(request_value) = args.get("request") {
             let request = parse_browser_action_request(request_value.clone())
@@ -1270,6 +1322,7 @@ impl Tool for ToolChrome {
             .await
             {
                 Ok(report) => {
+                    tool_failed = !report.ok;
                     typed_content = Some(execution_report_to_multimodal(&report, &image_policy)?);
                     let (execute_log, command_multimodal_els) =
                         format_controller_report(&report, "", &image_policy);
@@ -1308,6 +1361,7 @@ impl Tool for ToolChrome {
                 let action = match parse_result {
                     Ok(action) => action,
                     Err(e) => {
+                        tool_failed = true;
                         tool_log.push(format!("Failed to parse command #{}: {}.", idx + 1, e));
                         break;
                     }
@@ -1326,6 +1380,7 @@ impl Tool for ToolChrome {
                         multimodal_els.extend(command_multimodal_els);
                     }
                     Err(e) => {
+                        tool_failed = true;
                         let err_msg = format!("Failed to execute command: {}.", e);
                         tool_log.push(err_msg.clone());
                         crate::buddy::actor::report_error_persisted(
@@ -1367,7 +1422,7 @@ impl Tool for ToolChrome {
             ..Default::default()
         });
 
-        Ok((false, vec![msg]))
+        Ok((tool_failed, vec![msg]))
     }
 
     fn tool_description(&self) -> ToolDesc {
@@ -1945,6 +2000,54 @@ mod tests {
             "screenshot": {"mime": "image/png", "data": TINY_PNG_BASE64},
         }))
         .unwrap()
+    }
+
+    fn report_with_step_outcomes(report_ok: bool, step_ok: &[bool]) -> ExecutionReport {
+        let steps = step_ok
+            .iter()
+            .enumerate()
+            .map(|(index, ok)| {
+                serde_json::json!({
+                    "step_index": index,
+                    "ok": ok,
+                    "summary": "step",
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::from_value(serde_json::json!({
+            "ok": report_ok,
+            "steps": steps,
+            "dialogs": [],
+            "new_tabs": [],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_failed_batch_is_reported_as_a_failure_not_a_success() {
+        let failed = report_with_step_outcomes(false, &[true, false]);
+        assert_eq!(browser_outcome(&failed), "failure");
+        assert!(!failed.ok, "tool_failed is derived from report.ok");
+        assert_eq!(
+            browser_metadata(&failed)["failed_steps"],
+            serde_json::json!([1])
+        );
+        assert_eq!(browser_metadata(&failed)["outcome"], "failure");
+    }
+
+    #[test]
+    fn non_fatal_step_failures_stay_partial_and_do_not_flip_the_batch() {
+        let partial = report_with_step_outcomes(true, &[true, false]);
+        assert_eq!(browser_outcome(&partial), "partial");
+        assert!(partial.ok, "non-fatal failures must not flip report.ok");
+        assert_eq!(browser_metadata(&partial)["ok"], true);
+
+        let clean = report_with_step_outcomes(true, &[true, true]);
+        assert_eq!(browser_outcome(&clean), "success");
+        assert_eq!(
+            browser_metadata(&clean)["failed_steps"],
+            serde_json::json!([])
+        );
     }
 
     #[test]
@@ -2557,6 +2660,17 @@ fn step_image_is_attachable(report: &ExecutionReport, data: &Value) -> bool {
     report.screenshot.is_none() || data["artifact"]["kind"] == "filmstrip"
 }
 
+/// `success` when nothing failed, `partial` when only non-fatal steps (soft assertions,
+/// `click_if_exists`) failed and the batch still reports `ok`, `failure` otherwise.
+fn browser_outcome(report: &ExecutionReport) -> &'static str {
+    let any_step_failed = report.steps.iter().any(|step| !step.ok);
+    match (report.ok, any_step_failed) {
+        (false, _) => "failure",
+        (true, true) => "partial",
+        (true, false) => "success",
+    }
+}
+
 fn browser_metadata(report: &ExecutionReport) -> Value {
     let mut artifacts = report
         .steps
@@ -2593,6 +2707,14 @@ fn browser_metadata(report: &ExecutionReport) -> Value {
     artifacts.dedup_by(|left, right| left["id"] == right["id"]);
 
     serde_json::json!({
+        "outcome": browser_outcome(report),
+        "ok": report.ok,
+        "failed_steps": report
+            .steps
+            .iter()
+            .filter(|step| !step.ok)
+            .map(|step| step.step_index)
+            .collect::<Vec<_>>(),
         "page_url": refact_chat_api::sanitize_http_url(report.url.as_deref().unwrap_or_default()),
         "status": report.page.as_ref().and_then(|page| page.status),
         "network_count": report.network.len(),
@@ -2701,7 +2823,7 @@ fn execution_report_to_multimodal(
 
     let mut text_report = serde_json::to_value(report)
         .map_err(|e| format!("Failed to serialize browser report: {}", e))?;
-    redact_browser_credential_fields(&mut text_report);
+    redact_browser_report(&mut text_report);
     strip_binary_data_for_text(&mut text_report);
     let text_pretty = serde_json::to_string_pretty(&text_report)
         .map_err(|e| format!("Failed to pretty-print browser report: {}", e))?;
@@ -2774,9 +2896,145 @@ fn redact_browser_credential_fields(value: &mut serde_json::Value) {
     }
 }
 
+/// Keys whose string payloads are free-form page/script output rather than engine-owned
+/// identifiers, so their contents also take the path-and-URL pass from `redact_sensitive`.
+const BROWSER_FREE_FORM_KEYS: &[&str] = &[
+    "value",
+    "values",
+    "description",
+    "text",
+    "texts",
+    "html",
+    "content",
+    "expected",
+    "received",
+    "diff",
+    "arguments",
+    "entries",
+    "rows",
+    "cells",
+    "links",
+    "styles",
+    "tree",
+    "snippet",
+    "message",
+    "body",
+    "post_data",
+];
+
+/// Keys naming engine-minted artifacts the caller must reuse verbatim (`image_region`,
+/// `route_from_har`), so they never take the path pass.
+const BROWSER_OPAQUE_PATH_KEYS: &[&str] = &["path", "save_as", "artifact_path", "file_name"];
+
+fn browser_secret_token_patterns() -> &'static [(regex::Regex, &'static str)] {
+    static PATTERNS: std::sync::OnceLock<Vec<(regex::Regex, &'static str)>> =
+        std::sync::OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        vec![
+            (
+                regex::Regex::new(r"\bxox[abceprs]-[A-Za-z0-9-]{10,}").unwrap(),
+                "[REDACTED_SLACK_TOKEN]",
+            ),
+            (
+                regex::Regex::new(r"\bxapp-[0-9]-[A-Za-z0-9-]{10,}").unwrap(),
+                "[REDACTED_SLACK_TOKEN]",
+            ),
+            (
+                regex::Regex::new(
+                    r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+                )
+                .unwrap(),
+                "[REDACTED_JWT]",
+            ),
+            (
+                regex::Regex::new(r"\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b").unwrap(),
+                "[REDACTED_AWS_KEY]",
+            ),
+            (
+                regex::Regex::new(r"\bgh[opsur]_[A-Za-z0-9]{10,}\b").unwrap(),
+                "[REDACTED_GH_TOKEN]",
+            ),
+            (
+                regex::Regex::new(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b").unwrap(),
+                "[REDACTED_GH_TOKEN]",
+            ),
+            (
+                regex::Regex::new(r"\b[sprk]k_(?:live|test)_[A-Za-z0-9]{10,}\b").unwrap(),
+                "[REDACTED_STRIPE_KEY]",
+            ),
+            (
+                regex::Regex::new(r"\bAIza[0-9A-Za-z_-]{30,}\b").unwrap(),
+                "[REDACTED_GOOGLE_KEY]",
+            ),
+            (
+                regex::Regex::new(r"\bnpm_[A-Za-z0-9]{30,}\b").unwrap(),
+                "[REDACTED_NPM_TOKEN]",
+            ),
+            (
+                regex::Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}").unwrap(),
+                "Bearer [REDACTED]",
+            ),
+            (
+                regex::Regex::new(
+                    r#"(?i)\b(api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|secret|password|passwd)\b\s*["']?\s*[:=]\s*["']?[^\s"',;)}\]]{6,}"#,
+                )
+                .unwrap(),
+                "$1=[REDACTED]",
+            ),
+        ]
+    })
+}
+
+fn redact_browser_secret_tokens(text: &str) -> String {
+    let mut out = std::borrow::Cow::Borrowed(text);
+    for (pattern, replacement) in browser_secret_token_patterns() {
+        if pattern.is_match(&out) {
+            out = std::borrow::Cow::Owned(pattern.replace_all(&out, *replacement).into_owned());
+        }
+    }
+    out.into_owned()
+}
+
+fn redact_browser_payload_strings(value: &mut serde_json::Value, free_form: bool) {
+    match value {
+        serde_json::Value::String(text) => {
+            let scanned = if free_form {
+                refact_core::string_utils::redact_sensitive(text)
+            } else {
+                text.clone()
+            };
+            let redacted = redact_browser_secret_tokens(&scanned);
+            if redacted != *text {
+                *text = redacted;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_browser_payload_strings(item, free_form);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                let child_free_form = if BROWSER_OPAQUE_PATH_KEYS.contains(&key.as_str()) {
+                    false
+                } else {
+                    free_form || BROWSER_FREE_FORM_KEYS.contains(&key.as_str())
+                };
+                redact_browser_payload_strings(child, child_free_form);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_browser_report(value: &mut serde_json::Value) {
+    redact_browser_credential_fields(value);
+    redact_browser_payload_strings(value, false);
+}
+
 #[cfg(test)]
 mod browser_credential_redaction_tests {
-    use super::redact_browser_credential_fields;
+    use super::{redact_browser_credential_fields, redact_browser_report, redact_browser_secret_tokens};
 
     #[test]
     fn browser_credential_request_fields_are_redacted_recursively() {
@@ -2794,6 +3052,81 @@ mod browser_credential_redaction_tests {
         assert!(!serialized.contains("secret-key"));
         assert!(!serialized.contains("secret-handle"));
         assert!(serialized.contains("example.com"));
+    }
+
+    #[test]
+    fn eval_results_and_readouts_lose_their_secrets() {
+        let mut report = serde_json::json!({
+            "steps": [
+                {"data": {"value": "Bearer FAKEBEARER1234567890abcdefghij", "description": "String"}},
+                {"data": {"value": {"slack": "xoxc-1234567890-abcdefghijklmnop"}}},
+                {"data": {"texts": ["session token=hunter2hunter2", "harmless copy"]}},
+                {"data": {"text": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1"}},
+                {"assertion": {"expected": "xoxb-9876543210-zyxwvutsrq", "received": "xoxp-1122334455-abcdefghij"}}
+            ]
+        });
+        redact_browser_report(&mut report);
+        let serialized = serde_json::to_string(&report).unwrap();
+
+        for secret in [
+            "FAKEBEARER1234567890abcdefghij",
+            "xoxc-1234567890-abcdefghijklmnop",
+            "hunter2hunter2",
+            "xoxb-9876543210-zyxwvutsrq",
+            "xoxp-1122334455-abcdefghij",
+            "dBjftJeZ4CVPmB92K27uhbUJU1p1",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "leaked {secret}: {serialized}"
+            );
+        }
+        assert!(serialized.contains("harmless copy"));
+    }
+
+    #[test]
+    fn ordinary_page_text_and_artifact_paths_survive_redaction() {
+        let mut report = serde_json::json!({
+            "steps": [{
+                "data": {
+                    "text": "Sign in to continue. Forgot your password? Reset it here.",
+                    "artifact": {"kind": "image", "path": "/home/dev/.cache/refact/browser/shot-1.png"}
+                }
+            }]
+        });
+        redact_browser_report(&mut report);
+
+        assert_eq!(
+            report["steps"][0]["data"]["artifact"]["path"],
+            "/home/dev/.cache/refact/browser/shot-1.png"
+        );
+        let text = report["steps"][0]["data"]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Sign in to continue"),
+            "over-redacted: {text}"
+        );
+        assert!(
+            text.contains("Forgot your password?"),
+            "over-redacted: {text}"
+        );
+    }
+
+    #[test]
+    fn slack_and_high_entropy_shapes_are_covered_by_the_token_scan() {
+        for secret in [
+            "xoxc-2468013579-qwertyuiopasdfgh",
+            "xoxb-1111111111-aaaaaaaaaaaa",
+            "xapp-1-A012BCDEF-1234567890",
+            "AKIAIOSFODNN7EXAMPLE",
+            "ghs_abcdefghijklmnopqrstuvwxyz012345",
+        ] {
+            let redacted = redact_browser_secret_tokens(secret);
+            assert!(!redacted.contains(secret), "not redacted: {redacted}");
+        }
+        assert_eq!(
+            redact_browser_secret_tokens("click the Save button"),
+            "click the Save button"
+        );
     }
 }
 
@@ -2869,6 +3202,9 @@ fn resize_screenshot_b64(
 }
 
 fn format_step_data(data: &serde_json::Value, log: &mut Vec<String>) {
+    let mut redacted_data = data.clone();
+    redact_browser_report(&mut redacted_data);
+    let data = &redacted_data;
     if let Some(value) = data.get("value") {
         if !value.is_null() {
             if let Some(desc) = data.get("description").and_then(|v| v.as_str()) {

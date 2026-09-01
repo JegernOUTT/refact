@@ -24,7 +24,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::codegraph::code_intel_api::ToolJson;
 use crate::integrations::browser_controller;
-use crate::integrations::browser_runtime::{find_runtime_by_chat_id, BrowserRuntime};
+use crate::integrations::browser_runtime::{find_runtime_for_chat, BrowserRuntime, ChatRuntimeLookup};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 const DEFAULT_VIEWPORT_HEIGHT: u32 = 900;
@@ -32,9 +32,24 @@ const DEFAULT_DIFF_THRESHOLD: f64 = 0.1;
 const MAX_TARGETS: usize = 50;
 const MAX_MATRIX_CELLS: usize = 400;
 const MAX_AUDIT_FINDINGS: usize = 500;
-const DEFAULT_DESIGN_TOKEN_STYLES: &[&str] = &["src/styles/tokens.css"];
-const PAGE_NOT_INSTRUMENTED_ERROR: &str =
-    "page not instrumented for design tools (requires the local Vite dev-server flow)";
+const ARTIFACT_PATH_PREFIX: &str = "artifact://";
+const TOKEN_FILE_NAME_MARKERS: &[&str] = &["token", "theme", "variable", "palette"];
+const TOKEN_FILE_EXTENSIONS: &[&str] = &["css", "scss", "less"];
+const TOKEN_DISCOVERY_SKIPPED_DIRS: &[&str] = &[
+    ".git",
+    ".refact",
+    ".next",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "target",
+    "vendor",
+];
+const TOKEN_DISCOVERY_MAX_DEPTH: usize = 6;
+const TOKEN_DISCOVERY_MAX_FILES: usize = 8;
+const TOKEN_DISCOVERY_MAX_DIRS: usize = 2_000;
+const PAGE_NOT_INSTRUMENTED_ERROR: &str = "page not instrumented for design tools: the page has no `globalThis.__refact_injected__` runtime, so styles, refs and element states cannot be measured. Open an instrumented page instead: run the GUI dev server (`cd refact-agent/gui && npm run dev`, Vite serves http://localhost:5173) with the `refact-agent/vite-plugin-design` plugin (`@refact/vite-plugin-design`) enabled in its vite config, then point the `chrome` tool at that dev-server URL and retry. Production builds and third-party sites are never instrumented.";
 const INSTRUMENTATION_ERROR_MARKERS: &[&str] = &[
     "Unknown RefactInjected method",
     "RefactInjected is not installed",
@@ -841,31 +856,55 @@ fn tool_message(tool_call_id: &str, text: String) -> Result<(bool, Vec<ContextEn
     ))
 }
 
+fn chat_runtime_lookup(ccx: &AtCommandsContext) -> ChatRuntimeLookup {
+    ChatRuntimeLookup {
+        chat_id: ccx.chat_id.clone(),
+        root_chat_id: Some(ccx.root_chat_id.clone()).filter(|value| !value.is_empty()),
+        background_agent_id: ccx.background_agent_id.clone(),
+    }
+}
+
 async fn tool_context(
     ccx: &Arc<AMutex<AtCommandsContext>>,
 ) -> (
     crate::app_state::AppState,
-    String,
+    ChatRuntimeLookup,
     String,
     Option<crate::worktrees::scope::ExecutionScope>,
 ) {
     let ccx = ccx.lock().await;
     (
         ccx.app.clone(),
-        ccx.chat_id.clone(),
+        chat_runtime_lookup(&ccx),
         ccx.current_model.clone(),
         ccx.execution_scope.clone(),
     )
 }
 
+pub fn no_runtime_error(lookup: &ChatRuntimeLookup) -> String {
+    let tried = std::iter::once(lookup.chat_id.as_str())
+        .chain(lookup.root_chat_id.as_deref())
+        .chain(lookup.background_agent_id.as_deref())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("`, `");
+    format!(
+        "No browser session is open for this chat, so there is nothing to measure. \
+         This is not a configuration problem: design tools attach to a browser that the \
+         `chrome` tool opens. Make a `chrome` call first (for example \
+         `chrome({{\"steps\":[{{\"action\":\"navigate\",\"url\":\"http://localhost:5173\"}}]}})`), \
+         then retry this tool. Chat ids tried: `{tried}`."
+    )
+}
+
 async fn attached_runtime(
     app: crate::app_state::AppState,
-    chat_id: &str,
+    lookup: &ChatRuntimeLookup,
 ) -> Result<Arc<AMutex<BrowserRuntime>>, String> {
-    find_runtime_by_chat_id(app, chat_id)
+    find_runtime_for_chat(app, lookup)
         .await
         .map(|(_, runtime)| runtime)
-        .ok_or_else(|| format!("No browser runtime is attached to chat `{chat_id}`"))
+        .ok_or_else(|| no_runtime_error(lookup))
 }
 
 async fn image_policy_for_model(
@@ -1180,6 +1219,69 @@ fn token_colors_from_files(root: &Path, token_files: &[String]) -> Result<TokenC
     })
 }
 
+fn looks_like_token_file(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    if !TOKEN_FILE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str()) {
+        return false;
+    }
+    let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    let stem = stem.to_ascii_lowercase();
+    TOKEN_FILE_NAME_MARKERS
+        .iter()
+        .any(|marker| stem.contains(marker))
+}
+
+pub fn discover_design_token_files(root: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut queue = VecDeque::from([(root.to_path_buf(), 0_usize)]);
+    let mut visited_dirs = 0_usize;
+    while let Some((dir, depth)) = queue.pop_front() {
+        if found.len() >= TOKEN_DISCOVERY_MAX_FILES || visited_dirs >= TOKEN_DISCOVERY_MAX_DIRS {
+            break;
+        }
+        visited_dirs += 1;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                if depth + 1 <= TOKEN_DISCOVERY_MAX_DEPTH
+                    && !name.starts_with('.')
+                    && !TOKEN_DISCOVERY_SKIPPED_DIRS.contains(&name)
+                {
+                    queue.push_back((path, depth + 1));
+                }
+                continue;
+            }
+            if kind.is_file()
+                && looks_like_token_file(&path)
+                && found.len() < TOKEN_DISCOVERY_MAX_FILES
+            {
+                if let Some(relative) = path
+                    .strip_prefix(root)
+                    .ok()
+                    .and_then(|value| value.to_str())
+                {
+                    found.push(relative.to_string());
+                }
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 fn design_artifacts_dir(gcx: &crate::global_context::GlobalContext) -> PathBuf {
     gcx.cache_dir.join("design_artifacts")
 }
@@ -1227,11 +1329,74 @@ fn baseline_path(root: &Path, requested: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+pub fn artifact_reference_name(requested: &str) -> Option<String> {
+    let trimmed = requested.trim();
+    let trimmed = trimmed
+        .strip_prefix(ARTIFACT_PATH_PREFIX)
+        .unwrap_or(trimmed)
+        .trim();
+    let name = Path::new(trimmed).file_name()?.to_str()?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+async fn artifact_search_dirs(app: &crate::app_state::AppState) -> Vec<PathBuf> {
+    let mut dirs = vec![design_artifacts_dir(&app.gcx)];
+    let runtimes = app.integrations.browser_runtimes.clone();
+    let runtimes = runtimes.lock().await;
+    let arcs = runtimes.values().cloned().collect::<Vec<_>>();
+    drop(runtimes);
+    for arc in arcs {
+        let runtime = arc.lock().await;
+        dirs.push(runtime.artifacts_dir.clone());
+        dirs.push(runtime.downloads_dir.clone());
+    }
+    dirs
+}
+
+async fn resolve_image_source(
+    app: &crate::app_state::AppState,
+    execution_scope: Option<&crate::worktrees::scope::ExecutionScope>,
+    requested: &str,
+) -> Result<PathBuf, String> {
+    let raw = requested.trim();
+    let raw = raw.strip_prefix(ARTIFACT_PATH_PREFIX).unwrap_or(raw).trim();
+    if raw.is_empty() {
+        return Err("image_path must not be empty".to_string());
+    }
+    if let Some(scope) = execution_scope {
+        if let Ok(resolved) = scope.resolve_existing_path(Path::new(raw)) {
+            return Ok(resolved.path);
+        }
+    }
+    let direct = PathBuf::from(raw);
+    if direct.is_file() {
+        return Ok(direct);
+    }
+    let dirs = artifact_search_dirs(app).await;
+    if let Some(name) = artifact_reference_name(raw) {
+        for dir in &dirs {
+            let candidate = dir.join(&name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(format!(
+        "image `{requested}` was not found. Pass a filesystem path, or the `artifact.path` \
+         value returned by a `chrome` screenshot or another design tool. Searched the given \
+         path plus artifact directories: {}",
+        dirs.iter()
+            .map(|dir| dir.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 fn image_region_schema() -> Value {
     json!({
         "type":"object",
         "properties":{
-            "image_path":{"type":"string","description":"Path to an already-captured image"},
+            "image_path":{"type":"string","description":"Filesystem path to an already-captured image, or the artifact path returned by a chrome screenshot or another design tool"},
             "x":{"type":"integer","minimum":0},
             "y":{"type":"integer","minimum":0},
             "width":{"type":"integer","minimum":1},
@@ -1273,8 +1438,8 @@ impl Tool for ToolUiProbe {
             .iter()
             .map(|state| parse_element_state(state))
             .collect::<Result<Vec<_>, _>>()?;
-        let (app, chat_id, _, _) = tool_context(&ccx).await;
-        let runtime = attached_runtime(app, &chat_id).await?;
+        let (app, lookup, _, _) = tool_context(&ccx).await;
+        let runtime = attached_runtime(app, &lookup).await?;
         let mut runtime = runtime.lock().await;
         let tab = browser_controller::session_tab(&mut runtime)?;
         let original_viewport = runtime.context_state.viewport.clone();
@@ -1386,7 +1551,7 @@ impl Tool for ToolUiProbe {
             &self.config_path,
             "ui_probe",
             "UI Probe",
-            "Measure live DOM targets across a viewport × theme × state matrix. Returns computed styles, rectangles, and overflow flags without screenshots. Requires a page instrumented by the local dev-server flow; third-party pages return a page-not-instrumented error. Fails closed: measuring 0 cells is a tool error rather than an empty pass.",
+            "Measure live DOM targets across a viewport × theme × state matrix. Returns computed styles, rectangles, and overflow flags without screenshots. Open the page with the `chrome` tool first: this tool measures whatever browser session that call created. The page must be instrumented, i.e. expose `globalThis.__refact_injected__` — run the GUI dev server (`cd refact-agent/gui && npm run dev`, Vite on http://localhost:5173) with the `refact-agent/vite-plugin-design` plugin enabled; production builds and third-party sites return a page-not-instrumented error. Fails closed: measuring 0 cells is a tool error rather than an empty pass.",
             json!({
                 "type":"object",
                 "properties":{
@@ -1420,9 +1585,9 @@ impl Tool for ToolMarkElements {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let selector = args.get("selector").and_then(Value::as_str);
-        let (app, chat_id, model_id, _) = tool_context(&ccx).await;
+        let (app, lookup, model_id, _) = tool_context(&ccx).await;
         let policy = image_policy_for_model(app.gcx.clone(), &model_id).await;
-        let runtime = attached_runtime(app, &chat_id).await?;
+        let runtime = attached_runtime(app, &lookup).await?;
         let mut runtime = runtime.lock().await;
         let tab = browser_controller::session_tab(&mut runtime)?;
         let root_handle = selector
@@ -1519,18 +1684,15 @@ impl Tool for ToolContrastAudit {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let args: ContrastAuditArgs = parse_args(args)?;
-        let (app, chat_id, _, execution_scope) = tool_context(&ccx).await;
+        let (app, lookup, _, execution_scope) = tool_context(&ccx).await;
         let root = project_root(&app.gcx, execution_scope.as_ref())?;
         let token_files = if args.token_files.is_empty() {
-            DEFAULT_DESIGN_TOKEN_STYLES
-                .iter()
-                .map(|value| value.to_string())
-                .collect::<Vec<_>>()
+            discover_design_token_files(&root)
         } else {
             args.token_files
         };
         let token_scan = token_colors_from_files(&root, &token_files)?;
-        let runtime = attached_runtime(app, &chat_id).await?;
+        let runtime = attached_runtime(app, &lookup).await?;
         let mut runtime = runtime.lock().await;
         let tab = browser_controller::session_tab(&mut runtime)?;
         let raw = runtime
@@ -1625,9 +1787,9 @@ impl Tool for ToolContrastAudit {
             &self.config_path,
             "contrast_audit",
             "Contrast Audit",
-            "Audit live DOM contrast against the requested WCAG level: AA requires 4.5 for normal text and 3.0 for large text, AAA requires 7.0 for normal text and 4.5 for large text, and non-text UI contrast requires 3.0. A finding is emitted only when the measured ratio is below the requirement for the audited level and text size class. Also reports raw stylesheet colors absent from discovered token files. Fails closed: scanning 0 elements is a tool error rather than a pass, and resolving 0 token files leads the summary with a warning.",
+            "Audit live DOM contrast against the requested WCAG level: AA requires 4.5 for normal text and 3.0 for large text, AAA requires 7.0 for normal text and 4.5 for large text, and non-text UI contrast requires 3.0. A finding is emitted only when the measured ratio is below the requirement for the audited level and text size class. Open the page with the `chrome` tool first, and point it at an instrumented page that exposes `globalThis.__refact_injected__` — run the GUI dev server (`cd refact-agent/gui && npm run dev`, Vite on http://localhost:5173) with the `refact-agent/vite-plugin-design` plugin enabled. Also reports raw stylesheet colors absent from the token files; when token_files is omitted they are discovered under the workspace by name (tokens/theme/variables/palette .css/.scss/.less). Fails closed: scanning 0 elements is a tool error rather than a pass, and resolving 0 token files leads the summary with a warning.",
             json!({"type":"object","properties":{
-                "token_files":{"type":"array","items":{"type":"string"},"description":"Repository-relative design-token CSS files"},
+                "token_files":{"type":"array","items":{"type":"string"},"description":"Repository-relative design-token CSS files; omitted means discover them under the workspace"},
                 "level":{"type":"string","enum":["AA","AAA"],"default":"AA","description":"WCAG conformance level to audit against"}
             }}),
             false,
@@ -1654,13 +1816,7 @@ impl Tool for ToolImageRegion {
         let args: ImageRegionArgs = parse_args(args)?;
         let (app, _, model_id, execution_scope) = tool_context(&ccx).await;
         let policy = image_policy_for_model(app.gcx.clone(), &model_id).await;
-        let path = if let Some(scope) = execution_scope.as_ref() {
-            scope
-                .resolve_existing_path(Path::new(&args.image_path))?
-                .path
-        } else {
-            PathBuf::from(&args.image_path)
-        };
+        let path = resolve_image_source(&app, execution_scope.as_ref(), &args.image_path).await?;
         crate::files_in_workspace::check_file_privacy_for_send(app.gcx.clone(), &path).await?;
         let bytes = tokio::fs::read(&path)
             .await
@@ -1704,7 +1860,7 @@ impl Tool for ToolImageRegion {
             &self.config_path,
             "image_region",
             "Image Region",
-            "Crop an already-captured image at native resolution with optional padding. Returns a policy-processed image artifact.",
+            "Crop an already-captured image at native resolution with optional padding. Accepts a filesystem path or the artifact path returned by a `chrome` screenshot or another design tool. Returns a policy-processed image artifact.",
             image_region_schema(),
             false,
         )
@@ -1728,11 +1884,11 @@ impl Tool for ToolVisualDiff {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let args: VisualDiffArgs = parse_args(args)?;
-        let (app, chat_id, model_id, execution_scope) = tool_context(&ccx).await;
+        let (app, lookup, model_id, execution_scope) = tool_context(&ccx).await;
         let root = project_root(&app.gcx, execution_scope.as_ref())?;
         let baseline = baseline_path(&root, &args.baseline)?;
         let policy = image_policy_for_model(app.gcx.clone(), &model_id).await;
-        let runtime = attached_runtime(app, &chat_id).await?;
+        let runtime = attached_runtime(app, &lookup).await?;
         let mut runtime = runtime.lock().await;
         let current = capture_runtime_screenshot(
             &mut runtime,
@@ -2075,6 +2231,165 @@ mod tests {
                 ElementStateAction::Blur
             ]
         );
+    }
+
+    #[test]
+    fn runtime_lookup_falls_back_past_the_regenerated_turn_chat_id() {
+        use crate::integrations::browser_runtime::{select_runtime_for_chat, RuntimeOwner};
+
+        let lookup = ChatRuntimeLookup {
+            chat_id: "subchat-turn-2".to_string(),
+            root_chat_id: Some("root-chat".to_string()),
+            background_agent_id: Some("bgagent-7".to_string()),
+        };
+        let owned_by_root = vec![RuntimeOwner {
+            runtime_id: "rt-root".to_string(),
+            attached_chat_id: Some("root-chat".to_string()),
+        }];
+        let selection = select_runtime_for_chat(&owned_by_root, &lookup)
+            .expect("a stale turn id must not fail the first exact-match miss");
+        assert_eq!(selection.runtime_id, "rt-root");
+        assert!(selection.adopted);
+
+        let sole_stranger = vec![RuntimeOwner {
+            runtime_id: "rt-only".to_string(),
+            attached_chat_id: Some("subchat-turn-1".to_string()),
+        }];
+        assert!(
+            select_runtime_for_chat(
+                &sole_stranger,
+                &ChatRuntimeLookup::for_chat("subchat-turn-2")
+            )
+            .is_none(),
+            "an unrelated sole runtime must not be adopted"
+        );
+        let sole_unattached = vec![RuntimeOwner {
+            runtime_id: "rt-only".to_string(),
+            attached_chat_id: None,
+        }];
+        assert_eq!(
+            select_runtime_for_chat(&sole_unattached, &lookup)
+                .unwrap()
+                .runtime_id,
+            "rt-only"
+        );
+    }
+
+    #[test]
+    fn missing_browser_session_error_names_the_remedy_and_the_ids_tried() {
+        let error = no_runtime_error(&ChatRuntimeLookup {
+            chat_id: "subchat-1".to_string(),
+            root_chat_id: Some("root-1".to_string()),
+            background_agent_id: None,
+        });
+        assert!(error.contains("No browser session is open"), "{error}");
+        assert!(error.contains("`chrome`"), "{error}");
+        assert!(error.contains("navigate"), "{error}");
+        assert!(error.contains("`subchat-1`"), "{error}");
+        assert!(error.contains("`root-1`"), "{error}");
+        assert!(
+            error.contains("not a configuration problem"),
+            "the error must not imply a misconfiguration: {error}"
+        );
+    }
+
+    #[test]
+    fn instrumentation_error_names_the_plugin_the_command_and_the_marker() {
+        for remedy in [
+            "__refact_injected__",
+            "vite-plugin-design",
+            "npm run dev",
+            "localhost:5173",
+            "chrome",
+        ] {
+            assert!(
+                PAGE_NOT_INSTRUMENTED_ERROR.contains(remedy),
+                "instrumentation error lost `{remedy}`: {PAGE_NOT_INSTRUMENTED_ERROR}"
+            );
+        }
+        for description in [
+            ToolUiProbe {
+                config_path: "builtin".to_string(),
+            }
+            .tool_description()
+            .description,
+            ToolContrastAudit {
+                config_path: "builtin".to_string(),
+            }
+            .tool_description()
+            .description,
+        ] {
+            assert!(description.contains("__refact_injected__"), "{description}");
+            assert!(description.contains("vite-plugin-design"), "{description}");
+            assert!(description.contains("npm run dev"), "{description}");
+            assert!(description.contains("`chrome`"), "{description}");
+        }
+    }
+
+    #[test]
+    fn default_token_files_are_discovered_instead_of_a_hardcoded_path() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("gui/src/styles")).unwrap();
+        std::fs::create_dir_all(root.path().join("node_modules/pkg")).unwrap();
+        std::fs::write(
+            root.path().join("gui/src/styles/tokens.css"),
+            ":root{--accent:#E7150D;}",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("gui/src/styles/theme.scss"), "$bg:#fff;").unwrap();
+        std::fs::write(root.path().join("gui/src/styles/layout.css"), "#abc").unwrap();
+        std::fs::write(root.path().join("node_modules/pkg/tokens.css"), "#123456").unwrap();
+
+        let discovered = discover_design_token_files(root.path());
+        assert_eq!(
+            discovered,
+            vec!["gui/src/styles/theme.scss", "gui/src/styles/tokens.css"]
+        );
+        let scan = token_colors_from_files(root.path(), &discovered).unwrap();
+        assert_eq!(scan.resolved_files.len(), 2);
+        assert!(scan.colors.contains(&"#e7150d".to_string()));
+
+        assert!(discover_design_token_files(tempfile::tempdir().unwrap().path()).is_empty());
+        assert_eq!(
+            contrast_audit_verdict(4, WcagLevel::Aa, 0, 0, 0)
+                .warning
+                .as_deref(),
+            Some(NO_TOKEN_FILES_WARNING)
+        );
+    }
+
+    #[tokio::test]
+    async fn image_region_accepts_artifact_paths_and_bare_artifact_names() {
+        let app = crate::app_state::AppState::from_gcx(
+            crate::global_context::tests::make_test_gcx().await,
+        )
+        .await;
+        let artifacts = design_artifacts_dir(&app.gcx);
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let written = artifacts.join("chrome-screenshot-1.png");
+        std::fs::write(&written, b"png-bytes").unwrap();
+
+        for requested in [
+            written.to_string_lossy().into_owned(),
+            "chrome-screenshot-1.png".to_string(),
+            format!("{ARTIFACT_PATH_PREFIX}chrome-screenshot-1.png"),
+        ] {
+            assert_eq!(
+                resolve_image_source(&app, None, &requested).await.unwrap(),
+                written,
+                "{requested}"
+            );
+        }
+
+        let error = resolve_image_source(&app, None, "nope.png")
+            .await
+            .unwrap_err();
+        assert!(error.contains("artifact.path"), "{error}");
+        assert_eq!(
+            artifact_reference_name(&format!("{ARTIFACT_PATH_PREFIX}dir/shot.png")).unwrap(),
+            "shot.png"
+        );
+        assert!(artifact_reference_name("   ").is_none());
     }
 
     #[test]

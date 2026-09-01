@@ -1584,6 +1584,29 @@ fn task_meta_for_stateful_subchat(config: &SubchatConfig) -> Option<TaskMeta> {
     Some(task_meta)
 }
 
+pub(crate) fn stable_subchat_chat_id(
+    config: &SubchatConfig,
+    fresh_id: impl FnOnce() -> String,
+) -> String {
+    if let Some(chat_id) = config
+        .chat_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|chat_id| !chat_id.is_empty())
+    {
+        return chat_id.to_string();
+    }
+    if let Some(agent_id) = config
+        .background_agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|agent_id| !agent_id.is_empty())
+    {
+        return format!("subchat-{agent_id}");
+    }
+    fresh_id()
+}
+
 pub async fn run_subchat(
     gcx: Arc<GlobalContext>,
     messages: Vec<ChatMessage>,
@@ -1594,10 +1617,7 @@ pub async fn run_subchat(
         config.tool_name, config.model, config.stateful
     );
 
-    let chat_id = config
-        .chat_id
-        .clone()
-        .unwrap_or_else(|| format!("subchat-{}", Uuid::new_v4()));
+    let chat_id = stable_subchat_chat_id(&config, || format!("subchat-{}", Uuid::new_v4()));
 
     let messages = sanitize_messages_for_new_thread(&messages);
     let messages = prepare_subchat_messages(&gcx, messages, &config.model)?;
@@ -2655,6 +2675,18 @@ async fn execute_pending_tool_calls(
     Ok(messages)
 }
 
+pub(crate) fn stable_stream_chat_id(
+    context_chat_id: &str,
+    fresh_id: impl FnOnce() -> String,
+) -> String {
+    let context_chat_id = context_chat_id.trim();
+    if context_chat_id.is_empty() {
+        fresh_id()
+    } else {
+        context_chat_id.to_string()
+    }
+}
+
 async fn subchat_stream(
     ccx: Arc<AMutex<AtCommandsContext>>,
     model_id: &str,
@@ -2670,7 +2702,7 @@ async fn subchat_stream(
     progress_tool_call_id: Option<&str>,
     allow_provider_retries: bool,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
-    let (gcx, effective_n_ctx, abort_flag, task_meta, worktree) = {
+    let (gcx, effective_n_ctx, abort_flag, task_meta, worktree, context_chat_id, context_root_id) = {
         let cgcx = ccx.lock().await;
         (
             cgcx.global_context.clone(),
@@ -2678,6 +2710,8 @@ async fn subchat_stream(
             cgcx.abort_flag.clone(),
             cgcx.task_meta.clone(),
             cgcx.execution_scope_worktree(),
+            cgcx.chat_id.clone(),
+            cgcx.root_chat_id.clone(),
         )
     };
 
@@ -2695,8 +2729,11 @@ async fn subchat_stream(
         effective_n_ctx
     };
 
+    let stream_chat_id = stable_stream_chat_id(&context_chat_id, || Uuid::new_v4().to_string());
+    let stream_root_chat_id = Some(context_root_id).filter(|id| !id.trim().is_empty());
+
     let meta = ChatMeta {
-        chat_id: Uuid::new_v4().to_string(),
+        chat_id: stream_chat_id.clone(),
         chat_mode: mode_id.to_string(),
         chat_remote: false,
         current_config_file: String::new(),
@@ -2707,12 +2744,13 @@ async fn subchat_stream(
     };
 
     let thread = ThreadParams {
-        id: meta.chat_id.clone(),
+        id: stream_chat_id,
         model: model_id.to_string(),
         mode: mode_id.to_string(),
         context_tokens_cap: Some(capped_n_ctx),
         task_meta,
         worktree,
+        root_chat_id: stream_root_chat_id,
         ..Default::default()
     };
 
@@ -3140,12 +3178,12 @@ mod subchat_tests {
         partial_output_stream_error_message, prepare_subchat_messages,
         register_stateful_subchat_worktree, resolve_subchat_config_with_parent,
         resolve_subagent_confirmation_defaults, resolve_subchat_model, resolve_subchat_params,
-        resolve_subchat_worktree, safe_context_limit_error_for_log,
-        should_compact_context_limit_error, should_persist_subchat_trajectory,
-        stateful_thread_from_config, subchat_retries_allowed, subchat_trajectory_commit_intent,
-        trace_thread_from_config, save_failed_subchat_trajectory, SubchatConfig, SubchatProgress,
-        SubchatTrajectoryCommitPhase, ToolsPolicy, TraceParent, GUARDED_REPORT_INSTRUCTION,
-        PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        resolve_subchat_worktree, safe_context_limit_error_for_log, stable_stream_chat_id,
+        stable_subchat_chat_id, should_compact_context_limit_error,
+        should_persist_subchat_trajectory, stateful_thread_from_config, subchat_retries_allowed,
+        subchat_trajectory_commit_intent, trace_thread_from_config, save_failed_subchat_trajectory,
+        SubchatConfig, SubchatProgress, SubchatTrajectoryCommitPhase, ToolsPolicy, TraceParent,
+        GUARDED_REPORT_INSTRUCTION, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
@@ -3267,6 +3305,55 @@ mod subchat_tests {
             step_progress: None,
             trace_parent: TraceParent::unattributed(),
         }
+    }
+
+    #[test]
+    fn stable_chat_id_prefers_the_configured_id() {
+        let mut config = test_subchat_config();
+        config.chat_id = Some("subchat-stable".to_string());
+        config.background_agent_id = Some("bgagent-1".to_string());
+        assert_eq!(
+            stable_subchat_chat_id(&config, || "fresh".to_string()),
+            "subchat-stable"
+        );
+    }
+
+    #[test]
+    fn stable_chat_id_falls_back_to_the_background_agent_id() {
+        let mut config = test_subchat_config();
+        config.background_agent_id = Some("bgagent-1".to_string());
+        let first = stable_subchat_chat_id(&config, || "fresh-1".to_string());
+        let second = stable_subchat_chat_id(&config, || "fresh-2".to_string());
+        assert_eq!(first, "subchat-bgagent-1");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn stable_chat_id_still_mints_a_fresh_id_for_one_shot_subchats() {
+        let config = test_subchat_config();
+        assert_eq!(
+            stable_subchat_chat_id(&config, || "fresh".to_string()),
+            "fresh"
+        );
+        let mut blank = test_subchat_config();
+        blank.chat_id = Some("   ".to_string());
+        assert_eq!(
+            stable_subchat_chat_id(&blank, || "fresh".to_string()),
+            "fresh"
+        );
+    }
+
+    #[test]
+    fn stream_chat_id_reuses_the_context_chat_id_across_turns() {
+        assert_eq!(
+            stable_stream_chat_id("subchat-abc", || "fresh-1".to_string()),
+            "subchat-abc"
+        );
+        assert_eq!(
+            stable_stream_chat_id("subchat-abc", || "fresh-2".to_string()),
+            "subchat-abc"
+        );
+        assert_eq!(stable_stream_chat_id("  ", || "fresh".to_string()), "fresh");
     }
 
     #[tokio::test]

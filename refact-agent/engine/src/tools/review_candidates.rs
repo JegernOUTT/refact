@@ -14,6 +14,8 @@ pub struct CandidateFinding {
     pub confidence: f32,
     pub claim: String,
     pub rationale: String,
+    pub impact: Option<String>,
+    pub remediation: Option<String>,
 }
 
 impl CandidateFinding {
@@ -32,8 +34,8 @@ impl CandidateFinding {
                 line2: self.line2,
                 claim: self.claim,
                 evidence: Vec::new(),
-                impact: None,
-                remediation: None,
+                impact: self.impact,
+                remediation: self.remediation,
                 checks_performed: Vec::new(),
             },
             self.rationale,
@@ -85,6 +87,16 @@ struct RawCandidateFinding {
     confidence: f32,
     claim: String,
     rationale: String,
+    #[serde(default)]
+    impact: Option<String>,
+    #[serde(default)]
+    remediation: Option<String>,
+}
+
+fn optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 pub(crate) fn extract_last_json_block(text: &str) -> Result<&str, CandidateParseError> {
@@ -171,6 +183,8 @@ pub(crate) fn validate_candidate(
         confidence: raw.confidence.clamp(0.0, 1.0),
         claim,
         rationale: raw.rationale.trim().to_string(),
+        impact: optional_text(raw.impact),
+        remediation: optional_text(raw.remediation),
     })
 }
 

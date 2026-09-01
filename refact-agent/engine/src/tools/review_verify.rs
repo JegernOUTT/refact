@@ -311,10 +311,12 @@ pub(crate) fn apply_verifier_verdicts(
     }
 }
 
+/// Verification never executes anything: a "verified" verdict only means a second
+/// model re-read the same excerpt. The labels say exactly that.
 pub(crate) fn verification_status_label(status: &VerificationStatus) -> &'static str {
     match status {
-        VerificationStatus::Unverified => "unverified",
-        VerificationStatus::Verified => "verified",
+        VerificationStatus::Unverified => "unreviewed",
+        VerificationStatus::Verified => "model-verified",
         VerificationStatus::Downgraded => "downgraded",
         VerificationStatus::Rejected => "rejected",
         VerificationStatus::NeedsHumanValidation => "needs human validation",

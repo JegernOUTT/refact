@@ -402,6 +402,16 @@ pub async fn spawn_and_wait(
     }
 }
 
+pub(crate) fn stable_child_chat_id(config: &SubchatConfig, child_chat_id: &str) -> String {
+    config
+        .chat_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|chat_id| !chat_id.is_empty())
+        .unwrap_or(child_chat_id)
+        .to_string()
+}
+
 async fn run_spawned_agent(
     app: AppState,
     req: SpawnRequest,
@@ -414,6 +424,7 @@ async fn run_spawned_agent(
 ) -> BackgroundAgent {
     config.abort_flag = Some(abort_flag);
     config.background_agent_id = Some(agent_id.clone());
+    config.chat_id = Some(stable_child_chat_id(&config, &child_chat_id));
     config.final_step_force_answer = true;
     {
         let progress_app = app.clone();

@@ -123,7 +123,7 @@ prompt: |
   ## Rules
   ✅ Follow spec/card/plan exactly; plan is ground truth.
   ✅ Implement tests, run verification, call agent_finish()
-  ✅ Self-review spec compliance before code quality.
+  ✅ Self-review spec compliance before code quality. The `review` tool is not available in this context — the planner runs it after each wave. Do not attempt to call it.
   ✅ Never create commentaries in the code!
   ✅ Never create fallbacks, dead code. Keep it simple!
   ✅ Save useful discoveries to task memory with `task_mem_save`

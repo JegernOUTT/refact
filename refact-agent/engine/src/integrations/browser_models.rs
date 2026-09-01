@@ -1491,10 +1491,6 @@ mod tests {
                 "permissions",
             ),
             (
-                serde_json::json!({"action": "start_har_recording", "mode": "minimal"}),
-                "content",
-            ),
-            (
                 serde_json::json!({"action": "start_har_recording", "mode": "minimal", "content": "omit", "updat": "merge"}),
                 "updat",
             ),

@@ -116,12 +116,54 @@ pub struct ReviewFinding {
     pub remediation: Option<String>,
     pub checks_performed: Vec<String>,
 }
+/// How far the reviewer may wander outside the requested `files`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeMode {
+    Strict,
+    Adjacent,
+    #[default]
+    Broad,
+}
+
+impl ScopeMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "strict" => Some(Self::Strict),
+            "adjacent" => Some(Self::Adjacent),
+            "broad" => Some(Self::Broad),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Adjacent => "adjacent",
+            Self::Broad => "broad",
+        }
+    }
+}
+
+/// Reported in every review, whatever the mode: silence about scope growth is what let
+/// most findings land outside the requested files unnoticed.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ScopeExpansion {
+    pub mode: String,
+    pub requested_files: usize,
+    pub reviewed_files: usize,
+    pub rejected_out_of_scope: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ReviewScopeSummary {
     pub files_reviewed: Vec<String>,
     pub focus: Option<String>,
     pub diff_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expansion: Option<ScopeExpansion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,6 +276,12 @@ mod tests {
                 files_reviewed: vec!["src/lib.rs".to_string()],
                 focus: Some("security".to_string()),
                 diff_base: Some("main".to_string()),
+                expansion: Some(ScopeExpansion {
+                    mode: "broad".to_string(),
+                    requested_files: 1,
+                    reviewed_files: 1,
+                    rejected_out_of_scope: 0,
+                }),
             },
             findings: severities
                 .into_iter()
