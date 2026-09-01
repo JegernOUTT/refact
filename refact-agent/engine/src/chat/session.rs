@@ -1195,6 +1195,20 @@ impl ChatSession {
     }
 
     pub fn emit(&mut self, event: ChatEvent) {
+        if self.event_tx.receiver_count() == 0 {
+            if perf_diagnostics::is_enabled() {
+                perf_diagnostics::record(
+                    PerfComponent::SseBroadcast,
+                    Some(&self.chat_id),
+                    PerfOutcome::Skipped,
+                    0,
+                    None,
+                    None,
+                    None,
+                );
+            }
+            return;
+        }
         let serialize_started_at = perf_diagnostics::is_enabled().then(Instant::now);
         self.event_seq += 1;
         let envelope = EventEnvelope {
@@ -4605,11 +4619,43 @@ mod tests {
     #[test]
     fn test_emit_increments_seq() {
         let mut session = make_session();
+        let _rx = session.subscribe();
         assert_eq!(session.event_seq, 0);
         session.emit(ChatEvent::PauseCleared {});
         assert_eq!(session.event_seq, 1);
         session.emit(ChatEvent::PauseCleared {});
         assert_eq!(session.event_seq, 2);
+    }
+
+    #[test]
+    fn test_emit_skips_serialization_without_receivers() {
+        let mut session = make_session();
+        assert_eq!(session.event_tx.receiver_count(), 0);
+
+        session.emit(ChatEvent::PauseCleared {});
+        session.emit(ChatEvent::PauseCleared {});
+
+        assert_eq!(session.event_seq, 0);
+    }
+
+    #[test]
+    fn test_emit_seq_stays_contiguous_across_subscribe_gap() {
+        let mut session = make_session();
+
+        session.emit(ChatEvent::PauseCleared {});
+        assert_eq!(session.event_seq, 0);
+
+        let mut rx = session.subscribe();
+        let baseline = session.event_seq;
+
+        session.emit(ChatEvent::PauseCleared {});
+        let envelope: EventEnvelope =
+            serde_json::from_str(rx.try_recv().unwrap().as_str()).unwrap();
+        assert_eq!(envelope.seq, baseline + 1);
+
+        drop(rx);
+        session.emit(ChatEvent::PauseCleared {});
+        assert_eq!(session.event_seq, baseline + 1);
     }
 
     #[test]

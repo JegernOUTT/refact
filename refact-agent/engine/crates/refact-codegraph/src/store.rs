@@ -232,6 +232,19 @@ pub struct SymbolRecord {
     pub data: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalCheckpointMode {
+    Passive,
+    Truncate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalCheckpointResult {
+    pub busy: i64,
+    pub log_frames: i64,
+    pub checkpointed_frames: i64,
+}
+
 const SYMBOL_FUZZY_SQL: &str = "SELECT DISTINCT double_colon_path FROM ( \
          SELECT double_colon_path FROM symbols \
          WHERE reverse_symbol_path COLLATE NOCASE >= ?1 AND reverse_symbol_path COLLATE NOCASE < ?2 \
@@ -313,6 +326,22 @@ impl Store {
         }
     }
 
+    pub fn checkpoint_wal(&self, mode: WalCheckpointMode) -> Result<WalCheckpointResult, String> {
+        let pragma = match mode {
+            WalCheckpointMode::Passive => "PRAGMA wal_checkpoint(PASSIVE)",
+            WalCheckpointMode::Truncate => "PRAGMA wal_checkpoint(TRUNCATE)",
+        };
+        self.conn
+            .query_row(pragma, [], |row| {
+                Ok(WalCheckpointResult {
+                    busy: row.get(0)?,
+                    log_frames: row.get(1)?,
+                    checkpointed_frames: row.get(2)?,
+                })
+            })
+            .map_err(|e| format!("codegraph WAL checkpoint {mode:?}: {e}"))
+    }
+
     fn tune_persistent_connection(conn: &Connection) -> Result<(), String> {
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(|e| format!("codegraph pragma journal_mode: {e}"))?;
@@ -324,6 +353,10 @@ impl Store {
             .map_err(|e| format!("codegraph pragma cache_size: {e}"))?;
         conn.pragma_update(None, "mmap_size", 268_435_456i64)
             .map_err(|e| format!("codegraph pragma mmap_size: {e}"))?;
+        // Keep SQLite's conservative default as a backstop. Explicit checkpoints at batch and
+        // idle boundaries handle timely recycling and truncation without allowing a 4000-page WAL.
+        conn.pragma_update(None, "wal_autocheckpoint", 1_000i64)
+            .map_err(|e| format!("codegraph pragma wal_autocheckpoint: {e}"))?;
         Ok(())
     }
 
@@ -2999,5 +3032,54 @@ func main() {
         let mut paths = store.all_paths().unwrap();
         paths.sort();
         assert_eq!(paths, vec!["src/a.rs".to_string(), "src/b.rs".to_string()]);
+    }
+
+    #[test]
+    fn truncate_checkpoint_reclaims_wal_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("codegraph.sqlite");
+        let wal_path = dir.path().join("codegraph.sqlite-wal");
+        let store = Store::open(&db_path).unwrap();
+        let payload = "x".repeat(16 * 1024);
+
+        for index in 0..400 {
+            store
+                .insert_node_with_data(
+                    "function",
+                    "src/generated.rs",
+                    &format!("generated_{index}"),
+                    "rust",
+                    index,
+                    index,
+                    &payload,
+                )
+                .unwrap();
+        }
+
+        let wal_size_before = fs::metadata(&wal_path).unwrap().len();
+        assert!(
+            wal_size_before > 1_000_000,
+            "fixture did not grow WAL enough to prove truncation: {wal_size_before} bytes"
+        );
+
+        let result = store.checkpoint_wal(WalCheckpointMode::Truncate).unwrap();
+        assert_eq!(
+            result.busy, 0,
+            "checkpoint unexpectedly blocked: {result:?}"
+        );
+        let wal_size_after = fs::metadata(&wal_path).map(|meta| meta.len()).unwrap_or(0);
+        eprintln!(
+            "WAL truncate proof: before={wal_size_before} bytes, after={wal_size_after} bytes, \
+             result={result:?}"
+        );
+        assert!(
+            wal_size_after < wal_size_before,
+            "TRUNCATE checkpoint did not shrink WAL: before={wal_size_before}, \
+             after={wal_size_after}, result={result:?}"
+        );
+        assert_eq!(
+            wal_size_after, 0,
+            "TRUNCATE checkpoint should reclaim the entire idle WAL: {result:?}"
+        );
     }
 }

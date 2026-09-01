@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use futures::stream::{self, StreamExt};
 use tracing::{error, info, warn};
 
-use refact_codegraph::{lang_from_path, CodeGraphService, Counts, QueuedPath};
+use refact_codegraph::{lang_from_path, CodeGraphService, Counts, QueuedPath, WalCheckpointMode};
 
 use crate::global_context::GlobalContext;
 
@@ -249,6 +249,7 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
     let mut reported_unprocessed = 0;
     let mut batches_since_connect: u32 = 0;
     let mut last_connect = Instant::now();
+    let mut idle_wal_checkpoint_pending = true;
 
     loop {
         if gcx.shutdown_flag.load(Ordering::Relaxed) {
@@ -268,8 +269,14 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
                     connect_usages(&gcx, &service).await;
                     batches_since_connect = 0;
                     last_connect = Instant::now();
+                    idle_wal_checkpoint_pending = true;
                 }
-                Ok(false) => {}
+                Ok(false) => {
+                    if idle_wal_checkpoint_pending {
+                        service.checkpoint_wal(WalCheckpointMode::Truncate).await;
+                        idle_wal_checkpoint_pending = false;
+                    }
+                }
                 Err(err) => error!("codegraph: dirty usage check failed: {err}"),
             }
             if !service.is_initial_index_done() {
@@ -299,6 +306,7 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
 
         process_index_batch(gcx.clone(), service.clone(), batch).await;
         batches_since_connect = batches_since_connect.saturating_add(1);
+        idle_wal_checkpoint_pending = true;
         if gcx.shutdown_flag.load(Ordering::Relaxed) {
             break;
         }

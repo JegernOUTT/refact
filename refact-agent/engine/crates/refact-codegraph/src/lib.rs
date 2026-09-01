@@ -20,8 +20,9 @@ use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AMutex;
 use tokio::sync::Notify;
+use tracing::debug;
 
-pub use store::{Counts, Store};
+pub use store::{Counts, Store, WalCheckpointMode, WalCheckpointResult};
 
 pub fn lang_from_path(path: &str) -> &'static str {
     match Path::new(path)
@@ -499,11 +500,37 @@ impl CodeGraphService {
         let store = self.store.lock().await;
         let results = store.index_files_batch(entries)?;
         let changed = results.iter().any(|(_, changed)| *changed);
+        Self::checkpoint_wal_failure_tolerant(&store, WalCheckpointMode::Passive);
         drop(store);
         if changed {
             self.bump_graph_generation();
         }
         Ok(results)
+    }
+
+    fn checkpoint_wal_failure_tolerant(store: &Store, mode: WalCheckpointMode) {
+        match store.checkpoint_wal(mode) {
+            Ok(result) if result.busy != 0 => {
+                debug!(
+                    ?mode,
+                    ?result,
+                    "codegraph WAL checkpoint blocked; will retry later"
+                );
+            }
+            Ok(result) => {
+                debug!(?mode, ?result, "codegraph WAL checkpoint complete");
+            }
+            Err(err) => {
+                debug!(?mode, %err, "codegraph WAL checkpoint failed; will retry later");
+            }
+        }
+    }
+
+    /// Checkpoint the WAL without allowing a busy reader or SQLite error to disrupt indexing.
+    /// Use `Passive` after routine batches and `Truncate` only at a genuine idle boundary.
+    pub async fn checkpoint_wal(&self, mode: WalCheckpointMode) {
+        let store = self.store.lock().await;
+        Self::checkpoint_wal_failure_tolerant(&store, mode);
     }
 
     pub async fn remove_path(&self, path: &str) -> Result<(), String> {

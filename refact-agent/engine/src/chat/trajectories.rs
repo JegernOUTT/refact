@@ -2159,6 +2159,8 @@ async fn read_existing_trajectory_object(
     path: &Path,
     chat_id: &str,
 ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
+    #[cfg(test)]
+    TRAJECTORY_METADATA_DISK_READS.fetch_add(1, Ordering::Relaxed);
     match fs::symlink_metadata(path).await {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -2193,6 +2195,9 @@ async fn read_existing_trajectory_object(
         })
         .map(Some)
 }
+
+#[cfg(test)]
+static TRAJECTORY_METADATA_DISK_READS: AtomicUsize = AtomicUsize::new(0);
 
 fn is_known_trajectory_top_level_key(key: &str) -> bool {
     matches!(
@@ -3513,7 +3518,129 @@ struct DetachedTrajectoryWriteCache {
     backing_path: Option<PathBuf>,
     existing_metadata: Option<serde_json::Map<String, serde_json::Value>>,
     source: Option<TrajectorySourceIdentity>,
-    backing_fingerprint: Option<TrajectoryWriteFingerprint>,
+    backing_stamp: Option<TrajectoryFileStamp>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct TrajectoryFileStamp {
+    len: u64,
+    modified: SystemTime,
+}
+
+#[derive(Clone)]
+struct TrajectoryMetadataCacheEntry {
+    chat_id: String,
+    metadata: serde_json::Map<String, serde_json::Value>,
+    stamp: TrajectoryFileStamp,
+}
+
+const MAX_CACHED_TRAJECTORY_METADATA: usize = 256;
+
+fn trajectory_metadata_cache(
+) -> &'static StdMutex<std::collections::HashMap<PathBuf, TrajectoryMetadataCacheEntry>> {
+    static CACHE: OnceLock<
+        StdMutex<std::collections::HashMap<PathBuf, TrajectoryMetadataCacheEntry>>,
+    > = OnceLock::new();
+    CACHE.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+fn preservable_trajectory_metadata(
+    source: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    source
+        .iter()
+        .filter(|(key, _)| {
+            key.as_str() == "browser_meta" || !is_known_trajectory_top_level_key(key)
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+fn store_trajectory_metadata_cache_entry(path: &Path, entry: TrajectoryMetadataCacheEntry) {
+    let mut cache = trajectory_metadata_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !cache.contains_key(path) {
+        while cache.len() >= MAX_CACHED_TRAJECTORY_METADATA {
+            let Some(victim) = cache.keys().next().cloned() else {
+                break;
+            };
+            cache.remove(&victim);
+        }
+    }
+    cache.insert(path.to_path_buf(), entry);
+}
+
+async fn trajectory_file_stamp(path: &Path) -> Option<TrajectoryFileStamp> {
+    let metadata = fs::symlink_metadata(path).await.ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    Some(TrajectoryFileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok()?,
+    })
+}
+
+async fn trajectory_stamp_matches(path: &Path, expected: &TrajectoryFileStamp) -> bool {
+    trajectory_file_stamp(path).await.as_ref() == Some(expected)
+}
+
+async fn cached_existing_trajectory_object(
+    path: &Path,
+    chat_id: &str,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
+    let stamp = trajectory_file_stamp(path).await;
+    if let Some(stamp) = stamp.as_ref() {
+        let cached = trajectory_metadata_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(path)
+            .filter(|entry| entry.chat_id == chat_id && &entry.stamp == stamp)
+            .map(|entry| entry.metadata.clone());
+        if cached.is_some() {
+            return Ok(cached);
+        }
+    }
+
+    let metadata = read_existing_trajectory_object(path, chat_id).await?;
+    match (metadata.as_ref(), stamp) {
+        (Some(metadata), Some(stamp)) => {
+            store_trajectory_metadata_cache_entry(
+                path,
+                TrajectoryMetadataCacheEntry {
+                    chat_id: chat_id.to_string(),
+                    metadata: preservable_trajectory_metadata(metadata),
+                    stamp,
+                },
+            );
+        }
+        _ => {
+            trajectory_metadata_cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(path);
+        }
+    }
+    Ok(metadata)
+}
+
+async fn cache_written_trajectory_metadata(
+    path: &Path,
+    chat_id: &str,
+    trajectory: &serde_json::Value,
+) -> Option<TrajectoryFileStamp> {
+    let metadata = preservable_trajectory_metadata(trajectory.as_object()?);
+    let stamp = trajectory_file_stamp(path).await?;
+    store_trajectory_metadata_cache_entry(
+        path,
+        TrajectoryMetadataCacheEntry {
+            chat_id: chat_id.to_string(),
+            metadata,
+            stamp: stamp.clone(),
+        },
+    );
+    Some(stamp)
 }
 
 impl Default for DetachedTrajectoryWriterState {
@@ -3983,11 +4110,9 @@ async fn save_trajectory_snapshot_inner(
             match (
                 write_cache.backing_path.clone(),
                 write_cache.existing_metadata.clone(),
-                write_cache.backing_fingerprint.clone(),
+                write_cache.backing_stamp.clone(),
             ) {
-                (Some(path), Some(metadata), Some(fingerprint)) => {
-                    Some((path, metadata, fingerprint))
-                }
+                (Some(path), Some(metadata), Some(stamp)) => Some((path, metadata, stamp)),
                 _ => None,
             }
         } else {
@@ -3997,10 +4122,10 @@ async fn save_trajectory_snapshot_inner(
         None
     };
     let cached_path_and_metadata = match cached_entry {
-        Some((path, metadata, fingerprint))
+        Some((path, metadata, stamp))
             if metadata.get("id").and_then(|value| value.as_str())
                 == Some(snapshot.chat_id.as_str())
-                && trajectory_fingerprint_matches(&path, &fingerprint).await =>
+                && trajectory_stamp_matches(&path, &stamp).await =>
         {
             Some((path, metadata))
         }
@@ -4037,7 +4162,7 @@ async fn save_trajectory_snapshot_inner(
     };
     let existing_trajectory = match cached_path_and_metadata.map(|(_, metadata)| metadata) {
         Some(existing_trajectory) => Some(existing_trajectory),
-        None => match read_existing_trajectory_object(&file_path, &snapshot.chat_id).await {
+        None => match cached_existing_trajectory_object(&file_path, &snapshot.chat_id).await {
             Ok(existing_trajectory) => existing_trajectory,
             Err(error) => {
                 serialize_span.finish(
@@ -4116,15 +4241,16 @@ async fn save_trajectory_snapshot_inner(
     );
     atomic_write_result?;
 
+    let backing_stamp =
+        cache_written_trajectory_metadata(&file_path, &snapshot.chat_id, &trajectory).await;
     if let Some(write_cache) = write_cache.as_ref() {
         let metadata = trajectory.as_object().cloned();
-        let fingerprint = trajectory_write_fingerprint(&file_path).await;
         let mut write_cache = write_cache.lock().await;
-        if let (Some(metadata), Some(fingerprint)) = (metadata, fingerprint) {
+        if let (Some(metadata), Some(stamp)) = (metadata, backing_stamp) {
             write_cache.backing_path = Some(file_path.clone());
             write_cache.existing_metadata = Some(metadata);
             write_cache.source = Some(source.clone());
-            write_cache.backing_fingerprint = Some(fingerprint);
+            write_cache.backing_stamp = Some(stamp);
         } else {
             *write_cache = DetachedTrajectoryWriteCache::default();
         }
@@ -8770,6 +8896,73 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
         assert_eq!(saved["external_metadata"], json!({"preserved": true}));
+    }
+
+    #[serial(trajectory_perf)]
+    #[tokio::test]
+    async fn repeated_save_reuses_pretty_round_trip_metadata_without_a_second_disk_read() {
+        let _lock = serial_test_guard();
+        let workspace = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(workspace.path()).await;
+        let chat_id = "metadata-cache-round-trip";
+        let path = workspace
+            .path()
+            .join(".refact")
+            .join("trajectories")
+            .join(chat_id)
+            .join(format!("{chat_id}.json"));
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "id": chat_id,
+                "title": "Before",
+                "messages": [],
+                "browser_meta": {
+                    "browser_runtime_id": "browser-round-trip",
+                    "tab_urls": ["https://example.com/round-trip"]
+                },
+                "custom_future_field": {"nested": {"value": 61}},
+                "custom_scalar": "preserve-me"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let reads_before = TRAJECTORY_METADATA_DISK_READS.load(Ordering::Relaxed);
+        for title in ["First", "Second"] {
+            save_trajectory_snapshot(
+                gcx.clone(),
+                test_snapshot(
+                    chat_id,
+                    title,
+                    vec![ChatMessage::new("user".to_string(), title.to_string())],
+                ),
+            )
+            .await
+            .unwrap();
+        }
+        let reads_after = TRAJECTORY_METADATA_DISK_READS.load(Ordering::Relaxed);
+        assert_eq!(reads_after - reads_before, 1);
+
+        let text = tokio::fs::read_to_string(&path).await.unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(text, serde_json::to_string_pretty(&saved).unwrap());
+        assert!(text.contains("\n  \"browser_meta\": {"));
+        assert_eq!(saved["title"], "Second");
+        assert_eq!(
+            saved["browser_meta"]["browser_runtime_id"],
+            "browser-round-trip"
+        );
+        assert_eq!(saved["custom_future_field"]["nested"]["value"], 61);
+        assert_eq!(saved["custom_scalar"], "preserve-me");
+
+        let loaded = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages[0].content.content_text_only(), "Second");
     }
 
     #[tokio::test]

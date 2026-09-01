@@ -31,6 +31,25 @@ use crate::files_in_jsonl::enqueue_all_docs_from_jsonl_but_read_first;
 
 pub use refact_files::correction_cache::CacheCorrection;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchRegistrationMode {
+    Recursive,
+    NonRecursive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WatchRegistration {
+    path: PathBuf,
+    mode: WatchRegistrationMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchSubtreeClass {
+    Excluded,
+    CleanSubtree,
+    Mixed,
+}
+
 // How this works
 // --------------
 //
@@ -76,6 +95,221 @@ fn path_for_blocklist(path: &Path, roots: &[PathBuf]) -> PathBuf {
         .max_by_key(|(root, _)| root.components().count())
         .map(|(_, rel)| rel.to_path_buf())
         .unwrap_or_else(|| path.to_path_buf())
+}
+
+const WATCH_BLOCKLIST_PROBE_ROOT: &str = "__refact_watch_root__";
+const WATCH_BLOCKLIST_PROBE_LEAF: &str = "__refact_watch_probe__";
+
+fn path_is_excluded_from_watch(
+    scan_root: &Path,
+    path: &Path,
+    indexing_everywhere: &IndexingEverywhere,
+) -> bool {
+    if path_is_refact_internal(path) {
+        return true;
+    }
+    let rel_path = path.strip_prefix(scan_root).unwrap_or(path);
+    if path_has_allowed_hidden_component(rel_path) {
+        return false;
+    }
+    if path_has_hidden_component(rel_path) {
+        return true;
+    }
+    if rel_path.as_os_str().is_empty() {
+        return false;
+    }
+    let indexing_settings = indexing_everywhere.indexing_for_path(path);
+    let probe = Path::new(WATCH_BLOCKLIST_PROBE_ROOT)
+        .join(rel_path)
+        .join(WATCH_BLOCKLIST_PROBE_LEAF);
+    is_blocklisted(&indexing_settings, &probe)
+}
+
+fn classify_watch_subtree(
+    scan_root: &Path,
+    path: &Path,
+    indexing_everywhere: &IndexingEverywhere,
+) -> WatchSubtreeClass {
+    if path_is_excluded_from_watch(scan_root, path, indexing_everywhere) {
+        return WatchSubtreeClass::Excluded;
+    }
+
+    let read_dir = match fs::read_dir(path) {
+        Ok(read_dir) => read_dir,
+        Err(err) => {
+            tracing::debug!(
+                "Skipping unreadable directory during watch planning {}: {}",
+                path.display(),
+                err
+            );
+            return WatchSubtreeClass::CleanSubtree;
+        }
+    };
+
+    let mut saw_excluded_descendant = false;
+    for child in read_dir {
+        let child = match child {
+            Ok(child) => child,
+            Err(err) => {
+                tracing::debug!(
+                    "Skipping unreadable directory entry during watch planning {}: {}",
+                    path.display(),
+                    err
+                );
+                continue;
+            }
+        };
+        let file_type = match child.file_type() {
+            Ok(file_type) => file_type,
+            Err(err) => {
+                tracing::debug!(
+                    "Skipping directory entry with unknown type during watch planning {}: {}",
+                    child.path().display(),
+                    err
+                );
+                continue;
+            }
+        };
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+
+        match classify_watch_subtree(scan_root, &child.path(), indexing_everywhere) {
+            WatchSubtreeClass::Excluded => saw_excluded_descendant = true,
+            WatchSubtreeClass::Mixed => return WatchSubtreeClass::Mixed,
+            WatchSubtreeClass::CleanSubtree => {}
+        }
+    }
+
+    if saw_excluded_descendant {
+        WatchSubtreeClass::Mixed
+    } else {
+        WatchSubtreeClass::CleanSubtree
+    }
+}
+
+fn build_watch_plan_for_root(
+    scan_root: &Path,
+    indexing_everywhere: &IndexingEverywhere,
+) -> Vec<WatchRegistration> {
+    fn visit(
+        registrations: &mut Vec<WatchRegistration>,
+        scan_root: &Path,
+        path: &Path,
+        indexing_everywhere: &IndexingEverywhere,
+    ) {
+        match classify_watch_subtree(scan_root, path, indexing_everywhere) {
+            WatchSubtreeClass::Excluded => {}
+            WatchSubtreeClass::CleanSubtree => registrations.push(WatchRegistration {
+                path: path.to_path_buf(),
+                mode: WatchRegistrationMode::Recursive,
+            }),
+            WatchSubtreeClass::Mixed => {
+                registrations.push(WatchRegistration {
+                    path: path.to_path_buf(),
+                    mode: WatchRegistrationMode::NonRecursive,
+                });
+                let read_dir = match fs::read_dir(path) {
+                    Ok(read_dir) => read_dir,
+                    Err(err) => {
+                        tracing::debug!(
+                            "Skipping unreadable directory during watch plan descent {}: {}",
+                            path.display(),
+                            err
+                        );
+                        return;
+                    }
+                };
+                for child in read_dir {
+                    let child = match child {
+                        Ok(child) => child,
+                        Err(err) => {
+                            tracing::debug!(
+                                "Skipping unreadable directory entry during watch plan descent {}: {}",
+                                path.display(),
+                                err
+                            );
+                            continue;
+                        }
+                    };
+                    let file_type = match child.file_type() {
+                        Ok(file_type) => file_type,
+                        Err(err) => {
+                            tracing::debug!(
+                                "Skipping directory entry with unknown type during watch plan descent {}: {}",
+                                child.path().display(),
+                                err
+                            );
+                            continue;
+                        }
+                    };
+                    if !file_type.is_dir() || file_type.is_symlink() {
+                        continue;
+                    }
+                    visit(registrations, scan_root, &child.path(), indexing_everywhere);
+                }
+            }
+        }
+    }
+
+    let mut registrations = Vec::new();
+    visit(
+        &mut registrations,
+        scan_root,
+        scan_root,
+        indexing_everywhere,
+    );
+    registrations
+}
+
+fn build_watch_plan(
+    watch_folders: &[PathBuf],
+    indexing_everywhere: &IndexingEverywhere,
+) -> Vec<WatchRegistration> {
+    let mut plan = Vec::new();
+    for root in watch_folders {
+        let root = crate::files_correction::canonicalize_normalized_path(root.clone());
+        plan.extend(build_watch_plan_for_root(&root, indexing_everywhere));
+    }
+    plan.sort_by(|a, b| {
+        a.path.cmp(&b.path).then_with(|| match (a.mode, b.mode) {
+            (WatchRegistrationMode::Recursive, WatchRegistrationMode::NonRecursive) => {
+                std::cmp::Ordering::Less
+            }
+            (WatchRegistrationMode::NonRecursive, WatchRegistrationMode::Recursive) => {
+                std::cmp::Ordering::Greater
+            }
+            _ => std::cmp::Ordering::Equal,
+        })
+    });
+    plan.dedup_by(|a, b| a.path == b.path && a.mode == b.mode);
+    plan
+}
+
+async fn register_watch_path(
+    watcher_lock: &Arc<ARwLock<RecommendedWatcher>>,
+    registration: &WatchRegistration,
+) {
+    let mut watcher = watcher_lock.write().await;
+    let recursive_mode = match registration.mode {
+        WatchRegistrationMode::Recursive => RecursiveMode::Recursive,
+        WatchRegistrationMode::NonRecursive => RecursiveMode::NonRecursive,
+    };
+    if let Err(err) = watcher.watch(&registration.path, recursive_mode) {
+        tracing::warn!(
+            "Failed to add watcher for {} ({:?}): {}",
+            registration.path.display(),
+            registration.mode,
+            err
+        );
+    }
+}
+
+async fn unregister_watch_path(watcher_lock: &Arc<ARwLock<RecommendedWatcher>>, path: &Path) {
+    let mut watcher = watcher_lock.write().await;
+    if let Err(err) = watcher.unwatch(path) {
+        tracing::debug!("Failed to remove watcher for {}: {}", path.display(), err);
+    }
 }
 
 fn event_path_is_valid_file(
@@ -535,7 +769,7 @@ pub async fn watcher_init(gcx: Arc<GlobalContext>) {
             }
         });
     };
-    let mut watcher = match RecommendedWatcher::new(event_callback, Config::default()) {
+    let watcher = match RecommendedWatcher::new(event_callback, Config::default()) {
         Ok(w) => w,
         Err(e) => {
             tracing::warn!("Failed to create file watcher (file watching disabled): {e}");
@@ -547,13 +781,24 @@ pub async fn watcher_init(gcx: Arc<GlobalContext>) {
     watch_folders.extend(crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await);
     watch_folders.sort();
     watch_folders.dedup();
+    let watch_folders = watch_folders
+        .into_iter()
+        .map(crate::files_correction::canonicalize_normalized_path)
+        .collect::<Vec<_>>();
+    let indexing_everywhere = reload_indexing_everywhere_if_needed(gcx.clone()).await;
+    let watch_plan = build_watch_plan(&watch_folders, indexing_everywhere.as_ref());
 
-    for folder in &watch_folders {
-        info!("ADD WATCHER (1): {}", folder.display());
-        let _ = watcher.watch(folder, RecursiveMode::Recursive);
+    let watcher_lock = Arc::new(ARwLock::new(watcher));
+    for registration in &watch_plan {
+        info!(
+            "ADD WATCHER ({:?}): {}",
+            registration.mode,
+            registration.path.display()
+        );
+        register_watch_path(&watcher_lock, registration).await;
     }
 
-    let new_watcher = Some(Arc::new(ARwLock::new(watcher)));
+    let new_watcher = Some(watcher_lock);
     let old_watcher = {
         std::mem::replace(
             &mut *gcx.documents_state.fs_watcher.lock().unwrap(),
@@ -2311,12 +2556,110 @@ async fn flush_debounced_file_event_worker(gcx: Arc<GlobalContext>) {
 }
 
 pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
+    async fn update_directory_watch_registration(
+        gcx: Arc<GlobalContext>,
+        indexing_everywhere: &IndexingEverywhere,
+        path: &Path,
+        should_watch: bool,
+    ) {
+        let watcher_lock = {
+            gcx.documents_state
+                .fs_watcher
+                .lock()
+                .unwrap()
+                .as_ref()
+                .cloned()
+        };
+        let Some(watcher_lock) = watcher_lock else {
+            return;
+        };
+
+        let canonical_path =
+            crate::files_correction::canonicalize_normalized_path(path.to_path_buf());
+        if should_watch {
+            let mut watch_folders = gcx
+                .documents_state
+                .workspace_vcs_roots
+                .lock()
+                .unwrap()
+                .clone();
+            watch_folders.extend(
+                gcx.documents_state
+                    .workspace_folders
+                    .lock()
+                    .unwrap()
+                    .clone(),
+            );
+            let unscoped_watch_folders =
+                crate::files_correction::get_unscoped_project_dirs(gcx.clone()).await;
+            watch_folders.extend(unscoped_watch_folders);
+            let watch_folders = watch_folders
+                .into_iter()
+                .map(crate::files_correction::canonicalize_normalized_path)
+                .collect::<Vec<_>>();
+            let scan_root = watch_folders
+                .iter()
+                .filter(|root| canonical_path.starts_with(root))
+                .max_by_key(|root| root.components().count())
+                .cloned();
+            let Some(scan_root) = scan_root else {
+                return;
+            };
+            let registration =
+                match classify_watch_subtree(&scan_root, &canonical_path, indexing_everywhere) {
+                    WatchSubtreeClass::Excluded => None,
+                    WatchSubtreeClass::CleanSubtree => Some(WatchRegistration {
+                        path: canonical_path,
+                        mode: WatchRegistrationMode::Recursive,
+                    }),
+                    WatchSubtreeClass::Mixed => Some(WatchRegistration {
+                        path: canonical_path,
+                        mode: WatchRegistrationMode::NonRecursive,
+                    }),
+                };
+            if let Some(registration) = registration {
+                register_watch_path(&watcher_lock, &registration).await;
+            }
+        } else {
+            unregister_watch_path(&watcher_lock, &canonical_path).await;
+        }
+    }
+
     async fn on_file_change(gcx_weak: Weak<GlobalContext>, event: Event) {
         let gcx = match gcx_weak.clone().upgrade() {
             Some(gcx) => gcx,
             None => return,
         };
         let indexing_everywhere_arc = reload_indexing_everywhere_if_needed(gcx.clone()).await;
+        let maybe_created_dir = match &event.kind {
+            EventKind::Create(CreateKind::Folder) => event.paths.first().cloned(),
+            EventKind::Modify(ModifyKind::Name(_)) => event.paths.last().cloned(),
+            _ => None,
+        }
+        .filter(|path| path.is_dir());
+        let maybe_removed_dir = match &event.kind {
+            EventKind::Remove(RemoveKind::Folder) => event.paths.first().cloned(),
+            EventKind::Modify(ModifyKind::Name(_)) => event.paths.first().cloned(),
+            _ => None,
+        };
+        if let Some(path) = maybe_removed_dir.as_deref() {
+            update_directory_watch_registration(
+                gcx.clone(),
+                indexing_everywhere_arc.as_ref(),
+                path,
+                false,
+            )
+            .await;
+        }
+        if let Some(path) = maybe_created_dir.as_deref() {
+            update_directory_watch_registration(
+                gcx.clone(),
+                indexing_everywhere_arc.as_ref(),
+                path,
+                true,
+            )
+            .await;
+        }
         if event.paths.iter().any(|p| path_triggers_registry_reload(p)) {
             crate::yaml_configs::customization_registry::invalidate_all_registry_caches(
                 gcx.clone(),
@@ -2556,6 +2899,27 @@ pub async fn files_in_workspace_init_task(gcx: Arc<GlobalContext>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn registration_modes(
+        plan: &[WatchRegistration],
+        root: &Path,
+    ) -> Vec<(PathBuf, WatchRegistrationMode)> {
+        let mut entries = plan
+            .iter()
+            .map(|registration| {
+                (
+                    registration
+                        .path
+                        .strip_prefix(root)
+                        .unwrap_or(registration.path.as_path())
+                        .to_path_buf(),
+                    registration.mode,
+                )
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
 
     fn write_file(path: &Path, content: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2896,6 +3260,130 @@ mod tests {
 
         assert!(files.contains(&normalized(&regular)));
         assert!(!files.contains(&normalized(&staged)));
+    }
+
+    #[test]
+    fn watch_plan_excludes_blocklisted_dirs_and_keeps_refact_visible() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = normalized(temp.path());
+        write_file(
+            &root.join("src").join("a").join("b").join("lib.rs"),
+            "pub fn ok() {}
+",
+        );
+        write_file(
+            &root.join("node_modules").join("pkg").join("index.js"),
+            "console.log('x');
+",
+        );
+        write_file(
+            &root.join("target").join("debug").join("app"),
+            "binary
+",
+        );
+        write_file(
+            &root.join(".git").join("HEAD"),
+            "ref: refs/heads/main
+",
+        );
+        write_file(
+            &root.join(".venv").join("bin").join("python"),
+            "#!/usr/bin/env python
+",
+        );
+        write_file(
+            &root.join("dist").join("bundle.js"),
+            "console.log('dist');
+",
+        );
+        write_file(
+            &root
+                .join(".refact")
+                .join("skills")
+                .join("example")
+                .join("SKILL.md"),
+            "# skill
+",
+        );
+
+        let indexing_everywhere = IndexingEverywhere::default();
+        let plan = build_watch_plan(&[root.clone()], &indexing_everywhere);
+        let entries = registration_modes(&plan, &root);
+
+        assert!(entries.contains(&(PathBuf::from(""), WatchRegistrationMode::NonRecursive)));
+        assert!(entries.contains(&(PathBuf::from("src"), WatchRegistrationMode::Recursive)));
+        assert!(entries.contains(&(PathBuf::from(".refact"), WatchRegistrationMode::Recursive)));
+        assert!(!entries
+            .iter()
+            .any(|(path, _)| path == Path::new("node_modules")));
+        assert!(!entries.iter().any(|(path, _)| path == Path::new("target")));
+        assert!(!entries.iter().any(|(path, _)| path == Path::new(".git")));
+        assert!(!entries.iter().any(|(path, _)| path == Path::new(".venv")));
+        assert!(!entries.iter().any(|(path, _)| path == Path::new("dist")));
+    }
+
+    #[tokio::test]
+    async fn watch_plan_runtime_created_directory_under_mixed_parent_is_watched() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let temp = tempfile::tempdir().unwrap();
+        let root = normalized(temp.path());
+        write_file(
+            &root.join("src").join("lib.rs"),
+            "pub fn before() {}
+",
+        );
+        write_file(
+            &root.join("node_modules").join("pkg").join("index.js"),
+            "console.log('x');
+",
+        );
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
+        *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![root.clone()];
+
+        let created_dir = root.join("src").join("runtime");
+        std::fs::create_dir_all(&created_dir).unwrap();
+
+        let indexing_everywhere = IndexingEverywhere::default();
+        assert_eq!(
+            classify_watch_subtree(&root, &created_dir, &indexing_everywhere),
+            WatchSubtreeClass::CleanSubtree,
+            "a runtime-created directory under a mixed parent must be classified as watchable, \
+             otherwise the dynamic registration hook would silently skip it"
+        );
+        assert!(
+            !path_is_excluded_from_watch(&root, &created_dir, &indexing_everywhere),
+            "runtime-created source directory must not be excluded"
+        );
+
+        let create_event =
+            notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::Folder))
+                .add_path(created_dir.clone());
+        file_watcher_event(create_event, Arc::downgrade(&gcx)).await;
+
+        let runtime_file = created_dir.join("new.rs");
+        write_file(
+            &runtime_file,
+            "pub fn runtime() {}
+",
+        );
+        let modify_event =
+            notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
+                .add_path(runtime_file.clone());
+        file_watcher_event(modify_event, Arc::downgrade(&gcx)).await;
+
+        let queued = gcx
+            .documents_state
+            .file_event_debounce
+            .lock()
+            .unwrap()
+            .get(&normalized(&runtime_file))
+            .cloned();
+        assert!(
+            queued.is_some(),
+            "runtime-created directory file should be tracked"
+        );
+        gcx.shutdown_flag.store(true, Ordering::Relaxed);
+        gcx.documents_state.file_event_debounce_notify.notify_one();
     }
 
     #[tokio::test]

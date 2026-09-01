@@ -12,6 +12,7 @@ use crate::app_state::AppState;
 use crate::call_validation::ChatUsage;
 use crate::caps::BaseModelRecord;
 use crate::chat::diagnostics::safe_provider_error_diagnostic;
+use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
 use crate::llm::{LlmRequest, LlmStreamDelta, WireFormat, get_adapter, safe_truncate};
 use crate::llm::adapter::{AdapterSettings, HttpParts, StreamParseError};
 use crate::privacy::destinations::clear_for_model;
@@ -2187,11 +2188,14 @@ async fn run_llm_ndjson_request<C: StreamCollector>(
     abort_flag: Option<Arc<AtomicBool>>,
     abort_notify: Option<Arc<tokio::sync::Notify>>,
     collector: &mut C,
+    request_sent_at: Option<Instant>,
+    chat_id: Option<&str>,
 ) -> Result<Vec<ChoiceFinal>, String> {
     let mut stream = response.bytes_stream();
     let mut pending = Vec::new();
     let mut accumulators: Vec<ChoiceAccumulator> = vec![ChoiceAccumulator::default()];
     let mut stream_done = false;
+    let mut provider_ttft_recorded = false;
     let stream_started_at = Instant::now();
     let mut last_event_at = Instant::now();
     let mut heartbeat = tokio::time::interval(stream_heartbeat());
@@ -2241,6 +2245,19 @@ async fn run_llm_ndjson_request<C: StreamCollector>(
             }
         };
         last_event_at = Instant::now();
+        let has_complete_event = request_sent_at.is_some() && !provider_ttft_recorded && {
+            let mut line_has_content = false;
+            pending.iter().chain(bytes.iter()).any(|byte| {
+                if *byte == b'\n' {
+                    let complete = line_has_content;
+                    line_has_content = false;
+                    complete
+                } else {
+                    line_has_content |= !byte.is_ascii_whitespace();
+                    false
+                }
+            })
+        };
         stream_done = process_ndjson_bytes(
             adapter,
             auth_token,
@@ -2249,6 +2266,24 @@ async fn run_llm_ndjson_request<C: StreamCollector>(
             &mut accumulators,
             collector,
         )?;
+        if !provider_ttft_recorded && has_complete_event {
+            if let Some(started_at) = request_sent_at {
+                perf_diagnostics::record(
+                    PerfComponent::StreamProviderTtft,
+                    chat_id,
+                    PerfOutcome::Success,
+                    started_at
+                        .elapsed()
+                        .as_micros()
+                        .try_into()
+                        .unwrap_or(u64::MAX),
+                    None,
+                    None,
+                    None,
+                );
+            }
+            provider_ttft_recorded = true;
+        }
     }
 
     Ok(finalize_accumulators(accumulators, collector))
@@ -2277,6 +2312,15 @@ pub async fn run_llm_stream<C: StreamCollector>(
     app: AppState,
     params: StreamRunParams,
     collector: &mut C,
+) -> Result<LlmStreamOutcome, LlmStreamError> {
+    run_llm_stream_with_prepare_started(app, params, collector, None).await
+}
+
+pub(crate) async fn run_llm_stream_with_prepare_started<C: StreamCollector>(
+    app: AppState,
+    params: StreamRunParams,
+    collector: &mut C,
+    prepare_started_at: Option<Instant>,
 ) -> Result<LlmStreamOutcome, LlmStreamError> {
     let mut partial_output_emitted = false;
 
@@ -2389,6 +2433,22 @@ pub async fn run_llm_stream<C: StreamCollector>(
         messages_count = params.llm_request.messages.len(),
         "LLM streaming request"
     );
+
+    if let Some(started_at) = prepare_started_at {
+        perf_diagnostics::record(
+            PerfComponent::StreamPrepare,
+            params.chat_id.as_deref(),
+            PerfOutcome::Success,
+            started_at
+                .elapsed()
+                .as_micros()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            None,
+            None,
+            None,
+        );
+    }
 
     let header_retry_config = llm_http_header_retry_config(&params.model_rec);
     let mut codex_http_fallback_reason: Option<String> = None;
@@ -2517,6 +2577,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
         );
     }
 
+    let request_sent_at = perf_diagnostics::is_enabled().then(Instant::now);
     let mut response = if let Some((response_header_timeout, max_attempts)) = header_retry_config {
         send_llm_http_request_with_header_timeout(
             &client,
@@ -2539,6 +2600,22 @@ pub async fn run_llm_stream<C: StreamCollector>(
         .await
     }
     .map_err(|e| LlmStreamError::new(e, partial_output_emitted))?;
+    let provider_ttft_started_at = request_sent_at;
+    if let Some(started_at) = request_sent_at {
+        perf_diagnostics::record(
+            PerfComponent::StreamRequestSend,
+            params.chat_id.as_deref(),
+            PerfOutcome::Success,
+            started_at
+                .elapsed()
+                .as_micros()
+                .try_into()
+                .unwrap_or(u64::MAX),
+            None,
+            None,
+            None,
+        );
+    }
     capture_xai_oauth_rate_limit_headers(&app, &params.model_rec, response.headers()).await;
     let mut status = response.status();
     if !status.is_success()
@@ -2745,6 +2822,8 @@ pub async fn run_llm_stream<C: StreamCollector>(
             params.abort_flag.clone(),
             params.abort_notify.clone(),
             &mut tracking_collector,
+            provider_ttft_started_at,
+            params.chat_id.as_deref(),
         )
         .await
         .map_err(|e| LlmStreamError::new(e, *tracking_collector.partial_output_emitted))
@@ -2755,6 +2834,7 @@ pub async fn run_llm_stream<C: StreamCollector>(
 
     let mut accumulators: Vec<ChoiceAccumulator> = vec![ChoiceAccumulator::default()];
     let mut stream_done = false;
+    let mut provider_ttft_recorded = false;
 
     let stream_started_at = Instant::now();
     let mut last_progress_event_count = 0;
@@ -2833,6 +2913,24 @@ pub async fn run_llm_stream<C: StreamCollector>(
             false,
         )
         .map_err(|e| LlmStreamError::new(e, *tracking_collector.partial_output_emitted))?;
+        if !provider_ttft_recorded {
+            if let Some(started_at) = provider_ttft_started_at {
+                perf_diagnostics::record(
+                    PerfComponent::StreamProviderTtft,
+                    params.chat_id.as_deref(),
+                    PerfOutcome::Success,
+                    started_at
+                        .elapsed()
+                        .as_micros()
+                        .try_into()
+                        .unwrap_or(u64::MAX),
+                    None,
+                    None,
+                    None,
+                );
+            }
+            provider_ttft_recorded = true;
+        }
     }
 
     let results = finalize_accumulators(accumulators, &mut tracking_collector);

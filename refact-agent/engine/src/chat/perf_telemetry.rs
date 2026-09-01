@@ -187,6 +187,11 @@ impl PerformanceTelemetry {
                     PerfComponent::TrajectoryCommit,
                     PerfComponent::CommandQueueWait,
                     PerfComponent::StreamFirstDelta,
+                    PerfComponent::StreamPrepare,
+                    PerfComponent::StreamTokenCountRequest,
+                    PerfComponent::StreamRequestSend,
+                    PerfComponent::StreamProviderTtft,
+                    PerfComponent::StreamFirstContentDelta,
                     PerfComponent::SseSerialize,
                     PerfComponent::SseBroadcast,
                     PerfComponent::SseLagged,
@@ -613,6 +618,39 @@ mod tests {
         assert_eq!(aggregate.item_count_sum, 5);
         assert_eq!(aggregate.batch_size_sum, 3);
         assert_eq!(snapshot.rollups.tool_stages.sample_count, 3);
+    }
+
+    #[test]
+    fn stream_stage_component_names_round_trip_through_telemetry() {
+        let telemetry = PerformanceTelemetry::new(true);
+        let expected = [
+            (PerfComponent::StreamPrepare, "stream.prepare"),
+            (
+                PerfComponent::StreamTokenCountRequest,
+                "stream.token_count_request",
+            ),
+            (PerfComponent::StreamRequestSend, "stream.request_send"),
+            (PerfComponent::StreamProviderTtft, "stream.provider_ttft"),
+            (
+                PerfComponent::StreamFirstContentDelta,
+                "stream.first_content_delta",
+            ),
+        ];
+
+        for (component, name) in expected {
+            assert_eq!(component.as_str(), name);
+            assert!(telemetry.record(&event(component, PerfOutcome::Success, 1, None, None, None,)));
+        }
+
+        let snapshot = telemetry.snapshot();
+        for (_, name) in expected {
+            let aggregate = snapshot
+                .components
+                .iter()
+                .find(|aggregate| aggregate.component == Some(name))
+                .unwrap();
+            assert_eq!(aggregate.sample_count, 1, "missing telemetry for {name}");
+        }
     }
 
     #[test]

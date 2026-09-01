@@ -80,10 +80,15 @@ pub enum PerfComponent {
     TrajectoryIndexCoordinatorFlush,
     TrajectoryIndexEnqueue,
     TrajectoryIndexCacheHit,
+    StreamPrepare,
+    StreamTokenCountRequest,
+    StreamRequestSend,
+    StreamProviderTtft,
+    StreamFirstContentDelta,
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 65] = [
+    pub const ALL: [Self; 70] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -149,6 +154,11 @@ impl PerfComponent {
         Self::TrajectoryIndexCoordinatorFlush,
         Self::TrajectoryIndexEnqueue,
         Self::TrajectoryIndexCacheHit,
+        Self::StreamPrepare,
+        Self::StreamTokenCountRequest,
+        Self::StreamRequestSend,
+        Self::StreamProviderTtft,
+        Self::StreamFirstContentDelta,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -163,6 +173,11 @@ impl PerfComponent {
             Self::TrajectoryIndexRebuild => "trajectory.index_rebuild",
             Self::CommandQueueWait => "command.queue_wait",
             Self::StreamFirstDelta => "stream.first_delta",
+            Self::StreamPrepare => "stream.prepare",
+            Self::StreamTokenCountRequest => "stream.token_count_request",
+            Self::StreamRequestSend => "stream.request_send",
+            Self::StreamProviderTtft => "stream.provider_ttft",
+            Self::StreamFirstContentDelta => "stream.first_content_delta",
             Self::SseSerialize => "sse.serialize",
             Self::SseBroadcast => "sse.broadcast",
             Self::SseLagged => "sse.lagged",
@@ -913,6 +928,11 @@ mod tests {
             "trajectory.index_rebuild",
             "command.queue_wait",
             "stream.first_delta",
+            "stream.prepare",
+            "stream.token_count_request",
+            "stream.request_send",
+            "stream.provider_ttft",
+            "stream.first_content_delta",
             "sse.serialize",
             "sse.broadcast",
             "sse.lagged",
@@ -977,6 +997,11 @@ mod tests {
         assert!(labels.iter().all(|label| label.len() <= 40));
         assert!(labels.contains(&"command.queue_wait"));
         assert!(labels.contains(&"stream.first_delta"));
+        assert!(labels.contains(&"stream.prepare"));
+        assert!(labels.contains(&"stream.token_count_request"));
+        assert!(labels.contains(&"stream.request_send"));
+        assert!(labels.contains(&"stream.provider_ttft"));
+        assert!(labels.contains(&"stream.first_content_delta"));
         assert!(labels.contains(&"sse.serialize"));
         assert!(labels.contains(&"sse.broadcast"));
         assert!(labels.contains(&"sse.lagged"));

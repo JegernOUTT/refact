@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use serde_json::json;
 use tokio::sync::{Mutex as AMutex};
 use tracing::{info, warn};
@@ -41,8 +42,8 @@ use super::prepare::{
 };
 use super::prompts::prepend_the_right_system_prompt_and_maybe_more_initial_messages;
 use super::stream_core::{
-    run_llm_stream, StreamRunParams, StreamCollector, normalize_tool_call, ChoiceFinal,
-    LlmStreamError, LlmStreamOutcome, ABORT_ERROR_MESSAGE,
+    StreamRunParams, StreamCollector, normalize_tool_call, ChoiceFinal, LlmStreamError,
+    LlmStreamOutcome, ABORT_ERROR_MESSAGE,
 };
 use super::config::tokens;
 use crate::ext::hooks::HookEvent;
@@ -79,6 +80,11 @@ fn delta_ops_contain_visible_content(ops: &[DeltaOp]) -> bool {
         DeltaOp::SetThinkingBlocks { blocks } => !blocks.is_empty(),
         _ => false,
     })
+}
+
+fn delta_ops_contain_assistant_content(ops: &[DeltaOp]) -> bool {
+    ops.iter()
+        .any(|op| matches!(op, DeltaOp::AppendContent { text } if !text.is_empty()))
 }
 
 fn delta_is_coalescible_text(op: &DeltaOp) -> bool {
@@ -1650,6 +1656,7 @@ pub fn start_generation(
                     }
                 }
             };
+            let stream_prepare_started_at = perf_diagnostics::is_enabled().then(Instant::now);
 
             {
                 let mut ev = make_runtime_event(
@@ -1684,6 +1691,7 @@ pub fn start_generation(
                 chat_id.clone(),
                 abort_flag.clone(),
                 abort_notify.clone(),
+                stream_prepare_started_at,
             )
             .await;
 
@@ -2122,6 +2130,7 @@ pub async fn run_llm_generation(
     chat_id: String,
     abort_flag: Arc<AtomicBool>,
     abort_notify: Arc<tokio::sync::Notify>,
+    stream_prepare_started_at: Option<Instant>,
 ) -> Result<GenerationResult, LlmStreamError> {
     let gcx = app.gcx.clone();
     check_aborted_before_stream(&abort_flag)?;
@@ -2341,6 +2350,7 @@ pub async fn run_llm_generation(
         &model_rec,
         abort_flag,
         abort_notify,
+        stream_prepare_started_at,
     )
     .await
 }
@@ -2366,6 +2376,7 @@ async fn run_streaming_generation(
     model_rec: &crate::caps::ChatModelRecord,
     abort_flag: Arc<AtomicBool>,
     abort_notify: Arc<tokio::sync::Notify>,
+    stream_prepare_started_at: Option<Instant>,
 ) -> Result<GenerationResult, LlmStreamError> {
     info!(
         "session generation: model={}, messages={}",
@@ -2419,6 +2430,21 @@ async fn run_streaming_generation(
             supports_temperature: model_rec.supports_temperature,
         };
 
+        let token_count_started_at = perf_diagnostics::is_enabled()
+            .then(|| {
+                matches!(
+                    model_rec
+                        .base
+                        .tokenizer
+                        .trim()
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    refact_core::model_caps::ANTHROPIC_CLOUD_TOKENIZER
+                        | refact_core::model_caps::CLAUDE_CLOUD_TOKENIZER_ALIAS
+                )
+            })
+            .filter(|uses_cloud_token_count| *uses_cloud_token_count)
+            .map(|_| Instant::now());
         let cloud_input_usage = crate::chat::cloud_token_count::try_count_input_tokens(
             &app.gcx,
             &app.runtime.http_client,
@@ -2426,6 +2452,21 @@ async fn run_streaming_generation(
             &model_rec.base,
         )
         .await;
+        if let Some(started_at) = token_count_started_at {
+            perf_diagnostics::record(
+                PerfComponent::StreamTokenCountRequest,
+                Some(&chat_id),
+                PerfOutcome::Success,
+                started_at
+                    .elapsed()
+                    .as_micros()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+                None,
+                None,
+                None,
+            );
+        }
         if let Some(count) = cloud_input_usage.as_ref() {
             let usage = &count.usage;
             let context_limit = llm_request.params.n_ctx.unwrap_or(model_rec.base.n_ctx);
@@ -2504,6 +2545,8 @@ async fn run_streaming_generation(
         };
 
         let session_arc_emitter = session_arc.clone();
+        let first_content_started_at = stream_prepare_started_at;
+        let emitter_chat_id = chat_id.clone();
         let emitter_task = tokio::spawn(async move {
             fn merge_events(
                 events: &mut Vec<CollectorEventPayload>,
@@ -2523,6 +2566,7 @@ async fn run_streaming_generation(
             }
             let mut pending = Vec::<CollectorEventPayload>::new();
             let mut first_visible_delta_emitted = false;
+            let mut first_content_delta_recorded = false;
 
             while let Some(first_event) = rx.recv().await {
                 let flush_immediately = match &first_event {
@@ -2578,8 +2622,27 @@ async fn run_streaming_generation(
                 let mut session = session_arc_emitter.lock().await;
                 if !batched_ops.is_empty() {
                     for ops in batched_ops {
+                        let carries_content = delta_ops_contain_assistant_content(&ops);
                         first_visible_delta_emitted |= delta_ops_contain_visible_content(&ops);
                         session.emit_stream_delta(ops);
+                        if carries_content && !first_content_delta_recorded {
+                            if let Some(started_at) = first_content_started_at {
+                                perf_diagnostics::record(
+                                    PerfComponent::StreamFirstContentDelta,
+                                    Some(&emitter_chat_id),
+                                    PerfOutcome::Success,
+                                    started_at
+                                        .elapsed()
+                                        .as_micros()
+                                        .try_into()
+                                        .unwrap_or(u64::MAX),
+                                    None,
+                                    None,
+                                    None,
+                                );
+                            }
+                            first_content_delta_recorded = true;
+                        }
                     }
                 }
                 if let Some(usage) = latest_usage {
@@ -2606,7 +2669,26 @@ async fn run_streaming_generation(
                 let mut session = session_arc_emitter.lock().await;
                 if !final_ops.is_empty() {
                     for ops in final_ops {
+                        let carries_content = delta_ops_contain_assistant_content(&ops);
                         session.emit_stream_delta(ops);
+                        if carries_content && !first_content_delta_recorded {
+                            if let Some(started_at) = first_content_started_at {
+                                perf_diagnostics::record(
+                                    PerfComponent::StreamFirstContentDelta,
+                                    Some(&emitter_chat_id),
+                                    PerfOutcome::Success,
+                                    started_at
+                                        .elapsed()
+                                        .as_micros()
+                                        .try_into()
+                                        .unwrap_or(u64::MAX),
+                                    None,
+                                    None,
+                                    None,
+                                );
+                            }
+                            first_content_delta_recorded = true;
+                        }
                     }
                 }
                 if let Some(usage) = final_usage {
@@ -2618,7 +2700,13 @@ async fn run_streaming_generation(
         let call_ts_start = chrono::Utc::now().to_rfc3339();
         let call_start = std::time::Instant::now();
 
-        let stream_outcome = run_llm_stream(app.clone(), params, &mut collector).await;
+        let stream_outcome = super::stream_core::run_llm_stream_with_prepare_started(
+            app.clone(),
+            params,
+            &mut collector,
+            stream_prepare_started_at,
+        )
+        .await;
         drop(collector);
         let _ = emitter_task.await;
 

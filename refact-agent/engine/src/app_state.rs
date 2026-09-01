@@ -15,7 +15,7 @@ use refact_runtime_api::{
 };
 
 pub const TOOL_CATALOG_SNAPSHOTS_ENV: &str = "REFACT_TOOL_CATALOG_SNAPSHOTS";
-use tokio::sync::{Mutex as AMutex, RwLock as ARwLock};
+use tokio::sync::{Mutex as AMutex, Notify, RwLock as ARwLock};
 
 use crate::agents::registry::BackgroundAgentRegistry;
 use crate::buddy::actor::BuddyService;
@@ -315,6 +315,21 @@ type MutableTool = Box<dyn crate::tools::tools_description::Tool + Send>;
 
 struct AppTurnToolPool {
     tools: AMutex<HashMap<String, VecDeque<MutableTool>>>,
+    expansion_in_progress: AtomicBool,
+    expansion_finished: Notify,
+}
+
+struct ToolPoolExpansionGuard<'a> {
+    pool: &'a AppTurnToolPool,
+}
+
+impl Drop for ToolPoolExpansionGuard<'_> {
+    fn drop(&mut self) {
+        self.pool
+            .expansion_in_progress
+            .store(false, Ordering::Release);
+        self.pool.expansion_finished.notify_waiters();
+    }
 }
 
 impl AppTurnToolPool {
@@ -337,6 +352,8 @@ impl AppTurnToolPool {
         }
         Self {
             tools: AMutex::new(grouped),
+            expansion_in_progress: AtomicBool::new(false),
+            expansion_finished: Notify::new(),
         }
     }
 
@@ -459,6 +476,9 @@ impl AppToolRegistry {
     ) -> Vec<Box<dyn crate::tools::tools_description::Tool + Send>> {
         #[cfg(any(test, feature = "bench"))]
         if let Some(fixture_tool_factory) = &self.fixture_tool_factory {
+            // Exercise races around async production in pool tests; production construction has
+            // many real await points before returning the vector.
+            tokio::task::yield_now().await;
             return fixture_tool_factory();
         }
         crate::tools::tools_list::get_tools_for_mode(gcx, mode, model_id).await
@@ -640,9 +660,37 @@ impl AppToolRegistry {
         if let Some(tool) = pool_impl.take(catalog_desc).await {
             return Ok(Some(tool));
         }
-        self.add_turn_tool_pool_fallback(pool, gcx, mode, model_id, catalog)
-            .await?;
-        Ok(pool_impl.take(catalog_desc).await)
+        loop {
+            // A fallback vector contains one fresh instance of every tool. Single-flight its
+            // construction so concurrent misses for different tools share that vector. No lock is
+            // held across construction, and each caller still removes an owned instance.
+            if pool_impl
+                .expansion_in_progress
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let expansion_guard = ToolPoolExpansionGuard { pool: pool_impl };
+                let result = self
+                    .add_turn_tool_pool_fallback(pool, gcx.clone(), mode, model_id, catalog)
+                    .await;
+                let tool = match result {
+                    Ok(()) => pool_impl.take(catalog_desc).await,
+                    Err(error) => {
+                        drop(expansion_guard);
+                        return Err(error);
+                    }
+                };
+                drop(expansion_guard);
+                return Ok(tool);
+            }
+            let finished = pool_impl.expansion_finished.notified();
+            if pool_impl.expansion_in_progress.load(Ordering::Acquire) {
+                finished.await;
+            }
+            if let Some(tool) = pool_impl.take(catalog_desc).await {
+                return Ok(Some(tool));
+            }
+        }
     }
 
     fn find_catalog_descriptor<'a>(
@@ -833,18 +881,24 @@ impl ToolRegistry for AppToolRegistry {
         tool_slots: &[(refact_tool_api::ToolDesc, usize)],
     ) -> Result<(), String> {
         let gcx = self.gcx.clone();
+        let pool_impl = Self::app_turn_tool_pool(pool)?;
+        let mut vector_builds_needed = 0;
         for (tool_desc, required_slots) in tool_slots {
-            let pool_impl = Self::app_turn_tool_pool(pool)?;
             let existing = {
                 let tools = pool_impl.tools.lock().await;
                 tools
                     .get(&AppTurnToolPool::tool_key(tool_desc))
                     .map_or(0, VecDeque::len)
             };
-            for _ in existing..*required_slots {
-                self.add_turn_tool_pool_fallback(pool, gcx.clone(), mode, model_id, catalog)
-                    .await?;
-            }
+            vector_builds_needed =
+                vector_builds_needed.max(required_slots.saturating_sub(existing));
+        }
+        // Every full vector contributes one instance of every available tool, so the largest
+        // per-tool deficit satisfies all requested slots. Summing deficits rebuilt the same vector
+        // once for every missing slot and left large quantities of unused instances in the pool.
+        for _ in 0..vector_builds_needed {
+            self.add_turn_tool_pool_fallback(pool, gcx.clone(), mode, model_id, catalog)
+                .await?;
         }
         Ok(())
     }
@@ -889,6 +943,7 @@ impl ToolRegistry for AppToolRegistry {
                 ))
             }
         };
+        let catalog_desc = Self::find_catalog_descriptor(catalog, tool_name)?;
         let tools = self
             .fresh_mutable_tools(
                 self.gcx.clone(),
@@ -898,7 +953,6 @@ impl ToolRegistry for AppToolRegistry {
                 PerfComponent::ToolMutableVectorBuild,
             )
             .await;
-        let catalog_desc = Self::find_catalog_descriptor(catalog, tool_name)?;
         let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
         for tool in tools {
             let desc = tool.tool_description();
@@ -1033,6 +1087,13 @@ impl ToolRegistry for AppToolRegistry {
             .ok_or_else(|| "invalid AtCommandsContext passed to ToolRegistry".to_string())?
             .clone();
         let lookup_span = perf_diagnostics::span(PerfComponent::ToolExecutionLookup, None, None);
+        let catalog_desc = match Self::find_catalog_descriptor(catalog, tool_name) {
+            Some(desc) => desc,
+            None => {
+                lookup_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
+                return Ok(None);
+            }
+        };
         let gcx = {
             let cgcx = ccx.lock().await;
             cgcx.app.gcx.clone()
@@ -1046,10 +1107,6 @@ impl ToolRegistry for AppToolRegistry {
                 PerfComponent::ToolMutableVectorBuild,
             )
             .await;
-        let catalog_desc = match Self::find_catalog_descriptor(catalog, tool_name) {
-            Some(desc) => desc,
-            None => return Ok(None),
-        };
         let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
         for mut tool in tools {
             let desc = tool.tool_description();
@@ -1815,6 +1872,139 @@ mod tests {
         assert_eq!(
             pool.initial_vector_builds() + pool.fallback_vector_builds(),
             parallelism as u64
+        );
+    }
+
+    #[serial(runtime_settings)]
+    #[tokio::test]
+    async fn parallel_slot_preparation_uses_maximum_deficit_not_sum_of_deficits() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let names = vec!["first".to_string(), "second".to_string()];
+        let registry = fixture_registry_with_names(gcx.clone(), builds.clone(), names);
+        let catalog = registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model"))
+            .await;
+        let pool = registry
+            .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
+            .await;
+        let builds_before_slots = builds.load(Ordering::SeqCst);
+
+        registry
+            .prepare_turn_tool_pool(
+                &pool,
+                &catalog,
+                "agent",
+                Some("provider/model"),
+                &[
+                    (catalog.index.tools[0].clone(), 4),
+                    (catalog.index.tools[1].clone(), 4),
+                ],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(pool.fallback_vector_builds(), 3);
+        assert_eq!(builds.load(Ordering::SeqCst), builds_before_slots + 3);
+    }
+
+    #[serial(runtime_settings)]
+    #[tokio::test]
+    async fn concurrent_different_tool_misses_share_one_full_vector_build() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let names = (0..8).map(|index| format!("tool-{index}")).collect();
+        let registry = fixture_registry_with_names(gcx.clone(), builds.clone(), names);
+        let catalog = registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model"))
+            .await;
+        let pool = registry
+            .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
+            .await;
+        let pool_impl = AppToolRegistry::app_turn_tool_pool(&pool).unwrap();
+        let mut leased = Vec::new();
+        for desc in &catalog.index.tools {
+            leased.push(pool_impl.take(desc).await.unwrap());
+        }
+        let builds_before_misses = builds.load(Ordering::SeqCst);
+
+        let calls = catalog.index.tools.iter().map(|desc| {
+            registry.take_turn_tool(
+                &pool,
+                registry.gcx.clone(),
+                "agent",
+                Some("provider/model"),
+                &catalog,
+                &desc.name,
+            )
+        });
+        let replacements = futures::future::join_all(calls)
+            .await
+            .into_iter()
+            .map(|result| result.unwrap().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(replacements.len(), catalog.index.tools.len());
+        assert_eq!(builds.load(Ordering::SeqCst), builds_before_misses + 1);
+        assert_eq!(pool.fallback_vector_builds(), 1);
+        assert_eq!(leased.len(), replacements.len());
+    }
+
+    #[serial(runtime_settings)]
+    #[tokio::test]
+    async fn concurrent_same_tool_calls_receive_distinct_mutable_instances() {
+        let _env = ToolCatalogSnapshotsEnvGuard::enable();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let builds = Arc::new(AtomicUsize::new(0));
+        let registry = fixture_registry(gcx.clone(), builds);
+        let catalog = registry
+            .snapshot_for_mode_for_test("agent", Some("provider/model"))
+            .await;
+        let pool = registry
+            .build_turn_tool_pool(gcx, "agent", Some("provider/model"), &catalog)
+            .await;
+        let first = registry
+            .take_turn_tool(
+                &pool,
+                registry.gcx.clone(),
+                "agent",
+                Some("provider/model"),
+                &catalog,
+                "fixture",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let (second, third) = tokio::join!(
+            registry.take_turn_tool(
+                &pool,
+                registry.gcx.clone(),
+                "agent",
+                Some("provider/model"),
+                &catalog,
+                "fixture",
+            ),
+            registry.take_turn_tool(
+                &pool,
+                registry.gcx.clone(),
+                "agent",
+                Some("provider/model"),
+                &catalog,
+                "fixture",
+            )
+        );
+        let second = second.unwrap().unwrap();
+        let third = third.unwrap().unwrap();
+
+        assert_ne!(
+            second.tool_description().description,
+            third.tool_description().description
+        );
+        assert_ne!(
+            first.tool_description().description,
+            second.tool_description().description
         );
     }
 
