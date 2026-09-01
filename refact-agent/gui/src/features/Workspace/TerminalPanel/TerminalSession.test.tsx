@@ -7,6 +7,7 @@ type RenderFn = typeof import("../../../utils/test-utils").render;
 
 type FakeTerminalOptions = {
   cursorBlink?: boolean;
+  disableStdin?: boolean;
   fontFamily?: string;
   theme?: Record<string, string | undefined>;
 };
@@ -208,5 +209,29 @@ describe("TerminalSession", () => {
       expect(terminal.focus).toHaveBeenCalledTimes(callsAfterMount + 1),
     );
     expect(FakeTerminal.instances).toHaveLength(1);
+  });
+
+  test("renders non-TTY processes as read-only terminal mirrors", async () => {
+    const { getByText } = render(
+      <TerminalSession
+        processId="proc-read-only"
+        chatId="chat-a"
+        readOnly
+        focusRequest={1}
+        onStatusChange={vi.fn()}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+
+    await waitFor(() => expect(FakeTerminal.instances).toHaveLength(1));
+    expect(FakeTerminal.instances[0].constructorOptions).toMatchObject({
+      cursorBlink: false,
+      disableStdin: true,
+    });
+    expect(FakeTerminal.instances[0].focus).not.toHaveBeenCalled();
+    expect(getByText("Read-only output")).toBeVisible();
+    expect(useExecSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({ interactive: false }),
+    );
   });
 });

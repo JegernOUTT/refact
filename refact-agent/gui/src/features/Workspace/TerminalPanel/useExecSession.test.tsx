@@ -111,10 +111,12 @@ function Harness({
   runtime,
   onStatusChange,
   onResize,
+  interactive,
 }: {
   runtime: RuntimeFixture["runtime"];
   onStatusChange: (status: ExecStatus) => void;
   onResize?: (rows: number, cols: number) => void;
+  interactive?: boolean;
 }) {
   const state = useExecSession({
     processId: "proc-1",
@@ -122,6 +124,7 @@ function Harness({
     runtime,
     connection: CONFIG,
     apiKey: undefined,
+    interactive,
     onStatusChange,
     onResize,
   });
@@ -248,6 +251,44 @@ describe("useExecSession", () => {
     expect(fixture.fit).toHaveBeenCalled();
     expect(onResize).toHaveBeenCalledWith(40, 120);
     expect(fixture.write).toHaveBeenCalledWith("backfill");
+  });
+
+  test("streams non-TTY output without registering stdin or resize handling", async () => {
+    const stdinBodies: unknown[] = [];
+    const resizeBodies: unknown[] = [];
+    server.use(
+      http.get("*/v1/exec/proc-1/read", () =>
+        HttpResponse.json({
+          chunks: [{ seq: 0, stream: "combined", text: "readonly" }],
+          next_seq: 1,
+          status: "running",
+        }),
+      ),
+      http.post("*/v1/exec/proc-1/stdin", async ({ request }) => {
+        stdinBodies.push(await request.json());
+        return HttpResponse.json({});
+      }),
+      http.post("*/v1/exec/proc-1/resize", async ({ request }) => {
+        resizeBodies.push(await request.json());
+        return HttpResponse.json({});
+      }),
+    );
+    const fixture = makeRuntime();
+    render(
+      <Harness
+        runtime={fixture.runtime}
+        interactive={false}
+        onStatusChange={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    expect(fixture.write).toHaveBeenCalledWith("readonly");
+    expect(fixture.runtime.terminal.onData).not.toHaveBeenCalled();
+    fixture.emitData("ignored");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(stdinBodies).toEqual([]);
+    expect(resizeBodies).toEqual([]);
   });
 
   test("raw tty backfill preserves CRLF and advances the byte-offset cursor", async () => {

@@ -447,6 +447,132 @@ describe("chatSubscription", () => {
       expect(onEvent).toHaveBeenCalledWith(event);
     });
 
+    it.each<
+      [
+        string,
+        Record<string, string | number | boolean>,
+        { process_id: string; command_preview: string; started_at: number },
+      ]
+    >([
+      [
+        "camelCase",
+        {
+          processId: "exec-camel",
+          commandPreview: "npm run test",
+          mode: "foreground",
+          tty: false,
+          status: "running",
+          startedAt: 123,
+        },
+        {
+          process_id: "exec-camel",
+          command_preview: "npm run test",
+          started_at: 123,
+        },
+      ],
+      [
+        "snake_case",
+        {
+          process_id: "exec-snake",
+          command_preview: "npm run dev",
+          mode: "background",
+          tty: true,
+          status: "starting",
+          started_at: 456,
+        },
+        {
+          process_id: "exec-snake",
+          command_preview: "npm run dev",
+          started_at: 456,
+        },
+      ],
+    ])(
+      "normalizes %s exec process spawn events",
+      async (_case, process, expectedProcess) => {
+        const onEvent = vi.fn<(event: ChatEventEnvelope) => void>();
+        const encoder = new TextEncoder();
+        const event = {
+          chat_id: "test",
+          seq: "3",
+          type: "exec_process_spawned",
+          process,
+        };
+
+        mockFetch.mockResolvedValueOnce({
+          ok: true,
+          body: {
+            getReader: () => {
+              let called = false;
+              return {
+                read: async () => {
+                  if (called) return { done: true, value: undefined };
+                  called = true;
+                  return {
+                    done: false,
+                    value: encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+                  };
+                },
+              };
+            },
+          },
+        });
+
+        subscribeToChatEvents(
+          "test",
+          { host: "vscode", lspPort: 8001 },
+          { onEvent, onError: vi.fn() },
+        );
+
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        const received = onEvent.mock.calls[0]?.[0];
+        expect(received).toMatchObject({
+          type: "exec_process_spawned",
+          process: expectedProcess,
+        });
+      },
+    );
+
+    it("drops malformed exec process spawn events", async () => {
+      const onEvent = vi.fn<(event: ChatEventEnvelope) => void>();
+      const encoder = new TextEncoder();
+      const event = {
+        chat_id: "test",
+        seq: "3",
+        type: "exec_process_spawned",
+        process: { processId: "exec-malformed", tty: "yes" },
+      };
+
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        body: {
+          getReader: () => {
+            let called = false;
+            return {
+              read: async () => {
+                if (called) return { done: true, value: undefined };
+                called = true;
+                return {
+                  done: false,
+                  value: encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+                };
+              },
+            };
+          },
+        },
+      });
+
+      subscribeToChatEvents(
+        "test",
+        { host: "vscode", lspPort: 8001 },
+        { onEvent, onError: vi.fn() },
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(onEvent).not.toHaveBeenCalled();
+    });
+
     it("should treat oversized events as reconnectable errors", async () => {
       const onEvent = vi.fn<(event: ChatEventEnvelope) => void>();
       const onError = vi.fn();

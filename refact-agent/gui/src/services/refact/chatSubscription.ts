@@ -5,6 +5,7 @@ import type {
   GoalSnapshot,
   GoalStatus,
 } from "./types";
+import type { ExecStatus } from "./exec";
 import type { WorktreeMeta } from "./worktrees";
 
 export type SessionState =
@@ -195,6 +196,15 @@ export type DeltaOp =
   | { op: "set_usage"; usage: unknown }
   | { op: "merge_extra"; extra: Record<string, unknown> };
 
+export type ExecProcessSpawn = {
+  process_id: string;
+  command_preview: string;
+  mode: "foreground" | "background" | "service" | "interactive";
+  tty: boolean;
+  status: ExecStatus;
+  started_at: number;
+};
+
 export type EventEnvelope =
   | {
       chat_id: string;
@@ -219,6 +229,12 @@ export type EventEnvelope =
       seq: string;
       type: "background_agent_updated";
       agent: BackgroundAgentSummary;
+    }
+  | {
+      chat_id: string;
+      seq: string;
+      type: "exec_process_spawned";
+      process: ExecProcessSpawn;
     }
   | {
       chat_id: string;
@@ -579,6 +595,7 @@ export function subscribeToChatEvents(
             }
             normalizeSeq(parsed);
             normalizeBackgroundAgentFields(parsed);
+            normalizeExecProcessSpawnedFields(parsed);
             if (parsed.chat_id !== chatId) {
               continue;
             }
@@ -684,6 +701,60 @@ function normalizeBackgroundAgentFields(obj: EventEnvelope): void {
       .filter(isValidBackgroundAgent)
       .map((agent) => normalizeBackgroundAgentSummary(agent));
   }
+}
+
+function normalizeExecProcessSpawnedFields(obj: EventEnvelope): void {
+  if (obj.type !== "exec_process_spawned") return;
+  const process = obj.process as unknown as Record<string, unknown>;
+  const processId =
+    process.process_id === undefined ? process.processId : process.process_id;
+  const commandPreview =
+    process.command_preview === undefined
+      ? process.commandPreview
+      : process.command_preview;
+  const startedAt =
+    process.started_at === undefined ? process.startedAt : process.started_at;
+  if (
+    typeof processId !== "string" ||
+    processId.trim().length === 0 ||
+    typeof commandPreview !== "string" ||
+    !isExecMode(process.mode) ||
+    typeof process.tty !== "boolean" ||
+    !isExecStatus(process.status) ||
+    typeof startedAt !== "number" ||
+    !Number.isSafeInteger(startedAt) ||
+    startedAt < 0
+  ) {
+    throw new Error("Invalid exec process spawn");
+  }
+  obj.process = {
+    process_id: processId,
+    command_preview: commandPreview,
+    mode: process.mode,
+    tty: process.tty,
+    status: process.status,
+    started_at: startedAt,
+  };
+}
+
+function isExecMode(value: unknown): value is ExecProcessSpawn["mode"] {
+  return (
+    value === "foreground" ||
+    value === "background" ||
+    value === "service" ||
+    value === "interactive"
+  );
+}
+
+function isExecStatus(value: unknown): value is ExecStatus {
+  return (
+    value === "starting" ||
+    value === "running" ||
+    value === "exited" ||
+    value === "failed" ||
+    value === "killed" ||
+    value === "timed_out"
+  );
 }
 
 export function isValidBackgroundAgent(

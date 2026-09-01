@@ -34,6 +34,7 @@ type TerminalSessionProps = {
   processId: string;
   chatId: string;
   apiKey?: string;
+  readOnly?: boolean;
   focusRequest?: number;
   onStatusChange: (processId: string, status: ExecStatus) => void;
   onResize?: (processId: string, rows: number, cols: number) => void;
@@ -43,6 +44,7 @@ export function TerminalSession({
   processId,
   chatId,
   apiKey,
+  readOnly = false,
   focusRequest,
   onStatusChange,
   onResize,
@@ -130,7 +132,8 @@ export function TerminalSession({
     const container = containerRef.current;
     if (!container) return;
     const terminal = new Terminal({
-      cursorBlink: true,
+      cursorBlink: !readOnly,
+      disableStdin: readOnly,
       fontFamily: fontFamilyRef.current,
       theme: themeRef.current,
     });
@@ -138,13 +141,13 @@ export function TerminalSession({
     terminal.loadAddon(fitAddon);
     terminal.open(container);
     setRuntime({ terminal, fitAddon, container });
-    terminal.focus();
+    if (!readOnly) terminal.focus();
 
     return () => {
       setRuntime(null);
       terminal.dispose();
     };
-  }, []);
+  }, [readOnly]);
 
   useEffect(() => {
     if (!runtime) return;
@@ -153,9 +156,9 @@ export function TerminalSession({
   }, [fontFamily, runtime, theme]);
 
   useEffect(() => {
-    if (!runtime || focusRequest === undefined) return;
+    if (!runtime || readOnly || focusRequest === undefined) return;
     runtime.terminal.focus();
-  }, [focusRequest, runtime]);
+  }, [focusRequest, readOnly, runtime]);
 
   const handleStatusChange = useCallback(
     (status: ExecStatus) => onStatusChange(processId, status),
@@ -173,11 +176,15 @@ export function TerminalSession({
     apiKey,
     onStatusChange: handleStatusChange,
     onResize: handleResize,
+    interactive: !readOnly,
   });
 
   return (
     <div className={styles.session} data-terminal-process-id={processId}>
       <div ref={containerRef} className={styles.terminal} />
+      {readOnly ? (
+        <div className={styles.readOnlyHint}>Read-only output</div>
+      ) : null}
       {reconnecting ? (
         <div className={styles.connectionNotice}>Reconnecting terminal…</div>
       ) : null}

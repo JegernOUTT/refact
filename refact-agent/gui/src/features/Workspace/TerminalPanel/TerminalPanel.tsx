@@ -38,30 +38,32 @@ import {
   sessionsReattached,
   sessionStatusChanged,
   setTerminalWorkbenchOpen,
+  terminalSessionFromProcess,
 } from "./terminalSlice";
 import styles from "./TerminalPanel.module.css";
 
 const DEFAULT_PTY_ROWS = 24;
 const DEFAULT_PTY_COLS = 80;
 
-function shortProcessId(processId: string): string {
-  return processId.slice(0, 8);
-}
-
-function terminalTitle(
-  processId: string,
-  commandPreview: string | undefined,
-): string {
-  const label = commandPreview?.trim();
-  return `${label && label.length > 0 ? label : "shell"} · ${shortProcessId(
-    processId,
-  )}`;
-}
-
 function statusDot(status: ExecStatus): "running" | "error" | "idle" {
   if (status === "running" || status === "starting") return "running";
-  if (status === "failed" || status === "timed_out") return "error";
+  if (status === "failed" || status === "timed_out" || status === "killed") {
+    return "error";
+  }
   return "idle";
+}
+
+function sessionStatusLabel({
+  status,
+  exit_code: exitCode,
+}: {
+  status: ExecStatus;
+  exit_code?: number | null;
+}): string {
+  if (status === "exited" && exitCode !== undefined && exitCode !== null) {
+    return `exit ${exitCode}`;
+  }
+  return status.replace("_", " ");
 }
 
 export function TerminalPanel({ chatId }: { chatId: string }) {
@@ -89,6 +91,7 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [listAttempt, setListAttempt] = useState(0);
   const lastFittedRef = useRef<{ rows: number; cols: number } | null>(null);
+  const latestSessionsRef = useRef(sessions);
   const tabListId = useId();
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
   const [focusedProcessId, setFocusedProcessId] = useState<string | null>(null);
@@ -112,6 +115,7 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
       config.lspUrl,
     ],
   );
+  latestSessionsRef.current = sessions;
 
   useEffect(() => {
     setLoading(true);
@@ -123,19 +127,21 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
         if (cancelled) return;
         setDisabled(false);
         setError(null);
+        const reattachedSessions = response.processes.map(
+          terminalSessionFromProcess,
+        );
+        const reattachedProcessIds = new Set(
+          reattachedSessions.map((session) => session.process_id),
+        );
         dispatch(
           sessionsReattached({
             chatId,
-            sessions: response.processes
-              .filter((process) => process.tty)
-              .map((process) => ({
-                process_id: process.process_id,
-                title: terminalTitle(
-                  process.process_id,
-                  process.command_preview,
-                ),
-                status: process.status,
-              })),
+            sessions: [
+              ...reattachedSessions,
+              ...latestSessionsRef.current.filter(
+                (session) => !reattachedProcessIds.has(session.process_id),
+              ),
+            ],
           }),
         );
       })
@@ -176,11 +182,12 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
       dispatch(
         sessionAdded({
           chatId,
-          session: {
+          session: terminalSessionFromProcess({
             process_id: result.process_id,
-            title: terminalTitle(result.process_id, result.command_preview),
+            command_preview: result.command_preview,
             status: result.status,
-          },
+            tty: true,
+          }),
         }),
       );
     } catch (cause) {
@@ -330,6 +337,9 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
                 >
                   <StatusDot status={statusDot(session.status)} />
                   <span className={styles.tabTitle}>{session.title}</span>
+                  <span className={styles.tabStatus}>
+                    {sessionStatusLabel(session)}
+                  </span>
                 </button>
                 <IconButton
                   icon={X}
@@ -413,6 +423,7 @@ function ChatTerminalPanel({ chatId }: { chatId: string }) {
                         processId={session.process_id}
                         chatId={chatId}
                         apiKey={apiKey}
+                        readOnly={session.tty === false}
                         focusRequest={terminalFocusRequest}
                         onStatusChange={handleStatusChange}
                         onResize={handleSessionResize}

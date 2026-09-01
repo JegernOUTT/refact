@@ -191,7 +191,12 @@ import { firstChangedLine } from "../features/Workspace/FilesPanel/liveFileModel
 import { parentDirectoryPath } from "../features/Workspace/FilesPanel/fileTreeModel";
 import { selectActiveGitRoot } from "../features/Workspace/GitPanel/gitPanelSlice";
 import { gitReadApi } from "../services/refact/gitRead";
-import { clearTerminalChatState } from "../features/Workspace/TerminalPanel/terminalSlice";
+import {
+  clearTerminalChatState,
+  sessionAdded,
+  sessionStatusChanged,
+  terminalSessionFromProcess,
+} from "../features/Workspace/TerminalPanel/terminalSlice";
 
 const AUTH_ERROR_MESSAGE =
   "There is an issue with your API key. Check out your API Key or re-login";
@@ -1349,6 +1354,41 @@ startListening({
   actionCreator: applyChatEvent,
   effect: (action, listenerApi) => {
     const event = action.payload;
+    if (event.type === "exec_process_spawned") {
+      listenerApi.dispatch(
+        sessionAdded({
+          chatId: event.chat_id,
+          session: terminalSessionFromProcess({
+            process_id: event.process.process_id,
+            command_preview: event.process.command_preview,
+            status: event.process.status,
+            tty: event.process.tty,
+          }),
+        }),
+      );
+      return;
+    }
+    if (event.type === "process_completed") {
+      const { status } = event;
+      if (
+        status !== "starting" &&
+        status !== "running" &&
+        status !== "exited" &&
+        status !== "failed" &&
+        status !== "killed" &&
+        status !== "timed_out"
+      ) {
+        return;
+      }
+      listenerApi.dispatch(
+        sessionStatusChanged({
+          chatId: event.chat_id,
+          processId: event.process_id,
+          status,
+          exit_code: event.exit_code,
+        }),
+      );
+    }
     if (event.type === "ide_tool_required") {
       listenerApi.dispatch(
         ideToolRequired({

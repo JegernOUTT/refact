@@ -31,6 +31,7 @@ type UseExecSessionOptions = {
   runtime: TerminalRuntime | null;
   connection: EngineApiConnection;
   apiKey?: string;
+  interactive?: boolean;
   onStatusChange: (status: ExecStatus) => void;
   onResize?: (rows: number, cols: number) => void;
 };
@@ -56,6 +57,7 @@ export function useExecSession({
   runtime,
   connection,
   apiKey,
+  interactive = true,
   onStatusChange,
   onResize,
 }: UseExecSessionOptions) {
@@ -114,15 +116,18 @@ export function useExecSession({
       }
     };
 
-    const dataDisposable = terminal.onData((chars) => {
-      inputBuffer += chars;
-      if (inputTimer === null) {
-        inputTimer = setTimeout(() => void flushInput(), INPUT_DEBOUNCE_MS);
-      }
-    });
+    const dataDisposable = interactive
+      ? terminal.onData((chars) => {
+          inputBuffer += chars;
+          if (inputTimer === null) {
+            inputTimer = setTimeout(() => void flushInput(), INPUT_DEBOUNCE_MS);
+          }
+        })
+      : null;
 
     const syncSize = async () => {
-      if (stopped || isTerminalStatus(statusRef.current)) return;
+      if (stopped || !interactive || isTerminalStatus(statusRef.current))
+        return;
       try {
         fitAddon.fit();
       } catch {
@@ -150,10 +155,14 @@ export function useExecSession({
         void syncSize();
       }, RESIZE_DEBOUNCE_MS);
     };
-    const resizeObserver = new ResizeObserver(scheduleResize);
-    resizeObserver.observe(container);
-    const fonts = (document as Partial<Document>).fonts;
-    void fonts?.ready.then(() => scheduleResize());
+    const resizeObserver = interactive
+      ? new ResizeObserver(scheduleResize)
+      : null;
+    resizeObserver?.observe(container);
+    if (interactive) {
+      const fonts = (document as Partial<Document>).fonts;
+      void fonts?.ready.then(() => scheduleResize());
+    }
 
     const scheduleReconnect = () => {
       eventSource?.close();
@@ -224,7 +233,7 @@ export function useExecSession({
           connection,
           chatId,
           apiKey,
-          true,
+          interactive,
         );
         if (stopped) return;
         writeChunks(read.chunks);
@@ -250,8 +259,8 @@ export function useExecSession({
 
     return () => {
       stopped = true;
-      dataDisposable.dispose();
-      resizeObserver.disconnect();
+      dataDisposable?.dispose();
+      resizeObserver?.disconnect();
       eventSource?.close();
       if (inputTimer !== null) clearTimeout(inputTimer);
       if (resizeTimer !== null) clearTimeout(resizeTimer);
@@ -261,6 +270,7 @@ export function useExecSession({
     apiKey,
     chatId,
     connection,
+    interactive,
     onResize,
     onStatusChange,
     processId,

@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import { render } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
-import { createChatWithId } from "../../Chat/Thread";
+import { applyChatEvent, createChatWithId } from "../../Chat/Thread";
 import { makeSurfaceKey } from "../surfaceKey";
 import { openTab } from "../workspaceSlice";
 import { TerminalPanel } from "./TerminalPanel";
@@ -122,7 +122,7 @@ describe("TerminalPanel", () => {
     );
   });
 
-  test("reattaches running PTYs and seeds backfill before streaming", async () => {
+  test("reattaches all process types and seeds backfill before streaming", async () => {
     const listChatIds: (string | null)[] = [];
     server.use(
       http.get("*/v1/exec/list", ({ request }) => {
@@ -155,6 +155,13 @@ describe("TerminalPanel", () => {
           status: "running",
         }),
       ),
+      http.get("*/v1/exec/background/read", () =>
+        HttpResponse.json({
+          chunks: [{ seq: 0, stream: "combined", text: "task output" }],
+          next_seq: 1,
+          status: "running",
+        }),
+      ),
       http.post("*/v1/exec/reattach-123456/resize", () =>
         HttpResponse.json({}),
       ),
@@ -166,9 +173,112 @@ describe("TerminalPanel", () => {
     expect(
       await screen.findByRole("tab", { name: /\/bin\/zsh · reattach/i }),
     ).toBeVisible();
+    const backgroundTab = screen.getByRole("tab", {
+      name: /task · backgrou/i,
+    });
+    expect(backgroundTab).toBeVisible();
     await waitFor(() => expect(listChatIds).toContain("chat-a"));
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
-    expect(screen.queryByText("background")).not.toBeInTheDocument();
+    await view.user.click(backgroundTab);
+    expect(screen.getByText("Read-only output")).toBeVisible();
+  });
+
+  test("adds spawned process tabs live and retains their exit status", async () => {
+    server.use(
+      http.get("*/v1/exec/list", () => HttpResponse.json({ processes: [] })),
+      http.get("*/v1/exec/tool-1234/read", () =>
+        HttpResponse.json({
+          chunks: [{ seq: 0, stream: "combined", text: "live output" }],
+          next_seq: 1,
+          status: "running",
+        }),
+      ),
+    );
+    const view = renderTerminalPanel();
+    openWorkbench(view);
+    await screen.findByText("No terminal sessions");
+
+    view.store.dispatch(
+      applyChatEvent({
+        chat_id: "chat-a",
+        seq: "1",
+        type: "exec_process_spawned",
+        process: {
+          process_id: "tool-1234",
+          command_preview: "git status",
+          mode: "foreground",
+          tty: false,
+          status: "running",
+          started_at: 1,
+        },
+      }),
+    );
+
+    expect(
+      await screen.findByRole("tab", { name: /git status · tool-123/i }),
+    ).toHaveTextContent("running");
+    expect(screen.getByText("Read-only output")).toBeVisible();
+
+    view.store.dispatch(
+      applyChatEvent({
+        chat_id: "chat-a",
+        seq: "2",
+        type: "process_completed",
+        process_id: "tool-1234",
+        status: "exited",
+        exit_code: 0,
+        short_description: "git status",
+        mode: "foreground",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("tab", { name: /git status · tool-123/i }),
+      ).toHaveTextContent("exit 0"),
+    );
+  });
+
+  test("keeps a live spawn when mount reconciliation resolves afterward", async () => {
+    let resolveList: ((response: HttpResponse) => void) | undefined;
+    server.use(
+      http.get(
+        "*/v1/exec/list",
+        () =>
+          new Promise<HttpResponse>((resolve) => {
+            resolveList = resolve;
+          }),
+      ),
+      http.get("*/v1/exec/quick-123/read", () =>
+        HttpResponse.json({ chunks: [], next_seq: 0, status: "exited" }),
+      ),
+    );
+    const view = renderTerminalPanel();
+    openWorkbench(view);
+    await waitFor(() => expect(resolveList).toBeDefined());
+
+    view.store.dispatch(
+      applyChatEvent({
+        chat_id: "chat-a",
+        seq: "1",
+        type: "exec_process_spawned",
+        process: {
+          process_id: "quick-123",
+          command_preview: "pwd",
+          mode: "foreground",
+          tty: false,
+          status: "running",
+          started_at: 1,
+        },
+      }),
+    );
+    await screen.findByRole("tab", { name: /pwd · quick-12/i });
+
+    resolveList?.(HttpResponse.json({ processes: [] }));
+
+    expect(
+      await screen.findByRole("tab", { name: /pwd · quick-12/i }),
+    ).toBeVisible();
   });
 
   test("closes transports while switching tabs and collapsing", async () => {

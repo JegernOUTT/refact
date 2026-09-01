@@ -6,7 +6,35 @@ export type TerminalSessionMetadata = {
   process_id: string;
   title: string;
   status: ExecStatus;
+  tty?: boolean;
+  exit_code?: number | null;
 };
+
+export function terminalSessionFromProcess({
+  process_id: processId,
+  command_preview: commandPreview,
+  status,
+  tty,
+  exit_code: exitCode,
+}: {
+  process_id: string;
+  command_preview?: string;
+  status: ExecStatus;
+  tty: boolean;
+  exit_code?: number | null;
+}): TerminalSessionMetadata {
+  const label = commandPreview?.trim();
+  return {
+    process_id: processId,
+    title: `${label && label.length > 0 ? label : "shell"} · ${processId.slice(
+      0,
+      8,
+    )}`,
+    status,
+    tty,
+    ...(exitCode === undefined ? {} : { exit_code: exitCode }),
+  };
+}
 
 export type TerminalState = {
   sessionsByChat: Record<string, TerminalSessionMetadata[] | undefined>;
@@ -80,12 +108,19 @@ export const terminalSlice = createSlice({
     },
     sessionStatusChanged: (
       state,
-      action: PayloadAction<ChatProcessPayload & { status: ExecStatus }>,
+      action: PayloadAction<
+        ChatProcessPayload & { status: ExecStatus; exit_code?: number | null }
+      >,
     ) => {
       const session = state.sessionsByChat[action.payload.chatId]?.find(
         (item) => item.process_id === action.payload.processId,
       );
-      if (session) session.status = action.payload.status;
+      if (session) {
+        session.status = action.payload.status;
+        if (action.payload.exit_code !== undefined) {
+          session.exit_code = action.payload.exit_code;
+        }
+      }
     },
     sessionRemoved: (state, action: PayloadAction<ChatProcessPayload>) => {
       const { chatId, processId } = action.payload;
