@@ -569,12 +569,21 @@ async fn goal_seed_and_projection_survive_trajectory_reload() {
         .iter()
         .find(|message| message.role == "goal")
         .expect("hidden goal seed");
-    let loaded = load_trajectory_for_chat(
-        fixture.app.gcx.clone(),
-        completed.child_chat_id.as_deref().expect("child chat id"),
-    )
+    let child_chat_id = completed.child_chat_id.as_deref().expect("child chat id");
+    let loaded = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(loaded) =
+                load_trajectory_for_chat(fixture.app.gcx.clone(), child_chat_id).await
+            {
+                if loaded.goal.is_some() {
+                    return loaded;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
     .await
-    .expect("persisted child trajectory");
+    .expect("persisted child trajectory with goal projection");
     let goal = loaded.goal.expect("goal projection after reload");
 
     assert_eq!(max_steps, 3);
