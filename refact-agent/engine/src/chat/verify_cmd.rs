@@ -1,12 +1,76 @@
 //! Restricted verification command parsing and extraction for planner-provided verify commands.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
+use refact_tool_api::{extract_command_segments, first_matching_rule};
+
+use crate::global_context::GlobalContext;
 use crate::tasks::types::BoardCard;
+use crate::tools::shell_gate::{ApprovalMode, ShellGatePolicy};
 
-const ALLOWED_BINARIES: &[&str] = &["cargo", "npm", "npx", "pytest", "bun", "yarn"];
+// COMMAND_HINTS is only an extraction heuristic for scraping bare lines out of markdown prose; it
+// is not a security boundary and never gates execution.
+const COMMAND_HINTS: &[&str] = &[
+    "cargo", "npm", "npx", "pnpm", "yarn", "bun", "deno", "node", "pytest", "python", "python3",
+    "tox", "poetry", "uv", "go", "make", "cmake", "ninja", "bazel", "just", "gradle", "gradlew",
+    "mvn", "dotnet", "dart", "flutter", "swift", "ruby", "rake", "bundle", "mix", "zig",
+    "composer", "php", "tsc", "jest", "vitest", "ctest",
+];
 
-pub(crate) fn parse_restricted_argv(
+// Words that never appear in a real invocation but are common in acceptance-criteria prose. Hints
+// like `make` and `go` are also ordinary English verbs, so a bare line containing any of these is
+// treated as prose rather than a command.
+const PROSE_TOKENS: &[&str] = &[
+    "a", "all", "an", "and", "any", "are", "be", "been", "but", "can", "each", "every", "for",
+    "from", "if", "in", "into", "is", "it", "its", "must", "of", "on", "or", "our", "should",
+    "sure", "that", "the", "their", "then", "these", "they", "this", "those", "through", "to",
+    "was", "we", "were", "when", "will", "with", "would", "you", "your",
+];
+
+#[derive(Clone, Debug)]
+pub(crate) struct VerifyCommandPolicy {
+    deny: Vec<String>,
+    mode: ApprovalMode,
+}
+
+impl VerifyCommandPolicy {
+    pub(crate) async fn load(gcx: Arc<GlobalContext>) -> Self {
+        Self::from_shell_policy(&crate::tools::shell_gate::load_policy(gcx).await)
+    }
+
+    pub(crate) fn from_shell_policy(policy: &ShellGatePolicy) -> Self {
+        Self {
+            deny: policy.deny.clone(),
+            mode: policy.mode.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn permissive() -> Self {
+        Self {
+            deny: Vec::new(),
+            mode: ApprovalMode::Yolo,
+        }
+    }
+
+    pub(crate) fn check(&self, command: &str) -> Result<(), String> {
+        let segments = extract_command_segments(command);
+        match first_matching_rule(command, &segments, &self.deny) {
+            Some(rule) => {
+                tracing::debug!(
+                    mode = ?self.mode,
+                    rule = %rule,
+                    "verification command denied by shell policy"
+                );
+                Err(format!("denied by shell policy rule '{}'", rule))
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+pub(crate) fn parse_verification_argv(
     command: &str,
 ) -> Result<(Option<PathBuf>, Vec<String>), String> {
     let command = command.trim();
@@ -34,10 +98,6 @@ pub(crate) fn parse_restricted_argv(
     }
     if argv_tokens.iter().any(|token| token.contains('&')) {
         return Err("ampersand is only allowed in a leading cd prefix".to_string());
-    }
-    let program = &argv_tokens[0];
-    if !ALLOWED_BINARIES.iter().any(|allowed| program == allowed) {
-        return Err(format!("unsupported command binary '{}'", program));
     }
     Ok((cwd, argv_tokens.to_vec()))
 }
@@ -98,7 +158,17 @@ fn strip_list_and_backticks(value: &str) -> String {
     if value.starts_with('`') && value.ends_with('`') && value.len() >= 2 {
         value[1..value.len() - 1].trim().to_string()
     } else {
-        value.trim_end_matches('.').trim().to_string()
+        strip_sentence_period(value).trim().to_string()
+    }
+}
+
+fn strip_sentence_period(value: &str) -> &str {
+    let mut chars = value.chars().rev();
+    match (chars.next(), chars.next()) {
+        (Some('.'), Some(previous)) if previous.is_alphanumeric() => {
+            &value[..value.len() - '.'.len_utf8()]
+        }
+        _ => value,
     }
 }
 
@@ -106,6 +176,12 @@ fn looks_like_command(command: &str) -> bool {
     let Ok(tokens) = shell_words::split(command) else {
         return false;
     };
+    if tokens
+        .iter()
+        .any(|token| PROSE_TOKENS.contains(&token.to_ascii_lowercase().as_str()))
+    {
+        return false;
+    }
     let program = if tokens.first().is_some_and(|token| token == "cd")
         && tokens.get(2).is_some_and(|token| token == "&&")
     {
@@ -113,7 +189,7 @@ fn looks_like_command(command: &str) -> bool {
     } else {
         tokens.first()
     };
-    program.is_some_and(|program| ALLOWED_BINARIES.contains(&program.as_str()))
+    program.is_some_and(|program| COMMAND_HINTS.contains(&program.as_str()))
 }
 
 fn push_expanded_unique(commands: &mut Vec<String>, command: &str) {
@@ -153,7 +229,7 @@ fn split_safe_chain(command: &str) -> Result<Vec<String>, String> {
             Some(cwd) => format!("cd {} && {}", shell_words::quote(cwd), rendered),
             None => rendered,
         };
-        parse_restricted_argv(&rendered)?;
+        parse_verification_argv(&rendered)?;
         result.push(rendered);
     }
     Ok(result)
@@ -213,14 +289,14 @@ mod tests {
     #[test]
     fn parses_quoted_arguments_and_cwd() {
         let parsed =
-            parse_restricted_argv("cd \"dir with spaces\" && cargo test \"named test\"").unwrap();
+            parse_verification_argv("cd \"dir with spaces\" && cargo test \"named test\"").unwrap();
         assert_eq!(parsed.0, Some(PathBuf::from("dir with spaces")));
         assert_eq!(parsed.1, vec!["cargo", "test", "named test"]);
-        assert!(parse_restricted_argv("cargo test '").is_err());
+        assert!(parse_verification_argv("cargo test '").is_err());
     }
 
     #[test]
-    fn rejects_shell_features_and_unknown_binary() {
+    fn rejects_shell_features() {
         for command in [
             "cargo test $(rm -rf /)",
             "cargo test `date`",
@@ -229,10 +305,85 @@ mod tests {
             "cargo test; npm test",
             "cargo test *.rs",
             "cargo test && npm test",
+        ] {
+            assert!(parse_verification_argv(command).is_err(), "{command}");
+        }
+    }
+
+    #[test]
+    fn parses_previously_unsupported_binaries() {
+        for command in [
+            "dotnet test",
+            "go test ./...",
+            "make check",
+            "gradlew build",
             "bash -c cargo",
         ] {
-            assert!(parse_restricted_argv(command).is_err(), "{command}");
+            let parsed = parse_verification_argv(command);
+            assert!(parsed.is_ok(), "{command}: {:?}", parsed.err());
         }
+        assert_eq!(
+            parse_verification_argv("go test ./...").unwrap().1,
+            vec!["go", "test", "./..."]
+        );
+    }
+
+    #[test]
+    fn default_deny_rules_block_sudo_but_allow_normal_commands() {
+        let policy = VerifyCommandPolicy::from_shell_policy(&ShellGatePolicy::default());
+        let denied = policy.check("sudo rm -rf /").unwrap_err();
+        assert!(denied.contains("denied by shell policy rule"), "{denied}");
+        assert!(policy.check("dotnet test").is_ok());
+        assert!(policy.check("go test ./...").is_ok());
+        assert!(policy.check("rm -rf /").is_ok());
+    }
+
+    #[test]
+    fn yolo_mode_allows_arbitrary_binaries_but_still_denies() {
+        let policy = VerifyCommandPolicy::from_shell_policy(&ShellGatePolicy {
+            mode: ApprovalMode::Yolo,
+            ..ShellGatePolicy::default()
+        });
+        for command in ["mycompany-build --release", "gradlew build", "zig build"] {
+            assert!(parse_verification_argv(command).is_ok(), "{command}");
+            assert!(policy.check(command).is_ok(), "{command}");
+        }
+        assert!(policy.check("sudo id").is_err());
+        assert!(VerifyCommandPolicy::permissive().check("sudo id").is_ok());
+    }
+
+    #[test]
+    fn acceptance_prose_is_not_extracted_as_a_command() {
+        let card: BoardCard = serde_json::from_value(serde_json::json!({
+            "id":"T","title":"t","column":"done",
+            "instructions":"## Acceptance Criteria\n- make sure the tests pass\n- go through the migration list\n- just verify that it works\n- mix of unit and integration coverage\n",
+            "assignee":null,"agent_chat_id":null,"created_at":"now","started_at":null,"completed_at":null
+        })).unwrap();
+        assert!(
+            verification_commands(&card).is_empty(),
+            "prose must not be executed: {:?}",
+            verification_commands(&card)
+        );
+    }
+
+    #[test]
+    fn real_commands_in_acceptance_section_are_still_extracted() {
+        let card: BoardCard = serde_json::from_value(serde_json::json!({
+            "id":"T","title":"t","column":"done",
+            "instructions":"## Verification\n- make check\n- go test ./...\n- dotnet test\n- npm run lint\n",
+            "assignee":null,"agent_chat_id":null,"created_at":"now","started_at":null,"completed_at":null
+        })).unwrap();
+        assert_eq!(
+            verification_commands(&card),
+            vec!["make check", "go test ./...", "dotnet test", "npm run lint"]
+        );
+    }
+
+    #[test]
+    fn trailing_sentence_period_is_stripped_but_path_globs_survive() {
+        assert_eq!(strip_list_and_backticks("- cargo test."), "cargo test");
+        assert_eq!(strip_list_and_backticks("- go test ./..."), "go test ./...");
+        assert_eq!(strip_list_and_backticks("- pytest tests/"), "pytest tests/");
     }
 
     #[test]
@@ -268,7 +419,11 @@ mod tests {
             vec!["cargo check", "npm test"]
         );
         assert!(split_safe_chain("cargo check && && npm test").is_err());
-        assert!(split_safe_chain("cargo check && bash -c nope").is_err());
+        assert!(split_safe_chain("cargo check && npm test > out").is_err());
+        assert_eq!(
+            split_safe_chain("dotnet build && dotnet test").unwrap(),
+            vec!["dotnet build", "dotnet test"]
+        );
         assert!(split_safe_chain("cd crates && cargo check && npm test")
             .unwrap()
             .iter()

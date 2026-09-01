@@ -245,6 +245,17 @@ pub(crate) fn find_abandoned_worktrees(board: &crate::tasks::types::TaskBoard) -
         .collect()
 }
 
+pub(crate) fn abandoned_worktrees_error(action: &str, abandoned_worktrees: &[String]) -> String {
+    format!(
+        "Cannot {} while abandoned task worktrees exist. Resolve each one, then retry:\n\
+         - to keep the work: `merge_agent(card_id=...)`\n\
+         - to discard it without merging: remove the worktree directly with \
+         `git worktree remove <path> --force` (add `git branch -D <branch>` to drop its branch)\n\n{}",
+        action,
+        abandoned_worktrees.join("\n")
+    )
+}
+
 pub(crate) async fn prepare_agent_worktree(
     gcx: Arc<GlobalContext>,
     task_meta: &StoredTaskMeta,
@@ -859,10 +870,9 @@ impl Tool for ToolTaskSpawnAgent {
         let board = storage::load_board(gcx.clone(), &task_id).await?;
         let abandoned_worktrees = find_abandoned_worktrees(&board);
         if !abandoned_worktrees.is_empty() {
-            return Err(format!(
-                "Cannot spawn a new task agent while abandoned task worktrees exist. \
-                Clean them first with `merge_agent(card_id=...)` for merged cards, or remove them manually if they were intentionally abandoned.\n\n{}",
-                abandoned_worktrees.join("\n")
+            return Err(abandoned_worktrees_error(
+                "spawn a new task agent",
+                &abandoned_worktrees,
             ));
         }
 
@@ -2053,6 +2063,55 @@ mod tests {
         assert!(
             abandoned[0].contains("T-2"),
             "done card with retained worktree should still be flagged"
+        );
+    }
+
+    #[test]
+    fn abandoned_worktrees_error_names_merge_and_merge_free_remedies() {
+        let abandoned = vec!["- T-2 (Card) in column `done`: `/tmp/agent-worktree`".to_string()];
+
+        let message = abandoned_worktrees_error("spawn a new task agent", &abandoned);
+
+        assert!(
+            message.contains("Cannot spawn a new task agent while abandoned task worktrees exist"),
+            "{message}"
+        );
+        assert!(
+            message.contains("merge_agent(card_id=...)"),
+            "message must name the merge path: {message}"
+        );
+        assert!(
+            message.contains("git worktree remove <path> --force"),
+            "message must name a discard path that the verifier cannot block: {message}"
+        );
+        assert!(
+            message.contains("without merging"),
+            "message must make the merge-free path explicit: {message}"
+        );
+        assert!(
+            message.contains("/tmp/agent-worktree"),
+            "offending worktrees must still be listed: {message}"
+        );
+    }
+
+    #[test]
+    fn abandoned_worktrees_error_is_shared_between_spawn_agent_and_spawn_ab() {
+        let abandoned = vec!["- T-2 (Card) in column `done`: `/tmp/agent-worktree`".to_string()];
+
+        let spawn_agent_message = abandoned_worktrees_error("spawn a new task agent", &abandoned);
+        let spawn_ab_message = abandoned_worktrees_error("spawn A/B agents", &abandoned);
+
+        for message in [&spawn_agent_message, &spawn_ab_message] {
+            assert!(message.contains("merge_agent(card_id=...)"), "{message}");
+            assert!(
+                message.contains("git worktree remove <path> --force"),
+                "{message}"
+            );
+            assert!(message.contains("/tmp/agent-worktree"), "{message}");
+        }
+        assert!(
+            spawn_ab_message.contains("Cannot spawn A/B agents"),
+            "{spawn_ab_message}"
         );
     }
 

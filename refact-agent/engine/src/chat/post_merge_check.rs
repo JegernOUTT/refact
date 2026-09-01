@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::process::Command;
 
-use crate::chat::verify_cmd::{parse_restricted_argv, verification_commands};
+use crate::chat::verify_cmd::{parse_verification_argv, verification_commands, VerifyCommandPolicy};
 use crate::chat::verifier::ExpectedCardState;
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
@@ -228,15 +228,25 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
             "no verification command found".to_string(),
         ));
     }
+    let command_policy = VerifyCommandPolicy::load(gcx.clone()).await;
     let mut parsed = Vec::new();
     for command in commands {
-        match parse_restricted_argv(&command) {
-            Ok((cwd, argv)) => parsed.push((command, cwd, argv)),
+        match parse_verification_argv(&command) {
+            Ok((cwd, argv)) => {
+                if let Err(reason) = command_policy.check(&command) {
+                    return Ok(failed_without_revert(
+                        Some(command),
+                        VerificationOutcome::PolicyDenied,
+                        format!("Denied by shell policy: {}", reason),
+                    ));
+                }
+                parsed.push((command, cwd, argv));
+            }
             Err(reason) => {
                 return Ok(failed_without_revert(
                     Some(command),
                     VerificationOutcome::Rejected,
-                    format!("Rejected by command filter: {}", reason),
+                    format!("Cannot run as a command: {}", reason),
                 ));
             }
         }
@@ -1067,6 +1077,87 @@ mod tests {
                 argv: vec!["cargo".to_string(), "check".to_string()]
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn post_merge_runs_previously_unsupported_binaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        write_task(
+            gcx.clone(),
+            temp.path(),
+            card("## Acceptance Criteria\n- Verify: `dotnet test`"),
+        )
+        .await;
+        let mut runner = MockRunner {
+            outputs: VecDeque::from([output(true, Some(0), "ok")]),
+            calls: Vec::new(),
+        };
+
+        let result = post_merge_check_with_runner(gcx, request(temp.path()), &mut runner)
+            .await
+            .unwrap();
+
+        assert!(result.checked);
+        assert_eq!(
+            runner.calls,
+            vec![PostMergeCommand::Verify {
+                cwd: None,
+                argv: vec!["dotnet".to_string(), "test".to_string()]
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn post_merge_denies_command_matching_deny_rule() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        write_task(
+            gcx.clone(),
+            temp.path(),
+            card("## Acceptance Criteria\n- Verify: `sudo rm -rf /`"),
+        )
+        .await;
+        let mut runner = MockRunner::default();
+
+        let result = post_merge_check_with_runner(gcx, request(temp.path()), &mut runner)
+            .await
+            .unwrap();
+
+        assert!(result.checked);
+        assert!(!result.auto_reverted);
+        assert_eq!(result.outcome, VerificationOutcome::PolicyDenied);
+        assert!(
+            result.output_tail.starts_with("Denied by shell policy:"),
+            "{}",
+            result.output_tail
+        );
+        assert!(runner.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn post_merge_rejects_shell_syntax() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        write_task(
+            gcx.clone(),
+            temp.path(),
+            card("## Acceptance Criteria\n- Verify: `cargo test | tee f`"),
+        )
+        .await;
+        let mut runner = MockRunner::default();
+
+        let result = post_merge_check_with_runner(gcx, request(temp.path()), &mut runner)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, VerificationOutcome::Rejected);
+        assert!(
+            result.output_tail.starts_with("Cannot run as a command:"),
+            "{}",
+            result.output_tail
+        );
+        assert!(runner.calls.is_empty());
     }
 
     #[tokio::test]

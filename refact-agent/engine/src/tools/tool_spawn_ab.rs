@@ -17,9 +17,9 @@ use crate::tasks::storage;
 use crate::tasks::types::{AbVariantInfo, AbVariants, BoardCard, StatusUpdate};
 use crate::tools::task_tool_helpers::{wait_for_agent_abort, AGENT_ABORT_TIMEOUT};
 use crate::tools::tool_task_spawn_agent::{
-    build_agent_prompt, build_agent_thread_params, find_abandoned_worktrees,
-    prepare_agent_worktree_with_suffix, resolve_agent_model, resolve_invoking_planner_chat_id,
-    PreparedWorktree,
+    abandoned_worktrees_error, build_agent_prompt, build_agent_thread_params,
+    find_abandoned_worktrees, prepare_agent_worktree_with_suffix, resolve_agent_model,
+    resolve_invoking_planner_chat_id, PreparedWorktree,
 };
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::service::WorktreeService;
@@ -721,9 +721,9 @@ impl Tool for ToolSpawnAb {
         let board = storage::load_board(gcx.clone(), &task_id).await?;
         let abandoned_worktrees = find_abandoned_worktrees(&board);
         if !abandoned_worktrees.is_empty() {
-            return Err(format!(
-                "Cannot spawn A/B agents while abandoned task worktrees exist. Clean them first.\n\n{}",
-                abandoned_worktrees.join("\n")
+            return Err(abandoned_worktrees_error(
+                "spawn A/B agents",
+                &abandoned_worktrees,
             ));
         }
         let card = board

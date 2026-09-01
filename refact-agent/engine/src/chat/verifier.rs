@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use crate::chat::internal_roles::{event, EventSubkind};
 use crate::chat::verifier_diff::{git_changed_files_summary, resolve_verifier_diff_base};
-use crate::chat::verify_cmd::{parse_restricted_argv, verification_commands};
+use crate::chat::verify_cmd::{parse_verification_argv, verification_commands, VerifyCommandPolicy};
 use crate::exec::command_policy::{build_exec_request, CommandKind, CommandPolicyInput, ExecSource};
 use crate::exec::{ExecOutputStream, ExecStatus};
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
@@ -319,8 +319,11 @@ pub async fn verify_card(
         );
     }
 
+    let command_policy = VerifyCommandPolicy::load(gcx.clone()).await;
     for command in commands {
-        let result = run_verification_command(gcx.clone(), &worktree, &command).await;
+        let result =
+            run_verification_command_with_policy(gcx.clone(), &worktree, &command, &command_policy)
+                .await;
         if !result.passed {
             concerns.push(format!("Verification command failed: {}", result.command));
         }
@@ -411,6 +414,15 @@ pub async fn verify_card(
     Ok(report)
 }
 
+pub(crate) fn outcome_is_infrastructure(outcome: &VerificationOutcome) -> bool {
+    matches!(
+        outcome,
+        VerificationOutcome::InfrastructureFailed
+            | VerificationOutcome::Rejected
+            | VerificationOutcome::PolicyDenied
+    )
+}
+
 fn classify_verifier_report(
     no_commands: bool,
     command_results: &[VerificationResult],
@@ -421,18 +433,15 @@ fn classify_verifier_report(
         || command_results.iter().any(|result| {
             matches!(
                 result.outcome,
-                VerificationOutcome::CommandFailed
-                    | VerificationOutcome::Rejected
-                    | VerificationOutcome::PolicyDenied
-                    | VerificationOutcome::NoCommands
-            ) || (!result.passed && result.outcome != VerificationOutcome::InfrastructureFailed)
+                VerificationOutcome::CommandFailed | VerificationOutcome::NoCommands
+            ) || (!result.passed && !outcome_is_infrastructure(&result.outcome))
         });
     if command_verification_failed || review_has_concerns {
         return VerifierReportClassification::VerificationFailed;
     }
-    let infrastructure_failed = command_results.iter().any(|result| {
-        result.outcome == VerificationOutcome::InfrastructureFailed || !result.passed
-    });
+    let infrastructure_failed = command_results
+        .iter()
+        .any(|result| outcome_is_infrastructure(&result.outcome) || !result.passed);
     if infrastructure_failed || review_unavailable {
         return VerifierReportClassification::HumanReview;
     }
@@ -464,32 +473,53 @@ fn launch_failure_report(error: String) -> VerifierReport {
     }
 }
 
+#[cfg(test)]
 async fn run_verification_command(
     gcx: Arc<GlobalContext>,
     worktree: &Path,
     command: &str,
 ) -> VerificationResult {
+    let policy = VerifyCommandPolicy::load(gcx.clone()).await;
+    run_verification_command_with_policy(gcx, worktree, command, &policy).await
+}
+
+async fn run_verification_command_with_policy(
+    gcx: Arc<GlobalContext>,
+    worktree: &Path,
+    command: &str,
+    policy: &VerifyCommandPolicy,
+) -> VerificationResult {
     let mut runner = SystemVerificationCommandRunner { gcx };
-    run_verification_command_with_runner(worktree, command, &mut runner).await
+    run_verification_command_with_runner(worktree, command, policy, &mut runner).await
 }
 
 async fn run_verification_command_with_runner<R: VerificationCommandRunner>(
     worktree: &Path,
     command: &str,
+    policy: &VerifyCommandPolicy,
     runner: &mut R,
 ) -> VerificationResult {
-    let (cwd, argv) = match parse_restricted_argv(command) {
+    let (cwd, argv) = match parse_verification_argv(command) {
         Ok(parsed) => parsed,
         Err(reason) => {
             return VerificationResult {
                 command: command.to_string(),
                 exit_code: None,
                 passed: false,
-                output_tail: format!("Rejected by command filter: {}", reason),
+                output_tail: format!("Cannot run as a command: {}", reason),
                 outcome: VerificationOutcome::Rejected,
             };
         }
     };
+    if let Err(reason) = policy.check(command) {
+        return VerificationResult {
+            command: command.to_string(),
+            exit_code: None,
+            passed: false,
+            output_tail: format!("Denied by shell policy: {}", reason),
+            outcome: VerificationOutcome::PolicyDenied,
+        };
+    }
     runner.run(worktree, command, cwd, argv).await
 }
 
@@ -972,22 +1002,16 @@ mod tests {
             classify_verifier_report(true, &[], false, false),
             VerifierReportClassification::VerificationFailed
         );
-        for outcome in [
-            VerificationOutcome::CommandFailed,
-            VerificationOutcome::Rejected,
-            VerificationOutcome::PolicyDenied,
-        ] {
-            let result = VerificationResult {
-                command: "cargo test".to_string(),
-                passed: false,
-                outcome,
-                ..Default::default()
-            };
-            assert_eq!(
-                classify_verifier_report(false, &[result], false, false),
-                VerifierReportClassification::VerificationFailed
-            );
-        }
+        let result = VerificationResult {
+            command: "cargo test".to_string(),
+            passed: false,
+            outcome: VerificationOutcome::CommandFailed,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_verifier_report(false, &[result], false, false),
+            VerifierReportClassification::VerificationFailed
+        );
     }
 
     #[test]
@@ -1184,6 +1208,7 @@ mod tests {
         let result = run_verification_command_with_runner(
             temp.path(),
             "cd refact-agent/engine && cargo check",
+            &VerifyCommandPolicy::permissive(),
             &mut runner,
         )
         .await;
@@ -1200,6 +1225,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn verifier_runs_previously_unsupported_binaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runner = MockVerificationRunner::default();
+
+        for command in [
+            "dotnet test",
+            "go test ./...",
+            "make check",
+            "gradlew build",
+        ] {
+            let result = run_verification_command_with_runner(
+                temp.path(),
+                command,
+                &VerifyCommandPolicy::permissive(),
+                &mut runner,
+            )
+            .await;
+            assert!(result.passed, "{command}: {}", result.output_tail);
+        }
+        assert_eq!(runner.calls.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn verifier_denies_commands_matching_shell_policy_deny_rules() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runner = MockVerificationRunner::default();
+        let policy = VerifyCommandPolicy::from_shell_policy(
+            &crate::tools::shell_gate::ShellGatePolicy::default(),
+        );
+
+        let result = run_verification_command_with_runner(
+            temp.path(),
+            "sudo rm -rf /",
+            &policy,
+            &mut runner,
+        )
+        .await;
+
+        assert!(!result.passed);
+        assert_eq!(result.outcome, VerificationOutcome::PolicyDenied);
+        assert!(
+            result.output_tail.starts_with("Denied by shell policy:"),
+            "{}",
+            result.output_tail
+        );
+        assert!(runner.calls.is_empty());
+    }
+
+    fn command_result(
+        command: &str,
+        passed: bool,
+        outcome: VerificationOutcome,
+    ) -> VerificationResult {
+        VerificationResult {
+            command: command.to_string(),
+            exit_code: None,
+            passed,
+            output_tail: String::new(),
+            outcome,
+        }
+    }
+
+    #[test]
+    fn rejected_and_denied_commands_classify_as_human_review_not_verification_failure() {
+        for outcome in [
+            VerificationOutcome::Rejected,
+            VerificationOutcome::PolicyDenied,
+            VerificationOutcome::InfrastructureFailed,
+        ] {
+            let results = vec![command_result("dotnet test", false, outcome.clone())];
+            assert_eq!(
+                classify_verifier_report(false, &results, false, false),
+                VerifierReportClassification::HumanReview,
+                "{outcome:?} must be infrastructure, not a verification failure"
+            );
+        }
+    }
+
+    #[test]
+    fn genuine_command_failure_still_classifies_as_verification_failure() {
+        let results = vec![command_result(
+            "cargo test",
+            false,
+            VerificationOutcome::CommandFailed,
+        )];
+        assert_eq!(
+            classify_verifier_report(false, &results, false, false),
+            VerifierReportClassification::VerificationFailed
+        );
+
+        let mixed = vec![
+            command_result("cargo build", true, VerificationOutcome::Passed),
+            command_result("cargo test", false, VerificationOutcome::CommandFailed),
+        ];
+        assert_eq!(
+            classify_verifier_report(false, &mixed, false, false),
+            VerifierReportClassification::VerificationFailed
+        );
+    }
+
+    #[test]
+    fn passed_and_rejected_mix_is_human_review() {
+        let results = vec![
+            command_result("cargo build", true, VerificationOutcome::Passed),
+            command_result("dotnet test", false, VerificationOutcome::Rejected),
+        ];
+        assert_eq!(
+            classify_verifier_report(false, &results, false, false),
+            VerifierReportClassification::HumanReview
+        );
+    }
+
+    #[tokio::test]
+    async fn verifier_yolo_mode_allows_arbitrary_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runner = MockVerificationRunner::default();
+        let policy =
+            VerifyCommandPolicy::from_shell_policy(&crate::tools::shell_gate::ShellGatePolicy {
+                mode: crate::tools::shell_gate::ApprovalMode::Yolo,
+                ..crate::tools::shell_gate::ShellGatePolicy::default()
+            });
+
+        let result = run_verification_command_with_runner(
+            temp.path(),
+            "mycompany-verify --all",
+            &policy,
+            &mut runner,
+        )
+        .await;
+
+        assert!(result.passed, "{}", result.output_tail);
+        assert_eq!(runner.calls[0].3, vec!["mycompany-verify", "--all"]);
+    }
+
+    #[tokio::test]
     async fn verifier_rejects_shell_syntax() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -1207,9 +1367,8 @@ mod tests {
         let result = run_verification_command(gcx, temp.path(), "cargo test | tee f").await;
 
         assert!(!result.passed);
-        assert!(result
-            .output_tail
-            .starts_with("Rejected by command filter:"));
+        assert_eq!(result.outcome, VerificationOutcome::Rejected);
+        assert!(result.output_tail.starts_with("Cannot run as a command:"));
     }
 
     #[tokio::test]

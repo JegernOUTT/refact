@@ -13,7 +13,7 @@ use crate::tools::tools_description::{
 };
 use crate::call_validation::{ChatMessage, ChatContent, ContextEnum};
 use crate::at_commands::at_commands::AtCommandsContext;
-use crate::chat::verifier::load_expected_card_state;
+use crate::chat::verifier::{load_expected_card_state, outcome_is_infrastructure};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tools::task_tool_helpers::require_bound_planner_task;
@@ -368,8 +368,8 @@ async fn worktree_id_is_valid_for_card(
     Ok(view)
 }
 
-fn verifier_merge_block_message(card_id: &str, concerns: &[String]) -> String {
-    let rendered = if concerns.is_empty() {
+fn render_concern_list(concerns: &[String]) -> String {
+    if concerns.is_empty() {
         "- verifier failed without concerns".to_string()
     } else {
         concerns
@@ -377,26 +377,37 @@ fn verifier_merge_block_message(card_id: &str, concerns: &[String]) -> String {
             .map(|concern| format!("- {}", concern))
             .collect::<Vec<_>>()
             .join("\n")
-    };
+    }
+}
+
+fn verifier_merge_block_message(
+    card_id: &str,
+    concerns: &[String],
+    genuine_concerns: &[&str],
+) -> String {
+    let rendered = render_concern_list(concerns);
+    if genuine_concerns.is_empty() {
+        return format!(
+            "Card {} verifier failed and merge is refused. No concern was identified as a genuine verification failure; if every concern is infrastructure-only, retry with force=true. Concerns:\n{}",
+            card_id, rendered
+        );
+    }
+    let genuine_rendered = genuine_concerns
+        .iter()
+        .map(|concern| format!("- {}", concern))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
-        "Card {} verifier failed with a genuine or unclassified verification failure. Refusing merge; force=true cannot bypass verification failures. Concerns:\n{}",
-        card_id, rendered
+        "Card {} verifier failed with a genuine verification failure. Refusing merge; force=true cannot bypass verification failures. Genuine concerns:\n{}\nAll concerns:\n{}",
+        card_id, genuine_rendered, rendered
     )
 }
 
 fn verifier_force_warning(card_id: &str, concerns: &[String]) -> String {
-    let rendered = if concerns.is_empty() {
-        "- verifier failed without concerns".to_string()
-    } else {
-        concerns
-            .iter()
-            .map(|concern| format!("- {}", concern))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
     format!(
         "Card {} verifier failed and requires human review. Merge is continuing only because force=true. Concerns:\n{}",
-        card_id, rendered
+        card_id,
+        render_concern_list(concerns)
     )
 }
 
@@ -448,7 +459,7 @@ fn ensure_verifier_allows_merge(
     let infrastructure_commands = report
         .command_results
         .iter()
-        .filter(|result| result.outcome == VerificationOutcome::InfrastructureFailed)
+        .filter(|result| outcome_is_infrastructure(&result.outcome))
         .map(|result| result.command.as_str())
         .collect::<Vec<_>>();
     let forceable_human_review = !report.passed
@@ -460,10 +471,9 @@ fn ensure_verifier_allows_merge(
                     .iter()
                     .any(|concern| concern_is_launch_failure(concern))))
         && report.command_results.iter().all(|result| {
-            matches!(
-                result.outcome,
-                VerificationOutcome::Passed | VerificationOutcome::InfrastructureFailed
-            ) && (result.passed == (result.outcome == VerificationOutcome::Passed))
+            (result.outcome == VerificationOutcome::Passed
+                || outcome_is_infrastructure(&result.outcome))
+                && (result.passed == (result.outcome == VerificationOutcome::Passed))
         })
         && !report.concerns.is_empty()
         && report
@@ -483,7 +493,17 @@ fn ensure_verifier_allows_merge(
     if consistent_pass {
         return Ok(None);
     }
-    Err(verifier_merge_block_message(&card.id, &report.concerns))
+    let genuine_concerns = report
+        .concerns
+        .iter()
+        .filter(|concern| !concern_is_infrastructure_only(concern, &infrastructure_commands))
+        .map(|concern| concern.as_str())
+        .collect::<Vec<_>>();
+    Err(verifier_merge_block_message(
+        &card.id,
+        &report.concerns,
+        &genuine_concerns,
+    ))
 }
 
 fn ensure_card_done_allows_merge(
@@ -2207,6 +2227,168 @@ mod worktree_merge_tool_tests {
         });
 
         assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_some());
+    }
+
+    fn infrastructure_human_review_report(
+        outcome: crate::tasks::types::VerificationOutcome,
+    ) -> VerifierReport {
+        use crate::tasks::types::{VerificationResult, VerifierReportClassification};
+
+        VerifierReport {
+            passed: false,
+            concerns: vec!["Verification command failed: cargo test".to_string()],
+            recommendation: "human-review".to_string(),
+            classification: VerifierReportClassification::HumanReview,
+            command_results: vec![VerificationResult {
+                command: "cargo test".to_string(),
+                passed: false,
+                outcome,
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn merge_agent_force_allows_rejected_command_human_review() {
+        use crate::tasks::types::VerificationOutcome;
+
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(infrastructure_human_review_report(
+            VerificationOutcome::Rejected,
+        ));
+
+        let warning = ensure_verifier_allows_merge(&card, true).unwrap();
+
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("force=true"));
+        assert!(ensure_verifier_allows_merge(&card, false).is_err());
+    }
+
+    #[test]
+    fn merge_agent_force_allows_policy_denied_command_human_review() {
+        use crate::tasks::types::VerificationOutcome;
+
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(infrastructure_human_review_report(
+            VerificationOutcome::PolicyDenied,
+        ));
+
+        assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_some());
+        assert!(ensure_verifier_allows_merge(&card, false).is_err());
+    }
+
+    #[test]
+    fn merge_agent_force_still_blocks_command_failed_result() {
+        use crate::tasks::types::VerificationOutcome;
+
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(infrastructure_human_review_report(
+            VerificationOutcome::CommandFailed,
+        ));
+
+        let err = ensure_verifier_allows_merge(&card, true).unwrap_err();
+
+        assert!(err.contains("force=true cannot bypass verification failures"));
+        assert!(err.contains("Verification command failed: cargo test"));
+    }
+
+    #[test]
+    fn merge_agent_force_still_blocks_no_commands_result() {
+        use crate::tasks::types::{
+            VerificationOutcome, VerificationResult, VerifierReportClassification,
+        };
+
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(VerifierReport {
+            passed: false,
+            concerns: vec![
+                "No verification commands found in card instructions or final report".to_string(),
+            ],
+            recommendation: "human-review".to_string(),
+            classification: VerifierReportClassification::HumanReview,
+            command_results: vec![VerificationResult {
+                command: "cargo test".to_string(),
+                passed: false,
+                outcome: VerificationOutcome::NoCommands,
+                ..Default::default()
+            }],
+        });
+
+        assert!(ensure_verifier_allows_merge(&card, true).is_err());
+    }
+
+    #[test]
+    fn merge_agent_force_allows_mixed_passed_and_rejected_human_review() {
+        use crate::tasks::types::{
+            VerificationOutcome, VerificationResult, VerifierReportClassification,
+        };
+
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(VerifierReport {
+            passed: false,
+            concerns: vec!["Verification command failed: cargo clippy".to_string()],
+            recommendation: "human-review".to_string(),
+            classification: VerifierReportClassification::HumanReview,
+            command_results: vec![
+                VerificationResult {
+                    command: "cargo test".to_string(),
+                    passed: true,
+                    outcome: VerificationOutcome::Passed,
+                    ..Default::default()
+                },
+                VerificationResult {
+                    command: "cargo clippy".to_string(),
+                    passed: false,
+                    outcome: VerificationOutcome::Rejected,
+                    ..Default::default()
+                },
+            ],
+        });
+
+        assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_some());
+    }
+
+    #[test]
+    fn merge_agent_force_blocks_rejected_command_with_semantic_concern() {
+        use crate::tasks::types::VerificationOutcome;
+
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        let mut report = infrastructure_human_review_report(VerificationOutcome::Rejected);
+        report
+            .concerns
+            .push("Implementation does not satisfy the requested behavior".to_string());
+        card.verifier_report = Some(report);
+
+        let err = ensure_verifier_allows_merge(&card, true).unwrap_err();
+
+        assert!(err.contains("Genuine concerns:"));
+        assert!(err.contains("Implementation does not satisfy the requested behavior"));
+    }
+
+    #[test]
+    fn merge_agent_strict_consistent_pass_is_unchanged() {
+        use crate::tasks::types::{
+            VerificationOutcome, VerificationResult, VerifierReportClassification,
+        };
+
+        let mut card = test_card("wt", "agent", Path::new("/tmp/worktree"));
+        card.verifier_report = Some(VerifierReport {
+            passed: true,
+            concerns: Vec::new(),
+            recommendation: "merge".to_string(),
+            classification: VerifierReportClassification::Passed,
+            command_results: vec![VerificationResult {
+                command: "cargo test".to_string(),
+                passed: true,
+                outcome: VerificationOutcome::Passed,
+                ..Default::default()
+            }],
+        });
+
+        assert!(ensure_verifier_allows_merge(&card, false)
+            .unwrap()
+            .is_none());
+        assert!(ensure_verifier_allows_merge(&card, true).unwrap().is_none());
     }
 
     #[test]
