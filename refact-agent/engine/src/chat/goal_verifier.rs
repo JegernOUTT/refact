@@ -327,15 +327,32 @@ pub fn parse_goal_verdict(answer: &str, tool_called: bool) -> GoalVerdict {
         return GoalVerdict::Met;
     }
     if first.eq_ignore_ascii_case("GOAL: UNMET") {
+        let criteria_verdicts = parse_criteria_verdicts(answer);
         let gaps = lines
+            .filter(|line| !line.starts_with("CRITERION "))
             .map(|line| line.trim_start_matches(['-', '*', '•', ' ']).trim())
             .filter(|line| !line.is_empty())
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        if gaps.is_empty() {
-            inconclusive_verdict()
-        } else {
+        if !gaps.is_empty() {
             GoalVerdict::Unmet(gaps)
+        } else {
+            let criterion_gaps = criteria_verdicts
+                .into_iter()
+                .filter(|criterion| !criterion.met)
+                .map(|criterion| {
+                    if criterion.note.is_empty() {
+                        format!("{}: unmet", criterion.id)
+                    } else {
+                        format!("{}: {}", criterion.id, criterion.note)
+                    }
+                })
+                .collect::<Vec<_>>();
+            if criterion_gaps.is_empty() {
+                inconclusive_verdict()
+            } else {
+                GoalVerdict::Unmet(criterion_gaps)
+            }
         }
     } else {
         inconclusive_verdict()
@@ -873,6 +890,36 @@ mod tests {
         assert_eq!(
             parse_goal_verdict("GOAL: UNMET\n- missing tests\n* docs", false),
             GoalVerdict::Unmet(vec!["missing tests".to_string(), "docs".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_goal_verdict_unmet_excludes_criterion_statuses_from_bullets() {
+        assert_eq!(
+            parse_goal_verdict(
+                "GOAL: UNMET\nCRITERION C1: MET\nCRITERION C2: UNMET — docs missing\n- missing tests",
+                false,
+            ),
+            GoalVerdict::Unmet(vec!["missing tests".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_goal_verdict_unmet_synthesizes_unmet_criterion_gaps() {
+        assert_eq!(
+            parse_goal_verdict(
+                "GOAL: UNMET\nCRITERION C1: MET\nCRITERION C2: UNMET — docs missing\nCRITERION C3: UNMET",
+                false,
+            ),
+            GoalVerdict::Unmet(vec!["C2: docs missing".to_string(), "C3: unmet".to_string()])
+        );
+    }
+
+    #[test]
+    fn parse_goal_verdict_met_with_criterion_statuses_is_met() {
+        assert_eq!(
+            parse_goal_verdict("GOAL: MET\nCRITERION C1: MET\nCRITERION C2: MET", false),
+            GoalVerdict::Met
         );
     }
 
