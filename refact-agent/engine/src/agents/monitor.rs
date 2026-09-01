@@ -38,7 +38,6 @@ pub(crate) async fn monitor_once(app: AppState) -> Result<(), String> {
                     &record.agent_id,
                     "⚠ no activity for 20+ minutes".to_string(),
                     record.step_count,
-                    record.last_activity.clone(),
                 )
                 .await?;
             crate::agents::spawn::emit_background_agent_update(app.clone(), &updated).await;

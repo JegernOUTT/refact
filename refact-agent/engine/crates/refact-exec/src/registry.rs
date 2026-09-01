@@ -199,7 +199,13 @@ fn process_completion_event(snapshot: &ExecProcessSnapshot) -> Option<ProcessCom
 
 fn process_spawn_event(snapshot: &ExecProcessSnapshot) -> Option<ProcessSpawnEvent> {
     let chat_id = snapshot.meta.owner.chat_id.clone()?;
-    let started_at_ms = snapshot.meta.started_at_ms?;
+    let Some(started_at_ms) = snapshot.meta.started_at_ms else {
+        tracing::debug!(
+            process_id = %snapshot.meta.process_id,
+            "skipping process spawn event without started_at_ms"
+        );
+        return None;
+    };
     Some(ProcessSpawnEvent {
         process_id: snapshot.meta.process_id.clone(),
         chat_id,
@@ -2243,6 +2249,23 @@ mod tests {
             .await
             .unwrap();
         registry.notify_spawn(&started);
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn process_spawn_does_not_broadcast_before_started() {
+        let registry = ExecRegistry::new();
+        let mut rx = registry.subscribe_spawn();
+        let snapshot = registry
+            .register(
+                meta("exec_spawn_not_started", ExecMode::Background, "sleep 1")
+                    .with_chat_id("chat-spawn-not-started"),
+                DEFAULT_MAX_BYTES,
+            )
+            .await;
+
+        registry.notify_spawn(&snapshot);
 
         assert!(rx.try_recv().is_err());
     }

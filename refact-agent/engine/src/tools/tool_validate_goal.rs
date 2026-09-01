@@ -401,12 +401,26 @@ mod tests {
         );
 
         assert!(!content.contains("chat session"));
+        assert_ne!(content, "No active goal to validate.");
+        assert!(content.contains("GOAL") || content.contains("Goal validation"));
         assert!(app
             .chat
             .sessions
             .read()
             .await
             .contains_key("subchat-validate-goal"));
+        let session = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get("subchat-validate-goal")
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            session.lock().await.goal.as_ref().unwrap().content,
+            "ship feature"
+        );
     }
 
     #[tokio::test]

@@ -29,7 +29,7 @@ pub struct InboxMessage {
 pub struct AgentRuntime {
     pub abort_flag: Arc<AtomicBool>,
     pub notify: Arc<Notify>,
-    pub inbox: Arc<Mutex<Vec<InboxMessage>>>,
+    pub inbox: Arc<Mutex<VecDeque<InboxMessage>>>,
 }
 
 pub struct BackgroundAgentRegistry {
@@ -102,7 +102,7 @@ impl BackgroundAgentRegistry {
         };
         let abort_flag = Arc::new(AtomicBool::new(false));
         let notify = Arc::new(Notify::new());
-        let inbox = Arc::new(Mutex::new(Vec::new()));
+        let inbox = Arc::new(Mutex::new(VecDeque::new()));
         {
             let mut records = self.records.write().await;
             storage::save_record(&self.storage_root, &record).await?;
@@ -127,25 +127,15 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         child_chat_id: String,
     ) -> Result<BackgroundAgent, String> {
-        let mut records = self.records.write().await;
-        let current = records
-            .get(agent_id)
-            .cloned()
-            .ok_or_else(|| "agent not found".to_string())?;
-        if current.status.is_terminal() {
-            return Ok(current);
-        }
-        let mut updated = current;
-        let now = Utc::now();
-        updated.status = BgAgentStatus::Running;
-        updated.child_chat_id = Some(child_chat_id);
-        updated.started_at = Some(now);
-        updated.finished_at = None;
-        updated.error = None;
-        touch_record(&mut updated, now);
-        storage::save_record(&self.storage_root, &updated).await?;
-        records.insert(agent_id.to_string(), updated.clone());
-        Ok(updated)
+        self.update_record_if_not_terminal(agent_id, |record, now| {
+            record.status = BgAgentStatus::Running;
+            record.child_chat_id = Some(child_chat_id);
+            record.started_at = Some(now);
+            record.finished_at = None;
+            record.error = None;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn update_progress(
@@ -153,12 +143,11 @@ impl BackgroundAgentRegistry {
         agent_id: &str,
         progress: String,
         step_count: u32,
-        last_activity: Option<String>,
     ) -> Result<BackgroundAgent, String> {
-        self.update_active_record(agent_id, |record, _| {
+        self.update_record_if_not_terminal(agent_id, |record, now| {
             record.progress = Some(progress);
             record.step_count = step_count;
-            record.last_activity = last_activity;
+            record.last_activity = Some(now.to_rfc3339());
             Ok(())
         })
         .await
@@ -171,7 +160,7 @@ impl BackgroundAgentRegistry {
         step_count: Option<u32>,
         current_tool: Option<Option<String>>,
     ) -> Result<BackgroundAgent, String> {
-        self.update_active_record(agent_id, |record, now| {
+        self.update_record_if_not_terminal(agent_id, |record, now| {
             if let Some(progress) = progress {
                 record.progress = Some(progress);
             }
@@ -249,6 +238,9 @@ impl BackgroundAgentRegistry {
         let question_id = Uuid::new_v4().simple().to_string()[..8].to_string();
         let updated = self
             .update_record(agent_id, |record, now| {
+                if record.status.is_terminal() {
+                    return Err("agent already finished".to_string());
+                }
                 record.questions.push(AgentQuestion {
                     id: question_id.clone(),
                     text,
@@ -453,21 +445,11 @@ impl BackgroundAgentRegistry {
         &self,
         agent_id: &str,
     ) -> Result<BackgroundAgent, String> {
-        let mut records = self.records.write().await;
-        let current = records
-            .get(agent_id)
-            .cloned()
-            .ok_or_else(|| "agent not found".to_string())?;
-        if current.status.is_terminal() {
-            return Ok(current);
-        }
-        let mut updated = current;
-        let now = Utc::now();
-        updated.status = BgAgentStatus::WaitingForApproval;
-        touch_record(&mut updated, now);
-        storage::save_record(&self.storage_root, &updated).await?;
-        records.insert(agent_id.to_string(), updated.clone());
-        Ok(updated)
+        self.update_record_if_not_terminal(agent_id, |record, _| {
+            record.status = BgAgentStatus::WaitingForApproval;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn set_completion_message_id(
@@ -789,7 +771,7 @@ impl BackgroundAgentRegistry {
             .map(|runtime| runtime.abort_flag.clone())
     }
 
-    pub async fn inbox_for(&self, agent_id: &str) -> Option<Arc<Mutex<Vec<InboxMessage>>>> {
+    pub async fn inbox_for(&self, agent_id: &str) -> Option<Arc<Mutex<VecDeque<InboxMessage>>>> {
         self.runtime
             .read()
             .await
@@ -814,9 +796,9 @@ impl BackgroundAgentRegistry {
             .ok_or_else(|| "agent is not running in this process".to_string())?;
         let mut inbox = inbox.lock().await;
         if inbox.len() >= MAX_INBOX_MESSAGES {
-            inbox.remove(0);
+            inbox.pop_front();
         }
-        inbox.push(msg);
+        inbox.push_back(msg);
         Ok(())
     }
 
@@ -825,7 +807,7 @@ impl BackgroundAgentRegistry {
             return Vec::new();
         };
         let mut inbox = inbox.lock().await;
-        std::mem::take(&mut *inbox)
+        inbox.drain(..).collect()
     }
 
     pub async fn overlap_warning(
@@ -895,7 +877,7 @@ impl BackgroundAgentRegistry {
         Ok(updated)
     }
 
-    async fn update_active_record<F>(
+    async fn update_record_if_not_terminal<F>(
         &self,
         agent_id: &str,
         update: F,

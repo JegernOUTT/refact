@@ -1050,12 +1050,12 @@ mod tests {
             .mark_running(&running.agent_id, "subchat-running".to_string())
             .await
             .unwrap();
-        app.agents
+        let updated = app
+            .agents
             .update_progress(
                 &running.agent_id,
                 "searching call sites in src/".to_string(),
                 5,
-                Some("t_shell".to_string()),
             )
             .await
             .unwrap();
@@ -1082,8 +1082,8 @@ mod tests {
         assert!(output.contains(&running.agent_id));
         assert!(output.contains("delegate"));
         assert!(output.contains("🟢 running"));
-        assert!(output.contains("t_shell"));
         assert!(output.contains("Total: 2"));
+        assert!(output.contains(updated.last_activity.as_deref().unwrap()));
     }
 
     #[tokio::test]
@@ -1100,7 +1100,6 @@ mod tests {
                 &record.agent_id,
                 "searching call sites in src/".to_string(),
                 5,
-                Some("regex_search".to_string()),
             )
             .await
             .unwrap();
@@ -1121,7 +1120,7 @@ mod tests {
         assert!(output.contains("# Subagent: List callers of X"));
         assert!(output.contains("- Status: 🟢 running"));
         assert!(output.contains("- Step count: 5"));
-        assert!(output.contains("- Last activity: regex_search"));
+        assert!(output.contains(updated.last_activity.as_deref().unwrap()));
         assert!(output.contains("- Progress: searching call sites in src/"));
         assert!(output.contains("Child trajectory: [view](refact://chat/subchat-status)"));
     }

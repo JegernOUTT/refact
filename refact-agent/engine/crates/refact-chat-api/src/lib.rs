@@ -586,7 +586,6 @@ pub struct AgentQuestionSummary {
     pub answered_at: Option<DateTime<Utc>>,
 }
 
-/// The engine serializes this public wire record in camelCase; GUI state normalizes it on receipt.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundAgentSummary {

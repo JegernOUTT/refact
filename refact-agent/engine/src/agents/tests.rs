@@ -208,18 +208,15 @@ async fn update_progress_bumps_step_count_and_sets_last_activity() {
     let record = create_agent(&registry, "parent", BgAgentKind::Delegate).await;
 
     let updated = registry
-        .update_progress(
-            &record.agent_id,
-            "reading files".to_string(),
-            7,
-            Some("cat".to_string()),
-        )
+        .update_progress(&record.agent_id, "reading files".to_string(), 7)
         .await
         .expect("progress");
 
     assert_eq!(updated.progress.as_deref(), Some("reading files"));
     assert_eq!(updated.step_count, 7);
-    assert_eq!(updated.last_activity.as_deref(), Some("cat"));
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(updated.last_activity.as_deref().unwrap()).is_ok()
+    );
     assert_eq!(updated.change_seq, record.change_seq + 1);
 }
 
@@ -318,12 +315,7 @@ async fn terminal_agents_ignore_late_activity_and_progress_updates() {
         .await
         .expect("fail progress record");
     let late_progress = registry
-        .update_progress(
-            &progress_record.agent_id,
-            "late progress".to_string(),
-            8,
-            Some("shell".to_string()),
-        )
+        .update_progress(&progress_record.agent_id, "late progress".to_string(), 8)
         .await
         .expect("late progress is ignored");
 
@@ -441,6 +433,24 @@ async fn usage_question_and_inbox_lifecycle_persist_and_notify() {
         .await
         .expect_err("missing runtime errors");
     assert_eq!(missing, "agent not found");
+}
+
+#[tokio::test]
+async fn terminal_agent_rejects_late_question() {
+    let (_temp, registry) = registry().await;
+    let record = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
+    registry
+        .mark_completed(&record.agent_id, completion("child-question"))
+        .await
+        .expect("complete");
+
+    assert_eq!(
+        registry
+            .add_question(&record.agent_id, "Can I edit the pond?".to_string())
+            .await
+            .expect_err("terminal agent rejects questions"),
+        "agent already finished"
+    );
 }
 
 #[tokio::test]
@@ -1100,7 +1110,7 @@ async fn restart_recovery_interrupts_active_records() {
 }
 
 #[tokio::test]
-async fn overlap_warning_reports_running_delegate_file_overlap_only() {
+async fn overlap_warning_reports_running_agent_file_overlaps() {
     let (_temp, registry) = registry().await;
     let delegate = create_agent(&registry, "parent", BgAgentKind::Delegate).await;
     registry
@@ -1121,6 +1131,7 @@ async fn overlap_warning_reports_running_delegate_file_overlap_only() {
         .await
         .expect("warning");
     assert!(warning.contains(&delegate.agent_id));
+    assert!(warning.contains(&subagent.agent_id));
     assert!(warning.contains("src/frog.rs"));
 
     assert!(registry
