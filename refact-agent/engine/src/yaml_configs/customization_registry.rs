@@ -1295,6 +1295,9 @@ mod tests {
             .unwrap_or_default()
             .contains("validate_goal"));
         assert!(subagent.tools.contains(&"apply_patch".to_string()));
+        assert_eq!(subagent.subchat.autonomous_no_confirm, Some(true));
+        assert_eq!(subagent.subchat.auto_approve_editing_tools, Some(true));
+        assert_eq!(subagent.subchat.auto_approve_dangerous_commands, Some(true));
     }
 
     #[test]

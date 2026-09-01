@@ -214,6 +214,53 @@ async fn isolated_worktree_starts_from_parent_scope_branch() {
 
 #[serial(test_runner)]
 #[tokio::test]
+async fn spawned_test_subchat_session_carries_approval_defaults() {
+    let observed = Arc::new(Mutex::new(None));
+    let _runner = {
+        let observed = observed.clone();
+        crate::agents::spawn::install_test_runner(Arc::new(move |gcx, messages, config| {
+            let observed = observed.clone();
+            Box::pin(async move {
+                let app = AppState::from_gcx(gcx).await;
+                let chat_id = config.chat_id.as_deref().expect("stateful child chat id");
+                let thread = app
+                    .chat
+                    .sessions
+                    .read()
+                    .await
+                    .get(chat_id)
+                    .cloned()
+                    .expect("spawned child session")
+                    .lock()
+                    .await
+                    .thread
+                    .clone();
+                *observed.lock().await = Some((
+                    thread.autonomous_no_confirm,
+                    thread.auto_approve_editing_tools,
+                    thread.auto_approve_dangerous_commands,
+                ));
+                Ok(completed_result(messages, config))
+            })
+        }))
+    };
+    let fixture = repo_fixture().await;
+    let completed = await_completion(
+        crate::agents::spawn::spawn_background_agent(
+            fixture.app,
+            spawn_request("parent-approval-defaults", BgAgentKind::Subagent),
+        )
+        .await
+        .expect("spawn test subagent"),
+    )
+    .await;
+
+    assert_eq!(completed.status, BgAgentStatus::Completed);
+    assert_eq!(*observed.lock().await, Some((true, true, true)));
+}
+
+#[serial(test_runner)]
+#[tokio::test]
 async fn isolated_auto_merge_merges_changes_and_cleans_worktree() {
     let _runner =
         crate::agents::spawn::install_test_runner(Arc::new(move |_gcx, messages, config| {

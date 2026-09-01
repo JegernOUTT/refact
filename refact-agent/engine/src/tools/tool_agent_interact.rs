@@ -834,6 +834,8 @@ mod tests {
             tool_name: "subagent".to_string(),
             stateful: true,
             autonomous_no_confirm: false,
+            auto_approve_editing_tools: false,
+            auto_approve_dangerous_commands: false,
             chat_id: Some("subchat-child-chat".to_string()),
             title: Some("child".to_string()),
             parent_id: Some("parent".to_string()),

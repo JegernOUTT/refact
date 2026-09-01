@@ -119,6 +119,8 @@ async fn validate_command_inner(
             tool_name: "shell_command_validator".to_string(),
             stateful: false,
             autonomous_no_confirm: true,
+            auto_approve_editing_tools: false,
+            auto_approve_dangerous_commands: false,
             chat_id: None,
             title: None,
             parent_id: None,

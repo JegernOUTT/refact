@@ -369,6 +369,8 @@ async fn run_summary_subchat(
         tool_name: "agent_chat_summary".to_string(),
         stateful: false,
         autonomous_no_confirm: false,
+        auto_approve_editing_tools: false,
+        auto_approve_dangerous_commands: false,
         chat_id: None,
         title: Some("Agent Chat Summary".to_string()),
         parent_id: Some(parent_chat_id),

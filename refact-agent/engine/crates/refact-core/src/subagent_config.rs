@@ -86,6 +86,13 @@ impl SubagentConfig {
         if ovr.subchat.autonomous_no_confirm.is_some() {
             result.subchat.autonomous_no_confirm = ovr.subchat.autonomous_no_confirm;
         }
+        if ovr.subchat.auto_approve_editing_tools.is_some() {
+            result.subchat.auto_approve_editing_tools = ovr.subchat.auto_approve_editing_tools;
+        }
+        if ovr.subchat.auto_approve_dangerous_commands.is_some() {
+            result.subchat.auto_approve_dangerous_commands =
+                ovr.subchat.auto_approve_dangerous_commands;
+        }
         if ovr.messages.system_prompt.is_some() {
             result.messages.system_prompt = ovr.messages.system_prompt.clone();
         }
@@ -181,6 +188,10 @@ pub struct SubchatConfig {
     pub tokens_for_rag: Option<usize>,
     #[serde(default)]
     pub autonomous_no_confirm: Option<bool>,
+    #[serde(default)]
+    pub auto_approve_editing_tools: Option<bool>,
+    #[serde(default)]
+    pub auto_approve_dangerous_commands: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

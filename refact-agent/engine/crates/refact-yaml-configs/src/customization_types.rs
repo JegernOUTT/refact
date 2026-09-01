@@ -567,13 +567,15 @@ another_extra: 123
     }
 
     #[test]
-    fn test_subagent_apply_override_merges_autonomous_no_confirm() {
+    fn test_subagent_apply_override_merges_subchat_confirmation_settings() {
         let base: SubagentConfig = serde_yaml::from_str(
             r#"
 schema_version: 1
 id: base
 subchat:
   autonomous_no_confirm: false
+  auto_approve_editing_tools: true
+  auto_approve_dangerous_commands: true
 "#,
         )
         .unwrap();
@@ -583,12 +585,31 @@ schema_version: 1
 id: override
 subchat:
   autonomous_no_confirm: true
+  auto_approve_editing_tools: false
+  auto_approve_dangerous_commands: false
 "#,
         )
         .unwrap();
 
         let result = base.apply_override(&override_cfg);
         assert_eq!(result.subchat.autonomous_no_confirm, Some(true));
+        assert_eq!(result.subchat.auto_approve_editing_tools, Some(false));
+        assert_eq!(result.subchat.auto_approve_dangerous_commands, Some(false));
+    }
+
+    #[test]
+    fn test_subchat_confirmation_settings_default_to_none() {
+        let config: SubagentConfig = serde_yaml::from_str(
+            r#"
+schema_version: 1
+id: subagent
+subchat: {}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.subchat.auto_approve_editing_tools, None);
+        assert_eq!(config.subchat.auto_approve_dangerous_commands, None);
     }
 
     #[test]

@@ -1727,6 +1727,8 @@ async fn summarize_segment_text(
         tool_name: "segment_summarize".to_string(),
         stateful: false,
         autonomous_no_confirm: false,
+        auto_approve_editing_tools: false,
+        auto_approve_dangerous_commands: false,
         chat_id: None,
         title: None,
         parent_id: None,

@@ -176,7 +176,9 @@ pub async fn spawn_background_agent(
         Ok(SubchatConfig {
             tool_name: config_name.clone(),
             stateful: true,
-            autonomous_no_confirm: false,
+            autonomous_no_confirm: true,
+            auto_approve_editing_tools: true,
+            auto_approve_dangerous_commands: true,
             chat_id: Some(child_chat_id.clone()),
             title: Some(config_title.clone()),
             parent_id: Some(parent_chat_id.clone()),

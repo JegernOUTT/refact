@@ -2479,6 +2479,8 @@ async fn run_task_briefing_subchat(
                     tool_name: TASK_BRIEFING_CONTEXT_MARKER.to_string(),
                     stateful: false,
                     autonomous_no_confirm: false,
+                    auto_approve_editing_tools: false,
+                    auto_approve_dangerous_commands: false,
                     chat_id: None,
                     title: None,
                     parent_id: None,

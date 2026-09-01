@@ -380,6 +380,8 @@ pub struct SubchatConfig {
     pub tool_name: String,
     pub stateful: bool,
     pub autonomous_no_confirm: bool,
+    pub auto_approve_editing_tools: bool,
+    pub auto_approve_dangerous_commands: bool,
     pub chat_id: Option<String>,
     pub title: Option<String>,
     pub parent_id: Option<String>,
@@ -1137,8 +1139,8 @@ pub async fn resolve_subchat_config_with_parent(
     let params = resolve_subchat_params(gcx.clone(), tool_name).await?;
     let model = resolve_subchat_model_for_tool(gcx.clone(), tool_name, &params).await?;
     let cache_control = params.subchat_cache_control;
-    let autonomous_no_confirm =
-        resolve_subagent_autonomous_no_confirm(gcx.clone(), tool_name).await;
+    let (autonomous_no_confirm, auto_approve_editing_tools, auto_approve_dangerous_commands) =
+        resolve_subagent_confirmation_defaults(gcx.clone(), tool_name).await;
 
     let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
         .await
@@ -1178,6 +1180,8 @@ pub async fn resolve_subchat_config_with_parent(
         tool_name: tool_name.to_string(),
         stateful,
         autonomous_no_confirm,
+        auto_approve_editing_tools,
+        auto_approve_dangerous_commands,
         chat_id,
         title,
         parent_id,
@@ -1304,6 +1308,8 @@ pub async fn resolve_subchat_config_with_explicit_params(
         tool_name: attribution_id.to_string(),
         stateful,
         autonomous_no_confirm: spec.autonomous_no_confirm,
+        auto_approve_editing_tools: false,
+        auto_approve_dangerous_commands: false,
         chat_id,
         title,
         parent_id,
@@ -1406,16 +1412,30 @@ fn stateful_thread_from_config(chat_id: &str, config: &SubchatConfig) -> ThreadP
         link_type: config.link_type.clone(),
         root_chat_id: config.root_chat_id.clone(),
         autonomous_no_confirm: config.autonomous_no_confirm,
+        auto_approve_editing_tools: config.auto_approve_editing_tools,
+        auto_approve_dangerous_commands: config.auto_approve_dangerous_commands,
         buddy_meta: config.buddy_meta.clone(),
         ..Default::default()
     }
 }
 
-async fn resolve_subagent_autonomous_no_confirm(gcx: Arc<GlobalContext>, tool_name: &str) -> bool {
+async fn resolve_subagent_confirmation_defaults(
+    gcx: Arc<GlobalContext>,
+    tool_name: &str,
+) -> (bool, bool, bool) {
     crate::yaml_configs::customization_registry::get_subagent_config(gcx, tool_name, None)
         .await
-        .and_then(|config| config.subchat.autonomous_no_confirm)
-        .unwrap_or(false)
+        .map(|config| {
+            (
+                config.subchat.autonomous_no_confirm.unwrap_or(false),
+                config.subchat.auto_approve_editing_tools.unwrap_or(false),
+                config
+                    .subchat
+                    .auto_approve_dangerous_commands
+                    .unwrap_or(false),
+            )
+        })
+        .unwrap_or_default()
 }
 
 fn is_subagentic_link_type(link_type: &str) -> bool {
@@ -2065,6 +2085,8 @@ async fn run_subchat_loop(
             config.max_steps,
             config.parent_tool_call_id.clone(),
             config.autonomous_no_confirm,
+            config.auto_approve_editing_tools,
+            config.auto_approve_dangerous_commands,
             config.step_progress.clone(),
         )
         .await?;
@@ -2304,6 +2326,8 @@ async fn run_subchat_with_wrap_up(
             config.max_steps,
             config.parent_tool_call_id.clone(),
             config.autonomous_no_confirm,
+            config.auto_approve_editing_tools,
+            config.auto_approve_dangerous_commands,
             config.step_progress.clone(),
         )
         .await?;
@@ -2330,6 +2354,8 @@ async fn run_subchat_with_wrap_up(
         config.max_steps,
         config.parent_tool_call_id.clone(),
         config.autonomous_no_confirm,
+        config.auto_approve_editing_tools,
+        config.auto_approve_dangerous_commands,
         config.step_progress.clone(),
     )
     .await?;
@@ -2486,6 +2512,8 @@ async fn execute_pending_tool_calls(
     max_steps: usize,
     tx_toolid_mb: Option<String>,
     autonomous_no_confirm: bool,
+    auto_approve_editing_tools: bool,
+    auto_approve_dangerous_commands: bool,
     step_progress: Option<Arc<dyn Fn(SubchatProgress) + Send + Sync>>,
 ) -> Result<Vec<ChatMessage>, String> {
     let (gcx, n_ctx, task_meta, worktree, chat_id, root_chat_id) = {
@@ -2550,6 +2578,8 @@ async fn execute_pending_tool_calls(
         worktree,
         root_chat_id: Some(root_chat_id),
         autonomous_no_confirm,
+        auto_approve_editing_tools,
+        auto_approve_dangerous_commands,
         ..Default::default()
     };
 
@@ -3109,12 +3139,13 @@ mod subchat_tests {
         parent_compaction_diagnostic_status, parent_thread_worktree, parse_subchat_cache_control,
         partial_output_stream_error_message, prepare_subchat_messages,
         register_stateful_subchat_worktree, resolve_subchat_config_with_parent,
-        resolve_subchat_model, resolve_subchat_params, resolve_subchat_worktree,
-        safe_context_limit_error_for_log, should_compact_context_limit_error,
-        should_persist_subchat_trajectory, stateful_thread_from_config, subchat_retries_allowed,
-        subchat_trajectory_commit_intent, trace_thread_from_config, save_failed_subchat_trajectory,
-        SubchatConfig, SubchatProgress, SubchatTrajectoryCommitPhase, ToolsPolicy, TraceParent,
-        GUARDED_REPORT_INSTRUCTION, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        resolve_subagent_confirmation_defaults, resolve_subchat_model, resolve_subchat_params,
+        resolve_subchat_worktree, safe_context_limit_error_for_log,
+        should_compact_context_limit_error, should_persist_subchat_trajectory,
+        stateful_thread_from_config, subchat_retries_allowed, subchat_trajectory_commit_intent,
+        trace_thread_from_config, save_failed_subchat_trajectory, SubchatConfig, SubchatProgress,
+        SubchatTrajectoryCommitPhase, ToolsPolicy, TraceParent, GUARDED_REPORT_INSTRUCTION,
+        PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
@@ -3206,6 +3237,8 @@ mod subchat_tests {
             tool_name: "subagent".to_string(),
             stateful: false,
             autonomous_no_confirm: false,
+            auto_approve_editing_tools: false,
+            auto_approve_dangerous_commands: false,
             chat_id: None,
             title: None,
             parent_id: None,
@@ -3234,6 +3267,35 @@ mod subchat_tests {
             step_progress: None,
             trace_parent: TraceParent::unattributed(),
         }
+    }
+
+    #[tokio::test]
+    async fn subchat_confirmation_defaults_follow_yaml_settings() {
+        let gcx = make_test_gcx().await;
+        let config_dir = gcx.config_dir.clone();
+        global_configs_try_create_all(&config_dir).await.unwrap();
+
+        assert_eq!(
+            resolve_subagent_confirmation_defaults(gcx.clone(), "subagent").await,
+            (true, true, true)
+        );
+        assert_eq!(
+            resolve_subagent_confirmation_defaults(gcx.clone(), "title_generation").await,
+            (false, false, false)
+        );
+
+        fs::write(
+            config_dir.join("subagents/subagent.yaml"),
+            "schema_version: 7\nid: subagent\nsubchat:\n  autonomous_no_confirm: false\n  auto_approve_editing_tools: false\n  auto_approve_dangerous_commands: false\n",
+        )
+        .unwrap();
+        crate::yaml_configs::customization_registry::invalidate_all_registry_caches(gcx.clone())
+            .await;
+
+        assert_eq!(
+            resolve_subagent_confirmation_defaults(gcx, "subagent").await,
+            (false, false, false)
+        );
     }
 
     #[tokio::test]
@@ -3851,6 +3913,8 @@ mod subchat_tests {
             tool_name: "subagent".to_string(),
             stateful: true,
             autonomous_no_confirm: false,
+            auto_approve_editing_tools: true,
+            auto_approve_dangerous_commands: true,
             chat_id: None,
             title: Some("Subchat".to_string()),
             parent_id: Some("parent".to_string()),
@@ -3888,6 +3952,18 @@ mod subchat_tests {
         assert_eq!(thread.tool_use, "cat");
         assert_eq!(thread.parent_id.as_deref(), Some("parent"));
         assert_eq!(thread.root_chat_id.as_deref(), Some("root"));
+        assert!(thread.auto_approve_editing_tools);
+        assert!(thread.auto_approve_dangerous_commands);
+    }
+
+    #[test]
+    fn stateful_thread_from_config_preserves_disabled_approval_flags() {
+        let config = test_subchat_config();
+
+        let thread = stateful_thread_from_config("subchat-1", &config);
+
+        assert!(!thread.auto_approve_editing_tools);
+        assert!(!thread.auto_approve_dangerous_commands);
     }
 
     #[test]
@@ -3903,6 +3979,8 @@ mod subchat_tests {
             tool_name: "subagent".to_string(),
             stateful: true,
             autonomous_no_confirm: false,
+            auto_approve_editing_tools: false,
+            auto_approve_dangerous_commands: false,
             chat_id: None,
             title: Some("Subagent: Gathering Files".to_string()),
             parent_id: Some("planner-task-1-1".to_string()),
@@ -3961,6 +4039,8 @@ mod subchat_tests {
             tool_name: "subagent".to_string(),
             stateful: false,
             autonomous_no_confirm: false,
+            auto_approve_editing_tools: false,
+            auto_approve_dangerous_commands: false,
             chat_id: None,
             title: None,
             parent_id: None,
@@ -4203,6 +4283,8 @@ mod subchat_tests {
             tool_name: "subagent".to_string(),
             stateful: true,
             autonomous_no_confirm: false,
+            auto_approve_editing_tools: false,
+            auto_approve_dangerous_commands: false,
             chat_id: Some("child-ref-chat".to_string()),
             title: Some("Subchat".to_string()),
             parent_id: Some("parent-ref-chat".to_string()),

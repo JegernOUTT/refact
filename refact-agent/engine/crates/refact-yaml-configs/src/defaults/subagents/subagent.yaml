@@ -12,6 +12,9 @@ subchat:
   n_ctx: 200000
   max_new_tokens: 16000
   temperature: 0.0
+  autonomous_no_confirm: true
+  auto_approve_editing_tools: true
+  auto_approve_dangerous_commands: true
 
 messages:
   system_prompt: |
