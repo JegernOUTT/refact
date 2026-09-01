@@ -324,6 +324,7 @@ impl BackgroundAgentRegistry {
             updated.edited_files = edited_files;
             updated.diff_summary = diff_summary;
             updated.conflict_summary = conflict_summary;
+            updated.current_tool = None;
             if child_chat_id.is_some() {
                 updated.child_chat_id = child_chat_id;
             }
@@ -362,6 +363,7 @@ impl BackgroundAgentRegistry {
             let now = Utc::now();
             updated.status = BgAgentStatus::Failed;
             updated.error = Some(error);
+            updated.current_tool = None;
             updated.result_payload_path = Some(result_payload_path);
             updated.finished_at = Some(now);
             touch_record(&mut updated, now);
@@ -400,6 +402,7 @@ impl BackgroundAgentRegistry {
             let now = Utc::now();
             updated.status = BgAgentStatus::Cancelled;
             updated.error = reason;
+            updated.current_tool = None;
             updated.result_payload_path = Some(result_payload_path);
             updated.finished_at = Some(now);
             touch_record(&mut updated, now);
@@ -423,6 +426,7 @@ impl BackgroundAgentRegistry {
             .update_record(agent_id, |record, now| {
                 record.status = BgAgentStatus::Interrupted;
                 record.error = Some(reason);
+                record.current_tool = None;
                 record.finished_at = Some(now);
                 Ok(())
             })

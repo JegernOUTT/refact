@@ -161,9 +161,28 @@ impl AtCommandsContext {
         let effective_root = root_chat_id.unwrap_or_else(|| chat_id.clone());
         let global_context = app.gcx.clone();
         let session = app.chat.sessions.read().await.get(&chat_id).cloned();
-        let derived_privacy_zones = match session {
-            Some(session) => session.lock().await.derived_privacy_zones.clone(),
-            None => Arc::new(StdRwLock::new(HashMap::new())),
+        let (derived_privacy_zones, needs_agent_lookup) = match session {
+            Some(session) => {
+                let session = session.lock().await;
+                (
+                    session.derived_privacy_zones.clone(),
+                    session.thread.parent_id.is_some(),
+                )
+            }
+            None => (
+                Arc::new(StdRwLock::new(HashMap::new())),
+                chat_id.starts_with("subchat-"),
+            ),
+        };
+        let background_agent_id = if !needs_agent_lookup {
+            None
+        } else {
+            app.agents
+                .list_all()
+                .await
+                .into_iter()
+                .find(|record| record.child_chat_id.as_deref() == Some(chat_id.as_str()))
+                .map(|record| record.agent_id)
         };
         AtCommandsContext {
             global_context,
@@ -183,7 +202,7 @@ impl AtCommandsContext {
             derived_privacy_zones,
             subchat_depth: 0,
             tool_access_bypass: false,
-            background_agent_id: None,
+            background_agent_id,
             at_commands: at_commands_dict(app).await,
             subchat_tool_parameters: IndexMap::new(),
             postprocess_parameters: PostprocessSettings::new(),

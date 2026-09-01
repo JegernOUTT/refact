@@ -55,8 +55,24 @@ impl Tool for ToolValidateGoal {
         let session_arc = {
             let sessions = gcx.chat_sessions.read().await;
             sessions.get(&chat_id).cloned()
-        }
-        .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
+        };
+        let session_arc = match session_arc {
+            Some(session) => session,
+            None if crate::chat::try_restore_session_if_trajectory_exists(
+                app.clone(),
+                &app.chat.sessions,
+                &chat_id,
+            )
+            .await =>
+            {
+                let sessions = gcx.chat_sessions.read().await;
+                sessions
+                    .get(&chat_id)
+                    .cloned()
+                    .ok_or_else(|| format!("chat session `{chat_id}` not found"))?
+            }
+            None => return Err(format!("chat session `{chat_id}` not found")),
+        };
 
         let (begin, epoch, fork_trajectory_version) = {
             let mut session = session_arc.lock().await;
@@ -339,6 +355,58 @@ mod tests {
         let session = session_arc.lock().await;
         assert!(session.goal.is_none());
         assert!(session.command_queue.is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_child_session_is_restored_from_trajectory() {
+        let workspace = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let mut session = ChatSession::new("subchat-validate-goal".to_string());
+        session.install_goal("agent", "ship feature", true, GoalBudget::default());
+        let snapshot = crate::chat::trajectories::trajectory_snapshot_from_session(&session);
+        crate::chat::trajectories::save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+        app.chat
+            .sessions
+            .write()
+            .await
+            .remove("subchat-validate-goal");
+        let ccx = Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                app.clone(),
+                4096,
+                20,
+                false,
+                vec![],
+                "subchat-validate-goal".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ));
+        let mut tool = ToolValidateGoal {
+            config_path: String::new(),
+        };
+
+        let content = tool_content(
+            tool.tool_execute(ccx, &"call".to_string(), &HashMap::new())
+                .await
+                .unwrap(),
+        );
+
+        assert!(!content.contains("chat session"));
+        assert!(app
+            .chat
+            .sessions
+            .read()
+            .await
+            .contains_key("subchat-validate-goal"));
     }
 
     #[tokio::test]

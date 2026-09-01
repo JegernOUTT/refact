@@ -787,4 +787,143 @@ mod tests {
             .content_text_only()
             .contains("[message from user]\nPlease verify tests"));
     }
+
+    #[tokio::test]
+    async fn stateful_child_session_restores_identity_for_parent_tools() {
+        let workspace = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx.clone()).await;
+        let child = create(&app, "parent", "child").await;
+        app.agents
+            .mark_running(&child.agent_id, "subchat-child-chat".to_string())
+            .await
+            .unwrap();
+        let config = crate::subchat::SubchatConfig {
+            tool_name: "subagent".to_string(),
+            stateful: true,
+            autonomous_no_confirm: false,
+            chat_id: Some("subchat-child-chat".to_string()),
+            title: Some("child".to_string()),
+            parent_id: Some("parent".to_string()),
+            link_type: Some("subagent".to_string()),
+            root_chat_id: Some("parent".to_string()),
+            tools: crate::subchat::ToolsPolicy::All,
+            max_steps: 1,
+            prepend_system_prompt: false,
+            wrap_up: None,
+            task_meta: None,
+            worktree: None,
+            model: "test/model".to_string(),
+            mode: "agent".to_string(),
+            n_ctx: 4096,
+            max_new_tokens: 512,
+            temperature: None,
+            reasoning_effort: None,
+            cache_control: crate::llm::params::CacheControl::Ephemeral,
+            parent_tool_call_id: None,
+            parent_subchat_tx: None,
+            abort_flag: None,
+            background_agent_id: Some(child.agent_id.clone()),
+            subchat_depth: 1,
+            final_step_force_answer: false,
+            buddy_meta: None,
+            step_progress: None,
+            trace_parent: crate::subchat::TraceParent::rooted("parent", "parent"),
+        };
+        crate::subchat::install_stateful_subchat_session(&app, "subchat-child-chat", &config, &[])
+            .await;
+        let thread = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get("subchat-child-chat")
+            .cloned()
+            .unwrap()
+            .lock()
+            .await
+            .thread
+            .clone();
+        crate::chat::trajectories::save_trajectory_as_with_intent(
+            gcx.clone(),
+            &thread,
+            &[],
+            crate::chat::types::TrajectoryCommitIntent::Required,
+        )
+        .await;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if crate::chat::trajectories::load_trajectory_for_chat(
+                    gcx.clone(),
+                    "subchat-child-chat",
+                )
+                .await
+                .is_some()
+                {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("child trajectory should persist");
+        app.chat.sessions.write().await.remove("subchat-child-chat");
+
+        crate::chat::get_or_create_session_with_trajectory(
+            app.clone(),
+            &app.chat.sessions,
+            "subchat-child-chat",
+        )
+        .await;
+
+        let ccx = Arc::new(AMutex::new(
+            AtCommandsContext::new_from_app(
+                app.clone(),
+                4096,
+                20,
+                false,
+                vec![],
+                "subchat-child-chat".to_string(),
+                Some("parent".to_string()),
+                "test/model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ));
+        assert_eq!(
+            ccx.lock().await.background_agent_id.as_deref(),
+            Some(child.agent_id.as_str())
+        );
+        let mut progress = ToolProgressReport {
+            config_path: String::new(),
+        };
+        progress
+            .tool_execute(
+                ccx.clone(),
+                &"progress".to_string(),
+                &args(&[("status_line", json!("stateful child running"))]),
+            )
+            .await
+            .unwrap();
+        let mut message = ToolAgentMessage {
+            config_path: String::new(),
+        };
+        message
+            .tool_execute(
+                ccx,
+                &"message".to_string(),
+                &args(&[("to", json!("parent")), ("text", json!("hello parent"))]),
+            )
+            .await
+            .unwrap();
+        let record = app.agents.get_any(&child.agent_id).await.unwrap();
+        assert_eq!(
+            record.progress.as_deref(),
+            Some("note to parent: hello parent"),
+            "agent_message records the latest activity line (last write wins)"
+        );
+    }
 }

@@ -252,6 +252,48 @@ async fn update_activity_changes_only_requested_fields() {
 }
 
 #[tokio::test]
+async fn terminal_transitions_clear_current_tool() {
+    let (_temp, registry) = registry().await;
+    let completed = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
+    let failed = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
+    let cancelled = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
+    let interrupted = create_agent(&registry, "parent", BgAgentKind::Subagent).await;
+
+    for record in [&completed, &failed, &cancelled, &interrupted] {
+        registry
+            .update_activity(
+                &record.agent_id,
+                None,
+                None,
+                Some(Some("shell: cargo test".to_string())),
+            )
+            .await
+            .expect("set current tool");
+    }
+
+    let completed = registry
+        .mark_completed(&completed.agent_id, completion("child-completed"))
+        .await
+        .expect("complete");
+    let failed = registry
+        .mark_failed(&failed.agent_id, "failed".to_string())
+        .await
+        .expect("fail");
+    let cancelled = registry
+        .mark_cancelled(&cancelled.agent_id, Some("cancelled".to_string()))
+        .await
+        .expect("cancel");
+    let interrupted = registry
+        .mark_interrupted(&interrupted.agent_id, "interrupted".to_string())
+        .await
+        .expect("interrupt");
+
+    for record in [completed, failed, cancelled, interrupted] {
+        assert_eq!(record.current_tool, None);
+    }
+}
+
+#[tokio::test]
 async fn usage_question_and_inbox_lifecycle_persist_and_notify() {
     let (_temp, registry) = registry().await;
     let record = create_agent(&registry, "parent", BgAgentKind::Subagent).await;

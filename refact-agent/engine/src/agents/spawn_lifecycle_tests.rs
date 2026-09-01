@@ -477,7 +477,7 @@ async fn progress_callback_updates_live_tool_usage_and_cost() {
                 release_runner.notified().await;
                 progress(SubchatProgress::Usage {
                     tokens_delta: 123,
-                    model_id: "openai/gpt-4o".to_string(),
+                    cost_delta: Some(0.0123),
                 });
                 progress(SubchatProgress::ToolsFinished);
                 Ok(completed_result(messages, config))
@@ -514,7 +514,7 @@ async fn progress_callback_updates_live_tool_usage_and_cost() {
     .await;
 
     assert_eq!(reported.tokens_used, 123);
-    assert!(reported.cost_usd.is_none_or(|cost| cost >= 0.0));
+    assert_eq!(reported.cost_usd, Some(0.0123));
 }
 
 #[serial(test_runner)]

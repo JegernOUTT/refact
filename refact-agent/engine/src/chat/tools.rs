@@ -160,22 +160,21 @@ async fn build_tool_execution_context(
     thread: &ThreadParams,
     abort_flag: Option<Arc<AtomicBool>>,
 ) -> Arc<AMutex<AtCommandsContext>> {
-    Arc::new(AMutex::new(
-        AtCommandsContext::new_with_abort(
-            app.clone(),
-            n_ctx,
-            CHAT_TOP_N,
-            false,
-            messages.to_vec(),
-            thread.id.clone(),
-            thread.root_chat_id.clone(),
-            thread.model.clone(),
-            thread.task_meta.clone(),
-            thread.worktree.clone(),
-            abort_flag,
-        )
-        .await,
-    ))
+    let ccx = AtCommandsContext::new_with_abort(
+        app.clone(),
+        n_ctx,
+        CHAT_TOP_N,
+        false,
+        messages.to_vec(),
+        thread.id.clone(),
+        thread.root_chat_id.clone(),
+        thread.model.clone(),
+        thread.task_meta.clone(),
+        thread.worktree.clone(),
+        abort_flag,
+    )
+    .await;
+    Arc::new(AMutex::new(ccx))
 }
 
 fn execution_scope_for_thread(thread: &ThreadParams) -> Option<String> {

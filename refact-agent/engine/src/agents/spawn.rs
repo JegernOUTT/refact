@@ -451,10 +451,8 @@ async fn run_spawned_agent(
                     }
                     SubchatProgress::Usage {
                         tokens_delta,
-                        model_id,
+                        cost_delta,
                     } => {
-                        let cost_delta =
-                            estimate_usage_cost(&app.gcx, &model_id, tokens_delta).await;
                         app.agents
                             .add_usage(&agent_id, tokens_delta, cost_delta)
                             .await
@@ -890,20 +888,6 @@ async fn finalize_nested_spawn_worktree(
             }
         }
     }
-}
-
-async fn estimate_usage_cost(
-    gcx: &Arc<GlobalContext>,
-    model_id: &str,
-    tokens_delta: u64,
-) -> Option<f64> {
-    let pricing = crate::providers::pricing::lookup_model_pricing(gcx, model_id).await?;
-    let usage = crate::call_validation::ChatUsage {
-        total_tokens: tokens_delta as usize,
-        completion_tokens: tokens_delta as usize,
-        ..Default::default()
-    };
-    crate::providers::pricing::compute_cost(&usage, &pricing).map(|cost| cost.total_usd)
 }
 
 async fn push_sibling_notice(app: &AppState, agent_id: &str, req: &SpawnRequest, text: String) {

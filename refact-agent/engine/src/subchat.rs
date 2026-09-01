@@ -409,7 +409,7 @@ pub struct SubchatConfig {
     pub trace_parent: TraceParent,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SubchatProgress {
     Step(usize),
     ToolStarted {
@@ -419,7 +419,7 @@ pub enum SubchatProgress {
     ToolsFinished,
     Usage {
         tokens_delta: u64,
-        model_id: String,
+        cost_delta: Option<f64>,
     },
 }
 
@@ -1597,7 +1597,7 @@ pub async fn run_subchat(
     }
     let ccx = Arc::new(AMutex::new(
         AtCommandsContext::new_with_abort(
-            app,
+            app.clone(),
             config.n_ctx,
             1,
             false,
@@ -1650,6 +1650,7 @@ pub async fn run_subchat(
         Err(e) => {
             save_failed_subchat_trajectory(gcx.clone(), &chat_id, &config, &progress_messages, &e)
                 .await;
+            finish_stateful_subchat_session(&app, &chat_id, &config).await;
             clear_unbound_openai_codex_websocket_session(&chat_id).await;
             return Err(e);
         }
@@ -1666,6 +1667,7 @@ pub async fn run_subchat(
         let error = error.to_string();
         save_failed_subchat_trajectory(gcx.clone(), &chat_id, &config, &progress_messages, &error)
             .await;
+        finish_stateful_subchat_session(&app, &chat_id, &config).await;
         clear_unbound_openai_codex_websocket_session(&chat_id).await;
         return Err(error);
     }
@@ -1680,9 +1682,12 @@ pub async fn run_subchat(
             subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Final),
         )
         .await;
-        let app = AppState::from_gcx(gcx.clone()).await;
-        crate::chat::trajectories::refresh_session_from_trajectory_if_stale(app, &chat_id, true)
-            .await;
+        crate::chat::trajectories::refresh_session_from_trajectory_if_stale(
+            app.clone(),
+            &chat_id,
+            true,
+        )
+        .await;
     } else if should_persist_subchat_trajectory(&config) {
         let thread = trace_thread_from_config(&chat_id, &config);
         save_trajectory_as_with_intent(
@@ -1695,6 +1700,7 @@ pub async fn run_subchat(
     }
 
     let metering = aggregate_metering_from_messages(&current_messages);
+    finish_stateful_subchat_session(&app, &chat_id, &config).await;
     clear_unbound_openai_codex_websocket_session(&chat_id).await;
 
     Ok(SubchatResult {
@@ -1710,21 +1716,43 @@ pub(crate) async fn install_stateful_subchat_session(
     config: &SubchatConfig,
     messages: &[ChatMessage],
 ) {
-    let mut sessions = app.chat.sessions.write().await;
-    if sessions.contains_key(chat_id) {
+    let thread = stateful_thread_from_config(chat_id, config);
+    let session_arc = {
+        let mut sessions = app.chat.sessions.write().await;
+        if let Some(session) = sessions.get(chat_id) {
+            session.clone()
+        } else {
+            let session = crate::chat::types::ChatSession::new_with_trajectory(
+                chat_id.to_string(),
+                messages.to_vec(),
+                thread.clone(),
+                chrono::Utc::now().to_rfc3339(),
+                None,
+                Vec::new(),
+                None,
+            );
+            let session = Arc::new(AMutex::new(session));
+            sessions.insert(chat_id.to_string(), session.clone());
+            session
+        }
+    };
+    if config.background_agent_id.is_some() {
+        let mut session = session_arc.lock().await;
+        session.set_runtime_state(crate::chat::types::SessionState::Generating, None);
+    }
+}
+
+async fn finish_stateful_subchat_session(app: &AppState, chat_id: &str, config: &SubchatConfig) {
+    if !config.stateful || config.background_agent_id.is_none() {
         return;
     }
-    let thread = stateful_thread_from_config(chat_id, config);
-    let session = crate::chat::types::ChatSession::new_with_trajectory(
-        chat_id.to_string(),
-        messages.to_vec(),
-        thread,
-        chrono::Utc::now().to_rfc3339(),
-        None,
-        Vec::new(),
-        None,
-    );
-    sessions.insert(chat_id.to_string(), Arc::new(AMutex::new(session)));
+    let session = app.chat.sessions.read().await.get(chat_id).cloned();
+    if let Some(session) = session {
+        session
+            .lock()
+            .await
+            .set_runtime_state(crate::chat::types::SessionState::Idle, None);
+    }
 }
 
 pub async fn run_subchat_once(
@@ -2018,7 +2046,8 @@ async fn run_subchat_loop(
         };
 
         update_usage_from_messages(usage, &results);
-        emit_usage_progress(config, &results);
+        let gcx = ccx.lock().await.global_context.clone();
+        emit_usage_progress(&gcx, config, &results).await;
         messages = results.into_iter().next().unwrap_or(messages);
         persist_subchat_progress(&ccx, config, progress, &messages).await;
 
@@ -2141,7 +2170,8 @@ async fn run_forced_final_answer_turn(
     };
 
     update_usage_from_messages(usage, &results);
-    emit_usage_progress(config, &results);
+    let gcx = ccx.lock().await.global_context.clone();
+    emit_usage_progress(&gcx, config, &results).await;
     Ok(results.into_iter().next().unwrap_or(messages))
 }
 
@@ -2259,7 +2289,8 @@ async fn run_subchat_with_wrap_up(
         };
 
         update_usage_from_messages(usage, &results);
-        emit_usage_progress(config, &results);
+        let gcx = ccx.lock().await.global_context.clone();
+        emit_usage_progress(&gcx, config, &results).await;
         messages = results.into_iter().next().unwrap_or(messages);
         persist_subchat_progress(&ccx, config, progress, &messages).await;
 
@@ -2362,7 +2393,8 @@ async fn run_subchat_with_wrap_up(
         }
     };
     update_usage_from_messages(usage, &final_results);
-    emit_usage_progress(config, &final_results);
+    let gcx = ccx.lock().await.global_context.clone();
+    emit_usage_progress(&gcx, config, &final_results).await;
 
     Ok(final_results.into_iter().next().unwrap_or_default())
 }
@@ -2386,19 +2418,34 @@ fn emit_subchat_progress(config: &SubchatConfig, progress: SubchatProgress) {
     }
 }
 
-fn emit_usage_progress(config: &SubchatConfig, results: &[Vec<ChatMessage>]) {
-    let tokens_delta = results
+async fn emit_usage_progress(
+    gcx: &Arc<GlobalContext>,
+    config: &SubchatConfig,
+    results: &[Vec<ChatMessage>],
+) {
+    let usage = results
         .first()
         .and_then(|messages| messages.last())
-        .and_then(|message| message.usage.as_ref())
-        .map(|usage| usage.total_tokens as u64)
-        .unwrap_or_default();
+        .and_then(|message| message.usage.as_ref());
+    let Some(usage) = usage else {
+        return;
+    };
+    let tokens_delta = usage.total_tokens as u64;
     if tokens_delta > 0 {
+        let cost_delta = match usage.metering_usd.as_ref() {
+            Some(metering) => Some(metering.total_usd),
+            None => crate::providers::pricing::lookup_model_pricing(gcx, &config.model)
+                .await
+                .and_then(|pricing| {
+                    crate::providers::pricing::compute_cost(usage, &pricing)
+                        .map(|metering| metering.total_usd)
+                }),
+        };
         emit_subchat_progress(
             config,
             SubchatProgress::Usage {
                 tokens_delta,
-                model_id: config.model.clone(),
+                cost_delta,
             },
         );
     }
@@ -2441,13 +2488,15 @@ async fn execute_pending_tool_calls(
     autonomous_no_confirm: bool,
     step_progress: Option<Arc<dyn Fn(SubchatProgress) + Send + Sync>>,
 ) -> Result<Vec<ChatMessage>, String> {
-    let (gcx, n_ctx, task_meta, worktree) = {
+    let (gcx, n_ctx, task_meta, worktree, chat_id, root_chat_id) = {
         let cgcx = ccx.lock().await;
         (
             cgcx.global_context.clone(),
             cgcx.n_ctx,
             cgcx.task_meta.clone(),
             cgcx.execution_scope_worktree(),
+            cgcx.chat_id.clone(),
+            cgcx.root_chat_id.clone(),
         )
     };
     let app = AppState::from_gcx(gcx.clone()).await;
@@ -2493,12 +2542,13 @@ async fn execute_pending_tool_calls(
     }
 
     let thread = ThreadParams {
-        id: format!("subchat-{}", Uuid::new_v4()),
+        id: chat_id,
         model: model_id.to_string(),
         mode: mode_id.to_string(),
         context_tokens_cap: Some(n_ctx),
         task_meta,
         worktree,
+        root_chat_id: Some(root_chat_id),
         autonomous_no_confirm,
         ..Default::default()
     };
@@ -3063,7 +3113,7 @@ mod subchat_tests {
         safe_context_limit_error_for_log, should_compact_context_limit_error,
         should_persist_subchat_trajectory, stateful_thread_from_config, subchat_retries_allowed,
         subchat_trajectory_commit_intent, trace_thread_from_config, save_failed_subchat_trajectory,
-        SubchatConfig, SubchatTrajectoryCommitPhase, ToolsPolicy, TraceParent,
+        SubchatConfig, SubchatProgress, SubchatTrajectoryCommitPhase, ToolsPolicy, TraceParent,
         GUARDED_REPORT_INSTRUCTION, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
@@ -3184,6 +3234,53 @@ mod subchat_tests {
             step_progress: None,
             trace_parent: TraceParent::unattributed(),
         }
+    }
+
+    #[tokio::test]
+    async fn usage_progress_prefers_metering_and_omits_unknown_cost() {
+        let gcx = make_test_gcx().await;
+        let progress = Arc::new(StdMutex::new(Vec::new()));
+        let mut config = test_subchat_config();
+        config.step_progress = Some({
+            let progress = progress.clone();
+            Arc::new(move |update| progress.lock().unwrap().push(update))
+        });
+        let mut metered = ChatMessage::new("assistant".to_string(), "done".to_string());
+        metered.usage = Some(crate::call_validation::ChatUsage {
+            total_tokens: 12,
+            metering_usd: Some(crate::call_validation::MeteringUsd {
+                total_usd: 0.42,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        super::emit_usage_progress(&gcx, &config, &[vec![metered]]).await;
+
+        assert_eq!(
+            progress.lock().unwrap().as_slice(),
+            [SubchatProgress::Usage {
+                tokens_delta: 12,
+                cost_delta: Some(0.42),
+            }]
+        );
+
+        progress.lock().unwrap().clear();
+        let mut unmetered = ChatMessage::new("assistant".to_string(), "done".to_string());
+        unmetered.usage = Some(crate::call_validation::ChatUsage {
+            total_tokens: 7,
+            ..Default::default()
+        });
+
+        super::emit_usage_progress(&gcx, &config, &[vec![unmetered]]).await;
+
+        assert_eq!(
+            progress.lock().unwrap().as_slice(),
+            [SubchatProgress::Usage {
+                tokens_delta: 7,
+                cost_delta: None,
+            }]
+        );
     }
 
     #[test]
