@@ -121,6 +121,7 @@ const TITLE_GENERATION_SUBAGENT_ID: &str = "title_generation";
 pub const TRAJECTORY_WRITER_ENV: &str = "REFACT_TRAJECTORY_WRITER";
 pub const TRAJECTORY_WATCHER_SELF_WRITE_ENV: &str = "REFACT_TRAJECTORY_WATCHER_SELF_WRITE";
 const TRAJECTORY_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+const TRAJECTORY_COMMIT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(test)]
 const TITLE_GENERATION_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 #[cfg(not(test))]
@@ -3860,10 +3861,12 @@ async fn run_detached_trajectory_writer(
             };
             (version, snapshot, state.write_cache.clone())
         };
+        #[cfg(test)]
+        let hook_chat_id = snapshot.chat_id.clone();
         let result = save_trajectory_snapshot_inner(gcx.clone(), snapshot, Some(write_cache)).await;
         #[cfg(test)]
         if result.is_err() {
-            wait_for_test_detached_trajectory_writer_failure().await;
+            wait_for_test_detached_trajectory_writer_failure(&hook_chat_id).await;
         }
         let mut state = writer.lock().await;
         match result {
@@ -3901,6 +3904,8 @@ async fn wait_for_detached_trajectory_commit(
     writer: Arc<AMutex<DetachedTrajectoryWriterState>>,
     target_version: u64,
 ) -> Result<(), String> {
+    let mut last_progress = None;
+    let mut deadline = Instant::now() + TRAJECTORY_COMMIT_STALL_TIMEOUT;
     loop {
         let notified = {
             let state = writer.lock().await;
@@ -3916,9 +3921,46 @@ async fn wait_for_detached_trajectory_commit(
                 });
                 return Err(error);
             }
-            state.notify.clone().notified_owned()
+            if !state.in_flight && state.pending.is_none() {
+                return Err(state.error.clone().unwrap_or_else(|| {
+                    format!(
+                        "Detached trajectory writer stopped before committing version {} \
+                         (committed {})",
+                        target_version, state.committed_version
+                    )
+                }));
+            }
+            let progress = (
+                state.committed_version,
+                state.error_version,
+                state.requested_version,
+            );
+            if last_progress != Some(progress) {
+                last_progress = Some(progress);
+                deadline = Instant::now() + TRAJECTORY_COMMIT_STALL_TIMEOUT;
+            }
+            let mut notified = Box::pin(state.notify.clone().notified_owned());
+            let already_notified = notified.as_mut().enable();
+            drop(state);
+            if already_notified {
+                continue;
+            }
+            notified
         };
-        notified.await;
+        if tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), notified)
+            .await
+            .is_err()
+        {
+            let state = writer.lock().await;
+            return Err(format!(
+                "Detached trajectory writer made no progress for {} ms while committing version {} \
+                 (committed {}, last error {:?})",
+                TRAJECTORY_COMMIT_STALL_TIMEOUT.as_millis(),
+                target_version,
+                state.committed_version,
+                state.error
+            ));
+        }
     }
 }
 
@@ -3948,11 +3990,13 @@ fn set_test_message_serialization_failure(message_id: Option<String>) {
 
 #[cfg(test)]
 static TEST_DETACHED_TRAJECTORY_WRITER_FAILURE_HOOK: std::sync::OnceLock<
-    std::sync::Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+    std::sync::Mutex<Option<(String, Arc<Notify>, Arc<Notify>)>>,
 > = std::sync::OnceLock::new();
 
 #[cfg(test)]
-fn set_test_detached_trajectory_writer_failure_hook(hook: Option<(Arc<Notify>, Arc<Notify>)>) {
+fn set_test_detached_trajectory_writer_failure_hook(
+    hook: Option<(String, Arc<Notify>, Arc<Notify>)>,
+) {
     *TEST_DETACHED_TRAJECTORY_WRITER_FAILURE_HOOK
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
@@ -3960,13 +4004,16 @@ fn set_test_detached_trajectory_writer_failure_hook(hook: Option<(Arc<Notify>, A
 }
 
 #[cfg(test)]
-async fn wait_for_test_detached_trajectory_writer_failure() {
+async fn wait_for_test_detached_trajectory_writer_failure(chat_id: &str) {
     let hook = TEST_DETACHED_TRAJECTORY_WRITER_FAILURE_HOOK
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
         .expect("detached trajectory writer failure hook lock poisoned")
         .clone();
-    if let Some((failed, release)) = hook {
+    if let Some((hook_chat_id, failed, release)) = hook {
+        if hook_chat_id != chat_id {
+            return;
+        }
         failed.notify_one();
         release.notified().await;
     }
@@ -4714,19 +4761,46 @@ async fn wait_for_trajectory_commit(
     session_arc: Arc<AMutex<ChatSession>>,
     target_version: u64,
 ) -> Result<(), String> {
+    let mut last_progress = None;
+    let mut deadline = Instant::now() + TRAJECTORY_COMMIT_STALL_TIMEOUT;
     loop {
         let notified = {
             let session = session_arc.lock().await;
-            let notified = session.trajectory_commit_notify.clone().notified_owned();
             if session.trajectory_committed_version >= target_version {
                 return Ok(());
             }
             if let Some(error) = session.trajectory_save_error.clone() {
                 return Err(error);
             }
+            let progress = (
+                session.trajectory_committed_version,
+                session.trajectory_version,
+            );
+            if last_progress != Some(progress) {
+                last_progress = Some(progress);
+                deadline = Instant::now() + TRAJECTORY_COMMIT_STALL_TIMEOUT;
+            }
+            let mut notified = Box::pin(session.trajectory_commit_notify.clone().notified_owned());
+            let already_notified = notified.as_mut().enable();
+            drop(session);
+            if already_notified {
+                continue;
+            }
             notified
         };
-        notified.await;
+        if tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), notified)
+            .await
+            .is_err()
+        {
+            let session = session_arc.lock().await;
+            return Err(format!(
+                "Trajectory writer made no progress for {} ms while committing version {} \
+                 (committed {})",
+                TRAJECTORY_COMMIT_STALL_TIMEOUT.as_millis(),
+                target_version,
+                session.trajectory_committed_version
+            ));
+        }
     }
 }
 
@@ -9287,6 +9361,7 @@ mod tests {
         let failure_seen = Arc::new(Notify::new());
         let release_failure = Arc::new(Notify::new());
         set_test_detached_trajectory_writer_failure_hook(Some((
+            chat_id.to_string(),
             failure_seen.clone(),
             release_failure.clone(),
         )));
