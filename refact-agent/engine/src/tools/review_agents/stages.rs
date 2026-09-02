@@ -82,15 +82,20 @@ pub struct AppliesWhen {
 fn glob_matches(pattern: &str, path: &str) -> bool {
     let path = path.replace('\\', "/");
     let pattern = pattern.trim();
-    let Some((head, tail)) = pattern.split_once('*') else {
+    if !pattern.contains(['*', '?', '[']) {
         return path.ends_with(pattern);
-    };
-    if !path.starts_with(head.trim_end_matches('/')) && !head.is_empty() && !head.starts_with("**")
-    {
-        return false;
     }
-    let tail = tail.trim_start_matches('*').trim_start_matches('/');
-    tail.is_empty() || path.ends_with(tail) || path.contains(tail)
+    match glob::Pattern::new(pattern) {
+        Ok(compiled) => compiled.matches_with(
+            &path,
+            glob::MatchOptions {
+                case_sensitive: true,
+                require_literal_separator: true,
+                require_literal_leading_dot: false,
+            },
+        ),
+        Err(_) => path.ends_with(pattern),
+    }
 }
 
 impl AppliesWhen {
@@ -104,13 +109,14 @@ impl AppliesWhen {
                 .extension()
                 .map(|ext| ext.to_string_lossy().to_string())
                 .unwrap_or_default();
-            self.extensions
+            self.extensions.iter().any(|candidate| {
+                candidate
+                    .trim_start_matches('.')
+                    .eq_ignore_ascii_case(&extension)
+            }) || self
+                .path_globs
                 .iter()
-                .any(|candidate| candidate.trim_start_matches('.').eq_ignore_ascii_case(&extension))
-                || self
-                    .path_globs
-                    .iter()
-                    .any(|pattern| glob_matches(&pattern.to_ascii_lowercase(), &lowered))
+                .any(|pattern| glob_matches(&pattern.to_ascii_lowercase(), &lowered))
         })
     }
 }
@@ -219,10 +225,17 @@ async fn overlay_from_dir(catalog: &mut BTreeMap<String, StageSpec>, dir: PathBu
 }
 
 pub fn embedded_catalog() -> Vec<StageSpec> {
-    refact_yaml_configs::project_configs_bootstrap::embedded_defaults(STAGE_KIND)
-        .into_iter()
-        .filter_map(|(filename, content)| parse_stage(&filename, &content))
-        .collect()
+    let mut stages: Vec<StageSpec> =
+        refact_yaml_configs::project_configs_bootstrap::embedded_defaults(STAGE_KIND)
+            .into_iter()
+            .filter_map(|(filename, content)| parse_stage(&filename, &content))
+            .collect();
+    stages.sort_by(|left, right| {
+        left.order_index()
+            .cmp(&right.order_index())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    stages
 }
 
 pub async fn load_stage_catalog(gcx: Arc<GlobalContext>) -> Vec<StageSpec> {
@@ -343,6 +356,9 @@ mod tests {
     #[tokio::test]
     async fn review_stage_catalog_references_only_registered_tools() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.codegraph.lock().await = Some(std::sync::Arc::new(
+            refact_codegraph::CodeGraphService::open_in_memory().unwrap(),
+        ));
         let registered: HashSet<String> = crate::tools::tools_list::get_available_tools(gcx)
             .await
             .into_iter()
@@ -377,7 +393,8 @@ mod tests {
         let catalog = embedded_catalog();
         let rust_only = strings(&["src/lib.rs", "src/tools/mod.rs"]);
 
-        let selection = select_stages(catalog.clone(), ReviewDepth::Deep, None, &rust_only).unwrap();
+        let selection =
+            select_stages(catalog.clone(), ReviewDepth::Deep, None, &rust_only).unwrap();
         let scheduled: Vec<&str> = selection
             .scheduled
             .iter()
@@ -393,10 +410,7 @@ mod tests {
 
         let with_gui = strings(&["src/lib.rs", "gui/src/App.tsx"]);
         let selection = select_stages(catalog, ReviewDepth::Deep, None, &with_gui).unwrap();
-        assert!(selection
-            .scheduled
-            .iter()
-            .any(|spec| spec.id == "browser"));
+        assert!(selection.scheduled.iter().any(|spec| spec.id == "browser"));
     }
 
     #[test]
@@ -413,7 +427,15 @@ mod tests {
 
         assert_eq!(
             scheduled,
-            ["mechanical", "diff", "impact", "spec", "security", "dependencies", "simplicity"]
+            [
+                "mechanical",
+                "diff",
+                "impact",
+                "spec",
+                "security",
+                "dependencies",
+                "simplicity"
+            ]
         );
         assert!(selection
             .skipped
