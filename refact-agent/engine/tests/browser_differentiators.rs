@@ -170,6 +170,7 @@ async fn coverage_and_virtual_authenticator_work_without_always_on_domains() {
                 reset_on_navigation: Some(false),
             },
             BrowserStep::Eval {
+                timeout_ms: None,
                 expression: "window.coverageTarget".to_string(),
             },
             BrowserStep::StopCoverage,
@@ -201,6 +202,7 @@ async fn coverage_and_virtual_authenticator_work_without_always_on_domains() {
                 is_user_verified: Some(true),
             },
             BrowserStep::Click {
+                timeout_ms: None,
                 locator: BrowserLocator::css("#create"),
             },
             BrowserStep::WaitForText {
@@ -227,6 +229,7 @@ async fn coverage_and_virtual_authenticator_work_without_always_on_domains() {
                 id: authenticator_id.clone(),
             },
             BrowserStep::Click {
+                timeout_ms: None,
                 locator: BrowserLocator::css("#get"),
             },
             BrowserStep::WaitForText {
@@ -287,6 +290,7 @@ async fn differentiator_01_multi_step_batching_returns_ordered_indexed_results()
                 options: AccessibilitySnapshotOptions::default(),
             },
             BrowserStep::Click {
+                timeout_ms: None,
                 locator: BrowserLocator::reference(&reference("Save")),
             },
             BrowserStep::Fill {
@@ -334,6 +338,7 @@ async fn differentiator_02_click_if_exists_skips_missing_and_continues_batch() {
                 locator: BrowserLocator::css("#not-present"),
             },
             BrowserStep::Eval {
+                timeout_ms: None,
                 expression: "document.body.dataset.continued = 'yes'; 'continued'".to_string(),
             },
         ],
@@ -363,6 +368,7 @@ async fn differentiator_03_dismiss_overlays_explicit_and_default_handler_paths()
         &[
             BrowserStep::DismissOverlays { aggressive: false },
             BrowserStep::Click {
+                timeout_ms: None,
                 locator: BrowserLocator::css("#target"),
             },
         ],
@@ -384,6 +390,7 @@ async fn differentiator_03_dismiss_overlays_explicit_and_default_handler_paths()
     let automatic = execute_steps_with_runtime(
         &mut case.runtime,
         &[BrowserStep::Click {
+            timeout_ms: None,
             locator: BrowserLocator::css("#target"),
         }],
         &ImagePolicy::browser_capture(),
@@ -584,6 +591,7 @@ async fn differentiator_09_tab_log_and_runtime_buffers_keep_independent_cursors(
     let report = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            continue_on_error: false,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -592,6 +600,7 @@ async fn differentiator_09_tab_log_and_runtime_buffers_keep_independent_cursors(
             steps: vec![
                 BrowserStep::TabLog,
                 BrowserStep::Eval {
+                    timeout_ms: None,
                     expression: "console.log('cursor-console'); setTimeout(function(){ throw new Error('cursor-page-error'); }, 0); fetch('/slow-echo?ms=400').then(() => document.body.insertAdjacentText('beforeend', 'cursor-network-done')); 'started'".to_string(),
                 },
                 BrowserStep::WaitForText {
@@ -662,9 +671,11 @@ async fn differentiator_10_live_recorder_emits_actions_and_mutation_summaries() 
                 verify: true,
             },
             BrowserStep::Click {
+                timeout_ms: None,
                 locator: BrowserLocator::css("#record-click"),
             },
             BrowserStep::Eval {
+                timeout_ms: None,
                 expression: "document.querySelector('#record-input').dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true})); document.querySelector('#record-form').requestSubmit(); window.scrollTo(0, document.body.scrollHeight); document.body.append(document.createElement('aside')); 'events-dispatched'".to_string(),
             },
         ],
@@ -752,6 +763,7 @@ async fn differentiator_12_password_masking_survives_final_serialization() {
     let report = execute_request_with_runtime(
         runtime.clone(),
         BrowserActionRequest {
+            continue_on_error: false,
             session: SessionPolicy::SharedDefault,
             target: TabTarget::Active,
             attach_screenshot: None,
@@ -766,6 +778,7 @@ async fn differentiator_12_password_masking_survives_final_serialization() {
                     verify: true,
                 },
                 BrowserStep::Eval {
+                    timeout_ms: None,
                     expression: format!("console.error('password={SECRET}'); setTimeout(function(){{ throw new Error('password={SECRET}'); }}, 0); fetch('/slow-echo?ms=50'); 'started'"),
                 },
                 BrowserStep::WaitForResponse {
