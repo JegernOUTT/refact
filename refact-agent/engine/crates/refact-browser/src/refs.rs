@@ -178,10 +178,24 @@ impl Display for RefError {
                 formatter,
                 "ref {reference} is detached from the document; take a fresh AI snapshot"
             ),
-            Self::GenerationMismatch { reference, .. } => write!(
-                formatter,
-                "ref {reference} belongs to an earlier document generation; take a fresh AI snapshot"
-            ),
+            Self::GenerationMismatch {
+                reference,
+                snapshot_document_generation,
+                current_document_generation,
+                ..
+            } => {
+                if snapshot_document_generation != current_document_generation {
+                    write!(
+                        formatter,
+                        "ref {reference} belongs to an earlier document generation (the page navigated since that snapshot); take a fresh AI snapshot"
+                    )
+                } else {
+                    write!(
+                        formatter,
+                        "ref {reference} belongs to an earlier snapshot generation (the page's script context was recreated since that snapshot); take a fresh AI snapshot"
+                    )
+                }
+            }
             Self::Protocol { message } => formatter.write_str(message),
         }
     }
@@ -229,6 +243,20 @@ impl RefRegistry {
         let mut state = self.state.lock().unwrap();
         let tab = state.tabs.entry(target_id.to_string()).or_default();
         tab.document_generation = tab.document_generation.saturating_add(1);
+        tab.frame_generation = tab.frame_generation.saturating_add(1);
+        tab.known_refs = tab
+            .latest
+            .as_ref()
+            .map(|snapshot| snapshot.refs.keys().cloned().collect())
+            .unwrap_or_default();
+    }
+
+    pub fn utility_world_recreated(&self, target_id: &str) {
+        let mut state = self.state.lock().unwrap();
+        let tab = state.tabs.entry(target_id.to_string()).or_default();
+        if tab.latest.is_none() {
+            return;
+        }
         tab.frame_generation = tab.frame_generation.saturating_add(1);
         tab.known_refs = tab
             .latest
@@ -398,6 +426,45 @@ mod tests {
             })
         ));
         assert_eq!(registry.ref_prefix("tab").as_deref(), Some("f1"));
+    }
+
+    #[test]
+    fn recreated_utility_world_moves_refs_to_a_new_prefix_instead_of_colliding() {
+        let registry = RefRegistry::default();
+        assert_eq!(registry.ref_prefix("tab"), None);
+        registry.utility_world_recreated("tab");
+        assert_eq!(
+            registry.ref_prefix("tab"),
+            None,
+            "no snapshot yet: nothing to protect"
+        );
+
+        let reference: Ref = "e6".parse().unwrap();
+        registry.replace_snapshot("tab", HashMap::from([(reference.clone(), info("Main"))]));
+        registry.utility_world_recreated("tab");
+        assert_eq!(registry.ref_prefix("tab").as_deref(), Some("f1"));
+        let error = registry.resolve_current("tab", &reference).unwrap_err();
+        assert!(matches!(
+            error,
+            RefError::GenerationMismatch {
+                snapshot_document_generation: 0,
+                current_document_generation: 0,
+                snapshot_frame_generation: 0,
+                current_frame_generation: 1,
+                ..
+            }
+        ));
+        assert!(
+            error.to_string().contains("script context was recreated"),
+            "{error}"
+        );
+
+        registry.top_level_navigation("tab");
+        let navigated = registry.resolve_current("tab", &reference).unwrap_err();
+        assert!(
+            navigated.to_string().contains("the page navigated"),
+            "{navigated}"
+        );
     }
 
     #[test]

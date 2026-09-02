@@ -304,6 +304,7 @@ async fn a_default_navigate_batch_returns_a_snapshot_context_and_zero_images() {
                 timeout_ms: None,
             }],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -368,6 +369,7 @@ async fn page_context_screenshot_returns_a_png_instead_of_a_snapshot() {
                 timeout_ms: None,
             }],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -398,6 +400,7 @@ async fn page_context_screenshot_returns_a_png_instead_of_a_snapshot() {
                 timeout_ms: None,
             }],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -424,8 +427,10 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
         network: NetworkReportMode::default(),
         steps: vec![BrowserStep::Eval {
             expression: "document.querySelector('#fetch').click()".to_string(),
+            timeout_ms: None,
         }],
         block_service_workers: None,
+        continue_on_error: false,
     };
 
     let report =
@@ -458,6 +463,7 @@ async fn transactional_report_settles_fetch_and_returns_console_once() {
                 network: NetworkReportMode::default(),
                 steps: vec![],
                 block_service_workers: None,
+                continue_on_error: false,
             },
             &ImagePolicy::browser_capture(),
         )
@@ -490,6 +496,7 @@ async fn status_filtered_response_wait_skips_the_first_failure_and_matches_the_r
             steps: vec![
                 BrowserStep::Eval {
                     expression: "fetch('/probe-status-missing').then(function() { return fetch('/slow-echo?probe-status=retry&ms=200'); }); 'started'".to_string(),
+                    timeout_ms: None,
                 },
                 BrowserStep::WaitForResponse {
                     pattern: UrlPattern::Regex {
@@ -502,6 +509,7 @@ async fn status_filtered_response_wait_skips_the_first_failure_and_matches_the_r
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -546,6 +554,7 @@ async fn console_wait_catches_a_delayed_error_and_ignores_quieter_levels() {
             steps: vec![
                 BrowserStep::Eval {
                     expression: "console.log('console-probe quiet'); setTimeout(function() { console.error('console-probe late boom'); }, 400); 'started'".to_string(),
+                    timeout_ms: None,
                 },
                 BrowserStep::WaitForConsoleMessage {
                     contains: Some("console-probe".to_string()),
@@ -554,6 +563,7 @@ async fn console_wait_catches_a_delayed_error_and_ignores_quieter_levels() {
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -608,6 +618,7 @@ async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() 
                 },
                 BrowserStep::Click {
                     locator: BrowserLocator::css("#load"),
+                    timeout_ms: None,
                 },
                 BrowserStep::WaitForResponse {
                     pattern: UrlPattern::Regex {
@@ -627,6 +638,7 @@ async fn network_waits_coexist_with_locator_handlers_and_dialogs_in_one_batch() 
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -740,6 +752,7 @@ async fn navigation_steps_wait_for_reload_history_and_open_tab() {
             BrowserStep::Eval {
                 expression: "history.pushState({}, '', '#same-document'); location.href"
                     .to_string(),
+                timeout_ms: None,
             },
             BrowserStep::GoBack,
             BrowserStep::GoForward,
@@ -859,6 +872,7 @@ async fn an_idle_session_outlives_its_own_idle_eviction_window() {
             page_context: None,
             network: NetworkReportMode::default(),
             block_service_workers: None,
+            continue_on_error: false,
             steps: vec![BrowserStep::Navigate {
                 url: server.url("delayed-button.html"),
                 timeout_ms: None,
@@ -941,6 +955,7 @@ async fn dead_cdp_transport_is_relaunched_and_the_batch_is_retried_once() {
                 page_context: None,
                 network: NetworkReportMode::default(),
                 block_service_workers: None,
+                continue_on_error: false,
                 steps: vec![BrowserStep::Navigate {
                     url: case.server.url("delayed-button.html"),
                     timeout_ms: None,
@@ -1016,6 +1031,7 @@ async fn artifacts_capture_page_clip_element_pdf_and_highlight_lifecycle() {
             page_context: None,
             network: NetworkReportMode::default(),
             block_service_workers: None,
+            continue_on_error: false,
             steps: vec![
                 BrowserStep::Screenshot {
                     options: BrowserScreenshotOptions {
@@ -1213,10 +1229,13 @@ async fn design_tools_measure_marks_contrast_and_visual_changes() {
             options: Default::default(),
         }],
     );
-    assert_ne!(
-        baseline.steps[0].data.as_ref().unwrap()["data"],
-        changed.steps[0].data.as_ref().unwrap()["data"]
+    let baseline_image = &baseline.steps[0].data.as_ref().unwrap()["artifact"]["data"];
+    let changed_image = &changed.steps[0].data.as_ref().unwrap()["artifact"]["data"];
+    assert!(
+        baseline_image.is_string(),
+        "screenshot payload lives under artifact.data"
     );
+    assert_ne!(baseline_image, changed_image);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1330,6 +1349,7 @@ async fn click_delayed_button_without_wait_seconds() {
         &[
             BrowserStep::Click {
                 locator: BrowserLocator::css("#delayed"),
+                timeout_ms: None,
             },
             BrowserStep::WaitForText {
                 text: "delayed clicked".to_string(),
@@ -1662,6 +1682,7 @@ async fn click_obscured_waits_for_overlay() {
         &[
             BrowserStep::Click {
                 locator: BrowserLocator::css("#target"),
+                timeout_ms: None,
             },
             BrowserStep::WaitForText {
                 text: "clicked after overlay".to_string(),
@@ -1700,6 +1721,7 @@ async fn click_permanently_obscured_reports_intercepting_element() {
         &mut case.runtime,
         &[BrowserStep::Click {
             locator: BrowserLocator::css("#target"),
+            timeout_ms: None,
         }],
         &ImagePolicy::browser_capture(),
     );
@@ -2169,6 +2191,7 @@ async fn hover_reveals_css_menu() {
         &[
             BrowserStep::Hover {
                 locator: BrowserLocator::css("#trigger"),
+                timeout_ms: None,
             },
             BrowserStep::WaitForSelector {
                 locator: BrowserLocator::css("#menu a"),
@@ -2471,6 +2494,7 @@ async fn strict_multi_click_errors() {
         &case.tab,
         &[BrowserStep::Click {
             locator: BrowserLocator::css(".duplicate"),
+            timeout_ms: None,
         }],
     );
     assert!(
@@ -2729,6 +2753,7 @@ async fn click_if_exists_skips_attached_invisible_element_without_retry_budget()
         &case.tab,
         &[BrowserStep::Eval {
             expression: "document.body.insertAdjacentHTML('beforeend', '<button id=\"invisible-button\" style=\"visibility:hidden;width:60px;height:24px\">Invisible</button>')".to_string(),
+            timeout_ms: None,
         }],
     );
     assert!(prepared.ok, "fixture preparation failed: {prepared:?}");
@@ -2817,7 +2842,13 @@ async fn handle_clicks_second_strict_match() {
     };
     let report = execute_steps(
         &case.tab,
-        &[BrowserStep::Click { locator }, text_step("#result")],
+        &[
+            BrowserStep::Click {
+                locator,
+                timeout_ms: None,
+            },
+            text_step("#result"),
+        ],
     );
     assert!(report.ok, "nth handle click failed: {report:?}");
     assert_eq!(returned_text(&report), "second");
@@ -3170,6 +3201,7 @@ async fn moving_target_waits_until_stable() {
             },
             BrowserStep::Click {
                 locator: BrowserLocator::css("#moving"),
+                timeout_ms: None,
             },
             text_step("#result"),
         ],
@@ -3193,6 +3225,7 @@ async fn moving_target_click_reports_successful_retries() {
         &[
             BrowserStep::Click {
                 locator: BrowserLocator::css("#moving"),
+                timeout_ms: None,
             },
             text_step("#result"),
         ],
@@ -3266,6 +3299,7 @@ async fn fetch_after_click_renders_slow_echo() {
         &[
             BrowserStep::Click {
                 locator: BrowserLocator::css("#fetch"),
+                timeout_ms: None,
             },
             BrowserStep::WaitForText {
                 text: "echo ok after 400ms".to_string(),
@@ -3307,9 +3341,11 @@ async fn locator_handler_clears_cookie_banner_before_click_and_records_firing() 
                 },
                 BrowserStep::Click {
                     locator: BrowserLocator::css("#target"),
+                    timeout_ms: None,
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::default(),
     )
@@ -3365,12 +3401,15 @@ async fn locator_handler_clears_interstitial_that_appears_between_actions() {
                 },
                 BrowserStep::Click {
                     locator: BrowserLocator::css("#show"),
+                    timeout_ms: None,
                 },
                 BrowserStep::Click {
                     locator: BrowserLocator::css("#target"),
+                    timeout_ms: None,
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::default(),
     )
@@ -3403,6 +3442,7 @@ async fn legacy_dismiss_overlays_step_still_clears_cookie_banner() {
             BrowserStep::DismissOverlays { aggressive: false },
             BrowserStep::Click {
                 locator: BrowserLocator::css("#target"),
+                timeout_ms: None,
             },
         ],
     );
@@ -3434,6 +3474,7 @@ async fn popup_click_opens_second_tab() {
         &[
             BrowserStep::Click {
                 locator: BrowserLocator::css("#open"),
+                timeout_ms: None,
             },
             BrowserStep::ListTabs,
         ],
@@ -3464,6 +3505,7 @@ async fn switch_tab_retargets_later_steps() {
         &mut case.runtime,
         &[BrowserStep::Click {
             locator: BrowserLocator::css("#open"),
+            timeout_ms: None,
         }],
         &ImagePolicy::browser_capture(),
     );
@@ -3478,6 +3520,7 @@ async fn switch_tab_retargets_later_steps() {
             },
             BrowserStep::Eval {
                 expression: "document.querySelector('h1').textContent".to_string(),
+                timeout_ms: None,
             },
         ],
         &ImagePolicy::browser_capture(),
@@ -3505,6 +3548,7 @@ async fn wait_for_popup_defers_until_a_later_step_in_the_runtime_batch_path() {
             },
             BrowserStep::Click {
                 locator: BrowserLocator::css("#open"),
+                timeout_ms: None,
             },
         ],
         &ImagePolicy::browser_capture(),
@@ -3572,13 +3616,16 @@ async fn wait_for_popup_click_and_popup_action_share_one_batch() {
                 },
                 BrowserStep::Click {
                     locator: BrowserLocator::css("#open"),
+                    timeout_ms: None,
                 },
                 BrowserStep::Eval {
                     expression: "document.querySelector('h1').textContent".to_string(),
+                    timeout_ms: None,
                 },
                 BrowserStep::CloseTab { tab: None },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3635,6 +3682,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                 },
                 BrowserStep::Click {
                     locator: BrowserLocator::css("#fetch-data"),
+                    timeout_ms: None,
                 },
                 BrowserStep::WaitForText {
                     text: "mocked".to_string(),
@@ -3642,6 +3690,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3677,9 +3726,11 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                 BrowserStep::Eval {
                     expression: "document.querySelector('#result').textContent = 'idle'"
                         .to_string(),
+                    timeout_ms: None,
                 },
                 BrowserStep::Click {
                     locator: BrowserLocator::css("#fetch-data"),
+                    timeout_ms: None,
                 },
                 BrowserStep::WaitForText {
                     text: "fetch failed".to_string(),
@@ -3687,6 +3738,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3725,9 +3777,11 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                 BrowserStep::Eval {
                     expression: "document.querySelector('#result').textContent = 'idle'"
                         .to_string(),
+                    timeout_ms: None,
                 },
                 BrowserStep::Click {
                     locator: BrowserLocator::css("#fetch-redirect"),
+                    timeout_ms: None,
                 },
                 BrowserStep::WaitForText {
                     text: "modified".to_string(),
@@ -3735,6 +3789,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3768,9 +3823,11 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                 BrowserStep::Eval {
                     expression: "document.querySelector('#result').textContent = 'idle'"
                         .to_string(),
+                    timeout_ms: None,
                 },
                 BrowserStep::Click {
                     locator: BrowserLocator::css("#fetch-data"),
+                    timeout_ms: None,
                 },
                 BrowserStep::WaitForText {
                     text: "origin".to_string(),
@@ -3779,6 +3836,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                 BrowserStep::ListRoutes,
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3815,9 +3873,11 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                 },
                 BrowserStep::Click {
                     locator: BrowserLocator::css("#open-popup"),
+                    timeout_ms: None,
                 },
                 BrowserStep::Click {
                     locator: BrowserLocator::css("#fetch-data"),
+                    timeout_ms: None,
                 },
                 BrowserStep::WaitForText {
                     text: "popup-mocked".to_string(),
@@ -3825,6 +3885,7 @@ async fn network_routes_fulfill_abort_modify_redirects_unroute_and_reach_popups(
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3878,6 +3939,7 @@ async fn newest_route_falls_back_to_the_older_handler_and_times_expires_it() {
                 BrowserStep::ListRoutes,
                 BrowserStep::Click {
                     locator: BrowserLocator::css("#fetch-data"),
+                    timeout_ms: None,
                 },
                 BrowserStep::WaitForText {
                     text: "oldest".to_string(),
@@ -3885,6 +3947,7 @@ async fn newest_route_falls_back_to_the_older_handler_and_times_expires_it() {
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3916,6 +3979,7 @@ async fn newest_route_falls_back_to_the_older_handler_and_times_expires_it() {
             network: NetworkReportMode::default(),
             steps: vec![BrowserStep::ListRoutes],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -3970,6 +4034,7 @@ async fn fetch_and_fulfill_replays_the_real_response_with_overrides() {
                 },
                 BrowserStep::Click {
                     locator: BrowserLocator::css("#fetch-data"),
+                    timeout_ms: None,
                 },
                 BrowserStep::WaitForText {
                     text: "fetched".to_string(),
@@ -3977,6 +4042,7 @@ async fn fetch_and_fulfill_replays_the_real_response_with_overrides() {
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -4031,6 +4097,7 @@ async fn websocket_route_registers_page_socket_and_delivers_mock_frame() {
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -4110,6 +4177,7 @@ async fn intercept_case(
             network: NetworkReportMode::default(),
             steps,
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -4295,6 +4363,7 @@ async fn iframe_form_submit_reaches_same_origin_frame() {
             BrowserStep::Click {
                 locator: BrowserLocator::role("button", Some("Submit"))
                     .in_frames(vec![BrowserLocator::css("#form-frame")]),
+                timeout_ms: None,
             },
             BrowserStep::WaitForText {
                 text: "submitted Frame User".to_string(),
@@ -4321,6 +4390,7 @@ async fn nested_iframe_click_and_hidden_wait_use_frame_chain() {
             BrowserStep::Click {
                 locator: BrowserLocator::role("button", Some("Hide status"))
                     .in_frames(frames.clone()),
+                timeout_ms: None,
             },
             BrowserStep::WaitForElementHidden {
                 locator: BrowserLocator::role("status", None).in_frames(frames),
@@ -4373,6 +4443,7 @@ async fn nested_shadow_dom_button_and_input_are_actionable() {
             },
             BrowserStep::Click {
                 locator: BrowserLocator::css("#shadow-button"),
+                timeout_ms: None,
             },
             BrowserStep::WaitForText {
                 text: "shadow value".to_string(),
@@ -4402,12 +4473,15 @@ async fn dialog_fixture_auto_dismisses_confirm_and_reports_it() {
             steps: vec![
                 BrowserStep::Eval {
                     expression: "document.querySelector('#confirm').click(); 'clicked'".to_string(),
+                    timeout_ms: None,
                 },
                 BrowserStep::Eval {
                     expression: "document.querySelector('#result').textContent".to_string(),
+                    timeout_ms: None,
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -4446,12 +4520,15 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
                 },
                 BrowserStep::Eval {
                     expression: "document.querySelector('#confirm').click(); 'clicked'".to_string(),
+                    timeout_ms: None,
                 },
                 BrowserStep::Eval {
                     expression: "document.querySelector('#result').textContent".to_string(),
+                    timeout_ms: None,
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -4479,12 +4556,15 @@ async fn dialog_fixture_uses_armed_accept_and_prompt_text() {
                 },
                 BrowserStep::Eval {
                     expression: "document.querySelector('#prompt').click(); 'clicked'".to_string(),
+                    timeout_ms: None,
                 },
                 BrowserStep::Eval {
                     expression: "document.querySelector('#result').textContent".to_string(),
+                    timeout_ms: None,
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -4562,6 +4642,7 @@ async fn uploads_visible_hidden_and_file_chooser_inputs() {
             },
             BrowserStep::Eval {
                 expression: "JSON.stringify([document.querySelector('#visible-file').files.length, document.querySelector('#hidden-file').files.length])".to_string(),
+                timeout_ms: None,
             },
         ],
         &ImagePolicy::browser_capture(),
@@ -4578,6 +4659,7 @@ async fn uploads_visible_hidden_and_file_chooser_inputs() {
             },
             BrowserStep::Click {
                 locator: BrowserLocator::css("#visible-file"),
+                timeout_ms: None,
             },
         ],
         &ImagePolicy::browser_capture(),
@@ -4599,21 +4681,27 @@ async fn eval_invokes_function_expressions_and_keeps_plain_expressions() {
         &[
             BrowserStep::Eval {
                 expression: "() => 42".to_string(),
+                timeout_ms: None,
             },
             BrowserStep::Eval {
                 expression: "(() => 42)()".to_string(),
+                timeout_ms: None,
             },
             BrowserStep::Eval {
                 expression: "async () => 7".to_string(),
+                timeout_ms: None,
             },
             BrowserStep::Eval {
                 expression: "(function () { return 5; })".to_string(),
+                timeout_ms: None,
             },
             BrowserStep::Eval {
                 expression: "1+1".to_string(),
+                timeout_ms: None,
             },
             BrowserStep::Eval {
                 expression: "document.title".to_string(),
+                timeout_ms: None,
             },
         ],
     );
@@ -4638,6 +4726,7 @@ async fn eval_surfaces_errors_thrown_by_invoked_functions() {
         &case.tab,
         &[BrowserStep::Eval {
             expression: "() => { throw new Error(\"eval-boom\") }".to_string(),
+            timeout_ms: None,
         }],
     );
 
@@ -4661,6 +4750,7 @@ async fn captures_download_with_suggested_filename_and_runtime_path() {
         &[
             BrowserStep::Click {
                 locator: BrowserLocator::css("#download"),
+                timeout_ms: None,
             },
             BrowserStep::WaitForDownload {
                 timeout_ms: Some(10_000),
@@ -4931,6 +5021,7 @@ async fn html5_drag_and_drop_reaches_page_handler() {
             },
             BrowserStep::Eval {
                 expression: "String(document.querySelector('#target').dataset.dropped)".to_string(),
+                timeout_ms: None,
             },
         ],
         &ImagePolicy::browser_capture(),
@@ -4962,6 +5053,7 @@ async fn file_drop_and_coordinate_mouse_reach_page_handlers() {
             },
             BrowserStep::Eval {
                 expression: "String(document.querySelector('#files').dataset.files)".to_string(),
+                timeout_ms: None,
             },
         ],
         &ImagePolicy::browser_capture(),
@@ -4982,6 +5074,7 @@ async fn file_drop_and_coordinate_mouse_reach_page_handlers() {
             },
             BrowserStep::Eval {
                 expression: "document.querySelector('#canvas').dataset.drawn".to_string(),
+                timeout_ms: None,
             },
         ],
         &ImagePolicy::browser_capture(),
@@ -5194,6 +5287,7 @@ async fn production_snapshot_and_ref_actions_share_one_batch() {
             },
             BrowserStep::Click {
                 locator: BrowserLocator::reference(&save_ref),
+                timeout_ms: None,
             },
             BrowserStep::Fill {
                 locator: BrowserLocator::reference(&search_ref),
@@ -5282,6 +5376,7 @@ async fn scoped_accessibility_snapshot_returns_only_the_target_subtree() {
         &mut case.runtime,
         &[BrowserStep::Click {
             locator: BrowserLocator::reference(&save_ref),
+            timeout_ms: None,
         }],
         &ImagePolicy::browser_capture(),
     );
@@ -5445,6 +5540,7 @@ async fn production_ref_errors_distinguish_stale_and_navigation_generations() {
             BrowserStep::AccessibilitySnapshot { options },
             BrowserStep::Click {
                 locator: BrowserLocator::reference(&save_ref),
+                timeout_ms: None,
             },
         ],
         &ImagePolicy::browser_capture(),
@@ -5466,6 +5562,7 @@ async fn production_ref_errors_distinguish_stale_and_navigation_generations() {
         &mut case.runtime,
         &[BrowserStep::Click {
             locator: BrowserLocator::reference(&current_ref),
+            timeout_ms: None,
         }],
         &ImagePolicy::browser_capture(),
     );
@@ -5784,6 +5881,7 @@ async fn composed_locators_match_playwright_semantics() {
 
     let ambiguous_or = execute_steps(&case.tab, &[BrowserStep::Click {
         locator: serde_json::from_value(json!({"by":"test_id","value":"alpha-card","locator":{"by":"css","value":"button"},"or":{"by":"test_id","value":"fallback"}})).unwrap(),
+        timeout_ms: None,
     }]);
     assert!(!ambiguous_or.ok);
     assert!(ambiguous_or.steps[0]
@@ -5821,6 +5919,7 @@ async fn capture_frames_records_an_animation_as_a_labelled_filmstrip() {
         &[
             BrowserStep::Eval {
                 expression: "playAnimation()".to_string(),
+                timeout_ms: None,
             },
             BrowserStep::CaptureFrames {
                 duration_ms: Some(900),
@@ -5870,6 +5969,7 @@ async fn capture_frames_scopes_to_an_element_and_to_the_full_page() {
         &[
             BrowserStep::Eval {
                 expression: "playAnimation()".to_string(),
+                timeout_ms: None,
             },
             BrowserStep::CaptureFrames {
                 duration_ms: Some(600),
@@ -6031,6 +6131,7 @@ fn clock_request(steps: Vec<BrowserStep>) -> BrowserActionRequest {
         network: NetworkReportMode::default(),
         steps,
         block_service_workers: None,
+        continue_on_error: false,
     }
 }
 
@@ -6041,6 +6142,7 @@ fn clock_time(text: &str) -> ClockTime {
 fn probe_state() -> BrowserStep {
     BrowserStep::Eval {
         expression: "window.__state()".to_string(),
+        timeout_ms: None,
     }
 }
 
@@ -6083,6 +6185,7 @@ impl ClockCase {
                 },
                 BrowserStep::Eval {
                     expression: "window.__reset()".to_string(),
+                    timeout_ms: None,
                 },
                 probe_state(),
             ])
@@ -6171,6 +6274,7 @@ async fn screencast_sessions_compose_a_filmstrip_on_stop() {
             },
             BrowserStep::Eval {
                 expression: "playAnimation()".to_string(),
+                timeout_ms: None,
             },
             BrowserStep::WaitSeconds { seconds: 1.5 },
             BrowserStep::ScreencastStop {
@@ -6262,10 +6366,10 @@ async fn screenshot_mask_hides_a_fixture_element_and_restores_the_dom() {
     let unmasked_data = unmasked.steps[0].data.as_ref().unwrap();
     let masked_data = masked.steps[0].data.as_ref().unwrap();
     let unmasked_bytes = base64::prelude::BASE64_STANDARD
-        .decode(unmasked_data["data"].as_str().unwrap())
+        .decode(unmasked_data["artifact"]["data"].as_str().unwrap())
         .unwrap();
     let masked_bytes = base64::prelude::BASE64_STANDARD
-        .decode(masked_data["data"].as_str().unwrap())
+        .decode(masked_data["artifact"]["data"].as_str().unwrap())
         .unwrap();
 
     assert_eq!(dominant_color(&unmasked_bytes), (0, 0, 128));
@@ -6674,6 +6778,7 @@ async fn set_content_replaces_the_document_and_is_visible_in_the_next_snapshot()
             attach_screenshot: Some(false),
             network: NetworkReportMode::default(),
             block_service_workers: None,
+            continue_on_error: false,
             steps: vec![
                 BrowserStep::SetContent {
                     html: "<!doctype html><html><body><h1>Fixture-less heading</h1><button>Press me</button></body></html>"
@@ -6725,6 +6830,7 @@ async fn cdp_send_reaches_page_and_browser_targets_and_keeps_overrides() {
             attach_screenshot: Some(false),
             network: NetworkReportMode::default(),
             block_service_workers: None,
+            continue_on_error: false,
             page_context: None,
             steps: vec![
                 BrowserStep::CdpSend {
@@ -6749,6 +6855,7 @@ async fn cdp_send_reaches_page_and_browser_targets_and_keeps_overrides() {
                 },
                 BrowserStep::Eval {
                     expression: "window.innerWidth".to_string(),
+                    timeout_ms: None,
                 },
             ],
         },
@@ -6820,9 +6927,11 @@ async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
                 },
                 BrowserStep::Eval {
                     expression: "window.__refact_init_flag || 'missing'".to_string(),
+                    timeout_ms: None,
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -6855,9 +6964,11 @@ async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
                 },
                 BrowserStep::Eval {
                     expression: "window.__refact_init_flag || 'missing'".to_string(),
+                    timeout_ms: None,
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -6885,9 +6996,11 @@ async fn init_script_survives_navigation_and_clears_on_remove_and_reset() {
                 },
                 BrowserStep::Eval {
                     expression: "window.__refact_init_flag || 'missing'".to_string(),
+                    timeout_ms: None,
                 },
             ],
             block_service_workers: None,
+            continue_on_error: false,
         },
         &ImagePolicy::browser_capture(),
     )
@@ -6928,6 +7041,7 @@ async fn add_style_tag_changes_computed_style_and_add_script_tag_runs() {
                 expression:
                     "getComputedStyle(document.getElementById('target')).color + '|' + window.__refact_script_tag"
                         .to_string(),
+                timeout_ms: None,
             },
         ],
     );
@@ -6963,6 +7077,7 @@ async fn dispatch_event_fires_listeners_with_the_inferred_class_and_detail() {
             },
             BrowserStep::Eval {
                 expression: "JSON.stringify(window.__events)".to_string(),
+                timeout_ms: None,
             },
         ],
     );
@@ -7010,6 +7125,7 @@ async fn dispatch_event_fires_listeners_with_the_inferred_class_and_detail() {
                     }],
                     page_context: None,
                     block_service_workers: None,
+                    continue_on_error: false,
                 },
                 &ImagePolicy::browser_capture(),
             )

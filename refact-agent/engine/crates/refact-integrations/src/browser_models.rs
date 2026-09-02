@@ -1540,6 +1540,8 @@ pub enum BrowserStep {
 
     Click {
         locator: BrowserLocator,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
     },
     ClickIfExists {
         locator: BrowserLocator,
@@ -1554,6 +1556,8 @@ pub enum BrowserStep {
     },
     Hover {
         locator: BrowserLocator,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
     },
     Focus {
         locator: BrowserLocator,
@@ -1831,6 +1835,8 @@ pub enum BrowserStep {
 
     Eval {
         expression: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_ms: Option<u64>,
     },
     Styles {
         locator: BrowserLocator,
@@ -2458,10 +2464,10 @@ impl BrowserStep {
             &["soft", "timeout_ms"],
             &[],
         ),
-        ("click", &["locator"], &[], &[]),
+        ("click", &["locator"], &["timeout_ms"], &[]),
         ("click_if_exists", &["locator"], &[], &[]),
         ("tap", &[], &["locator", "x", "y"], &[]),
-        ("hover", &["locator"], &[], &[]),
+        ("hover", &["locator"], &["timeout_ms"], &[]),
         ("focus", &["locator"], &[], &[]),
         ("blur", &["locator"], &[], &[]),
         ("scroll_to", &["locator"], &[], &[]),
@@ -2669,7 +2675,7 @@ impl BrowserStep {
             ],
             &[],
         ),
-        ("eval", &["expression"], &[], &[]),
+        ("eval", &["expression"], &["timeout_ms"], &[]),
         ("styles", &["locator"], &["property_filter"], &[]),
         ("set_content", &["html"], &["wait_until"], &[]),
         ("page_content", &[], &[], &[]),
@@ -2763,6 +2769,8 @@ pub struct BrowserActionRequest {
     pub network: NetworkReportMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_service_workers: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continue_on_error: bool,
     pub steps: Vec<BrowserStep>,
 }
 
@@ -2863,6 +2871,8 @@ pub struct StepResult {
     pub assertion: Option<BrowserAssertionResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locator_echo: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
 }
 
 impl StepResult {
@@ -2880,6 +2890,7 @@ impl StepResult {
             actionability: None,
             assertion: None,
             locator_echo: None,
+            skipped: false,
         }
     }
 
@@ -2901,7 +2912,22 @@ impl StepResult {
             actionability: None,
             assertion: None,
             locator_echo: None,
+            skipped: false,
         }
+    }
+
+    pub fn skipped(step_index: usize, failed_step_index: usize) -> Self {
+        let mut result = Self::success(
+            step_index,
+            format!("Skipped: step {failed_step_index} failed earlier in this batch"),
+        );
+        result.ok = false;
+        result.skipped = true;
+        result
+    }
+
+    pub fn was_executed(&self) -> bool {
+        !self.skipped
     }
 
     pub fn with_data(mut self, data: serde_json::Value) -> Self {
@@ -2946,6 +2972,19 @@ pub struct BrowserPageSnapshot {
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact: Option<BrowserSnapshotArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames: Vec<BrowserFrameSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserFrameSummary {
+    pub frame_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    pub depth: usize,
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -2958,7 +2997,7 @@ pub struct BrowserPageContext {
     pub snapshot: Option<BrowserPageSnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecutionReport {
     pub ok: bool,
     pub steps: Vec<StepResult>,
@@ -3606,14 +3645,20 @@ mod tests {
                 timeout_ms: Some(1_000),
                 soft: Some(true),
             },
-            BrowserStep::Click { locator: locator() },
+            BrowserStep::Click {
+                locator: locator(),
+                timeout_ms: None,
+            },
             BrowserStep::ClickIfExists { locator: locator() },
             BrowserStep::Tap {
                 locator: Some(locator()),
                 x: None,
                 y: None,
             },
-            BrowserStep::Hover { locator: locator() },
+            BrowserStep::Hover {
+                locator: locator(),
+                timeout_ms: None,
+            },
             BrowserStep::Focus { locator: locator() },
             BrowserStep::Blur { locator: locator() },
             BrowserStep::ScrollTo { locator: locator() },
@@ -3807,6 +3852,7 @@ mod tests {
             },
             BrowserStep::Eval {
                 expression: "document.title".to_string(),
+                timeout_ms: None,
             },
             BrowserStep::Styles {
                 locator: locator(),
@@ -4380,7 +4426,7 @@ mod tests {
         let json_str = r##"{"action": "click", "locator": {"by": "css", "value": "#btn"}}"##;
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
         match step {
-            BrowserStep::Click { locator } => {
+            BrowserStep::Click { locator, .. } => {
                 assert_eq!(
                     locator.strategy,
                     LocatorStrategy::Css {
@@ -4857,8 +4903,12 @@ mod tests {
         let json_str = r#"{"action": "eval", "expression": "document.title"}"#;
         let step: BrowserStep = serde_json::from_str(json_str).unwrap();
         match step {
-            BrowserStep::Eval { expression } => {
+            BrowserStep::Eval {
+                expression,
+                timeout_ms,
+            } => {
                 assert_eq!(expression, "document.title");
+                assert_eq!(timeout_ms, None);
             }
             _ => panic!("Expected Eval"),
         }
@@ -5150,10 +5200,12 @@ mod tests {
                     path: std::path::PathBuf::from("/tmp/artifacts/snapshot-1.yaml"),
                     bytes: 12_000,
                 }),
+                frames: Vec::new(),
             }),
         };
 
         let value = serde_json::to_value(&page).unwrap();
+        assert!(value["snapshot"].get("frames").is_none());
         assert_eq!(value["status"], 404);
         assert_eq!(value["console"]["errors"], 1);
         assert_eq!(value["snapshot"]["truncated"], true);

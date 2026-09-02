@@ -321,14 +321,18 @@ impl DownloadTracker {
             return;
         };
         let download = &mut tracker.downloads[index].info;
+        let already_canceled = download.state == DownloadState::Canceled;
         download.received_bytes = received_bytes;
         download.total_bytes = total_bytes;
-        download.failure_reason = (state == DownloadState::Canceled).then(|| {
-            download
-                .failure_reason
-                .clone()
-                .unwrap_or(CANCELED_REASON.to_string())
-        });
+        match state {
+            DownloadState::Canceled => {
+                download
+                    .failure_reason
+                    .get_or_insert_with(|| CANCELED_REASON.to_string());
+            }
+            DownloadState::InProgress if already_canceled => return,
+            _ => download.failure_reason = None,
+        }
         let terminal = is_terminal(&state);
         download.state = state;
         if terminal {

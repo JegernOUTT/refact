@@ -664,6 +664,23 @@ fn websocket_event_from_binding_payload(payload: &Value) -> Option<Value> {
     Some(value)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum FlushDecision {
+    Flushed,
+    StopTransportDead,
+    Retry { report: bool },
+}
+
+fn classify_flush_result(result: &Result<(), String>, failure_reported: bool) -> FlushDecision {
+    match result {
+        Ok(()) => FlushDecision::Flushed,
+        Err(error) if crate::is_transport_dead_error(error) => FlushDecision::StopTransportDead,
+        Err(_) => FlushDecision::Retry {
+            report: !failure_reported,
+        },
+    }
+}
+
 fn spawn_command_flusher(tab: &std::sync::Arc<Tab>, registry: std::sync::Arc<WebSocketRegistry>) {
     let target_id = tab.get_target_id().to_string();
     let flusher_tab = std::sync::Arc::downgrade(tab);
@@ -678,21 +695,29 @@ fn spawn_command_flusher(tab: &std::sync::Arc<Tab>, registry: std::sync::Arc<Web
                 failure_reported = false;
                 continue;
             }
-            match registry.flush_tab_commands(&tab) {
-                Ok(()) => failure_reported = false,
-                Err(error) => {
-                    if crate::is_transport_dead_error(&error) {
-                        let dropped = registry.discard_commands_for(&target_id);
-                        tracing::debug!(
-                            "WebSocket command flusher for tab {target_id} stopping after \
-                             transport loss, dropped {dropped} queued command(s)"
+            let result = registry.flush_tab_commands(&tab);
+            match classify_flush_result(&result, failure_reported) {
+                FlushDecision::Flushed => failure_reported = false,
+                FlushDecision::StopTransportDead => {
+                    let dropped = registry.discard_commands_for(&target_id);
+                    tracing::debug!(
+                        "WebSocket command flusher for tab {target_id} stopping after \
+                         transport loss, dropped {dropped} queued command(s)"
+                    );
+                    return;
+                }
+                FlushDecision::Retry { report } => {
+                    if report {
+                        tracing::warn!(
+                            "WebSocket command dispatch failed: {}",
+                            result
+                                .as_ref()
+                                .err()
+                                .map(String::as_str)
+                                .unwrap_or_default()
                         );
-                        return;
                     }
-                    if !failure_reported {
-                        tracing::warn!("WebSocket command dispatch failed: {error}");
-                        failure_reported = true;
-                    }
+                    failure_reported = true;
                     std::thread::sleep(FLUSH_POLL_INTERVAL);
                 }
             }
@@ -777,7 +802,8 @@ fn websocket_mock_script() -> String {
     close(code = 1000, reason = '') {{
       this.readyState = 3;
       this.server?.close(code, reason);
-      this.dispatchEvent(new CloseEvent('close', {{ code, reason, wasClean: true }}));
+      const close = new CloseEvent('close', {{ code, reason, wasClean: true }});
+      this.dispatchEvent(close); this.onclose?.(close);
       emit({{ type: 'closed', id: this.id, code, reason }});
       sockets.delete(this.id);
     }}
@@ -1088,24 +1114,38 @@ mod tests {
         assert!(registry.has_pending_commands("tab-2"));
     }
 
-    // The flusher must exit on transport loss instead of logging once per iteration.
     #[test]
     fn the_command_flusher_stops_on_transport_loss_and_backs_off_otherwise() {
-        let source = include_str!("websocket.rs");
-        let flusher = source
-            .split_once("fn spawn_command_flusher(")
-            .unwrap()
-            .1
-            .split_once("\n}\n")
-            .unwrap()
-            .0;
-        assert!(flusher.contains("crate::is_transport_dead_error(&error)"));
-        assert!(flusher.contains("registry.discard_commands_for(&target_id)"));
-        assert!(flusher.contains("std::thread::sleep(FLUSH_POLL_INTERVAL)"));
-        assert!(
-            flusher.contains("if !failure_reported"),
+        assert_eq!(classify_flush_result(&Ok(()), true), FlushDecision::Flushed);
+        assert_eq!(
+            classify_flush_result(
+                &Err("Unable to make method calls because underlying connection is closed".into()),
+                false
+            ),
+            FlushDecision::StopTransportDead
+        );
+        assert_eq!(
+            classify_flush_result(&Err("socket route is not installed".into()), false),
+            FlushDecision::Retry { report: true }
+        );
+        assert_eq!(
+            classify_flush_result(&Err("socket route is not installed".into()), true),
+            FlushDecision::Retry { report: false },
             "repeated identical dispatch failures must not be logged every iteration"
         );
+    }
+
+    #[test]
+    fn the_injected_close_invokes_the_onclose_handler_property_like_server_close() {
+        let script = websocket_mock_script();
+        let close_body = script
+            .split_once("close(code = 1000, reason = '') {")
+            .unwrap()
+            .1
+            .split_once("serverClose(")
+            .unwrap()
+            .0;
+        assert!(close_body.contains("this.dispatchEvent(close); this.onclose?.(close);"));
     }
 
     #[test]

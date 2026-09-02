@@ -181,10 +181,20 @@ impl ContextState {
             })
             .map_err(|error| format!("Failed to set timezone: {error}"))?;
         }
-        if let Some((user_agent, accept_language)) = &self.user_agent {
+        let accept_language = self
+            .user_agent
+            .as_ref()
+            .and_then(|(_, accept_language)| accept_language.clone())
+            .or_else(|| self.locale.clone());
+        let user_agent = match (&self.user_agent, &accept_language) {
+            (Some((user_agent, _)), _) => Some(user_agent.clone()),
+            (None, Some(_)) => Some(current_user_agent(tab)?),
+            (None, None) => None,
+        };
+        if let Some(user_agent) = user_agent {
             tab.call_method(Emulation::SetUserAgentOverride {
-                user_agent: user_agent.clone(),
-                accept_language: accept_language.clone(),
+                user_agent,
+                accept_language,
                 platform: None,
                 user_agent_metadata: None,
             })
@@ -285,6 +295,15 @@ impl ContextState {
             http_credentials: self.http_credentials.is_some(),
         }
     }
+}
+
+fn current_user_agent(tab: &Tab) -> Result<String, String> {
+    tab.evaluate("navigator.userAgent", false)
+        .map_err(|error| format!("Failed to read the current user agent: {error}"))?
+        .value
+        .and_then(|value| value.as_str().map(str::to_string))
+        .filter(|user_agent| !user_agent.is_empty())
+        .ok_or_else(|| "Failed to read the current user agent".to_string())
 }
 
 pub fn apply_viewport(tab: &Tab, viewport: &ViewportState) -> Result<(), String> {

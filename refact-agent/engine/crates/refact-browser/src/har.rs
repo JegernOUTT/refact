@@ -395,18 +395,21 @@ pub struct HarMerge {
 }
 
 pub fn merge_har_entries(base: Vec<HarEntry>, recorded: Vec<HarEntry>) -> HarMerge {
+    let mut stale_base_slots: Vec<bool> = vec![true; base.len()];
     let mut merge = HarMerge {
         entries: base,
         ..Default::default()
     };
     for entry in recorded {
-        match merge
+        let slot = merge
             .entries
-            .iter_mut()
-            .find(|existing| request_matches(existing, &entry.request))
-        {
-            Some(existing) => {
-                *existing = entry;
+            .iter()
+            .zip(stale_base_slots.iter())
+            .position(|(existing, stale)| *stale && request_matches(existing, &entry.request));
+        match slot {
+            Some(index) => {
+                merge.entries[index] = entry;
+                stale_base_slots[index] = false;
                 merge.replaced += 1;
             }
             None => {
@@ -984,6 +987,44 @@ mod tests {
         assert_eq!(merge.entries[0].response.status, 503);
         assert_eq!(merge.entries[1].response.status, 201);
         assert_eq!(merge.entries[2].request.url, "https://example.test/b");
+    }
+
+    #[test]
+    fn recording_never_collapses_requests_recorded_in_the_same_session() {
+        let merge = merge_har_entries(
+            Vec::new(),
+            vec![
+                entry_for("GET", "https://example.test/api?[REDACTED]", 200),
+                entry_for("GET", "https://example.test/api?[REDACTED]", 404),
+                entry_for("GET", "https://example.test/api?[REDACTED]", 500),
+            ],
+        );
+        assert_eq!((merge.replaced, merge.appended), (0, 3));
+        assert_eq!(
+            merge
+                .entries
+                .iter()
+                .map(|entry| entry.response.status)
+                .collect::<Vec<_>>(),
+            vec![200, 404, 500]
+        );
+
+        let merge = merge_har_entries(
+            vec![entry_for("GET", "https://example.test/api?[REDACTED]", 200)],
+            vec![
+                entry_for("GET", "https://example.test/api?[REDACTED]", 404),
+                entry_for("GET", "https://example.test/api?[REDACTED]", 500),
+            ],
+        );
+        assert_eq!((merge.replaced, merge.appended), (1, 1));
+        assert_eq!(
+            merge
+                .entries
+                .iter()
+                .map(|entry| entry.response.status)
+                .collect::<Vec<_>>(),
+            vec![404, 500]
+        );
     }
 
     #[test]

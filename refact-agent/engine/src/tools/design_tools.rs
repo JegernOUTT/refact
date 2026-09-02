@@ -1347,6 +1347,7 @@ async fn artifact_search_dirs(app: &crate::app_state::AppState) -> Vec<PathBuf> 
     drop(runtimes);
     for arc in arcs {
         let runtime = arc.lock().await;
+        dirs.push(runtime.artifacts_dir.join("screenshots"));
         dirs.push(runtime.artifacts_dir.clone());
         dirs.push(runtime.downloads_dir.clone());
     }

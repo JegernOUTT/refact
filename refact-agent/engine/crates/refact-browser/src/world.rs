@@ -74,6 +74,7 @@ pub struct BindingCall {
 #[derive(Default)]
 struct TabWorldState {
     installed: bool,
+    main_world_created: bool,
     frames: FrameTree,
     frame_contexts: HashMap<Page::FrameId, Runtime::ExecutionContextId>,
     context_frames: HashMap<Runtime::ExecutionContextId, Page::FrameId>,
@@ -140,17 +141,24 @@ impl WorldManager {
             let context_id = match self.context_for_frame(tab.get_target_id(), &frame_id) {
                 Some(context_id) => context_id,
                 None => {
-                    tab.call_method(Page::CreateIsolatedWorld {
-                        frame_id: frame_id.clone(),
-                        world_name: Some(UTILITY_WORLD_NAME.to_string()),
-                        grant_univeral_access: Some(true),
-                    })
-                    .map_err(|error| {
-                        format!(
-                            "Failed to create browser utility world for frame {frame_id}: {error}"
-                        )
-                    })?
-                    .execution_context_id
+                    let context_id = tab
+                        .call_method(Page::CreateIsolatedWorld {
+                            frame_id: frame_id.clone(),
+                            world_name: Some(UTILITY_WORLD_NAME.to_string()),
+                            grant_univeral_access: Some(true),
+                        })
+                        .map_err(|error| {
+                            format!(
+                                "Failed to create browser utility world for frame {frame_id}: {error}"
+                            )
+                        })?
+                        .execution_context_id;
+                    if frame_id == main_frame_id
+                        && self.note_main_world_created(tab.get_target_id())
+                    {
+                        self.refs.utility_world_recreated(tab.get_target_id());
+                    }
+                    context_id
                 }
             };
             self.record_context(tab.get_target_id(), frame_id, context_id);
@@ -810,6 +818,12 @@ impl WorldManager {
             .context_frames
             .get(&context_id)
             .cloned()
+    }
+
+    fn note_main_world_created(&self, target_id: &str) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let tab = state.tabs.entry(target_id.to_string()).or_default();
+        std::mem::replace(&mut tab.main_world_created, true)
     }
 
     fn is_initialized(&self, target_id: &str, context_id: Runtime::ExecutionContextId) -> bool {

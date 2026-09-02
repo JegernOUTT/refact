@@ -33,7 +33,7 @@ pub fn redact_sensitive(text: &str) -> String {
                 "Authorization: [REDACTED]",
             ),
             (
-                Regex::new(r#"(?i)(https?://[^\s?#]+)\?[^\s)\]]+"#).unwrap(),
+                Regex::new(r#"(?i)(https?://[^\s?#]+)\?[^\s)\]\[][^\s)\]]*"#).unwrap(),
                 "$1?[REDACTED]",
             ),
             (
@@ -108,4 +108,17 @@ pub fn bounded_redaction_window(text: &str, scan_cap: usize) -> (&str, bool) {
         .unwrap_or(0);
 
     (&prefix[..end], true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_sensitive;
+
+    #[test]
+    fn url_query_redaction_is_idempotent() {
+        let once = redact_sensitive("GET https://x.test/big?kb=512&i=7 200");
+        assert_eq!(once, "GET https://x.test/big?[REDACTED] 200");
+        assert_eq!(redact_sensitive(&once), once);
+        assert_eq!(redact_sensitive(&redact_sensitive(&once)), once);
+    }
 }

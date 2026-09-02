@@ -150,7 +150,7 @@ const CHROME_DESCRIPTION: &str = concat!(
     ". help answers from documentation and never launches the browser, so it is free to consult before a run.\n",
     "Capability groups, each with a help topic: navigation and tabs; locator-driven input plus a mouse_*/tap coordinate escape hatch; forms; waits; assertions (expect, expect_poll); readouts (bounding_box, count, input_value, all_texts, element_state); inspection and snapshots; screenshots, pdf, and filmstrip capture; network interception (route, HAR, WebSocket) and http_request; emulation, devices, storage, and cookies; the fake clock; locator handlers and dialogs; coverage and virtual authenticators; cdp_send and reset. The `action` enum below is the authoritative action list.\n",
     "Locators are ref-first with a fallback vocabulary (role, test_id, text, label, placeholder, alt_text, title, css, xpath, id, name, autocomplete) composable with nth/first/last, filter, and/or, and an outermost-first `frames` chain. Non-selecting actions are strict: ambiguous locators fail loudly with the match count.\n",
-    "Page report: a page-changing batch returns `page` with the final URL and title, `page.status` for a non-2xx main document, `page.console` error/warning COUNTS (full text stays in `console` and `tab_log`), and `page.snapshot`, inlined when small and otherwise a `text/yaml` artifact plus the head, `lines`, `bytes`, and `truncated:true`. Locator-driven actions echo a canonical Playwright-style locator in `locator_echo`.\n",
+    "Page report: a page-changing batch returns `page` with the final URL and title, `page.status` for a non-2xx main document, `page.console` error/warning COUNTS (full text stays in `console` and `tab_log`), and `page.snapshot`, inlined when small and otherwise a `text/yaml` artifact plus the head, `lines`, `bytes`, and `truncated:true`. Locator-driven actions report `locator_echo`, a canonical locator generated for the element actually acted on.\n",
     "`page_context` picks the page-changed context: `snapshot` (the default) attaches the ref-annotated ARIA snapshot and NO image, `screenshot` attaches a policy-sized image instead, `both` attaches each, `none` attaches only the page header. `attach_screenshot` is the tri-state override and wins over `page_context`: true = always attach, false = never attach, omitted = follow `page_context`. `network` controls per-request report volume: `summary` (the default) emits one `method url status bytes ms` line per request, `full` keeps headers, `none` drops per-request entries.\n",
     "Click, hover, fill, clear, check, and uncheck auto-wait for actionability. Never use `wait_seconds` for readiness; use `wait_for_response`, `wait_for_load_state`, `wait_for_selector`, or `wait_for_function`."
 );
@@ -463,7 +463,7 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "timeout_ms".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 0, "description": "Step timeout in milliseconds; waits, navigate, and expect default to 5000"}),
+        serde_json::json!({"type": "integer", "minimum": 0, "description": "Timeout in ms where accepted (waits/navigate/expect/click/hover default 5000; eval 30000)"}),
     );
     properties.insert(
         "ticks".to_string(),
@@ -583,7 +583,13 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "compose".to_string(),
-        serde_json::json!({"type": "boolean", "description": "screencast_stop composes a filmstrip; defaults to true"}),
+        serde_json::json!({
+            "anyOf": [
+                {"type": "boolean"},
+                {"type": "string", "enum": ["grid", "separate"]}
+            ],
+            "description": "screencast_stop: bool, compose a filmstrip (default true). screenshot_elements: grid = one labeled sheet, separate = one image per locator"
+        }),
     );
     properties.insert(
         "max_width".to_string(),
@@ -783,10 +789,6 @@ fn browser_step_schema_with_actions(
         serde_json::json!({"type": "array", "items": browser_locator_alias_schema("captured element")}),
     );
     properties.insert(
-        "compose".to_string(),
-        serde_json::json!({"type": "string", "enum": ["grid", "separate"], "description": "grid composes one labeled contact sheet, separate returns one image per locator"}),
-    );
-    properties.insert(
         "states".to_string(),
         serde_json::json!({"type": "array", "items": {"type": "string", "enum": ["default", "hover", "focus", "active"]}}),
     );
@@ -807,8 +809,6 @@ fn browser_step_schema_with_actions(
         "format".to_string(),
         serde_json::json!({"type": "string", "enum": ["Letter", "Legal", "Tabloid", "Ledger", "A0", "A1", "A2", "A3", "A4", "A5", "A6"]}),
     );
-    properties.insert("width".to_string(), serde_json::json!({"type": "string"}));
-    properties.insert("height".to_string(), serde_json::json!({"type": "string"}));
     properties.insert(
         "margins".to_string(),
         serde_json::json!({
@@ -836,11 +836,17 @@ fn browser_step_schema_with_actions(
     );
     properties.insert(
         "width".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 1}),
+        serde_json::json!({
+            "anyOf": [{"type": "integer", "minimum": 1}, {"type": "string"}],
+            "description": "integer pixels (set_viewport/set_window_bounds) or CSS length string (pdf)"
+        }),
     );
     properties.insert(
         "height".to_string(),
-        serde_json::json!({"type": "integer", "minimum": 1}),
+        serde_json::json!({
+            "anyOf": [{"type": "integer", "minimum": 1}, {"type": "string"}],
+            "description": "integer pixels (set_viewport/set_window_bounds) or CSS length string (pdf)"
+        }),
     );
     properties.insert(
         "device_scale_factor".to_string(),
@@ -1118,6 +1124,8 @@ fn browser_request_schema() -> serde_json::Value {
             "page_context": {"type": "string", "enum": ["snapshot", "screenshot", "both", "none"], "description": "What to attach as page-changed context. snapshot (default) attaches the ref-annotated aria snapshot and no image, screenshot attaches a policy-sized PNG instead, both attaches each, none attaches only the page header"},
             "attach_screenshot": {"type": "boolean", "description": "Screenshot override: true = always attach, false = never attach, omitted = follow page_context"},
             "network": {"type": "string", "enum": ["none", "summary", "full"], "description": "Per-request report volume. summary (default) emits one `method url status bytes ms` line per request, full keeps request and response headers, none drops per-request entries"},
+            "block_service_workers": {"type": "boolean", "description": "Block service workers for this context (sticky until reset)"},
+            "continue_on_error": {"type": "boolean", "description": "Run later steps after a failure instead of skipping them (default false); ok stays false"},
             "target": tab_target_schema(),
             "steps": {
                 "type": "array",
@@ -1865,10 +1873,14 @@ mod tests {
             .and_then(Value::as_object)
             .unwrap();
 
+        assert_eq!(properties["compose"]["anyOf"][0]["type"], "boolean");
         assert_eq!(
-            properties["compose"]["enum"],
+            properties["compose"]["anyOf"][1]["enum"],
             serde_json::json!(["grid", "separate"])
         );
+        assert_eq!(properties["width"]["anyOf"][0]["type"], "integer");
+        assert_eq!(properties["width"]["anyOf"][1]["type"], "string");
+        assert_eq!(properties["height"]["anyOf"][1]["type"], "string");
         assert_eq!(
             properties["states"]["items"]["enum"],
             serde_json::json!(["default", "hover", "focus", "active"])
@@ -1986,6 +1998,53 @@ mod tests {
         assert!(report.screenshot.is_none());
         let content = execution_report_to_multimodal(&report, &ImagePolicy::default()).unwrap();
         assert!(content.iter().any(|element| element.is_image()));
+    }
+
+    #[test]
+    fn artifact_only_screenshot_payload_is_still_attached_and_keeps_its_path() {
+        const TINY_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let data = serde_json::json!({
+            "artifact": {
+                "kind": "image",
+                "mime": "image/png",
+                "data": TINY_PNG_BASE64,
+                "width": 1,
+                "height": 1,
+                "bytes": 68,
+                "path": "/tmp/artifacts/screenshots/shot-1.png",
+            }
+        });
+        assert_eq!(
+            step_inline_image(&data),
+            Some(("image/png", TINY_PNG_BASE64))
+        );
+        assert!(step_inline_image(&serde_json::json!({"artifact": {"kind": "pdf"}})).is_none());
+
+        let step =
+            crate::integrations::browser_models::StepResult::success(0, "Screenshot captured")
+                .with_data(data);
+        let report: ExecutionReport = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "steps": [step],
+            "dialogs": [],
+            "new_tabs": [],
+        }))
+        .unwrap();
+        let content = execution_report_to_multimodal(&report, &ImagePolicy::default()).unwrap();
+        assert!(content.iter().any(|element| element.is_image()));
+        let text = content
+            .iter()
+            .filter(|element| !element.is_image())
+            .map(|element| element.m_content.clone())
+            .collect::<String>();
+        assert!(
+            text.contains("/tmp/artifacts/screenshots/shot-1.png"),
+            "{text}"
+        );
+        assert!(
+            !text.contains(TINY_PNG_BASE64),
+            "base64 leaked into text: {text}"
+        );
     }
 
     fn report_with_screenshot(step_data: Value) -> ExecutionReport {
@@ -2660,6 +2719,16 @@ fn step_image_is_attachable(report: &ExecutionReport, data: &Value) -> bool {
     report.screenshot.is_none() || data["artifact"]["kind"] == "filmstrip"
 }
 
+fn inline_image_fields(node: &Value) -> Option<(&str, &str)> {
+    let mime = node.get("mime")?.as_str()?;
+    let encoded = node.get("data")?.as_str()?;
+    mime.starts_with("image/").then_some((mime, encoded))
+}
+
+fn step_inline_image(data: &Value) -> Option<(&str, &str)> {
+    inline_image_fields(data).or_else(|| data.get("artifact").and_then(inline_image_fields))
+}
+
 /// `success` when nothing failed, `partial` when only non-fatal steps (soft assertions,
 /// `click_if_exists`) failed and the batch still reports `ok`, `failure` otherwise.
 fn browser_outcome(report: &ExecutionReport) -> &'static str {
@@ -2749,19 +2818,14 @@ fn format_controller_report(
 
         if let Some(ref data) = result.data {
             if step_image_is_attachable(report, data) {
-                if let (Some(mime), Some(b64_data)) = (
-                    data.get("mime").and_then(|v| v.as_str()),
-                    data.get("data").and_then(|v| v.as_str()),
-                ) {
-                    if mime.starts_with("image/") {
-                        match resize_screenshot_b64(b64_data, mime, image_policy) {
-                            Ok((resized, resized_mime)) => {
-                                if let Ok(el) = MultimodalElement::new(resized_mime, resized) {
-                                    multimodal.push(el);
-                                }
+                if let Some((mime, b64_data)) = step_inline_image(data) {
+                    match resize_screenshot_b64(b64_data, mime, image_policy) {
+                        Ok((resized, resized_mime)) => {
+                            if let Ok(el) = MultimodalElement::new(resized_mime, resized) {
+                                multimodal.push(el);
                             }
-                            Err(e) => log.push(format!("Screenshot processing: {}", e)),
                         }
+                        Err(e) => log.push(format!("Screenshot processing: {}", e)),
                     }
                 }
             }
@@ -2834,16 +2898,10 @@ fn execution_report_to_multimodal(
             if !step_image_is_attachable(report, data) {
                 continue;
             }
-            if let (Some(mime), Some(b64_data)) = (
-                data.get("mime").and_then(|v| v.as_str()),
-                data.get("data").and_then(|v| v.as_str()),
-            ) {
-                if mime.starts_with("image/") {
-                    let (resized, resized_mime) =
-                        resize_screenshot_b64(b64_data, mime, image_policy)?;
-                    if let Ok(el) = MultimodalElement::new(resized_mime, resized) {
-                        content.push(el);
-                    }
+            if let Some((mime, b64_data)) = step_inline_image(data) {
+                let (resized, resized_mime) = resize_screenshot_b64(b64_data, mime, image_policy)?;
+                if let Ok(el) = MultimodalElement::new(resized_mime, resized) {
+                    content.push(el);
                 }
             }
             for (mime, b64_data) in step_gallery_images(data) {

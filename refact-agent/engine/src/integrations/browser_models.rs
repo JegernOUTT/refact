@@ -22,6 +22,8 @@ struct BrowserActionRequestEnvelope {
     network: NetworkReportMode,
     #[serde(default)]
     block_service_workers: Option<bool>,
+    #[serde(default)]
+    continue_on_error: bool,
     steps: Vec<Value>,
 }
 
@@ -39,6 +41,7 @@ pub fn parse_browser_action_request(value: Value) -> Result<BrowserActionRequest
         page_context: envelope.page_context,
         network: envelope.network,
         block_service_workers: envelope.block_service_workers,
+        continue_on_error: envelope.continue_on_error,
         steps,
     })
 }
@@ -48,6 +51,14 @@ fn parse_browser_step(index: usize, raw_step: Value) -> Result<BrowserStep, Stri
         .get("action")
         .and_then(Value::as_str)
         .map(str::to_string);
+    if let (Some(action), Some(object)) = (action.as_deref(), raw_step.as_object()) {
+        if let Some(stray) = stray_field_on_fieldless_action(action, object) {
+            return Err(format!(
+                "step[{index}] ({action}): unknown field `{}`; `{action}` takes no fields",
+                bounded_error_text(stray)
+            ));
+        }
+    }
     serde_json::from_value::<BrowserStep>(raw_step).map_err(|error| match action {
         Some(action) if BrowserStep::ACTION_NAMES.contains(&action.as_str()) => format!(
             "step[{index}] ({action}): {}",
@@ -62,18 +73,53 @@ fn parse_browser_step(index: usize, raw_step: Value) -> Result<BrowserStep, Stri
     })
 }
 
+fn stray_field_on_fieldless_action<'a>(
+    action: &str,
+    object: &'a serde_json::Map<String, Value>,
+) -> Option<&'a str> {
+    let (_, required, optional, aliases) = BrowserStep::ACTION_FIELDS
+        .iter()
+        .find(|(name, ..)| *name == action)?;
+    if !(required.is_empty() && optional.is_empty() && aliases.is_empty()) {
+        return None;
+    }
+    object
+        .keys()
+        .find(|key| key.as_str() != "action")
+        .map(String::as_str)
+}
+
 fn format_action_suggestions(action: &str) -> String {
-    let lowered = action.to_ascii_lowercase();
+    let lowered = action.to_ascii_lowercase().replace('-', "_");
+    let max_distance = (lowered.len() / 3).max(2);
     let mut scored = BrowserStep::ACTION_NAMES
         .iter()
-        .map(|candidate| (shared_prefix_len(&lowered, candidate), *candidate))
-        .filter(|(score, _)| *score >= MIN_ACTION_SUGGESTION_SCORE)
+        .filter_map(|candidate| {
+            let distance = edit_distance(&lowered, candidate);
+            let prefix = shared_prefix_len(&lowered, candidate);
+            let tier = if candidate.starts_with(&lowered) || lowered.starts_with(candidate) {
+                0
+            } else if distance <= max_distance {
+                1
+            } else if prefix >= MIN_ACTION_SUGGESTION_SCORE {
+                2
+            } else {
+                return None;
+            };
+            Some((tier, distance, prefix, *candidate))
+        })
         .collect::<Vec<_>>();
-    scored.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(right.1)));
+    scored.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then(left.1.cmp(&right.1))
+            .then(right.2.cmp(&left.2))
+            .then(left.3.cmp(right.3))
+    });
     let names = scored
         .into_iter()
         .take(MAX_ACTION_SUGGESTIONS)
-        .map(|(_, candidate)| candidate)
+        .map(|(_, _, _, candidate)| candidate)
         .collect::<Vec<_>>();
     if names.is_empty() {
         String::new()
@@ -87,6 +133,22 @@ fn shared_prefix_len(left: &str, right: &str) -> usize {
         .zip(right.bytes())
         .take_while(|(left, right)| left == right)
         .count()
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0; right.len() + 1];
+    for (i, left_char) in left.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, right_char) in right.iter().enumerate() {
+            let substitution = previous[j] + usize::from(left_char != right_char);
+            current[j + 1] = substitution.min(previous[j + 1] + 1).min(current[j] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
 }
 
 fn bounded_error_text(message: &str) -> String {
@@ -148,6 +210,29 @@ mod tests {
     }
 
     #[test]
+    fn fieldless_actions_reject_stray_fields_like_every_other_action() {
+        assert_step_rejection(
+            serde_json::json!({"action": "reload", "bogus_field_xyz": 1}),
+            "unknown field `bogus_field_xyz`; `reload` takes no fields",
+        );
+        assert_step_rejection(
+            serde_json::json!({"action": "list_tabs", "timeout_ms": 5000}),
+            "`list_tabs` takes no fields",
+        );
+        assert_step_rejection(
+            serde_json::json!({"action": "tab_log", "locator": {"by": "css", "value": "#x"}}),
+            "`tab_log` takes no fields",
+        );
+        let request = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "reload"}, {"action": "hide_highlight"}],
+            "continue_on_error": true
+        }))
+        .unwrap();
+        assert_eq!(request.steps.len(), 2);
+        assert!(request.continue_on_error);
+    }
+
+    #[test]
     fn missing_required_field_names_the_step_index_and_action() {
         let error = parse_browser_action_request(serde_json::json!({
             "steps": [
@@ -179,6 +264,24 @@ mod tests {
         assert_eq!(
             error,
             "step[1]: unknown action 'clic'; did you mean click, click_if_exists"
+        );
+
+        let typo_in_the_first_letters = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "sceenshot"}]
+        }))
+        .unwrap_err();
+        assert_eq!(
+            typo_in_the_first_letters,
+            "step[0]: unknown action 'sceenshot'; did you mean screenshot"
+        );
+
+        let dashed = parse_browser_action_request(serde_json::json!({
+            "steps": [{"action": "wait-for-selector", "locator": {"by": "css", "value": "#x"}}]
+        }))
+        .unwrap_err();
+        assert!(
+            dashed.contains("did you mean wait_for_selector"),
+            "{dashed}"
         );
     }
 

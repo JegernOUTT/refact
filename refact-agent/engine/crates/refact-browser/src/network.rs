@@ -173,6 +173,17 @@ impl NetworkIdleTracker {
         }
     }
 
+    fn inflight_request_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .frames
+            .values()
+            .flat_map(|frame| frame.inflight.iter().cloned())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
     fn subtree_idle(&self, frame_id: &str, now_ms: u64) -> bool {
         let Some(frame) = self.frames.get(frame_id) else {
             return false;
@@ -584,13 +595,59 @@ impl NetworkMonitorHandle {
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(format!("Timed out after {}ms", timeout.as_millis()));
+                return Err(load_state_timeout_message(&state, load_state, timeout));
             }
             let wake = remaining.min(Duration::from_millis(NETWORK_IDLE_MS));
             let (next, _) = self.changed.wait_timeout(state, wake).unwrap();
             state = next;
         }
     }
+}
+
+const LOAD_STATE_TIMEOUT_URL_SAMPLE: usize = 5;
+
+fn load_state_timeout_message(
+    state: &NetworkMonitor,
+    load_state: NetworkLoadState,
+    timeout: Duration,
+) -> String {
+    let mut message = format!("Timed out after {}ms", timeout.as_millis());
+    if load_state != NetworkLoadState::Networkidle {
+        return message;
+    }
+    let inflight = state.idle.inflight_request_ids();
+    let sample: Vec<String> = inflight
+        .iter()
+        .filter_map(|request_id| state.active.get(request_id))
+        .take(LOAD_STATE_TIMEOUT_URL_SAMPLE)
+        .map(|request| {
+            format!(
+                "{} {}",
+                request.entry.method,
+                summarize_network_url(&request.entry.url)
+            )
+        })
+        .collect();
+    if inflight.is_empty() {
+        message.push_str(
+            "; the network went quiet but never stayed idle for 500ms — pages that poll or keep sockets open never reach networkidle",
+        );
+    } else {
+        message.push_str(&format!(
+            "; {} request(s) still in flight: {}{}",
+            inflight.len(),
+            sample.join(", "),
+            if inflight.len() > sample.len() {
+                ", …"
+            } else {
+                ""
+            }
+        ));
+    }
+    message.push_str(
+        "; use wait_for_response, wait_for_function, wait_for_text or wait_for_selector instead of networkidle on live apps",
+    );
+    message
 }
 
 #[derive(Clone, Debug, Default)]
@@ -742,6 +799,32 @@ pub fn mask_text(value: &str) -> String {
         .into_owned()
 }
 
+const SUMMARY_URL_MAX_CHARS: usize = 200;
+
+pub fn summarize_network_url(url: &str) -> String {
+    let lower_prefix: String = url.chars().take(5).collect::<String>().to_ascii_lowercase();
+    if lower_prefix.starts_with("data:") || lower_prefix.starts_with("blob:") {
+        let scheme_end = url.find(':').map(|index| index + 1).unwrap_or(url.len());
+        let payload = &url[scheme_end..];
+        let media_type: String = payload
+            .chars()
+            .take_while(|ch| *ch != ',' && *ch != ';')
+            .take(60)
+            .collect();
+        return format!(
+            "{}{} [embedded, {} chars]",
+            &url[..scheme_end],
+            media_type,
+            url.chars().count()
+        );
+    }
+    if url.chars().count() > SUMMARY_URL_MAX_CHARS {
+        let head: String = url.chars().take(SUMMARY_URL_MAX_CHARS).collect();
+        return format!("{head}… [{} chars]", url.chars().count());
+    }
+    url.to_string()
+}
+
 pub fn summarize_network_entry(entry: &NetworkEntry) -> String {
     let status = entry
         .status
@@ -755,17 +838,17 @@ pub fn summarize_network_entry(entry: &NetworkEntry) -> String {
     let elapsed = entry
         .timing
         .as_ref()
-        .and_then(|timing| {
-            timing
-                .response_end
-                .map(|end| (end - timing.start_time) * 1_000.0)
-        })
+        .and_then(|timing| timing.response_end.map(|end| end - timing.start_time))
         .filter(|elapsed| elapsed.is_finite() && *elapsed >= 0.0)
         .map(|elapsed| format!("{}ms", elapsed.round()))
         .unwrap_or_else(|| "-".to_string());
     let mut line = format!(
         "{} {} {} {} {}",
-        entry.method, entry.url, status, bytes, elapsed
+        entry.method,
+        summarize_network_url(&entry.url),
+        status,
+        bytes,
+        elapsed
     );
     if let Some(failure) = entry.failure_text.as_deref() {
         line.push(' ');
@@ -962,6 +1045,45 @@ mod tests {
     }
 
     #[test]
+    fn summary_reports_elapsed_in_milliseconds_and_collapses_embedded_urls() {
+        let entry = NetworkEntry {
+            method: "GET".to_string(),
+            url: "https://x.test/slow-echo".to_string(),
+            status: Some(200),
+            encoded_data_length: Some(190),
+            timing: Some(NetworkTiming {
+                start_time: 1_788_280_000_000.0,
+                request_start: None,
+                response_start: None,
+                response_end: Some(1_788_280_000_401.0),
+            }),
+            ..NetworkEntry::default()
+        };
+        assert_eq!(
+            summarize_network_entry(&entry),
+            "GET https://x.test/slow-echo 200 190b 401ms"
+        );
+
+        let embedded = NetworkEntry {
+            method: "GET".to_string(),
+            url: format!("data:image/png;base64,{}", "A".repeat(5_000)),
+            status: Some(200),
+            ..NetworkEntry::default()
+        };
+        let line = summarize_network_entry(&embedded);
+        assert_eq!(line, "GET data:image/png [embedded, 5022 chars] 200 - -");
+
+        let long = NetworkEntry {
+            method: "GET".to_string(),
+            url: format!("https://x.test/{}", "p".repeat(400)),
+            ..NetworkEntry::default()
+        };
+        let line = summarize_network_entry(&long);
+        assert!(line.len() < 260, "{line}");
+        assert!(line.contains("… [415 chars]"));
+    }
+
+    #[test]
     fn method_and_status_filters_cover_every_combination() {
         let entry = NetworkEntry {
             method: "POST".to_string(),
@@ -1070,6 +1192,34 @@ mod tests {
     }
 
     #[test]
+    fn networkidle_timeout_names_the_inflight_requests_and_a_better_wait() {
+        let monitor = NetworkMonitorHandle::default();
+        monitor.attach_frame("main".to_string(), None);
+        monitor.request_started(request("poll", "main", "https://x.test/api/poll", "Fetch"));
+        let error = monitor
+            .wait_for_load_state(NetworkLoadState::Networkidle, Duration::ZERO)
+            .unwrap_err();
+        assert!(error.starts_with("Timed out after 0ms"), "{error}");
+        assert!(
+            error.contains("1 request(s) still in flight: GET https://x.test/api/poll"),
+            "{error}"
+        );
+        assert!(error.contains("wait_for_response"), "{error}");
+
+        let quiet = NetworkMonitorHandle::default();
+        quiet.attach_frame("main".to_string(), None);
+        let error = quiet
+            .wait_for_load_state(NetworkLoadState::Networkidle, Duration::ZERO)
+            .unwrap_err();
+        assert!(error.contains("never stayed idle for 500ms"), "{error}");
+
+        let plain = quiet
+            .wait_for_load_state(NetworkLoadState::Load, Duration::ZERO)
+            .unwrap_err();
+        assert_eq!(plain, "Timed out after 0ms");
+    }
+
+    #[test]
     fn network_idle_requires_every_frame_subtree_for_five_hundred_ms() {
         let mut idle = NetworkIdleTracker::default();
         idle.attach("main".to_string(), None, 0);
@@ -1131,14 +1281,14 @@ mod tests {
                 "default-src 'self'".to_string(),
             )]),
         ));
-        monitor.finish("api", 10.545, Some(1_234));
+        monitor.finish("api", 555.0, Some(1_234));
         monitor.record_request(request(
             "blocked",
             "main",
             "https://x.test/blocked",
             "Image",
         ));
-        monitor.fail("blocked", 10.2, "net::ERR_BLOCKED_BY_CLIENT".to_string());
+        monitor.fail("blocked", 210.0, "net::ERR_BLOCKED_BY_CLIENT".to_string());
         monitor.completed
     }
 

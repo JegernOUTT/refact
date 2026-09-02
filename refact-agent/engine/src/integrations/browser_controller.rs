@@ -96,7 +96,6 @@ const REPORT_STABILIZATION_TIMEOUT_MS: u64 = 3_000;
 const REPORT_STABILITY_INTERVAL_MS: u64 = 200;
 const CONSOLE_POLL_INTERVAL_MS: u64 = 50;
 
-#[allow(dead_code)]
 pub fn resolve_tab(runtime: &BrowserRuntime, target: &TabTarget) -> Result<Arc<Tab>, String> {
     match target {
         TabTarget::Active => runtime
@@ -224,6 +223,7 @@ struct BrowserActionDriver<'a> {
     precheck_deadline: Instant,
     resolved: Option<ResolvedElement>,
     locator_echo: Option<String>,
+    pointer_attempt: usize,
 }
 
 struct DragActionabilityDriver<'a> {
@@ -364,6 +364,7 @@ impl<'a> BrowserActionDriver<'a> {
                 )),
             resolved: None,
             locator_echo: None,
+            pointer_attempt: 0,
         }
     }
 
@@ -425,6 +426,8 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
             .resolved
             .as_ref()
             .and_then(|resolved| generate_locator_echo(self.tab, self.world, &resolved.handle));
+        let scroll_strategy = ScrollStrategy::for_attempt(self.pointer_attempt);
+        self.pointer_attempt += 1;
         let resolved = self.resolved()?;
         let dispatcher = CdpMouseDispatcher::new(self.tab);
         if self.action == ActionKind::Focus {
@@ -444,6 +447,13 @@ impl ActionabilityDriver for BrowserActionDriver<'_> {
                 .map_err(|error| ActionabilityDiagnostic::PrecheckFailed {
                     description: error.to_string(),
                 });
+        }
+        if let Err(error) = dispatcher.scroll_into_view(&resolved.handle, scroll_strategy) {
+            if refact_browser::is_transport_dead_error(&error.to_string()) {
+                return Err(ActionabilityDiagnostic::PrecheckFailed {
+                    description: error.to_string(),
+                });
+            }
         }
         let point = dispatcher
             .clickable_point(&resolved.handle)
@@ -846,6 +856,7 @@ fn execute_steps_with_world(
         pre_step_url = Some(tab.get_url());
         results.push(result);
     }
+    mark_unexecuted_steps_skipped(&mut results, steps.len());
 
     let _ = world.release_all(tab);
 
@@ -2537,6 +2548,7 @@ pub async fn execute_request_with_runtime_validated(
         let rt = runtime_arc.lock().await;
         rt.attached_chat_id
             .clone()
+            .filter(|_| rt.owns_browser_process())
             .map(|chat_id| (chat_id, rt.profile_dir.clone(), rt.launch_options.clone()))
     };
     let Some((chat_id, profile_dir, launch_options)) = plan else {
@@ -2570,42 +2582,144 @@ pub async fn execute_request_with_runtime_validated(
             .push(crate::integrations::browser_runtime::RELAUNCH_WARNING.to_string());
         return Ok(report);
     };
+    let resume = resume.with_replay_from(&request.steps);
+    if resume.resume_index > 0 && resume.replay.is_none() {
+        return Ok(resume_refused_without_page_context(resume));
+    }
     let mut retry_request = request;
-    retry_request.steps = retry_request.steps.split_off(resume.resume_index);
+    let tail = retry_request.steps.split_off(resume.resume_index);
+    retry_request.steps = resume
+        .replay
+        .iter()
+        .map(|(_, step)| step.clone())
+        .chain(tail)
+        .collect();
     let retry = execute_request_with_runtime(runtime_arc, retry_request, image_policy).await?;
     Ok(merge_resumed_report(resume, retry))
 }
 
 struct ResumePlan {
     resume_index: usize,
+    total_steps: usize,
     completed_steps: Vec<StepResult>,
     warnings: Vec<String>,
+    replay: Option<(usize, BrowserStep)>,
+}
+
+impl ResumePlan {
+    fn with_replay_from(mut self, steps: &[BrowserStep]) -> Self {
+        self.replay = steps
+            .iter()
+            .take(self.resume_index)
+            .enumerate()
+            .rev()
+            .find(|(_, step)| restores_document_after_relaunch(step))
+            .map(|(idx, step)| (idx, step.clone()));
+        self
+    }
+}
+
+fn restores_document_after_relaunch(step: &BrowserStep) -> bool {
+    matches!(
+        step,
+        BrowserStep::Navigate { .. } | BrowserStep::SetContent { .. } | BrowserStep::OpenTab { .. }
+    )
 }
 
 fn plan_resume(attempt: &ExecutionReport, total_steps: usize) -> ResumePlan {
     let step_at = |index: usize| attempt.steps.iter().find(|step| step.step_index == index);
     let resume_index = (0..total_steps)
-        .find(|index| step_at(*index).is_none_or(step_hit_dead_transport))
+        .find(|index| {
+            step_at(*index).is_none_or(|step| step.skipped || step_hit_dead_transport(step))
+        })
         .unwrap_or(total_steps);
     ResumePlan {
         resume_index,
+        total_steps,
         completed_steps: (0..resume_index).filter_map(step_at).cloned().collect(),
         warnings: attempt.warnings.clone(),
+        replay: None,
+    }
+}
+
+fn resume_refused_without_page_context(resume: ResumePlan) -> ExecutionReport {
+    let mut steps = resume.completed_steps;
+    steps.push(StepResult::failure(
+        resume.resume_index,
+        "Resume after browser relaunch",
+        "the page could not be restored after the relaunch, so this step was not run",
+    ));
+    mark_unexecuted_steps_skipped(&mut steps, resume.total_steps);
+    let mut warnings = resume.warnings;
+    warnings.push(
+        crate::integrations::browser_runtime::relaunch_without_page_context_warning(
+            resume.resume_index,
+        ),
+    );
+    ExecutionReport {
+        ok: false,
+        steps,
+        warnings,
+        url: Some("about:blank".to_string()),
+        ..ExecutionReport::default()
     }
 }
 
 fn merge_resumed_report(resume: ResumePlan, mut retry: ExecutionReport) -> ExecutionReport {
     let mut steps = resume.completed_steps;
     let mut retried = std::mem::take(&mut retry.steps);
+    let mut warnings = resume.warnings;
+    let shift = match &resume.replay {
+        Some((replayed_index, _)) => {
+            let replay_result = (!retried.is_empty()).then(|| retried.remove(0));
+            match replay_result {
+                Some(result) if result.ok => {
+                    warnings.push(
+                        crate::integrations::browser_runtime::relaunch_replay_warning(
+                            *replayed_index,
+                            resume.resume_index,
+                            &result.summary,
+                        ),
+                    );
+                    resume.resume_index - 1
+                }
+                other => {
+                    let detail = other
+                        .map(|result| result.error.unwrap_or(result.summary))
+                        .unwrap_or_else(|| "no result was produced".to_string());
+                    steps.push(StepResult::failure(
+                        resume.resume_index,
+                        "Resume after browser relaunch",
+                        format!(
+                            "replayed step {replayed_index} to restore the document, but it failed: {detail}"
+                        ),
+                    ));
+                    mark_unexecuted_steps_skipped(&mut steps, resume.total_steps);
+                    warnings.push(
+                        crate::integrations::browser_runtime::relaunch_resume_warning(
+                            resume.resume_index,
+                        ),
+                    );
+                    warnings.append(&mut retry.warnings);
+                    retry.warnings = warnings;
+                    retry.steps = steps;
+                    retry.ok = false;
+                    return retry;
+                }
+            }
+        }
+        None => {
+            warnings.push(
+                crate::integrations::browser_runtime::relaunch_resume_warning(resume.resume_index),
+            );
+            resume.resume_index
+        }
+    };
     for step in &mut retried {
-        step.step_index += resume.resume_index;
+        step.step_index += shift;
     }
     steps.append(&mut retried);
     retry.steps = steps;
-
-    let mut warnings = resume.warnings;
-    warnings
-        .push(crate::integrations::browser_runtime::relaunch_resume_warning(resume.resume_index));
     warnings.append(&mut retry.warnings);
     retry.warnings = warnings;
     retry
@@ -2831,22 +2945,19 @@ pub async fn execute_request_with_runtime(
         } = step
         {
             let timeout = Duration::from_millis(clamp_timeout_ms(*timeout_ms));
-            match tokio::task::block_in_place(|| {
-                download_monitor.wait_for_download(
-                    armed_network_waits
-                        .get(&idx)
-                        .copied()
-                        .unwrap_or_else(|| download_monitor.cursor()),
-                    timeout,
-                    save_as.as_deref(),
-                )
-            }) {
-                Ok(download) => {
-                    StepResult::success(idx, format!("Downloaded {}", download.suggested_filename))
-                        .with_data(serde_json::to_value(download).unwrap_or_default())
-                }
-                Err(error) => StepResult::failure(idx, "Wait for download", error),
-            }
+            download_step_result(
+                idx,
+                tokio::task::block_in_place(|| {
+                    download_monitor.wait_for_download(
+                        armed_network_waits
+                            .get(&idx)
+                            .copied()
+                            .unwrap_or_else(|| download_monitor.cursor()),
+                        timeout,
+                        save_as.as_deref(),
+                    )
+                }),
+            )
         } else if let BrowserStep::WaitForConsoleMessage {
             contains,
             level,
@@ -2867,6 +2978,10 @@ pub async fn execute_request_with_runtime(
                 idx,
                 tokio::task::block_in_place(|| download_monitor.cancel_download(id.as_deref())),
             )
+        } else if matches!(step, BrowserStep::TabLog) {
+            let mut rt = runtime_arc.lock().await;
+            rt.drain_raw_events();
+            tab_log_from_buffer(idx, &rt.console_buffer)
         } else if let BrowserStep::Pdf { options } = step {
             let mut rt = runtime_arc.lock().await;
             let result = match rt.get_active_tab() {
@@ -3056,6 +3171,10 @@ pub async fn execute_request_with_runtime(
                 ),
             }
         };
+        if result.ok && is_image_capture_step(step) {
+            let artifacts_dir = runtime_arc.lock().await.artifacts_dir.clone();
+            result = persist_image_artifact(result, &artifacts_dir);
+        }
         if file_chooser_was_armed && matches!(step, BrowserStep::Click { .. }) {
             if result.ok {
                 result = match &current_tab {
@@ -3188,11 +3307,15 @@ pub async fn execute_request_with_runtime(
         let is_non_fatal = is_non_fatal_step(step);
         if !result.ok && !is_non_fatal {
             all_ok = false;
+            let transport_dead = step_hit_dead_transport(&result);
             results.push(result);
-            break;
+            if !request.continue_on_error || transport_dead {
+                break;
+            }
+            continue;
         }
         results.push(result);
-        if !all_ok {
+        if !all_ok && !request.continue_on_error {
             break;
         }
     }
@@ -3203,6 +3326,7 @@ pub async fn execute_request_with_runtime(
         }
         all_ok = false;
     }
+    mark_unexecuted_steps_skipped(&mut results, request.steps.len());
 
     {
         let mut rt = runtime_arc.lock().await;
@@ -3516,16 +3640,18 @@ pub fn execute_steps_with_runtime(
                     runtime.set_active_tab_target_id(target_id.clone());
                     match navigation.transpose() {
                         Err(error) => StepResult::failure(idx, "OpenTab", error),
-                        Ok(warning) => navigation_step_success(
-                            idx,
-                            format!(
-                                "Opened new {} tab ({})",
-                                device_label,
-                                &target_id[..8.min(target_id.len())]
+                        Ok(warning) => merge_step_data(
+                            navigation_step_success(
+                                idx,
+                                format!(
+                                    "Opened new {} tab ({})",
+                                    device_label,
+                                    &target_id[..8.min(target_id.len())]
+                                ),
+                                warning.flatten(),
                             ),
-                            warning.flatten(),
-                        )
-                        .with_data(serde_json::json!({"tab_id": target_id})),
+                            serde_json::json!({"tab_id": target_id}),
+                        ),
                     }
                 }
                 Err(error) => StepResult::failure(idx, "OpenTab", error),
@@ -3659,10 +3785,9 @@ pub fn execute_steps_with_runtime(
                     }
                 }
             }
-            BrowserStep::WaitForNetworkIdle { timeout_ms } => wait_for_load_state(
+            BrowserStep::WaitForNetworkIdle { timeout_ms } => wait_for_network_idle_step(
                 &runtime.network_monitor,
                 idx,
-                BrowserLoadState::Networkidle,
                 clamp_timeout_ms(*timeout_ms),
             ),
             BrowserStep::HandleDialog {
@@ -3726,6 +3851,10 @@ pub fn execute_steps_with_runtime(
                 Some(tab) => step_page_content(tab, idx, &runtime.artifacts_dir),
                 None => StepResult::failure(idx, "Page content", "No active tab"),
             },
+            BrowserStep::TabLog => {
+                runtime.drain_raw_events();
+                tab_log_from_buffer(idx, &runtime.console_buffer)
+            }
             BrowserStep::AddInitScript { .. } | BrowserStep::RemoveInitScript { .. } => {
                 execute_init_script_step(runtime, step, idx)
             }
@@ -3788,6 +3917,9 @@ pub fn execute_steps_with_runtime(
                                 runtime.file_chooser_manager.record(upload);
                             }
                         }
+                    }
+                    if result.ok && is_image_capture_step(other) {
+                        result = persist_image_artifact(result, &runtime.artifacts_dir);
                     }
                     result
                 }
@@ -3862,6 +3994,7 @@ pub fn execute_steps_with_runtime(
         }
         all_ok = false;
     }
+    mark_unexecuted_steps_skipped(&mut results, steps.len());
 
     let (url, title) = match &current_tab {
         Some(tab) => (Some(tab.get_url()), tab.get_title().ok()),
@@ -3918,6 +4051,20 @@ fn is_non_fatal_step(step: &BrowserStep) -> bool {
     )
 }
 
+fn mark_unexecuted_steps_skipped(results: &mut Vec<StepResult>, total_steps: usize) {
+    let executed = results.len();
+    if executed >= total_steps {
+        return;
+    }
+    let failed_step_index = results
+        .iter()
+        .rev()
+        .find(|result| !result.ok)
+        .map(|result| result.step_index)
+        .unwrap_or(executed.saturating_sub(1));
+    results.extend((executed..total_steps).map(|idx| StepResult::skipped(idx, failed_step_index)));
+}
+
 fn replaces_document_in_place(step: &BrowserStep) -> bool {
     matches!(step, BrowserStep::SetContent { .. })
 }
@@ -3949,12 +4096,9 @@ fn execute_runtime_network_step(
         BrowserStep::SetContent { html, wait_until } => {
             step_set_content(tab, world, network_monitor, idx, html, *wait_until)
         }
-        BrowserStep::WaitForNetworkIdle { timeout_ms } => wait_for_load_state(
-            network_monitor,
-            idx,
-            BrowserLoadState::Networkidle,
-            clamp_timeout_ms(*timeout_ms),
-        ),
+        BrowserStep::WaitForNetworkIdle { timeout_ms } => {
+            wait_for_network_idle_step(network_monitor, idx, clamp_timeout_ms(*timeout_ms))
+        }
         BrowserStep::WaitForLoadState { state, timeout_ms } => {
             wait_for_load_state(network_monitor, idx, *state, clamp_timeout_ms(*timeout_ms))
         }
@@ -4016,6 +4160,41 @@ fn wait_for_load_state(
         BrowserLoadState::Load => "load",
         BrowserLoadState::Networkidle => "networkidle",
     };
+    wait_for_load_state_labelled(
+        monitor,
+        idx,
+        state,
+        timeout_ms,
+        &format!("Wait for load state {state_name}"),
+    )
+}
+
+fn wait_for_network_idle_step(
+    monitor: &NetworkMonitorHandle,
+    idx: usize,
+    timeout_ms: u64,
+) -> StepResult {
+    wait_for_load_state_labelled(
+        monitor,
+        idx,
+        BrowserLoadState::Networkidle,
+        timeout_ms,
+        "Wait for network idle",
+    )
+}
+
+fn wait_for_load_state_labelled(
+    monitor: &NetworkMonitorHandle,
+    idx: usize,
+    state: BrowserLoadState,
+    timeout_ms: u64,
+    summary: &str,
+) -> StepResult {
+    let state_name = match state {
+        BrowserLoadState::Domcontentloaded => "domcontentloaded",
+        BrowserLoadState::Load => "load",
+        BrowserLoadState::Networkidle => "networkidle",
+    };
     let monitor_state = match state {
         BrowserLoadState::Domcontentloaded => NetworkLoadState::Domcontentloaded,
         BrowserLoadState::Load => NetworkLoadState::Load,
@@ -4023,7 +4202,7 @@ fn wait_for_load_state(
     };
     match monitor.wait_for_load_state(monitor_state, Duration::from_millis(timeout_ms)) {
         Ok(()) => StepResult::success(idx, format!("Reached load state {state_name}")),
-        Err(error) => StepResult::failure(idx, format!("Wait for load state {state_name}"), error),
+        Err(error) => StepResult::failure(idx, summary, error),
     }
 }
 
@@ -4561,7 +4740,10 @@ fn execute_single_step(
             soft.unwrap_or(false),
         ),
 
-        BrowserStep::Click { locator } => step_locator_action(
+        BrowserStep::Click {
+            locator,
+            timeout_ms,
+        } => step_locator_action_with_timeout(
             tab,
             world,
             idx,
@@ -4570,6 +4752,7 @@ fn execute_single_step(
             handlers,
             locator_handler_firings,
             image_policy,
+            *timeout_ms,
         ),
         BrowserStep::ClickIfExists { locator } => step_click_if_exists(
             tab,
@@ -4592,7 +4775,10 @@ fn execute_single_step(
             image_policy,
             mouse_state,
         ),
-        BrowserStep::Hover { locator } => step_locator_action(
+        BrowserStep::Hover {
+            locator,
+            timeout_ms,
+        } => step_locator_action_with_timeout(
             tab,
             world,
             idx,
@@ -4601,6 +4787,7 @@ fn execute_single_step(
             handlers,
             locator_handler_firings,
             image_policy,
+            *timeout_ms,
         ),
         BrowserStep::Focus { locator } => step_locator_action(
             tab,
@@ -4908,7 +5095,10 @@ fn execute_single_step(
             StepResult::failure(idx, "PDF", "PDF generation requires a browser runtime")
         }
 
-        BrowserStep::Eval { expression } => step_eval(tab, idx, expression),
+        BrowserStep::Eval {
+            expression,
+            timeout_ms,
+        } => step_eval(tab, idx, expression, *timeout_ms),
         BrowserStep::Styles {
             locator,
             property_filter,
@@ -4947,7 +5137,7 @@ fn execute_single_step(
             event_init,
         } => step_dispatch_event(tab, world, idx, locator, event_type, event_init.as_ref()),
 
-        BrowserStep::TabLog => step_tab_log(tab, idx),
+        BrowserStep::TabLog => step_tab_log(idx),
 
         BrowserStep::AddLocatorHandler {
             name,
@@ -4970,6 +5160,7 @@ fn execute_single_step(
 
         BrowserStep::DismissOverlays { aggressive } => step_dismiss_overlays(
             tab,
+            world,
             idx,
             handlers,
             locator_handler_firings,
@@ -6004,7 +6195,11 @@ fn step_drag_and_drop(
     ) {
         Ok(source) => source,
         Err(error) => {
-            let mut result = StepResult::failure(idx, "Drag source failed", error.to_string());
+            let mut result = StepResult::failure(
+                idx,
+                "Drag source failed",
+                actionability_error_text(&error, source),
+            );
             result.actionability = Some(error.diagnostics(ActionKind::DragSource));
             return result;
         }
@@ -6022,7 +6217,11 @@ fn step_drag_and_drop(
     ) {
         Ok(target) => target,
         Err(error) => {
-            let mut result = StepResult::failure(idx, "Drag target failed", error.to_string());
+            let mut result = StepResult::failure(
+                idx,
+                "Drag target failed",
+                actionability_error_text(&error, target),
+            );
             result.actionability = Some(error.diagnostics(ActionKind::DragTarget));
             return result;
         }
@@ -6078,7 +6277,11 @@ fn step_drop_files(
     ) {
         Ok(resolved) => resolved,
         Err(error) => {
-            let mut result = StepResult::failure(idx, "File drop target failed", error.to_string());
+            let mut result = StepResult::failure(
+                idx,
+                "File drop target failed",
+                actionability_error_text(&error, target),
+            );
             result.actionability = Some(error.diagnostics(ActionKind::DragTarget));
             return result;
         }
@@ -6171,9 +6374,27 @@ fn step_nav_js(tab: &Tab, idx: usize, js: &str, success_msg: &str) -> StepResult
     }
 }
 
-fn navigation_step_success(idx: usize, summary: String, warning: Option<String>) -> StepResult {
+fn merge_step_data(mut result: StepResult, extra: serde_json::Value) -> StepResult {
+    match (result.data.as_mut(), extra) {
+        (Some(Value::Object(existing)), Value::Object(extra)) => existing.extend(extra),
+        (_, extra) => result.data = Some(extra),
+    }
+    result
+}
+
+fn navigation_step_success(
+    idx: usize,
+    summary: String,
+    warning: Option<NavigationTimeoutWarning>,
+) -> StepResult {
     match warning {
-        Some(warning) => StepResult::success(idx, format!("{summary} ({warning})")),
+        Some(warning) => StepResult::success(idx, format!("{summary} ({warning})")).with_data(
+            serde_json::json!({
+                "load_event": "not_observed",
+                "ready_state": warning.ready_state,
+                "waited_ms": warning.timeout_ms,
+            }),
+        ),
         None => StepResult::success(idx, summary),
     }
 }
@@ -6291,24 +6512,45 @@ fn document_ready_state(tab: &Tab) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NavigationTimeoutWarning {
+    ready_state: String,
+    timeout_ms: u64,
+}
+
+impl std::fmt::Display for NavigationTimeoutWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{NAVIGATION_LIFECYCLE_EVENT} event not observed within {}ms; document.readyState={} — continuing",
+            self.timeout_ms, self.ready_state
+        )
+    }
+}
+
 fn classify_navigation_timeout(
     ready_state: &str,
     committed: bool,
     timeout_ms: u64,
-) -> Option<String> {
+) -> Option<NavigationTimeoutWarning> {
+    let document_readable = matches!(ready_state, "loading" | "interactive" | "complete");
+    if !document_readable {
+        return None;
+    }
     if !matches!(ready_state, "interactive" | "complete") && !committed {
         return None;
     }
-    Some(format!(
-        "{NAVIGATION_LIFECYCLE_EVENT} event not observed within {timeout_ms}ms; document.readyState={ready_state} — continuing"
-    ))
+    Some(NavigationTimeoutWarning {
+        ready_state: ready_state.to_string(),
+        timeout_ms,
+    })
 }
 
 fn run_and_wait_for_navigation(
     tab: &Tab,
     timeout_ms: u64,
     trigger: impl FnOnce() -> Result<NavigationWaitTarget, String>,
-) -> Result<Option<String>, String> {
+) -> Result<Option<NavigationTimeoutWarning>, String> {
     let (sender, receiver) = mpsc::channel();
     let listener = tab
         .add_event_listener(Arc::new(move |event: &Event| match event {
@@ -6355,9 +6597,16 @@ fn run_and_wait_for_navigation(
             message,
         } => {
             let committed = committed || expected_url.is_some_and(|url| url == tab.get_url());
-            classify_navigation_timeout(&document_ready_state(tab), committed, timeout_ms)
-                .map(Some)
-                .ok_or(message)
+            let ready_state = document_ready_state(tab);
+            match classify_navigation_timeout(&ready_state, committed, timeout_ms) {
+                Some(warning) => Ok(Some(warning)),
+                None if !matches!(ready_state.as_str(), "loading" | "interactive" | "complete") => {
+                    Err(format!(
+                        "{message}; document.readyState could not be read ({ready_state}), so the page is not evaluable"
+                    ))
+                }
+                None => Err(message),
+            }
         }
     }
 }
@@ -6471,6 +6720,30 @@ fn step_locator_action(
     locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
     image_policy: &ImagePolicy,
 ) -> StepResult {
+    step_locator_action_with_timeout(
+        tab,
+        world,
+        idx,
+        locator,
+        action,
+        handlers,
+        locator_handler_firings,
+        image_policy,
+        None,
+    )
+}
+
+fn step_locator_action_with_timeout(
+    tab: &Tab,
+    world: &WorldManager,
+    idx: usize,
+    locator: &BrowserLocator,
+    action: &str,
+    handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
+    locator_handler_firings: &mut Vec<LocatorHandlerFiring>,
+    image_policy: &ImagePolicy,
+    timeout_ms: Option<u64>,
+) -> StepResult {
     if let Some(action_kind) = match action {
         "click" => Some(ActionKind::Click),
         "hover" => Some(ActionKind::Hover),
@@ -6479,7 +6752,10 @@ fn step_locator_action(
         "scroll_to" => Some(ActionKind::ScrollIntoViewIfNeeded),
         _ => None,
     } {
-        return step_actionable_action(
+        let timeout = timeout_ms
+            .map(|ms| Duration::from_millis(clamp_timeout_ms(Some(ms))))
+            .unwrap_or_else(|| ActionabilityTimeouts::default().action);
+        return step_actionable_action_in_mode(
             tab,
             world,
             idx,
@@ -6489,6 +6765,8 @@ fn step_locator_action(
             handlers,
             locator_handler_firings,
             image_policy,
+            ActionabilityExecutionMode::Standard,
+            timeout,
         );
     }
     match resolve_interactable(tab, world, locator) {
@@ -6516,6 +6794,13 @@ fn step_locator_action(
         }
         Err(e) => StepResult::failure(idx, format!("{} failed", action), e),
     }
+}
+
+fn actionability_error_text(
+    error: &refact_browser::ActionabilityError,
+    locator: &BrowserLocator,
+) -> String {
+    format!("{}: {}", describe_locator(locator), error.headline())
 }
 
 fn step_actionable_action(
@@ -6593,8 +6878,11 @@ fn step_actionable_action_in_mode(
         }
         Err(error) => {
             let diagnostics = error.diagnostics(action_kind);
-            let mut result =
-                StepResult::failure(idx, format!("{action} failed"), error.to_string());
+            let mut result = StepResult::failure(
+                idx,
+                format!("{action} failed"),
+                actionability_error_text(&error, locator),
+            );
             result.retries = diagnostics.attempts.unwrap_or_default();
             result.actionability = Some(diagnostics);
             result
@@ -6655,7 +6943,7 @@ fn classify_click_if_exists_probe(probe: Result<(), String>) -> ClickIfExistsPro
     }
 }
 
-fn click_if_exists_action_result(result: StepResult) -> StepResult {
+fn click_if_exists_action_result(mut result: StepResult) -> StepResult {
     let error = result
         .error
         .clone()
@@ -6663,9 +6951,19 @@ fn click_if_exists_action_result(result: StepResult) -> StepResult {
     if result.ok || refact_browser::is_transport_dead_error(&error) {
         return result;
     }
+    let mut data = result.data.take().unwrap_or_else(|| serde_json::json!({}));
+    if let Some(object) = data.as_object_mut() {
+        object.insert("clicked".to_string(), serde_json::Value::Bool(false));
+        object.insert(
+            "skip_reason".to_string(),
+            serde_json::Value::String(error.clone()),
+        );
+    }
     StepResult {
         ok: true,
-        summary: format!("Click failed (non-fatal): {error}"),
+        summary: format!("Click skipped (non-fatal): {error}"),
+        error: None,
+        data: Some(data),
         ..result
     }
 }
@@ -7492,19 +7790,40 @@ fn poll_locator_until<T>(
 ) -> Result<T, String> {
     let settings = browser_settings::current();
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut last_error: Option<String>;
     loop {
         match resolve_locator_handles(tab, world, locator).and_then(&mut sample) {
             Ok(Some(value)) => return Ok(value),
-            Ok(None) => {}
+            Ok(None) => last_error = None,
+            Err(error) if refact_browser::is_transport_dead_error(&error) => return Err(error),
+            Err(error) if is_transient_page_error(&error) => last_error = Some(error),
             Err(error) => return Err(error),
         }
         if Instant::now() >= deadline {
-            return Err(format!("Timed out after {}ms", timeout_ms));
+            return Err(poll_deadline_error(
+                last_error,
+                format!("Timed out after {}ms", timeout_ms),
+            ));
         }
         std::thread::sleep(Duration::from_millis(
             settings.timing.default_poll_interval_ms,
         ));
     }
+}
+
+fn is_transient_page_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    [
+        "cannot find context",
+        "execution context was destroyed",
+        "inspected target navigated",
+        "no node with given id",
+        "could not find object with given id",
+        "could not find node with given id",
+        "cannot find object",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn step_wait_seconds(idx: usize, seconds: f64) -> StepResult {
@@ -7954,11 +8273,26 @@ fn step_accessibility_snapshot(
                 .max_chars
                 .unwrap_or(settings.capture.default_aria_snapshot_chars)
                 .min(settings.capture.max_aria_snapshot_chars);
+            let frames = frames_for_snapshot(tab, &snapshot.yaml);
             snapshot.yaml = truncate_chars(snapshot.yaml, limit);
-            StepResult::success(idx, "Accessibility snapshot").with_data(
-                serde_json::to_value(snapshot)
-                    .unwrap_or_else(|error| serde_json::json!({"error": error.to_string()})),
-            )
+            let mut data = serde_json::to_value(snapshot)
+                .unwrap_or_else(|error| serde_json::json!({"error": error.to_string()}));
+            if !frames.is_empty() {
+                if let Some(object) = data.as_object_mut() {
+                    object.insert(
+                        "frames".to_string(),
+                        serde_json::to_value(&frames).unwrap_or_default(),
+                    );
+                    object.insert(
+                        "frames_hint".to_string(),
+                        Value::String(
+                            "iframe contents are not part of this snapshot; act inside a frame with locator.frames (an outermost-first chain of iframe locators) or snapshot with a locator that targets the iframe"
+                                .to_string(),
+                        ),
+                    );
+                }
+            }
+            StepResult::success(idx, "Accessibility snapshot").with_data(data)
         }
         Err(error) => StepResult::failure(idx, "Accessibility snapshot failed", error.to_string()),
     }
@@ -8023,15 +8357,20 @@ fn report_snapshot_requested(page_context: PageContextMode, page_changed: bool) 
 }
 
 fn console_counts(console: &[ConsoleEntry], page_errors: &[String]) -> BrowserConsoleCounts {
+    let level_is = |entry: &ConsoleEntry, names: &[&str]| {
+        names
+            .iter()
+            .any(|name| entry.level.eq_ignore_ascii_case(name))
+    };
     BrowserConsoleCounts {
         errors: page_errors.len()
             + console
                 .iter()
-                .filter(|entry| matches!(entry.level.as_str(), "error" | "assert"))
+                .filter(|entry| level_is(entry, &["error", "assert"]))
                 .count(),
         warnings: console
             .iter()
-            .filter(|entry| matches!(entry.level.as_str(), "warning" | "warn"))
+            .filter(|entry| level_is(entry, &["warning", "warn"]))
             .count(),
     }
 }
@@ -8050,6 +8389,43 @@ fn snapshot_head(yaml: &str, max_lines: usize) -> String {
     yaml.lines().take(max_lines).collect::<Vec<_>>().join("\n")
 }
 
+fn snapshot_mentions_iframe(yaml: &str) -> bool {
+    yaml.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("- iframe") || trimmed.starts_with("- frame")
+    })
+}
+
+fn child_frame_summaries(tab: &Tab) -> Vec<BrowserFrameSummary> {
+    fn walk(node: &Page::FrameTree, depth: usize, out: &mut Vec<BrowserFrameSummary>) {
+        if depth > 0 {
+            out.push(BrowserFrameSummary {
+                frame_id: node.frame.id.clone(),
+                parent_id: node.frame.parent_id.clone(),
+                depth,
+                url: refact_browser::mask_text(&node.frame.url),
+                name: node.frame.name.clone().filter(|name| !name.is_empty()),
+            });
+        }
+        for child in node.child_frames.iter().flatten() {
+            walk(child, depth + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    if let Ok(tree) = tab.call_method(Page::GetFrameTree(None)) {
+        walk(&tree.frame_tree, 0, &mut out);
+    }
+    out
+}
+
+fn frames_for_snapshot(tab: &Tab, yaml: &str) -> Vec<BrowserFrameSummary> {
+    if snapshot_mentions_iframe(yaml) {
+        child_frame_summaries(tab)
+    } else {
+        Vec::new()
+    }
+}
+
 fn build_page_snapshot(yaml: String, artifacts_dir: &Path) -> Result<BrowserPageSnapshot, String> {
     let settings = browser_settings::current();
     let bytes = yaml.len();
@@ -8061,6 +8437,7 @@ fn build_page_snapshot(yaml: String, artifacts_dir: &Path) -> Result<BrowserPage
             bytes,
             truncated: false,
             artifact: None,
+            frames: Vec::new(),
         });
     }
     std::fs::create_dir_all(artifacts_dir).map_err(|error| {
@@ -8091,6 +8468,7 @@ fn build_page_snapshot(yaml: String, artifacts_dir: &Path) -> Result<BrowserPage
             path,
             bytes,
         }),
+        frames: Vec::new(),
     })
 }
 
@@ -8110,7 +8488,10 @@ fn capture_page_snapshot(
             },
         )
         .map_err(|error| error.to_string())?;
-    build_page_snapshot(snapshot.yaml, artifacts_dir)
+    let frames = frames_for_snapshot(tab, &snapshot.yaml);
+    let mut page_snapshot = build_page_snapshot(snapshot.yaml, artifacts_dir)?;
+    page_snapshot.frames = frames;
+    Ok(page_snapshot)
 }
 
 fn capture_report_screenshot(tab: &Tab, policy: &ImagePolicy) -> Result<BrowserScreenshot, String> {
@@ -8371,18 +8752,75 @@ fn step_screenshot(
     policy: &ImagePolicy,
 ) -> StepResult {
     match capture_screenshot(tab, world, options, None, policy) {
-        Ok(capture) => StepResult::success(idx, "Screenshot captured").with_data(
-            serde_json::json!({
-                "artifact": {"kind": "image", "mime": capture.mime, "data": capture.data, "width": capture.width, "height": capture.height, "bytes": capture.bytes},
-                "mime": capture.mime,
-                "data": capture.data,
-                "width": capture.width,
-                "height": capture.height,
-                "bytes": capture.bytes,
-            }),
-        ),
+        Ok(capture) => {
+            StepResult::success(idx, "Screenshot captured").with_data(image_artifact_data(&capture))
+        }
         Err(error) => StepResult::failure(idx, "Screenshot failed", error),
     }
+}
+
+fn image_artifact_data(capture: &PolicyScreenshot) -> Value {
+    serde_json::json!({
+        "artifact": {
+            "kind": "image",
+            "mime": capture.mime,
+            "data": capture.data,
+            "width": capture.width,
+            "height": capture.height,
+            "bytes": capture.bytes,
+        },
+    })
+}
+
+fn persist_image_artifact(mut result: StepResult, artifacts_dir: &Path) -> StepResult {
+    let Some(artifact) = result
+        .data
+        .as_mut()
+        .and_then(Value::as_object_mut)
+        .and_then(|data| data.get_mut("artifact"))
+        .and_then(Value::as_object_mut)
+    else {
+        return result;
+    };
+    if artifact.get("kind").and_then(Value::as_str) != Some("image")
+        || artifact.contains_key("path")
+    {
+        return result;
+    }
+    let (Some(mime), Some(encoded)) = (
+        artifact.get("mime").and_then(Value::as_str),
+        artifact.get("data").and_then(Value::as_str),
+    ) else {
+        return result;
+    };
+    let extension = match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        _ => "bin",
+    };
+    let Ok(bytes) = base64::prelude::BASE64_STANDARD.decode(encoded) else {
+        return result;
+    };
+    let dir = artifacts_dir.join("screenshots");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return result;
+    }
+    let path = dir.join(format!("shot-{}.{extension}", uuid::Uuid::new_v4()));
+    if std::fs::write(&path, bytes).is_ok() {
+        artifact.insert(
+            "path".to_string(),
+            Value::String(path.to_string_lossy().into_owned()),
+        );
+    }
+    result
+}
+
+fn is_image_capture_step(step: &BrowserStep) -> bool {
+    matches!(
+        step,
+        BrowserStep::Screenshot { .. } | BrowserStep::ScreenshotElement { .. }
+    )
 }
 
 fn step_screenshot_element(
@@ -8418,14 +8856,7 @@ fn step_screenshot_element(
 
     match capture_screenshot(tab, world, options, Some(clip), policy) {
         Ok(capture) => StepResult::success(idx, format!("Element screenshot of <{}>", info.tag))
-            .with_data(serde_json::json!({
-                "artifact": {"kind": "image", "mime": capture.mime, "data": capture.data, "width": capture.width, "height": capture.height, "bytes": capture.bytes},
-                "mime": capture.mime,
-                "data": capture.data,
-                "width": capture.width,
-                "height": capture.height,
-                "bytes": capture.bytes,
-            })),
+            .with_data(image_artifact_data(&capture)),
         Err(e) => StepResult::failure(idx, "Element screenshot failed", e),
     }
 }
@@ -8864,23 +9295,115 @@ fn invoke_eval_function(tab: &Tab, object_id: String) -> Result<Runtime::RemoteO
     Ok(invoked.result)
 }
 
-fn step_eval(tab: &Tab, idx: usize, expression: &str) -> StepResult {
-    let evaluated = match tab.evaluate(expression, false) {
-        Ok(remote) => remote,
-        Err(e) => return StepResult::failure(idx, "Eval failed", e.to_string()),
+const EVAL_DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
+fn step_eval(tab: &Tab, idx: usize, expression: &str, timeout_ms: Option<u64>) -> StepResult {
+    let timeout_ms = timeout_ms.unwrap_or(EVAL_DEFAULT_TIMEOUT_MS);
+    let evaluated = match tab.call_method(Runtime::Evaluate {
+        expression: expression.to_string(),
+        return_by_value: Some(false),
+        generate_preview: Some(true),
+        silent: Some(false),
+        await_promise: Some(true),
+        include_command_line_api: Some(false),
+        user_gesture: Some(true),
+        object_group: None,
+        context_id: None,
+        throw_on_side_effect: None,
+        timeout: Some(timeout_ms as f64),
+        disable_breaks: None,
+        repl_mode: None,
+        allow_unsafe_eval_blocked_by_csp: None,
+        unique_context_id: None,
+        serialization_options: None,
+    }) {
+        Ok(evaluated) => evaluated,
+        Err(error) => {
+            let message = error.to_string();
+            let summary = if message.contains("timed out") || message.contains("Timeout") {
+                format!("Eval timed out after {timeout_ms}ms")
+            } else {
+                "Eval failed".to_string()
+            };
+            return StepResult::failure(idx, summary, message);
+        }
     };
-    let remote = match eval_invocation_target(&evaluated.Type, evaluated.object_id.as_ref()) {
-        Some(object_id) => match invoke_eval_function(tab, object_id) {
-            Ok(remote) => remote,
-            Err(error) => return StepResult::failure(idx, "Eval failed", error),
-        },
-        None => evaluated,
-    };
-    let value = remote.value.unwrap_or(serde_json::Value::Null);
-    let desc = remote.description.unwrap_or_default();
+    if let Some(exception) = evaluated.exception_details {
+        return StepResult::failure(
+            idx,
+            "Eval threw an exception",
+            js_exception_message(&exception),
+        );
+    }
+    let remote =
+        match eval_invocation_target(&evaluated.result.Type, evaluated.result.object_id.as_ref()) {
+            Some(object_id) => match invoke_eval_function(tab, object_id) {
+                Ok(remote) => remote,
+                Err(error) => return StepResult::failure(idx, "Eval threw an exception", error),
+            },
+            None => evaluated.result,
+        };
+    let (value, description) = eval_remote_object_value(tab, remote);
     StepResult::success(idx, "Eval completed".to_string())
-        .with_data(serde_json::json!({"value": value, "description": desc}))
+        .with_data(serde_json::json!({"value": value, "description": description}))
 }
+
+fn eval_remote_object_value(tab: &Tab, remote: Runtime::RemoteObject) -> (Value, String) {
+    let description = remote
+        .description
+        .clone()
+        .unwrap_or_else(|| format!("{:?}", remote.Type).to_ascii_lowercase());
+    if let Some(value) = remote.value {
+        return (value, description);
+    }
+    let Some(object_id) = remote.object_id else {
+        return (Value::Null, description);
+    };
+    let serialized = tab
+        .call_method(Runtime::CallFunctionOn {
+            function_declaration: EVAL_SERIALIZE_JS.to_string(),
+            object_id: Some(object_id),
+            arguments: None,
+            silent: Some(true),
+            return_by_value: Some(true),
+            generate_preview: None,
+            user_gesture: Some(false),
+            await_promise: Some(false),
+            execution_context_id: None,
+            object_group: None,
+            throw_on_side_effect: None,
+            unique_context_id: None,
+            serialization_options: None,
+        })
+        .ok()
+        .filter(|invoked| invoked.exception_details.is_none())
+        .and_then(|invoked| invoked.result.value);
+    match serialized {
+        Some(value) => (value, description),
+        None => (Value::Null, description),
+    }
+}
+
+const EVAL_SERIALIZE_JS: &str = r#"function() {
+  var seen = [];
+  var replacer = function(key, value) {
+    if (typeof value === 'bigint') return value.toString() + 'n';
+    if (typeof value === 'function') return '[Function ' + (value.name || 'anonymous') + ']';
+    if (typeof value === 'symbol') return value.toString();
+    if (value && typeof value === 'object') {
+      if (typeof Node !== 'undefined' && value instanceof Node) {
+        return value.nodeType === 1 ? '<' + value.tagName.toLowerCase() + '>' : '[' + value.nodeName + ']';
+      }
+      if (value instanceof Map) return Object.fromEntries(value);
+      if (value instanceof Set) return Array.from(value);
+      if (value instanceof Error) return { name: value.name, message: value.message, stack: value.stack };
+      if (seen.indexOf(value) !== -1) return '[Circular]';
+      seen.push(value);
+    }
+    return value;
+  };
+  return JSON.parse(JSON.stringify(this, replacer));
+}"#;
 
 fn eval_js_awaited(tab: &Tab, expression: &str) -> Result<serde_json::Value, String> {
     let result = tab
@@ -9242,19 +9765,33 @@ fn step_styles(
     }
 }
 
-fn step_tab_log(tab: &Tab, idx: usize) -> StepResult {
-    let js = r#"(function() {
-  if (!window.__refact_console_log) return JSON.stringify({ok: true, entries: []});
-  return JSON.stringify({ok: true, entries: window.__refact_console_log.slice(-50)});
-})()"#;
-    match eval_js_ok(tab, js) {
-        Ok(result) => StepResult::success(idx, "Tab log retrieved".to_string()).with_data(result),
-        Err(_) => StepResult::success(
-            idx,
-            "Tab log: no captured logs available (use BrowserRuntime buffers for full logs)"
-                .to_string(),
-        ),
-    }
+const TAB_LOG_MAX_ENTRIES: usize = 50;
+
+fn tab_log_from_buffer(idx: usize, console: &[ConsoleEntry]) -> StepResult {
+    let start = console.len().saturating_sub(TAB_LOG_MAX_ENTRIES);
+    let entries = &console[start..];
+    let summary = if entries.is_empty() {
+        "Tab log: no console messages captured yet in this session".to_string()
+    } else {
+        format!(
+            "Tab log: {} most recent console message(s) (session captured {})",
+            entries.len(),
+            console.len()
+        )
+    };
+    StepResult::success(idx, summary).with_data(serde_json::json!({
+        "entries": entries,
+        "total_captured": console.len(),
+        "truncated": start > 0,
+    }))
+}
+
+fn step_tab_log(idx: usize) -> StepResult {
+    StepResult::failure(
+        idx,
+        "Tab log",
+        "tab_log needs the session console buffer, which is only available in a top-level batch; run it as a normal step rather than inside a locator handler",
+    )
 }
 
 fn step_add_locator_handler(
@@ -9342,6 +9879,7 @@ fn dismiss_overlays(tab: &Tab, aggressive: bool) -> Result<String, String> {
 
 fn step_dismiss_overlays(
     tab: &Tab,
+    world: &WorldManager,
     idx: usize,
     handlers: Option<&Arc<Mutex<LocatorHandlerRegistry>>>,
     firings: &mut Vec<LocatorHandlerFiring>,
@@ -9387,7 +9925,7 @@ fn step_dismiss_overlays(
     };
     let result = execute_locator_handler(
         tab,
-        &WorldManager::default(),
+        world,
         handlers,
         firings,
         image_policy,
@@ -9989,6 +10527,186 @@ mod tests {
             .contains("relaunched and retried"));
     }
 
+    fn navigate_step(url: &str) -> BrowserStep {
+        BrowserStep::Navigate {
+            url: url.to_string(),
+            timeout_ms: None,
+        }
+    }
+
+    fn screenshot_step() -> BrowserStep {
+        serde_json::from_value(serde_json::json!({"action": "screenshot"})).unwrap()
+    }
+
+    #[test]
+    fn unexecuted_steps_are_marked_skipped_instead_of_vanishing() {
+        let mut results = vec![
+            StepResult::success(0, "Navigate"),
+            StepResult::failure(1, "Click", "Timeout 5000ms exceeded"),
+        ];
+        mark_unexecuted_steps_skipped(&mut results, 4);
+        assert_eq!(results.len(), 4);
+        assert!(results[2].skipped && results[3].skipped);
+        assert!(!results[2].ok);
+        assert!(results[2].summary.contains("step 1 failed earlier"));
+        assert!(!results[0].skipped && !results[1].skipped);
+        assert!(results[1].was_executed());
+        assert!(!results[2].was_executed());
+
+        let serialized = serde_json::to_value(&results).unwrap();
+        assert_eq!(serialized[2]["skipped"], true);
+        assert!(serialized[0].get("skipped").is_none());
+
+        let mut complete = vec![StepResult::success(0, "Navigate")];
+        mark_unexecuted_steps_skipped(&mut complete, 1);
+        assert_eq!(complete.len(), 1);
+    }
+
+    #[test]
+    fn plan_resume_treats_skipped_placeholders_as_unfinished() {
+        let attempt = report_with_steps(vec![
+            StepResult::success(0, "Navigate"),
+            StepResult::failure(1, "Click", DEAD_TRANSPORT),
+            StepResult::skipped(2, 1),
+            StepResult::skipped(3, 1),
+        ]);
+        let resume = plan_resume(&attempt, 4);
+        assert_eq!(resume.resume_index, 1);
+        assert_eq!(resume.completed_steps.len(), 1);
+    }
+
+    #[test]
+    fn resume_replays_the_last_navigation_before_the_dead_step() {
+        let steps = vec![
+            navigate_step("https://example.test/a"),
+            screenshot_step(),
+            navigate_step("https://example.test/b"),
+            screenshot_step(),
+            screenshot_step(),
+        ];
+        let attempt = report_with_steps(vec![
+            StepResult::success(0, "Navigated to a"),
+            StepResult::success(1, "Screenshot"),
+            StepResult::success(2, "Navigated to b"),
+            StepResult::failure(3, "Screenshot", DEAD_TRANSPORT),
+            StepResult::skipped(4, 3),
+        ]);
+        let resume = plan_resume(&attempt, steps.len()).with_replay_from(&steps);
+        assert_eq!(resume.resume_index, 3);
+        let (replayed_index, replayed) = resume.replay.clone().expect("navigation to replay");
+        assert_eq!(replayed_index, 2);
+        assert!(matches!(replayed, BrowserStep::Navigate { ref url, .. } if url.ends_with("/b")));
+
+        let retry = report_with_steps(vec![
+            StepResult::success(0, "Navigated to b (replayed)"),
+            StepResult::success(1, "Screenshot"),
+            StepResult::success(2, "Screenshot"),
+        ]);
+        let merged = merge_resumed_report(resume, retry);
+        assert!(merged.ok);
+        assert_eq!(
+            merged
+                .steps
+                .iter()
+                .map(|step| step.step_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
+        assert_eq!(merged.steps[3].summary, "Screenshot");
+        assert!(merged.steps.iter().all(|step| step.ok && !step.skipped));
+        let warning = merged
+            .warnings
+            .iter()
+            .find(|warning| warning.contains("replayed step 2"))
+            .expect("replay warning");
+        assert!(warning.contains("resumed from step 3"));
+        assert!(!warning.contains("NOT replayed"));
+    }
+
+    #[test]
+    fn resume_replay_warning_names_the_steps_that_were_not_replayed() {
+        let steps = vec![
+            navigate_step("https://example.test/a"),
+            serde_json::from_value(serde_json::json!({
+                "action": "fill",
+                "locator": {"by": "css", "value": "#q"},
+                "text": "hello"
+            }))
+            .unwrap(),
+            screenshot_step(),
+        ];
+        let attempt = report_with_steps(vec![
+            StepResult::success(0, "Navigated to a"),
+            StepResult::success(1, "Filled #q"),
+            StepResult::failure(2, "Screenshot", DEAD_TRANSPORT),
+        ]);
+        let resume = plan_resume(&attempt, steps.len()).with_replay_from(&steps);
+        assert_eq!(resume.replay.as_ref().map(|(idx, _)| *idx), Some(0));
+        let retry = report_with_steps(vec![
+            StepResult::success(0, "Navigated to a"),
+            StepResult::success(1, "Screenshot"),
+        ]);
+        let merged = merge_resumed_report(resume, retry);
+        assert_eq!(merged.steps.len(), 3);
+        assert!(merged
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("steps 1..=1 were NOT replayed")));
+    }
+
+    #[test]
+    fn resume_fails_loudly_when_the_replayed_navigation_fails() {
+        let steps = vec![
+            navigate_step("https://example.test/a"),
+            screenshot_step(),
+            screenshot_step(),
+        ];
+        let attempt = report_with_steps(vec![
+            StepResult::success(0, "Navigated to a"),
+            StepResult::failure(1, "Screenshot", DEAD_TRANSPORT),
+            StepResult::skipped(2, 1),
+        ]);
+        let resume = plan_resume(&attempt, steps.len()).with_replay_from(&steps);
+        let retry = report_with_steps(vec![
+            StepResult::failure(0, "Navigate", "net::ERR_CONNECTION_REFUSED"),
+            StepResult::skipped(1, 0),
+            StepResult::skipped(2, 0),
+        ]);
+        let merged = merge_resumed_report(resume, retry);
+        assert!(!merged.ok);
+        assert_eq!(merged.steps.len(), 3);
+        assert!(merged.steps[0].ok);
+        assert!(!merged.steps[1].ok && !merged.steps[1].skipped);
+        assert!(merged.steps[1].error.as_deref().unwrap().contains(
+            "replayed step 0 to restore the document, but it failed: net::ERR_CONNECTION_REFUSED"
+        ));
+        assert!(merged.steps[2].skipped);
+    }
+
+    #[test]
+    fn resume_is_refused_when_no_navigation_precedes_the_dead_step() {
+        let steps = vec![screenshot_step(), screenshot_step(), screenshot_step()];
+        let attempt = report_with_steps(vec![
+            StepResult::success(0, "Screenshot"),
+            StepResult::failure(1, "Screenshot", DEAD_TRANSPORT),
+            StepResult::skipped(2, 1),
+        ]);
+        let resume = plan_resume(&attempt, steps.len()).with_replay_from(&steps);
+        assert!(resume.replay.is_none());
+        assert_eq!(resume.resume_index, 1);
+
+        let refused = resume_refused_without_page_context(resume);
+        assert!(!refused.ok);
+        assert_eq!(refused.url.as_deref(), Some("about:blank"));
+        assert_eq!(refused.steps.len(), 3);
+        assert!(refused.steps[0].ok);
+        assert!(!refused.steps[1].ok && !refused.steps[1].skipped);
+        assert!(refused.steps[2].skipped);
+        assert!(refused.warnings.iter().any(
+            |warning| warning.contains("no navigate/open_tab/set_content step precedes step 1")
+        ));
+    }
+
     fn actionable_state() -> refact_browser::ElementState {
         refact_browser::ElementState {
             visible: true,
@@ -10326,6 +11044,25 @@ mod tests {
         assert_eq!(counts.errors, 3);
         assert_eq!(counts.warnings, 2);
         assert!(!serde_json::to_string(&counts).unwrap().contains("secret"));
+
+        let cdp_debug_repr = console_counts(&[entry("Error"), entry("Warning"), entry("Log")], &[]);
+        assert_eq!(cdp_debug_repr.errors, 1);
+        assert_eq!(cdp_debug_repr.warnings, 1);
+    }
+
+    #[test]
+    fn console_levels_are_normalized_from_cdp_debug_names() {
+        assert_eq!(refact_browser::console_level_label("Error"), "error");
+        assert_eq!(refact_browser::console_level_label("Warning"), "warning");
+        assert_eq!(refact_browser::console_level_label("Log"), "log");
+        assert_eq!(
+            refact_browser::console_level_label("StartGroup"),
+            "start_group"
+        );
+        assert_eq!(
+            refact_browser::console_level_label("page_error"),
+            "page_error"
+        );
     }
 
     #[test]
@@ -10888,11 +11625,13 @@ mod tests {
     fn lifecycle_timeout_on_loaded_document_degrades_to_a_warning() {
         let complete = classify_navigation_timeout("complete", false, 5_000).unwrap();
         assert_eq!(
-            complete,
+            complete.to_string(),
             "load event not observed within 5000ms; document.readyState=complete — continuing"
         );
         assert_eq!(
-            classify_navigation_timeout("interactive", false, 5_000).unwrap(),
+            classify_navigation_timeout("interactive", false, 5_000)
+                .unwrap()
+                .to_string(),
             "load event not observed within 5000ms; document.readyState=interactive — continuing"
         );
     }
@@ -10900,7 +11639,9 @@ mod tests {
     #[test]
     fn lifecycle_timeout_on_committed_navigation_degrades_to_a_warning() {
         assert_eq!(
-            classify_navigation_timeout("loading", true, 5_000).unwrap(),
+            classify_navigation_timeout("loading", true, 5_000)
+                .unwrap()
+                .to_string(),
             "load event not observed within 5000ms; document.readyState=loading — continuing"
         );
     }
@@ -10909,6 +11650,12 @@ mod tests {
     fn lifecycle_timeout_without_commit_stays_a_failure() {
         assert!(classify_navigation_timeout("loading", false, 5_000).is_none());
         assert!(classify_navigation_timeout("unknown", false, 5_000).is_none());
+    }
+
+    #[test]
+    fn lifecycle_timeout_with_unreadable_document_is_never_a_soft_success() {
+        assert!(classify_navigation_timeout("unknown", true, 5_000).is_none());
+        assert!(classify_navigation_timeout("", true, 5_000).is_none());
     }
 
     #[test]
@@ -10925,6 +11672,13 @@ mod tests {
             warned.summary,
             "Navigated to https://example.test (load event not observed within 5000ms; document.readyState=interactive — continuing)"
         );
+        let data = warned.data.as_ref().unwrap();
+        assert_eq!(data["load_event"], "not_observed");
+        assert_eq!(data["ready_state"], "interactive");
+        assert_eq!(data["waited_ms"], 5_000);
+        let merged = merge_step_data(warned, serde_json::json!({"tab_id": "abc"}));
+        assert_eq!(merged.data.as_ref().unwrap()["tab_id"], "abc");
+        assert_eq!(merged.data.as_ref().unwrap()["ready_state"], "interactive");
         assert_eq!(
             navigation_step_success(3, "Navigated to https://example.test".to_string(), None)
                 .summary,
@@ -12589,7 +13343,13 @@ mod tests {
         assert!(non_fatal.ok);
         assert_eq!(
             non_fatal.summary,
-            "Click failed (non-fatal): Element is not visible"
+            "Click skipped (non-fatal): Element is not visible"
+        );
+        assert!(non_fatal.error.is_none());
+        assert_eq!(non_fatal.data.as_ref().unwrap()["clicked"], false);
+        assert_eq!(
+            non_fatal.data.as_ref().unwrap()["skip_reason"],
+            "Element is not visible"
         );
 
         let fatal = click_if_exists_action_result(StepResult::failure(

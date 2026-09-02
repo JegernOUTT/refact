@@ -37,6 +37,8 @@ pub(crate) fn strict_mode_violation_summary(count: usize, previews: &[String]) -
     message
 }
 
+pub const STRICT_MODE_REMEDY: &str = "Narrow the locator: add `nth` (0-based, -1 = last), `first`/`last`, `filter.has_text`, or a more specific role/name; `count` and `all_texts` are non-strict and safe for probing.";
+
 fn append_strict_mode_previews(message: &mut String, count: usize, previews: &[String]) {
     for (index, preview) in previews.iter().take(MAX_STRICT_MODE_PREVIEWS).enumerate() {
         let preview = preview
@@ -48,6 +50,8 @@ fn append_strict_mode_previews(message: &mut String, count: usize, previews: &[S
     if count > previews.len().min(MAX_STRICT_MODE_PREVIEWS) {
         message.push_str("\n  ...");
     }
+    message.push('\n');
+    message.push_str(STRICT_MODE_REMEDY);
 }
 
 #[cfg(test)]
@@ -83,7 +87,9 @@ mod tests {
         assert!(message.contains("resolved to 7 elements"));
         assert!(message.contains("<button>Save</button>"));
         assert!(message.contains("<button>Save draft</button>"));
-        assert!(message.ends_with("..."));
+        assert!(message.contains("\n  ...\n"));
+        assert!(message.ends_with(STRICT_MODE_REMEDY));
+        assert!(message.contains("`nth`") && message.contains("`filter.has_text`"));
     }
 
     #[test]
@@ -109,6 +115,7 @@ mod tests {
             .strip_prefix("  1) ")
             .unwrap();
         assert_eq!(first_preview.chars().count(), MAX_STRICT_MODE_PREVIEW_CHARS);
-        assert!(message.ends_with("..."));
+        assert!(message.contains("\n  ...\n"));
+        assert!(message.ends_with(STRICT_MODE_REMEDY));
     }
 }

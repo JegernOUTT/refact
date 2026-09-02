@@ -392,6 +392,17 @@ impl Display for ActionabilityError {
 
 impl Error for ActionabilityError {}
 
+impl ActionabilityError {
+    pub fn headline(&self) -> String {
+        let rendered = self.to_string();
+        let without_log = rendered
+            .split_once("\nCall log:")
+            .map(|(head, _)| head)
+            .unwrap_or(&rendered);
+        without_log.trim_end().to_string()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActionabilitySuccess<T> {
     pub output: T,
@@ -1537,6 +1548,9 @@ mod tests {
         );
         assert!(error.to_string().contains("Timeout 250ms exceeded."));
         assert!(error.to_string().contains("Call log:"));
+        let headline = ActionabilityError::Timeout(error.clone()).headline();
+        assert_eq!(headline, "Timeout 250ms exceeded.");
+        assert!(!headline.contains("Call log"));
     }
 
     #[test]

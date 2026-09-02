@@ -194,6 +194,21 @@ pub fn normalize_timestamp_ms(ts: f64) -> f64 {
     }
 }
 
+pub fn console_level_label(debug_repr: &str) -> String {
+    let mut label = String::with_capacity(debug_repr.len() + 2);
+    for (index, ch) in debug_repr.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if index > 0 {
+                label.push('_');
+            }
+            label.push(ch.to_ascii_lowercase());
+        } else {
+            label.push(ch);
+        }
+    }
+    label
+}
+
 pub fn normalize_timestamp_ms_opt(ts: f64) -> Option<f64> {
     if !ts.is_finite() || ts < 0.0 {
         None
@@ -704,8 +719,22 @@ impl BrowserRuntime {
         self.allowed_roots = roots;
     }
 
+    pub fn owns_browser_process(&self) -> bool {
+        !self.profile_dir.as_os_str().is_empty()
+    }
+
+    fn containment_roots(&self) -> Vec<PathBuf> {
+        let mut roots = self.allowed_roots.clone();
+        if self.owns_browser_process() {
+            roots.push(self.profile_dir.join("artifacts"));
+            roots.push(self.profile_dir.join("downloads"));
+        }
+        roots.push(self.downloads_dir.clone());
+        roots
+    }
+
     pub fn contained_path(&self, path: &str, label: &str) -> Result<PathBuf, String> {
-        resolve_contained_path(path, label, &self.artifacts_dir, &self.allowed_roots)
+        resolve_contained_path(path, label, &self.artifacts_dir, &self.containment_roots())
     }
 
     pub fn window_bounds(&self) -> Option<&WindowBounds> {
@@ -766,8 +795,11 @@ impl BrowserRuntime {
         handler: refact_integrations::browser_models::RouteHandler,
         times: Option<u32>,
     ) -> Result<(), String> {
-        let handler =
-            routing::normalize_route_handler(handler, &self.artifacts_dir, &self.allowed_roots)?;
+        let handler = routing::normalize_route_handler(
+            handler,
+            &self.artifacts_dir,
+            &self.containment_roots(),
+        )?;
         self.route_registry.add(pattern.clone(), handler, times)?;
         if let Err(error) = self.reconcile_route_interception() {
             self.route_registry.remove(Some(&pattern));
@@ -985,10 +1017,11 @@ impl BrowserRuntime {
     }
 }
 
-pub const TRANSPORT_DEAD_MARKERS: [&str; 3] = [
+pub const TRANSPORT_DEAD_MARKERS: [&str; 4] = [
     "underlying connection is closed",
     "connectionclosed",
     "connection closed",
+    "cdp session closed",
 ];
 
 pub fn is_transport_dead_error(error: &str) -> bool {
@@ -1043,10 +1076,12 @@ impl Drop for BrowserRuntime {
             }
         }
         self.route_registry.remove(None);
-        if self.launch_options.downloads_dir.is_none() {
+        if self.launch_options.downloads_dir.is_none() && !self.owns_browser_process() {
             let _ = std::fs::remove_dir_all(&self.downloads_dir);
         }
-        let _ = std::fs::remove_dir_all(&self.artifacts_dir);
+        if !self.owns_browser_process() {
+            let _ = std::fs::remove_dir_all(&self.artifacts_dir);
+        }
     }
 }
 
@@ -1352,7 +1387,7 @@ pub fn setup_console_capture(
                 .join(" ");
             let entry = ConsoleEntry {
                 timestamp: normalize_timestamp_ms(e.params.timestamp),
-                level: format!("{:?}", e.params.Type),
+                level: console_level_label(&format!("{:?}", e.params.Type)),
                 text,
             };
             if let Ok(mut buf) = console_buffer.lock() {
@@ -1366,7 +1401,7 @@ pub fn setup_console_capture(
         Event::LogEntryAdded(e) => {
             let entry = ConsoleEntry {
                 timestamp: normalize_timestamp_ms(e.params.entry.timestamp),
-                level: format!("{:?}", e.params.entry.level),
+                level: console_level_label(&format!("{:?}", e.params.entry.level)),
                 text: e.params.entry.text.clone(),
             };
             if let Ok(mut buf) = console_buffer.lock() {
@@ -1983,14 +2018,14 @@ mod tests {
     fn production_pointer_path_uses_actionability_cdp_mouse() {
         let source = include_str!("../../../src/integrations/browser_controller.rs");
         let routing = source
-            .split_once("fn step_locator_action(")
+            .split_once("fn step_locator_action_with_timeout(")
             .unwrap()
             .1
             .split_once("fn step_actionable_action(")
             .unwrap()
             .0;
         assert!(routing.contains("\"click\" => Some(ActionKind::Click)"));
-        assert!(routing.contains("return step_actionable_action("));
+        assert!(routing.contains("return step_actionable_action_in_mode("));
         assert!(!routing.contains("this.click()"));
 
         let driver = source

@@ -26,13 +26,24 @@ Canonical batch:
 Pass this object as `request`; e5/e7 stand for handles minted by the snapshot the previous batch
 returned. ONE call can carry many steps, unlike one-action-per-call servers.
 
+Batch semantics: steps run in order and the first failing step stops the batch. Every step that was
+not reached is still listed in `steps[]` with `skipped: true` and `ok: false`, so `steps.length`
+always equals the number of steps you sent. Set batch-level `continue_on_error: true` to keep
+running independent steps (endpoint probes, several `open_tab` candidates) after a failure; the
+batch still reports `ok: false` and each failure keeps its own `error`. Soft assertions and
+`click_if_exists` never stop a batch. A browser that died mid-batch is relaunched and the batch is
+resumed after replaying the last navigate/open_tab/set_content step; when no such step exists in the
+batch the remaining steps are refused (never run against about:blank) and a warning says so.
+
 Page report: a page-changing batch returns `page` with the final URL and title, `page.status` when
 the main document answered with a non-2xx status, `page.console` error/warning COUNTS (full text
 stays in `console` and `tab_log`), and `page.snapshot`. Snapshots inline their YAML when small; a
 large tree is written to a `text/yaml` artifact and `page.snapshot` carries the head plus
-`{artifact:{kind,mime,path,bytes}}`, `lines`, `bytes`, and `truncated:true`. Locator-driven actions
-echo a canonical Playwright-style locator in `locator_echo` so a run stays auditable after the refs
-expire.
+`{artifact:{kind,mime,path,bytes}}`, `lines`, `bytes`, and `truncated:true`. When the tree contains
+iframes, `page.snapshot.frames` lists each child frame's id, url, name and depth. Locator-driven
+actions report `locator_echo`: a canonical Playwright-style locator GENERATED for the element that
+was actually acted on (it may name a role/name/nth you never sent), so a run stays auditable after
+the refs expire and you can re-target the same element without a ref.
 
 `page_context` picks the page-changed context: `snapshot` (the default) attaches the ref-annotated
 ARIA snapshot and NO image, `screenshot` attaches a policy-sized image instead, `both` attaches
@@ -416,6 +427,12 @@ Other advanced steps: eval, highlight_element, highlight
 (locator/ref plus optional `style` and `label`), hide_highlight, annotate (locator/ref plus `text`),
 and fixed-delay wait_seconds.
 
+`eval` runs `expression` as a script (statements are fine; the completion value is the result). A
+returned Promise is awaited, a returned function is invoked (and its Promise awaited), and objects,
+arrays, Maps, Sets and DOM nodes are serialized into `data.value` instead of collapsing to null. A
+thrown exception fails the step with the JS error message. Runaway scripts are terminated after
+optional `timeout_ms` (default 30000).
+
 Handlers and overlay auto-dismiss do NOT guard `mouse_*` coordinate actions.
 
 ## cdp
@@ -460,6 +477,12 @@ Strict-mode failure: a non-selecting action found several matches. Add `nth`, `f
 
 Flaky waits: replace `wait_seconds` with `wait_for_selector`, `wait_for_load_state`,
 `wait_for_response`, or `wait_for_function`.
+
+`networkidle` never arrives on apps that poll or hold sockets open; its timeout error lists the
+requests still in flight. Wait for the specific response, text, selector or predicate instead.
+
+`tab_log` returns the session console buffer (most recent 50 entries); `page.console` carries
+error/warning counts and `console` the entries captured by the batch itself.
 
 A coordinate click did nothing: overlays are not auto-dismissed for `mouse_*`. Dismiss the overlay
 first, or use a locator action.

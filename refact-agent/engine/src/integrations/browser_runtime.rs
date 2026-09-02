@@ -440,6 +440,31 @@ pub fn relaunch_resume_warning(resume_index: usize) -> String {
     )
 }
 
+pub fn relaunch_replay_warning(
+    replayed_index: usize,
+    resume_index: usize,
+    replayed_summary: &str,
+) -> String {
+    let unreplayed = if replayed_index + 1 < resume_index {
+        format!(
+            "; steps {}..={} were NOT replayed, so page state produced by them may be lost",
+            replayed_index + 1,
+            resume_index - 1
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "browser session was dead; relaunched, replayed step {replayed_index} ({replayed_summary}) to restore the document, then resumed from step {resume_index} — open tabs were lost, cookies/storage persist via profile{unreplayed}"
+    )
+}
+
+pub fn relaunch_without_page_context_warning(resume_index: usize) -> String {
+    format!(
+        "browser session was dead and was relaunched, but no navigate/open_tab/set_content step precedes step {resume_index} in this batch, so the page could not be restored and the relaunched browser is at about:blank; steps {resume_index}+ were not run — navigate again and retry them"
+    )
+}
+
 static RELAUNCH_LOCKS: OnceLock<StdMutex<HashMap<String, Arc<AMutex<()>>>>> = OnceLock::new();
 
 fn relaunch_lock_for_chat(chat_id: &str) -> Arc<AMutex<()>> {
@@ -694,12 +719,15 @@ pub async fn browser_monitor_background_task(app: crate::app_state::AppState) {
 
             if !still_connected {
                 match chat_id {
-                    Some(chat_id) => to_relaunch.push(RuntimeRecoveryPlan {
-                        runtime_id: rid.clone(),
-                        chat_id,
-                        profile_dir,
-                        launch_options,
-                    }),
+                    Some(chat_id) if !profile_dir.as_os_str().is_empty() => {
+                        to_relaunch.push(RuntimeRecoveryPlan {
+                            runtime_id: rid.clone(),
+                            chat_id,
+                            profile_dir,
+                            launch_options,
+                        })
+                    }
+                    Some(_) => to_remove.push((rid.clone(), false)),
                     None => to_remove.push((rid.clone(), true)),
                 }
             }
@@ -768,7 +796,13 @@ mod tests {
             "dead runtimes attached to a chat are still leaked forever"
         );
         assert!(monitor.contains("if !still_connected {"));
-        assert!(monitor.contains("Some(chat_id) => to_relaunch.push(RuntimeRecoveryPlan {"));
+        assert!(monitor.contains(
+            "Some(chat_id) if !profile_dir.as_os_str().is_empty() => {\n                        to_relaunch.push(RuntimeRecoveryPlan {"
+        ));
+        assert!(
+            monitor.contains("Some(_) => to_remove.push((rid.clone(), false)),"),
+            "a dead connected (not launched) runtime must be dropped, never relaunched from an empty profile"
+        );
         assert!(monitor.contains("None => to_remove.push((rid.clone(), true)),"));
         assert!(monitor.contains("relaunch_runtime_for_chat("));
         assert!(

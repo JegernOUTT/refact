@@ -510,6 +510,7 @@ pub fn to_browser_steps(action: &BrowserAction) -> Option<Vec<BrowserStep>> {
         BrowserAction::Reload { .. } => Some(vec![BrowserStep::Reload]),
         BrowserAction::ClickAtElement { selector, .. } => Some(vec![BrowserStep::Click {
             locator: BrowserLocator::css(selector),
+            timeout_ms: None,
         }]),
         BrowserAction::PressKey { key, modifiers, .. } => Some(vec![BrowserStep::PressKey {
             key: key.clone(),
@@ -518,6 +519,7 @@ pub fn to_browser_steps(action: &BrowserAction) -> Option<Vec<BrowserStep>> {
         BrowserAction::TabLog { .. } => Some(vec![BrowserStep::TabLog]),
         BrowserAction::Eval { expression, .. } => Some(vec![BrowserStep::Eval {
             expression: expression.clone(),
+            timeout_ms: None,
         }]),
         BrowserAction::Styles {
             selector,
@@ -1226,7 +1228,7 @@ mod tests {
         let action = parse_command("eval 1 document.title").unwrap();
         let steps = to_browser_steps(&action).unwrap();
         assert!(
-            matches!(&steps[0], BrowserStep::Eval { expression } if expression == "document.title")
+            matches!(&steps[0], BrowserStep::Eval { expression, .. } if expression == "document.title")
         );
     }
 
@@ -1342,7 +1344,7 @@ mod tests {
                 .unwrap();
         let steps = to_browser_steps(&action).unwrap();
         match &steps[0] {
-            BrowserStep::Click { locator } => {
+            BrowserStep::Click { locator, .. } => {
                 let json = serde_json::to_value(locator).unwrap();
                 assert_eq!(json["by"], "css");
                 let val = json["value"].as_str().unwrap();

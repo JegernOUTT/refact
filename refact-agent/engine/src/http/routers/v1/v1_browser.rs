@@ -958,6 +958,7 @@ pub async fn handle_browser_eval(
 
     let steps = vec![crate::integrations::browser_models::BrowserStep::Eval {
         expression: post.expression.clone(),
+        timeout_ms: None,
     }];
     let report = tokio::task::block_in_place(|| {
         browser_controller::execute_steps(&tab, &steps, &ImagePolicy::default())
