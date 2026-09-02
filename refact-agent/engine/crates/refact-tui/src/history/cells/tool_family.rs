@@ -67,7 +67,6 @@ const TUI_TOOL_FAMILY_REGISTRY: &[(&str, ToolFamily)] = &[
     ("agent_ask_planner", ToolFamily::RequestInput),
     ("planner_reply", ToolFamily::RequestInput),
     ("subagent", ToolFamily::Server),
-    ("delegate", ToolFamily::Server),
     ("tasks_set", ToolFamily::Server),
     ("task_done", ToolFamily::Server),
     ("buddy_say", ToolFamily::Server),
@@ -470,6 +469,7 @@ mod tests {
             "vecdb_search",
             "request_user_input",
             "request-user-input",
+            "delegate",
         ] {
             assert!(
                 !TUI_TOOL_FAMILY_REGISTRY
