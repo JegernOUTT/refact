@@ -65,7 +65,15 @@ struct PtyRuntimeProcess {
     child: Box<dyn portable_pty::Child + Send>,
     process_id: Option<u32>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    master: Box<dyn MasterPty + Send>,
+    master: Option<Box<dyn MasterPty + Send>>,
+}
+
+impl Drop for PtyRuntimeProcess {
+    fn drop(&mut self) {
+        if let Some(master) = self.master.take() {
+            drop_pty_master(master);
+        }
+    }
 }
 
 enum RuntimeChild {
@@ -91,9 +99,18 @@ impl RuntimeChild {
         match self {
             RuntimeChild::Pty(process) => process
                 .master
+                .as_ref()
+                .ok_or_else(|| "pty is already released; process is not running".to_string())?
                 .resize(crate::pty::pty_size(rows, cols))
                 .map_err(|error| format!("failed to resize pty: {error}")),
             RuntimeChild::Tokio(_) => Err("process is not PTY-backed".to_string()),
+        }
+    }
+
+    fn take_pty_master(&mut self) -> Option<Box<dyn MasterPty + Send>> {
+        match self {
+            RuntimeChild::Pty(process) => process.master.take(),
+            RuntimeChild::Tokio(_) => None,
         }
     }
 
@@ -459,6 +476,28 @@ fn pump_drain_timeout_status(timeout: Duration) -> ExecStatus {
     }
 }
 
+// Windows ConPTY only closes the output pipe once the pseudoconsole itself is closed, so the
+// blocking PTY reader never sees EOF while the runtime keeps `master` alive.
+async fn release_pty_master(child: &Arc<Mutex<RuntimeChild>>) {
+    if let Some(master) = child.lock().await.take_pty_master() {
+        drop_pty_master(master);
+    }
+}
+
+#[cfg(not(windows))]
+fn drop_pty_master(master: Box<dyn MasterPty + Send>) {
+    drop(master);
+}
+
+// `ClosePseudoConsole` waits for the console host on Windows before 11 24H2, and runtime shutdown
+// joins tokio worker and blocking-pool threads, so that wait needs a thread of its own.
+#[cfg(windows)]
+fn drop_pty_master(master: Box<dyn MasterPty + Send>) {
+    let _ = std::thread::Builder::new()
+        .name("refact-pty-release".to_string())
+        .spawn(move || drop(master));
+}
+
 async fn kill_and_reap(child: &Arc<Mutex<RuntimeChild>>) -> Result<(), String> {
     let kill_result = {
         let mut child = child.lock().await;
@@ -718,14 +757,24 @@ async fn monitor_process(
         }
     };
 
+    if matches!(
+        terminal_status,
+        ExecStatus::SandboxLauncherFailed { .. }
+            | ExecStatus::Failed { .. }
+            | ExecStatus::TimedOut
+            | ExecStatus::Killed
+    ) {
+        if let Err(error) = kill_and_reap_observed(&child, &observation).await {
+            tracing::warn!("exec kill/reap failed for {process_id}: {error}");
+        }
+    }
+    release_pty_master(&child).await;
+
     let terminal_status = match terminal_status {
         ExecStatus::SandboxLauncherFailed { .. }
         | ExecStatus::Failed { .. }
         | ExecStatus::TimedOut
         | ExecStatus::Killed => {
-            if let Err(error) = kill_and_reap_observed(&child, &observation).await {
-                tracing::warn!("exec kill/reap failed for {process_id}: {error}");
-            }
             finish_pumps_with_timeout(stdout_task, stderr_task, KILL_PUMP_DRAIN_TIMEOUT).await;
             terminal_status
         }
@@ -992,7 +1041,7 @@ impl ExecRegistry {
             child,
             process_id: child_process_id,
             writer: stdin_writer.clone(),
-            master: pty_handle.master,
+            master: Some(pty_handle.master),
         })));
         let (control_tx, control_rx) = mpsc::channel(8);
         let terminal = Arc::new(Notify::new());
@@ -1356,6 +1405,75 @@ mod tests {
             "transcript stays normalized: {transcript_text:?}"
         );
         assert!(transcript_text.contains('a') && transcript_text.contains('b'));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pty_master_is_released_once_process_is_terminal() {
+        let registry = ExecRegistry::new();
+        let request = ExecSpawnRequest::background("exit 0").with_tty(true);
+        let command = pty_command(&request, None).unwrap();
+        let (meta, process_id) = build_process_meta(&request).unwrap();
+        let (pty_handle, pty_child) =
+            crate::pty::spawn_pty(command, crate::pty::default_pty_size()).unwrap();
+        let child_process_id = pty_child.process_id();
+        let stdin_writer = Arc::new(Mutex::new(pty_handle.writer));
+        let child = Arc::new(Mutex::new(RuntimeChild::Pty(PtyRuntimeProcess {
+            child: pty_child,
+            process_id: child_process_id,
+            writer: stdin_writer.clone(),
+            master: Some(pty_handle.master),
+        })));
+        let (control_tx, control_rx) = mpsc::channel(8);
+        registry
+            .register_new_with_runtime(
+                meta,
+                crate::transcript::DEFAULT_MAX_BYTES,
+                ExecProcessRuntime {
+                    control_tx,
+                    terminal: Arc::new(Notify::new()),
+                    stdin_writer: Some(stdin_writer),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        let stdout_task = pump_blocking_output(
+            registry.clone(),
+            process_id.clone(),
+            ExecOutputStream::Combined,
+            pty_handle.reader,
+            None,
+        );
+        let stderr_task = AbortOnDropTask(tokio::spawn(async {}));
+        registry.mark_started(&process_id).await.unwrap();
+
+        monitor_process(
+            registry.clone(),
+            process_id.clone(),
+            child.clone(),
+            control_rx,
+            None,
+            None,
+            None,
+            false,
+            None,
+            stdout_task,
+            stderr_task,
+        )
+        .await;
+
+        assert!(registry
+            .get(&process_id)
+            .await
+            .unwrap()
+            .status
+            .is_terminal());
+        assert_eq!(
+            child.lock().await.resize(40, 120),
+            Err("pty is already released; process is not running".to_string())
+        );
+        assert!(child.lock().await.take_pty_master().is_none());
     }
 
     #[cfg(unix)]
