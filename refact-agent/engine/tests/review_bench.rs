@@ -324,6 +324,7 @@ fn report(findings: Vec<ReviewFinding>, checks_performed: Vec<&str>) -> ReviewRe
             files_reviewed: vec![],
             focus: None,
             diff_base: None,
+            expansion: None,
         },
         findings,
         checks_performed: checks_performed.into_iter().map(str::to_string).collect(),

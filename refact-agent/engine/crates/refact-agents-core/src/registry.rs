@@ -1155,8 +1155,8 @@ mod tests {
         let inbox = registry.inbox_for(&record.agent_id).await.unwrap();
         let inbox = inbox.lock().await;
         assert_eq!(inbox.len(), MAX_INBOX_MESSAGES);
-        assert_eq!(inbox.first().unwrap().text, "1");
-        assert_eq!(inbox.last().unwrap().text, MAX_INBOX_MESSAGES.to_string());
+        assert_eq!(inbox.front().unwrap().text, "1");
+        assert_eq!(inbox.back().unwrap().text, MAX_INBOX_MESSAGES.to_string());
     }
 
     #[tokio::test]
