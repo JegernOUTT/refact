@@ -3173,6 +3173,7 @@ mod tests {
                     }
                     Err(_) => return,
                 };
+                stream.set_nonblocking(false).unwrap();
                 let headers = read_request_headers(&mut stream);
                 let response = match scripted.next() {
                     Some(body) => {
