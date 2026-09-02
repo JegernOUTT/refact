@@ -25,6 +25,7 @@ describe("Drawer", () => {
           chatId: "chat-a",
           session: {
             process_id: "running-one",
+            label: "zsh",
             title: "zsh · running",
             status: "running",
           },
@@ -35,6 +36,7 @@ describe("Drawer", () => {
           chatId: "chat-a",
           session: {
             process_id: "killed-three",
+            label: "build",
             title: "build · killed",
             status: "killed",
           },
@@ -45,6 +47,7 @@ describe("Drawer", () => {
           chatId: "chat-a",
           session: {
             process_id: "failed-two",
+            label: "tests",
             title: "tests · failed",
             status: "failed",
           },

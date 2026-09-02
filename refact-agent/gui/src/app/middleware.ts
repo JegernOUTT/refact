@@ -1386,6 +1386,7 @@ startListening({
           processId: event.process_id,
           status,
           exit_code: event.exit_code,
+          ended_at_ms: Date.now(),
         }),
       );
     }

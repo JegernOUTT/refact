@@ -115,6 +115,7 @@ describe("TerminalPanel spawn dimensions", () => {
       {
         chat_id: "chat-a",
         cwd: "/worktrees/chat-a",
+        env: { TERM: "xterm-256color", COLORTERM: "truecolor", NO_COLOR: "" },
         pty: true,
         rows: 48,
         cols: 132,

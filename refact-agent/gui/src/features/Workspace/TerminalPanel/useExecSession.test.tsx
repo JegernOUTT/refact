@@ -114,7 +114,7 @@ function Harness({
   interactive,
 }: {
   runtime: RuntimeFixture["runtime"];
-  onStatusChange: (status: ExecStatus) => void;
+  onStatusChange: (status: ExecStatus, exitCode?: number | null) => void;
   onResize?: (rows: number, cols: number) => void;
   interactive?: boolean;
 }) {
@@ -207,17 +207,83 @@ describe("useExecSession", () => {
     expect(fixture.fit).toHaveBeenCalled();
 
     act(() => {
-      source.emit("exit", { process_id: "proc-1", status: "exited" });
+      source.emit("exit", {
+        process_id: "proc-1",
+        status: "exited",
+        exit_code: 0,
+        ended_at_ms: 1_700_000_000_000,
+      });
     });
     expect(fixture.write).toHaveBeenCalledWith(
-      "\r\n[process exited: exited]\r\n",
+      "\r\n\u001b[2m[process exited with code 0]\u001b[22m\r\n",
     );
-    expect(onStatusChange).toHaveBeenLastCalledWith("exited");
+    expect(onStatusChange).toHaveBeenLastCalledWith(
+      "exited",
+      0,
+      1_700_000_000_000,
+    );
     expect(source.close).toHaveBeenCalled();
 
     view.unmount();
     expect(fixture.disposeInput).toHaveBeenCalled();
     expect(FakeResizeObserver.disconnect).toHaveBeenCalled();
+  });
+
+  test("renders a finished process from backfill without opening a stream", async () => {
+    server.use(
+      http.get("*/v1/exec/proc-1/read", () =>
+        HttpResponse.json({
+          chunks: [{ seq: 0, stream: "combined", text: "done" }],
+          next_seq: 1,
+          status: "exited",
+          exit_code: 2,
+        }),
+      ),
+    );
+    const fixture = makeRuntime();
+    const onStatusChange = vi.fn();
+    render(
+      <Harness
+        runtime={fixture.runtime}
+        interactive={false}
+        onStatusChange={onStatusChange}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(fixture.write).toHaveBeenCalledWith(
+        "\r\n\u001b[2m[process exited with code 2]\u001b[22m\r\n",
+      ),
+    );
+    expect(fixture.write).toHaveBeenCalledWith("done");
+    expect(onStatusChange).toHaveBeenLastCalledWith(
+      "exited",
+      2,
+      expect.any(Number),
+    );
+    expect(FakeEventSource.instances).toHaveLength(0);
+  });
+
+  test("labels killed and timed out processes in the exit notice", async () => {
+    server.use(
+      http.get("*/v1/exec/proc-1/read", () =>
+        HttpResponse.json({ chunks: [], next_seq: 0, status: "running" }),
+      ),
+      http.post("*/v1/exec/proc-1/resize", () => HttpResponse.json({})),
+    );
+    const fixture = makeRuntime();
+    render(<Harness runtime={fixture.runtime} onStatusChange={vi.fn()} />);
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+
+    act(() => {
+      FakeEventSource.instances[0].emit("exit", {
+        process_id: "proc-1",
+        status: "timed_out",
+      });
+    });
+    expect(fixture.write).toHaveBeenCalledWith(
+      "\r\n\u001b[2m[process timed out]\u001b[22m\r\n",
+    );
   });
 
   test("syncs the fitted PTY size before painting backfill on attach", async () => {
@@ -253,7 +319,7 @@ describe("useExecSession", () => {
     expect(fixture.write).toHaveBeenCalledWith("backfill");
   });
 
-  test("streams non-TTY output without registering stdin or resize handling", async () => {
+  test("streams non-TTY output and fits locally without stdin or PTY resize", async () => {
     const stdinBodies: unknown[] = [];
     const resizeBodies: unknown[] = [];
     server.use(
@@ -284,6 +350,7 @@ describe("useExecSession", () => {
 
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
     expect(fixture.write).toHaveBeenCalledWith("readonly");
+    expect(fixture.fit).toHaveBeenCalled();
     expect(fixture.runtime.terminal.onData).not.toHaveBeenCalled();
     fixture.emitData("ignored");
     await new Promise((resolve) => setTimeout(resolve, 20));

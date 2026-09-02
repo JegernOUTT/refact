@@ -18,6 +18,8 @@ const INPUT_DEBOUNCE_MS = 16;
 const RESIZE_DEBOUNCE_MS = 150;
 const INITIAL_RECONNECT_DELAY_MS = 250;
 const MAX_RECONNECT_DELAY_MS = 5_000;
+const DIM = "\u001b[2m";
+const DIM_OFF = "\u001b[22m";
 
 type TerminalRuntime = {
   terminal: Terminal;
@@ -32,7 +34,11 @@ type UseExecSessionOptions = {
   connection: EngineApiConnection;
   apiKey?: string;
   interactive?: boolean;
-  onStatusChange: (status: ExecStatus) => void;
+  onStatusChange: (
+    status: ExecStatus,
+    exitCode?: number | null,
+    endedAtMs?: number | null,
+  ) => void;
   onResize?: (rows: number, cols: number) => void;
 };
 
@@ -49,6 +55,24 @@ function parseEvent<T>(event: Event): T | null {
 
 function isTerminalStatus(status: ExecStatus): boolean {
   return !["starting", "running"].includes(status);
+}
+
+export function exitNoticeText(
+  status: ExecStatus,
+  exitCode?: number | null,
+): string {
+  switch (status) {
+    case "killed":
+      return "process killed";
+    case "timed_out":
+      return "process timed out";
+    case "failed":
+      return "process failed";
+    default:
+      return exitCode === undefined || exitCode === null
+        ? "process exited"
+        : `process exited with code ${exitCode}`;
+  }
 }
 
 export function useExecSession({
@@ -85,9 +109,17 @@ export function useExecSession({
       setError(cause instanceof Error ? cause.message : String(cause));
     };
 
-    const updateStatus = (status: ExecStatus) => {
+    const updateStatus = (
+      status: ExecStatus,
+      exitCode?: number | null,
+      endedAtMs?: number | null,
+    ) => {
       statusRef.current = status;
-      onStatusChange(status);
+      onStatusChange(
+        status,
+        exitCode,
+        isTerminalStatus(status) ? endedAtMs ?? Date.now() : undefined,
+      );
     };
 
     const writeChunks = (chunks: ExecOutputChunk[]) => {
@@ -98,10 +130,12 @@ export function useExecSession({
       }
     };
 
-    const writeExitNotice = (status: ExecStatus) => {
+    const writeExitNotice = (status: ExecStatus, exitCode?: number | null) => {
       if (exitNoticeWritten) return;
       exitNoticeWritten = true;
-      terminal.write(`\r\n[process exited: ${status}]\r\n`);
+      terminal.write(
+        `\r\n${DIM}[${exitNoticeText(status, exitCode)}]${DIM_OFF}\r\n`,
+      );
     };
 
     const flushInput = async () => {
@@ -126,8 +160,7 @@ export function useExecSession({
       : null;
 
     const syncSize = async () => {
-      if (stopped || !interactive || isTerminalStatus(statusRef.current))
-        return;
+      if (stopped) return;
       try {
         fitAddon.fit();
       } catch {
@@ -136,6 +169,7 @@ export function useExecSession({
       const { rows, cols } = terminal;
       if (rows <= 0 || cols <= 0) return;
       onResize?.(rows, cols);
+      if (!interactive || isTerminalStatus(statusRef.current)) return;
       if (syncedSize && syncedSize.rows === rows && syncedSize.cols === cols) {
         return;
       }
@@ -155,14 +189,10 @@ export function useExecSession({
         void syncSize();
       }, RESIZE_DEBOUNCE_MS);
     };
-    const resizeObserver = interactive
-      ? new ResizeObserver(scheduleResize)
-      : null;
-    resizeObserver?.observe(container);
-    if (interactive) {
-      const fonts = (document as Partial<Document>).fonts;
-      void fonts?.ready.then(() => scheduleResize());
-    }
+    const resizeObserver = new ResizeObserver(scheduleResize);
+    resizeObserver.observe(container);
+    const fonts = (document as Partial<Document>).fonts;
+    void fonts?.ready.then(() => scheduleResize());
 
     const scheduleReconnect = () => {
       eventSource?.close();
@@ -206,7 +236,7 @@ export function useExecSession({
           nextSequenceRef.current,
           snapshot.next_seq,
         );
-        updateStatus(snapshot.status);
+        updateStatus(snapshot.status, snapshot.exit_code);
       });
       eventSource.addEventListener("output", (event) => {
         const chunk = parseEvent<ExecOutputChunk>(event);
@@ -215,8 +245,8 @@ export function useExecSession({
       eventSource.addEventListener("exit", (event) => {
         const exit = parseEvent<ExecExitEvent>(event);
         if (!exit) return;
-        updateStatus(exit.status);
-        writeExitNotice(exit.status);
+        updateStatus(exit.status, exit.exit_code, exit.ended_at_ms);
+        writeExitNotice(exit.status, exit.exit_code);
         eventSource?.close();
         eventSource = null;
         setReconnecting(false);
@@ -241,9 +271,9 @@ export function useExecSession({
           nextSequenceRef.current,
           read.next_seq,
         );
-        updateStatus(read.status);
+        updateStatus(read.status, read.exit_code, read.ended_at_ms);
         if (isTerminalStatus(read.status)) {
-          writeExitNotice(read.status);
+          writeExitNotice(read.status, read.exit_code);
           setReconnecting(false);
           return;
         }
@@ -260,7 +290,7 @@ export function useExecSession({
     return () => {
       stopped = true;
       dataDisposable?.dispose();
-      resizeObserver?.disconnect();
+      resizeObserver.disconnect();
       eventSource?.close();
       if (inputTimer !== null) clearTimeout(inputTimer);
       if (resizeTimer !== null) clearTimeout(resizeTimer);

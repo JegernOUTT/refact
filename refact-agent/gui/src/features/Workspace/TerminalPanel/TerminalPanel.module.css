@@ -9,14 +9,61 @@
   overflow: hidden;
   color: var(--rf-color-fg);
   background: transparent;
+  container-type: inline-size;
+}
+
+.splitter {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: var(--rf-z-base);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--rf-space-xs);
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.splitter::before {
+  position: absolute;
+  inset: 0;
+  background: var(--rf-color-accent-soft);
+  content: "";
+  opacity: var(--rf-motion-opacity-hidden);
+}
+
+.splitter:hover::before,
+.splitter:focus-visible::before,
+.splitter[data-dragging]::before {
+  opacity: var(--rf-motion-opacity-visible);
+}
+
+.splitter:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-focus-ring-w));
+}
+
+.splitterHandle {
+  position: relative;
+  width: var(--rf-space-6);
+  height: var(--rf-space-2xs);
+  background: var(--rf-border-strong);
+  border-radius: var(--rf-radius-pill);
+}
+
+.splitter:hover .splitterHandle,
+.splitter[data-dragging] .splitterHandle {
+  background: var(--rf-color-accent);
 }
 
 .header {
   display: flex;
   align-items: center;
-  gap: var(--rf-space-2);
+  gap: var(--rf-space-1);
   min-height: var(--rf-control-h-lg);
-  padding: var(--rf-space-1) var(--rf-space-2);
+  padding: 0 var(--rf-space-1) 0 var(--rf-space-3);
   border-bottom: var(--rf-hairline) solid var(--rf-border);
 }
 
@@ -24,78 +71,177 @@
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: var(--rf-space-1);
+  gap: var(--rf-space-xs);
+  margin-inline-end: var(--rf-space-1);
+  padding-inline-end: var(--rf-space-2);
   color: var(--rf-color-fg);
   font: var(--rf-weight-semibold) var(--rf-text-2) / var(--rf-line)
     var(--rf-font-ui);
+  border-inline-end: var(--rf-hairline) solid var(--rf-border);
 }
 
 .tabs {
   display: flex;
   flex: 1 1 auto;
-  gap: var(--rf-space-1);
+  align-items: center;
+  gap: var(--rf-space-2xs);
   min-width: 0;
-  overflow-x: auto;
+  min-height: var(--rf-control-h-icon-sm);
+  overflow: auto hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
 }
 
-.tab,
-.tabActive {
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tabs[data-overflow-end] {
+  mask-image: linear-gradient(
+    to right,
+    black calc(100% - var(--rf-space-6)),
+    transparent
+  );
+}
+
+.tabs[data-overflow-start] {
+  mask-image: linear-gradient(to right, transparent, black var(--rf-space-6));
+}
+
+.tabs[data-overflow-start][data-overflow-end] {
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    black var(--rf-space-6),
+    black calc(100% - var(--rf-space-6)),
+    transparent
+  );
+}
+
+.tab {
+  position: relative;
   display: flex;
   flex: 0 0 auto;
   align-items: center;
   min-width: 0;
+  max-width: min(var(--rf-overlay-popover-min), 100%);
+  height: var(--rf-control-h-icon-sm);
+  padding-inline-end: var(--rf-space-2xs);
+  color: var(--rf-color-muted);
+  border: var(--rf-hairline) solid transparent;
   border-radius: var(--rf-radius-ctl);
 }
 
+.tab:hover {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+}
+
 .tabActive {
-  background: var(--rf-color-accent-soft);
+  max-width: min(var(--rf-overlay-popover-max), 100%);
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-2);
+  border-color: var(--rf-border);
+}
+
+.tabActive:hover {
+  background: var(--rf-surface-2);
 }
 
 .tabSelect {
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
   gap: var(--rf-space-xs);
   min-width: 0;
-  min-height: var(--rf-control-h-sm);
-  padding: 0 var(--rf-space-2);
-  color: var(--rf-color-muted);
+  height: 100%;
+  padding: 0 var(--rf-space-1) 0 var(--rf-space-2);
+  color: inherit;
   font: var(--rf-weight-medium) var(--rf-text-2) / var(--rf-line)
     var(--rf-font-ui);
   background: transparent;
   border: 0;
+  border-radius: inherit;
   cursor: pointer;
 }
 
-.tabActive .tabSelect {
-  color: var(--rf-color-fg);
+.tabSelect:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-hairline));
 }
 
 .tabTitle {
-  max-width: var(--rf-overlay-popover-max);
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: start;
 }
 
 .tabStatus {
+  flex: 0 0 auto;
   color: var(--rf-color-muted);
   font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
     var(--rf-font-ui);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
+.tab[data-tone="error"] .tabStatus {
+  color: var(--rf-color-danger);
+}
+
 .closeButton {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: calc(var(--rf-control-h-sm) - var(--rf-space-1));
+  height: calc(var(--rf-control-h-sm) - var(--rf-space-1));
+  padding: 0;
   color: var(--rf-color-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--rf-radius-chip);
+  cursor: pointer;
+  opacity: var(--rf-motion-opacity-muted);
+}
+
+.tab:hover .closeButton,
+.tab:focus-within .closeButton,
+.tabActive .closeButton {
+  opacity: var(--rf-motion-opacity-visible);
+}
+
+.closeButton:hover,
+.closeButton:focus-visible {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-3);
+  opacity: var(--rf-motion-opacity-visible);
+}
+
+.closeButton:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: calc(-1 * var(--rf-hairline));
+}
+
+.readOnlyBadge {
+  flex: 0 0 auto;
+  margin-inline: var(--rf-space-1);
+}
+
+.actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--rf-space-2xs);
 }
 
 .body {
   position: relative;
   display: flex;
-  block-size: clamp(
-    calc(var(--rf-control-h) * 6),
-    30dvh,
-    calc(var(--rf-control-h) * 10)
-  );
+  block-size: var(--rf-terminal-h);
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -125,8 +271,10 @@
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  padding: var(--rf-space-2);
+  padding: var(--rf-space-2) var(--rf-space-1) var(--rf-space-1)
+    var(--rf-space-3);
   overflow: hidden;
+  background: var(--rf-bg);
 }
 
 .terminal {
@@ -136,14 +284,41 @@
   overflow: hidden;
 }
 
-.readOnlyHint {
+.search {
   position: absolute;
   top: var(--rf-space-2);
   right: var(--rf-space-3);
-  color: var(--rf-color-muted);
-  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+  z-index: var(--rf-z-dropdown);
+  display: flex;
+  gap: var(--rf-space-2xs);
+  align-items: center;
+  padding: var(--rf-space-2xs);
+  background: var(--rf-surface-overlay);
+  border: var(--rf-hairline) solid var(--rf-border-strong);
+  border-radius: var(--rf-radius-ctl);
+  box-shadow: var(--rf-elev-overlay);
+}
+
+.searchInput {
+  width: var(--rf-overlay-popover-min);
+  max-width: 40cqw;
+  height: var(--rf-control-h-sm);
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-fg);
+  font: var(--rf-weight-regular) var(--rf-text-2) / var(--rf-line)
     var(--rf-font-ui);
-  pointer-events: none;
+  background: var(--rf-surface-1);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-chip);
+  outline: none;
+}
+
+.searchInput::placeholder {
+  color: var(--rf-color-faint);
+}
+
+.searchInput:focus-visible {
+  border-color: var(--rf-focus-ring);
 }
 
 .connectionNotice,
@@ -168,7 +343,15 @@
 }
 
 .panelError {
+  display: flex;
+  gap: var(--rf-space-2);
+  align-items: flex-start;
   z-index: var(--rf-z-popover);
+}
+
+.panelErrorText {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .loading {
@@ -191,4 +374,36 @@
   width: 100%;
   min-width: 0;
   min-height: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tab,
+  .closeButton,
+  .splitterHandle,
+  .splitter::before {
+    transition:
+      background var(--rf-dur-fast) var(--rf-ease-standard),
+      border-color var(--rf-dur-fast) var(--rf-ease-standard),
+      color var(--rf-dur-fast) var(--rf-ease-standard),
+      opacity var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+}
+
+@container (max-width: 560px) {
+  .titleText {
+    display: none;
+  }
+
+  .title {
+    margin-inline-end: 0;
+    padding-inline-end: var(--rf-space-1);
+  }
+
+  .tabStatus {
+    display: none;
+  }
+
+  .tab[data-tone="error"] .tabStatus {
+    display: inline;
+  }
 }

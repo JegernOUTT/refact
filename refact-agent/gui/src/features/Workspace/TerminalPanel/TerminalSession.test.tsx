@@ -1,14 +1,22 @@
 import { waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
+import { terminalKeyHandler } from "./terminalKeys";
+
 type TerminalSessionComponent =
   typeof import("./TerminalSession").TerminalSession;
 type RenderFn = typeof import("../../../utils/test-utils").render;
 
 type FakeTerminalOptions = {
+  convertEol?: boolean;
   cursorBlink?: boolean;
+  cursorInactiveStyle?: string;
   disableStdin?: boolean;
   fontFamily?: string;
+  fontSize?: number;
+  lineHeight?: number;
+  macOptionIsMeta?: boolean;
+  scrollback?: number;
   theme?: Record<string, string | undefined>;
 };
 
@@ -18,12 +26,18 @@ class FakeTerminal {
   options: FakeTerminalOptions = {};
   rows = 24;
   cols = 80;
+  unicode = { activeVersion: "6" };
   loadAddon = (): undefined => undefined;
   open = (): undefined => undefined;
   focus = vi.fn<() => undefined>();
   dispose = (): undefined => undefined;
   onData = () => ({ dispose: (): undefined => undefined });
-  write = (): undefined => undefined;
+  write = vi.fn<(data: string) => undefined>();
+  attachCustomKeyEventHandler =
+    vi.fn<(handler: (event: KeyboardEvent) => boolean) => undefined>();
+  hasSelection = (): boolean => false;
+  getSelection = (): string => "";
+  clearSelection = (): undefined => undefined;
 
   constructor(options: FakeTerminalOptions) {
     this.constructorOptions = options;
@@ -43,6 +57,7 @@ const DARK_TOKENS: Record<string, string> = {
   "--rf-chart-5": "#6cb6c9",
   "--rf-chart-6": "#b08ad1",
   "--rf-font-mono": "ui-monospace, monospace",
+  "--rf-text-2": "13px",
 };
 
 const LIGHT_TOKENS: Record<string, string> = {
@@ -127,6 +142,83 @@ describe("TerminalSession", () => {
     expect(constructed.theme?.magenta).toBe("#b08ad1");
     expect(constructed.theme?.brightBlack).toBe("rgba(255, 255, 255, 0.28)");
     expect(constructed.fontFamily).toBe("ui-monospace, monospace");
+    expect(constructed.fontSize).toBe(13);
+    expect(constructed.lineHeight).toBeGreaterThan(1);
+    expect(constructed.scrollback).toBeGreaterThan(1000);
+    expect(constructed.convertEol).toBe(false);
+    expect(constructed.macOptionIsMeta).toBe(true);
+    expect(FakeTerminal.instances[0].unicode.activeVersion).toBe("11");
+    expect(
+      FakeTerminal.instances[0].attachCustomKeyEventHandler,
+    ).toHaveBeenCalledOnce();
+    expect(FakeTerminal.instances[0].write).not.toHaveBeenCalled();
+  });
+
+  test("opens the find bar from a search request and closes it with Escape", async () => {
+    const view = render(
+      <TerminalSession
+        processId="proc-search"
+        chatId="chat-a"
+        searchRequest={0}
+        onStatusChange={vi.fn()}
+      />,
+      { preloadedState: CONFIG_STATE },
+    );
+    await waitFor(() => expect(FakeTerminal.instances).toHaveLength(1));
+    expect(view.queryByLabelText("Find in terminal")).toBeNull();
+
+    view.rerender(
+      <TerminalSession
+        processId="proc-search"
+        chatId="chat-a"
+        searchRequest={1}
+        onStatusChange={vi.fn()}
+      />,
+    );
+    const input = await view.findByLabelText("Find in terminal");
+    expect(input).toHaveFocus();
+    await view.user.keyboard("{Escape}");
+    expect(view.queryByLabelText("Find in terminal")).toBeNull();
+    expect(FakeTerminal.instances[0].focus).toHaveBeenCalled();
+  });
+
+  test("terminal key handler copies, pastes and searches without leaking to the pty", () => {
+    const copy = vi.fn();
+    const openSearch = vi.fn();
+    const selection = { current: "selected text" };
+    const terminal = {
+      hasSelection: () => selection.current.length > 0,
+      getSelection: () => selection.current,
+      clearSelection: vi.fn(),
+    };
+    const keydown = (init: KeyboardEventInit) =>
+      new KeyboardEvent("keydown", init);
+
+    const linux = terminalKeyHandler(terminal, { copy, openSearch }, false);
+    expect(linux(keydown({ key: "c", ctrlKey: true }))).toBe(false);
+    expect(copy).toHaveBeenLastCalledWith("selected text");
+    expect(terminal.clearSelection).toHaveBeenCalled();
+    selection.current = "";
+    expect(linux(keydown({ key: "c", ctrlKey: true }))).toBe(true);
+    expect(linux(keydown({ key: "C", ctrlKey: true, shiftKey: true }))).toBe(
+      false,
+    );
+    expect(linux(keydown({ key: "v", ctrlKey: true }))).toBe(false);
+    expect(linux(keydown({ key: "f", ctrlKey: true }))).toBe(true);
+    expect(linux(keydown({ key: "F", ctrlKey: true, shiftKey: true }))).toBe(
+      false,
+    );
+    expect(openSearch).toHaveBeenCalledOnce();
+    expect(linux(keydown({ key: "Tab" }))).toBe(true);
+    expect(linux(new KeyboardEvent("keyup", { key: "c", ctrlKey: true }))).toBe(
+      true,
+    );
+
+    const mac = terminalKeyHandler(terminal, { copy, openSearch }, true);
+    expect(mac(keydown({ key: "c", ctrlKey: true }))).toBe(true);
+    expect(mac(keydown({ key: "c", metaKey: true }))).toBe(false);
+    expect(mac(keydown({ key: "v", metaKey: true }))).toBe(false);
+    expect(mac(keydown({ key: "f", metaKey: true }))).toBe(false);
   });
 
   test("appearance switch updates options.theme without recreating the terminal", async () => {
@@ -180,6 +272,7 @@ describe("TerminalSession", () => {
     expect(constructed.theme?.background).toBeUndefined();
     expect(constructed.theme?.foreground).toBeUndefined();
     expect(constructed.fontFamily).toBeUndefined();
+    expect(constructed.fontSize).toBeUndefined();
   });
 
   test("focuses an existing terminal when focus is requested", async () => {
@@ -212,7 +305,7 @@ describe("TerminalSession", () => {
   });
 
   test("renders non-TTY processes as read-only terminal mirrors", async () => {
-    const { getByText } = render(
+    render(
       <TerminalSession
         processId="proc-read-only"
         chatId="chat-a"
@@ -225,11 +318,13 @@ describe("TerminalSession", () => {
 
     await waitFor(() => expect(FakeTerminal.instances).toHaveLength(1));
     expect(FakeTerminal.instances[0].constructorOptions).toMatchObject({
+      convertEol: true,
       cursorBlink: false,
+      cursorInactiveStyle: "none",
       disableStdin: true,
     });
     expect(FakeTerminal.instances[0].focus).not.toHaveBeenCalled();
-    expect(getByText("Read-only output")).toBeVisible();
+    expect(FakeTerminal.instances[0].write).toHaveBeenCalledWith("\u001b[?25l");
     expect(useExecSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({ interactive: false }),
     );

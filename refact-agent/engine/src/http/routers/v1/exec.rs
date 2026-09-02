@@ -61,6 +61,8 @@ pub struct ExecProcessHttpSnapshot {
     pub created_at_ms: u64,
     pub tty: bool,
     pub service_name: Option<String>,
+    pub exit_code: Option<i32>,
+    pub ended_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +106,8 @@ pub struct ExecReadHttpResponse {
     pub chunks: Vec<ExecOutputHttpChunk>,
     pub next_seq: u64,
     pub status: &'static str,
+    pub exit_code: Option<i32>,
+    pub ended_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -391,6 +395,8 @@ pub async fn handle_v1_exec_read(
             chunks,
             next_seq,
             status: status_label(&snapshot.status),
+            exit_code: exit_code(&snapshot.status),
+            ended_at_ms: snapshot.meta.ended_at_ms,
         }));
     }
     let limit = query
@@ -406,6 +412,8 @@ pub async fn handle_v1_exec_read(
         chunks: read.chunks.iter().map(http_chunk).collect(),
         next_seq: read.next_seq,
         status: status_label(&snapshot.status),
+        exit_code: exit_code(&snapshot.status),
+        ended_at_ms: snapshot.meta.ended_at_ms,
     }))
 }
 
@@ -501,6 +509,7 @@ pub async fn handle_v1_exec_subscribe(
             "status": status_label(&initial_snapshot.status),
             "chunks": initial_read.chunks.iter().map(http_chunk).collect::<Vec<_>>(),
             "next_seq": initial_read.next_seq,
+            "exit_code": exit_code(&initial_snapshot.status),
         });
         yield Ok::<_, Infallible>(sse_event("snapshot", &snapshot));
         if initial_snapshot.status.is_terminal() {
@@ -610,6 +619,7 @@ fn subscribe_raw_tty_stream(
             "status": status_label(&initial_snapshot.status),
             "chunks": chunks,
             "next_seq": offset,
+            "exit_code": exit_code(&initial_snapshot.status),
         });
         yield Ok::<_, Infallible>(sse_event("snapshot", &snapshot));
         if initial_snapshot.status.is_terminal() {
@@ -689,6 +699,8 @@ fn http_snapshot(snapshot: &ExecProcessSnapshot) -> ExecProcessHttpSnapshot {
         created_at_ms: snapshot.meta.created_at_ms,
         tty: snapshot.meta.tty,
         service_name: snapshot.meta.owner.service_name.clone(),
+        exit_code: exit_code(&snapshot.status),
+        ended_at_ms: snapshot.meta.ended_at_ms,
     }
 }
 
@@ -721,6 +733,8 @@ fn sse_exit(snapshot: &ExecProcessSnapshot) -> String {
         &json!({
             "process_id": snapshot.meta.process_id.as_str(),
             "status": status_label(&snapshot.status),
+            "exit_code": exit_code(&snapshot.status),
+            "ended_at_ms": snapshot.meta.ended_at_ms,
         }),
     )
 }
@@ -730,6 +744,14 @@ fn stream_label(stream: &ExecOutputStream) -> &'static str {
         ExecOutputStream::Stdout => "stdout",
         ExecOutputStream::Stderr => "stderr",
         ExecOutputStream::Combined => "combined",
+    }
+}
+
+fn exit_code(status: &ExecStatus) -> Option<i32> {
+    match status {
+        ExecStatus::Exited { exit_code } => *exit_code,
+        ExecStatus::SandboxLauncherFailed { exit_code } => Some(*exit_code),
+        _ => None,
     }
 }
 
@@ -1573,5 +1595,93 @@ mod tests {
             .iter()
             .any(|chunk| chunk["text"].as_str().unwrap().contains("plain-hello")));
         assert!(chunks.iter().all(|chunk| chunk.get("offset").is_none()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::parallel(exec_http_env)]
+    async fn nonzero_exit_code_is_exposed_by_list_read_and_sse() {
+        let (_temp, app) = test_app().await;
+        let router = make_refact_http_server(app);
+        let (status, spawned) = json_response(
+            router.clone(),
+            post_json(
+                "/v1/exec/spawn",
+                json!({ "argv": ["sh", "-c", "exit 3"], "pty": false }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let process_id = spawned["process_id"].as_str().unwrap().to_string();
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/exec/{process_id}/subscribe"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        let collected = tokio::time::timeout(Duration::from_secs(10), async move {
+            let mut text = String::new();
+            while let Some(chunk) = body.data().await {
+                text.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+                if text.contains("event: exit") {
+                    break;
+                }
+            }
+            text
+        })
+        .await
+        .expect("SSE stream should terminate after exit");
+
+        assert!(collected.contains("event: exit"), "{collected:?}");
+        assert!(
+            collected.contains("\"exit_code\":3"),
+            "SSE exit event must carry the exit code: {collected:?}"
+        );
+
+        let (status, listed) = json_response(
+            router.clone(),
+            Request::builder()
+                .uri("/v1/exec/list")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let listed_process = listed["processes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|process| process["process_id"] == process_id.as_str())
+            .expect("spawned process must be listed")
+            .clone();
+        assert_eq!(listed_process["status"], "exited");
+        assert_eq!(listed_process["exit_code"], json!(3));
+        assert!(
+            listed_process["ended_at_ms"].as_u64().unwrap_or_default() > 0,
+            "list must expose ended_at_ms after exit: {listed_process:?}"
+        );
+
+        let (status, read) = json_response(
+            router,
+            Request::builder()
+                .uri(format!("/v1/exec/{process_id}/read?since_seq=0"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(read["status"], "exited");
+        assert_eq!(read["exit_code"], json!(3));
+        assert!(
+            read["ended_at_ms"].as_u64().unwrap_or_default() > 0,
+            "read must expose ended_at_ms after exit: {read:?}"
+        );
     }
 }

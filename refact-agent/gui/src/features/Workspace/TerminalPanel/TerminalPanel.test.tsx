@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 
 import { screen, waitFor } from "@testing-library/react";
+import { act } from "react-dom/test-utils";
 import { http, HttpResponse } from "msw";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -8,9 +9,20 @@ import { render } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
 import { applyChatEvent, createChatWithId } from "../../Chat/Thread";
 import { makeSurfaceKey } from "../surfaceKey";
-import { openTab } from "../workspaceSlice";
+import {
+  DRAWER_DEFAULT_HEIGHT,
+  DRAWER_MIN_HEIGHT,
+  openTab,
+  selectWorkspaceDrawer,
+  setDrawerHeight,
+} from "../workspaceSlice";
 import { TerminalPanel } from "./TerminalPanel";
-import { setTerminalWorkbenchOpen } from "./terminalSlice";
+import {
+  activeSessionChanged,
+  FINISHED_SESSION_TTL_MS,
+  sessionAdded,
+  setTerminalWorkbenchOpen,
+} from "./terminalSlice";
 import emptyStateStyles from "../../../components/ui/EmptyState/EmptyState.module.css";
 import terminalPanelStyles from "./TerminalPanel.module.css";
 
@@ -110,16 +122,57 @@ describe("TerminalPanel", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
-  test("gives the expand-grid body a bounded responsive block size", () => {
+  test("sizes the expand-grid body from the persisted drawer height", () => {
     const bodyRule = terminalPanelCss.match(/\.body\s*\{([^}]*)\}/u)?.[1];
 
-    expect(bodyRule).toMatch(
-      /block-size:\s*clamp\([\s\S]*calc\(var\(--rf-control-h\)\s*\*\s*6\)[\s\S]*30dvh[\s\S]*calc\(var\(--rf-control-h\)\s*\*\s*10\)[\s\S]*\)/u,
-    );
+    expect(bodyRule).toMatch(/block-size:\s*var\(--rf-terminal-h\)/u);
     expect(bodyRule).not.toMatch(/\bflex\s*:/u);
     expect(terminalPanelCss).toMatch(
       /\.body\[hidden\]\s*\{[^}]*display:\s*none/u,
     );
+  });
+
+  test("resizes the workbench from the separator and persists the height", async () => {
+    server.use(
+      http.get("*/v1/exec/list", () => HttpResponse.json({ processes: [] })),
+    );
+    const view = renderTerminalPanel();
+    openWorkbench(view);
+
+    const separator = await screen.findByRole("separator", {
+      name: "Resize terminal",
+    });
+    const panel = screen.getByRole("region", {
+      name: "Terminal workbench for chat-a",
+    });
+    expect(panel.style.getPropertyValue("--rf-terminal-h")).toBe(
+      `${DRAWER_DEFAULT_HEIGHT}px`,
+    );
+    expect(separator).toHaveAttribute(
+      "aria-valuenow",
+      String(DRAWER_DEFAULT_HEIGHT),
+    );
+
+    separator.focus();
+    await view.user.keyboard("{ArrowUp}");
+    const grown = selectWorkspaceDrawer(view.store.getState()).height;
+    expect(grown).toBeGreaterThan(DRAWER_DEFAULT_HEIGHT);
+    expect(panel.style.getPropertyValue("--rf-terminal-h")).toBe(`${grown}px`);
+
+    act(() => {
+      view.store.dispatch(setDrawerHeight(DRAWER_MIN_HEIGHT));
+    });
+    await view.user.keyboard("{ArrowDown}");
+    expect(selectWorkspaceDrawer(view.store.getState()).height).toBe(
+      DRAWER_MIN_HEIGHT,
+    );
+
+    await view.user.click(
+      screen.getByRole("button", { name: "Collapse terminal workbench" }),
+    );
+    expect(
+      screen.queryByRole("separator", { name: "Resize terminal" }),
+    ).toBeNull();
   });
 
   test("reattaches all process types and seeds backfill before streaming", async () => {
@@ -179,8 +232,9 @@ describe("TerminalPanel", () => {
     expect(backgroundTab).toBeVisible();
     await waitFor(() => expect(listChatIds).toContain("chat-a"));
     await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    expect(screen.queryByText("Read-only")).toBeNull();
     await view.user.click(backgroundTab);
-    expect(screen.getByText("Read-only output")).toBeVisible();
+    expect(screen.getByText("Read-only")).toBeVisible();
   });
 
   test("adds spawned process tabs live and retains their exit status", async () => {
@@ -217,7 +271,7 @@ describe("TerminalPanel", () => {
     expect(
       await screen.findByRole("tab", { name: /git status · tool-123/i }),
     ).toHaveTextContent("running");
-    expect(screen.getByText("Read-only output")).toBeVisible();
+    expect(screen.getByText("Read-only")).toBeVisible();
 
     view.store.dispatch(
       applyChatEvent({
@@ -439,6 +493,106 @@ describe("TerminalPanel", () => {
     expect(FakeEventSource.instances).toHaveLength(0);
   });
 
+  test("auto-closes finished sessions after ten minutes but keeps the viewed one", async () => {
+    const now = Date.now();
+    server.use(
+      http.get("*/v1/exec/list", () =>
+        HttpResponse.json({
+          processes: [
+            {
+              process_id: "live-shell-1",
+              status: "running",
+              command_preview: "/bin/zsh",
+              created_at_ms: 1,
+              tty: true,
+              service_name: null,
+            },
+            {
+              process_id: "old-task-1",
+              status: "exited",
+              command_preview: "old task",
+              created_at_ms: 2,
+              tty: false,
+              service_name: null,
+              exit_code: 0,
+              ended_at_ms: now - FINISHED_SESSION_TTL_MS - 1_000,
+            },
+            {
+              process_id: "recent-task",
+              status: "exited",
+              command_preview: "recent task",
+              created_at_ms: 3,
+              tty: false,
+              service_name: null,
+              exit_code: 1,
+              ended_at_ms: now,
+            },
+          ],
+        }),
+      ),
+      http.get("*/v1/exec/:processId/read", ({ params }) =>
+        HttpResponse.json(
+          params.processId === "viewed-old"
+            ? {
+                chunks: [],
+                next_seq: 0,
+                status: "exited",
+                exit_code: 0,
+                ended_at_ms: now - FINISHED_SESSION_TTL_MS - 1_000,
+              }
+            : { chunks: [], next_seq: 0, status: "running" },
+        ),
+      ),
+      http.post("*/v1/exec/:processId/resize", () => HttpResponse.json({})),
+    );
+
+    const view = renderTerminalPanel();
+    await screen.findByRole("tab", { name: /recent task · recent-t/i });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("tab", { name: /old task · old-task/i }),
+      ).toBeNull(),
+    );
+    expect(
+      screen.getByRole("tab", { name: /recent task · recent-t/i }),
+    ).toHaveTextContent("exit 1");
+
+    openWorkbench(view);
+    await screen.findByLabelText("Terminal input");
+    act(() => {
+      view.store.dispatch(
+        sessionAdded({
+          chatId: "chat-a",
+          session: {
+            process_id: "viewed-old",
+            label: "viewed task",
+            title: "viewed task · viewed-o",
+            status: "exited",
+            tty: false,
+            exit_code: 0,
+            ended_at_ms: now - FINISHED_SESSION_TTL_MS - 1_000,
+          },
+        }),
+      );
+    });
+    await screen.findByText("Read-only");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(
+      screen.getByRole("tab", { name: /viewed task · viewed-o/i }),
+    ).toBeVisible();
+
+    act(() => {
+      view.store.dispatch(
+        activeSessionChanged({ chatId: "chat-a", processId: "live-shell-1" }),
+      );
+    });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("tab", { name: /viewed task · viewed-o/i }),
+      ).toBeNull(),
+    );
+  });
+
   test("keeps two explicit chat workbenches isolated", async () => {
     const listChatIds: (string | null)[] = [];
     server.use(
@@ -562,6 +716,7 @@ describe("TerminalPanel", () => {
       {
         chat_id: "chat-a",
         cwd: "/worktrees/chat-a",
+        env: { TERM: "xterm-256color", COLORTERM: "truecolor", NO_COLOR: "" },
         pty: true,
         rows: 24,
         cols: 80,

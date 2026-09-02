@@ -34,6 +34,8 @@ export type ExecProcessSnapshot = {
   created_at_ms: number;
   tty: boolean;
   service_name: string | null;
+  exit_code?: number | null;
+  ended_at_ms?: number | null;
 };
 
 export type ExecListResponse = {
@@ -51,6 +53,8 @@ export type ExecReadResponse = {
   chunks: ExecOutputChunk[];
   next_seq: number;
   status: ExecStatus;
+  exit_code?: number | null;
+  ended_at_ms?: number | null;
 };
 
 export type ExecKillResponse = {
@@ -71,11 +75,14 @@ export type ExecSnapshotEvent = {
   status: ExecStatus;
   chunks: ExecOutputChunk[];
   next_seq: number;
+  exit_code?: number | null;
 };
 
 export type ExecExitEvent = {
   process_id: string;
   status: ExecStatus;
+  exit_code?: number | null;
+  ended_at_ms?: number | null;
 };
 
 export class ExecHttpError extends Error {
@@ -104,6 +111,26 @@ function execHeaders(apiKey?: string): Record<string, string> {
   return headers;
 }
 
+function execErrorMessage(body: string, status: number): string {
+  const text = body.trim();
+  if (!text) return `Exec request failed: ${status}`;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      "detail" in parsed &&
+      typeof parsed.detail === "string" &&
+      parsed.detail.trim()
+    ) {
+      return parsed.detail.trim();
+    }
+  } catch {
+    return text;
+  }
+  return text;
+}
+
 async function execRequest<T>(
   connection: PortOrConnection,
   path: string,
@@ -119,9 +146,8 @@ async function execRequest<T>(
     },
   });
   if (!response.ok) {
-    const detail = (await response.text()).trim();
     throw new ExecHttpError(
-      detail || `Exec request failed: ${response.status}`,
+      execErrorMessage(await response.text(), response.status),
       response.status,
     );
   }

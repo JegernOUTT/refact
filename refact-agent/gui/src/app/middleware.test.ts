@@ -1176,6 +1176,7 @@ describe("workspace routing middleware", () => {
         chatId: "chat-a",
         session: {
           process_id: "process-a",
+          label: "shell",
           title: "shell · process-a",
           status: "running",
         },
@@ -1220,6 +1221,7 @@ describe("workspace routing middleware", () => {
         chatId: "chat-a",
         session: {
           process_id: "process-a",
+          label: "shell",
           title: "shell · process-a",
           status: "exited",
         },

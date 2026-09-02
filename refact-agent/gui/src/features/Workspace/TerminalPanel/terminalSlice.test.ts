@@ -3,14 +3,18 @@ import { describe, expect, test } from "vitest";
 import reducer, {
   activeSessionChanged,
   clearTerminalChatState,
+  expiredSessionsPruned,
+  FINISHED_SESSION_TTL_MS,
   selectActiveTerminalProcessId,
   selectTerminalSessions,
   selectTerminalWorkbenchOpen,
+  sessionExpiresAt,
   setTerminalWorkbenchOpen,
   sessionAdded,
   sessionRemoved,
   sessionsReattached,
   sessionStatusChanged,
+  terminalSessionFromProcess,
   toggleTerminalWorkbench,
 } from "./terminalSlice";
 
@@ -19,11 +23,108 @@ const session = (
   status: "starting" | "running" | "exited" = "running",
 ) => ({
   process_id: processId,
+  label: "zsh",
   title: `zsh · ${processId}`,
   status,
 });
 
 describe("terminalSlice", () => {
+  test("finished sessions expire ten minutes after they ended", () => {
+    const running = terminalSessionFromProcess({
+      process_id: "run",
+      status: "running",
+      tty: true,
+    });
+    expect(sessionExpiresAt(running)).toBeNull();
+    const unknownEnd = terminalSessionFromProcess({
+      process_id: "old",
+      status: "exited",
+      tty: false,
+      ended_at_ms: null,
+    });
+    expect(sessionExpiresAt(unknownEnd)).toBeNull();
+    const finished = terminalSessionFromProcess({
+      process_id: "done",
+      status: "exited",
+      tty: false,
+      exit_code: 0,
+      ended_at_ms: 1_000,
+    });
+    expect(sessionExpiresAt(finished)).toBe(1_000 + FINISHED_SESSION_TTL_MS);
+  });
+
+  test("prunes expired sessions except the kept one and repairs the active tab", () => {
+    let state = reducer(undefined, { type: "init" });
+    for (const id of ["stale", "fresh", "live", "viewed"]) {
+      state = reducer(
+        state,
+        sessionAdded({ chatId: "chat-a", session: session(id) }),
+      );
+    }
+    state = reducer(
+      state,
+      sessionStatusChanged({
+        chatId: "chat-a",
+        processId: "stale",
+        status: "exited",
+        exit_code: 1,
+        ended_at_ms: 0,
+      }),
+    );
+    state = reducer(
+      state,
+      sessionStatusChanged({
+        chatId: "chat-a",
+        processId: "fresh",
+        status: "exited",
+        exit_code: 0,
+        ended_at_ms: FINISHED_SESSION_TTL_MS,
+      }),
+    );
+    state = reducer(
+      state,
+      sessionStatusChanged({
+        chatId: "chat-a",
+        processId: "viewed",
+        status: "killed",
+        ended_at_ms: 0,
+      }),
+    );
+
+    state = reducer(
+      state,
+      expiredSessionsPruned({
+        chatId: "chat-a",
+        now: FINISHED_SESSION_TTL_MS + 1,
+        keepProcessId: "viewed",
+      }),
+    );
+    expect(
+      selectTerminalSessions({ terminal: state }, "chat-a").map(
+        (item) => item.process_id,
+      ),
+    ).toEqual(["fresh", "live", "viewed"]);
+    expect(selectActiveTerminalProcessId({ terminal: state }, "chat-a")).toBe(
+      "viewed",
+    );
+
+    state = reducer(
+      state,
+      expiredSessionsPruned({
+        chatId: "chat-a",
+        now: FINISHED_SESSION_TTL_MS * 2 + 1,
+      }),
+    );
+    expect(
+      selectTerminalSessions({ terminal: state }, "chat-a").map(
+        (item) => item.process_id,
+      ),
+    ).toEqual(["live"]);
+    expect(selectActiveTerminalProcessId({ terminal: state }, "chat-a")).toBe(
+      "live",
+    );
+  });
+
   test("keeps session metadata and active tabs isolated by chat", () => {
     let state = reducer(undefined, { type: "init" });
     state = reducer(

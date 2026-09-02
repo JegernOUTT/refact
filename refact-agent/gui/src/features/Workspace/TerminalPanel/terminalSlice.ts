@@ -2,12 +2,20 @@ import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
 import type { ExecStatus } from "../../../services/refact/exec";
 
+export const FINISHED_SESSION_TTL_MS = 10 * 60_000;
+
+export function isFinishedStatus(status: ExecStatus): boolean {
+  return status !== "starting" && status !== "running";
+}
+
 export type TerminalSessionMetadata = {
   process_id: string;
+  label: string;
   title: string;
   status: ExecStatus;
   tty?: boolean;
   exit_code?: number | null;
+  ended_at_ms?: number | null;
 };
 
 export function terminalSessionFromProcess({
@@ -16,24 +24,45 @@ export function terminalSessionFromProcess({
   status,
   tty,
   exit_code: exitCode,
+  ended_at_ms: endedAtMs,
 }: {
   process_id: string;
   command_preview?: string;
   status: ExecStatus;
   tty: boolean;
   exit_code?: number | null;
+  ended_at_ms?: number | null;
 }): TerminalSessionMetadata {
-  const label = commandPreview?.trim();
+  const preview = commandPreview?.trim();
+  const label = preview && preview.length > 0 ? preview : "shell";
   return {
     process_id: processId,
-    title: `${label && label.length > 0 ? label : "shell"} · ${processId.slice(
-      0,
-      8,
-    )}`,
+    label,
+    title: `${label} · ${processId.slice(0, 8)}`,
     status,
     tty,
     ...(exitCode === undefined ? {} : { exit_code: exitCode }),
+    ...(endedAtMs === undefined ? {} : { ended_at_ms: endedAtMs }),
   };
+}
+
+export function sessionExpiresAt(
+  session: TerminalSessionMetadata,
+): number | null {
+  if (!isFinishedStatus(session.status)) return null;
+  if (typeof session.ended_at_ms !== "number") return null;
+  return session.ended_at_ms + FINISHED_SESSION_TTL_MS;
+}
+
+function nextActiveProcessId(
+  sessions: TerminalSessionMetadata[],
+  removedIndex: number,
+): string | null {
+  return (
+    sessions.at(removedIndex)?.process_id ??
+    sessions.at(removedIndex - 1)?.process_id ??
+    null
+  );
 }
 
 export type TerminalState = {
@@ -109,7 +138,11 @@ export const terminalSlice = createSlice({
     sessionStatusChanged: (
       state,
       action: PayloadAction<
-        ChatProcessPayload & { status: ExecStatus; exit_code?: number | null }
+        ChatProcessPayload & {
+          status: ExecStatus;
+          exit_code?: number | null;
+          ended_at_ms?: number | null;
+        }
       >,
     ) => {
       const session = state.sessionsByChat[action.payload.chatId]?.find(
@@ -119,6 +152,9 @@ export const terminalSlice = createSlice({
         session.status = action.payload.status;
         if (action.payload.exit_code !== undefined) {
           session.exit_code = action.payload.exit_code;
+        }
+        if (action.payload.ended_at_ms !== undefined) {
+          session.ended_at_ms = action.payload.ended_at_ms;
         }
       }
     },
@@ -132,10 +168,40 @@ export const terminalSlice = createSlice({
       if (index === -1) return;
       sessions.splice(index, 1);
       if (state.activeProcessIdByChat[chatId] === processId) {
-        state.activeProcessIdByChat[chatId] =
-          sessions.at(index)?.process_id ??
-          sessions.at(index - 1)?.process_id ??
-          null;
+        state.activeProcessIdByChat[chatId] = nextActiveProcessId(
+          sessions,
+          index,
+        );
+      }
+    },
+    expiredSessionsPruned: (
+      state,
+      action: PayloadAction<{
+        chatId: string;
+        now: number;
+        keepProcessId?: string | null;
+      }>,
+    ) => {
+      const { chatId, now, keepProcessId } = action.payload;
+      const sessions = state.sessionsByChat[chatId];
+      if (!sessions) return;
+      for (let index = sessions.length - 1; index >= 0; index -= 1) {
+        const session = sessions[index];
+        const expiresAt = sessionExpiresAt(session);
+        if (
+          expiresAt === null ||
+          expiresAt > now ||
+          session.process_id === keepProcessId
+        ) {
+          continue;
+        }
+        sessions.splice(index, 1);
+        if (state.activeProcessIdByChat[chatId] === session.process_id) {
+          state.activeProcessIdByChat[chatId] = nextActiveProcessId(
+            sessions,
+            index,
+          );
+        }
       }
     },
     setTerminalWorkbenchOpen: (
@@ -170,6 +236,7 @@ export const terminalSlice = createSlice({
 export const {
   activeSessionChanged,
   clearTerminalChatState,
+  expiredSessionsPruned,
   sessionAdded,
   sessionRemoved,
   sessionsReattached,
