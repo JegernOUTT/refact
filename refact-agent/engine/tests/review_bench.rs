@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use refact_lsp::tools::review_types::{
-    ReviewFinding, ReviewReport, ReviewScopeSummary, ReviewSeverity, VerificationStatus,
+    ReviewDiffSummary, ReviewFinding, ReviewReport, ReviewScopeSummary, ReviewSeverity,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 const FIXTURE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/review_fixtures");
@@ -25,11 +25,21 @@ struct LineRange {
     end: u32,
 }
 
+/// Manifests spell the top severity `critical`, which only `ReviewSeverity::parse` still accepts.
+fn deserialize_severity<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ReviewSeverity, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    ReviewSeverity::parse(&raw)
+        .ok_or_else(|| serde::de::Error::custom(format!("unknown severity {raw:?}")))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 struct SeededDefect {
     file: String,
     line_range: LineRange,
     category: String,
+    #[serde(deserialize_with = "deserialize_severity")]
     severity: ReviewSeverity,
     description: String,
     marker: String,
@@ -51,10 +61,9 @@ struct FixtureMetrics {
     seeded_recall: f64,
     seeded_high_severity_recall: f64,
     precision_proxy: f64,
-    unsupported_rate: f64,
     duplicate_rate: f64,
     clean_false_positive_count: usize,
-    high_critical_unverified_count: usize,
+    high_severity_hypothesis_count: usize,
 }
 
 fn fixture_directories() -> Vec<PathBuf> {
@@ -89,10 +98,9 @@ fn ranges_overlap(left_start: u32, left_end: u32, right_start: u32, right_end: u
 
 fn finding_matches_seed(finding: &ReviewFinding, seed: &SeededDefect) -> bool {
     file_matches(&finding.file, &seed.file)
-        && finding.category == seed.category
         && ranges_overlap(
-            finding.line1,
-            finding.line2,
+            finding.line_start,
+            finding.line_end,
             seed.line_range.start,
             seed.line_range.end,
         )
@@ -125,7 +133,7 @@ fn seeded_high_severity_recall(report: &ReviewReport, manifest: &FixtureManifest
         .filter(|seed| {
             matches!(
                 seed.severity,
-                ReviewSeverity::High | ReviewSeverity::Critical
+                ReviewSeverity::High | ReviewSeverity::Blocker
             )
         })
         .collect::<Vec<_>>();
@@ -145,15 +153,11 @@ fn seeded_high_severity_recall(report: &ReviewReport, manifest: &FixtureManifest
 }
 
 fn precision_proxy(report: &ReviewReport, manifest: &FixtureManifest) -> f64 {
-    let verified = report
-        .findings
-        .iter()
-        .filter(|finding| finding.verification_status == VerificationStatus::Verified)
-        .collect::<Vec<_>>();
-    if verified.is_empty() {
+    let supported = report.facts();
+    if supported.is_empty() {
         return 1.0;
     }
-    let matched = verified
+    let matched = supported
         .iter()
         .filter(|finding| {
             manifest
@@ -162,7 +166,7 @@ fn precision_proxy(report: &ReviewReport, manifest: &FixtureManifest) -> f64 {
                 .any(|seed| finding_matches_seed(finding, seed))
         })
         .count();
-    matched as f64 / verified.len() as f64
+    matched as f64 / supported.len() as f64
 }
 
 fn corroborated_precision(findings: &[(bool, bool)]) -> (f64, f64) {
@@ -191,41 +195,13 @@ fn corroborated_precision(findings: &[(bool, bool)]) -> (f64, f64) {
     (corroborated_precision, overall_precision)
 }
 
-fn rejected_candidate_count(report: &ReviewReport) -> usize {
-    report
-        .checks_performed
-        .iter()
-        .filter_map(|check| check.strip_prefix("verifier_rejected:"))
-        .filter_map(|count| count.parse::<usize>().ok())
-        .sum()
-}
-
-fn deduplicated_candidate_count(report: &ReviewReport) -> usize {
-    report
-        .findings
-        .iter()
-        .flat_map(|finding| &finding.checks_performed)
-        .filter(|check| check.starts_with("deduped_from:"))
-        .count()
-}
-
-fn unsupported_rate(report: &ReviewReport) -> f64 {
-    let rejected = rejected_candidate_count(report);
-    let candidates = report.findings.len() + rejected + deduplicated_candidate_count(report);
-    if candidates == 0 {
-        return 0.0;
-    }
-    rejected as f64 / candidates as f64
-}
-
 fn ranges_are_near(left: &ReviewFinding, right: &ReviewFinding) -> bool {
-    left.line1 <= right.line2.saturating_add(5) && right.line1 <= left.line2.saturating_add(5)
+    left.line_start <= right.line_end.saturating_add(5)
+        && right.line_start <= left.line_end.saturating_add(5)
 }
 
 fn are_t13_duplicates(left: &ReviewFinding, right: &ReviewFinding) -> bool {
-    normalized_path(&left.file) == normalized_path(&right.file)
-        && left.category == right.category
-        && ranges_are_near(left, right)
+    normalized_path(&left.file) == normalized_path(&right.file) && ranges_are_near(left, right)
 }
 
 fn duplicate_violation_count(report: &ReviewReport) -> usize {
@@ -251,26 +227,21 @@ fn clean_false_positive_count(report: &ReviewReport, manifest: &FixtureManifest)
     if manifest.kind != FixtureKind::Clean {
         return 0;
     }
-    report
-        .findings
-        .iter()
-        .filter(|finding| finding.verification_status == VerificationStatus::Verified)
-        .count()
+    report.facts().len()
 }
 
-fn high_critical_unverified_count(report: &ReviewReport, manifest: &FixtureManifest) -> usize {
+fn high_severity_hypothesis_count(report: &ReviewReport, manifest: &FixtureManifest) -> usize {
     if manifest.kind != FixtureKind::Clean {
         return 0;
     }
     report
-        .findings
-        .iter()
+        .hypotheses()
+        .into_iter()
         .filter(|finding| {
-            finding.verification_status == VerificationStatus::Unverified
-                && matches!(
-                    finding.severity,
-                    ReviewSeverity::High | ReviewSeverity::Critical
-                )
+            matches!(
+                finding.severity,
+                ReviewSeverity::High | ReviewSeverity::Blocker
+            )
         })
         .count()
 }
@@ -284,53 +255,51 @@ fn compute_metrics(
         seeded_recall: seeded_recall(report, manifest),
         seeded_high_severity_recall: seeded_high_severity_recall(report, manifest),
         precision_proxy: precision_proxy(report, manifest),
-        unsupported_rate: unsupported_rate(report),
         duplicate_rate: duplicate_rate(report, manual_near_duplicates),
         clean_false_positive_count: clean_false_positive_count(report, manifest),
-        high_critical_unverified_count: high_critical_unverified_count(report, manifest),
+        high_severity_hypothesis_count: high_severity_hypothesis_count(report, manifest),
     }
 }
 
 fn finding(
     file: &str,
-    line1: u32,
-    line2: u32,
-    category: &str,
+    line_start: u32,
+    line_end: u32,
     severity: ReviewSeverity,
-    status: VerificationStatus,
+    supported: bool,
 ) -> ReviewFinding {
     ReviewFinding {
         id: String::new(),
-        category: category.to_string(),
+        stage: "diff".to_string(),
+        model: None,
+        title: "Frog finding".to_string(),
         severity,
-        confidence: 0.9,
-        verification_status: status,
-        rank_tier: Default::default(),
-        sources: vec![],
         file: file.to_string(),
-        line1,
-        line2,
+        line_start,
+        line_end,
         claim: "Frog finding".to_string(),
-        evidence: vec![],
-        impact: None,
-        remediation: None,
-        checks_performed: vec![],
+        evidence: String::new(),
+        evidence_present: supported,
+        reproduction: None,
+        fix: None,
+        introduced_by_diff: true,
+        out_of_scope: false,
+        reported_by: vec![],
+        locations: vec![],
+        disputed: None,
     }
 }
 
-fn report(findings: Vec<ReviewFinding>, checks_performed: Vec<&str>) -> ReviewReport {
+fn report(findings: Vec<ReviewFinding>) -> ReviewReport {
     ReviewReport {
-        scope: ReviewScopeSummary {
-            files_reviewed: vec![],
-            focus: None,
-            diff_base: None,
-            expansion: None,
-        },
+        depth: "normal".to_string(),
+        scope: ReviewScopeSummary::default(),
+        diff: ReviewDiffSummary::default(),
+        stages: vec![],
         findings,
-        checks_performed: checks_performed.into_iter().map(str::to_string).collect(),
-        summary: String::new(),
-        assumed_intent: None,
-        pipeline: Default::default(),
+        duration_ms: 0,
+        duplicates_merged: 0,
+        scratch_dir: None,
     }
 }
 
@@ -357,7 +326,7 @@ fn seed(file: &str, start: u32, end: u32, category: &str) -> SeededDefect {
 }
 
 #[test]
-fn metrics_match_only_overlapping_file_and_category() {
+fn metrics_match_only_overlapping_file_and_lines() {
     let manifest = synthetic_manifest(
         FixtureKind::Seeded,
         vec![
@@ -366,42 +335,18 @@ fn metrics_match_only_overlapping_file_and_category() {
             seed("welcome.py", 40, 45, "tests"),
         ],
     );
-    let candidate_report = report(
-        vec![
-            finding(
-                "fixtures/pond.py",
-                20,
-                20,
-                "correctness",
-                ReviewSeverity::High,
-                VerificationStatus::Verified,
-            ),
-            finding(
-                "bank.py",
-                36,
-                36,
-                "security",
-                ReviewSeverity::High,
-                VerificationStatus::Verified,
-            ),
-            finding(
-                "welcome.py",
-                42,
-                42,
-                "correctness",
-                ReviewSeverity::High,
-                VerificationStatus::Verified,
-            ),
-        ],
-        vec![],
-    );
+    let candidate_report = report(vec![
+        finding("fixtures/pond.py", 20, 20, ReviewSeverity::High, true),
+        finding("bank.py", 36, 36, ReviewSeverity::High, true),
+        finding("welcome.py", 42, 42, ReviewSeverity::High, true),
+    ]);
 
-    assert_eq!(seeded_recall(&candidate_report, &manifest), 1.0 / 3.0);
+    assert_eq!(seeded_recall(&candidate_report, &manifest), 2.0 / 3.0);
     assert_eq!(
         seeded_high_severity_recall(&candidate_report, &manifest),
-        1.0 / 3.0
+        2.0 / 3.0
     );
-    assert_eq!(precision_proxy(&candidate_report, &manifest), 1.0 / 3.0);
+    assert_eq!(precision_proxy(&candidate_report, &manifest), 2.0 / 3.0);
 }
 
 #[test]
@@ -426,73 +371,12 @@ fn corroborated_precision_uses_perfect_empty_denominators() {
 }
 
 #[test]
-fn unsupported_rate_uses_verifier_rejection_counters() {
-    let candidate_report = report(
-        vec![
-            finding(
-                "pond.py",
-                1,
-                1,
-                "correctness",
-                ReviewSeverity::Medium,
-                VerificationStatus::Verified,
-            ),
-            finding(
-                "bank.py",
-                1,
-                1,
-                "security",
-                ReviewSeverity::Medium,
-                VerificationStatus::NeedsHumanValidation,
-            ),
-        ],
-        vec![
-            "verifier_rejected:1",
-            "verifier_rejected:1",
-            "evidence_reject:4:missing",
-        ],
-    );
-
-    assert_eq!(unsupported_rate(&candidate_report), 0.5);
-    let mut retained_after_dedup = candidate_report.clone();
-    retained_after_dedup.findings[0]
-        .checks_performed
-        .push("deduped_from:rf-frog".to_string());
-    assert_eq!(unsupported_rate(&retained_after_dedup), 0.4);
-    assert_eq!(unsupported_rate(&report(Vec::new(), vec![])), 0.0);
-}
-
-#[test]
 fn duplicate_rate_checks_t13_invariant_and_manual_hook() {
-    let candidate_report = report(
-        vec![
-            finding(
-                "pond.py",
-                10,
-                12,
-                "correctness",
-                ReviewSeverity::High,
-                VerificationStatus::Verified,
-            ),
-            finding(
-                "pond.py",
-                17,
-                18,
-                "correctness",
-                ReviewSeverity::Medium,
-                VerificationStatus::Verified,
-            ),
-            finding(
-                "pond.py",
-                24,
-                25,
-                "correctness",
-                ReviewSeverity::Medium,
-                VerificationStatus::Verified,
-            ),
-        ],
-        vec![],
-    );
+    let candidate_report = report(vec![
+        finding("pond.py", 10, 12, ReviewSeverity::High, true),
+        finding("pond.py", 17, 18, ReviewSeverity::Medium, true),
+        finding("pond.py", 24, 25, ReviewSeverity::Medium, true),
+    ]);
 
     assert_eq!(duplicate_violation_count(&candidate_report), 1);
     assert_eq!(duplicate_rate(&candidate_report, 0), 1.0 / 3.0);
@@ -500,44 +384,20 @@ fn duplicate_rate_checks_t13_invariant_and_manual_hook() {
 }
 
 #[test]
-fn clean_metrics_count_verified_and_high_unverified_findings() {
+fn clean_metrics_count_supported_and_high_severity_hypothesis_findings() {
     let manifest = synthetic_manifest(FixtureKind::Clean, vec![]);
-    let candidate_report = report(
-        vec![
-            finding(
-                "pond.py",
-                1,
-                1,
-                "correctness",
-                ReviewSeverity::Low,
-                VerificationStatus::Verified,
-            ),
-            finding(
-                "pond.py",
-                10,
-                10,
-                "correctness",
-                ReviewSeverity::High,
-                VerificationStatus::Unverified,
-            ),
-            finding(
-                "pond.py",
-                20,
-                20,
-                "correctness",
-                ReviewSeverity::Medium,
-                VerificationStatus::Unverified,
-            ),
-        ],
-        vec![],
-    );
+    let candidate_report = report(vec![
+        finding("pond.py", 1, 1, ReviewSeverity::Low, true),
+        finding("pond.py", 10, 10, ReviewSeverity::High, false),
+        finding("pond.py", 20, 20, ReviewSeverity::Medium, false),
+    ]);
     let metrics = compute_metrics(&candidate_report, &manifest, 0);
 
     assert_eq!(metrics.seeded_recall, 1.0);
     assert_eq!(metrics.seeded_high_severity_recall, 1.0);
     assert_eq!(metrics.precision_proxy, 0.0);
     assert_eq!(metrics.clean_false_positive_count, 1);
-    assert_eq!(metrics.high_critical_unverified_count, 1);
+    assert_eq!(metrics.high_severity_hypothesis_count, 1);
 }
 
 #[test]
@@ -812,7 +672,7 @@ async fn live_review_pipeline_benchmark() {
     }
 
     println!(
-        "fixture\tseeded_recall\tseeded_high_severity_recall\tprecision_proxy\tunsupported_rate\tduplicate_rate\tclean_false_positives\thigh_critical_unverified"
+        "fixture\tseeded_recall\tseeded_high_severity_recall\tprecision_proxy\tduplicate_rate\tclean_false_positives\thigh_severity_hypotheses"
     );
     for directory in fixture_directories() {
         let manifest = load_manifest(&directory);
@@ -830,15 +690,14 @@ async fn live_review_pipeline_benchmark() {
             duplicate_scores.get(&manifest.id).copied().unwrap_or(0),
         );
         println!(
-            "{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{}\t{}",
+            "{}\t{:.3}\t{:.3}\t{:.3}\t{:.3}\t{}\t{}",
             manifest.id,
             metrics.seeded_recall,
             metrics.seeded_high_severity_recall,
             metrics.precision_proxy,
-            metrics.unsupported_rate,
             metrics.duplicate_rate,
             metrics.clean_false_positive_count,
-            metrics.high_critical_unverified_count,
+            metrics.high_severity_hypothesis_count,
         );
     }
 }
