@@ -1,0 +1,87 @@
+.chip {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  min-width: 0;
+  height: var(--rf-control-h-sm);
+  gap: var(--rf-space-1);
+  padding: 0 var(--rf-space-2);
+  color: var(--rf-color-muted);
+  background: var(--rf-surface-glass);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-pill);
+  cursor: pointer;
+  transition:
+    background-color var(--rf-dur-fast) var(--rf-ease-standard),
+    color var(--rf-dur-fast) var(--rf-ease-standard);
+}
+
+.chip:hover {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+}
+
+.chip:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+.chipLabel {
+  max-width: 180px;
+  overflow: hidden;
+  padding-inline-start: var(--rf-space-1);
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  gap: var(--rf-space-2);
+}
+
+.rowLabel {
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+}
+
+.engineUrl {
+  display: block;
+  overflow: hidden;
+  color: var(--rf-color-muted);
+  cursor: pointer;
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+  text-align: left;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.engineUrl:hover {
+  color: var(--rf-color-fg);
+}
+
+.engineUrl:focus-visible {
+  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
+  outline-offset: var(--rf-hairline);
+}
+
+@container toolbar (max-width: 760px) {
+  .chipLabel {
+    display: none;
+  }
+}

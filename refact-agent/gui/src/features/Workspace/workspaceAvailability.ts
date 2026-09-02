@@ -13,6 +13,15 @@ export type WorkspaceDockAvailability = {
   terminal: boolean;
 };
 
+export type WorkspaceDockSectionId = "files" | "git" | "agents" | "tasks";
+
+export function isDockSectionAvailable(
+  section: WorkspaceDockSectionId,
+  availability: WorkspaceDockAvailability,
+): boolean {
+  return section === "agents" || availability[section];
+}
+
 export function resolveWorkspaceDockAvailability(
   host: Config["host"],
   capabilities: WorkspacePanelCapabilities,

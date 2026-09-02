@@ -14,8 +14,11 @@ use crate::agents::types::{BackgroundAgent, BgAgentKind, BgAgentStatus};
 use crate::app_state::AppState;
 use crate::call_validation::ChatMessage;
 use crate::chat::trajectories::{load_trajectory_for_chat, save_trajectory_as};
-use crate::chat::types::{GoalBudget, GoalCriterion, ThreadParams};
-use crate::subchat::{SubchatConfig, SubchatProgress, SubchatResult};
+use crate::chat::types::{GoalBudget, GoalCriterion, SessionState, ThreadParams};
+use crate::subchat::{
+    finish_stateful_subchat_session, mirror_subchat_messages_into_session, SubchatConfig,
+    SubchatProgress, SubchatResult,
+};
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::types::WorktreeMeta;
 
@@ -709,4 +712,138 @@ async fn subagent_worktree_changes_are_collected_without_delegate_kind() {
         .edited_files
         .iter()
         .any(|path| path == "subagent-change.txt"));
+}
+
+#[serial(test_runner)]
+#[tokio::test]
+async fn registered_subagent_session_mirrors_runner_messages_while_generating() {
+    let observed_live = Arc::new(Mutex::new(None));
+    let _runner = {
+        let observed_live = observed_live.clone();
+        crate::agents::spawn::install_test_runner(Arc::new(move |gcx, messages, config| {
+            let observed_live = observed_live.clone();
+            Box::pin(async move {
+                let app = AppState::from_gcx(gcx).await;
+                let chat_id = config.chat_id.clone().expect("stateful child chat id");
+                let seed_len = messages.len();
+
+                let mut committed = messages;
+                committed.push(ChatMessage::new(
+                    "assistant".to_string(),
+                    "runner step".to_string(),
+                ));
+                committed.push(ChatMessage::new(
+                    "user".to_string(),
+                    "runner follow-up".to_string(),
+                ));
+                mirror_subchat_messages_into_session(&app, &chat_id, &committed).await;
+
+                let live = app
+                    .chat
+                    .sessions
+                    .read()
+                    .await
+                    .get(&chat_id)
+                    .cloned()
+                    .expect("registered subagent session");
+                {
+                    let live = live.lock().await;
+                    *observed_live.lock().await = Some((
+                        seed_len,
+                        live.messages.len(),
+                        live.runtime.state,
+                        live.trajectory_dirty,
+                    ));
+                }
+
+                let mut final_messages = committed;
+                final_messages.push(ChatMessage::new(
+                    "assistant".to_string(),
+                    "done".to_string(),
+                ));
+                mirror_subchat_messages_into_session(&app, &chat_id, &final_messages).await;
+                finish_stateful_subchat_session(&app, &chat_id, &config).await;
+                Ok(SubchatResult {
+                    messages: final_messages,
+                    metering: serde_json::Map::new(),
+                    chat_id: config.chat_id,
+                })
+            })
+        }))
+    };
+    let fixture = repo_fixture().await;
+    let completed = await_completion(
+        crate::agents::spawn::spawn_background_agent(
+            fixture.app.clone(),
+            spawn_request("parent-session-mirror", BgAgentKind::Subagent),
+        )
+        .await
+        .expect("spawn mirroring agent"),
+    )
+    .await;
+    let (seed_len, live_len, live_state, live_dirty) =
+        observed_live.lock().await.take().expect("live observation");
+    let child_chat_id = completed.child_chat_id.as_deref().expect("child chat id");
+    let session = fixture
+        .app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get(child_chat_id)
+        .cloned()
+        .expect("registered subagent session after completion");
+    let session = session.lock().await;
+
+    assert_eq!(completed.status, BgAgentStatus::Completed);
+    assert!(seed_len > 0);
+    assert_eq!(live_len, seed_len + 2);
+    assert_eq!(live_state, SessionState::Generating);
+    assert!(!live_dirty);
+    assert_eq!(session.messages.len(), seed_len + 3);
+    assert_eq!(
+        session.messages.last().map(|message| message.role.clone()),
+        Some("assistant".to_string())
+    );
+    assert_eq!(session.runtime.state, SessionState::Idle);
+    assert!(!session.trajectory_dirty);
+}
+
+#[serial(test_runner)]
+#[tokio::test]
+async fn dirty_non_runner_owned_session_is_not_overwritten_by_the_mirror() {
+    let fixture = repo_fixture().await;
+    let chat_id = "mirror-dirty-guard";
+    let session = Arc::new(Mutex::new(crate::chat::types::ChatSession::new(
+        chat_id.to_string(),
+    )));
+    {
+        let mut guarded = session.lock().await;
+        guarded.add_message(ChatMessage::new("user".to_string(), "mine".to_string()));
+        assert!(guarded.trajectory_dirty);
+    }
+    fixture
+        .app
+        .chat
+        .sessions
+        .write()
+        .await
+        .insert(chat_id.to_string(), session.clone());
+
+    mirror_subchat_messages_into_session(
+        &fixture.app,
+        chat_id,
+        &[ChatMessage::new(
+            "assistant".to_string(),
+            "runner".to_string(),
+        )],
+    )
+    .await;
+
+    let session = session.lock().await;
+    assert_eq!(session.messages.len(), 1);
+    assert_eq!(
+        session.messages[0].content.content_text_only(),
+        "mine".to_string()
+    );
 }

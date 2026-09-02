@@ -34,29 +34,6 @@
   height: 100%;
 }
 
-.engineUrl {
-  display: inline-block;
-  max-width: 180px;
-  overflow: hidden;
-  color: var(--rf-color-muted);
-  cursor: pointer;
-  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
-    var(--rf-font-ui);
-  text-align: left;
-  text-decoration: none;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.engineUrl:hover {
-  color: var(--rf-color-fg);
-}
-
-.engineUrl:focus-visible {
-  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-hairline);
-}
-
 .iconButton {
   flex-shrink: 0;
   border-color: transparent;
@@ -71,12 +48,6 @@
 
 .homeButton {
   color: var(--rf-color-accent);
-}
-
-.workspacePanelsButton[aria-pressed="true"],
-.liveEditsButton[aria-pressed="true"] {
-  color: var(--rf-color-accent);
-  background: var(--rf-color-accent-soft);
 }
 
 .toolbarDivider {
@@ -97,23 +68,9 @@
   backdrop-filter: none;
 }
 
-@container toolbar (max-width: 760px) {
-  .engineUrl {
-    display: none;
-  }
-}
-
 @container toolbar (max-width: 520px) {
   .toolbarDivider {
     margin: 0 var(--rf-space-1);
-  }
-}
-
-@container toolbar (max-width: 440px) {
-  .newTaskAction,
-  .themeToggleAction,
-  .engineUrl {
-    display: none;
   }
 }
 

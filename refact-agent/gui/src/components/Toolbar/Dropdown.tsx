@@ -6,12 +6,15 @@ import {
   FileText,
   Gauge,
   Menu as MenuIcon,
+  Moon,
   Settings,
   SlidersHorizontal,
+  Sun,
 } from "lucide-react";
 
 import { selectHost } from "../../features/Config/configSlice";
 import { useAppSelector } from "../../hooks/useAppSelector";
+import { useAppearance } from "../../hooks/useAppearance";
 import { useEventsBusForIDE } from "../../hooks/useEventBusForIDE";
 import { Icon, IconButton, Menu, Tooltip } from "../ui";
 import styles from "./Toolbar.module.css";
@@ -29,7 +32,6 @@ export type DropdownNavigationOptions =
 type DropdownProps = {
   handleNavigation: (to: DropdownNavigationOptions) => void;
   triggerClassName?: string;
-  useGhostTrigger?: boolean;
 };
 
 export const Dropdown: React.FC<DropdownProps> = ({
@@ -38,6 +40,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
 }: DropdownProps) => {
   const host = useAppSelector(selectHost);
   const { openPrivacyFile } = useEventsBusForIDE();
+  const { isDarkMode, toggle: toggleDarkMode } = useAppearance();
   const isWebHost = host === "web";
 
   const refactProductType = useMemo(() => {
@@ -80,6 +83,11 @@ export const Dropdown: React.FC<DropdownProps> = ({
         {!isWebHost && (
           <Menu.Item onSelect={() => void openPrivacyFile()}>
             <Icon icon={FileText} size="sm" /> Edit privacy.yaml
+          </Menu.Item>
+        )}
+        {isWebHost && (
+          <Menu.Item onSelect={toggleDarkMode}>
+            <Icon icon={isDarkMode ? Moon : Sun} size="sm" /> Toggle Dark Mode
           </Menu.Item>
         )}
         <Menu.Separator />

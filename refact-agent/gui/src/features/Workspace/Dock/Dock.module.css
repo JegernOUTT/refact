@@ -10,35 +10,46 @@
   color: var(--rf-color-fg);
   background: var(--rf-bg);
   border-right: var(--rf-hairline) solid var(--rf-border);
+  opacity: var(--rf-motion-opacity-visible);
+  transform: translateX(var(--rf-motion-distance-none));
 }
 
-.switcher {
+.dock[data-state="closed"] {
+  flex-basis: 0;
+  width: 0;
+  min-width: 0;
+  border-right-width: 0;
+  opacity: var(--rf-motion-opacity-hidden);
+  transform: translateX(calc(-1 * var(--rf-motion-distance-sm)));
+}
+
+/* Fixed-width inner shell: the outer element animates its flex basis while the
+   content keeps its final width, so nothing reflows during the slide. */
+.panelInner {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  width: var(--workspace-dock-w, 100%);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sheetHeader {
   display: flex;
   flex: 0 0 auto;
+  justify-content: flex-end;
   padding: var(--rf-space-2);
   border-bottom: var(--rf-hairline) solid var(--rf-border);
-}
-
-.switcher > * {
-  flex: 1 1 auto;
-  width: 100%;
 }
 
 /*
  * Narrow-mode dismiss: the dock renders as a near-fullscreen left Sheet on
  * small viewports; without a visible close control the sheet reads as the
- * whole app (audit L-01). Keep the button compact against the stretching
- * switcher row above.
+ * whole app (audit L-01).
  */
-.switcher > .sheetClose {
+.sheetClose {
   flex: 0 0 auto;
   width: var(--rf-control-h-icon-sm);
-  margin-left: var(--rf-space-2);
-  align-self: center;
-}
-
-.sectionBadge {
-  flex: 0 0 auto;
 }
 
 .content {
@@ -115,4 +126,43 @@
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .dock {
+    transition:
+      flex-basis var(--rf-dur-med) var(--rf-ease-entrance),
+      opacity var(--rf-dur-med) var(--rf-ease-entrance),
+      transform var(--rf-dur-med) var(--rf-ease-entrance),
+      width var(--rf-dur-med) var(--rf-ease-entrance);
+  }
+
+  .dock[data-state="closed"] {
+    transition:
+      flex-basis var(--rf-dur-med) var(--rf-ease-exit),
+      opacity var(--rf-dur-med) var(--rf-ease-exit),
+      transform var(--rf-dur-med) var(--rf-ease-exit),
+      width var(--rf-dur-med) var(--rf-ease-exit);
+  }
+}
+
+/* The html[data-reduced-motion="on"] mirror below must stay in sync. */
+@media (prefers-reduced-motion: reduce) {
+  .dock,
+  .dock[data-state="closed"] {
+    transition: none;
+  }
+
+  .dock[data-state="closed"] {
+    transform: none;
+  }
+}
+
+html[data-reduced-motion="on"] .dock,
+html[data-reduced-motion="on"] .dock[data-state="closed"] {
+  transition: none;
+}
+
+html[data-reduced-motion="on"] .dock[data-state="closed"] {
+  transform: none;
 }

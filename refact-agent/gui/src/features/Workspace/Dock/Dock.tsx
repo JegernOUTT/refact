@@ -1,5 +1,5 @@
 import classNames from "classnames";
-import { Files, GitBranch, ListTodo, X } from "lucide-react";
+import { X } from "lucide-react";
 import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
@@ -10,22 +10,20 @@ import {
   useState,
 } from "react";
 
+import { IconButton, Sheet, useMediaQuery } from "../../../components/ui";
 import {
-  Badge,
-  Icon,
-  IconButton,
-  SegmentedControl,
-  Sheet,
-  useMediaQuery,
-} from "../../../components/ui";
+  COLLAPSE_ANIMATION_MS,
+  useDelayedUnmount,
+} from "../../../components/shared/useDelayedUnmount";
 import { useAppDispatch, useAppSelector } from "../../../hooks";
-import { useGetGitStatusQuery } from "../../../services/refact/gitRead";
+import { AgentsSection } from "../../AgentsPanel";
+import { switchToThread } from "../../Chat/Thread";
 import { selectCapabilities } from "../../Config/configSlice";
 import { FilesPanel } from "../FilesPanel";
-import { changedFileCount, GitDock } from "../GitPanel";
+import { GitDock } from "../GitPanel";
 import {
   normalizeDockWidth,
-  selectFocusedChatWorkspaceRoots,
+  selectFocusedWorkspaceChatId,
   selectPanelsForced,
   selectWorkspaceDock,
   setDockOpen,
@@ -42,86 +40,44 @@ type DockStyle = CSSProperties & {
   "--workspace-dock-w": string;
 };
 
-type DockOption = {
-  value: WorkspaceDockSection;
-  label: React.ReactNode;
-  ariaLabel?: string;
-};
-
-function GitDockLabel() {
-  const contextRoots = useAppSelector(selectFocusedChatWorkspaceRoots);
-  const { data } = useGetGitStatusQuery(contextRoots);
-  const changedCount =
-    data?.roots.reduce((count, root) => count + changedFileCount(root), 0) ?? 0;
-
-  return (
-    <>
-      <Icon icon={GitBranch} size="sm" />
-      Git
-      <Badge
-        aria-label={`${changedCount} changed ${
-          changedCount === 1 ? "file" : "files"
-        }`}
-        className={styles.sectionBadge}
-        size="xs"
-        tone={changedCount > 0 ? "warning" : "muted"}
-      >
-        {changedCount}
-      </Badge>
-    </>
-  );
-}
-
 export function Dock() {
   const dispatch = useAppDispatch();
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
   const dock = useAppSelector(selectWorkspaceDock);
+  const focusedChatId = useAppSelector(selectFocusedWorkspaceChatId);
   const isNarrow = useMediaQuery(narrowQuery);
   const dockRef = useRef<HTMLElement>(null);
   const liveWidthRef = useRef(dock.width);
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const [dragging, setDragging] = useState(false);
-  const options = useMemo<DockOption[]>(() => {
-    const result: DockOption[] = [];
-    if (capabilities.filesPanel || panelsForced) {
-      result.push({
-        value: "files",
-        label: (
-          <>
-            <Icon icon={Files} size="sm" />
-            Files
-          </>
-        ),
-      });
-    }
-    if (capabilities.gitPanel || panelsForced) {
-      result.push({
-        value: "git",
-        label: <GitDockLabel />,
-        ariaLabel: "Git",
-      });
-    }
-    result.push({
-      value: "tasks",
-      label: (
-        <>
-          <Icon icon={ListTodo} size="sm" />
-          Tasks
-        </>
-      ),
-    });
+  const { shouldRender, isAnimatingOpen } = useDelayedUnmount(
+    dock.open,
+    COLLAPSE_ANIMATION_MS,
+  );
+  const availableSections = useMemo<WorkspaceDockSection[]>(() => {
+    const result: WorkspaceDockSection[] = [];
+    if (capabilities.filesPanel || panelsForced) result.push("files");
+    if (capabilities.gitPanel || panelsForced) result.push("git");
+    result.push("agents", "tasks");
     return result;
   }, [capabilities.filesPanel, capabilities.gitPanel, panelsForced]);
-  const activeSection = options.some((option) => option.value === dock.section)
+  const activeSection = availableSections.includes(dock.section)
     ? dock.section
-    : options[0].value;
+    : availableSections[0];
 
   useEffect(() => {
     if (activeSection !== dock.section) {
       dispatch(setDockSection(activeSection));
     }
   }, [activeSection, dispatch, dock.section]);
+
+  const handleAgentNavigation = useCallback(
+    (childChatId: string) => {
+      dispatch(switchToThread({ id: childChatId }));
+    },
+    [dispatch],
+  );
 
   const handleResizePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -171,19 +127,9 @@ export function Dock() {
   useEffect(() => () => dragCleanupRef.current?.(), []);
 
   const content = (withClose: boolean) => (
-    <>
-      <div className={styles.switcher}>
-        <SegmentedControl
-          aria-label="Workspace dock sections"
-          name="workspace-dock-section"
-          onValueChange={(value) =>
-            dispatch(setDockSection(value as WorkspaceDockSection))
-          }
-          options={options}
-          size="sm"
-          value={activeSection}
-        />
-        {withClose && (
+    <div className={styles.panelInner}>
+      {withClose && (
+        <div className={styles.sheetHeader}>
           <Sheet.Close asChild>
             <IconButton
               aria-label="Close workspace panel"
@@ -193,8 +139,8 @@ export function Dock() {
               variant="ghost"
             />
           </Sheet.Close>
-        )}
-      </div>
+        </div>
+      )}
       <div
         key={activeSection}
         className={classNames(styles.content, "rf-enter")}
@@ -203,9 +149,15 @@ export function Dock() {
       >
         {activeSection === "files" ? <FilesPanel /> : null}
         {activeSection === "git" ? <GitDock /> : null}
+        {activeSection === "agents" ? (
+          <AgentsSection
+            chatId={focusedChatId}
+            onNavigate={handleAgentNavigation}
+          />
+        ) : null}
         {activeSection === "tasks" ? <TasksSection /> : null}
       </div>
-    </>
+    </div>
   );
 
   if (isNarrow) {
@@ -231,12 +183,13 @@ export function Dock() {
     );
   }
 
-  if (!dock.open) return null;
+  if (!dock.open && !shouldRender) return null;
 
   return (
     <aside
       aria-label="Workspace dock"
-      className={classNames(styles.dock, "rf-grow-in")}
+      className={styles.dock}
+      data-state={isAnimatingOpen ? "open" : "closed"}
       data-testid="workspace-dock"
       ref={dockRef}
       style={{ "--workspace-dock-w": `${dock.width}px` } as DockStyle}

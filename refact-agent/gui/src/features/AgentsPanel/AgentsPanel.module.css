@@ -1,13 +1,11 @@
 .panel {
   display: flex;
-  flex: 0 0 336px;
+  flex: 1 1 auto;
   flex-direction: column;
-  width: 336px;
-  min-width: 300px;
+  min-width: 0;
   min-height: 0;
+  overflow: hidden;
   color: var(--rf-color-fg);
-  background: var(--rf-surface-1);
-  border-right: var(--rf-hairline) solid var(--rf-border);
 }
 
 .panelHeader {
@@ -21,7 +19,6 @@
 
 .titleRow,
 .panelTitle,
-.nodeRow,
 .nodeActions,
 .confirmActions,
 .branchRow,
@@ -77,10 +74,15 @@
   min-width: 0;
 }
 
+/* Stacked row: title owns the full width on line one, secondary metadata and
+   the expand chip sit on line two, the live tool ticker on line three. */
 .nodeRow {
+  --rf-agent-row-indent: calc(var(--rf-space-2) + var(--rf-row-gap));
+
+  display: flex;
+  flex-direction: column;
+  gap: var(--rf-space-2xs);
   min-width: 0;
-  min-height: var(--rf-control-h);
-  gap: var(--rf-row-gap);
   padding: var(--rf-row-pad);
   border-radius: var(--rf-radius-ctl);
   cursor: pointer;
@@ -91,19 +93,26 @@
   background: var(--rf-surface-2);
 }
 
-.treeGuide {
-  display: none;
+.titleLine {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--rf-row-gap);
+  min-width: 0;
 }
 
-.expandButton,
-.expandSpacer {
-  flex: 0 0 var(--rf-control-h-icon-sm);
+.metaLine {
+  display: flex;
+  align-items: center;
+  gap: var(--rf-row-gap);
+  min-width: 0;
+  padding-left: var(--rf-agent-row-indent);
+  overflow: hidden;
 }
 
 .nodeTitle {
   flex: 1 1 auto;
   min-width: 0;
-  display: -webkit-box;
   overflow: hidden;
   padding: 0;
   color: var(--rf-color-fg);
@@ -112,8 +121,8 @@
   font: var(--rf-weight-medium) var(--rf-text-2) / var(--rf-line)
     var(--rf-font-ui);
   text-align: left;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -122,6 +131,7 @@
 }
 
 .nodeTitle:focus-visible,
+.expandChip:focus-visible,
 .messageInput:focus-visible {
   outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
   outline-offset: var(--rf-focus-ring-w);
@@ -129,7 +139,8 @@
 
 .modelChip,
 .questionsBadge,
-.nodeUsage {
+.nodeUsage,
+.expandChip {
   flex: 0 0 auto;
 }
 
@@ -141,24 +152,72 @@
 }
 
 .nodeUsage {
+  overflow: hidden;
   color: var(--rf-color-muted);
   font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
     var(--rf-font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.nodeActions {
+.expandChip {
+  display: inline-flex;
+  align-items: center;
   gap: var(--rf-space-2xs);
-  opacity: 0;
+  min-height: var(--rf-control-h-sm);
+  padding: 0 var(--rf-space-1);
+  color: var(--rf-color-muted);
+  background: transparent;
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-pill);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.expandChip:hover {
+  color: var(--rf-color-fg);
+  border-color: var(--rf-color-accent);
+}
+
+.expandChevron {
+  transform: rotate(0deg);
+}
+
+.expandChip[aria-expanded="true"] .expandChevron {
+  transform: rotate(90deg);
+}
+
+/* Overlaid so hover actions never steal width from the title. */
+.nodeActions {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  gap: var(--rf-space-2xs);
+  padding-left: var(--rf-space-4);
+  background: linear-gradient(
+    to right,
+    transparent,
+    var(--rf-surface-glass) var(--rf-space-4),
+    var(--rf-surface-glass)
+  );
+  backdrop-filter: blur(var(--rf-blur-overlay));
+  opacity: var(--rf-motion-opacity-hidden);
+  pointer-events: none;
+  transform: translateX(var(--rf-motion-distance-xs));
 }
 
 .nodeRow:focus-within .nodeActions,
 .nodeRow:hover .nodeActions {
-  opacity: 1;
+  opacity: var(--rf-motion-opacity-visible);
+  pointer-events: auto;
+  transform: translateX(var(--rf-motion-distance-none));
 }
 
 .toolTicker {
-  padding: 0 var(--rf-row-pad) var(--rf-row-pad)
-    calc(var(--rf-control-h-icon-sm) + var(--rf-panel-pad));
+  padding-left: var(--rf-agent-row-indent);
   overflow: hidden;
   color: var(--rf-color-muted);
   font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
@@ -170,7 +229,7 @@
 .messageForm {
   gap: var(--rf-space-1);
   padding: var(--rf-space-1) var(--rf-space-2) var(--rf-space-2)
-    calc(var(--rf-control-h-icon-sm) + var(--rf-space-3));
+    calc(var(--rf-row-pad) + var(--rf-space-2) + var(--rf-row-gap));
 }
 
 .messageInput {
@@ -191,7 +250,7 @@
   flex-direction: column;
   gap: var(--rf-space-2);
   padding: var(--rf-space-2) var(--rf-space-2) var(--rf-space-3)
-    calc(var(--rf-control-h-icon-sm) + var(--rf-space-3));
+    calc(var(--rf-row-pad) + var(--rf-space-2) + var(--rf-row-gap));
   color: var(--rf-color-muted);
   font: var(--rf-weight-regular) var(--rf-text-1) / var(--rf-line)
     var(--rf-font-ui);
@@ -260,33 +319,62 @@
   gap: var(--rf-space-2);
 }
 
-.drawerContent {
-  width: min(360px, calc(100vw - var(--rf-space-6)));
-  height: calc(100dvh - var(--rf-space-5));
-  padding: 0;
-}
-
-.drawerContent .panel {
-  flex: 1 1 auto;
-  width: 100%;
-  min-width: 0;
-  border-right: 0;
-}
-
 @media (hover: none), (pointer: coarse) {
   .nodeActions {
-    opacity: 1;
+    position: static;
+    padding-left: 0;
+    background: none;
+    backdrop-filter: none;
+    opacity: var(--rf-motion-opacity-visible);
+    pointer-events: auto;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .nodeActions {
+    background: var(--rf-surface-2);
+    backdrop-filter: none;
   }
 }
 
 @media (prefers-reduced-motion: no-preference) {
+  .nodeRow {
+    transition:
+      background var(--rf-dur-fast) var(--rf-ease-standard),
+      color var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+
   .nodeActions {
-    transition: opacity var(--rf-dur-fast) var(--rf-ease-standard);
+    transition:
+      opacity var(--rf-dur-fast) var(--rf-ease-standard),
+      transform var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+
+  .expandChip {
+    transition:
+      border-color var(--rf-dur-fast) var(--rf-ease-standard),
+      color var(--rf-dur-fast) var(--rf-ease-standard);
+  }
+
+  .expandChevron {
+    transition: transform var(--rf-dur-fast) var(--rf-ease-standard);
   }
 }
 
+/* The html[data-reduced-motion="on"] mirror below must stay in sync. */
 @media (prefers-reduced-motion: reduce) {
-  .nodeActions {
+  .nodeRow,
+  .nodeActions,
+  .expandChip,
+  .expandChevron {
     transition: none;
   }
+}
+
+html[data-reduced-motion="on"] .nodeRow,
+html[data-reduced-motion="on"] .nodeActions,
+html[data-reduced-motion="on"] .expandChip,
+html[data-reduced-motion="on"] .expandChevron {
+  transition: none;
 }

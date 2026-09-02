@@ -3551,7 +3551,9 @@ fn preservable_trajectory_metadata(
     source
         .iter()
         .filter(|(key, _)| {
-            key.as_str() == "browser_meta" || !is_known_trajectory_top_level_key(key)
+            // `created_at` is a known key but must survive re-saves, so it is cached too.
+            matches!(key.as_str(), "browser_meta" | "created_at")
+                || !is_known_trajectory_top_level_key(key)
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
@@ -4227,6 +4229,14 @@ async fn save_trajectory_snapshot_inner(
 
     let updated_at = chrono::Utc::now().to_rfc3339();
     trajectory["updated_at"] = serde_json::Value::String(updated_at.clone());
+    if let Some(existing_created_at) = existing_trajectory
+        .as_ref()
+        .and_then(|existing| existing.get("created_at"))
+        .and_then(|created_at| created_at.as_str())
+        .filter(|created_at| parsed_rfc3339_utc(created_at).is_some())
+    {
+        trajectory["created_at"] = serde_json::Value::String(existing_created_at.to_string());
+    }
     preserve_existing_trajectory_metadata(&mut trajectory, existing_trajectory);
 
     let tmp_path = unique_trajectory_tmp_path(&file_path);
@@ -9898,6 +9908,44 @@ mod tests {
             "child must live in the root chat folder"
         );
         assert!(load_trajectory_for_chat(gcx, child_id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn resaving_a_trajectory_keeps_the_original_created_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "created-at-stable-on-resave";
+
+        let mut first = test_snapshot(
+            chat_id,
+            "First",
+            vec![ChatMessage::new("user".to_string(), "hi".to_string())],
+        );
+        first.created_at = "2024-01-01T00:00:00Z".to_string();
+        save_trajectory_snapshot(gcx.clone(), first).await.unwrap();
+        let path = nested_trajectory_path(dir.path(), chat_id, chat_id);
+        let first_raw: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        let first_created_at = first_raw["created_at"].as_str().unwrap().to_string();
+        let first_updated_at = first_raw["updated_at"].as_str().unwrap().to_string();
+
+        let mut second = test_snapshot(
+            chat_id,
+            "Second",
+            vec![
+                ChatMessage::new("user".to_string(), "hi".to_string()),
+                ChatMessage::new("assistant".to_string(), "there".to_string()),
+            ],
+        );
+        second.created_at = "2025-06-01T00:00:00Z".to_string();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        save_trajectory_snapshot(gcx, second).await.unwrap();
+        let second_raw: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+
+        assert_eq!(first_created_at, "2024-01-01T00:00:00Z");
+        assert_eq!(second_raw["created_at"].as_str().unwrap(), first_created_at);
+        assert_ne!(second_raw["updated_at"].as_str().unwrap(), first_updated_at);
     }
 
     #[tokio::test]

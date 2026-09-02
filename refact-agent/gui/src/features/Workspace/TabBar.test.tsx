@@ -280,11 +280,12 @@ describe("TabBar", () => {
     expect(store.getState().workspace.activeTabId).toBe(chat("chat-b"));
   });
 
-  it("does not render the live-edits control outside the Toolbar", () => {
+  it("does not render the live-edits control in the tab bar", () => {
     const store = createStoreWithChatTabs();
     renderTabBar(store);
 
     expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull();
+    expect(screen.queryByRole("switch", { name: "Live edits" })).toBeNull();
   });
 
   it("closes a tab exactly once when its transition ends", () => {

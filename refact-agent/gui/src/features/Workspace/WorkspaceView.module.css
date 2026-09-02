@@ -26,10 +26,16 @@
 }
 
 .unsplitBody {
+  --rf-chat-gutter-x: var(--rf-page-pad-x);
+  --rf-chat-gutter-y: var(--rf-page-pad-y);
+
   position: relative;
 }
 
 .splitBody {
+  --rf-chat-gutter-x: 0px;
+  --rf-chat-gutter-y: 0px;
+
   padding: var(--rf-space-2);
 }
 
@@ -73,8 +79,8 @@
 
 .unsplitSplitAffordance {
   position: absolute;
-  top: var(--rf-space-2);
-  right: var(--rf-space-2);
+  top: calc(var(--rf-space-2) + var(--rf-chat-gutter-y, 0px));
+  right: calc(var(--rf-space-2) + var(--rf-chat-gutter-x, 0px));
   z-index: var(--rf-z-dropdown);
   opacity: var(--rf-motion-opacity-visible);
   transform: translateY(var(--rf-motion-distance-none));

@@ -1,62 +1,110 @@
 import { describe, expect, test } from "vitest";
 
 import {
+  setDockOpen,
+  setDockSection,
+  toggleDock,
+} from "../Workspace/workspaceSlice";
+import {
   agentsPanelSlice,
+  agentsSectionUserClosed,
+  agentsSectionUserOpened,
+  autoOpenCleared,
   autoOpenRequested,
-  panelAutoClosed,
-  panelClosed,
-  panelOpened,
-  selectAgentsPanelOpen,
+  selectAgentsPanelAutoOpenedFor,
   selectAgentsPanelTab,
   selectAgentsPanelUserClosed,
-  selectAgentsPanelUserOpened,
   tabChanged,
 } from "./agentsPanelSlice";
 
-describe("agentsPanelSlice", () => {
-  test("remembers a manual close while allowing a manual reopen", () => {
-    let state = agentsPanelSlice.reducer(undefined, panelClosed("chat-1"));
-    state = agentsPanelSlice.reducer(state, autoOpenRequested("chat-1"));
+const reduce = agentsPanelSlice.reducer;
 
-    expect(selectAgentsPanelOpen({ agentsPanel: state }, "chat-1")).toBe(false);
+describe("agentsPanelSlice", () => {
+  test("starts on the active tab with nothing auto-opened", () => {
+    const state = reduce(undefined, { type: "@@INIT" });
+
+    expect(selectAgentsPanelTab({ agentsPanel: state })).toBe("active");
+    expect(selectAgentsPanelAutoOpenedFor({ agentsPanel: state })).toBeNull();
+    expect(selectAgentsPanelUserClosed({ agentsPanel: state }, "chat-1")).toBe(
+      false,
+    );
+  });
+
+  test("changes the tab", () => {
+    let state = reduce(undefined, tabChanged("all"));
+    expect(selectAgentsPanelTab({ agentsPanel: state })).toBe("all");
+
+    state = reduce(state, tabChanged("active"));
+    expect(selectAgentsPanelTab({ agentsPanel: state })).toBe("active");
+  });
+
+  test("records the chat an auto-open was requested for", () => {
+    const state = reduce(undefined, autoOpenRequested("chat-1"));
+
+    expect(selectAgentsPanelAutoOpenedFor({ agentsPanel: state })).toBe(
+      "chat-1",
+    );
+  });
+
+  test("suppresses auto-open for a chat the user closed, until they reopen it", () => {
+    let state = reduce(undefined, agentsSectionUserClosed("chat-1"));
+    state = reduce(state, autoOpenRequested("chat-1"));
+
     expect(selectAgentsPanelUserClosed({ agentsPanel: state }, "chat-1")).toBe(
       true,
     );
+    expect(selectAgentsPanelAutoOpenedFor({ agentsPanel: state })).toBeNull();
 
-    state = agentsPanelSlice.reducer(state, panelOpened("chat-1"));
-    expect(selectAgentsPanelOpen({ agentsPanel: state }, "chat-1")).toBe(true);
+    state = reduce(state, autoOpenRequested("chat-2"));
+    expect(selectAgentsPanelAutoOpenedFor({ agentsPanel: state })).toBe(
+      "chat-2",
+    );
+
+    state = reduce(state, agentsSectionUserOpened("chat-1"));
+    expect(selectAgentsPanelUserClosed({ agentsPanel: state }, "chat-1")).toBe(
+      false,
+    );
+    expect(selectAgentsPanelAutoOpenedFor({ agentsPanel: state })).toBeNull();
+
+    state = reduce(state, autoOpenRequested("chat-1"));
+    expect(selectAgentsPanelAutoOpenedFor({ agentsPanel: state })).toBe(
+      "chat-1",
+    );
+  });
+
+  test("clears the auto-open marker explicitly", () => {
+    let state = reduce(undefined, autoOpenRequested("chat-1"));
+    state = reduce(state, autoOpenCleared());
+
+    expect(selectAgentsPanelAutoOpenedFor({ agentsPanel: state })).toBeNull();
     expect(selectAgentsPanelUserClosed({ agentsPanel: state }, "chat-1")).toBe(
       false,
     );
   });
 
-  test("auto-opens unclosed chats and changes tabs", () => {
-    let state = agentsPanelSlice.reducer(
-      undefined,
-      autoOpenRequested("chat-1"),
-    );
-    state = agentsPanelSlice.reducer(state, tabChanged("all"));
+  test.each([
+    ["setDockSection", setDockSection("files")],
+    ["setDockOpen", setDockOpen(false)],
+    ["toggleDock", toggleDock()],
+  ])(
+    "drops the auto-open marker when the dock is driven by %s",
+    (_, action) => {
+      let state = reduce(undefined, autoOpenRequested("chat-1"));
+      state = reduce(state, action);
 
-    expect(selectAgentsPanelOpen({ agentsPanel: state }, "chat-1")).toBe(true);
-    expect(selectAgentsPanelOpen({ agentsPanel: state }, "unknown-chat")).toBe(
-      false,
-    );
+      expect(selectAgentsPanelAutoOpenedFor({ agentsPanel: state })).toBeNull();
+      expect(
+        selectAgentsPanelUserClosed({ agentsPanel: state }, "chat-1"),
+      ).toBe(false);
+    },
+  );
+
+  test("keeps the tab selection across dock interactions", () => {
+    let state = reduce(undefined, tabChanged("all"));
+    state = reduce(state, autoOpenRequested("chat-1"));
+    state = reduce(state, setDockSection("agents"));
+
     expect(selectAgentsPanelTab({ agentsPanel: state })).toBe("all");
-  });
-
-  test("auto-closes an automatically opened panel without marking it user closed", () => {
-    let state = agentsPanelSlice.reducer(
-      undefined,
-      autoOpenRequested("chat-1"),
-    );
-    state = agentsPanelSlice.reducer(state, panelAutoClosed("chat-1"));
-
-    expect(selectAgentsPanelOpen({ agentsPanel: state }, "chat-1")).toBe(false);
-    expect(selectAgentsPanelUserClosed({ agentsPanel: state }, "chat-1")).toBe(
-      false,
-    );
-    expect(selectAgentsPanelUserOpened({ agentsPanel: state }, "chat-1")).toBe(
-      false,
-    );
+    expect(selectAgentsPanelAutoOpenedFor({ agentsPanel: state })).toBeNull();
   });
 });

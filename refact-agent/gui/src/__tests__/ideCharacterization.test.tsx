@@ -184,6 +184,8 @@ function renderApp(
   return render(<InnerApp />, { store });
 }
 
+const RAIL_SECTIONS = ["Files", "Git", "Agents", "Tasks"] as const;
+
 function expectNoDashboardChrome() {
   expect(screen.queryByTestId("daemon-dashboard-shell")).toBeNull();
   expect(
@@ -195,11 +197,16 @@ function expectNoDashboardChrome() {
 
 function expectNoPanelChrome() {
   expect(
-    screen.getByRole("button", { name: "Workspace panels" }),
-  ).toHaveAttribute("aria-pressed", "false");
-  expect(screen.queryByRole("tab", { name: "Files" })).toBeNull();
-  expect(screen.queryByRole("tab", { name: "Git" })).toBeNull();
-  expect(screen.queryByRole("tab", { name: "Terminal" })).toBeNull();
+    screen.getByRole("navigation", { name: "Workspace sections" }),
+  ).toBeInTheDocument();
+  for (const section of RAIL_SECTIONS) {
+    expect(screen.getByRole("button", { name: section })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+  }
+  expect(screen.queryByLabelText("Workspace dock")).toBeNull();
+  expect(screen.queryByTestId("workspace-dock-section")).toBeNull();
   expect(
     screen.queryByRole("button", { name: "Toggle workspace dock" }),
   ).toBeNull();
@@ -218,7 +225,7 @@ describe("IDE characterization: zero new chrome", () => {
   const ideHosts = [["vscode"], ["jetbrains"]] as const;
 
   it.each(ideHosts)(
-    "renders the %s host with only the opt-in panel button",
+    "renders the %s host with the activity rail but no docked panels",
     async (host) => {
       const { store } = renderApp({ host }, (appStore) => {
         appStore.dispatch(
@@ -244,7 +251,7 @@ describe("IDE characterization: zero new chrome", () => {
   );
 
   it.each(ideHosts)(
-    "keeps %s capability overrides behind the opt-in panel button",
+    "keeps %s capability overrides behind the activity rail opt-in",
     async (host) => {
       const { store } = renderApp(
         {
@@ -269,18 +276,14 @@ describe("IDE characterization: zero new chrome", () => {
       await screen.findByRole("tab", { name: /Chat Alpha/ });
 
       expectNoPanelChrome();
-      expect(screen.queryByLabelText("Workspace dock")).toBeNull();
-      expect(
-        screen.queryByLabelText("Terminal workbench for chat-a"),
-      ).toBeNull();
       expect(store.getState().workspace.panelsForced).toBe(false);
     },
   );
 
   it.each(ideHosts)(
-    "mounts workspace panels after opting in on %s",
+    "mounts the workspace dock after opting in from the rail on %s",
     async (host) => {
-      const { user } = renderApp({ host }, (appStore) => {
+      const { store, user } = renderApp({ host }, (appStore) => {
         appStore.dispatch(
           createChatWithId({
             id: "chat-a",
@@ -292,22 +295,22 @@ describe("IDE characterization: zero new chrome", () => {
 
       await screen.findByRole("tab", { name: /Chat Alpha/ });
       expect(screen.queryByLabelText("Workspace dock")).toBeNull();
-      expect(screen.queryByLabelText("Terminal drawer")).toBeNull();
 
-      await user.click(
-        screen.getByRole("button", { name: "Workspace panels" }),
-      );
+      await user.click(screen.getByRole("button", { name: "Files" }));
 
       expect(
         await screen.findByLabelText("Workspace dock"),
       ).toBeInTheDocument();
+      expect(store.getState().workspace.panelsForced).toBe(true);
+      expect(screen.getByTestId("workspace-dock-section")).toHaveAttribute(
+        "data-section",
+        "files",
+      );
+      expect(screen.getByRole("button", { name: "Files" })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+      );
       expect(screen.queryByLabelText("Terminal drawer")).toBeNull();
-      expect(
-        screen.getByLabelText("Terminal workbench for chat-a"),
-      ).toBeInTheDocument();
-      expect(screen.getByRole("radio", { name: "Files" })).toBeInTheDocument();
-      expect(screen.getByRole("radio", { name: "Git" })).toBeInTheDocument();
-      expect(screen.getByText("Terminal")).toBeInTheDocument();
     },
   );
 

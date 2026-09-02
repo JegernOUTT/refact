@@ -1517,9 +1517,30 @@ async fn persist_subchat_progress(
     .await;
     if config.stateful {
         let app = AppState::from_gcx(gcx).await;
-        crate::chat::trajectories::refresh_session_from_trajectory_if_stale(app, &chat_id, true)
-            .await;
+        mirror_subchat_messages_into_session(&app, &chat_id, messages).await;
     }
+}
+
+pub(crate) async fn mirror_subchat_messages_into_session(
+    app: &AppState,
+    chat_id: &str,
+    messages: &[ChatMessage],
+) {
+    let session_arc = {
+        let sessions = app.chat.sessions.read().await;
+        sessions.get(chat_id).cloned()
+    };
+    let Some(session_arc) = session_arc else {
+        return;
+    };
+    let mut session = session_arc.lock().await;
+    if session.closed {
+        return;
+    }
+    if !session.is_runner_owned_subagent_view() && session.trajectory_dirty {
+        return;
+    }
+    session.mirror_runner_messages(messages.to_vec());
 }
 
 fn take_subchat_progress(progress: &SubchatProgressMessages) -> Vec<ChatMessage> {
@@ -1565,8 +1586,7 @@ async fn save_failed_subchat_trajectory(
     .await;
     if config.stateful {
         let app = AppState::from_gcx(gcx).await;
-        crate::chat::trajectories::refresh_session_from_trajectory_if_stale(app, chat_id, true)
-            .await;
+        mirror_subchat_messages_into_session(&app, chat_id, &messages).await;
     }
 }
 
@@ -1722,12 +1742,7 @@ pub async fn run_subchat(
             subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Final),
         )
         .await;
-        crate::chat::trajectories::refresh_session_from_trajectory_if_stale(
-            app.clone(),
-            &chat_id,
-            true,
-        )
-        .await;
+        mirror_subchat_messages_into_session(&app, &chat_id, &current_messages).await;
     } else if should_persist_subchat_trajectory(&config) {
         let thread = trace_thread_from_config(&chat_id, &config);
         save_trajectory_as_with_intent(
@@ -1782,7 +1797,11 @@ pub(crate) async fn install_stateful_subchat_session(
     }
 }
 
-async fn finish_stateful_subchat_session(app: &AppState, chat_id: &str, config: &SubchatConfig) {
+pub(crate) async fn finish_stateful_subchat_session(
+    app: &AppState,
+    chat_id: &str,
+    config: &SubchatConfig,
+) {
     if !config.stateful || config.background_agent_id.is_none() {
         return;
     }

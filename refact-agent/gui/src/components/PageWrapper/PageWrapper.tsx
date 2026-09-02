@@ -9,6 +9,7 @@ type PageWrapperProps = {
   className?: string;
   style?: React.CSSProperties;
   noPadding?: boolean;
+  flush?: boolean;
 };
 
 export const PageWrapper: React.FC<PageWrapperProps> = ({
@@ -17,6 +18,7 @@ export const PageWrapper: React.FC<PageWrapperProps> = ({
   host,
   style,
   noPadding,
+  flush,
 }) => {
   return (
     <div
@@ -24,6 +26,7 @@ export const PageWrapper: React.FC<PageWrapperProps> = ({
         styles.PageWrapper,
         host === "web" ? styles.web : styles.ide,
         noPadding && styles.noPadding,
+        flush && styles.flush,
         className,
       )}
       style={style}

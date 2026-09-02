@@ -51,7 +51,29 @@ describe("useWorkspaceShortcuts", () => {
     expect(store.getState().workspace.dock?.open).toBe(true);
   });
 
-  it("toggles web workspace chrome and selects visible dock sections", () => {
+  it("maps digits 1-4 to files, git, agents, and tasks", () => {
+    const { store } = renderShortcuts();
+
+    fireEvent.keyDown(window, { key: "1", ctrlKey: true });
+    expect(store.getState().workspace.dock).toMatchObject({
+      open: true,
+      section: "files",
+    });
+
+    fireEvent.keyDown(window, { key: "2", ctrlKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("git");
+
+    fireEvent.keyDown(window, { key: "3", metaKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("agents");
+
+    fireEvent.keyDown(window, { key: "4", metaKey: true });
+    expect(store.getState().workspace.dock).toMatchObject({
+      open: true,
+      section: "tasks",
+    });
+  });
+
+  it("toggles the dock with the modifier B shortcut", () => {
     const { store } = renderShortcuts();
 
     fireEvent.keyDown(window, { key: "b", ctrlKey: true });
@@ -59,15 +81,6 @@ describe("useWorkspaceShortcuts", () => {
 
     fireEvent.keyDown(window, { key: "B", metaKey: true });
     expect(store.getState().workspace.dock?.open).toBe(true);
-
-    fireEvent.keyDown(window, { key: "2", ctrlKey: true });
-    expect(store.getState().workspace.dock).toMatchObject({
-      open: true,
-      section: "git",
-    });
-
-    fireEvent.keyDown(window, { key: "3", metaKey: true });
-    expect(store.getState().workspace.dock?.section).toBe("tasks");
   });
 
   it("ignores the terminal shortcut when terminal capability is unavailable", () => {
@@ -113,6 +126,35 @@ describe("useWorkspaceShortcuts", () => {
     expect(store.getState().workspace.dock?.section).toBe("git");
   });
 
+  it("keeps the agents section reachable without dock capabilities", () => {
+    const { store, rerender } = renderShortcuts();
+    store.dispatch(
+      updateConfig({
+        capabilities: {
+          filesPanel: false,
+          gitPanel: false,
+          terminalPanel: false,
+        },
+      }),
+    );
+    store.dispatch(setDockSection("files"));
+    store.dispatch(setDockOpen(false));
+    rerender();
+
+    fireEvent.keyDown(window, { key: "1", ctrlKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("files");
+    fireEvent.keyDown(window, { key: "2", ctrlKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("files");
+    fireEvent.keyDown(window, { key: "4", ctrlKey: true });
+    expect(store.getState().workspace.dock?.open).toBe(false);
+
+    fireEvent.keyDown(window, { key: "3", ctrlKey: true });
+    expect(store.getState().workspace.dock).toMatchObject({
+      open: true,
+      section: "agents",
+    });
+  });
+
   it("keeps terminal-only workspaces on the terminal-specific shortcut", () => {
     const { store, rerender } = renderShortcuts();
     store.dispatch(
@@ -124,21 +166,19 @@ describe("useWorkspaceShortcuts", () => {
         },
       }),
     );
+    store.dispatch(setDockSection("files"));
     store.dispatch(setDockOpen(false));
     rerender();
-
-    fireEvent.keyDown(window, { key: "b", ctrlKey: true });
-    expect(store.getState().workspace.dock?.open).toBe(false);
 
     fireEvent.keyDown(window, { key: "j", metaKey: true });
     expect(store.getState().workspace.dock?.open).toBe(false);
     expect(store.getState().terminal.workbenchOpenByChat["chat-a"]).toBe(true);
 
-    fireEvent.keyDown(window, { key: "3", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "4", ctrlKey: true });
     expect(store.getState().workspace.dock?.section).toBe("files");
   });
 
-  it("supports task shortcuts when workspace panels are forced", () => {
+  it("supports files, git, and task shortcuts when workspace panels are forced", () => {
     const { store, rerender } = renderShortcuts();
     store.dispatch(
       updateConfig({
@@ -156,7 +196,11 @@ describe("useWorkspaceShortcuts", () => {
     fireEvent.keyDown(window, { key: "b", ctrlKey: true });
     expect(store.getState().workspace.dock?.open).toBe(true);
 
-    fireEvent.keyDown(window, { key: "3", metaKey: true });
+    fireEvent.keyDown(window, { key: "1", metaKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("files");
+    fireEvent.keyDown(window, { key: "2", metaKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("git");
+    fireEvent.keyDown(window, { key: "4", metaKey: true });
     expect(store.getState().workspace.dock).toMatchObject({
       open: true,
       section: "tasks",
@@ -178,7 +222,7 @@ describe("useWorkspaceShortcuts", () => {
     store.dispatch(setDockOpen(false));
     rerender();
 
-    fireEvent.keyDown(window, { key: "3", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "4", ctrlKey: true });
 
     expect(store.getState().workspace.dock).toMatchObject({
       open: false,
@@ -208,7 +252,7 @@ describe("useWorkspaceShortcuts", () => {
       section: "files",
     });
 
-    fireEvent.keyDown(window, { key: "3", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "4", ctrlKey: true });
     expect(store.getState().workspace.dock?.section).toBe("tasks");
     fireEvent.keyDown(window, { key: "1", ctrlKey: true });
     fireEvent.keyDown(window, { key: "2", ctrlKey: true });
@@ -241,7 +285,7 @@ describe("useWorkspaceShortcuts", () => {
       section: "git",
     });
 
-    fireEvent.keyDown(window, { key: "3", metaKey: true });
+    fireEvent.keyDown(window, { key: "4", metaKey: true });
     expect(store.getState().workspace.dock?.section).toBe("tasks");
     fireEvent.keyDown(window, { key: "2", metaKey: true });
     fireEvent.keyDown(window, { key: "1", metaKey: true });
@@ -252,7 +296,7 @@ describe("useWorkspaceShortcuts", () => {
     ).toBeUndefined();
   });
 
-  it("ignores workspace shortcuts when no target is available", () => {
+  it("ignores panel shortcuts when no dock target is available", () => {
     const { store, rerender } = renderShortcuts();
     store.dispatch(
       updateConfig({
@@ -263,17 +307,17 @@ describe("useWorkspaceShortcuts", () => {
         },
       }),
     );
-    store.dispatch(setDockSection("tasks"));
+    store.dispatch(setDockSection("files"));
     store.dispatch(setDockOpen(false));
     rerender();
 
-    for (const key of ["b", "j", "1", "2", "3"]) {
+    for (const key of ["j", "1", "2", "4"]) {
       fireEvent.keyDown(window, { key, ctrlKey: true });
     }
 
     expect(store.getState().workspace.dock).toMatchObject({
       open: false,
-      section: "tasks",
+      section: "files",
     });
     expect(
       store.getState().terminal.workbenchOpenByChat["chat-a"],
@@ -289,8 +333,10 @@ describe("useWorkspaceShortcuts", () => {
 
     fireEvent.keyDown(radio, { key: "2", ctrlKey: true });
     expect(store.getState().workspace.dock?.section).toBe("git");
-    fireEvent.keyDown(checkbox, { key: "3", ctrlKey: true });
+    fireEvent.keyDown(checkbox, { key: "4", ctrlKey: true });
     expect(store.getState().workspace.dock?.section).toBe("tasks");
+    fireEvent.keyDown(radio, { key: "3", ctrlKey: true });
+    expect(store.getState().workspace.dock?.section).toBe("agents");
     fireEvent.keyDown(radio, { key: "1", ctrlKey: true });
     expect(store.getState().workspace.dock?.section).toBe("files");
     fireEvent.keyDown(checkbox, { key: "j", ctrlKey: true });
@@ -325,7 +371,7 @@ describe("useWorkspaceShortcuts", () => {
     fireEvent.keyDown(bareInput, { key: "1", ctrlKey: true });
     fireEvent.keyDown(textarea, { key: "2", ctrlKey: true });
     fireEvent.keyDown(select, { key: "3", ctrlKey: true });
-    fireEvent.keyDown(editable, { key: "2", ctrlKey: true });
+    fireEvent.keyDown(editable, { key: "4", ctrlKey: true });
     fireEvent.keyDown(terminalChild, { key: "j", metaKey: true });
 
     expect(store.getState().workspace.dock).toMatchObject({
@@ -344,24 +390,25 @@ describe("useWorkspaceShortcuts", () => {
     terminal.remove();
   });
 
-  it("toggles the dock after a section shortcut focuses its radio", () => {
+  it("toggles the dock after a section shortcut moves focus to a rail button", () => {
     const { store } = renderShortcuts();
-    const radio = document.body.appendChild(document.createElement("input"));
-    radio.type = "radio";
-    radio.ariaLabel = "Git";
+    const railButton = document.body.appendChild(
+      document.createElement("button"),
+    );
+    railButton.ariaLabel = "Git";
 
     fireEvent.keyDown(window, { key: "2", ctrlKey: true });
-    radio.focus();
-    expect(document.activeElement).toBe(radio);
+    railButton.focus();
+    expect(document.activeElement).toBe(railButton);
     expect(store.getState().workspace.dock).toMatchObject({
       open: true,
       section: "git",
     });
 
-    fireEvent.keyDown(radio, { key: "b", ctrlKey: true });
+    fireEvent.keyDown(railButton, { key: "b", ctrlKey: true });
     expect(store.getState().workspace.dock?.open).toBe(false);
 
-    radio.remove();
+    railButton.remove();
   });
 
   it.each(["ide", "vscode", "jetbrains"] as const)(
@@ -382,7 +429,7 @@ describe("useWorkspaceShortcuts", () => {
       store.dispatch(setDockOpen(false));
       rerender();
 
-      for (const key of ["b", "j", "1", "2", "3"]) {
+      for (const key of ["b", "j", "1", "2", "3", "4"]) {
         fireEvent.keyDown(window, { key, ctrlKey: true });
       }
 
@@ -404,6 +451,7 @@ describe("useWorkspaceShortcuts", () => {
     fireEvent.keyDown(window, { key: "b", ctrlKey: true });
     fireEvent.keyDown(window, { key: "j", ctrlKey: true });
     fireEvent.keyDown(window, { key: "2", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "3", ctrlKey: true });
 
     expect(store.getState().workspace.dock).toMatchObject({
       open: true,
@@ -422,7 +470,7 @@ describe("useWorkspaceShortcuts", () => {
     store.dispatch(setDockOpen(false));
     rerender();
 
-    for (const key of ["b", "j", "1", "2", "3"]) {
+    for (const key of ["b", "j", "1", "2", "3", "4"]) {
       fireEvent.keyDown(window, { key, ctrlKey: true });
     }
 

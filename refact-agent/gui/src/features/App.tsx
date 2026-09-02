@@ -592,7 +592,11 @@ const WorkspaceApp: React.FC<AppProps> = ({ style }: AppProps) => {
       ) : (
         <>
           {activeTab && <Toolbar activeTab={activeTab} />}
-          <PageWrapper host={config.host} style={pageWrapperStyle}>
+          <PageWrapper
+            host={config.host}
+            style={pageWrapperStyle}
+            flush={renderedPage.name === "chat"}
+          >
             {renderedPage.name === "login page" && <LoginPage />}
             {pageSwitching && <ChatLoading />}
             {!pageSwitching && renderedPage.name === "history" && <Dashboard />}

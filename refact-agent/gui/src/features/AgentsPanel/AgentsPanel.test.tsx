@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
@@ -5,9 +7,32 @@ import { http, HttpResponse } from "msw";
 import type { BackgroundAgentSummary } from "../../services/refact";
 import { createDefaultChatState, render } from "../../utils/test-utils";
 import { server } from "../../utils/mockServer";
-import { AgentsPanel } from "./AgentsPanel";
+import { AgentsSection } from "./AgentsPanel";
 
 const chatId = "parent-chat";
+
+const agentsPanelCss = readFileSync(
+  "src/features/AgentsPanel/AgentsPanel.module.css",
+  "utf8",
+);
+const globalTokensCss = [
+  readFileSync("src/styles/tokens.css", "utf8"),
+  readFileSync("src/styles/motion.css", "utf8"),
+].join("\n");
+
+const LOCALLY_DEFINED_CUSTOM_PROPS = ["--rf-agent-row-indent"];
+
+function undefinedTokensIn(css: string): string[] {
+  const used = new Set(
+    [...css.matchAll(/var\((--rf-[a-z0-9-]+)/gu)].map((match) => match[1]),
+  );
+  return [...used].filter(
+    (token) =>
+      !LOCALLY_DEFINED_CUSTOM_PROPS.includes(token) &&
+      !new RegExp(`${token}\\s*:`, "u").test(globalTokensCss) &&
+      !new RegExp(`${token}\\s*:`, "u").test(css),
+  );
+}
 
 function agent(
   id: string,
@@ -55,9 +80,29 @@ function panelState(agents: BackgroundAgentSummary[]) {
   return { chat };
 }
 
-describe("AgentsPanel", () => {
+describe("AgentsSection", () => {
   beforeEach(() => {
     server.use(http.get("*/v1/background-agents", () => HttpResponse.json([])));
+  });
+
+  test("prompts for a chat when the dock has no focused chat", () => {
+    render(<AgentsSection chatId={null} />);
+
+    expect(
+      screen.getByText("Open a chat to see its agents"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("radiogroup", { name: "Agents filter" }),
+    ).not.toBeInTheDocument();
+  });
+
+  test("shows an empty state when the focused chat has no agents", () => {
+    render(<AgentsSection chatId={chatId} />, {
+      preloadedState: panelState([]),
+    });
+
+    expect(screen.getByText("No agents")).toBeInTheDocument();
+    expect(screen.getByText("No agents are running.")).toBeInTheDocument();
   });
 
   test("renders a three-level hierarchy and aggregate usage", async () => {
@@ -73,7 +118,7 @@ describe("AgentsPanel", () => {
     const grandchild = agent("grandchild", "grandchild-chat", null, {
       title: "Grandchild agent",
     });
-    const { user } = render(<AgentsPanel chatId={chatId} />, {
+    const { user } = render(<AgentsSection chatId={chatId} />, {
       preloadedState: panelState([root, child, grandchild]),
     });
 
@@ -93,14 +138,20 @@ describe("AgentsPanel", () => {
       status: "completed",
       title: "Finished agent",
     });
-    const { user } = render(<AgentsPanel chatId={chatId} />, {
+    const { user, store } = render(<AgentsSection chatId={chatId} />, {
       preloadedState: panelState([running, done]),
     });
 
+    expect(
+      screen.getByRole("radio", { name: "Active (1)" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "All (2)" })).toBeInTheDocument();
     expect(screen.getByText("Running agent")).toBeInTheDocument();
     expect(screen.queryByText("Finished agent")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("radio", { name: /all/i }));
+
+    await user.click(screen.getByRole("radio", { name: /^All/ }));
     expect(screen.getByText("Finished agent")).toBeInTheDocument();
+    expect(store.getState().agentsPanel.tab).toBe("all");
   });
 
   test("navigates from a row, posts a message, copies agent details, and confirms cancellation", async () => {
@@ -125,7 +176,7 @@ describe("AgentsPanel", () => {
       worktree_branch: "refact/task/worker",
     });
     const { user } = render(
-      <AgentsPanel chatId={chatId} onNavigate={onNavigate} />,
+      <AgentsSection chatId={chatId} onNavigate={onNavigate} />,
       {
         preloadedState: panelState([worker]),
       },
@@ -153,7 +204,6 @@ describe("AgentsPanel", () => {
         text: "Please check tests",
       });
     });
-    await user.click(screen.getByLabelText("Message Worker"));
     await user.click(screen.getByLabelText("Cancel Worker"));
     expect(screen.getByText("Cancel this agent subtree?")).toBeInTheDocument();
     await user.click(screen.getByText("Cancel subtree"));
@@ -162,15 +212,55 @@ describe("AgentsPanel", () => {
     });
   });
 
-  test("uses a drawer when requested", () => {
-    render(<AgentsPanel chatId={chatId} narrow />, {
-      preloadedState: panelState([agent("worker", chatId, null)]),
+  test("hides message and cancel actions for terminal agents", async () => {
+    const done = agent("done", chatId, "done-chat", {
+      status: "completed",
+      title: "Finished agent",
+    });
+    const { user } = render(<AgentsSection chatId={chatId} />, {
+      preloadedState: panelState([done]),
     });
 
-    expect(document.querySelector('[role="dialog"]')).toBeInTheDocument();
-    expect(document.querySelector('[role="dialog"]')?.className).toContain(
-      "left",
+    await user.click(screen.getByRole("radio", { name: /^All/ }));
+    expect(screen.getByText("Finished agent")).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Message Finished agent"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Cancel Finished agent"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Copy agent ID")).toBeInTheDocument();
+  });
+
+  test("strips agent-kind prefixes and markdown emphasis from displayed titles", () => {
+    const worker = agent("worker", chatId, "worker-chat", {
+      title: "Subagent: **Fix the flaky test**",
+    });
+    render(<AgentsSection chatId={chatId} />, {
+      preloadedState: panelState([worker]),
+    });
+
+    const title = screen.getByRole("button", { name: "Fix the flaky test" });
+    expect(title).toBeInTheDocument();
+    expect(title).toHaveAttribute("title", "Subagent: **Fix the flaky test**");
+    expect(
+      screen.getByLabelText("Message Subagent: **Fix the flaky test**"),
+    ).toBeInTheDocument();
+  });
+
+  test("formats aggregate usage above a million tokens with an M suffix", () => {
+    const heavy = agent("heavy", chatId, null, {
+      title: "Heavy agent",
+      tokens_used: 4_996_000,
+    });
+    render(<AgentsSection chatId={chatId} />, {
+      preloadedState: panelState([heavy]),
+    });
+
+    expect(screen.getByTestId("agents-aggregate-usage")).toHaveTextContent(
+      "5.0M tokens",
     );
+    expect(screen.getByText("5.0M")).toBeInTheDocument();
   });
 
   test("hides terminal tool state and costs without a positive finite value", async () => {
@@ -180,14 +270,44 @@ describe("AgentsPanel", () => {
       cost_usd: 0,
       title: "Finished agent",
     });
-    const { user } = render(<AgentsPanel chatId={chatId} />, {
+    const { user } = render(<AgentsSection chatId={chatId} />, {
       preloadedState: panelState([done]),
     });
 
-    await user.click(screen.getByRole("radio", { name: /all/i }));
+    await user.click(screen.getByRole("radio", { name: /^All/ }));
     expect(screen.queryByText("shell")).not.toBeInTheDocument();
     expect(screen.getByTestId("agents-aggregate-usage")).not.toHaveTextContent(
       "$",
     );
+  });
+
+  test("reserves no chevron slot on leaf rows and overlays row actions", () => {
+    expect(agentsPanelCss).not.toMatch(/\.expandSpacer/u);
+    expect(agentsPanelCss).toMatch(
+      /\.nodeActions\s*\{[\s\S]*position: absolute[\s\S]*pointer-events: none/u,
+    );
+    expect(agentsPanelCss).toMatch(
+      /@media \(hover: none\), \(pointer: coarse\)[\s\S]*\.nodeActions[\s\S]*pointer-events: auto/u,
+    );
+  });
+
+  test("honours reduced motion through both the media query and the html attribute", () => {
+    expect(agentsPanelCss).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.nodeRow,[\s\S]*transition: none/u,
+    );
+    expect(agentsPanelCss).toMatch(
+      /html\[data-reduced-motion="on"\] \.nodeRow/u,
+    );
+  });
+
+  test("lets the dock own the panel chrome instead of positioning itself", () => {
+    expect(agentsPanelCss).toMatch(/\.panel\s*\{[\s\S]*flex: 1 1 auto/u);
+    expect(agentsPanelCss).not.toMatch(/\.panel\[data-state="closed"\]/u);
+    expect(agentsPanelCss).not.toMatch(/--rf-agents-panel-w/u);
+    expect(agentsPanelCss).not.toMatch(/position: fixed/u);
+  });
+
+  test("styles the agents module with defined design tokens only", () => {
+    expect(undefinedTokensIn(agentsPanelCss)).toEqual([]);
   });
 });

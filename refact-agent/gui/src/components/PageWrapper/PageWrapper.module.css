@@ -8,26 +8,51 @@
 }
 
 .web {
-  padding: var(--rf-space-3) var(--rf-space-4);
+  --rf-page-pad-y: var(--rf-space-3);
+  --rf-page-pad-x: var(--rf-space-4);
+
+  padding: var(--rf-page-pad-y) var(--rf-page-pad-x);
 }
 
 .ide {
-  padding: var(--rf-space-1) var(--rf-space-2);
+  --rf-page-pad-y: var(--rf-space-1);
+  --rf-page-pad-x: var(--rf-space-2);
+
+  padding: var(--rf-page-pad-y) var(--rf-page-pad-x);
 }
 
 .noPadding {
-  padding: 0 var(--rf-space-2);
+  --rf-page-pad-y: 0px;
+  --rf-page-pad-x: var(--rf-space-2);
+
+  padding: var(--rf-page-pad-y) var(--rf-page-pad-x);
+}
+
+.flush {
+  padding: 0;
 }
 
 @media (min-width: 768px) {
   .ide {
-    padding-inline: var(--rf-space-4);
+    --rf-page-pad-x: var(--rf-space-4);
+
+    padding-inline: var(--rf-page-pad-x);
+  }
+
+  .flush {
+    padding: 0;
   }
 }
 
 @media (min-width: 1280px) {
   .web,
   .ide {
-    padding-inline: var(--rf-space-6);
+    --rf-page-pad-x: var(--rf-space-6);
+
+    padding-inline: var(--rf-page-pad-x);
+  }
+
+  .flush {
+    padding: 0;
   }
 }

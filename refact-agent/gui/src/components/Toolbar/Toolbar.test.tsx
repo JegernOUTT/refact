@@ -13,7 +13,6 @@ import { push } from "../../features/Pages/pagesSlice";
 import { openTask } from "../../features/Tasks";
 import {
   makeSurfaceKey,
-  bindSurfaceToChat,
   openTab,
   setPanelsForced,
   setDockOpen,
@@ -213,244 +212,20 @@ describe("Toolbar single workspace tab row", () => {
     expect(screen.queryByRole("button", { name: /agents/i })).toBeNull();
   });
 
-  it.each(["web", "ide", "vscode", "jetbrains"] as const)(
-    "renders and toggles workspace panels on the %s host",
-    async (host) => {
-      useToolbarHandlers();
-      const activeTab = { type: "chat" as const, id: "chat-1" };
-      const view = render(<Toolbar activeTab={activeTab} />, {
-        preloadedState: {
-          config: { ...baseConfig, host },
-          pages: pagesForActiveTab(activeTab),
-        },
-      });
-      const button = screen.getByRole("button", { name: "Workspace panels" });
-
-      expect(button).toHaveAttribute(
-        "aria-pressed",
-        host === "web" ? "true" : "false",
-      );
-      await view.user.click(button);
-
-      if (host === "web") {
-        expect(view.store.getState().workspace.dock?.open).toBe(false);
-        expect(button).toHaveAttribute("aria-pressed", "false");
-      } else {
-        expect(view.store.getState().workspace.panelsForced).toBe(true);
-        expect(button).toHaveAttribute("aria-pressed", "true");
-      }
-    },
-  );
-
-  it("hides the workspace panels button on web surfaces that do not host the dock", () => {
+  it("keeps the toolbar left section down to Home only", () => {
     useToolbarHandlers();
-    render(<Toolbar activeTab={{ type: "dashboard" }} />, {
-      preloadedState: {
-        config: { ...baseConfig, host: "web" },
-        pages: pagesForActiveTab({ type: "dashboard" }),
-      },
-    });
+    renderToolbar({ type: "chat", id: "chat-1" });
 
+    expect(screen.getByRole("button", { name: "Home" })).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Workspace panels" }),
     ).not.toBeInTheDocument();
-  });
-
-  it("hides the workspace panels button for a terminal-only web host without mutating dock state", () => {
-    useToolbarHandlers();
-    const view = render(<Toolbar activeTab={{ type: "dashboard" }} />, {
-      preloadedState: {
-        config: {
-          ...baseConfig,
-          capabilities: {
-            filesPanel: false,
-            gitPanel: false,
-            terminalPanel: true,
-          },
-        },
-        pages: pagesForActiveTab({ type: "dashboard" }),
-      },
-    });
-
     expect(
-      screen.queryByRole("button", { name: "Workspace panels" }),
+      screen.queryByRole("button", { name: "Live edits" }),
     ).not.toBeInTheDocument();
-    expect(view.store.getState().workspace.dock?.open).toBe(true);
-    expect(view.store.getState().workspace.panelsForced).toBe(false);
   });
 
-  it.each(["ide", "vscode", "jetbrains"] as const)(
-    "keeps %s capability overrides behind the panelsForced opt-in",
-    async (host) => {
-      useToolbarHandlers();
-      const view = render(<Toolbar activeTab={{ type: "dashboard" }} />, {
-        preloadedState: {
-          config: {
-            ...baseConfig,
-            host,
-            capabilities: {
-              filesPanel: true,
-              gitPanel: true,
-              terminalPanel: true,
-            },
-          },
-          pages: pagesForActiveTab({ type: "dashboard" }),
-        },
-      });
-      const button = screen.getByRole("button", { name: "Workspace panels" });
-
-      expect(button).toHaveAttribute("aria-pressed", "false");
-      expect(view.store.getState().workspace.panelsForced).toBe(false);
-
-      await view.user.click(button);
-
-      expect(view.store.getState().workspace.panelsForced).toBe(true);
-      expect(view.store.getState().workspace.dock?.open).toBe(true);
-      expect(button).toHaveAttribute("aria-pressed", "true");
-    },
-  );
-
-  it("reflects externally collapsed web dock state", async () => {
-    useToolbarHandlers();
-    const view = renderToolbar({ type: "chat", id: "chat-1" });
-    const button = screen.getByRole("button", { name: "Workspace panels" });
-
-    act(() => {
-      view.store.dispatch(setDockOpen(false));
-    });
-
-    await waitFor(() =>
-      expect(button).toHaveAttribute("aria-pressed", "false"),
-    );
-  });
-
-  it("shows the icon-only Live edits control on the deployed web toolbar and toggles per chat", async () => {
-    useToolbarHandlers();
-    const activeTab = { type: "chat" as const, id: "chat-a" };
-    const view = renderToolbar(activeTab);
-    const chatA = makeSurfaceKey("chat", "chat-a");
-    const chatB = makeSurfaceKey("chat", "chat-b");
-
-    act(() => {
-      view.store.dispatch(
-        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
-      );
-      view.store.dispatch(
-        createChatWithId({ id: "chat-b", title: "Chat Beta" }),
-      );
-      view.store.dispatch(openTab(chatA));
-      view.store.dispatch(openTab(chatB));
-      view.store.dispatch(setActiveTab(chatA));
-    });
-    rerenderToolbar(view, activeTab);
-
-    const liveEdits = screen.getByRole("button", { name: "Live edits" });
-    expect(liveEdits).toHaveAttribute("aria-pressed", "false");
-    expect(liveEdits).not.toHaveTextContent("Live edits");
-
-    await view.user.click(liveEdits);
-    expect(view.store.getState().workspace.liveEditsByChat?.["chat-a"]).toBe(
-      true,
-    );
-    expect(liveEdits).toHaveAttribute("aria-pressed", "true");
-
-    act(() => {
-      view.store.dispatch(setActiveTab(chatB));
-    });
-
-    // Sticky default: the last manual choice carries over to other chats.
-    await waitFor(() =>
-      expect(liveEdits).toHaveAttribute("aria-pressed", "true"),
-    );
-    await view.user.click(liveEdits);
-    expect(view.store.getState().workspace.liveEditsByChat).toEqual({
-      "chat-a": true,
-      "chat-b": false,
-    });
-
-    act(() => {
-      view.store.dispatch(setActiveTab(chatA));
-    });
-    await waitFor(() =>
-      expect(liveEdits).toHaveAttribute("aria-pressed", "true"),
-    );
-  });
-
-  it("keeps Live edits bound to the originating chat while a file tab is active", async () => {
-    useToolbarHandlers();
-    const activeTab = { type: "chat" as const, id: "chat-a" };
-    const view = renderToolbar(activeTab);
-    const chatA = makeSurfaceKey("chat", "chat-a");
-    const file = makeSurfaceKey("file", "/worktrees/chat-a/src/main.ts");
-
-    act(() => {
-      view.store.dispatch(
-        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
-      );
-      view.store.dispatch(openTab(chatA));
-      view.store.dispatch(openTab(file));
-      view.store.dispatch(
-        bindSurfaceToChat({ surfaceKey: file, chatId: "chat-a" }),
-      );
-    });
-    rerenderToolbar(view, activeTab);
-
-    const liveEdits = screen.getByRole("button", { name: "Live edits" });
-    expect(liveEdits).toHaveAttribute("aria-pressed", "false");
-    await view.user.click(liveEdits);
-    expect(view.store.getState().workspace.liveEditsByChat?.["chat-a"]).toBe(
-      true,
-    );
-  });
-
-  it("hides Live edits on the home page even with a focused workspace chat", () => {
-    useToolbarHandlers();
-    const view = renderToolbar({ type: "dashboard" });
-
-    act(() => {
-      view.store.dispatch(
-        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
-      );
-      view.store.dispatch(openTab(makeSurfaceKey("chat", "chat-a")));
-      view.store.dispatch(setActiveTab(makeSurfaceKey("chat", "chat-a")));
-    });
-    rerenderToolbar(view, { type: "dashboard" });
-
-    expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull();
-  });
-
-  it("hides Live edits without a focused chat or available panels", () => {
-    useToolbarHandlers();
-    const activeTab = { type: "chat" as const, id: "chat-a" };
-    const view = render(<Toolbar activeTab={activeTab} />, {
-      preloadedState: {
-        config: {
-          ...baseConfig,
-          capabilities: {
-            filesPanel: false,
-            gitPanel: false,
-            terminalPanel: false,
-          },
-        },
-        pages: pagesForActiveTab(activeTab),
-      },
-    });
-
-    expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull();
-
-    act(() => {
-      view.store.dispatch(
-        createChatWithId({ id: "chat-a", title: "Chat Alpha" }),
-      );
-      view.store.dispatch(openTab(makeSurfaceKey("chat", "chat-a")));
-      view.store.dispatch(setActiveTab(makeSurfaceKey("chat", "chat-a")));
-    });
-    view.rerender(<Toolbar activeTab={activeTab} />);
-
-    expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull();
-  });
-
-  it("shows IDE Live edits after Workspace panels opt-in and defaults off", async () => {
+  it("does not render a Live edits control on any host", () => {
     useToolbarHandlers();
     const activeTab = { type: "chat" as const, id: "chat-a" };
     const view = render(<Toolbar activeTab={activeTab} />, {
@@ -467,28 +242,59 @@ describe("Toolbar single workspace tab row", () => {
       );
       view.store.dispatch(openTab(chatA));
       view.store.dispatch(setActiveTab(chatA));
+      view.store.dispatch(setPanelsForced(true));
+      view.store.dispatch(setDockOpen(true));
     });
-    view.rerender(<Toolbar activeTab={activeTab} />);
+    rerenderToolbar(view, activeTab);
 
     expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull();
+  });
+
+  it("opens the engine status popover with the Engine URL link and Daemon action", async () => {
+    useToolbarHandlers();
+    window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ = [];
+    const view = renderToolbar({ type: "dashboard" });
 
     await view.user.click(
-      screen.getByRole("button", { name: "Workspace panels" }),
-    );
-    const liveEdits = screen.getByRole("button", { name: "Live edits" });
-    expect(liveEdits).toHaveAttribute("aria-pressed", "false");
-
-    await view.user.click(liveEdits);
-    expect(view.store.getState().workspace.liveEditsByChat?.["chat-a"]).toBe(
-      true,
+      screen.getByRole("button", { name: "Engine status" }),
     );
 
-    act(() => {
-      view.store.dispatch(setPanelsForced(false));
+    expect(
+      await screen.findByRole("link", {
+        name: "Engine URL http://127.0.0.1:8001",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Refact Daemon" }),
+    ).toBeInTheDocument();
+  });
+
+  it("creates a New Task from the split button menu and opens the task workspace", async () => {
+    useToolbarHandlers();
+    const view = renderToolbar({ type: "dashboard" });
+
+    expect(
+      screen.queryByRole("button", { name: "New Task" }),
+    ).not.toBeInTheDocument();
+
+    await view.user.click(
+      screen.getByRole("button", { name: "More new actions" }),
+    );
+    await view.user.click(
+      await screen.findByRole("menuitem", { name: "New Task" }),
+    );
+
+    await waitFor(() => {
+      expect(view.store.getState().tasksUI.openTasks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: "task-new", name: "New Task" }),
+        ]),
+      );
+      expect(view.store.getState().pages.at(-1)).toEqual({
+        name: "task workspace",
+        taskId: "task-new",
+      });
     });
-    await waitFor(() =>
-      expect(screen.queryByRole("button", { name: "Live edits" })).toBeNull(),
-    );
   });
 
   it("renders the unified workspace tab bar on chat and task pages without legacy KitTabs", () => {
@@ -556,7 +362,7 @@ describe("Toolbar single workspace tab row", () => {
       screen.getByRole("button", { name: "New Chat" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "New Task" }),
+      screen.getByRole("button", { name: "More new actions" }),
     ).toBeInTheDocument();
   });
 
@@ -570,12 +376,15 @@ describe("Toolbar single workspace tab row", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("opens the Refact Daemon page from the connection area", async () => {
+  it("opens the Daemon page from the engine status popover", async () => {
     useToolbarHandlers();
     const view = renderToolbar({ type: "dashboard" });
 
     await view.user.click(
-      screen.getByRole("button", { name: "Refact Daemon" }),
+      screen.getByRole("button", { name: "Engine status" }),
+    );
+    await view.user.click(
+      await screen.findByRole("button", { name: "Refact Daemon" }),
     );
 
     expect(view.store.getState().pages.at(-1)).toEqual({
@@ -622,12 +431,12 @@ describe("Toolbar single workspace tab row", () => {
       screen.getByRole("button", { name: "New Chat" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "New Task" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Toggle Dark Mode" }),
+      screen.getByRole("button", { name: "More new actions" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Menu" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Toggle Dark Mode" }),
+    ).not.toBeInTheDocument();
 
     await view.user.click(screen.getByRole("button", { name: "Home" }));
     expect(view.store.getState().pages.at(-1)?.name).toBe("history");
@@ -638,23 +447,28 @@ describe("Toolbar single workspace tab row", () => {
     );
     expect(view.store.getState().pages.at(-1)?.name).toBe("chat");
 
+    await view.user.click(screen.getByRole("button", { name: "Menu" }));
     await view.user.click(
-      screen.getByRole("button", { name: "Toggle Dark Mode" }),
+      await screen.findByRole("menuitem", { name: "Toggle Dark Mode" }),
     );
     expect(view.store.getState().config.themeProps.appearance).toBe("light");
+  });
 
-    await view.user.click(screen.getByRole("button", { name: "New Task" }));
-    await waitFor(() => {
-      expect(view.store.getState().tasksUI.openTasks).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ id: "task-new", name: "New Task" }),
-        ]),
-      );
-      expect(view.store.getState().pages.at(-1)).toEqual({
-        name: "task workspace",
-        taskId: "task-new",
-      });
+  it("hides the theme toggle menu item on IDE hosts", async () => {
+    useToolbarHandlers();
+    render(<Toolbar activeTab={{ type: "dashboard" }} />, {
+      preloadedState: {
+        config: { ...baseConfig, host: "vscode" as const },
+        pages: pagesForActiveTab({ type: "dashboard" }),
+      },
     });
+
+    await userEvent.click(screen.getByRole("button", { name: "Menu" }));
+    await screen.findByRole("menuitem", { name: "Settings" });
+
+    expect(
+      screen.queryByRole("menuitem", { name: "Toggle Dark Mode" }),
+    ).not.toBeInTheDocument();
   });
 
   it("uses the active workspace chat for New Chat cleanup", async () => {

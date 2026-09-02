@@ -1,0 +1,37 @@
+.group {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: var(--rf-control-h-sm);
+  overflow: hidden;
+  background: var(--rf-surface-glass);
+  border: var(--rf-hairline) solid var(--rf-border);
+  border-radius: var(--rf-radius-pill);
+}
+
+.mainAction,
+.menuAction {
+  flex-shrink: 0;
+  color: var(--rf-color-muted);
+  background: transparent;
+  border-color: transparent;
+  border-radius: 0;
+}
+
+.mainAction:hover:not(:disabled),
+.menuAction:hover:not(:disabled) {
+  color: var(--rf-color-fg);
+  background: var(--rf-surface-1);
+  border-color: transparent;
+}
+
+.menuAction {
+  width: var(--rf-control-h-sm);
+}
+
+.divider {
+  width: var(--rf-hairline);
+  height: var(--rf-icon-sm);
+  flex-shrink: 0;
+  background: var(--rf-border);
+}

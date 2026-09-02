@@ -134,6 +134,10 @@ async fn inject_as_priority(
         if session.closed {
             return false;
         }
+        if session.is_runner_owned_subagent_view() {
+            session.emit(process_completion_envelope_event(&event));
+            return true;
+        }
         let outcome = session.enqueue_priority_command(CommandRequest {
             client_request_id: format!("process-completed-{}", event.process_id),
             priority: true,
@@ -651,6 +655,106 @@ mod tests {
             .count();
         assert_eq!(process_events, 1);
         assert_eq!(queued_regenerates, 1);
+    }
+
+    #[tokio::test]
+    async fn runner_owned_subagent_session_only_gets_the_completion_envelope() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let chat_id = "runner-owned-process-completion";
+        let session = test_session(&gcx, chat_id).await;
+        let mut events = {
+            let mut session = session.lock().await;
+            session.thread.parent_id = Some("parent-chat".to_string());
+            session.thread.link_type = Some("subagent".to_string());
+            session
+                .queue_processor_running
+                .store(true, Ordering::SeqCst);
+            let events = session.subscribe();
+            session.set_runtime_state(crate::chat::types::SessionState::Generating, None);
+            events
+        };
+        let event = ProcessCompletionEvent {
+            process_id: ExecProcessId("exec_runner_owned".to_string()),
+            chat_id: chat_id.to_string(),
+            status: ExecStatus::Exited { exit_code: Some(0) },
+            exit_code: Some(0),
+            duration_ms: Some(5),
+            short_description: "runner owned process".to_string(),
+            mode: ExecMode::Background,
+        };
+
+        assert!(inject_as_priority(gcx, session.clone(), event).await);
+
+        {
+            let session = session.lock().await;
+            assert!(session.messages.is_empty());
+            assert!(session.command_queue.is_empty());
+        }
+        let mut saw_completion_envelope = false;
+        while let Ok(json) = events.try_recv() {
+            let envelope: crate::chat::types::EventEnvelope = serde_json::from_str(&json).unwrap();
+            if let ChatEvent::ProcessCompleted {
+                process_id,
+                status,
+                exit_code,
+                short_description,
+                mode,
+            } = envelope.event
+            {
+                assert_eq!(process_id, "exec_runner_owned");
+                assert_eq!(status, "exited");
+                assert_eq!(exit_code, Some(0));
+                assert_eq!(short_description, "runner owned process");
+                assert_eq!(mode, "background");
+                saw_completion_envelope = true;
+            }
+        }
+        assert!(saw_completion_envelope);
+    }
+
+    #[tokio::test]
+    async fn ordinary_session_still_gets_message_and_regenerate() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let chat_id = "ordinary-process-completion";
+        let session = test_session(&gcx, chat_id).await;
+        {
+            let session = session.lock().await;
+            session
+                .queue_processor_running
+                .store(true, Ordering::SeqCst);
+        }
+        let event = ProcessCompletionEvent {
+            process_id: ExecProcessId("exec_ordinary".to_string()),
+            chat_id: chat_id.to_string(),
+            status: ExecStatus::Exited { exit_code: Some(0) },
+            exit_code: Some(0),
+            duration_ms: Some(5),
+            short_description: "ordinary process".to_string(),
+            mode: ExecMode::Background,
+        };
+
+        assert!(inject_as_priority(gcx, session.clone(), event).await);
+
+        let session = session.lock().await;
+        assert_eq!(
+            session
+                .messages
+                .iter()
+                .filter(|message| is_process_completed_message(message))
+                .count(),
+            1
+        );
+        assert_eq!(
+            session
+                .command_queue
+                .iter()
+                .filter(|request| {
+                    request.client_request_id == "process-completed-exec_ordinary"
+                        && matches!(request.command, ChatCommand::Regenerate {})
+                })
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

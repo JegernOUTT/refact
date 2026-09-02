@@ -15,6 +15,7 @@ import { setTabDragData } from "../ChatPanes/tabDrag";
 import {
   addSurfaceToPane,
   openTab,
+  setDockSection,
   setPanelsForced,
   setActiveTab,
   splitTab,
@@ -121,14 +122,36 @@ function expectSurface(key: SurfaceKey) {
 }
 
 describe("WorkspaceView", () => {
+  it("always renders the activity rail with every section entry", () => {
+    renderWorkspaceView(createWorkspaceStore());
+
+    expect(
+      screen.getByRole("navigation", { name: "Workspace sections" }),
+    ).toBeVisible();
+    for (const label of ["Files", "Git", "Agents", "Tasks"]) {
+      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+    }
+  });
+
+  it("keeps the activity rail mounted for IDE hosts without forced panels", () => {
+    const store = createWorkspaceStore();
+    store.dispatch(updateConfig({ host: "vscode" }));
+    renderWorkspaceView(store);
+
+    expect(
+      screen.getByRole("navigation", { name: "Workspace sections" }),
+    ).toBeVisible();
+    expect(screen.queryByLabelText("Workspace dock")).not.toBeInTheDocument();
+  });
+
   it.each([
     ["terminal only", false, false, true, false, false],
     ["forced panels", false, false, false, true, true],
     ["files only", true, false, false, false, true],
-    ["git only", false, true, false, false, true],
+    ["git only", false, true, false, false, false],
     ["no capabilities", false, false, false, false, false],
   ] as const)(
-    "matches dock rendering for web %s",
+    "matches dock rendering for web %s with the default files section",
     (_name, filesPanel, gitPanel, terminalPanel, panelsForced, expected) => {
       const store = createWorkspaceStore();
       setWorkspaceAvailability(store, {
@@ -148,6 +171,34 @@ describe("WorkspaceView", () => {
       }
     },
   );
+
+  it("mounts the dock for a git-only workspace once the git section is selected", () => {
+    const store = createWorkspaceStore();
+    setWorkspaceAvailability(store, {
+      filesPanel: false,
+      gitPanel: true,
+      terminalPanel: false,
+    });
+    store.dispatch(setDockSection("git"));
+
+    renderWorkspaceView(store);
+
+    expect(screen.getByLabelText("Workspace dock")).toBeVisible();
+  });
+
+  it("mounts the dock for the agents section without any panel capability", () => {
+    const store = createWorkspaceStore();
+    setWorkspaceAvailability(store, {
+      filesPanel: false,
+      gitPanel: false,
+      terminalPanel: false,
+    });
+    store.dispatch(setDockSection("agents"));
+
+    renderWorkspaceView(store);
+
+    expect(screen.getByLabelText("Workspace dock")).toBeVisible();
+  });
 
   it("renders forced IDE dock chrome without a duplicate workspace toggle", () => {
     const store = createWorkspaceStore();
@@ -230,8 +281,8 @@ describe("WorkspaceView", () => {
     expect(
       screen.getByLabelText("Terminal workbench for chat-a"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Files" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: "Git" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Files" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Git" })).toBeInTheDocument();
   });
 
   it("renders an unsplit surface without pane chrome", () => {

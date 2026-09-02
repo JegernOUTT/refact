@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fireEvent, render, screen, waitFor } from "../../../utils/test-utils";
 import { server } from "../../../utils/mockServer";
-import { setDockOpen } from "../workspaceSlice";
+import { setDockOpen, setDockSection } from "../workspaceSlice";
+import { updateConfig } from "../../Config/configSlice";
 import { Dock } from "./Dock";
-import badgeStyles from "../../../components/ui/Badge/Badge.module.css";
 import sheetStyles from "../../../components/ui/Sheet/Sheet.module.css";
 import dockStyles from "./Dock.module.css";
 
@@ -54,6 +54,14 @@ function mockNarrow(narrow: boolean) {
   });
 }
 
+function stubFileTree() {
+  server.use(
+    http.get("*/v1/files/tree", () =>
+      HttpResponse.json({ path: "", entries: [], truncated: false }),
+    ),
+  );
+}
+
 describe("Dock", () => {
   beforeEach(() => {
     server.use(
@@ -69,14 +77,10 @@ describe("Dock", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders capability sections and clamps persisted resize width", () => {
+  it("renders a single section body without an in-dock section switcher", () => {
     mockNarrow(false);
-    server.use(
-      http.get("*/v1/files/tree", () =>
-        HttpResponse.json({ path: "", entries: [], truncated: false }),
-      ),
-    );
-    const view = render(<Dock />, {
+    stubFileTree();
+    render(<Dock />, {
       preloadedState: {
         config: {
           host: "web",
@@ -89,17 +93,24 @@ describe("Dock", () => {
         },
       },
     });
+
+    expect(screen.getByTestId("workspace-dock")).toBeInTheDocument();
+    const section = screen.getByTestId("workspace-dock-section");
+    expect(section).toHaveAttribute("data-section", "files");
+    expect(section).toHaveClass("rf-enter");
+    expect(screen.queryByRole("radio", { name: "Files" })).toBeNull();
+    expect(screen.queryByRole("radio", { name: "Git" })).toBeNull();
+    expect(screen.queryByRole("radio", { name: "Tasks" })).toBeNull();
+    expect(screen.queryByRole("radiogroup")).toBeNull();
+  });
+
+  it("clamps a persisted resize width to the dock maximum", () => {
+    mockNarrow(false);
+    stubFileTree();
+    const view = render(<Dock />);
     const store = view.store;
 
-    expect(screen.getByRole("radio", { name: "Files" })).toBeInTheDocument();
-    expect(screen.queryByRole("radio", { name: "Git" })).toBeNull();
-    expect(screen.getByRole("radio", { name: "Tasks" })).toBeInTheDocument();
-
     const dock = screen.getByTestId("workspace-dock");
-    expect(dock).toHaveClass("rf-grow-in");
-    expect(screen.getByTestId("workspace-dock-section")).toHaveClass(
-      "rf-enter",
-    );
     vi.spyOn(dock, "getBoundingClientRect").mockReturnValue({
       x: 0,
       y: 0,
@@ -121,13 +132,147 @@ describe("Dock", () => {
     expect(store.getState().workspace.dock?.width).toBe(400);
   });
 
+  it("clamps a persisted resize width to the dock minimum", () => {
+    mockNarrow(false);
+    stubFileTree();
+    const view = render(<Dock />);
+
+    const dock = screen.getByTestId("workspace-dock");
+    vi.spyOn(dock, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 280,
+      height: 600,
+      top: 0,
+      right: 280,
+      bottom: 600,
+      left: 0,
+      toJSON: () => ({}),
+    });
+    const splitter = screen.getByRole("separator", {
+      name: "Resize workspace dock",
+    });
+    fireEvent.pointerDown(splitter, { button: 0, clientX: 280 });
+    fireEvent.pointerMove(window, { clientX: 0 });
+    fireEvent.pointerUp(window, { clientX: 0 });
+
+    expect(view.store.getState().workspace.dock?.width).toBe(240);
+  });
+
+  it("unmounts the wide dock once the collapse animation settles", async () => {
+    mockNarrow(false);
+    stubFileTree();
+    const view = render(<Dock />);
+
+    expect(screen.getByTestId("workspace-dock")).toBeInTheDocument();
+    view.store.dispatch(setDockOpen(false));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("workspace-dock")).toBeNull();
+    });
+  });
+
+  it("renders the requested section body for each dock section", async () => {
+    mockNarrow(false);
+    stubFileTree();
+    const view = render(<Dock />);
+
+    expect(screen.getByTestId("workspace-dock-section")).toHaveAttribute(
+      "data-section",
+      "files",
+    );
+
+    view.store.dispatch(setDockSection("git"));
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-dock-section")).toHaveAttribute(
+        "data-section",
+        "git",
+      );
+    });
+    expect(
+      await screen.findByText("No git repository found in this workspace."),
+    ).toBeInTheDocument();
+
+    view.store.dispatch(setDockSection("agents"));
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-dock-section")).toHaveAttribute(
+        "data-section",
+        "agents",
+      );
+    });
+
+    view.store.dispatch(setDockSection("tasks"));
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-dock-section")).toHaveAttribute(
+        "data-section",
+        "tasks",
+      );
+    });
+  });
+
+  it("remounts the section body so each switch replays the enter animation", async () => {
+    mockNarrow(false);
+    stubFileTree();
+    const view = render(<Dock />);
+
+    const filesSection = screen.getByTestId("workspace-dock-section");
+    view.store.dispatch(setDockSection("git"));
+
+    await waitFor(() => {
+      const gitSection = screen.getByTestId("workspace-dock-section");
+      expect(gitSection).not.toBe(filesSection);
+      expect(gitSection).toHaveClass("rf-enter");
+    });
+  });
+
+  it("falls back to the first available section when the stored one is gone", async () => {
+    mockNarrow(false);
+    stubFileTree();
+    const view = render(<Dock />, {
+      preloadedState: {
+        config: {
+          host: "web",
+          lspPort: 8001,
+          themeProps: { appearance: "dark" },
+          capabilities: { filesPanel: false, gitPanel: true },
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-dock-section")).toHaveAttribute(
+        "data-section",
+        "git",
+      );
+    });
+    expect(view.store.getState().workspace.dock?.section).toBe("git");
+  });
+
+  it("keeps agents and tasks available with no panel capabilities", async () => {
+    mockNarrow(false);
+    stubFileTree();
+    const view = render(<Dock />);
+    view.store.dispatch(
+      updateConfig({
+        capabilities: {
+          filesPanel: false,
+          gitPanel: false,
+          terminalPanel: false,
+        },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-dock-section")).toHaveAttribute(
+        "data-section",
+        "agents",
+      );
+    });
+  });
+
   it("uses a Sheet on narrow viewports and follows open state", async () => {
     mockNarrow(true);
-    server.use(
-      http.get("*/v1/files/tree", () =>
-        HttpResponse.json({ path: "", entries: [], truncated: false }),
-      ),
-    );
+    stubFileTree();
     const view = render(<Dock />);
 
     expect(screen.getByRole("dialog")).toBeInTheDocument();
@@ -137,11 +282,7 @@ describe("Dock", () => {
 
   it("offers a visible close control inside the narrow Sheet (audit L-01)", async () => {
     mockNarrow(true);
-    server.use(
-      http.get("*/v1/files/tree", () =>
-        HttpResponse.json({ path: "", entries: [], truncated: false }),
-      ),
-    );
+    stubFileTree();
     const view = render(<Dock />);
 
     const close = screen.getByRole("button", {
@@ -174,84 +315,11 @@ describe("Dock", () => {
     }
 
     mockNarrow(true);
-    server.use(
-      http.get("*/v1/files/tree", () =>
-        HttpResponse.json({ path: "", entries: [], truncated: false }),
-      ),
-    );
+    stubFileTree();
     render(<Dock />);
 
     expect(screen.getByRole("dialog")).toHaveClass(dockStyles.sheet);
     expect(document.querySelector(`.${sheetStyles.overlay}`)).toBeNull();
     expect(document.body.style.pointerEvents).not.toBe("none");
-  });
-
-  it("switches to the Git dock section", async () => {
-    mockNarrow(false);
-    server.use(
-      http.get("*/v1/files/tree", () =>
-        HttpResponse.json({ path: "", entries: [], truncated: false }),
-      ),
-      http.get("*/v1/git/status", () => HttpResponse.json({ roots: [] })),
-    );
-    render(<Dock />);
-    const filesSection = screen.getByTestId("workspace-dock-section");
-    expect(filesSection).toHaveAttribute("data-section", "files");
-    fireEvent.click(screen.getByRole("radio", { name: "Git" }));
-    const gitSection = screen.getByTestId("workspace-dock-section");
-    expect(gitSection).not.toBe(filesSection);
-    expect(gitSection).toHaveClass("rf-enter");
-    expect(gitSection).toHaveAttribute("data-section", "git");
-    expect(
-      await screen.findByText("No git repository found in this workspace."),
-    ).toBeInTheDocument();
-  });
-
-  it("counts unique changed paths on the Git switcher entry", async () => {
-    mockNarrow(false);
-    server.use(
-      http.get("*/v1/files/tree", () =>
-        HttpResponse.json({ path: "", entries: [], truncated: false }),
-      ),
-      http.get("*/v1/git/status", () =>
-        HttpResponse.json({
-          roots: [
-            {
-              root: "/repo",
-              branch: "main",
-              head_detached: false,
-              ahead: 0,
-              behind: 0,
-              staged: [
-                {
-                  relative_path: "a",
-                  absolute_path: "/repo/a",
-                  status: "MODIFIED",
-                },
-              ],
-              unstaged: [
-                {
-                  relative_path: "a",
-                  absolute_path: "/repo/a",
-                  status: "MODIFIED",
-                },
-                {
-                  relative_path: "b",
-                  absolute_path: "/repo/b",
-                  status: "DELETED",
-                },
-              ],
-              untracked_included: true,
-            },
-          ],
-        }),
-      ),
-    );
-
-    render(<Dock />);
-
-    const badge = await screen.findByLabelText("2 changed files");
-    expect(badge).toHaveTextContent("2");
-    expect(badge).toHaveClass(badgeStyles.warning, badgeStyles["size-xs"]);
   });
 });

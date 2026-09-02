@@ -45,7 +45,7 @@ export type WorkspaceState = {
   drawer?: WorkspaceDrawerState;
 };
 
-export type WorkspaceDockSection = "files" | "git" | "tasks";
+export type WorkspaceDockSection = "files" | "git" | "agents" | "tasks";
 
 export type WorkspaceDockState = {
   open: boolean;
@@ -123,6 +123,7 @@ export const normalizeWorkspaceDock = (
   section:
     dock?.section === "files" ||
     dock?.section === "git" ||
+    dock?.section === "agents" ||
     dock?.section === "tasks"
       ? dock.section
       : DEFAULT_WORKSPACE_DOCK.section,

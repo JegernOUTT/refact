@@ -1,13 +1,8 @@
-import { Bot, X } from "lucide-react";
+import classNames from "classnames";
+import { Bot } from "lucide-react";
 import { useMemo } from "react";
 
-import {
-  Badge,
-  EmptyState,
-  IconButton,
-  SegmentedControl,
-  Sheet,
-} from "../../components/ui";
+import { Badge, EmptyState, SegmentedControl } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
 import {
   useGetBackgroundAgentsQuery,
@@ -20,23 +15,21 @@ import {
   selectActiveBackgroundAgents,
   selectBackgroundAgentPool,
 } from "../Chat/Thread";
-import {
-  panelClosed,
-  selectAgentsPanelTab,
-  tabChanged,
-} from "./agentsPanelSlice";
+import { selectAgentsPanelTab, tabChanged } from "./agentsPanelSlice";
 import { AgentTreeNode } from "./AgentTreeNode";
 import styles from "./AgentsPanel.module.css";
 
-export type AgentsPanelProps = {
-  chatId: string;
-  narrow?: boolean;
+export type AgentsSectionProps = {
+  chatId: string | null;
   onNavigate?: (chatId: string) => void;
 };
 
 function formatTokens(tokens: number): string {
   if (tokens < 1000) return `${tokens} tokens`;
-  return `${(tokens / 1000).toFixed(tokens >= 10_000 ? 0 : 1)}k tokens`;
+  if (tokens < 1_000_000) {
+    return `${(tokens / 1000).toFixed(tokens >= 10_000 ? 0 : 1)}k tokens`;
+  }
+  return `${(tokens / 1_000_000).toFixed(1)}M tokens`;
 }
 
 function formatCost(cost: number | null): string | null {
@@ -44,10 +37,13 @@ function formatCost(cost: number | null): string | null {
   return `$${cost.toFixed(cost < 0.01 ? 4 : 2)}`;
 }
 
-function AgentsPanelContents({
+function AgentsSectionContents({
   chatId,
   onNavigate,
-}: Omit<AgentsPanelProps, "narrow">) {
+}: {
+  chatId: string;
+  onNavigate?: (chatId: string) => void;
+}) {
   const dispatch = useAppDispatch();
   const tab = useAppSelector(selectAgentsPanelTab);
   const agentPool = useAppSelector((state) => selectBackgroundAgentPool(state));
@@ -95,7 +91,7 @@ function AgentsPanelContents({
   const cost = formatCost(aggregate.costTotal);
 
   return (
-    <section className={styles.panel} aria-label="Agents">
+    <>
       <header className={styles.panelHeader}>
         <div className={styles.titleRow}>
           <div className={styles.panelTitle}>
@@ -103,13 +99,6 @@ function AgentsPanelContents({
             <span>Agents</span>
             <Badge tone="accent">{aggregate.runningCount}</Badge>
           </div>
-          <IconButton
-            aria-label="Close agents panel"
-            icon={X}
-            size="sm"
-            variant="plain"
-            onClick={() => dispatch(panelClosed(chatId))}
-          />
         </div>
         <div
           className={styles.aggregateUsage}
@@ -150,7 +139,7 @@ function AgentsPanelContents({
             variant="compact"
           />
         ) : (
-          <ul className={styles.tree}>
+          <ul className={classNames(styles.tree, "rf-stagger")}>
             {visibleTree.map((node) => (
               <AgentTreeNode
                 chatId={chatId}
@@ -162,34 +151,24 @@ function AgentsPanelContents({
           </ul>
         )}
       </div>
-    </section>
+    </>
   );
 }
 
-export function AgentsPanel({
-  chatId,
-  narrow = false,
-  onNavigate,
-}: AgentsPanelProps) {
-  const dispatch = useAppDispatch();
-
-  if (narrow) {
-    return (
-      <Sheet
-        open
-        onOpenChange={(open) => !open && dispatch(panelClosed(chatId))}
-      >
-        <Sheet.Content
-          className={styles.drawerContent}
-          maxWidth="min(360px, calc(100vw - var(--rf-space-6)))"
-          scrollable={false}
-          side="left"
-        >
-          <AgentsPanelContents chatId={chatId} onNavigate={onNavigate} />
-        </Sheet.Content>
-      </Sheet>
-    );
-  }
-
-  return <AgentsPanelContents chatId={chatId} onNavigate={onNavigate} />;
+export function AgentsSection({ chatId, onNavigate }: AgentsSectionProps) {
+  return (
+    <section aria-label="Agents" className={styles.panel}>
+      {chatId === null ? (
+        <div className={styles.panelBody}>
+          <EmptyState
+            icon={Bot}
+            title="Open a chat to see its agents"
+            variant="compact"
+          />
+        </div>
+      ) : (
+        <AgentsSectionContents chatId={chatId} onNavigate={onNavigate} />
+      )}
+    </section>
+  );
 }

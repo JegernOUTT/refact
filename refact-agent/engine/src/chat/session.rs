@@ -1166,6 +1166,22 @@ impl ChatSession {
             && self.last_activity.elapsed() > session_idle_timeout()
     }
 
+    pub fn is_runner_owned_subagent_view(&self) -> bool {
+        self.runtime.state == SessionState::Generating
+            && self.thread.parent_id.is_some()
+            && self.thread.link_type.as_deref().is_some_and(|link_type| {
+                !matches!(link_type, "handoff" | "mode_transition" | "branch")
+            })
+    }
+
+    pub(crate) fn mirror_runner_messages(&mut self, messages: Vec<ChatMessage>) {
+        self.messages = messages;
+        self.rebuild_goal_projection_from_messages();
+        self.touch();
+        let snapshot = self.snapshot();
+        self.emit(snapshot);
+    }
+
     pub fn close_event_channel(&mut self) {
         self.clear_discarded_queue_timestamps();
         self.clear_stream_and_confirmation_timestamps();

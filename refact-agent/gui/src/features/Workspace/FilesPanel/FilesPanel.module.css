@@ -46,8 +46,29 @@
   text-transform: none;
 }
 
-.showIgnoredToggle {
+.headerToggles {
+  display: flex;
+  align-items: center;
   flex: 0 0 auto;
+  gap: var(--rf-space-3);
+}
+
+.headerToggles > label {
+  flex: 0 0 auto;
+  color: var(--rf-color-muted);
+  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
+    var(--rf-font-ui);
+  text-transform: none;
+}
+
+.showIgnoredToggle,
+.liveEditsToggle {
+  flex: 0 0 auto;
+}
+
+.liveEditsToggle:disabled {
+  cursor: default;
+  opacity: var(--rf-disabled-opacity);
 }
 
 .tree {

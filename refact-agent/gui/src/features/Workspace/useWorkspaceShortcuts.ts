@@ -76,7 +76,7 @@ export function useWorkspaceShortcuts() {
       }
 
       const key = event.key.toLowerCase();
-      if (key === "b" && dockAvailable) {
+      if (key === "b") {
         event.preventDefault();
         dispatch(toggleDock());
         return;
@@ -97,11 +97,13 @@ export function useWorkspaceShortcuts() {
       let section: WorkspaceDockSection;
       if (key === "1") section = "files";
       else if (key === "2") section = "git";
-      else if (key === "3") section = "tasks";
+      else if (key === "3") section = "agents";
+      else if (key === "4") section = "tasks";
       else return;
       const sectionAvailable =
         (section === "files" && filesAvailable) ||
         (section === "git" && gitAvailable) ||
+        section === "agents" ||
         (section === "tasks" && tasksAvailable);
       if (!sectionAvailable) return;
       event.preventDefault();

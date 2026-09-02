@@ -1,5 +1,7 @@
 .chatRoot {
   position: relative;
+  padding: var(--rf-chat-gutter-y, 0px)
+    calc(var(--rf-space-1) + var(--rf-chat-gutter-x, 0px));
 }
 
 .chatShell {
@@ -8,51 +10,6 @@
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-}
-
-.agentsToggle {
-  position: absolute;
-  z-index: var(--rf-z-dropdown);
-  top: var(--rf-space-2);
-  right: var(--rf-space-3);
-  display: inline-flex;
-  align-items: center;
-  gap: var(--rf-space-1);
-  min-height: var(--rf-control-h-sm);
-  padding: 0 var(--rf-space-2);
-  color: var(--rf-color-muted);
-  background: var(--rf-surface-glass);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-pill);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
-  font: var(--rf-weight-medium) var(--rf-text-1) / var(--rf-line)
-    var(--rf-font-ui);
-  cursor: pointer;
-}
-
-.agentsToggle:hover,
-.agentsToggle[aria-expanded="true"] {
-  color: var(--rf-color-fg);
-  border-color: var(--rf-color-accent);
-}
-
-.agentsToggle:focus-visible {
-  outline: var(--rf-focus-ring-w) solid var(--rf-focus-ring);
-  outline-offset: var(--rf-focus-ring-w);
-}
-
-.agentsBadge {
-  display: inline-grid;
-  min-width: var(--rf-control-h-sm);
-  min-height: var(--rf-control-h-sm);
-  place-items: center;
-  padding: 0 var(--rf-space-1);
-  color: var(--rf-color-accent-fg);
-  background: var(--rf-color-accent);
-  border-radius: var(--rf-radius-pill);
-  font: var(--rf-weight-semibold) var(--rf-text-1) / var(--rf-line)
-    var(--rf-font-ui);
 }
 
 /* End the transcript viewport (and its scrollbar) at the dock's top edge
@@ -68,24 +25,22 @@
   }
 }
 
-@media (prefers-reduced-transparency: reduce) {
-  .agentsToggle {
-    background: var(--rf-surface-2);
-    backdrop-filter: none;
-  }
-}
-
 .bottomDock {
   position: absolute;
   z-index: var(--rf-z-dropdown);
   right: 0;
-  bottom: 0;
+  bottom: var(--rf-chat-gutter-y, 0px);
   left: 0;
-  /* Match the transcript column gutters: chat root px (4px) + virtuoso list
-     padding (8px) on the left, chat root px + .content scrollbar clearance
-     (16px) on the right, so glass panels align with the messages above. */
-  padding-left: calc(var(--rf-space-1) + var(--rf-space-2));
-  padding-right: calc(var(--rf-space-1) + var(--rf-space-4));
+  /* Match the transcript column gutters: page gutter + chat root px (4px) +
+     virtuoso list padding (8px) on the left, page gutter + chat root px +
+     .content scrollbar clearance (16px) on the right, so glass panels align
+     with the messages above. */
+  padding-left: calc(
+    var(--rf-space-1) + var(--rf-space-2) + var(--rf-chat-gutter-x, 0px)
+  );
+  padding-right: calc(
+    var(--rf-space-1) + var(--rf-space-4) + var(--rf-chat-gutter-x, 0px)
+  );
 }
 
 .dockPanel {

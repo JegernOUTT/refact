@@ -1,6 +1,6 @@
+import classNames from "classnames";
 import {
   Check,
-  ChevronDown,
   ChevronRight,
   CircleStop,
   Copy,
@@ -17,6 +17,10 @@ import {
   StatusDot,
   Tooltip,
 } from "../../components/ui";
+import {
+  COLLAPSE_ANIMATION_MS,
+  useDelayedUnmount,
+} from "../../components/shared/useDelayedUnmount";
 import { useCopyToClipboard } from "../../hooks";
 import { useInternalLinkHandler } from "../../contexts/internalLinkUtils";
 import {
@@ -37,6 +41,9 @@ export type AgentTreeNodeProps = {
   onNavigate?: (chatId: string) => void;
 };
 
+const AGENT_TITLE_PREFIX = /^\s*(?:subagent|delegate)\s*:\s*/iu;
+const MARKDOWN_EMPHASIS = /(\*\*|__|`)/gu;
+
 function isTerminal(agent: BackgroundAgentSummary): boolean {
   return ["completed", "failed", "cancelled", "interrupted"].includes(
     agent.status,
@@ -51,10 +58,22 @@ function statusFor(agent: BackgroundAgentSummary) {
   return "idle" as const;
 }
 
+function displayAgentTitle(agent: BackgroundAgentSummary): string {
+  const raw = agent.title || agent.agent_id;
+  const stripped = raw
+    .replace(AGENT_TITLE_PREFIX, "")
+    .replace(MARKDOWN_EMPHASIS, "")
+    .trim();
+  return stripped || raw;
+}
+
 function formatTokens(tokens: number | undefined): string {
   if (!tokens) return "—";
   if (tokens < 1000) return `${tokens}`;
-  return `${(tokens / 1000).toFixed(tokens >= 10_000 ? 0 : 1)}k`;
+  if (tokens < 1_000_000) {
+    return `${(tokens / 1000).toFixed(tokens >= 10_000 ? 0 : 1)}k`;
+  }
+  return `${(tokens / 1_000_000).toFixed(1)}M`;
 }
 
 function formatCost(cost: number | null | undefined): string | null {
@@ -102,6 +121,17 @@ export function AgentTreeNode({
   const cost = formatCost(agent.cost_usd);
   const files = detailFiles(agent);
   const questions = agent.questions ?? [];
+  const title = displayAgentTitle(agent);
+  const rawTitle = agent.title || agent.agent_id;
+  const showMessageForm = messageOpen && !terminal;
+
+  const expandedMotion = useDelayedUnmount(expanded, COLLAPSE_ANIMATION_MS);
+  const messageMotion = useDelayedUnmount(
+    showMessageForm,
+    COLLAPSE_ANIMATION_MS,
+  );
+  const renderDetails = expanded || expandedMotion.shouldRender;
+  const renderMessageForm = showMessageForm || messageMotion.shouldRender;
 
   const navigate = () => {
     if (!agent.child_chat_id) return;
@@ -150,241 +180,266 @@ export function AgentTreeNode({
   };
 
   return (
-    <li className={styles.node} data-depth={depth}>
+    <li className={classNames(styles.node, "rf-enter-rise")} data-depth={depth}>
       <div
         className={styles.nodeRow}
         data-testid={`agent-row-${agent.agent_id}`}
         onClick={navigate}
       >
-        <span className={styles.treeGuide} aria-hidden="true" />
-        {hasChildren ? (
-          <IconButton
-            aria-expanded={expanded}
-            aria-label={`${expanded ? "Collapse" : "Expand"} ${agent.title}`}
-            className={styles.expandButton}
-            icon={expanded ? ChevronDown : ChevronRight}
-            size="sm"
-            variant="plain"
-            onClick={(event) => {
-              event.stopPropagation();
-              setExpanded((value) => !value);
-            }}
+        <div className={styles.titleLine}>
+          <StatusDot
+            aria-label={agent.status}
+            pulse={!terminal && agent.status === "running"}
+            size="small"
+            status={statusFor(agent)}
           />
-        ) : (
-          <span className={styles.expandSpacer} aria-hidden="true" />
-        )}
-        <StatusDot
-          aria-label={agent.status}
-          pulse={!terminal && agent.status === "running"}
-          size="small"
-          status={statusFor(agent)}
-        />
-        <button
-          type="button"
-          className={styles.nodeTitle}
-          disabled={!agent.child_chat_id}
-          onClick={() => {
-            navigate();
-          }}
-        >
-          {agent.title || agent.agent_id}
-        </button>
-        <Badge
-          className={styles.modelChip}
-          tone="muted"
-          title={agent.model_type ?? agent.kind}
-        >
-          {agent.model_type ?? agent.kind}
-        </Badge>
-        <span className={styles.nodeUsage}>
-          {formatTokens(agent.tokens_used)}
-          {cost ? ` · ${cost}` : ""}
-        </span>
-        {(agent.pending_questions ?? 0) > 0 && (
-          <Badge
-            className={styles.questionsBadge}
-            tone="warning"
-            title="Pending questions"
+          <button
+            type="button"
+            className={styles.nodeTitle}
+            disabled={!agent.child_chat_id}
+            title={rawTitle}
+            onClick={() => {
+              navigate();
+            }}
           >
-            {agent.pending_questions}
-          </Badge>
-        )}
-        <div className={styles.nodeActions}>
-          {!terminal && (
-            <Tooltip content="Send message">
+            {title}
+          </button>
+          <div className={styles.nodeActions}>
+            {!terminal && (
+              <Tooltip content="Send message">
+                <IconButton
+                  aria-expanded={messageOpen}
+                  aria-label={`Message ${rawTitle}`}
+                  icon={MessageSquare}
+                  size="sm"
+                  variant="plain"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setMessageOpen((value) => !value);
+                  }}
+                />
+              </Tooltip>
+            )}
+            <Tooltip content={copied === "id" ? "Copied" : "Copy agent ID"}>
               <IconButton
-                aria-expanded={messageOpen}
-                aria-label={`Message ${agent.title}`}
-                icon={MessageSquare}
+                aria-label="Copy agent ID"
+                icon={copied === "id" ? Check : Copy}
                 size="sm"
                 variant="plain"
                 onClick={(event) => {
                   event.stopPropagation();
-                  setMessageOpen((value) => !value);
+                  handleCopy("id", agent.agent_id);
                 }}
               />
             </Tooltip>
+            {agent.worktree_branch && (
+              <Tooltip content={copied === "branch" ? "Copied" : "Copy branch"}>
+                <IconButton
+                  aria-label="Copy branch"
+                  icon={copied === "branch" ? Check : Copy}
+                  size="sm"
+                  variant="plain"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    handleCopy("branch", agent.worktree_branch ?? "");
+                  }}
+                />
+              </Tooltip>
+            )}
+            {!terminal && (
+              <Popover>
+                <Popover.Trigger asChild>
+                  <IconButton
+                    aria-label={`Cancel ${rawTitle}`}
+                    disabled={cancelState.isLoading}
+                    icon={CircleStop}
+                    onClick={(event) => event.stopPropagation()}
+                    size="sm"
+                    variant="danger"
+                  />
+                </Popover.Trigger>
+                <Popover.Content maxWidth="280px">
+                  <div className={styles.confirmPopover}>
+                    <strong>Cancel this agent subtree?</strong>
+                    <span>Running child agents will be cancelled too.</span>
+                    <div className={styles.confirmActions}>
+                      <Popover.Close asChild>
+                        <Button size="sm" variant="soft">
+                          Keep running
+                        </Button>
+                      </Popover.Close>
+                      <Popover.Close asChild>
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          onClick={() => void handleCancel()}
+                        >
+                          Cancel subtree
+                        </Button>
+                      </Popover.Close>
+                    </div>
+                  </div>
+                </Popover.Content>
+              </Popover>
+            )}
+          </div>
+        </div>
+        <div className={styles.metaLine}>
+          <Badge
+            className={styles.modelChip}
+            tone="muted"
+            title={agent.model_type ?? agent.kind}
+          >
+            {agent.model_type ?? agent.kind}
+          </Badge>
+          <span className={styles.nodeUsage}>
+            {formatTokens(agent.tokens_used)}
+            {cost ? ` · ${cost}` : ""}
+          </span>
+          {(agent.pending_questions ?? 0) > 0 && (
+            <Badge
+              className={styles.questionsBadge}
+              tone="warning"
+              title="Pending questions"
+            >
+              {agent.pending_questions}
+            </Badge>
           )}
-          <Tooltip content={copied === "id" ? "Copied" : "Copy agent ID"}>
-            <IconButton
-              aria-label="Copy agent ID"
-              icon={copied === "id" ? Check : Copy}
-              size="sm"
-              variant="plain"
+          {hasChildren && (
+            <button
+              type="button"
+              aria-expanded={expanded}
+              aria-label={`${expanded ? "Collapse" : "Expand"} ${rawTitle}`}
+              className={styles.expandChip}
               onClick={(event) => {
                 event.stopPropagation();
-                handleCopy("id", agent.agent_id);
+                setExpanded((value) => !value);
               }}
-            />
-          </Tooltip>
-          {agent.worktree_branch && (
-            <Tooltip content={copied === "branch" ? "Copied" : "Copy branch"}>
-              <IconButton
-                aria-label="Copy branch"
-                icon={copied === "branch" ? Check : Copy}
-                size="sm"
-                variant="plain"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  handleCopy("branch", agent.worktree_branch ?? "");
-                }}
+            >
+              <ChevronRight
+                aria-hidden="true"
+                className={styles.expandChevron}
+                size={12}
               />
-            </Tooltip>
-          )}
-          {!terminal && (
-            <Popover>
-              <Popover.Trigger asChild>
-                <IconButton
-                  aria-label={`Cancel ${agent.title}`}
-                  disabled={cancelState.isLoading}
-                  icon={CircleStop}
-                  onClick={(event) => event.stopPropagation()}
-                  size="sm"
-                  variant="danger"
-                />
-              </Popover.Trigger>
-              <Popover.Content maxWidth="280px">
-                <div className={styles.confirmPopover}>
-                  <strong>Cancel this agent subtree?</strong>
-                  <span>Running child agents will be cancelled too.</span>
-                  <div className={styles.confirmActions}>
-                    <Popover.Close asChild>
-                      <Button size="sm" variant="soft">
-                        Keep running
-                      </Button>
-                    </Popover.Close>
-                    <Popover.Close asChild>
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        onClick={() => void handleCancel()}
-                      >
-                        Cancel subtree
-                      </Button>
-                    </Popover.Close>
-                  </div>
-                </div>
-              </Popover.Content>
-            </Popover>
+              {`${children.length} agents`}
+            </button>
           )}
         </div>
+        {!terminal && agent.current_tool && (
+          <div className={styles.toolTicker} title={agent.current_tool}>
+            {agent.current_tool}
+          </div>
+        )}
       </div>
-      {!terminal && agent.current_tool && (
-        <div className={styles.toolTicker} title={agent.current_tool}>
-          {agent.current_tool}
-        </div>
-      )}
-      {messageOpen && !terminal && (
-        <form
-          className={styles.messageForm}
-          onSubmit={(event) => {
-            event.preventDefault();
-            void handleMessage();
-          }}
+      {renderMessageForm && (
+        <div
+          className="rf-expand-grid"
+          data-open={messageMotion.isAnimatingOpen}
         >
-          <input
-            aria-label={`Message for ${agent.title}`}
-            autoFocus
-            className={styles.messageInput}
-            placeholder="Send a message"
-            value={message}
-            onChange={(event) => setMessage(event.target.value)}
-          />
-          <IconButton
-            aria-label="Send message"
-            disabled={!message.trim()}
-            icon={Send}
-            loading={messageState.isLoading}
-            size="sm"
-            type="submit"
-            variant="primary"
-          />
-        </form>
-      )}
-      {expanded && (
-        <div className={styles.nodeDetails}>
-          {agent.progress && <p>{agent.progress}</p>}
-          {agent.goal_summary && <p>{agent.goal_summary}</p>}
-          {files.length > 0 && (
-            <div className={styles.fileList}>
-              {files.map((file) => (
-                <Badge key={file} tone="muted" title={file}>
-                  {file}
-                </Badge>
-              ))}
-            </div>
-          )}
-          {(agent.worktree_branch ?? agent.merge_status) && (
-            <div className={styles.branchRow}>
-              {agent.worktree_branch && <span>{agent.worktree_branch}</span>}
-              {agent.merge_status && (
-                <Badge tone="muted">{agent.merge_status}</Badge>
-              )}
-            </div>
-          )}
-          {(agent.started_at ?? agent.finished_at ?? agent.last_activity) && (
-            <div className={styles.timestamps}>
-              {agent.started_at && (
-                <span>
-                  Started {new Date(agent.started_at).toLocaleString()}
-                </span>
-              )}
-              {agent.last_activity && (
-                <span>
-                  Active {new Date(agent.last_activity).toLocaleString()}
-                </span>
-              )}
-              {agent.finished_at && (
-                <span>
-                  Finished {new Date(agent.finished_at).toLocaleString()}
-                </span>
-              )}
-            </div>
-          )}
-          {questions.length > 0 && (
-            <div className={styles.questions}>
-              {questions.map((question) => (
-                <div key={question.id} className={styles.question}>
-                  <span>{question.text}</span>
-                  <span>{question.answer ?? "Awaiting answer"}</span>
-                </div>
-              ))}
-            </div>
-          )}
+          <div>
+            <form
+              className={styles.messageForm}
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handleMessage();
+              }}
+            >
+              <input
+                aria-label={`Message for ${rawTitle}`}
+                autoFocus
+                className={styles.messageInput}
+                placeholder="Send a message"
+                value={message}
+                onChange={(event) => setMessage(event.target.value)}
+              />
+              <IconButton
+                aria-label="Send message"
+                disabled={!message.trim()}
+                icon={Send}
+                loading={messageState.isLoading}
+                size="sm"
+                type="submit"
+                variant="primary"
+              />
+            </form>
+          </div>
         </div>
       )}
-      {hasChildren && expanded && (
-        <ul className={styles.children}>
-          {children.map((child) => (
-            <AgentTreeNode
-              chatId={chatId}
-              key={child.agent.agent_id}
-              depth={depth + 1}
-              node={child}
-              onNavigate={onNavigate}
-            />
-          ))}
-        </ul>
+      {renderDetails && (
+        <div
+          className="rf-expand-grid"
+          data-open={expandedMotion.isAnimatingOpen}
+        >
+          <div>
+            <div className={styles.nodeDetails}>
+              {agent.progress && <p>{agent.progress}</p>}
+              {agent.goal_summary && <p>{agent.goal_summary}</p>}
+              {files.length > 0 && (
+                <div className={styles.fileList}>
+                  {files.map((file) => (
+                    <Badge key={file} tone="muted" title={file}>
+                      {file}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+              {(agent.worktree_branch ?? agent.merge_status) && (
+                <div className={styles.branchRow}>
+                  {agent.worktree_branch && (
+                    <span>{agent.worktree_branch}</span>
+                  )}
+                  {agent.merge_status && (
+                    <Badge tone="muted">{agent.merge_status}</Badge>
+                  )}
+                </div>
+              )}
+              {(agent.started_at ??
+                agent.finished_at ??
+                agent.last_activity) && (
+                <div className={styles.timestamps}>
+                  {agent.started_at && (
+                    <span>
+                      Started {new Date(agent.started_at).toLocaleString()}
+                    </span>
+                  )}
+                  {agent.last_activity && (
+                    <span>
+                      Active {new Date(agent.last_activity).toLocaleString()}
+                    </span>
+                  )}
+                  {agent.finished_at && (
+                    <span>
+                      Finished {new Date(agent.finished_at).toLocaleString()}
+                    </span>
+                  )}
+                </div>
+              )}
+              {questions.length > 0 && (
+                <div className={styles.questions}>
+                  {questions.map((question) => (
+                    <div key={question.id} className={styles.question}>
+                      <span>{question.text}</span>
+                      <span>{question.answer ?? "Awaiting answer"}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            {hasChildren && (
+              <ul className={classNames(styles.children, "rf-stagger")}>
+                {children.map((child) => (
+                  <AgentTreeNode
+                    chatId={chatId}
+                    key={child.agent.agent_id}
+                    depth={depth + 1}
+                    node={child}
+                    onNavigate={onNavigate}
+                  />
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
       )}
     </li>
   );

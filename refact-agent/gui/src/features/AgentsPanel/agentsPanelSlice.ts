@@ -1,19 +1,23 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
+import {
+  setDockOpen,
+  setDockSection,
+  toggleDock,
+} from "../Workspace/workspaceSlice";
+
 export type AgentsPanelTab = "active" | "all";
 
 export type AgentsPanelState = {
-  openByChat: Record<string, boolean>;
+  autoOpenedFor: string | null;
   tab: AgentsPanelTab;
   userClosedByChat: Record<string, boolean>;
-  userOpenedByChat: Record<string, boolean>;
 };
 
 const initialState: AgentsPanelState = {
-  openByChat: {},
+  autoOpenedFor: null,
   tab: "active",
   userClosedByChat: {},
-  userOpenedByChat: {},
 };
 
 export const agentsPanelSlice = createSlice({
@@ -21,53 +25,56 @@ export const agentsPanelSlice = createSlice({
   reducerPath: "agentsPanel",
   initialState,
   reducers: {
-    panelOpened: (state, action: PayloadAction<string>) => {
-      state.openByChat[action.payload] = true;
-      state.userClosedByChat[action.payload] = false;
-      state.userOpenedByChat[action.payload] = true;
-    },
-    panelClosed: (state, action: PayloadAction<string>) => {
-      state.openByChat[action.payload] = false;
-      state.userClosedByChat[action.payload] = true;
-    },
     tabChanged: (state, action: PayloadAction<AgentsPanelTab>) => {
       state.tab = action.payload;
     },
     autoOpenRequested: (state, action: PayloadAction<string>) => {
-      if (!state.userClosedByChat[action.payload]) {
-        state.openByChat[action.payload] = true;
-        state.userOpenedByChat[action.payload] = false;
-      }
+      if (state.userClosedByChat[action.payload]) return;
+      state.autoOpenedFor = action.payload;
     },
-    panelAutoClosed: (state, action: PayloadAction<string>) => {
-      state.openByChat[action.payload] = false;
+    autoOpenCleared: (state) => {
+      state.autoOpenedFor = null;
     },
+    agentsSectionUserClosed: (state, action: PayloadAction<string>) => {
+      state.userClosedByChat[action.payload] = true;
+      state.autoOpenedFor = null;
+    },
+    agentsSectionUserOpened: (state, action: PayloadAction<string>) => {
+      state.userClosedByChat[action.payload] = false;
+      state.autoOpenedFor = null;
+    },
+  },
+  extraReducers: (builder) => {
+    builder
+      .addCase(setDockSection, (state) => {
+        state.autoOpenedFor = null;
+      })
+      .addCase(setDockOpen, (state) => {
+        state.autoOpenedFor = null;
+      })
+      .addCase(toggleDock, (state) => {
+        state.autoOpenedFor = null;
+      });
   },
 });
 
 export const {
-  panelOpened,
-  panelClosed,
   tabChanged,
   autoOpenRequested,
-  panelAutoClosed,
+  autoOpenCleared,
+  agentsSectionUserClosed,
+  agentsSectionUserOpened,
 } = agentsPanelSlice.actions;
 
 type AgentsPanelRootState = {
   agentsPanel: AgentsPanelState;
 };
 
-export const selectAgentsPanelOpen = (
-  state: AgentsPanelRootState,
-  chatId: string,
-) => {
-  const openByChat: Partial<Record<string, boolean>> =
-    state.agentsPanel.openByChat;
-  return openByChat[chatId] ?? false;
-};
-
 export const selectAgentsPanelTab = (state: AgentsPanelRootState) =>
   state.agentsPanel.tab;
+
+export const selectAgentsPanelAutoOpenedFor = (state: AgentsPanelRootState) =>
+  state.agentsPanel.autoOpenedFor;
 
 export const selectAgentsPanelUserClosed = (
   state: AgentsPanelRootState,
@@ -76,15 +83,6 @@ export const selectAgentsPanelUserClosed = (
   const userClosedByChat: Partial<Record<string, boolean>> =
     state.agentsPanel.userClosedByChat;
   return userClosedByChat[chatId] ?? false;
-};
-
-export const selectAgentsPanelUserOpened = (
-  state: AgentsPanelRootState,
-  chatId: string,
-) => {
-  const userOpenedByChat: Partial<Record<string, boolean>> =
-    state.agentsPanel.userOpenedByChat;
-  return userOpenedByChat[chatId] ?? false;
 };
 
 export default agentsPanelSlice.reducer;

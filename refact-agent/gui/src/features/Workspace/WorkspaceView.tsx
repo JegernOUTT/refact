@@ -21,6 +21,7 @@ import {
   usePointerDropZone,
 } from "../ChatPanes/usePointerDrag";
 import { GroupSplitView } from "./GroupSplitView";
+import { ActivityRail } from "./ActivityRail";
 import { Dock } from "./Dock";
 import { SurfacePane } from "./SurfacePane";
 import { isChatSurface, makeSurfaceKey } from "./surfaceKey";
@@ -31,16 +32,22 @@ import {
   selectIsTabSplit,
   selectPanelsForced,
   selectTabs,
+  selectWorkspaceDock,
   selectWorkspaceGroups,
   splitTab,
 } from "./workspaceSlice";
+import { useAgentsSidebarAutoOpen } from "./useAgentsSidebarAutoOpen";
 import { useWorkspaceShortcuts } from "./useWorkspaceShortcuts";
-import { resolveWorkspaceDockAvailability } from "./workspaceAvailability";
+import {
+  isDockSectionAvailable,
+  resolveWorkspaceDockAvailability,
+} from "./workspaceAvailability";
 import styles from "./WorkspaceView.module.css";
 
 export function WorkspaceView() {
   const dispatch = useAppDispatch();
   useWorkspaceShortcuts();
+  useAgentsSidebarAutoOpen();
   const [unsplitDragActive, setUnsplitDragActive] = useState(false);
   const activeTabId = useAppSelector(selectActiveTabId);
   const currentThreadId = useAppSelector(selectCurrentThreadId);
@@ -50,11 +57,13 @@ export function WorkspaceView() {
   const host = useAppSelector(selectHost);
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
-  const { dock: dockAvailable } = resolveWorkspaceDockAvailability(
+  const dock = useAppSelector(selectWorkspaceDock);
+  const dockAvailability = resolveWorkspaceDockAvailability(
     host,
     capabilities,
     panelsForced,
   );
+  const dockMounted = isDockSectionAvailable(dock.section, dockAvailability);
   const currentSurfaceKey = currentThreadId
     ? makeSurfaceKey("chat", currentThreadId)
     : null;
@@ -206,7 +215,8 @@ export function WorkspaceView() {
 
   return (
     <div className={styles.workspaceView}>
-      {dockAvailable ? <Dock /> : null}
+      <ActivityRail />
+      {dockMounted ? <Dock /> : null}
       <div className={styles.mainColumn}>
         <div
           className={classNames(

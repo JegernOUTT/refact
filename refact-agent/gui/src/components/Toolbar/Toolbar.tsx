@@ -1,16 +1,7 @@
 import { Dropdown, DropdownNavigationOptions } from "./Dropdown";
-import {
-  CheckSquare,
-  FileDiff,
-  Home,
-  Moon,
-  PanelLeft,
-  Plus,
-  Server,
-  Sun,
-} from "lucide-react";
+import { Home } from "lucide-react";
 import classNames from "classnames";
-import { ComponentProps, useCallback, useMemo } from "react";
+import { ComponentProps, useCallback } from "react";
 
 import { newChatAction } from "../../events";
 import {
@@ -26,33 +17,19 @@ import { openTask, selectOpenTasksFromRoot } from "../../features/Tasks";
 import { selectCapabilities } from "../../features/Config/configSlice";
 import {
   selectFocusedWorkspaceChatId,
-  selectLiveEditsForChat,
   selectPanelsForced,
   selectTabs,
-  selectWorkspaceDock,
-  setDockOpen,
-  setLiveEditsForChat,
-  setPanelsForced,
-  toggleDock,
 } from "../../features/Workspace";
 import { TabBar } from "../../features/Workspace/TabBar";
 import { useAppDispatch } from "../../hooks/useAppDispatch";
 import { useAppSelector } from "../../hooks/useAppSelector";
-import { useAppearance } from "../../hooks/useAppearance";
 import { useConfig } from "../../hooks/useConfig";
 import { useEventsBusForIDE } from "../../hooks/useEventBusForIDE";
-import { useOpenUrl } from "../../hooks/useOpenUrl";
 import { useCreateTaskMutation } from "../../services/refact/tasks";
-import {
-  resolveEngineBaseUrl,
-  type EngineApiConfig,
-} from "../../services/refact/apiUrl";
 import { resolveWorkspaceDockAvailability } from "../../features/Workspace/workspaceAvailability";
 import { IconButton, Tooltip } from "../ui";
-import {
-  ConnectionStatusIndicator,
-  RagStatusIndicators,
-} from "../ConnectionStatus";
+import { EngineStatusChip } from "../ConnectionStatus";
+import { NewSplitButton } from "./NewSplitButton";
 import styles from "./Toolbar.module.css";
 
 export type DashboardTab = {
@@ -85,8 +62,6 @@ type ToolbarIconButtonProps = {
   onClick: () => void;
   icon: ComponentProps<typeof IconButton>["icon"];
   className?: string;
-  disabled?: boolean;
-  pressed?: boolean;
 };
 
 const ToolbarIconButton = ({
@@ -94,16 +69,12 @@ const ToolbarIconButton = ({
   onClick,
   icon,
   className,
-  disabled,
-  pressed,
 }: ToolbarIconButtonProps) => (
   <Tooltip>
     <Tooltip.Trigger asChild>
       <IconButton
         aria-label={label}
-        aria-pressed={pressed}
         className={classNames(styles.iconButton, "rf-pressable", className)}
-        disabled={disabled}
         icon={icon}
         onClick={onClick}
         size="sm"
@@ -114,73 +85,9 @@ const ToolbarIconButton = ({
   </Tooltip>
 );
 
-function isUsableHttpUrl(value: string | undefined): value is string {
-  if (!value) return false;
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
-function normalizeDisplayUrl(value: string): string {
-  return value.replace(/\/+$/, "");
-}
-
-function isLocalhostUrl(value: string): boolean {
-  try {
-    const { hostname } = new URL(value);
-    return (
-      hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1"
-    );
-  } catch {
-    return false;
-  }
-}
-
-function resolveCommonBrowserUrl(config: EngineApiConfig): string | null {
-  if (isUsableHttpUrl(config.browserUrl)) {
-    return normalizeDisplayUrl(config.browserUrl);
-  }
-
-  const candidates = window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ ?? [];
-  const mdnsCandidate = candidates.find((candidate) => {
-    if (!isUsableHttpUrl(candidate)) return false;
-    return new URL(candidate).hostname.endsWith(".local");
-  });
-  if (mdnsCandidate) return normalizeDisplayUrl(mdnsCandidate);
-
-  const lanCandidate = candidates.find((candidate) => {
-    if (!isUsableHttpUrl(candidate)) return false;
-    return !isLocalhostUrl(candidate);
-  });
-  if (lanCandidate) return normalizeDisplayUrl(lanCandidate);
-
-  return null;
-}
-
-function resolveBrowserEngineUrl(config: EngineApiConfig): string {
-  const commonUrl = resolveCommonBrowserUrl(config);
-  if (commonUrl) return commonUrl;
-
-  const baseUrl = resolveEngineBaseUrl(config);
-  if (!baseUrl) return normalizeDisplayUrl(window.location.origin);
-  if (baseUrl.startsWith("/")) {
-    return normalizeDisplayUrl(
-      new URL(baseUrl, window.location.origin).toString(),
-    );
-  }
-  return normalizeDisplayUrl(baseUrl);
-}
-
 export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const dispatch = useAppDispatch();
-  const { isDarkMode, toggle: toggleDarkMode } = useAppearance();
-  const config = useConfig();
-  const { host } = config;
-  const openUrl = useOpenUrl();
-  const engineUrl = useMemo(() => resolveBrowserEngineUrl(config), [config]);
+  const { host } = useConfig();
   const allThreads = useAppSelector(selectAllThreads);
   const currentChatId = useAppSelector(selectChatId);
   const focusedWorkspaceChatId = useAppSelector(selectFocusedWorkspaceChatId);
@@ -189,27 +96,11 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
   const pages = useAppSelector(selectPages);
   const capabilities = useAppSelector(selectCapabilities);
   const panelsForced = useAppSelector(selectPanelsForced);
-  const workspaceDock = useAppSelector(selectWorkspaceDock);
   const workspaceAvailability = resolveWorkspaceDockAvailability(
     host,
     capabilities,
     panelsForced,
   );
-  const dockSurfaceActive = activeTab.type === "chat";
-  const showWorkspacePanels =
-    host !== "web" || (workspaceAvailability.dock && dockSurfaceActive);
-  const workspacePanelsPressed = workspaceAvailability.dock
-    ? workspaceDock.open
-    : false;
-  const liveEdits = useAppSelector((state) =>
-    focusedWorkspaceChatId
-      ? selectLiveEditsForChat(state, focusedWorkspaceChatId)
-      : false,
-  );
-  const showLiveEdits =
-    activeTab.type === "chat" &&
-    focusedWorkspaceChatId !== null &&
-    workspaceAvailability.files;
   const { openSettings } = useEventsBusForIDE();
   const toolbarChatId =
     activeTab.type === "chat"
@@ -259,10 +150,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
     [dispatch, openSettings],
   );
 
-  const onOpenRefactDaemon = useCallback(() => {
-    dispatch(push({ name: "refact daemon" }));
-  }, [dispatch]);
-
   const onCreateNewChat = useCallback(() => {
     const currentThread = shouldCleanToolbarChat
       ? (allThreads[toolbarChatId] as
@@ -310,29 +197,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
       .catch(() => undefined);
   }, [createTask, dispatch]);
 
-  const onOpenChatInBrowser = useCallback(() => {
-    openUrl(engineUrl);
-  }, [engineUrl, openUrl]);
-
-  const onToggleWorkspacePanels = useCallback(() => {
-    if (workspaceAvailability.dock) {
-      dispatch(toggleDock());
-      return;
-    }
-    dispatch(setPanelsForced(true));
-    dispatch(setDockOpen(true));
-  }, [dispatch, workspaceAvailability.dock]);
-
-  const onToggleLiveEdits = useCallback(() => {
-    if (!focusedWorkspaceChatId) return;
-    dispatch(
-      setLiveEditsForChat({
-        chatId: focusedWorkspaceChatId,
-        enabled: !liveEdits,
-      }),
-    );
-  }, [dispatch, focusedWorkspaceChatId, liveEdits]);
-
   return (
     <div className={styles.toolbar}>
       <div className={styles.toolbarSection}>
@@ -342,24 +206,6 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
           icon={Home}
           onClick={goHome}
         />
-        {showWorkspacePanels ? (
-          <ToolbarIconButton
-            label="Workspace panels"
-            className={styles.workspacePanelsButton}
-            icon={PanelLeft}
-            onClick={onToggleWorkspacePanels}
-            pressed={workspacePanelsPressed}
-          />
-        ) : null}
-        {showLiveEdits ? (
-          <ToolbarIconButton
-            label="Live edits"
-            className={styles.liveEditsButton}
-            icon={FileDiff}
-            onClick={onToggleLiveEdits}
-            pressed={liveEdits}
-          />
-        ) : null}
       </div>
 
       {showTabBar ? (
@@ -378,57 +224,22 @@ export const Toolbar = ({ activeTab }: ToolbarProps) => {
       <div
         className={classNames(styles.toolbarSection, styles.connectionSection)}
       >
-        <ConnectionStatusIndicator />
-        <RagStatusIndicators />
-        <a
-          className={styles.engineUrl}
-          href={engineUrl}
-          title={engineUrl}
-          aria-label={`Engine URL ${engineUrl}`}
-          onClick={(event) => {
-            event.preventDefault();
-            onOpenChatInBrowser();
-          }}
-        >
-          {engineUrl}
-        </a>
-        <ToolbarIconButton
-          label="Refact Daemon"
-          icon={Server}
-          onClick={onOpenRefactDaemon}
-        />
+        <EngineStatusChip />
       </div>
 
       <div className={styles.toolbarDivider} />
 
       <div className={classNames(styles.toolbarSection, styles.actionSection)}>
-        <ToolbarIconButton
-          label="New Chat"
-          icon={Plus}
-          onClick={onCreateNewChat}
-        />
-
-        <ToolbarIconButton
-          label="New Task"
-          icon={CheckSquare}
-          className={styles.newTaskAction}
-          onClick={onCreateNewTask}
+        <NewSplitButton
+          onCreateNewChat={onCreateNewChat}
+          onCreateNewTask={onCreateNewTask}
         />
       </div>
 
       <div className={styles.toolbarDivider} />
 
       <div className={classNames(styles.toolbarSection, styles.menuSection)}>
-        {host === "web" && (
-          <ToolbarIconButton
-            label="Toggle Dark Mode"
-            icon={isDarkMode ? Moon : Sun}
-            className={styles.themeToggleAction}
-            onClick={toggleDarkMode}
-          />
-        )}
-
-        <Dropdown handleNavigation={handleNavigation} useGhostTrigger />
+        <Dropdown handleNavigation={handleNavigation} />
       </div>
     </div>
   );

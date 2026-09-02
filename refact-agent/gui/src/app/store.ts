@@ -10,6 +10,7 @@ import {
   REHYDRATE,
   persistReducer,
   persistStore,
+  type PersistedState,
 } from "redux-persist";
 import { statsApi } from "../services/refact/stats";
 import { codeIntelApi } from "../services/refact/codeIntel";
@@ -90,6 +91,7 @@ import { notificationsSlice } from "../features/Notifications";
 import { schedulerSlice } from "../features/Scheduler";
 import { schedulerApi } from "../services/refact/schedulerApi";
 import {
+  normalizeWorkspaceDock,
   reconcileWorkspaceState,
   workspaceSlice,
 } from "../features/Workspace/workspaceSlice";
@@ -112,6 +114,32 @@ const persistedTipOfTheDayReducer = persistReducer<
   ReturnType<typeof tipOfTheDaySlice.reducer>
 >(tipOfTheDayPersistConfig, tipOfTheDaySlice.reducer);
 
+type PersistedWorkspaceState = ReturnType<typeof workspaceSlice.reducer>;
+
+const workspacePersistConfig = {
+  key: "workspace",
+  storage: storage(),
+  whitelist: ["dock"],
+  version: 1,
+  stateReconciler: mergeInitialState,
+  migrate: (state?: PersistedState) =>
+    Promise.resolve(
+      state
+        ? {
+            ...state,
+            dock: normalizeWorkspaceDock(
+              (state as Partial<PersistedWorkspaceState>).dock,
+            ),
+          }
+        : state,
+    ),
+};
+
+const persistedWorkspaceReducer = persistReducer<PersistedWorkspaceState>(
+  workspacePersistConfig,
+  workspaceSlice.reducer,
+) as unknown as typeof workspaceSlice.reducer;
+
 // https://redux-toolkit.js.org/api/combineSlices
 // `combineSlices` automatically combines the reducers using
 // their `reducerPath`s, therefore we no longer need to call `combineReducers`.
@@ -119,6 +147,7 @@ const rootReducer = combineSlices(
   {
     // tipOfTheDay: persistedTipOfTheDayReducer,
     [tipOfTheDaySlice.reducerPath]: persistedTipOfTheDayReducer,
+    [workspaceSlice.reducerPath]: persistedWorkspaceReducer,
     config: configReducer,
     active_file: activeFileReducer,
     current_project: currentProjectInfoReducer,
@@ -189,7 +218,6 @@ const rootReducer = combineSlices(
   designSlice,
   notificationsSlice,
   schedulerSlice,
-  workspaceSlice,
   terminalSlice,
   dashboardSlice,
   filesPanelSlice,
@@ -220,7 +248,7 @@ const workspaceInvariantReducer = (state: ReturnType<typeof rootReducer>) => {
 
   return {
     ...state,
-    workspace: nextWorkspace,
+    workspace: { ...state.workspace, ...nextWorkspace },
   };
 };
 

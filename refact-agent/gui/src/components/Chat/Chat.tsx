@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Bot } from "lucide-react";
 import { ChatForm, ChatFormProps } from "../ChatForm";
 import { ChatContent } from "../ChatContent";
 import { Flex, Button, Card, Container } from "@radix-ui/themes";
@@ -10,13 +9,9 @@ import { useChatActions } from "../../hooks/useChatActions";
 import { type Config } from "../../features/Config/configSlice";
 import {
   enableSend,
-  flattenBackgroundAgentTree,
-  selectActiveBackgroundAgents,
-  selectBackgroundAgentsTree,
   selectIsStreamingById,
   selectPreventSendById,
   selectIsBuddyChat,
-  switchToThread,
   useThreadId,
 } from "../../features/Chat/Thread";
 import { BuddyChatCompanion } from "../../features/Buddy";
@@ -42,15 +37,6 @@ import {
   selectWorkspaceDock,
 } from "../../features/Workspace/workspaceSlice";
 import { useBottomDockClearance } from "./useBottomDockClearance";
-import { AgentsPanel } from "../../features/AgentsPanel";
-import {
-  autoOpenRequested,
-  panelAutoClosed,
-  panelOpened,
-  selectAgentsPanelOpen,
-  selectAgentsPanelUserOpened,
-} from "../../features/AgentsPanel/agentsPanelSlice";
-import { useMediaQuery } from "../ui";
 
 export type ChatProps = {
   host: Config["host"];
@@ -70,21 +56,6 @@ export const Chat: React.FC<ChatProps> = ({
 
   const [isViewingRawJSON, setIsViewingRawJSON] = useState(false);
   const chatId = useThreadId();
-  const isNarrow = useMediaQuery("(max-width: 719px)");
-  const panelOpen = useAppSelector((state) =>
-    selectAgentsPanelOpen(state, chatId),
-  );
-  const panelUserOpened = useAppSelector((state) =>
-    selectAgentsPanelUserOpened(state, chatId),
-  );
-  const agentTree = useAppSelector((state) =>
-    selectBackgroundAgentsTree(state, chatId),
-  );
-  const agents = flattenBackgroundAgentTree(agentTree);
-  const activeAgents = useAppSelector((state) =>
-    selectActiveBackgroundAgents(state, chatId),
-  );
-  const previousRunningCount = useRef<number | null>(null);
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
   );
@@ -117,39 +88,6 @@ export const Chat: React.FC<ChatProps> = ({
       dispatch(unregisterVisibleChatMount({ chatId }));
     };
   }, [dispatch, chatId]);
-
-  useEffect(() => {
-    const previous = previousRunningCount.current;
-    const running = activeAgents.length;
-    previousRunningCount.current = running;
-
-    if (previous === 0 && running > 0 && !isNarrow) {
-      dispatch(autoOpenRequested(chatId));
-    }
-    if (
-      previous !== null &&
-      previous > 0 &&
-      running === 0 &&
-      !panelUserOpened
-    ) {
-      dispatch(panelAutoClosed(chatId));
-    }
-  }, [activeAgents.length, chatId, dispatch, isNarrow, panelUserOpened]);
-
-  const handleToggleAgents = useCallback(() => {
-    if (panelOpen) {
-      dispatch(panelAutoClosed(chatId));
-    } else {
-      dispatch(panelOpened(chatId));
-    }
-  }, [chatId, dispatch, panelOpen]);
-
-  const handleAgentNavigation = useCallback(
-    (childChatId: string) => {
-      dispatch(switchToThread({ id: childChatId }));
-    },
-    [dispatch],
-  );
 
   const preventSend = useAppSelector((state) =>
     selectPreventSendById(state, chatId),
@@ -198,36 +136,12 @@ export const Chat: React.FC<ChatProps> = ({
           overflow: "hidden",
         }}
       >
-        {panelOpen && (
-          <AgentsPanel
-            chatId={chatId}
-            narrow={isNarrow}
-            onNavigate={handleAgentNavigation}
-          />
-        )}
         <Flex
           className={styles.chatRoot}
           direction="column"
           flexGrow="1"
           width="100%"
-          px="1"
         >
-          {agents.length > 0 && (
-            <button
-              aria-expanded={panelOpen}
-              className={styles.agentsToggle}
-              type="button"
-              onClick={handleToggleAgents}
-            >
-              <Bot aria-hidden="true" size={16} />
-              <span>Agents</span>
-              {activeAgents.length > 0 && (
-                <span className={styles.agentsBadge}>
-                  {activeAgents.length}
-                </span>
-              )}
-            </button>
-          )}
           <Flex
             direction="column"
             className={styles.transcriptArea}

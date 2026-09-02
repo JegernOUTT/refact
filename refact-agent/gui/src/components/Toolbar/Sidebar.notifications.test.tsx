@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
 
 import { render, screen } from "../../utils/test-utils";
+import type { RootState } from "../../app/store";
 import { Toolbar } from "./Toolbar";
 
 afterEach(() => {
@@ -9,12 +10,19 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+async function renderToolbarAndOpenEngineStatus(options: {
+  preloadedState: Partial<RootState>;
+}) {
+  render(<Toolbar activeTab={{ type: "dashboard" }} />, options);
+  await userEvent.click(screen.getByRole("button", { name: "Engine status" }));
+}
+
 describe("Toolbar", () => {
   it("opens the current origin as an external browser link in relative mode", async () => {
     window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ = [];
     const open = vi.spyOn(window, "open").mockReturnValue(null);
 
-    render(<Toolbar activeTab={{ type: "dashboard" }} />, {
+    await renderToolbarAndOpenEngineStatus({
       preloadedState: {
         config: {
           host: "web",
@@ -26,7 +34,7 @@ describe("Toolbar", () => {
       },
     });
 
-    const engineLink = screen.getByRole("link", {
+    const engineLink = await screen.findByRole("link", {
       name: `Engine URL ${window.location.origin}`,
     });
     expect(engineLink).toBeInTheDocument();
@@ -50,7 +58,7 @@ describe("Toolbar", () => {
       "http://workstation.local:8765",
     ];
 
-    render(<Toolbar activeTab={{ type: "dashboard" }} />, {
+    await renderToolbarAndOpenEngineStatus({
       preloadedState: {
         config: {
           host: "web",
@@ -63,7 +71,7 @@ describe("Toolbar", () => {
     });
 
     expect(
-      screen.getByLabelText("Engine URL http://workstation.local:8765"),
+      await screen.findByLabelText("Engine URL http://workstation.local:8765"),
     ).toBeInTheDocument();
 
     await userEvent.click(
@@ -81,7 +89,7 @@ describe("Toolbar", () => {
     const open = vi.spyOn(window, "open").mockReturnValue(null);
     window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ = [];
 
-    render(<Toolbar activeTab={{ type: "dashboard" }} />, {
+    await renderToolbarAndOpenEngineStatus({
       preloadedState: {
         config: {
           host: "vscode",
@@ -94,7 +102,7 @@ describe("Toolbar", () => {
     });
 
     expect(
-      screen.getByLabelText("Engine URL http://192.168.1.42:8765"),
+      await screen.findByLabelText("Engine URL http://192.168.1.42:8765"),
     ).toBeInTheDocument();
 
     await userEvent.click(
@@ -112,7 +120,7 @@ describe("Toolbar", () => {
     const open = vi.spyOn(window, "open").mockReturnValue(null);
     window.__REFACT_ENGINE_ORIGIN_CANDIDATES__ = [];
 
-    render(<Toolbar activeTab={{ type: "dashboard" }} />, {
+    await renderToolbarAndOpenEngineStatus({
       preloadedState: {
         config: {
           host: "web",
@@ -124,7 +132,7 @@ describe("Toolbar", () => {
     });
 
     expect(
-      screen.getByLabelText("Engine URL https://example.com/refact"),
+      await screen.findByLabelText("Engine URL https://example.com/refact"),
     ).toBeInTheDocument();
 
     await userEvent.click(

@@ -240,6 +240,38 @@ describe("FilesPanel", () => {
     );
   });
 
+  it("toggles live edits for the focused chat from the explorer header", async () => {
+    server.use(rootHandler());
+    const view = render(<FilesPanel />);
+    view.store.dispatch(createChatWithId({ id: "chat-a" }));
+    view.store.dispatch(openTab("chat:chat-a"));
+    view.store.dispatch(setActiveTab("chat:chat-a"));
+
+    const liveEdits = await screen.findByRole("switch", {
+      name: "Live edits",
+    });
+    await waitFor(() => expect(liveEdits).toBeEnabled());
+    expect(liveEdits).not.toBeChecked();
+
+    await view.user.click(liveEdits);
+
+    await waitFor(() =>
+      expect(view.store.getState().workspace.liveEditsByChat?.["chat-a"]).toBe(
+        true,
+      ),
+    );
+    expect(liveEdits).toBeChecked();
+  });
+
+  it("disables the live edits switch without a focused chat", async () => {
+    server.use(rootHandler());
+    render(<FilesPanel />);
+
+    expect(
+      await screen.findByRole("switch", { name: "Live edits" }),
+    ).toBeDisabled();
+  });
+
   it("replaces refetched children while keeping the directory expanded", async () => {
     let sourceRequests = 0;
     let sourceEntries: FilesTreeEntry[] = [
