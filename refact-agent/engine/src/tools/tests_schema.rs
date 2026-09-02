@@ -512,21 +512,6 @@ mod tests {
                 ],
             ),
             (
-                "review",
-                &[
-                    "search_symbol_definition",
-                    "codegraph_overview",
-                    "code_health",
-                    "git_risk",
-                    "code_why",
-                    "code_duplication",
-                    "dead_code",
-                    "security_scan",
-                    "pr_blast",
-                    "code_map",
-                ],
-            ),
-            (
                 "task_agent",
                 &[
                     "search_symbol_definition",
