@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Duration, Utc};
 use tokio::fs;
@@ -11,6 +12,23 @@ const RESULTS_DIR: &str = "results";
 pub const TERMINAL_RETENTION_DAYS: i64 = 7;
 pub const MAX_RECORDS: usize = 2000;
 
+static TMP_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+// A shared temp name makes concurrent savers steal each other's file: the first rename moves it
+// away and the second fails with ENOENT.
+fn tmp_path_for(dest_path: &Path) -> PathBuf {
+    let file_name = dest_path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| RECORDS_FILE.to_string());
+    let unique = TMP_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_name = format!("{file_name}.{}.{unique}.tmp", std::process::id());
+    match dest_path.parent() {
+        Some(parent) => parent.join(tmp_name),
+        None => PathBuf::from(tmp_name),
+    }
+}
+
 async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
     #[cfg(windows)]
     if dest_path.exists() {
@@ -18,9 +36,13 @@ async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), Stri
             .await
             .map_err(|e| format!("Failed to remove existing file: {e}"))?;
     }
-    fs::rename(tmp_path, dest_path)
-        .await
-        .map_err(|e| format!("Failed to rename: {e}"))
+    if let Err(e) = fs::rename(tmp_path, dest_path).await {
+        let _ = fs::remove_file(tmp_path).await;
+        return Err(format!(
+            "Failed to rename {tmp_path:?} to {dest_path:?}: {e}"
+        ));
+    }
+    Ok(())
 }
 
 fn record_terminal_timestamp(record: &BackgroundAgent) -> Option<DateTime<Utc>> {
@@ -73,12 +95,13 @@ pub async fn save_all(
         .await
         .map_err(|e| format!("Failed to create background agents directory: {e}"))?;
     let records_path = storage_root.join(RECORDS_FILE);
-    let tmp_path = storage_root.join(format!("{RECORDS_FILE}.tmp"));
+    let tmp_path = tmp_path_for(&records_path);
     let content = serde_json::to_string_pretty(&records)
         .map_err(|e| format!("Failed to serialize background agents: {e}"))?;
-    fs::write(&tmp_path, content)
-        .await
-        .map_err(|e| format!("Failed to write background agents file: {e}"))?;
+    if let Err(e) = fs::write(&tmp_path, content).await {
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err(format!("Failed to write background agents file: {e}"));
+    }
     atomic_write_file(&tmp_path, &records_path).await
 }
 
@@ -239,12 +262,13 @@ pub async fn save_result_payload(
         .await
         .map_err(|e| format!("Failed to create background agent results directory: {e}"))?;
     let result_path = results_dir.join(format!("{agent_id}.json"));
-    let tmp_path = results_dir.join(format!("{agent_id}.json.tmp"));
+    let tmp_path = tmp_path_for(&result_path);
     let content = serde_json::to_string_pretty(payload)
         .map_err(|e| format!("Failed to serialize background agent result: {e}"))?;
-    fs::write(&tmp_path, content)
-        .await
-        .map_err(|e| format!("Failed to write background agent result: {e}"))?;
+    if let Err(e) = fs::write(&tmp_path, content).await {
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err(format!("Failed to write background agent result: {e}"));
+    }
     atomic_write_file(&tmp_path, &result_path).await?;
     Ok(result_path)
 }
