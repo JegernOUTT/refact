@@ -10,7 +10,7 @@ import { Icon } from "../../ui";
 import { useStoredOpen } from "../useStoredOpen";
 import { ToolCard, type ToolStatus } from "./ToolCard";
 import { ReviewReportView } from "./ReviewReportView";
-import { extractReviewReport } from "./reviewReportJson";
+import { extractReviewReport, reviewReportFromExtra } from "./reviewReportJson";
 import styles from "./GenericTool.module.css";
 
 interface CodeReviewToolProps {
@@ -44,13 +44,13 @@ export const CodeReviewTool: React.FC<CodeReviewToolProps> = ({ toolCall }) => {
       ? maybeResult.content
       : null;
   const report = useMemo(
-    () => (content ? extractReviewReport(content) : null),
-    [content],
+    () =>
+      reviewReportFromExtra(maybeResult?.extra) ??
+      (content ? extractReviewReport(content) : null),
+    [maybeResult, content],
   );
   const summary = report
-    ? `Review: ${report.findings.length} findings${
-        report.pipeline?.depth ? ` (${report.pipeline.depth})` : ""
-      }`
+    ? `Review: ${report.findings.length} findings (${report.depth})`
     : "Review code";
   const shouldRenderMarkdown =
     content !== null && content.length <= 50_000 && looksLikeMarkdown(content);

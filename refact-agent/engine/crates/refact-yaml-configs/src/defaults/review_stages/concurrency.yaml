@@ -1,0 +1,35 @@
+schema_version: 1
+id: concurrency
+title: "Review: concurrency and lifecycle"
+phase: parallel
+contract: findings
+depth: opt_in
+budget_minutes: 8
+writes_allowed: false
+applies_when:
+  always: true
+preferred_tools:
+  - cat
+  - search_pattern
+  - search_symbol_definition
+  - shell
+  - glob
+fallback: >-
+  If symbol lookup is unavailable, follow the lock and task names with search_pattern.
+task: |
+  Review the concurrency and lifecycle behaviour of the diff. Humans miss this class most often,
+  so be systematic rather than impressionistic.
+
+  1. Locks and shared state: every lock the diff takes, the order it takes them in relative to
+     other lock sites in the repository, whether a guard is held across an await or a blocking
+     call, and whether the same state is read twice expecting it not to change.
+  2. Tasks and lifetimes: spawned work whose handle is dropped, loops without a shutdown or
+     cancellation check, receivers awaited without a timeout or a shutdown arm, work that
+     outlives the state it borrows, and cleanup that only runs on the success path.
+  3. Ordering and atomicity: check-then-act races, non-atomic read-modify-write on shared state,
+     assumptions about message or event ordering, and duplicate delivery.
+  4. Follow the repository's own documented discipline: read AGENTS.md, CONTRIBUTING.md and
+     nearby modules for the lock ordering, shutdown and cancellation rules this codebase already
+     states, and report deviations from them by name.
+  5. Every finding needs an interleaving: thread or task A does this, B does that, and here is
+     the resulting state. Without a concrete interleaving, do not file it.

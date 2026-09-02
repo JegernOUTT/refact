@@ -1,0 +1,36 @@
+schema_version: 1
+id: simplicity
+title: "Review: simplicity and maintainability"
+phase: parallel
+contract: findings
+depth: normal
+budget_minutes: 6
+writes_allowed: false
+applies_when:
+  always: true
+preferred_tools:
+  - code_health
+  - code_duplication
+  - dead_code
+  - cat
+  - search_pattern
+  - shell
+fallback: >-
+  If the code graph tools are unavailable, read the changed files directly and report only
+  duplication and complexity you can point at with quoted lines.
+task: |
+  Report maintainability defects the diff introduces. Deterministic signal first, opinion never.
+
+  1. Run code_health on the changed files and code_duplication for the repository, and use
+     dead_code for symbols the diff orphaned. Quote the measured numbers in the evidence.
+  2. File findings for: a function the diff made materially more complex, logic duplicated by the
+     diff instead of reused, code the diff made unreachable or unused, an abstraction with a
+     single caller introduced for no stated reason, and error handling that swallows context.
+  3. Anchor every finding to lines the diff touched. Pre-existing complexity is not this stage's
+     business unless the diff made it worse.
+  4. severity is at most medium here, and note is the right level for anything a maintainer could
+     reasonably disagree with.
+  5. Do not report formatting, naming preferences, import order, comment style, or anything the
+     project's configured linter and formatter already decide.
+
+  If the diff is small and clean, say so and return no findings.

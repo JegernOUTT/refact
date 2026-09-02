@@ -16,7 +16,6 @@ The policy selects read-only confinement for read-only chat modes and workspace-
 
 ## Review evidence commands
 
-`review_commands.enabled` defaults to `false`. When enabled, code review runs up to `review_commands.max_commands_per_review` entries from `review_commands.allowlist`; each entry provides a display `name`, literal `argv`, and `timeout_secs`. Review findings and model output cannot supply or alter command arguments. Commands run in the active workspace through the centralized `review_evidence` execution source, inherit `terminal_security` environment and sandbox policy, and degrade to a recorded skip when execution is unavailable. Keep this feature opt-in until the sandbox rollout has passed its deployment gates; only then should deployments consider enabling it by default.
 
 ## Command confirmation
 
@@ -63,7 +62,6 @@ The following production sites bypass `refact-exec`. The inventory was verified 
 | `src/ext/hooks_runner.rs:590` | trusted-internal-lifecycle | Test-only process-liveness assertion invokes fixed `kill -0`; it is not a production spawn path. |
 | `src/git/cleanup.rs:283` | trusted-internal-lifecycle | Runs fixed Git garbage collection on an engine-owned shadow repository. |
 | `src/integrations/mcp/integr_mcp_stdio.rs:98` | integration-bootstrap | Starts a configured MCP server after executable resolution and argv parsing. |
-| `src/tools/code_review_scope.rs:93` | trusted-internal-lifecycle | Collects review-scope Git evidence with fixed operations. |
 | `src/tools/tool_agent_diff.rs:512` | trusted-internal-lifecycle | Streams bounded Git evidence from a task-owned worktree. |
 | `src/tools/tool_agent_lifecycle.rs:551,562` | trusted-internal-lifecycle | Removes a task worktree and branch during fallback cleanup. |
 | `src/tools/tool_spawn_ab.rs:395,410` | trusted-internal-lifecycle | Removes losing A/B task worktrees and branches during fallback cleanup. |

@@ -1,0 +1,50 @@
+{
+  "commit": "bdb4a0eb8",
+  "scope": [
+    "refact-agent/engine/crates/refact-browser/",
+    "refact-agent/engine/src/integrations/browser_controller.rs",
+    "refact-agent/engine/src/tools/tool_chrome.rs"
+  ],
+  "targets": {
+    "recall": 0.8,
+    "reproduced_share": 0.6,
+    "wall_clock_minutes": 10
+  },
+  "true_defects": [
+    {"id": "flat-step-schema", "keywords": ["flat", "step", "schema", "deny_unknown_fields"]},
+    {"id": "compose-key-overwritten", "keywords": ["compose", "schema", "overwrit", "bool"]},
+    {"id": "width-height-overwritten", "keywords": ["width", "height", "overwrit", "integer"]},
+    {"id": "authenticator-id-rejected", "keywords": ["add_virtual_authenticator", "id", "reject"]},
+    {"id": "block-service-workers-missing", "keywords": ["block_service_workers", "schema"]},
+    {"id": "tool-failed-never-true", "keywords": ["tool_failed", "never", "true"]},
+    {"id": "skipped-steps-vanish", "keywords": ["skipped", "steps", "missing"]},
+    {"id": "nonfatal-keeps-ok-true", "keywords": ["ok", "true", "error", "non-fatal"]},
+    {"id": "call-log-emitted-twice", "keywords": ["call_log", "twice", "duplicate"]},
+    {"id": "eval-bypasses-redaction", "keywords": ["eval", "redact", "sensitive"]},
+    {"id": "canceled-download-success", "keywords": ["download", "cancel", "success"]},
+    {"id": "download-marker-missing", "keywords": ["download", "session closed", "transport_dead"]},
+    {"id": "cold-start-launch-failure", "keywords": ["describe_launch_failure", "cold", "start"]},
+    {"id": "console-counter-case", "keywords": ["console", "counter", "case", "pascal"]},
+    {"id": "dismiss-overlays-world", "keywords": ["dismiss_overlays", "worldmanager", "throwaway"]},
+    {"id": "poll-locator-transient", "keywords": ["poll_locator_until", "transient", "resolution"]},
+    {"id": "download-progress-clobbers", "keywords": ["downloadtracker", "progress", "cancel", "reason"]},
+    {"id": "screenshot-base64-duplicated", "keywords": ["screenshot", "base64", "duplicat", "artifact"]},
+    {"id": "stale-allow-dead-code", "keywords": ["dead_code", "resolve_tab", "allow"]},
+    {"id": "scroll-strategy-unused", "keywords": ["scrollstrategy", "unused", "for_attempt"]},
+    {"id": "websocket-close-skips-onclose", "keywords": ["websocket", "close", "onclose"]},
+    {"id": "websocket-test-source-text", "keywords": ["websocket", "test", "source", "assert"]},
+    {"id": "suggester-misses-prefix-typos", "keywords": ["suggest", "typo", "action", "name"]},
+    {"id": "connect-leaves-profile-dir-empty", "keywords": ["connect", "profile_dir", "empty"]}
+  ],
+  "known_false_positives": [
+    {"id": "file-chooser-leak", "keywords": ["file", "chooser", "leak", "session"]},
+    {"id": "block-in-place-panic", "keywords": ["block_in_place", "panic", "runtime"]},
+    {"id": "drag-source-handle-leak", "keywords": ["drag", "source", "handle", "leak"]},
+    {"id": "concurrent-starts-multiple-runtimes", "keywords": ["concurrent", "multiple", "runtime", "register"]},
+    {"id": "known-refs-unbounded", "keywords": ["known_refs", "unbounded", "grow"]},
+    {"id": "relaunch-discards-console", "keywords": ["relaunch", "console", "discard", "silent"]},
+    {"id": "block-service-workers-per-batch", "keywords": ["block_service_workers", "per-batch", "context"]},
+    {"id": "wait-console-runtime-available", "keywords": ["wait_for_console_message", "runtime", "available"]},
+    {"id": "duplicate-schema-finding", "keywords": ["schema", "duplicate", "severity"]}
+  ]
+}

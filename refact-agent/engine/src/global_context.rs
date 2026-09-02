@@ -235,8 +235,6 @@ struct EngineGlobalConfig {
     hooks: HooksConfig,
     #[serde(default)]
     terminal_security: TerminalSecurityConfig,
-    #[serde(default)]
-    review_commands: ReviewCommandsConfig,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -256,38 +254,6 @@ pub struct TerminalSecurityConfig {
     pub mode: TerminalSecurityMode,
     #[serde(default)]
     pub env_passthrough: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ReviewCommandConfig {
-    pub name: String,
-    pub argv: Vec<String>,
-    pub timeout_secs: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ReviewCommandsConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub allowlist: Vec<ReviewCommandConfig>,
-    #[serde(default = "default_max_commands_per_review")]
-    pub max_commands_per_review: usize,
-}
-
-fn default_max_commands_per_review() -> usize {
-    3
-}
-
-impl Default for ReviewCommandsConfig {
-    fn default() -> Self {
-        Self {
-            // Keep command-backed review evidence opt-in until sandbox rollout approval; see docs/terminal_security.md.
-            enabled: false,
-            allowlist: Vec::new(),
-            max_commands_per_review: default_max_commands_per_review(),
-        }
-    }
 }
 
 #[derive(Default)]
@@ -327,7 +293,6 @@ impl Default for EngineGlobalConfig {
             scheduler: SchedulerConfig::default(),
             hooks: HooksConfig::default(),
             terminal_security: TerminalSecurityConfig::default(),
-            review_commands: ReviewCommandsConfig::default(),
         }
     }
 }
@@ -397,7 +362,6 @@ pub struct GlobalContext {
     pub scheduler_config: SchedulerConfig,
     pub hooks_config: HooksConfig,
     pub terminal_security_config: TerminalSecurityConfig,
-    pub review_commands_config: ReviewCommandsConfig,
 }
 
 pub type SharedGlobalContext = Arc<GlobalContext>; // TODO: remove this type alias, confusing
@@ -494,7 +458,6 @@ async fn load_engine_global_config(
     SchedulerConfig,
     HooksConfig,
     TerminalSecurityConfig,
-    ReviewCommandsConfig,
 ) {
     let path = if cmdline.privacy_yaml.is_empty() {
         config_dir.join("privacy.yaml")
@@ -526,7 +489,6 @@ async fn load_engine_global_config(
         scheduler,
         config.hooks,
         config.terminal_security,
-        config.review_commands,
     )
 }
 
@@ -808,7 +770,7 @@ pub async fn create_global_context(
         http_client_builder = http_client_builder.danger_accept_invalid_certs(true)
     }
     let http_client = http_client_builder.build().unwrap();
-    let (scheduler_config, hooks_config, terminal_security_config, review_commands_config) =
+    let (scheduler_config, hooks_config, terminal_security_config) =
         load_engine_global_config(&config_dir, &cmdline).await;
     let trajectory_settings_path = crate::runtime_settings::settings_path(&config_dir);
     let trajectory_settings = crate::runtime_settings::load_from_path(&trajectory_settings_path)
@@ -914,7 +876,6 @@ pub async fn create_global_context(
         scheduler_config,
         hooks_config,
         terminal_security_config,
-        review_commands_config,
     };
     let gcx = Arc::new(cx);
     crate::files_in_workspace::watcher_init(gcx.clone()).await;
@@ -932,7 +893,7 @@ pub mod tests {
 
     #[test]
     fn test_engine_global_config_parses_trusted_projects() {
-        let yaml = "scheduler:\n  enabled: true\nhooks:\n  trusted_projects: [/home/me/repo]\nterminal_security:\n  mode: sandbox_preferred\n  env_passthrough: [HTTP_PROXY, CARGO_*]\nreview_commands:\n  enabled: true\n  allowlist:\n    - name: test\n      argv: [cargo, test]\n      timeout_secs: 600\n  max_commands_per_review: 2\n";
+        let yaml = "scheduler:\n  enabled: true\nhooks:\n  trusted_projects: [/home/me/repo]\nterminal_security:\n  mode: sandbox_preferred\n  env_passthrough: [HTTP_PROXY, CARGO_*]\n";
         let cfg: EngineGlobalConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
             cfg.hooks.trusted_projects,
@@ -947,11 +908,6 @@ pub mod tests {
             cfg.terminal_security.mode,
             TerminalSecurityMode::SandboxPreferred
         );
-        assert!(cfg.review_commands.enabled);
-        assert_eq!(cfg.review_commands.max_commands_per_review, 2);
-        assert_eq!(cfg.review_commands.allowlist[0].name, "test");
-        assert_eq!(cfg.review_commands.allowlist[0].argv, ["cargo", "test"]);
-        assert_eq!(cfg.review_commands.allowlist[0].timeout_secs, 600);
     }
 
     #[test]
@@ -962,7 +918,6 @@ pub mod tests {
             cfg.terminal_security.mode,
             TerminalSecurityMode::ApprovalOnly
         );
-        assert_eq!(cfg.review_commands, ReviewCommandsConfig::default());
     }
 
     #[test]
@@ -1205,7 +1160,6 @@ pub mod tests {
             scheduler_config: SchedulerConfig::default(),
             hooks_config: HooksConfig::default(),
             terminal_security_config: TerminalSecurityConfig::default(),
-            review_commands_config: ReviewCommandsConfig::default(),
         };
         Arc::new(cx)
     }

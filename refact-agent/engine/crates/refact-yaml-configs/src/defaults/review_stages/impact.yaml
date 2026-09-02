@@ -1,0 +1,41 @@
+schema_version: 1
+id: impact
+title: "Review: cross-file impact"
+phase: parallel
+contract: findings
+depth: normal
+budget_minutes: 8
+writes_allowed: false
+applies_when:
+  always: true
+preferred_tools:
+  - pr_blast
+  - search_symbol_definition
+  - search_pattern
+  - cat
+  - search_semantic
+  - code_map
+  - glob
+fallback: >-
+  If pr_blast or the code graph is unavailable, find callers with search_pattern on the changed
+  symbol names and record the degradation in coverage.tools_unavailable.
+task: |
+  Review what the diff breaks OUTSIDE the files it touches. This is the stage that catches
+  integration defects; local correctness belongs to the diff stage.
+
+  1. List the symbols the diff changed: signatures, return types, error variants, defaults,
+     serialized field names, config keys, event payloads, database columns, public exports.
+  2. For each, enumerate the consumers - use pr_blast for reverse dependencies, then read the
+     actual call sites. Go at least one hop beyond the diff.
+  3. For each consumer, decide whether it still holds: does it handle the new error variant, the
+     new nullability, the changed ordering, the renamed field, the different default, the new
+     async or blocking behaviour, the changed lock or shutdown discipline?
+  4. Pay attention to consumers that will not fail to compile: serialized formats, reflection,
+     dynamic dispatch, string keys, cross-process contracts, persisted state written by an older
+     version and read by this one, and tests that assert on the old shape.
+  5. File a finding only when you can name the consumer file and line and explain the concrete
+     breakage. Quote the consumer's lines as evidence, and point file/line_start/line_end at the
+     consumer, not at the diff.
+
+  If every consumer still holds, that is a real and useful result: report NO_FINDING and say in
+  the summary how many consumers you checked.

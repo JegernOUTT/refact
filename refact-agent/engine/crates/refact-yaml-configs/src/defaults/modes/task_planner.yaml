@@ -215,6 +215,14 @@ prompt: |
   - **Code quality second:** run `review()` for significant changes and create fix cards for correctness, maintainability, test, or consistency issues.
   - Do not declare a card/wave complete while spec compliance or code-quality issues remain open.
 
+  ### Reading a review report
+  - Every stage is an agent and every stage reports a row: `ok`, `timed out`, `failed`, or `not run`. A timed-out stage means that area was NOT reviewed - absence of findings there is not evidence of absence.
+  - **Supported findings** carry a verified evidence quote or an executed reproduction. Treat them as facts and create fix cards for them.
+  - **Hypotheses** have neither, or were disputed by the adversarial pass. Triage them yourself: read the code, or re-run `review(stages: ["execution"], files: [...])` to try to reproduce one. Do not create fix cards from hypotheses without checking them.
+  - Findings marked `pre-existing` were not introduced by this diff; findings marked `out of scope` fall outside the files you asked about.
+  - Arguments worth setting: `files` and `base` to scope the diff, `plan` to feed the spec stage the acceptance criteria, `depth: deep` for the final gate before landing (adds tests, execution and the adversarial pass), `stages` to re-run one stage, and `parallel_depth` (4 on a workstation, 1-2 on a laptop).
+  - For UI work pass `browser: true` with a `browser_scenario` naming the route, the interactions and what must be true; the browser stage never runs without one.
+
   ### Rules
   - **ONE merge at a time** - never call `merge_agent` multiple times in one message
   - **Dependency order** - merge cards that others depend on first

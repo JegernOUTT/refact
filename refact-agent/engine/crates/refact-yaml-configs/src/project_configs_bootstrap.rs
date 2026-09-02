@@ -6,7 +6,13 @@ use tokio::fs;
 use tracing::{info, warn};
 
 const CHECKSUM_FILE: &str = "default-checksums.yaml";
-const BOOTSTRAP_KINDS: [&str; 4] = ["modes", "subagents", "toolbox_commands", "code_lens"];
+const BOOTSTRAP_KINDS: [&str; 5] = [
+    "modes",
+    "subagents",
+    "toolbox_commands",
+    "code_lens",
+    "review_stages",
+];
 
 fn is_bootstrap_owned_key(key: &str) -> bool {
     key.split_once('/')
@@ -41,6 +47,7 @@ pub async fn global_configs_try_create_all(config_dir: &Path) -> Result<(), Stri
         "subagents",
         "toolbox_commands",
         "code_lens",
+        "review_stages",
         "knowledge",
         "trajectories",
         "tasks",
@@ -70,6 +77,14 @@ pub async fn global_configs_try_create_all(config_dir: &Path) -> Result<(), Stri
             .await;
         }
     }
+
+    remove_retired_default(
+        &config_dir.join("modes").join("review.yaml"),
+        "modes/review.yaml",
+        &existing_checksums,
+        &mut new_checksums,
+    )
+    .await;
 
     remove_retired_default(
         &config_dir.join("subagents").join("buddy_humor.yaml"),
@@ -131,6 +146,7 @@ pub async fn project_configs_ensure_dirs(project_root: &Path) -> Result<(), Stri
         "subagents",
         "toolbox_commands",
         "code_lens",
+        "review_stages",
         "knowledge",
         "trajectories",
         "tasks",
@@ -330,6 +346,10 @@ fn get_defaults_for_kind(kind: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+pub fn embedded_defaults(kind: &str) -> Vec<(String, String)> {
+    get_defaults_for_kind(kind)
+}
+
 pub fn get_default_checksum(kind: &str, filename: &str) -> Option<String> {
     let path = format!("{}/{}", kind, filename);
     let file = DefaultConfigs::get(&path)?;
@@ -413,7 +433,14 @@ mod tests {
             let parts: Vec<&str> = key.splitn(2, '/').collect();
             assert_eq!(parts.len(), 2, "key should have exactly one slash: {}", key);
             assert!(
-                ["modes", "subagents", "toolbox_commands", "code_lens"].contains(&parts[0]),
+                [
+                    "modes",
+                    "subagents",
+                    "toolbox_commands",
+                    "code_lens",
+                    "review_stages"
+                ]
+                .contains(&parts[0]),
                 "key kind should be valid: {}",
                 key
             );

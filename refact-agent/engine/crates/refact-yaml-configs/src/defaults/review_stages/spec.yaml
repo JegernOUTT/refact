@@ -1,0 +1,36 @@
+schema_version: 1
+id: spec
+title: "Review: specification compliance"
+phase: parallel
+contract: findings
+depth: normal
+budget_minutes: 6
+writes_allowed: false
+applies_when:
+  always: true
+preferred_tools:
+  - cat
+  - search_pattern
+  - glob
+  - tree
+  - search_semantic
+fallback: >-
+  If no plan or acceptance criteria were supplied, derive the intent from the diff, the commit
+  messages, and the documentation it touches, and say in the summary that the intent was inferred.
+task: |
+  Compare what was asked for against what was implemented. Report only gaps, not restatements.
+
+  1. Take the plan, acceptance criteria and focus text as the specification. If none were given,
+     reconstruct the intent from the changed documentation, tests and commit messages.
+  2. Walk each requirement and locate the code that satisfies it. Report a finding when a
+     requirement is unimplemented, partially implemented, implemented somewhere the requirement
+     did not ask for, or contradicted by the code.
+  3. Report claims the change makes but does not keep: documentation, comments, log messages,
+     error text, README or config descriptions that no longer match the behaviour.
+  4. Report requirements that are implemented but untested when the specification asked for the
+     behaviour to be guaranteed.
+  5. Ambiguity is not a defect. If the requirement is unclear, file it as a note with the
+     ambiguity spelled out instead of asserting a violation.
+
+  Point file/line_start/line_end at the code that fails the requirement, or at the closest place
+  the missing code should have been. Quote it verbatim.

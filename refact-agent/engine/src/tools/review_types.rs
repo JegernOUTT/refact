@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewDepth {
@@ -22,101 +23,50 @@ impl ReviewDepth {
         }
     }
 }
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewSeverity {
+    Note,
     Low,
     Medium,
     High,
-    Critical,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VerificationStatus {
-    Unverified,
-    Verified,
-    Downgraded,
-    Rejected,
-    NeedsHumanValidation,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum RankTier {
-    ExecutionReproduced,
-    Corroborated,
-    Verified,
-    NeedsHumanValidation,
-    #[default]
-    Unverified,
-    Downgraded,
+    Blocker,
 }
 
-impl RankTier {
+impl ReviewSeverity {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "blocker" | "critical" | "fatal" => Some(Self::Blocker),
+            "high" | "major" => Some(Self::High),
+            "medium" | "moderate" => Some(Self::Medium),
+            "low" | "minor" => Some(Self::Low),
+            "note" | "info" | "nit" | "trivial" => Some(Self::Note),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Blocker => "blocker",
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+            Self::Note => "note",
+        }
+    }
+
     pub fn rank(&self) -> u8 {
         match self {
-            Self::ExecutionReproduced => 5,
-            Self::Corroborated => 4,
-            Self::Verified => 3,
-            Self::NeedsHumanValidation => 2,
-            Self::Unverified => 1,
-            Self::Downgraded => 0,
+            Self::Blocker => 4,
+            Self::High => 3,
+            Self::Medium => 2,
+            Self::Low => 1,
+            Self::Note => 0,
         }
     }
+}
 
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::ExecutionReproduced => "execution-reproduced",
-            Self::Corroborated => "corroborated",
-            Self::Verified => "verified",
-            Self::NeedsHumanValidation => "needs human validation",
-            Self::Unverified => "unverified",
-            Self::Downgraded => "downgraded",
-        }
-    }
-}
-pub mod evidence_kinds {
-    pub const EXCERPT: &str = "excerpt";
-    pub const DIFF_HUNK: &str = "diff_hunk";
-    pub const SYMBOL: &str = "symbol";
-    pub const CHECK: &str = "check";
-    pub const STATIC_FACT: &str = "static_fact";
-    pub const COMMAND_OUTPUT: &str = "command_output";
-    pub const EXECUTION_OUTPUT: &str = "execution_output";
-    pub const MUTATION_PROBE: &str = "mutation_probe";
-    pub const SCREENSHOT: &str = "screenshot";
-    pub const CONSOLE_LOG: &str = "console_log";
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ReviewEvidence {
-    pub kind: String,
-    pub path: Option<String>,
-    pub line1: Option<u32>,
-    pub line2: Option<u32>,
-    pub content: String,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ReviewFinding {
-    pub id: String,
-    pub category: String,
-    pub severity: ReviewSeverity,
-    pub confidence: f32,
-    pub verification_status: VerificationStatus,
-    #[serde(default)]
-    pub rank_tier: RankTier,
-    #[serde(default)]
-    pub sources: Vec<String>,
-    pub file: String,
-    pub line1: u32,
-    pub line2: u32,
-    pub claim: String,
-    pub evidence: Vec<ReviewEvidence>,
-    pub impact: Option<String>,
-    pub remediation: Option<String>,
-    pub checks_performed: Vec<String>,
-}
-/// How far the reviewer may wander outside the requested `files`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeMode {
@@ -145,236 +95,318 @@ impl ScopeMode {
     }
 }
 
-/// Reported in every review, whatever the mode: silence about scope growth is what let
-/// most findings land outside the requested files unnoticed.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct ScopeExpansion {
+pub struct CommandRun {
+    pub cmd: String,
+    pub exit: i32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StageCoverage {
+    #[serde(default)]
+    pub files_read: Vec<String>,
+    #[serde(default)]
+    pub commands_run: Vec<CommandRun>,
+    #[serde(default)]
+    pub tools_unavailable: Vec<String>,
+    #[serde(default)]
+    pub stopped_early: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageStatusKind {
+    Ok,
+    TimedOut,
+    Failed,
+    NotRun,
+}
+
+impl StageStatusKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::TimedOut => "timed out",
+            Self::Failed => "failed",
+            Self::NotRun => "not run",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct StageRun {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub status: StageStatusKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub duration_ms: u64,
+    pub findings: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub coverage: StageCoverage,
+}
+
+impl StageRun {
+    fn base(name: &str, status: StageStatusKind, reason: Option<String>) -> Self {
+        Self {
+            name: name.to_string(),
+            model: None,
+            status,
+            reason,
+            duration_ms: 0,
+            findings: 0,
+            summary: None,
+            coverage: StageCoverage::default(),
+        }
+    }
+
+    pub fn ok(name: &str, model: Option<String>, duration_ms: u64) -> Self {
+        let mut run = Self::base(name, StageStatusKind::Ok, None);
+        run.model = model;
+        run.duration_ms = duration_ms;
+        run
+    }
+
+    pub fn timed_out(name: &str, model: Option<String>, duration_ms: u64, reason: &str) -> Self {
+        let mut run = Self::base(name, StageStatusKind::TimedOut, Some(reason.to_string()));
+        run.model = model;
+        run.duration_ms = duration_ms;
+        run
+    }
+
+    pub fn failed(name: &str, model: Option<String>, duration_ms: u64, reason: &str) -> Self {
+        let mut run = Self::base(name, StageStatusKind::Failed, Some(reason.to_string()));
+        run.model = model;
+        run.duration_ms = duration_ms;
+        run
+    }
+
+    pub fn not_run(name: &str, reason: &str) -> Self {
+        Self::base(name, StageStatusKind::NotRun, Some(reason.to_string()))
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.status == StageStatusKind::Ok
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct FindingLocation {
+    pub file: String,
+    pub line_start: u32,
+    pub line_end: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct Dispute {
+    pub stage: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewFinding {
+    pub id: String,
+    pub stage: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub title: String,
+    pub severity: ReviewSeverity,
+    pub file: String,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub claim: String,
+    pub evidence: String,
+    pub evidence_present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reproduction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
+    pub introduced_by_diff: bool,
+    pub out_of_scope: bool,
+    #[serde(default)]
+    pub reported_by: Vec<String>,
+    #[serde(default)]
+    pub locations: Vec<FindingLocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disputed: Option<Dispute>,
+}
+
+impl ReviewFinding {
+    pub fn is_hypothesis(&self) -> bool {
+        if self.disputed.is_some() {
+            return true;
+        }
+        self.reproduction.is_none() && !self.evidence_present
+    }
+
+    pub fn has_reproduction(&self) -> bool {
+        self.reproduction
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewScopeSummary {
     pub mode: String,
     pub requested_files: usize,
     pub reviewed_files: usize,
-    pub rejected_out_of_scope: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ReviewScopeSummary {
-    pub files_reviewed: Vec<String>,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<String>,
-    pub diff_base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expansion: Option<ScopeExpansion>,
+    pub expansion: Option<String>,
+    #[serde(default)]
+    pub out_of_scope_findings: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ReviewDiffSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    pub changed_files: usize,
+    pub hunks: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct MechanicalCheck {
-    pub name: String,
-    pub command: Vec<String>,
-    pub exit_status: i32,
-    pub output_excerpt: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct MechanicalResult {
-    pub passed: bool,
-    pub checks: Vec<MechanicalCheck>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewStageStatus {
-    Skipped,
-    Completed,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ReviewStage {
-    pub name: String,
-    pub status: ReviewStageStatus,
-    pub reason: Option<String>,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentRunStatus {
-    Ran,
-    Skipped,
-    Failed,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct AgentRunReport {
-    pub agent: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    pub status: AgentRunStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    pub candidates: usize,
-    pub survived: usize,
-    pub duration_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub steps: Option<usize>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ReviewPipelineMetadata {
-    pub stages: Vec<ReviewStage>,
-    pub stopped_reason: Option<String>,
-    pub mechanical: Option<MechanicalResult>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub depth: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agents: Vec<AgentRunReport>,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ReviewReport {
+    pub depth: String,
     pub scope: ReviewScopeSummary,
+    pub diff: ReviewDiffSummary,
+    pub stages: Vec<StageRun>,
     pub findings: Vec<ReviewFinding>,
-    pub checks_performed: Vec<String>,
-    pub summary: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assumed_intent: Option<String>,
+    pub duration_ms: u64,
     #[serde(default)]
-    pub pipeline: ReviewPipelineMetadata,
+    pub duplicates_merged: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scratch_dir: Option<String>,
+}
+
+impl ReviewReport {
+    pub fn facts(&self) -> Vec<&ReviewFinding> {
+        self.findings
+            .iter()
+            .filter(|finding| !finding.is_hypothesis())
+            .collect()
+    }
+
+    pub fn hypotheses(&self) -> Vec<&ReviewFinding> {
+        self.findings
+            .iter()
+            .filter(|finding| finding.is_hypothesis())
+            .collect()
+    }
+
+    pub fn reproduced(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|finding| !finding.is_hypothesis() && finding.has_reproduction())
+            .count()
+    }
+
+    pub fn pre_existing(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|finding| !finding.introduced_by_diff)
+            .count()
+    }
+
+    pub fn incomplete_stages(&self) -> Vec<&StageRun> {
+        self.stages
+            .iter()
+            .filter(|stage| !stage.is_complete())
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn finding(id: &str) -> ReviewFinding {
+        ReviewFinding {
+            id: id.to_string(),
+            stage: "diff".to_string(),
+            model: Some("some-model".to_string()),
+            title: "Error is dropped".to_string(),
+            severity: ReviewSeverity::High,
+            file: "src/lib.rs".to_string(),
+            line_start: 10,
+            line_end: 14,
+            claim: "The error arm returns success.".to_string(),
+            evidence: "return Ok(());".to_string(),
+            evidence_present: true,
+            reproduction: Some("cargo test -p thing failing_case".to_string()),
+            fix: Some("Propagate the error.".to_string()),
+            introduced_by_diff: true,
+            out_of_scope: false,
+            reported_by: vec!["diff".to_string()],
+            locations: vec![],
+            disputed: None,
+        }
+    }
+
     #[test]
-    fn tool_review_report_serde_roundtrip_covers_all_enum_variants() {
-        let severities = [
-            ReviewSeverity::Low,
-            ReviewSeverity::Medium,
-            ReviewSeverity::High,
-            ReviewSeverity::Critical,
-            ReviewSeverity::Critical,
-        ];
-        let statuses = [
-            VerificationStatus::Unverified,
-            VerificationStatus::Verified,
-            VerificationStatus::Downgraded,
-            VerificationStatus::Rejected,
-            VerificationStatus::NeedsHumanValidation,
-        ];
-        let tiers = [
-            RankTier::Unverified,
-            RankTier::ExecutionReproduced,
-            RankTier::Corroborated,
-            RankTier::Verified,
-            RankTier::Downgraded,
-        ];
+    fn review_report_serde_roundtrip_keeps_every_field() {
+        let mut hypothesis = finding("rf-2");
+        hypothesis.reproduction = None;
+        hypothesis.evidence_present = false;
+        hypothesis.severity = ReviewSeverity::Note;
         let report = ReviewReport {
+            depth: "deep".to_string(),
             scope: ReviewScopeSummary {
-                files_reviewed: vec!["src/lib.rs".to_string()],
-                focus: Some("security".to_string()),
-                diff_base: Some("main".to_string()),
-                expansion: Some(ScopeExpansion {
-                    mode: "broad".to_string(),
-                    requested_files: 1,
-                    reviewed_files: 1,
-                    rejected_out_of_scope: 0,
-                }),
+                mode: "strict".to_string(),
+                requested_files: 12,
+                reviewed_files: 14,
+                files: vec!["src/lib.rs".to_string()],
+                focus: Some("browser lifecycle".to_string()),
+                expansion: Some("+2 dependency edges".to_string()),
+                out_of_scope_findings: 1,
             },
-            findings: severities
-                .into_iter()
-                .zip(statuses)
-                .zip(tiers)
-                .enumerate()
-                .map(
-                    |(index, ((severity, verification_status), rank_tier))| ReviewFinding {
-                        id: format!("finding-{index}"),
-                        category: "correctness".to_string(),
-                        severity,
-                        confidence: 0.9,
-                        verification_status,
-                        rank_tier,
-                        sources: vec![
-                            "l1_diff@thinking".to_string(),
-                            "s4_test_integrity".to_string(),
-                        ],
-                        file: "src/lib.rs".to_string(),
-                        line1: 10,
-                        line2: 12,
-                        claim: "A claim".to_string(),
-                        evidence: vec![ReviewEvidence {
-                            kind: "excerpt".to_string(),
-                            path: Some("src/lib.rs".to_string()),
-                            line1: Some(10),
-                            line2: Some(12),
-                            content: "let value = 1;".to_string(),
-                        }],
-                        impact: Some("An impact".to_string()),
-                        remediation: Some("A remediation".to_string()),
-                        checks_performed: vec!["cargo check".to_string()],
-                    },
-                )
-                .collect(),
-            checks_performed: vec!["cargo check".to_string()],
-            summary: "Review summary".to_string(),
-            assumed_intent: Some("Ship the parser".to_string()),
-            pipeline: ReviewPipelineMetadata {
-                stages: vec![ReviewStage {
-                    name: "mechanical".to_string(),
-                    status: ReviewStageStatus::Completed,
-                    reason: None,
-                }],
-                stopped_reason: None,
-                mechanical: Some(MechanicalResult {
-                    passed: true,
-                    checks: vec![MechanicalCheck {
-                        name: "cargo check".to_string(),
-                        command: vec!["cargo".to_string(), "check".to_string()],
-                        exit_status: 0,
-                        output_excerpt: "Finished".to_string(),
-                    }],
-                }),
-                depth: Some("deep".to_string()),
-                agents: vec![AgentRunReport {
-                    agent: "l1_diff".to_string(),
-                    model: Some("thinking-model".to_string()),
-                    status: AgentRunStatus::Ran,
-                    reason: None,
-                    candidates: 3,
-                    survived: 2,
-                    duration_ms: 1200,
-                    steps: Some(1),
-                }],
+            diff: ReviewDiffSummary {
+                base: Some("1a2b3c".to_string()),
+                head: Some("HEAD".to_string()),
+                changed_files: 7,
+                hunks: 31,
             },
+            stages: vec![
+                StageRun::ok("diff", Some("model-a".to_string()), 4010),
+                StageRun::timed_out("dependencies", None, 360000, "stage_budget"),
+                StageRun::failed("spec", None, 10, "output_contract"),
+                StageRun::not_run("browser", "applies_when"),
+            ],
+            findings: vec![finding("rf-1"), hypothesis],
+            duration_ms: 500000,
+            duplicates_merged: 3,
+            scratch_dir: Some(".refact/review_scratch/rv-1".to_string()),
         };
 
         let value = serde_json::to_value(&report).unwrap();
-        assert_eq!(value["findings"][0]["severity"], "low");
-        assert_eq!(value["findings"][1]["severity"], "medium");
-        assert_eq!(value["findings"][2]["severity"], "high");
-        assert_eq!(value["findings"][3]["severity"], "critical");
-        assert_eq!(value["findings"][0]["verification_status"], "unverified");
-        assert_eq!(value["findings"][1]["verification_status"], "verified");
-        assert_eq!(value["findings"][2]["verification_status"], "downgraded");
-        assert_eq!(value["findings"][3]["verification_status"], "rejected");
-        assert_eq!(
-            value["findings"][4]["verification_status"],
-            "needs_human_validation"
-        );
-        assert_eq!(value["findings"][1]["rank_tier"], "execution_reproduced");
-        assert_eq!(value["findings"][2]["rank_tier"], "corroborated");
-        assert_eq!(value["findings"][0]["sources"][0], "l1_diff@thinking");
-        assert_eq!(value["pipeline"]["stages"][0]["status"], "completed");
-        assert_eq!(value["pipeline"]["depth"], "deep");
-        assert_eq!(value["pipeline"]["agents"][0]["agent"], "l1_diff");
-        assert_eq!(value["pipeline"]["agents"][0]["status"], "ran");
-        assert_eq!(value["assumed_intent"], "Ship the parser");
-        assert_eq!(
-            value["pipeline"]["mechanical"]["checks"][0]["exit_status"],
-            0
-        );
+        assert_eq!(value["findings"][0]["severity"], "high");
+        assert_eq!(value["findings"][1]["severity"], "note");
+        assert_eq!(value["stages"][0]["status"], "ok");
+        assert_eq!(value["stages"][1]["status"], "timed_out");
+        assert_eq!(value["stages"][1]["reason"], "stage_budget");
+        assert_eq!(value["stages"][3]["status"], "not_run");
+        assert_eq!(value["scope"]["mode"], "strict");
+        assert!(value["findings"][0].get("confidence").is_none());
+        assert!(value["findings"][0].get("rank_tier").is_none());
+        assert!(value["findings"][0].get("verification_status").is_none());
         assert_eq!(
             serde_json::from_value::<ReviewReport>(value).unwrap(),
             report
@@ -382,44 +414,89 @@ mod tests {
     }
 
     #[test]
-    fn tool_review_finding_deserializes_legacy_json_without_new_fields() {
-        let legacy = serde_json::json!({
-            "id": "rf-1234abcd",
-            "category": "correctness",
-            "severity": "high",
-            "confidence": 0.8,
-            "verification_status": "verified",
-            "file": "src/lib.rs",
-            "line1": 1,
-            "line2": 2,
-            "claim": "A claim",
-            "evidence": [],
-            "impact": null,
-            "remediation": null,
-            "checks_performed": []
+    fn review_hypotheses_are_findings_without_reproduction_and_without_evidence() {
+        let mut quoted_only = finding("rf-quote");
+        quoted_only.reproduction = None;
+        let mut repro_only = finding("rf-repro");
+        repro_only.evidence_present = false;
+        let mut neither = finding("rf-none");
+        neither.reproduction = None;
+        neither.evidence_present = false;
+        let mut disputed = finding("rf-disputed");
+        disputed.disputed = Some(Dispute {
+            stage: "adversarial".to_string(),
+            reason: "guarded by an earlier check".to_string(),
         });
-        let finding: ReviewFinding = serde_json::from_value(legacy).unwrap();
-        assert_eq!(finding.rank_tier, RankTier::Unverified);
-        assert!(finding.sources.is_empty());
+
+        let report = ReviewReport {
+            depth: "normal".to_string(),
+            scope: ReviewScopeSummary::default(),
+            diff: ReviewDiffSummary::default(),
+            stages: vec![],
+            findings: vec![quoted_only, repro_only, neither, disputed],
+            duration_ms: 0,
+            duplicates_merged: 0,
+            scratch_dir: None,
+        };
+
+        let hypotheses: Vec<&str> = report
+            .hypotheses()
+            .into_iter()
+            .map(|finding| finding.id.as_str())
+            .collect();
+        assert_eq!(hypotheses, ["rf-none", "rf-disputed"]);
+        let facts: Vec<&str> = report
+            .facts()
+            .into_iter()
+            .map(|finding| finding.id.as_str())
+            .collect();
+        assert_eq!(facts, ["rf-quote", "rf-repro"]);
+        assert_eq!(report.reproduced(), 1);
     }
 
     #[test]
-    fn tool_review_depth_parses_known_values_only() {
+    fn review_severity_parses_current_and_legacy_words_and_rejects_junk() {
+        assert_eq!(ReviewSeverity::parse("blocker"), Some(ReviewSeverity::Blocker));
+        assert_eq!(
+            ReviewSeverity::parse(" CRITICAL "),
+            Some(ReviewSeverity::Blocker)
+        );
+        assert_eq!(ReviewSeverity::parse("nit"), Some(ReviewSeverity::Note));
+        assert_eq!(ReviewSeverity::parse("showstopper"), None);
+        assert!(ReviewSeverity::Blocker.rank() > ReviewSeverity::High.rank());
+        assert!(ReviewSeverity::Low.rank() > ReviewSeverity::Note.rank());
+    }
+
+    #[test]
+    fn review_stage_rows_record_incomplete_stages() {
+        let report = ReviewReport {
+            depth: "normal".to_string(),
+            scope: ReviewScopeSummary::default(),
+            diff: ReviewDiffSummary::default(),
+            stages: vec![
+                StageRun::ok("diff", None, 1),
+                StageRun::timed_out("tests", None, 2, "stage_budget"),
+                StageRun::not_run("browser", "applies_when"),
+            ],
+            findings: vec![],
+            duration_ms: 0,
+            duplicates_merged: 0,
+            scratch_dir: None,
+        };
+
+        let incomplete: Vec<&str> = report
+            .incomplete_stages()
+            .into_iter()
+            .map(|stage| stage.name.as_str())
+            .collect();
+        assert_eq!(incomplete, ["tests", "browser"]);
+    }
+
+    #[test]
+    fn review_depth_parses_known_values_only() {
         assert_eq!(ReviewDepth::parse("normal"), Some(ReviewDepth::Normal));
-        assert_eq!(ReviewDepth::parse("quick"), Some(ReviewDepth::Normal));
-        assert_eq!(ReviewDepth::parse(" Standard "), Some(ReviewDepth::Normal));
         assert_eq!(ReviewDepth::parse("DEEP"), Some(ReviewDepth::Deep));
         assert_eq!(ReviewDepth::parse("max"), None);
-        assert_eq!(ReviewDepth::Normal.as_str(), "normal");
         assert!(ReviewDepth::Normal < ReviewDepth::Deep);
-    }
-
-    #[test]
-    fn tool_review_rank_tier_ordering_matches_evidence_strength() {
-        assert!(RankTier::ExecutionReproduced.rank() > RankTier::Corroborated.rank());
-        assert!(RankTier::Corroborated.rank() > RankTier::Verified.rank());
-        assert!(RankTier::Verified.rank() > RankTier::NeedsHumanValidation.rank());
-        assert!(RankTier::NeedsHumanValidation.rank() > RankTier::Unverified.rank());
-        assert!(RankTier::Unverified.rank() > RankTier::Downgraded.rank());
     }
 }

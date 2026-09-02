@@ -1,0 +1,40 @@
+schema_version: 1
+id: diff
+title: "Review: diff correctness"
+phase: parallel
+contract: findings
+depth: normal
+budget_minutes: 8
+writes_allowed: false
+applies_when:
+  always: true
+preferred_tools:
+  - cat
+  - search_pattern
+  - search_symbol_definition
+  - glob
+  - tree
+  - shell
+fallback: >-
+  If symbol lookup is unavailable, fall back to search_pattern over the repository and say so in
+  coverage.tools_unavailable.
+task: |
+  Find correctness defects introduced by this diff.
+
+  1. Read every hunk in scope, then read the whole enclosing function or method for each hunk -
+     never judge a change from the hunk alone.
+  2. For each changed function, read at least one caller and one callee. A change is only correct
+     relative to how it is used.
+  3. Look for: inverted or missing conditions, off-by-one and boundary errors, dropped or
+     swallowed errors, early returns that skip cleanup, resource lifetimes, unchecked unwraps and
+     casts, state mutated after validation, values that can never take the branch they gate,
+     newly unreachable code, and behaviour that silently changed for existing callers.
+  4. Before filing, try to disprove the finding: read the guard that would prevent it, the test
+     that would catch it, and the invariant the module documents. If the guard exists, drop it.
+  5. Every finding must quote the exact lines it is about and describe one concrete failure
+     scenario: the input or state, the path taken, and the wrong outcome. If you cannot name that
+     scenario, do not file it.
+  6. reproduction is a command, a test name, or a call trace through named functions - only fill
+     it in when you actually followed that path. Otherwise leave it null.
+
+  NO_FINDING is a valid and frequent result. Do not invent issues to look useful.

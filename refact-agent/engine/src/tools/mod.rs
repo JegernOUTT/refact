@@ -1,11 +1,9 @@
 pub(crate) mod native_enrichment;
 pub mod review_agents;
-pub mod review_candidates;
 pub mod review_evidence;
-mod review_merge;
+pub mod review_merge;
 pub mod review_scope;
 pub mod review_types;
-mod review_verify;
 pub mod scope_utils;
 pub mod shell_gate;
 pub mod shell_gate_llm;

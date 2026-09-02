@@ -1,0 +1,37 @@
+schema_version: 1
+id: dependencies
+title: "Review: dependencies and imports"
+phase: parallel
+contract: findings
+depth: normal
+budget_minutes: 6
+writes_allowed: false
+applies_when:
+  always: true
+preferred_tools:
+  - cat
+  - glob
+  - search_pattern
+  - shell
+  - tree
+fallback: >-
+  If the package manager cannot be run, resolve every import by reading manifests, lockfiles and
+  the workspace layout, and record what you could not verify in coverage.tools_unavailable.
+task: |
+  Prove that everything the diff imports or depends on actually resolves.
+
+  1. Collect every import, require, use, include and dynamic import the diff adds or changes.
+  2. Resolve each one: a language builtin, a declared dependency in the manifest that owns this
+     file, a workspace member, or a path inside the repository. Say which manifest you checked.
+  3. File a finding for anything that does not resolve: a package used but not declared, a
+     declared version that does not match the lockfile, a workspace member not registered, an
+     optional or dev dependency used in production code, a feature flag not enabled, a
+     platform-specific dependency used unconditionally, or a path import that does not exist.
+  4. Check dependency changes in manifests too: a bumped version whose breaking changes the code
+     does not handle, a removed dependency still imported somewhere, a new dependency with a
+     licence the repository's policy forbids, and duplicate implementations of something the
+     repository already depends on.
+  5. evidence is the import line plus the manifest section you checked. reproduction is the
+     resolve or build command when you ran one.
+
+  Do not report a CVE unless you can show the vulnerable API is actually called by this code.

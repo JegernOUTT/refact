@@ -1,1183 +1,288 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
-use crate::exec::command_policy::{
-    build_exec_request, queue_sandbox_audit, ChatMode, CommandKind, CommandPolicyInput, ExecSource,
-};
-use crate::exec::{ExecOutputStream, ExecStatus};
 use crate::files_in_workspace::get_file_text_from_memory_or_disk;
-use crate::global_context::{GlobalContext, ReviewCommandConfig};
-use crate::tools::review_scope::ReviewScope;
-use crate::tools::review_types::{
-    MechanicalCheck, MechanicalResult, ReviewEvidence, ReviewFinding, ReviewReport, ReviewSeverity,
-};
+use crate::global_context::GlobalContext;
+use crate::tools::review_scope::{paths_match, ReviewScope};
+use crate::tools::review_types::ReviewFinding;
 
-const EXCERPT_CONTEXT_LINES: u32 = 5;
-const MAX_EXCERPT_BYTES: usize = 1024;
-const MAX_DIFF_HUNK_BYTES: usize = 640;
-const MAX_SYMBOL_BYTES: usize = 384;
-const MAX_SYMBOLS_PER_FINDING: usize = 8;
-const MAX_COMMAND_OUTPUT_BYTES: usize = 1536;
-const COMMAND_TRANSCRIPT_BYTES: usize = 64 * 1024;
-const COMMAND_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
-const TRUNCATION_MARKER: &str = "\n[evidence truncated]";
-const MECHANICAL_EXECUTION_FAILED: i32 = -1;
+const WINDOW_LINES: u32 = 3;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvidenceRejection {
-    pub finding_id: String,
-    pub index: usize,
-    pub reason: String,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EvidenceOutcome {
+    pub checked: usize,
+    pub present: usize,
+    pub relocated: usize,
+    pub unreadable: usize,
 }
 
-impl EvidenceRejection {
-    pub fn check_name(&self) -> String {
-        let key = if self.finding_id.is_empty() {
-            self.index.to_string()
-        } else {
-            self.finding_id.clone()
-        };
-        format!("evidence_reject:{key}:{}", self.reason)
+fn strip_line_number_prefix(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    let digits: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() || digits.len() > 7 {
+        return trimmed;
     }
-}
-
-#[derive(Default)]
-struct SymbolGraphFacts {
-    ids_by_name_and_path: HashMap<(String, String), Vec<i64>>,
-    incoming_by_id: HashMap<i64, usize>,
-}
-
-impl SymbolGraphFacts {
-    fn from_cached(cached: &refact_codegraph::CachedGraphAnalytics) -> Self {
-        let mut facts = Self::default();
-        for (id, name, path) in &cached.data.nodes {
-            facts
-                .ids_by_name_and_path
-                .entry((name.clone(), normalize_path(path)))
-                .or_default()
-                .push(*id);
+    let rest = &trimmed[digits.len()..];
+    for marker in [": ", ":", "| ", "|", " "] {
+        if let Some(stripped) = rest.strip_prefix(marker) {
+            return stripped;
         }
-        for (_src, dst, kind) in &cached.data.edges {
-            if kind != "defined_in" {
-                *facts.incoming_by_id.entry(*dst).or_default() += 1;
-            }
-        }
-        facts
     }
-
-    fn usage_count(&self, name: &str, path: &str) -> usize {
-        self.ids_by_name_and_path
-            .get(&(name.to_string(), normalize_path(path)))
-            .into_iter()
-            .flatten()
-            .map(|id| self.incoming_by_id.get(id).copied().unwrap_or(0))
-            .sum()
-    }
+    trimmed
 }
 
-fn normalize_path(path: &str) -> String {
-    path.replace('\\', "/")
-        .trim_start_matches("./")
-        .trim_end_matches('/')
-        .to_string()
+pub fn normalize_snippet(text: &str) -> String {
+    text.lines()
+        .map(strip_line_number_prefix)
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-fn path_matches(candidate: &str, scope_path: &Path) -> bool {
-    let candidate = normalize_path(candidate);
-    let scope_path = normalize_path(&scope_path.to_string_lossy());
-    if Path::new(&candidate).is_absolute() {
-        return candidate == scope_path;
-    }
-    scope_path == candidate || scope_path.ends_with(&format!("/{candidate}"))
-}
-
-fn resolve_scope_path(scope: &ReviewScope, candidate: &str) -> Option<PathBuf> {
-    let matches = scope
-        .files
-        .iter()
-        .filter(|path| path_matches(candidate, path))
-        .collect::<Vec<_>>();
-    (matches.len() == 1).then(|| matches[0].clone())
-}
-
-fn truncate_content(content: String, max_bytes: usize) -> String {
-    if content.len() <= max_bytes {
-        return content;
-    }
-    let content_budget = max_bytes.saturating_sub(TRUNCATION_MARKER.len());
-    let mut end = content_budget;
-    while end > 0 && !content.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut truncated = content[..end].to_string();
-    truncated.push_str(TRUNCATION_MARKER);
-    truncated
-}
-
-fn tail_content(content: &str, max_bytes: usize) -> String {
-    if content.len() <= max_bytes {
-        return content.to_string();
-    }
-    let mut start = content.len().saturating_sub(max_bytes);
-    while start < content.len() && !content.is_char_boundary(start) {
-        start += 1;
-    }
-    content[start..].to_string()
-}
-
-fn marker_atom(value: &str) -> String {
-    value
-        .chars()
-        .take(80)
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
-                character
-            } else {
-                '_'
-            }
+fn window_text(text: &str, line_start: u32, line_end: u32) -> String {
+    let first = line_start.saturating_sub(WINDOW_LINES).max(1) as usize;
+    let last = line_end.saturating_add(WINDOW_LINES) as usize;
+    text.lines()
+        .enumerate()
+        .filter(|(index, _)| {
+            let line = index + 1;
+            line >= first && line <= last
         })
-        .collect()
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-async fn command_request(
-    gcx: Arc<GlobalContext>,
-    command: &ReviewCommandConfig,
-    workspace_root: PathBuf,
-    chat_mode: Option<ChatMode>,
-) -> Result<
-    crate::exec::command_policy::ExecRequestPolicy,
-    crate::exec::command_policy::ExecPolicyError,
-> {
-    if command.name.trim().is_empty() {
-        return Err(crate::exec::command_policy::ExecPolicyError {
-            message: "invalid_name".to_string(),
-            audit: None,
-        });
-    }
-    if command
-        .argv
-        .first()
-        .is_none_or(|value| value.trim().is_empty())
-    {
-        return Err(crate::exec::command_policy::ExecPolicyError {
-            message: "invalid_argv".to_string(),
-            audit: None,
-        });
-    }
-    if command.timeout_secs == 0 {
-        return Err(crate::exec::command_policy::ExecPolicyError {
-            message: "invalid_timeout".to_string(),
-            audit: None,
-        });
-    }
-    build_exec_request(
-        gcx,
-        CommandPolicyInput {
-            source: ExecSource::ReviewEvidence,
-            command: CommandKind::Argv(&command.argv),
-            cwd: Some(workspace_root),
-            env: HashMap::new(),
-            chat_mode,
-            escalation: None,
-        },
-    )
-    .await
-}
-
-async fn run_review_command(
-    gcx: Arc<GlobalContext>,
-    command: &ReviewCommandConfig,
-    workspace_root: PathBuf,
-    chat_mode: Option<ChatMode>,
-    chat_id: &str,
-) -> Result<(i32, String), String> {
-    let policy = match command_request(gcx.clone(), command, workspace_root, chat_mode).await {
-        Ok(policy) => policy,
-        Err(error) => {
-            if let Some(audit) = error.audit {
-                queue_sandbox_audit(gcx, chat_id, audit).await;
-            }
-            return Err(marker_atom(&error.message));
-        }
-    };
-    if let Some(audit) = policy.audit {
-        queue_sandbox_audit(gcx.clone(), chat_id, audit).await;
-    }
-    let warning = policy.warning;
-    let request = policy
-        .request
-        .with_timeout(Duration::from_secs(command.timeout_secs))
-        .with_output_drain_timeout(COMMAND_DRAIN_TIMEOUT)
-        .with_transcript_limit(COMMAND_TRANSCRIPT_BYTES);
-    let result = gcx
-        .exec_registry
-        .spawn(request)
-        .await
-        .map_err(|error| marker_atom(&error))?;
-    let read = gcx
-        .exec_registry
-        .read(&result.snapshot.meta.process_id, 0, None)
-        .await;
-    let mut output = String::new();
-    if let Some(warning) = warning {
-        output.push_str(&warning);
-        output.push('\n');
-    }
-    for chunk in read.chunks {
-        match chunk.stream {
-            ExecOutputStream::Stdout | ExecOutputStream::Stderr | ExecOutputStream::Combined => {
-                output.push_str(&chunk.text)
-            }
-        }
-    }
-    match result.snapshot.status {
-        ExecStatus::Exited {
-            exit_code: Some(exit_code),
-        } => Ok((exit_code, tail_content(&output, MAX_COMMAND_OUTPUT_BYTES))),
-        ExecStatus::SandboxLauncherFailed { .. } => Err("sandbox_launcher_failed".to_string()),
-        ExecStatus::TimedOut => Err("timeout".to_string()),
-        ExecStatus::Failed { .. } => Err("failed".to_string()),
-        ExecStatus::Killed => Err("killed".to_string()),
-        ExecStatus::Exited { exit_code: None } => Err("no_exit_code".to_string()),
-        ExecStatus::Starting | ExecStatus::Running => Err("incomplete".to_string()),
-    }
-}
-
-pub async fn collect_command_evidence(
-    gcx: Arc<GlobalContext>,
-    workspace_root: Option<PathBuf>,
-    chat_mode: Option<ChatMode>,
-    chat_id: &str,
-    report: &mut ReviewReport,
-) {
-    let mechanical = collect_mechanical_results(gcx, workspace_root, chat_mode, chat_id).await;
-    apply_command_evidence(report, mechanical.as_ref());
-}
-
-pub async fn collect_mechanical_results(
-    gcx: Arc<GlobalContext>,
-    workspace_root: Option<PathBuf>,
-    chat_mode: Option<ChatMode>,
-    chat_id: &str,
-) -> Option<MechanicalResult> {
-    let config = gcx.review_commands_config.clone();
-    if !config.enabled {
+fn locate_snippet(text: &str, needle: &str) -> Option<(u32, u32)> {
+    let needle_lines: Vec<String> = normalize_snippet(needle)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    if needle_lines.is_empty() {
         return None;
     }
-    let commands = config
-        .allowlist
-        .iter()
-        .take(config.max_commands_per_review)
-        .collect::<Vec<_>>();
-    if commands.is_empty() {
-        return Some(MechanicalResult {
-            passed: true,
-            checks: vec![],
-        });
-    }
-    let Some(workspace_root) = workspace_root else {
-        return Some(MechanicalResult {
-            passed: false,
-            checks: commands
-                .into_iter()
-                .map(|command| MechanicalCheck {
-                    name: command.name.clone(),
-                    command: command.argv.clone(),
-                    exit_status: MECHANICAL_EXECUTION_FAILED,
-                    output_excerpt: "workspace_unavailable".to_string(),
-                })
-                .collect(),
-        });
-    };
-    let mut checks = Vec::with_capacity(commands.len());
-    for command in commands {
-        match run_review_command(
-            gcx.clone(),
-            command,
-            workspace_root.clone(),
-            chat_mode.clone(),
-            chat_id,
-        )
-        .await
-        {
-            Ok((exit_code, output)) => checks.push(MechanicalCheck {
-                name: command.name.clone(),
-                command: command.argv.clone(),
-                exit_status: exit_code,
-                output_excerpt: output,
-            }),
-            Err(reason) => checks.push(MechanicalCheck {
-                name: command.name.clone(),
-                command: command.argv.clone(),
-                exit_status: MECHANICAL_EXECUTION_FAILED,
-                output_excerpt: marker_atom(&reason),
-            }),
-        }
-    }
-    Some(MechanicalResult {
-        passed: checks.iter().all(|check| check.exit_status == 0),
-        checks,
-    })
-}
-
-pub fn apply_command_evidence(report: &mut ReviewReport, mechanical: Option<&MechanicalResult>) {
-    let Some(mechanical) = mechanical else {
-        report
-            .checks_performed
-            .push("commands_disabled".to_string());
-        return;
-    };
-    if mechanical.checks.is_empty() {
-        report
-            .checks_performed
-            .push("commands_skipped:no_allowlisted_commands".to_string());
-        return;
-    }
-    for check in &mechanical.checks {
-        let command_name = marker_atom(&check.name);
-        if check.exit_status == MECHANICAL_EXECUTION_FAILED {
-            report.checks_performed.push(format!(
-                "command_skipped:{command_name}:{}",
-                marker_atom(&check.output_excerpt)
-            ));
+    let file_lines: Vec<String> = text
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    let first = needle_lines.first()?;
+    for (index, line) in file_lines.iter().enumerate() {
+        if !line.contains(first.as_str()) {
             continue;
         }
-        let exit_code = check.exit_status;
-        let check_name = format!("command:{command_name}:exit={exit_code}");
-        report.checks_performed.push(check_name.clone());
-        let content = format!(
-            "command: {}\nexit_code: {exit_code}\noutput:\n{}",
-            check.name, check.output_excerpt
-        );
-        for finding in &mut report.findings {
-            if matches!(
-                finding.severity,
-                ReviewSeverity::High | ReviewSeverity::Critical
-            ) {
-                finding.evidence.push(ReviewEvidence {
-                    kind: "check".to_string(),
-                    path: None,
-                    line1: None,
-                    line2: None,
-                    content: content.clone(),
-                });
-                finding.checks_performed.push(check_name.clone());
+        let mut cursor = index;
+        let mut matched = 0;
+        for needle_line in &needle_lines {
+            let mut found = false;
+            while cursor < file_lines.len() {
+                if file_lines[cursor].contains(needle_line.as_str()) {
+                    found = true;
+                    cursor += 1;
+                    break;
+                }
+                if !file_lines[cursor].trim().is_empty() {
+                    break;
+                }
+                cursor += 1;
             }
+            if !found {
+                break;
+            }
+            matched += 1;
+        }
+        if matched == needle_lines.len() {
+            return Some((index as u32 + 1, cursor as u32));
         }
     }
+    None
 }
 
-fn excerpt_for_range(text: &str, line1: u32, line2: u32) -> (u32, u32, String) {
-    let lines = text.lines().collect::<Vec<_>>();
-    let context_line1 = line1.saturating_sub(EXCERPT_CONTEXT_LINES).max(1);
-    let context_line2 = line2
-        .saturating_add(EXCERPT_CONTEXT_LINES)
-        .min(lines.len() as u32);
-    let mut content = String::new();
-    for line_number in context_line1..=context_line2 {
-        content.push_str(&format!(
-            "{line_number}: {}\n",
-            lines[line_number.saturating_sub(1) as usize]
-        ));
+pub fn resolve_scope_path(scope: &ReviewScope, candidate: &str) -> Option<PathBuf> {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return None;
     }
-    (context_line1, context_line2, content)
-}
-
-fn patch_header_path(line: &str) -> Option<&str> {
-    line.strip_prefix("diff --git ")?
-        .split_whitespace()
-        .nth(1)
-        .map(|path| path.trim_matches('"').trim_start_matches("b/"))
-}
-
-fn patch_path_matches(candidate: &Path, patch_path: &str) -> bool {
-    let candidate = normalize_path(&candidate.to_string_lossy());
-    let patch_path = normalize_path(patch_path);
-    candidate == patch_path || candidate.ends_with(&format!("/{patch_path}"))
-}
-
-fn parse_new_hunk_range(header: &str) -> Option<(u32, u32)> {
-    if header.trim() == "@@" {
-        return Some((1, u32::MAX));
+    let direct = PathBuf::from(candidate);
+    if direct.is_absolute() && direct.exists() {
+        return Some(direct);
     }
-    let range = header
-        .split_whitespace()
-        .find(|part| part.starts_with('+'))?
-        .trim_start_matches('+');
-    let (start, count) = match range.split_once(',') {
-        Some((start, count)) => (start.parse::<u32>().ok()?, count.parse::<u32>().ok()?),
-        None => (range.parse::<u32>().ok()?, 1),
-    };
-    let end = start.saturating_add(count.saturating_sub(1));
-    Some((start, end))
-}
-
-fn ranges_overlap(line1: u32, line2: u32, other_line1: u32, other_line2: u32) -> bool {
-    line1 <= other_line2 && other_line1 <= line2
-}
-
-fn overlapping_diff_hunks(patch: &str, file: &Path, line1: u32, line2: u32) -> Option<String> {
-    let lines = patch.lines().collect::<Vec<_>>();
-    let mut output = String::new();
-    let mut current_file_matches = false;
-    let mut index = 0;
-    while index < lines.len() {
-        if let Some(path) = patch_header_path(lines[index]) {
-            current_file_matches = patch_path_matches(file, path);
-            index += 1;
-            continue;
-        }
-        if !current_file_matches || !lines[index].starts_with("@@") {
-            index += 1;
-            continue;
-        }
-        let hunk_start = index;
-        index += 1;
-        while index < lines.len()
-            && !lines[index].starts_with("@@")
-            && !lines[index].starts_with("diff --git ")
-            && !lines[index].starts_with("## ")
-        {
-            index += 1;
-        }
-        let Some((hunk_line1, hunk_line2)) = parse_new_hunk_range(lines[hunk_start]) else {
-            continue;
-        };
-        if !ranges_overlap(line1, line2, hunk_line1, hunk_line2) {
-            continue;
-        }
-        if !output.is_empty() {
-            output.push('\n');
-        }
-        output.push_str(&lines[hunk_start..index].join("\n"));
-        output.push('\n');
+    let known = scope
+        .files
+        .iter()
+        .chain(scope.changed_files.iter())
+        .find(|path| paths_match(&path.to_string_lossy(), candidate));
+    if let Some(path) = known {
+        return Some(path.clone());
     }
-    (!output.is_empty()).then_some(output)
-}
-
-fn is_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
-}
-
-fn is_camel_or_snake(value: &str) -> bool {
-    value.contains('_')
-        || value
-            .chars()
-            .skip(1)
-            .any(|character| character.is_ascii_uppercase())
-}
-
-fn symbol_tokens(claim: &str, excerpt: &str) -> Vec<String> {
-    let mut symbols = BTreeSet::new();
-    let mut remainder = claim;
-    while let Some(start) = remainder.find('`') {
-        remainder = &remainder[start + 1..];
-        let Some(end) = remainder.find('`') else {
-            break;
-        };
-        let value = &remainder[..end];
-        if is_identifier(value) {
-            symbols.insert(value.to_string());
-        }
-        remainder = &remainder[end + 1..];
-    }
-    for value in
-        claim.split(|character: char| !(character == '_' || character.is_ascii_alphanumeric()))
-    {
-        if is_identifier(value) && is_camel_or_snake(value) && excerpt.contains(value) {
-            symbols.insert(value.to_string());
+    if let Some(root) = scope.repo_root.as_ref() {
+        let joined = root.join(candidate);
+        if joined.exists() {
+            return Some(joined);
         }
     }
-    symbols.into_iter().take(MAX_SYMBOLS_PER_FINDING).collect()
+    direct.exists().then_some(direct)
 }
 
-async fn symbol_evidence(
-    service: &crate::codegraph::CodeGraphService,
-    graph: &SymbolGraphFacts,
-    claim: &str,
-    excerpt: &str,
-) -> Result<Option<String>, String> {
-    let symbols = symbol_tokens(claim, excerpt);
-    if symbols.is_empty() {
-        return Ok(None);
-    }
-    let mut lines = Vec::with_capacity(symbols.len());
-    for symbol in symbols {
-        let mut definitions = service.definitions(&symbol).await?;
-        definitions.sort_by_key(|definition| {
-            (
-                normalize_path(&definition.cpath),
-                definition.full_line1(),
-                definition.path(),
-            )
-        });
-        let Some(definition) = definitions.first() else {
-            lines.push(format!("symbol {symbol}: NOT FOUND"));
-            continue;
-        };
-        let usage_count = definitions
-            .iter()
-            .map(|definition| graph.usage_count(&definition.name(), &definition.cpath))
-            .sum::<usize>();
-        lines.push(format!(
-            "symbol {symbol}: defined at {}:{}, {usage_count} usages",
-            definition.cpath,
-            definition.full_line1()
-        ));
-    }
-    Ok(Some(lines.join("\n")))
-}
-
-fn rejection(finding: &ReviewFinding, index: usize, reason: &str) -> EvidenceRejection {
-    EvidenceRejection {
-        finding_id: finding.id.clone(),
-        index: index + 1,
-        reason: reason.to_string(),
-    }
-}
-
-pub async fn collect_evidence(
+pub async fn verify_evidence(
     gcx: Arc<GlobalContext>,
     scope: &ReviewScope,
-    findings: &mut Vec<ReviewFinding>,
-) -> Vec<EvidenceRejection> {
-    let codegraph = gcx.codegraph.lock().await.clone();
-    let graph_facts = match codegraph.as_ref() {
-        Some(service) => service
-            .cached_graph_analytics()
-            .await
-            .ok()
-            .map(|cached| SymbolGraphFacts::from_cached(&cached)),
-        None => None,
-    };
-    let mut surviving = Vec::with_capacity(findings.len());
-    let mut rejections = Vec::new();
-    let changed_files = scope
-        .changed_files
-        .iter()
-        .cloned()
-        .map(crate::files_correction::canonicalize_normalized_path)
-        .collect::<HashSet<PathBuf>>();
-
-    for (index, mut finding) in std::mem::take(findings).into_iter().enumerate() {
-        let Some(file) = resolve_scope_path(scope, &finding.file) else {
-            rejections.push(rejection(&finding, index, "file_not_in_scope"));
+    findings: &mut [ReviewFinding],
+) -> EvidenceOutcome {
+    let mut outcome = EvidenceOutcome::default();
+    for finding in findings.iter_mut() {
+        outcome.checked += 1;
+        if finding.evidence.trim().is_empty() {
+            continue;
+        }
+        let Some(path) = resolve_scope_path(scope, &finding.file) else {
+            outcome.unreadable += 1;
             continue;
         };
-        let file = crate::files_correction::canonicalize_normalized_path(file);
-        let text = match get_file_text_from_memory_or_disk(gcx.clone(), &file).await {
-            Ok(text) => text,
-            Err(_) => {
-                rejections.push(rejection(&finding, index, "file_unreadable"));
-                continue;
-            }
+        let Ok(text) = get_file_text_from_memory_or_disk(gcx.clone(), &path).await else {
+            outcome.unreadable += 1;
+            continue;
         };
-        let line_count = text.lines().count() as u32;
-        if finding.line1 < 1
-            || finding.line2 < 1
-            || finding.line1 > line_count
-            || finding.line2 > line_count
-        {
-            rejections.push(rejection(&finding, index, "range_out_of_bounds"));
+        finding.file = path.to_string_lossy().to_string();
+        let window = window_text(&text, finding.line_start, finding.line_end);
+        let needle = normalize_snippet(&finding.evidence);
+        if !needle.is_empty() && normalize_snippet(&window).contains(&needle) {
+            finding.evidence_present = true;
+            outcome.present += 1;
             continue;
         }
-        if finding.line2 < finding.line1 {
-            rejections.push(rejection(&finding, index, "range_invalid"));
-            continue;
+        if let Some((start, end)) = locate_snippet(&text, &finding.evidence) {
+            finding.line_start = start;
+            finding.line_end = end.max(start);
+            finding.evidence_present = true;
+            outcome.present += 1;
+            outcome.relocated += 1;
         }
-        finding.file = file.to_string_lossy().to_string();
-        let (excerpt_line1, excerpt_line2, excerpt) =
-            excerpt_for_range(&text, finding.line1, finding.line2);
-        finding.evidence.push(ReviewEvidence {
-            kind: "excerpt".to_string(),
-            path: Some(file.to_string_lossy().to_string()),
-            line1: Some(excerpt_line1),
-            line2: Some(excerpt_line2),
-            content: truncate_content(excerpt.clone(), MAX_EXCERPT_BYTES),
-        });
-        finding.checks_performed.push("excerpt_ok".to_string());
-
-        if scope.diff_base.is_none() {
-            finding
-                .checks_performed
-                .push("diff_hunk_skipped:no_diff_base".to_string());
-        } else if !changed_files.contains(&file) {
-            finding
-                .checks_performed
-                .push("diff_hunk_skipped:file_unchanged".to_string());
-        } else if let Some(patch) = scope.diff_patch.as_deref() {
-            if let Some(content) =
-                overlapping_diff_hunks(patch, &file, finding.line1, finding.line2)
-            {
-                finding.evidence.push(ReviewEvidence {
-                    kind: "diff_hunk".to_string(),
-                    path: Some(file.to_string_lossy().to_string()),
-                    line1: Some(finding.line1),
-                    line2: Some(finding.line2),
-                    content: truncate_content(content, MAX_DIFF_HUNK_BYTES),
-                });
-                finding
-                    .checks_performed
-                    .push("diff_hunk_attached".to_string());
-            } else {
-                finding
-                    .checks_performed
-                    .push("diff_hunk_skipped:no_overlap".to_string());
-            }
-        } else {
-            finding
-                .checks_performed
-                .push("diff_hunk_skipped:patch_unavailable".to_string());
-        }
-
-        match (codegraph.as_deref(), graph_facts.as_ref()) {
-            (None, _) => finding
-                .checks_performed
-                .push("symbols_skipped:codegraph_unavailable".to_string()),
-            (Some(_), None) => finding
-                .checks_performed
-                .push("symbols_skipped:codegraph_error".to_string()),
-            (Some(service), Some(graph)) => {
-                match symbol_evidence(service, graph, &finding.claim, &excerpt).await {
-                    Ok(content) => {
-                        finding.checks_performed.push("symbols_checked".to_string());
-                        if let Some(content) = content {
-                            finding.evidence.push(ReviewEvidence {
-                                kind: "symbol".to_string(),
-                                path: None,
-                                line1: None,
-                                line2: None,
-                                content: truncate_content(content, MAX_SYMBOL_BYTES),
-                            });
-                        }
-                    }
-                    Err(_) => finding
-                        .checks_performed
-                        .push("symbols_skipped:codegraph_error".to_string()),
-                }
-            }
-        }
-        surviving.push(finding);
     }
-
-    *findings = surviving;
-    rejections
+    outcome
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::global_context::{ReviewCommandConfig, ReviewCommandsConfig};
-    use crate::tools::review_scope::ReviewBudgets;
-    use crate::tools::review_types::{ReviewSeverity, VerificationStatus};
+    use crate::tools::review_scope::DiffHunks;
+    use crate::tools::review_types::{ReviewSeverity, ScopeMode};
 
-    fn finding(file: &Path, line1: u32, line2: u32, claim: &str) -> ReviewFinding {
+    const FILE: &str = "fn one() {\n    let value = 1;\n}\n\nfn two() {\n    return Ok(());\n}\n";
+
+    fn scope_for(root: &std::path::Path, file: &std::path::Path) -> ReviewScope {
+        ReviewScope {
+            mode: ScopeMode::Strict,
+            requested: vec![file.to_path_buf()],
+            files: vec![file.to_path_buf()],
+            changed_files: vec![],
+            focus: None,
+            plan: None,
+            base: None,
+            head: None,
+            diff_patch: None,
+            hunks: DiffHunks::default(),
+            repo_root: Some(root.to_path_buf()),
+            expansion: None,
+        }
+    }
+
+    fn finding(file: &str, line_start: u32, line_end: u32, evidence: &str) -> ReviewFinding {
         ReviewFinding {
             id: String::new(),
-            category: "correctness".to_string(),
+            stage: "diff".to_string(),
+            model: None,
+            title: "title".to_string(),
             severity: ReviewSeverity::High,
-            confidence: 0.8,
-            verification_status: VerificationStatus::Unverified,
-            rank_tier: Default::default(),
-            sources: vec![],
-            file: file.to_string_lossy().to_string(),
-            line1,
-            line2,
-            claim: claim.to_string(),
-            evidence: vec![],
-            impact: None,
-            remediation: None,
-            checks_performed: vec![],
+            file: file.to_string(),
+            line_start,
+            line_end,
+            claim: "claim".to_string(),
+            evidence: evidence.to_string(),
+            evidence_present: false,
+            reproduction: None,
+            fix: None,
+            introduced_by_diff: false,
+            out_of_scope: false,
+            reported_by: vec![],
+            locations: vec![],
+            disputed: None,
         }
     }
 
-    fn scope(file: PathBuf) -> ReviewScope {
-        ReviewScope {
-            files: vec![file],
-            seed_files: vec![],
-            focus: None,
-            diff_base: None,
-            changed_files: vec![],
-            diff_patch: None,
-            budgets: ReviewBudgets {
-                max_files: 10,
-                tokens_budget: 10_000,
-                max_candidates: 30,
-            },
-        }
-    }
-
-    async fn gcx_for(root: &Path) -> Arc<GlobalContext> {
+    #[tokio::test]
+    async fn review_evidence_confirms_quote_inside_the_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("lib.rs");
+        std::fs::write(&path, FILE).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
-        gcx
-    }
+        let scope = scope_for(temp.path(), &path);
+        let mut findings = vec![finding("lib.rs", 6, 6, "return Ok(());")];
 
-    async fn gcx_with_review_commands(
-        root: &Path,
-        commands: Vec<ReviewCommandConfig>,
-        max_commands_per_review: usize,
-    ) -> Arc<GlobalContext> {
-        let mut gcx = crate::global_context::tests::make_test_gcx().await;
-        Arc::get_mut(&mut gcx).unwrap().review_commands_config = ReviewCommandsConfig {
-            enabled: true,
-            allowlist: commands,
-            max_commands_per_review,
-        };
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.to_path_buf()];
-        gcx
-    }
+        let outcome = verify_evidence(gcx, &scope, &mut findings).await;
 
-    fn report_with_severities() -> ReviewReport {
-        ReviewReport {
-            scope: crate::tools::review_types::ReviewScopeSummary {
-                files_reviewed: vec!["src/lib.rs".to_string()],
-                focus: None,
-                diff_base: None,
-                expansion: None,
-            },
-            findings: vec![
-                finding(
-                    Path::new("src/lib.rs"),
-                    1,
-                    1,
-                    "High claim; rm -rf workspace",
-                ),
-                ReviewFinding {
-                    severity: ReviewSeverity::Medium,
-                    ..finding(Path::new("src/lib.rs"), 2, 2, "Medium claim")
-                },
-            ],
-            checks_performed: vec![],
-            summary: "Review".to_string(),
-            assumed_intent: None,
-            pipeline: Default::default(),
-        }
+        assert!(findings[0].evidence_present);
+        assert_eq!(findings[0].line_start, 6);
+        assert_eq!(outcome.present, 1);
+        assert_eq!(outcome.relocated, 0);
     }
 
     #[tokio::test]
-    async fn tool_review_evidence_rejects_fabricated_ranges() {
+    async fn review_evidence_relocates_a_quote_found_elsewhere_in_the_file() {
         let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("sample.rs");
-        std::fs::write(
-            &file,
-            (1..=12)
-                .map(|line| format!("line {line}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
-        .unwrap();
-        let gcx = gcx_for(temp.path()).await;
+        let path = temp.path().join("lib.rs");
+        std::fs::write(&path, FILE).unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let scope = scope_for(temp.path(), &path);
+        let mut findings = vec![finding("lib.rs", 120, 124, "    return Ok(());")];
+
+        let outcome = verify_evidence(gcx, &scope, &mut findings).await;
+
+        assert!(findings[0].evidence_present);
+        assert_eq!(findings[0].line_start, 6);
+        assert_eq!(findings[0].line_end, 6);
+        assert_eq!(outcome.relocated, 1);
+    }
+
+    #[tokio::test]
+    async fn review_evidence_rejects_a_quote_that_is_not_in_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("lib.rs");
+        std::fs::write(&path, FILE).unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let scope = scope_for(temp.path(), &path);
         let mut findings = vec![
-            finding(&file, 0, 1, "Zero start."),
-            finding(&file, 1, 0, "Zero end."),
-            finding(&file, 8, 30, "Past end."),
-            finding(&file, 13, 13, "Start past end."),
+            finding("lib.rs", 2, 2, "let value = 999;"),
+            finding("nowhere.rs", 1, 1, "let value = 1;"),
         ];
 
-        let rejected = collect_evidence(gcx, &scope(file.clone()), &mut findings).await;
+        let outcome = verify_evidence(gcx, &scope, &mut findings).await;
 
-        assert!(findings.is_empty());
-        assert_eq!(rejected.len(), 4);
-        assert!(rejected
-            .iter()
-            .all(|rejection| rejection.reason == "range_out_of_bounds"));
-        assert_eq!(
-            rejected
-                .iter()
-                .map(EvidenceRejection::check_name)
-                .collect::<Vec<_>>(),
-            vec![
-                "evidence_reject:1:range_out_of_bounds",
-                "evidence_reject:2:range_out_of_bounds",
-                "evidence_reject:3:range_out_of_bounds",
-                "evidence_reject:4:range_out_of_bounds",
-            ]
-        );
+        assert!(!findings[0].evidence_present);
+        assert!(!findings[1].evidence_present);
+        assert_eq!(outcome.present, 0);
+        assert_eq!(outcome.unreadable, 1);
     }
 
     #[tokio::test]
-    async fn tool_review_evidence_rejects_out_of_range_and_out_of_scope_findings() {
+    async fn review_evidence_accepts_quotes_with_line_number_prefixes() {
         let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("sample.rs");
-        let other = temp.path().join("other.rs");
-        std::fs::write(&file, "one\ntwo\n").unwrap();
-        std::fs::write(&other, "one\n").unwrap();
-        let gcx = gcx_for(temp.path()).await;
-        let mut findings = vec![
-            finding(&file, 3, 3, "Outside lines."),
-            finding(&other, 1, 1, "Outside scope."),
-        ];
+        let path = temp.path().join("lib.rs");
+        std::fs::write(&path, FILE).unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let scope = scope_for(temp.path(), &path);
+        let mut findings = vec![finding("lib.rs", 5, 7, "5: fn two() {\n6:     return Ok(());")];
 
-        let rejected = collect_evidence(gcx, &scope(file), &mut findings).await;
+        verify_evidence(gcx, &scope, &mut findings).await;
 
-        assert!(findings.is_empty());
-        assert_eq!(rejected[0].reason, "range_out_of_bounds");
-        assert_eq!(
-            rejected[0].check_name(),
-            "evidence_reject:1:range_out_of_bounds"
-        );
-        assert_eq!(rejected[1].reason, "file_not_in_scope");
-        assert_eq!(
-            rejected[1].check_name(),
-            "evidence_reject:2:file_not_in_scope"
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_review_evidence_attaches_overlapping_precomputed_diff_hunk() {
-        let temp = tempfile::tempdir().unwrap();
-        let temp_root =
-            dunce::simplified(&std::fs::canonicalize(temp.path()).unwrap()).to_path_buf();
-        let file = temp_root.join("src").join("sample.rs");
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, "one\ntwo changed\nthree\n").unwrap();
-        let gcx = gcx_for(&temp_root).await;
-        let mut review_scope = scope(file.clone());
-        review_scope.diff_base = Some("base".to_string());
-        review_scope.changed_files = vec![file.clone()];
-        review_scope.diff_patch = Some(
-            "diff --git a/src/sample.rs b/src/sample.rs\n--- a/src/sample.rs\n+++ b/src/sample.rs\n@@ -1,3 +1,3 @@\n one\n-two\n+two changed\n three\n"
-                .to_string(),
-        );
-        let mut findings = vec![finding(&file, 2, 2, "Changed line.")];
-
-        collect_evidence(gcx, &review_scope, &mut findings).await;
-
-        let diff = findings[0]
-            .evidence
-            .iter()
-            .find(|evidence| evidence.kind == "diff_hunk")
-            .unwrap();
-        assert!(diff.content.contains("+two changed"));
-        assert!(findings[0]
-            .checks_performed
-            .contains(&"diff_hunk_attached".to_string()));
-    }
-
-    #[tokio::test]
-    async fn tool_review_evidence_silently_records_missing_patch_and_codegraph() {
-        let temp = tempfile::tempdir().unwrap();
-        let temp_root =
-            dunce::simplified(&std::fs::canonicalize(temp.path()).unwrap()).to_path_buf();
-        let file = temp_root.join("sample.rs");
-        std::fs::write(&file, "fn sample() {}\n").unwrap();
-        let gcx = gcx_for(&temp_root).await;
-        let mut review_scope = scope(file.clone());
-        review_scope.diff_base = Some("base".to_string());
-        review_scope.changed_files = vec![file.clone()];
-        let mut findings = vec![finding(&file, 1, 1, "`sample` can fail.")];
-
-        collect_evidence(gcx, &review_scope, &mut findings).await;
-
-        assert_eq!(findings[0].evidence.len(), 1);
-        assert!(findings[0]
-            .checks_performed
-            .contains(&"diff_hunk_skipped:patch_unavailable".to_string()));
-        assert!(findings[0]
-            .checks_performed
-            .contains(&"symbols_skipped:codegraph_unavailable".to_string()));
-    }
-
-    #[tokio::test]
-    async fn tool_review_evidence_attaches_codegraph_symbol_facts() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("sample.rs");
-        let text = "pub struct TargetSymbol;\npub fn caller() { let _ = TargetSymbol; }\n";
-        std::fs::write(&file, text).unwrap();
-        let gcx = gcx_for(temp.path()).await;
-        let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
-        service
-            .index_file(&file.to_string_lossy(), text, "rust")
-            .await
-            .unwrap();
-        service.connect_usages().await.unwrap();
-        *gcx.codegraph.lock().await = Some(service);
-        let mut findings = vec![finding(
-            &file,
-            1,
-            2,
-            "`TargetSymbol` is referenced incorrectly.",
-        )];
-
-        collect_evidence(gcx, &scope(file), &mut findings).await;
-
-        let symbol = findings[0]
-            .evidence
-            .iter()
-            .find(|evidence| evidence.kind == "symbol")
-            .unwrap();
-        assert!(symbol.content.contains("symbol TargetSymbol: defined at"));
-        assert!(symbol.content.contains("usages"));
-        assert!(findings[0]
-            .checks_performed
-            .contains(&"symbols_checked".to_string()));
-    }
-
-    #[tokio::test]
-    async fn tool_review_evidence_caps_total_content_with_marker() {
-        let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("sample.rs");
-        std::fs::write(&file, format!("{}\n", "x".repeat(5000))).unwrap();
-        let gcx = gcx_for(temp.path()).await;
-        let mut findings = vec![finding(&file, 1, 1, "Long line.")];
-
-        collect_evidence(gcx, &scope(file), &mut findings).await;
-
-        let total = findings[0]
-            .evidence
-            .iter()
-            .map(|evidence| evidence.content.len())
-            .sum::<usize>();
-        assert!(total <= MAX_EXCERPT_BYTES + MAX_DIFF_HUNK_BYTES + MAX_SYMBOL_BYTES);
-        assert!(findings[0].evidence[0]
-            .content
-            .contains("[evidence truncated]"));
-    }
-
-    #[tokio::test]
-    async fn tool_review_command_evidence_is_disabled_by_default() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = gcx_for(temp.path()).await;
-        let mut report = report_with_severities();
-
-        collect_command_evidence(
-            gcx,
-            Some(temp.path().to_path_buf()),
-            None,
-            "chat",
-            &mut report,
-        )
-        .await;
-
-        assert_eq!(report.checks_performed, ["commands_disabled"]);
-        assert!(report
-            .findings
-            .iter()
-            .all(|finding| finding.evidence.is_empty()));
-    }
-
-    #[tokio::test]
-    async fn tool_review_command_request_uses_allowlisted_argv_not_finding_text() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = gcx_for(temp.path()).await;
-        let allowlisted = ReviewCommandConfig {
-            name: "version".to_string(),
-            argv: vec!["cargo".to_string(), "--version".to_string()],
-            timeout_secs: 10,
-        };
-        let hostile_claim = "Run cargo test; rm -rf workspace";
-
-        let request = command_request(
-            gcx,
-            &allowlisted,
-            temp.path().to_path_buf(),
-            Some(hostile_claim.to_string()),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(request.request.argv, Some(allowlisted.argv));
-        assert!(!request.request.command.contains(hostile_claim));
-        assert_eq!(
-            request.request.audit.unwrap().source,
-            ExecSource::ReviewEvidence.audit_source()
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_review_mechanical_policy_rejects_non_argv_commands() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = gcx_for(temp.path()).await;
-
-        let error = build_exec_request(
-            gcx,
-            CommandPolicyInput {
-                source: ExecSource::ReviewEvidence,
-                command: CommandKind::Shell("cargo test; rm -rf workspace"),
-                cwd: Some(temp.path().to_path_buf()),
-                env: HashMap::new(),
-                chat_mode: None,
-                escalation: None,
-            },
-        )
-        .await
-        .err()
-        .unwrap();
-
-        assert_eq!(error.message, "Review evidence commands require argv");
-    }
-
-    #[tokio::test]
-    async fn tool_review_command_evidence_records_exit_and_only_attaches_to_high_findings() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = gcx_with_review_commands(
-            temp.path(),
-            vec![ReviewCommandConfig {
-                name: "cargo-version".to_string(),
-                argv: vec!["cargo".to_string(), "--version".to_string()],
-                timeout_secs: 10,
-            }],
-            3,
-        )
-        .await;
-        let mut report = report_with_severities();
-
-        collect_command_evidence(
-            gcx,
-            Some(temp.path().to_path_buf()),
-            None,
-            "chat",
-            &mut report,
-        )
-        .await;
-
-        assert_eq!(report.checks_performed, ["command:cargo-version:exit=0"]);
-        assert_eq!(report.findings[0].evidence.len(), 1);
-        assert_eq!(report.findings[0].evidence[0].kind, "check");
-        assert!(report.findings[0].evidence[0].content.contains("cargo "));
-        assert!(report.findings[1].evidence.is_empty());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn tool_review_command_evidence_records_nonzero_exit() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = gcx_with_review_commands(
-            temp.path(),
-            vec![ReviewCommandConfig {
-                name: "false".to_string(),
-                argv: vec!["false".to_string()],
-                timeout_secs: 10,
-            }],
-            3,
-        )
-        .await;
-        let mut report = report_with_severities();
-
-        collect_command_evidence(
-            gcx,
-            Some(temp.path().to_path_buf()),
-            None,
-            "chat",
-            &mut report,
-        )
-        .await;
-
-        assert_eq!(report.checks_performed, ["command:false:exit=1"]);
-        assert!(report.findings[0].evidence[0]
-            .content
-            .contains("exit_code: 1"));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn tool_review_command_evidence_skips_timeout() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = gcx_with_review_commands(
-            temp.path(),
-            vec![ReviewCommandConfig {
-                name: "slow".to_string(),
-                argv: vec!["sleep".to_string(), "5".to_string()],
-                timeout_secs: 1,
-            }],
-            3,
-        )
-        .await;
-        let mut report = report_with_severities();
-
-        collect_command_evidence(
-            gcx,
-            Some(temp.path().to_path_buf()),
-            None,
-            "chat",
-            &mut report,
-        )
-        .await;
-
-        assert_eq!(report.checks_performed, ["command_skipped:slow:timeout"]);
-        assert!(report.findings[0].evidence.is_empty());
-    }
-
-    #[tokio::test]
-    async fn tool_review_command_evidence_skips_unavailable_command() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = gcx_with_review_commands(
-            temp.path(),
-            vec![ReviewCommandConfig {
-                name: "missing".to_string(),
-                argv: vec!["refact-command-that-does-not-exist".to_string()],
-                timeout_secs: 10,
-            }],
-            3,
-        )
-        .await;
-        let mut report = report_with_severities();
-
-        collect_command_evidence(
-            gcx,
-            Some(temp.path().to_path_buf()),
-            None,
-            "chat",
-            &mut report,
-        )
-        .await;
-
-        assert_eq!(report.checks_performed.len(), 1);
-        assert!(report.checks_performed[0].starts_with("command_skipped:missing:"));
-        assert!(report.findings[0].evidence.is_empty());
-    }
-
-    #[tokio::test]
-    async fn tool_review_command_evidence_respects_command_limit() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = gcx_with_review_commands(
-            temp.path(),
-            vec![
-                ReviewCommandConfig {
-                    name: "first".to_string(),
-                    argv: vec!["cargo".to_string(), "--version".to_string()],
-                    timeout_secs: 10,
-                },
-                ReviewCommandConfig {
-                    name: "second".to_string(),
-                    argv: vec!["refact-command-that-does-not-exist".to_string()],
-                    timeout_secs: 10,
-                },
-            ],
-            1,
-        )
-        .await;
-        let mut report = report_with_severities();
-
-        collect_command_evidence(
-            gcx,
-            Some(temp.path().to_path_buf()),
-            None,
-            "chat",
-            &mut report,
-        )
-        .await;
-
-        assert_eq!(report.checks_performed, ["command:first:exit=0"]);
+        assert!(findings[0].evidence_present);
     }
 
     #[test]
-    fn tool_review_evidence_module_has_no_process_spawns() {
-        let sources = [
-            include_str!("review_evidence.rs"),
-            include_str!("tool_review.rs"),
-        ];
-        let std_process = ["process", "::Command"].concat();
-        let tokio_process = ["tokio", "::process"].concat();
-
-        for source in sources {
-            assert!(!source.contains(&std_process));
-            assert!(!source.contains(&tokio_process));
-        }
+    fn review_evidence_normalizes_whitespace_and_drops_blank_lines() {
+        assert_eq!(
+            normalize_snippet("  let   a = 1;  \n\n\tlet b = 2;\n"),
+            "let a = 1;\nlet b = 2;"
+        );
     }
 }

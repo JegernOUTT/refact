@@ -1,59 +1,192 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::process::Command;
+use tokio::sync::Mutex as AMutex;
 
-use crate::call_validation::SubchatParameters;
 use crate::global_context::GlobalContext;
-use crate::tools::subagent_phases::DEFAULT_MAX_FILES;
+use crate::tools::review_types::{ReviewDiffSummary, ReviewScopeSummary, ScopeMode};
 
-const DEFAULT_MAX_CANDIDATES: usize = 30;
-const TOKENS_EXTRA_BUDGET_PERCENT: f32 = 0.06;
 const MAX_DIFF_PATCH_BYTES: usize = 512 * 1024;
+const ADJACENT_EXPANSION_CAP: usize = 40;
 
-/// Limits applied across code review stages.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReviewBudgets {
-    pub max_files: usize,
-    pub tokens_budget: i64,
-    pub max_candidates: usize,
+const GENERATED_MARKERS: &[&str] = &[
+    "/node_modules/",
+    "/target/debug/",
+    "/target/release/",
+    "/dist/",
+    "/build/",
+    "/__snapshots__/",
+    "/.next/",
+    "/vendor/",
+];
+
+const GENERATED_SUFFIXES: &[&str] = &[
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "cargo.lock",
+    "poetry.lock",
+    ".snap",
+    ".min.js",
+    ".min.css",
+    ".generated.rs",
+    ".generated.ts",
+    "_pb2.py",
+];
+
+pub fn normalize_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_end_matches('/')
+        .to_string()
 }
 
-/// Files, git context, focus, and limits shared by code review stages.
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub fn paths_match(left: &str, right: &str) -> bool {
+    let left = normalize_path(left);
+    let right = normalize_path(right);
+    left == right || left.ends_with(&format!("/{right}")) || right.ends_with(&format!("/{left}"))
+}
+
+pub fn is_generated_path(path: &str) -> bool {
+    let lowered = normalize_path(path).to_ascii_lowercase();
+    if GENERATED_MARKERS.iter().any(|m| lowered.contains(m)) {
+        return true;
+    }
+    GENERATED_SUFFIXES
+        .iter()
+        .any(|suffix| lowered.ends_with(suffix))
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiffHunks {
+    by_path: HashMap<String, Vec<(u32, u32)>>,
+}
+
+impl DiffHunks {
+    pub fn parse(patch: &str) -> Self {
+        let mut by_path: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
+        let mut current: Option<String> = None;
+        for line in patch.lines() {
+            if let Some(rest) = line.strip_prefix("+++ ") {
+                let path = rest.trim();
+                current = (path != "/dev/null").then(|| {
+                    normalize_path(path.strip_prefix("b/").unwrap_or(path).trim_end_matches('\t'))
+                });
+                continue;
+            }
+            if !line.starts_with("@@") {
+                continue;
+            }
+            let Some(path) = current.clone() else {
+                continue;
+            };
+            let Some(range) = parse_new_hunk_range(line) else {
+                continue;
+            };
+            by_path.entry(path).or_default().push(range);
+        }
+        Self { by_path }
+    }
+
+    pub fn contains(&self, file: &str, line_start: u32, line_end: u32) -> bool {
+        let file = normalize_path(file);
+        self.by_path
+            .iter()
+            .filter(|(path, _)| paths_match(path, &file))
+            .any(|(_, ranges)| {
+                ranges
+                    .iter()
+                    .any(|(start, end)| line_start <= *end && *start <= line_end)
+            })
+    }
+
+    pub fn touches_file(&self, file: &str) -> bool {
+        let file = normalize_path(file);
+        self.by_path.keys().any(|path| paths_match(path, &file))
+    }
+
+    pub fn hunk_count(&self) -> usize {
+        self.by_path.values().map(Vec::len).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_path.is_empty()
+    }
+}
+
+fn parse_new_hunk_range(header: &str) -> Option<(u32, u32)> {
+    let plus = header.split('+').nth(1)?;
+    let spec = plus.split(&[' ', '@'][..]).next()?;
+    let mut parts = spec.split(',');
+    let start: u32 = parts.next()?.trim().parse().ok()?;
+    let count: u32 = parts.next().and_then(|v| v.trim().parse().ok()).unwrap_or(1);
+    Some((start, start + count.saturating_sub(1).max(0)))
+}
+
+#[derive(Debug, Clone)]
 pub struct ReviewScope {
+    pub mode: ScopeMode,
+    pub requested: Vec<PathBuf>,
     pub files: Vec<PathBuf>,
-    pub seed_files: Vec<PathBuf>,
-    pub focus: Option<String>,
-    pub diff_base: Option<String>,
     pub changed_files: Vec<PathBuf>,
+    pub focus: Option<String>,
+    pub plan: Option<String>,
+    pub base: Option<String>,
+    pub head: Option<String>,
     pub diff_patch: Option<String>,
-    pub budgets: ReviewBudgets,
+    pub hunks: DiffHunks,
+    pub repo_root: Option<PathBuf>,
+    pub expansion: Option<String>,
 }
 
-fn merge_files(gathered: Vec<PathBuf>, seed: Vec<PathBuf>, max_files: usize) -> Vec<PathBuf> {
-    let mut files = Vec::with_capacity(gathered.len().saturating_add(seed.len()));
-    let mut seen = HashSet::new();
-    for path in seed.iter().chain(gathered.iter()) {
-        if seen.insert(path.clone()) {
-            files.push(path.clone());
+impl ReviewScope {
+    pub fn in_scope(&self, file: &str) -> bool {
+        if self.mode == ScopeMode::Broad || self.files.is_empty() {
+            return true;
+        }
+        self.files
+            .iter()
+            .any(|path| paths_match(&path.to_string_lossy(), file))
+    }
+
+    pub fn file_strings(&self) -> Vec<String> {
+        self.files
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect()
+    }
+
+    pub fn summary(&self) -> ReviewScopeSummary {
+        ReviewScopeSummary {
+            mode: self.mode.as_str().to_string(),
+            requested_files: self.requested.len(),
+            reviewed_files: self.files.len(),
+            files: self.file_strings(),
+            focus: self.focus.clone(),
+            expansion: self.expansion.clone(),
+            out_of_scope_findings: 0,
         }
     }
-    files.truncate(max_files);
-    files
+
+    pub fn diff_summary(&self) -> ReviewDiffSummary {
+        ReviewDiffSummary {
+            base: self.base.clone(),
+            head: self.head.clone(),
+            changed_files: self.changed_files.len(),
+            hunks: self.hunks.hunk_count(),
+        }
+    }
 }
 
-fn review_budget_components(subchat_params: &SubchatParameters) -> (usize, usize) {
-    let extra = (subchat_params.subchat_n_ctx as f32 * TOKENS_EXTRA_BUDGET_PERCENT) as usize;
-    let required =
-        subchat_params.subchat_max_new_tokens + subchat_params.subchat_tokens_for_rag + extra;
-    (extra, required)
-}
-
-fn review_tokens_budget(subchat_params: &SubchatParameters) -> i64 {
-    let (_, required) = review_budget_components(subchat_params);
-    subchat_params.subchat_n_ctx as i64 - required as i64
+pub struct ScopeRequest {
+    pub requested: Vec<PathBuf>,
+    pub mode: ScopeMode,
+    pub base: Option<String>,
+    pub focus: Option<String>,
+    pub plan: Option<String>,
+    pub max_files: usize,
 }
 
 fn repo_root_for_scope(gcx: &GlobalContext, paths: &[PathBuf]) -> Option<PathBuf> {
@@ -88,7 +221,13 @@ async fn git_output(root: &Path, args: &[&str]) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-async fn detect_diff_base(root: &Path) -> Option<String> {
+pub async fn resolve_base(root: &Path, requested: Option<&str>) -> Option<String> {
+    if let Some(requested) = requested.map(str::trim).filter(|v| !v.is_empty()) {
+        if let Some(base) = git_output(root, &["merge-base", requested, "HEAD"]).await {
+            return Some(base);
+        }
+        return git_output(root, &["rev-parse", requested]).await;
+    }
     for candidate in [
         "HEAD@{upstream}",
         "main",
@@ -103,82 +242,219 @@ async fn detect_diff_base(root: &Path) -> Option<String> {
     git_output(root, &["rev-parse", "HEAD"]).await
 }
 
-async fn git_context(
-    gcx: &GlobalContext,
-    files: &[PathBuf],
-) -> (Option<String>, Vec<PathBuf>, Option<String>) {
-    let Some(root) = repo_root_for_scope(gcx, files) else {
-        return (None, Vec::new(), None);
+async fn adjacent_expansion(
+    gcx: Arc<GlobalContext>,
+    seed: &[PathBuf],
+) -> (Vec<PathBuf>, Option<String>) {
+    let service = gcx.codegraph.lock().await.clone();
+    let Some(service) = service else {
+        return (Vec::new(), Some("codegraph unavailable".to_string()));
     };
-    let Some(diff_base) = detect_diff_base(&root).await else {
-        return (None, Vec::new(), None);
-    };
-    let Ok(diff) =
-        refact_worktrees::git::diff_for_path(&root, Some(&diff_base), None, MAX_DIFF_PATCH_BYTES)
-    else {
-        return (None, Vec::new(), None);
-    };
-    let mut seen = HashSet::new();
-    let changed_files = diff
-        .files
-        .into_iter()
-        .map(|file| crate::files_correction::canonicalize_normalized_path(root.join(file.path)))
-        .filter(|path| seen.insert(path.clone()))
+    let seed_strings: Vec<String> = seed
+        .iter()
+        .map(|path| path.to_string_lossy().to_string())
         .collect();
-    let patch = (!diff.patch.trim().is_empty()).then_some(diff.patch);
-    (Some(diff_base), changed_files, patch)
+    let report = match service.pr_blast(&seed_strings, 1).await {
+        Ok(report) => report,
+        Err(error) => return (Vec::new(), Some(format!("pr_blast failed: {error}"))),
+    };
+    let mut seen: HashSet<String> = seed_strings.iter().map(|p| normalize_path(p)).collect();
+    let mut expanded = Vec::new();
+    for impact in report
+        .directly_impacted
+        .iter()
+        .chain(report.transitively_impacted.iter())
+    {
+        if expanded.len() >= ADJACENT_EXPANSION_CAP {
+            break;
+        }
+        if is_generated_path(&impact.path) || !seen.insert(normalize_path(&impact.path)) {
+            continue;
+        }
+        expanded.push(PathBuf::from(&impact.path));
+    }
+    let note = (!expanded.is_empty()).then(|| format!("+{} dependency edges", expanded.len()));
+    (expanded, note)
 }
 
-/// Build the immutable input shared by the code review pipeline.
-///
-/// @param gcx Global workspace state used for git repository discovery.
-/// @param gathered Files selected by the gather phase.
-/// @param seed User-supplied files that take priority under the file cap.
-/// @param focus Optional review focus text.
-/// @param subchat_params Token limits for review stages.
-/// @returns The capped files, git context, focus, and stage budgets.
-pub async fn build_review_scope(
-    gcx: Arc<GlobalContext>,
-    gathered: Vec<PathBuf>,
-    seed: Vec<PathBuf>,
-    focus: Option<String>,
-    subchat_params: &SubchatParameters,
-) -> ReviewScope {
-    build_review_scope_with_max_files(
-        gcx,
-        gathered,
-        seed,
+pub async fn build_review_scope(gcx: Arc<GlobalContext>, request: ScopeRequest) -> ReviewScope {
+    let ScopeRequest {
+        requested,
+        mode,
+        base,
         focus,
-        subchat_params,
-        DEFAULT_MAX_FILES,
-    )
-    .await
-}
+        plan,
+        max_files,
+    } = request;
+    let max_files = max_files.max(1);
+    let repo_root = repo_root_for_scope(gcx.as_ref(), &requested);
 
-pub(crate) async fn build_review_scope_with_max_files(
-    gcx: Arc<GlobalContext>,
-    gathered: Vec<PathBuf>,
-    seed: Vec<PathBuf>,
-    focus: Option<String>,
-    subchat_params: &SubchatParameters,
-    max_files: usize,
-) -> ReviewScope {
-    let files = merge_files(gathered, seed.clone(), max_files);
-    let (diff_base, changed_files, diff_patch) = git_context(gcx.as_ref(), &files).await;
+    let (base, head, changed_files, diff_patch) = match repo_root.as_ref() {
+        Some(root) => {
+            let base = resolve_base(root, base.as_deref()).await;
+            let head = git_output(root, &["rev-parse", "--short", "HEAD"]).await;
+            match base.as_ref().and_then(|base| {
+                refact_worktrees::git::diff_for_path(root, Some(base), None, MAX_DIFF_PATCH_BYTES)
+                    .ok()
+            }) {
+                Some(diff) => {
+                    let mut seen = HashSet::new();
+                    let changed = diff
+                        .files
+                        .into_iter()
+                        .map(|file| {
+                            crate::files_correction::canonicalize_normalized_path(
+                                root.join(file.path),
+                            )
+                        })
+                        .filter(|path| seen.insert(path.clone()))
+                        .collect::<Vec<_>>();
+                    let patch = (!diff.patch.trim().is_empty()).then_some(diff.patch);
+                    (base, head, changed, patch)
+                }
+                None => (base, head, Vec::new(), None),
+            }
+        }
+        None => (None, None, Vec::new(), None),
+    };
+
+    let hunks = diff_patch
+        .as_deref()
+        .map(DiffHunks::parse)
+        .unwrap_or_default();
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut push = |files: &mut Vec<PathBuf>, seen: &mut HashSet<String>, path: &PathBuf| {
+        let key = normalize_path(&path.to_string_lossy());
+        if !key.is_empty() && seen.insert(key) {
+            files.push(path.clone());
+        }
+    };
+    for path in &requested {
+        push(&mut files, &mut seen, path);
+    }
+    for path in &changed_files {
+        if is_generated_path(&path.to_string_lossy()) {
+            continue;
+        }
+        push(&mut files, &mut seen, path);
+    }
+
+    let mut expansion = None;
+    if mode == ScopeMode::Adjacent {
+        let (expanded, note) = adjacent_expansion(gcx.clone(), &files).await;
+        for path in &expanded {
+            push(&mut files, &mut seen, path);
+        }
+        expansion = note;
+    }
+    if files.len() > max_files {
+        files.truncate(max_files);
+        expansion = Some(match expansion {
+            Some(note) => format!("{note}, truncated to {max_files} files"),
+            None => format!("truncated to {max_files} files"),
+        });
+    }
+
     ReviewScope {
+        mode,
+        requested,
         files,
-        seed_files: seed,
+        changed_files,
         focus: focus
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
-        diff_base,
-        changed_files,
+        plan: plan
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        base,
+        head,
         diff_patch,
-        budgets: ReviewBudgets {
-            max_files,
-            tokens_budget: review_tokens_budget(subchat_params),
-            max_candidates: DEFAULT_MAX_CANDIDATES,
-        },
+        hunks,
+        repo_root,
+        expansion,
+    }
+}
+
+pub struct DiffAttribution {
+    root: Option<PathBuf>,
+    base: Option<String>,
+    hunks: DiffHunks,
+    blame: AMutex<HashMap<String, HashSet<u32>>>,
+}
+
+impl DiffAttribution {
+    pub fn new(scope: &ReviewScope) -> Self {
+        Self {
+            root: scope.repo_root.clone(),
+            base: scope.base.clone(),
+            hunks: scope.hunks.clone(),
+            blame: AMutex::new(HashMap::new()),
+        }
+    }
+
+    pub async fn introduced(&self, file: &str, line_start: u32, line_end: u32) -> bool {
+        if self.hunks.is_empty() {
+            return true;
+        }
+        if self.hunks.contains(file, line_start, line_end) {
+            return true;
+        }
+        if !self.hunks.touches_file(file) {
+            return false;
+        }
+        let touched = self.blame_lines(file).await;
+        (line_start..=line_end.max(line_start)).any(|line| touched.contains(&line))
+    }
+
+    async fn blame_lines(&self, file: &str) -> HashSet<u32> {
+        let key = normalize_path(file);
+        if let Some(cached) = self.blame.lock().await.get(&key) {
+            return cached.clone();
+        }
+        let lines = self.compute_blame_lines(file).await;
+        self.blame.lock().await.insert(key, lines.clone());
+        lines
+    }
+
+    async fn compute_blame_lines(&self, file: &str) -> HashSet<u32> {
+        let (Some(root), Some(base)) = (self.root.as_ref(), self.base.as_ref()) else {
+            return HashSet::new();
+        };
+        let range = format!("{base}..HEAD");
+        let Some(revisions) = git_output(root, &["rev-list", &range]).await else {
+            return HashSet::new();
+        };
+        let branch_commits: HashSet<String> =
+            revisions.lines().map(|line| line.to_string()).collect();
+        if branch_commits.is_empty() {
+            return HashSet::new();
+        }
+        let Some(blame) =
+            git_output(root, &["blame", "--line-porcelain", "--", file.trim()]).await
+        else {
+            return HashSet::new();
+        };
+        let mut touched = HashSet::new();
+        for line in blame.lines() {
+            let mut parts = line.split_whitespace();
+            let (Some(sha), Some(_original), Some(final_line)) =
+                (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            if sha.len() < 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+            let Ok(final_line) = final_line.parse::<u32>() else {
+                continue;
+            };
+            if branch_commits.contains(sha) {
+                touched.insert(final_line);
+            }
+        }
+        touched
     }
 }
 
@@ -187,25 +463,7 @@ mod tests {
     use super::*;
     use std::process::Command as StdCommand;
 
-    use crate::call_validation::ChatModelType;
-    use crate::llm::params::CacheControl;
-
-    fn subchat_params(
-        n_ctx: usize,
-        max_new_tokens: usize,
-        tokens_for_rag: usize,
-    ) -> SubchatParameters {
-        SubchatParameters {
-            subchat_model_type: ChatModelType::Default,
-            subchat_model: String::new(),
-            subchat_n_ctx: n_ctx,
-            subchat_max_new_tokens: max_new_tokens,
-            subchat_temperature: None,
-            subchat_tokens_for_rag: tokens_for_rag,
-            subchat_reasoning_effort: None,
-            subchat_cache_control: CacheControl::Off,
-        }
-    }
+    const PATCH: &str = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -10,3 +10,5 @@ fn thing() {\n context\n+added\n+added\n@@ -80,0 +90,1 @@\n+one more\ndiff --git a/src/other.rs b/src/other.rs\n--- /dev/null\n+++ b/src/other.rs\n@@ -0,0 +1,4 @@\n+new file\n";
 
     fn run_git(root: &Path, args: &[&str]) -> String {
         let output = StdCommand::new("git")
@@ -232,33 +490,83 @@ mod tests {
         run_git(root, &["commit", "-m", "base"]);
     }
 
-    #[tokio::test]
-    async fn tool_review_scope_merges_seeds_first_deduplicates_and_caps() {
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        let temp = tempfile::tempdir().unwrap();
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
-        let seed = temp.path().join("seed.rs");
-        let gathered_first = temp.path().join("first.rs");
-        let gathered_last = temp.path().join("last.rs");
+    #[test]
+    fn review_scope_hunk_membership_uses_new_side_ranges() {
+        let hunks = DiffHunks::parse(PATCH);
 
-        let scope = build_review_scope_with_max_files(
-            gcx,
-            vec![gathered_first.clone(), seed.clone(), gathered_last],
-            vec![seed.clone()],
-            None,
-            &subchat_params(10_000, 2_000, 1_000),
-            2,
-        )
-        .await;
-
-        assert_eq!(scope.files, vec![seed.clone(), gathered_first]);
-        assert_eq!(scope.seed_files, vec![seed]);
-        assert_eq!(scope.budgets.max_files, 2);
-        assert_eq!(scope.budgets.max_candidates, 30);
+        assert_eq!(hunks.hunk_count(), 3);
+        assert!(hunks.contains("src/lib.rs", 10, 10));
+        assert!(hunks.contains("src/lib.rs", 14, 20));
+        assert!(!hunks.contains("src/lib.rs", 15, 20));
+        assert!(hunks.contains("src/lib.rs", 90, 90));
+        assert!(hunks.contains("/abs/repo/src/other.rs", 1, 4));
+        assert!(!hunks.contains("src/untouched.rs", 1, 400));
+        assert!(hunks.touches_file("src/lib.rs"));
+        assert!(!hunks.touches_file("src/untouched.rs"));
     }
 
     #[tokio::test]
-    async fn tool_review_scope_detects_git_changed_files_against_base() {
+    async fn review_scope_attribution_falls_back_to_blame_for_moved_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        init_repo(temp.path());
+        let base = run_git(temp.path(), &["rev-parse", "HEAD"]);
+        std::fs::write(temp.path().join("moved.rs"), "alpha\nbeta\ngamma\n").unwrap();
+        run_git(temp.path(), &["add", "moved.rs"]);
+        run_git(temp.path(), &["commit", "-m", "add moved"]);
+
+        let scope = ReviewScope {
+            mode: ScopeMode::Strict,
+            requested: vec![],
+            files: vec![],
+            changed_files: vec![],
+            focus: None,
+            plan: None,
+            base: Some(base),
+            head: None,
+            diff_patch: None,
+            hunks: DiffHunks::parse(
+                "--- a/moved.rs\n+++ b/moved.rs\n@@ -0,0 +1,1 @@\n+alpha\n",
+            ),
+            repo_root: Some(temp.path().to_path_buf()),
+            expansion: None,
+        };
+        let attribution = DiffAttribution::new(&scope);
+
+        assert!(attribution.introduced("moved.rs", 1, 1).await);
+        assert!(attribution.introduced("moved.rs", 3, 3).await);
+        assert!(!attribution.introduced("base.txt", 1, 1).await);
+    }
+
+    #[tokio::test]
+    async fn review_scope_strict_keeps_requested_files_and_flags_outsiders() {
+        let temp = tempfile::tempdir().unwrap();
+        init_repo(temp.path());
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let requested = vec![temp.path().join("base.txt")];
+
+        let scope = build_review_scope(
+            gcx,
+            ScopeRequest {
+                requested: requested.clone(),
+                mode: ScopeMode::Strict,
+                base: None,
+                focus: Some("  safety  ".to_string()),
+                plan: None,
+                max_files: 10,
+            },
+        )
+        .await;
+
+        assert_eq!(scope.requested, requested);
+        assert!(scope.in_scope(&temp.path().join("base.txt").to_string_lossy()));
+        assert!(!scope.in_scope("src/elsewhere.rs"));
+        assert_eq!(scope.focus.as_deref(), Some("safety"));
+        assert!(scope.base.is_some());
+    }
+
+    #[tokio::test]
+    async fn review_scope_broad_accepts_any_file_and_records_changed_set() {
         let temp = tempfile::tempdir().unwrap();
         init_repo(temp.path());
         run_git(temp.path(), &["checkout", "-b", "feature"]);
@@ -270,50 +578,63 @@ mod tests {
 
         let scope = build_review_scope(
             gcx,
-            Vec::new(),
-            Vec::new(),
-            None,
-            &subchat_params(10_000, 2_000, 1_000),
+            ScopeRequest {
+                requested: vec![],
+                mode: ScopeMode::Broad,
+                base: Some("main".to_string()),
+                focus: None,
+                plan: None,
+                max_files: 10,
+            },
         )
         .await;
 
-        assert!(scope.diff_base.is_some());
         assert_eq!(
             scope.changed_files,
             vec![crate::files_correction::canonicalize_normalized_path(
                 temp.path().join("changed.rs")
             )]
         );
+        assert!(scope.in_scope("anything/at/all.rs"));
         assert!(scope
             .diff_patch
             .as_deref()
             .is_some_and(|patch| patch.contains("changed.rs")));
+        assert!(!scope.hunks.is_empty());
+    }
+
+    #[test]
+    fn review_scope_generated_paths_are_excluded_from_review() {
+        assert!(is_generated_path("Cargo.lock"));
+        assert!(is_generated_path("gui/package-lock.json"));
+        assert!(is_generated_path("src/__snapshots__/App.test.tsx.snap"));
+        assert!(is_generated_path("web/node_modules/left-pad/index.js"));
+        assert!(!is_generated_path("src/lib.rs"));
+        assert!(!is_generated_path("gui/package.json"));
     }
 
     #[tokio::test]
-    async fn tool_review_scope_supports_non_git_workspace() {
+    async fn review_scope_without_git_still_reviews_requested_files() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
 
         let scope = build_review_scope(
             gcx,
-            Vec::new(),
-            Vec::new(),
-            None,
-            &subchat_params(10_000, 2_000, 1_000),
+            ScopeRequest {
+                requested: vec![temp.path().join("solo.rs")],
+                mode: ScopeMode::Strict,
+                base: None,
+                focus: None,
+                plan: None,
+                max_files: 10,
+            },
         )
         .await;
 
-        assert_eq!(scope.diff_base, None);
+        assert_eq!(scope.base, None);
         assert!(scope.changed_files.is_empty());
-        assert_eq!(scope.diff_patch, None);
-    }
-
-    #[test]
-    fn tool_review_scope_budget_math_matches_existing_values() {
-        let params = subchat_params(10_000, 2_000, 1_000);
-
-        assert_eq!(review_tokens_budget(&params), 6_400);
+        assert_eq!(scope.files.len(), 1);
+        assert!(scope.hunks.is_empty());
     }
 }

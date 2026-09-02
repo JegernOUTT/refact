@@ -1,131 +1,104 @@
 import type { BadgeTone } from "../../ui";
 
-export type ReviewSeverity = "low" | "medium" | "high" | "critical";
-export type VerificationStatus =
-  | "unverified"
-  | "verified"
-  | "downgraded"
-  | "rejected"
-  | "needs_human_validation";
-export type ReviewRankTier =
-  | "execution_reproduced"
-  | "corroborated"
-  | "verified"
-  | "needs_human_validation"
-  | "unverified"
-  | "downgraded";
-export type PipelineStageStatus = "skipped" | "completed" | "failed";
-export type ReviewAgentStatus = "ran" | "skipped" | "failed";
+export type ReviewSeverity = "blocker" | "high" | "medium" | "low" | "note";
+export type StageStatus = "ok" | "timed_out" | "failed" | "not_run";
 
 export interface ReviewScope {
-  files_reviewed: string[];
+  mode: string;
+  requested_files: number;
+  reviewed_files: number;
+  files: string[];
   focus: string | null;
-  diff_base: string | null;
+  expansion: string | null;
+  out_of_scope_findings: number;
 }
 
-export interface ReviewEvidence {
-  kind: string;
-  path: string | null;
-  line1: number | null;
-  line2: number | null;
-  content: string;
+export interface ReviewDiff {
+  base: string | null;
+  head: string | null;
+  changed_files: number;
+  hunks: number;
+}
+
+export interface CommandRun {
+  cmd: string;
+  exit: number;
+}
+
+export interface StageCoverage {
+  files_read: string[];
+  commands_run: CommandRun[];
+  tools_unavailable: string[];
+  stopped_early: string | null;
+}
+
+export interface StageRun {
+  name: string;
+  model: string | null;
+  status: StageStatus;
+  reason: string | null;
+  duration_ms: number;
+  findings: number;
+  summary: string | null;
+  coverage: StageCoverage;
+}
+
+export interface FindingLocation {
+  file: string;
+  line_start: number;
+  line_end: number;
+}
+
+export interface Dispute {
+  stage: string;
+  reason: string;
 }
 
 export interface ReviewFinding {
   id: string;
-  category: string;
-  severity: ReviewSeverity;
-  confidence: number;
-  verification_status: VerificationStatus;
-  rank_tier: ReviewRankTier;
-  sources: string[];
-  file: string;
-  line1: number | null;
-  line2: number | null;
-  claim: string;
-  evidence: ReviewEvidence[];
-  impact: string | null;
-  remediation: string | null;
-  checks_performed: string[];
-}
-
-export interface ReviewPipelineStage {
-  name: string;
-  status: PipelineStageStatus;
-  reason: string | null;
-}
-
-export interface ReviewMechanicalCheck {
-  name: string;
-  command: string[];
-  exit_status: number;
-  output_excerpt: string;
-}
-
-export interface ReviewMechanicalResult {
-  passed: boolean;
-  checks: ReviewMechanicalCheck[];
-}
-
-export interface ReviewAgentCoverage {
-  agent: string;
+  stage: string;
   model: string | null;
-  status: ReviewAgentStatus;
-  reason: string | null;
-  candidates: number;
-  survived: number;
-  duration_ms: number;
-  steps: number | null;
-}
-
-export interface ReviewPipeline {
-  stages: ReviewPipelineStage[];
-  stopped_reason: string | null;
-  mechanical: ReviewMechanicalResult | null;
-  depth: string | null;
-  agents: ReviewAgentCoverage[];
+  title: string;
+  severity: ReviewSeverity;
+  file: string;
+  line_start: number;
+  line_end: number;
+  claim: string;
+  evidence: string;
+  evidence_present: boolean;
+  reproduction: string | null;
+  fix: string | null;
+  introduced_by_diff: boolean;
+  out_of_scope: boolean;
+  reported_by: string[];
+  locations: FindingLocation[];
+  disputed: Dispute | null;
 }
 
 export interface ReviewReport {
+  depth: string;
   scope: ReviewScope;
+  diff: ReviewDiff;
+  stages: StageRun[];
   findings: ReviewFinding[];
-  checks_performed: string[];
-  summary: string;
-  assumed_intent: string | null;
-  pipeline: ReviewPipeline | null;
+  duration_ms: number;
+  duplicates_merged: number;
+  scratch_dir: string | null;
 }
 
-export const tierOrder: readonly ReviewRankTier[] = [
-  "execution_reproduced",
-  "corroborated",
-  "verified",
-  "needs_human_validation",
-  "unverified",
-  "downgraded",
+export const severityOrder: readonly ReviewSeverity[] = [
+  "blocker",
+  "high",
+  "medium",
+  "low",
+  "note",
 ];
 
-const severities: readonly ReviewSeverity[] = [
-  "low",
-  "medium",
-  "high",
-  "critical",
-];
-const verificationStatuses: readonly VerificationStatus[] = [
-  "unverified",
-  "verified",
-  "downgraded",
-  "rejected",
-  "needs_human_validation",
-];
-const stageStatuses: readonly PipelineStageStatus[] = [
-  "skipped",
-  "completed",
+const stageStatuses: readonly StageStatus[] = [
+  "ok",
+  "timed_out",
   "failed",
-];
-const agentStatuses: readonly ReviewAgentStatus[] = [
-  "ran",
-  "skipped",
-  "failed",
+  "not_run",
 ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -144,8 +117,8 @@ function numberValue(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function nullableNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+function booleanValue(value: unknown, fallback = false): boolean {
+  return typeof value === "boolean" ? value : fallback;
 }
 
 function stringArray(value: unknown): string[] {
@@ -164,110 +137,151 @@ function memberOf<T extends string>(
     : fallback;
 }
 
-function normalizeEvidence(value: unknown): ReviewEvidence | null {
+function normalizeCommand(value: unknown): CommandRun | null {
+  if (!isRecord(value)) return null;
+  return { cmd: stringValue(value.cmd), exit: numberValue(value.exit) };
+}
+
+function normalizeCoverage(value: unknown): StageCoverage {
+  if (!isRecord(value)) {
+    return {
+      files_read: [],
+      commands_run: [],
+      tools_unavailable: [],
+      stopped_early: null,
+    };
+  }
+  return {
+    files_read: stringArray(value.files_read),
+    commands_run: Array.isArray(value.commands_run)
+      ? value.commands_run
+          .map(normalizeCommand)
+          .filter((item): item is CommandRun => item !== null)
+      : [],
+    tools_unavailable: stringArray(value.tools_unavailable),
+    stopped_early: nullableString(value.stopped_early),
+  };
+}
+
+function normalizeStage(value: unknown): StageRun | null {
   if (!isRecord(value)) return null;
   return {
-    kind: stringValue(value.kind, "evidence"),
-    path: nullableString(value.path),
-    line1: nullableNumber(value.line1),
-    line2: nullableNumber(value.line2),
-    content: stringValue(value.content),
+    name: stringValue(value.name),
+    model: nullableString(value.model),
+    status: memberOf(value.status, stageStatuses, "not_run"),
+    reason: nullableString(value.reason),
+    duration_ms: numberValue(value.duration_ms),
+    findings: numberValue(value.findings),
+    summary: nullableString(value.summary),
+    coverage: normalizeCoverage(value.coverage),
+  };
+}
+
+function normalizeLocation(value: unknown): FindingLocation | null {
+  if (!isRecord(value)) return null;
+  return {
+    file: stringValue(value.file),
+    line_start: numberValue(value.line_start),
+    line_end: numberValue(value.line_end),
+  };
+}
+
+function normalizeDispute(value: unknown): Dispute | null {
+  if (!isRecord(value)) return null;
+  return {
+    stage: stringValue(value.stage, "adversarial"),
+    reason: stringValue(value.reason),
   };
 }
 
 function normalizeFinding(value: unknown, index: number): ReviewFinding | null {
   if (!isRecord(value)) return null;
+  const lineStart = numberValue(value.line_start, 1);
   return {
     id: stringValue(value.id, `finding-${index + 1}`),
-    category: stringValue(value.category, "uncategorized"),
-    severity: memberOf(value.severity, severities, "low"),
-    confidence: numberValue(value.confidence),
-    verification_status: memberOf(
-      value.verification_status,
-      verificationStatuses,
-      "unverified",
-    ),
-    rank_tier: memberOf(value.rank_tier, tierOrder, "unverified"),
-    sources: stringArray(value.sources),
-    file: stringValue(value.file),
-    line1: nullableNumber(value.line1),
-    line2: nullableNumber(value.line2),
-    claim: stringValue(value.claim),
-    evidence: Array.isArray(value.evidence)
-      ? value.evidence
-          .map(normalizeEvidence)
-          .filter((item): item is ReviewEvidence => item !== null)
-      : [],
-    impact: nullableString(value.impact),
-    remediation: nullableString(value.remediation),
-    checks_performed: stringArray(value.checks_performed),
-  };
-}
-
-function normalizeStage(value: unknown): ReviewPipelineStage | null {
-  if (!isRecord(value)) return null;
-  return {
-    name: stringValue(value.name),
-    status: memberOf(value.status, stageStatuses, "skipped"),
-    reason: nullableString(value.reason),
-  };
-}
-
-function normalizeMechanicalCheck(
-  value: unknown,
-): ReviewMechanicalCheck | null {
-  if (!isRecord(value)) return null;
-  return {
-    name: stringValue(value.name),
-    command: stringArray(value.command),
-    exit_status: numberValue(value.exit_status),
-    output_excerpt: stringValue(value.output_excerpt),
-  };
-}
-
-function normalizeMechanical(value: unknown): ReviewMechanicalResult | null {
-  if (!isRecord(value)) return null;
-  return {
-    passed: typeof value.passed === "boolean" ? value.passed : false,
-    checks: Array.isArray(value.checks)
-      ? value.checks
-          .map(normalizeMechanicalCheck)
-          .filter((item): item is ReviewMechanicalCheck => item !== null)
-      : [],
-  };
-}
-
-function normalizeAgent(value: unknown): ReviewAgentCoverage | null {
-  if (!isRecord(value)) return null;
-  return {
-    agent: stringValue(value.agent),
+    stage: stringValue(value.stage, "unknown"),
     model: nullableString(value.model),
-    status: memberOf(value.status, agentStatuses, "skipped"),
-    reason: nullableString(value.reason),
-    candidates: numberValue(value.candidates),
-    survived: numberValue(value.survived),
-    duration_ms: numberValue(value.duration_ms),
-    steps: nullableNumber(value.steps),
+    title: stringValue(value.title),
+    severity: memberOf(value.severity, severityOrder, "low"),
+    file: stringValue(value.file),
+    line_start: lineStart,
+    line_end: numberValue(value.line_end, lineStart),
+    claim: stringValue(value.claim),
+    evidence: stringValue(value.evidence),
+    evidence_present: booleanValue(value.evidence_present),
+    reproduction: nullableString(value.reproduction),
+    fix: nullableString(value.fix),
+    introduced_by_diff: booleanValue(value.introduced_by_diff, true),
+    out_of_scope: booleanValue(value.out_of_scope),
+    reported_by: stringArray(value.reported_by),
+    locations: Array.isArray(value.locations)
+      ? value.locations
+          .map(normalizeLocation)
+          .filter((item): item is FindingLocation => item !== null)
+      : [],
+    disputed: normalizeDispute(value.disputed),
   };
 }
 
-function normalizePipeline(value: unknown): ReviewPipeline | null {
-  if (!isRecord(value)) return null;
+function normalizeScope(value: unknown): ReviewScope {
+  if (!isRecord(value)) {
+    return {
+      mode: "broad",
+      requested_files: 0,
+      reviewed_files: 0,
+      files: [],
+      focus: null,
+      expansion: null,
+      out_of_scope_findings: 0,
+    };
+  }
   return {
-    stages: Array.isArray(value.stages)
-      ? value.stages
-          .map(normalizeStage)
-          .filter((item): item is ReviewPipelineStage => item !== null)
-      : [],
-    stopped_reason: nullableString(value.stopped_reason),
-    mechanical: normalizeMechanical(value.mechanical),
-    depth: nullableString(value.depth),
-    agents: Array.isArray(value.agents)
-      ? value.agents
-          .map(normalizeAgent)
-          .filter((item): item is ReviewAgentCoverage => item !== null)
-      : [],
+    mode: stringValue(value.mode, "broad"),
+    requested_files: numberValue(value.requested_files),
+    reviewed_files: numberValue(value.reviewed_files),
+    files: stringArray(value.files),
+    focus: nullableString(value.focus),
+    expansion: nullableString(value.expansion),
+    out_of_scope_findings: numberValue(value.out_of_scope_findings),
   };
+}
+
+function normalizeDiff(value: unknown): ReviewDiff {
+  if (!isRecord(value)) {
+    return { base: null, head: null, changed_files: 0, hunks: 0 };
+  }
+  return {
+    base: nullableString(value.base),
+    head: nullableString(value.head),
+    changed_files: numberValue(value.changed_files),
+    hunks: numberValue(value.hunks),
+  };
+}
+
+export function parseReviewReport(value: unknown): ReviewReport | null {
+  if (!isRecord(value) || !Array.isArray(value.findings)) return null;
+  if (!isRecord(value.scope) || !Array.isArray(value.stages)) return null;
+  return {
+    depth: stringValue(value.depth, "normal"),
+    scope: normalizeScope(value.scope),
+    diff: normalizeDiff(value.diff),
+    stages: value.stages
+      .map(normalizeStage)
+      .filter((item): item is StageRun => item !== null),
+    findings: value.findings
+      .map(normalizeFinding)
+      .filter((item): item is ReviewFinding => item !== null),
+    duration_ms: numberValue(value.duration_ms),
+    duplicates_merged: numberValue(value.duplicates_merged),
+    scratch_dir: nullableString(value.scratch_dir),
+  };
+}
+
+export function reviewReportFromExtra(
+  extra: Record<string, unknown> | undefined,
+): ReviewReport | null {
+  if (!extra) return null;
+  return parseReviewReport(extra.review_report);
 }
 
 export function extractReviewReport(content: string): ReviewReport | null {
@@ -276,50 +290,33 @@ export function extractReviewReport(content: string): ReviewReport | null {
   );
   const match = blocks.at(-1);
   if (!match) return null;
-  if (content.slice(match.index + match[0].length).trim().length > 0)
-    return null;
   try {
-    const parsed: unknown = JSON.parse(match[1]);
-    if (
-      !isRecord(parsed) ||
-      !Array.isArray(parsed.findings) ||
-      !isRecord(parsed.scope)
-    ) {
-      return null;
-    }
-    return {
-      scope: {
-        files_reviewed: stringArray(parsed.scope.files_reviewed),
-        focus: nullableString(parsed.scope.focus),
-        diff_base: nullableString(parsed.scope.diff_base),
-      },
-      findings: parsed.findings
-        .map(normalizeFinding)
-        .filter((item): item is ReviewFinding => item !== null),
-      checks_performed: stringArray(parsed.checks_performed),
-      summary: stringValue(parsed.summary),
-      assumed_intent: nullableString(parsed.assumed_intent),
-      pipeline: normalizePipeline(parsed.pipeline),
-    };
+    return parseReviewReport(JSON.parse(match[1]));
   } catch {
     return null;
   }
 }
 
+export function isHypothesis(finding: ReviewFinding): boolean {
+  if (finding.disputed !== null) return true;
+  return finding.reproduction === null && !finding.evidence_present;
+}
+
 export function severityTone(severity: ReviewSeverity): BadgeTone {
-  if (severity === "critical" || severity === "high") return "danger";
+  if (severity === "blocker" || severity === "high") return "danger";
   if (severity === "medium") return "warning";
   return "muted";
 }
 
-export function tierLabel(tier: ReviewRankTier): string {
-  if (tier === "execution_reproduced") return "execution-reproduced";
-  if (tier === "needs_human_validation") return "needs human validation";
-  return tier;
+export function stageStatusTone(status: StageStatus): BadgeTone {
+  if (status === "ok") return "success";
+  if (status === "failed") return "danger";
+  if (status === "timed_out") return "warning";
+  return "muted";
 }
 
-export function agentStatusTone(status: ReviewAgentStatus): BadgeTone {
-  if (status === "ran") return "success";
-  if (status === "failed") return "danger";
-  return "muted";
+export function stageStatusLabel(status: StageStatus): string {
+  if (status === "timed_out") return "timed out";
+  if (status === "not_run") return "not run";
+  return status;
 }

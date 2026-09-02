@@ -1,0 +1,48 @@
+schema_version: 1
+id: browser
+title: "Review: browser behaviour"
+phase: parallel
+contract: findings
+depth: deep
+budget_minutes: 20
+writes_allowed: false
+applies_when:
+  extensions: [tsx, jsx, ts, js, vue, svelte, css, scss, html]
+preferred_tools:
+  - chrome
+  - shell
+  - cat
+  - search_pattern
+  - glob
+  - process_start
+  - process_read
+  - process_wait
+  - process_kill
+  - ui_probe
+  - mark_elements
+  - contrast_audit
+  - image_region
+fallback: >-
+  If no dev server can be started or the browser is unavailable, say so in
+  coverage.tools_unavailable and stop; do not speculate about rendered behaviour.
+task: |
+  Drive the user interface in a real browser and report only what you observed.
+
+  The caller supplies the scenario. It is authoritative: run exactly that scenario, and if it
+  cannot be run, say why in coverage.stopped_early instead of inventing a different one.
+
+  1. Find how this repository serves the app: read its README, package scripts and CI config. If a
+     server is already running, use it; otherwise start the documented dev server as a background
+     process and wait for it to be ready.
+  2. Follow the scenario step by step. Read the accessibility snapshot rather than screenshots for
+     structure, and interact the way a user would.
+  3. Report: runtime console errors, failed network calls, interactions that do nothing, state
+     that does not update, layout that breaks at a narrow viewport, keyboard traps, missing
+     accessible names, and contrast failures reported by the audit tool.
+  4. Every finding needs observed evidence: the console message, the failed request line, the
+     snapshot fragment, or the measured contrast ratio. reproduction is the sequence of steps
+     you actually performed, written so someone can repeat it.
+  5. Point file and lines at the component source responsible, not at the rendered output.
+  6. Shut down anything you started before finishing, and record the commands you ran.
+
+  If the changed screens behave correctly, report that and return no findings.

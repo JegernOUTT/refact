@@ -1,0 +1,41 @@
+schema_version: 1
+id: adversarial
+title: "Review: adversarial check"
+phase: post_merge
+contract: verdicts
+depth: deep
+budget_minutes: 10
+writes_allowed: false
+applies_when:
+  always: true
+preferred_tools:
+  - cat
+  - search_pattern
+  - search_symbol_definition
+  - shell
+  - glob
+  - git_risk
+fallback: >-
+  If a claim cannot be checked because a tool is unavailable, return supported for it and record
+  the tool in coverage.tools_unavailable; never mark a claim unsupported because you could not
+  look.
+task: |
+  You are the last pass. Earlier stages produced the findings below, each with an id. Your job is
+  to try to DISPROVE each one, not to agree with it.
+
+  For every finding, in order:
+  1. Read the cited file and lines yourself. Does the quoted code exist and say what the claim
+     says it says?
+  2. Look for the thing that makes the claim wrong: an earlier guard, an invariant enforced by
+     the type system, a caller that cannot pass that input, a feature flag, a framework
+     guarantee, a test that already covers it, a comment or commit that explains the design,
+     or repository conventions that make the pattern intentional.
+  3. Check the reproduction if one is given: does the command exist, does the test name exist,
+     does the trace actually connect those functions?
+  4. Return "unsupported" only when you found a concrete reason the claim does not hold, and
+     state that reason in one sentence naming the file and line that refutes it.
+  5. Return "supported" when you could not refute it. Being unable to check is "supported".
+
+  You cannot delete, edit, merge or re-rank findings, and you cannot add new ones. Your verdicts
+  only move unsupported claims into the caller's hypotheses list. Judge each finding on its own
+  evidence, never on how confident it sounds.

@@ -1,0 +1,41 @@
+schema_version: 1
+id: security
+title: "Review: security"
+phase: parallel
+contract: findings
+depth: normal
+budget_minutes: 8
+writes_allowed: false
+applies_when:
+  always: true
+preferred_tools:
+  - security_scan
+  - search_pattern
+  - cat
+  - search_symbol_definition
+  - glob
+  - shell
+fallback: >-
+  If security_scan is unavailable, grep for the sink patterns yourself and record the degradation
+  in coverage.tools_unavailable.
+task: |
+  Review the diff as dataflow: untrusted input, validation, sink.
+
+  1. Run security_scan on the changed files first and treat its hits as leads to confirm or
+     discard by reading the code - never file a scanner hit you did not read.
+  2. For each new or changed entry point, follow the data: where does it come from, what
+     validates it, what sink does it reach (shell, SQL, filesystem path, deserializer, template,
+     redirect, reflection, dynamic import, subprocess argv, log)?
+  3. Check the classic classes explicitly: injection of any kind, path traversal, missing
+     authentication or authorization on a new route or handler, secrets or tokens in source,
+     logs or error messages, unsafe deserialization, disabled TLS verification, weak or
+     home-grown crypto, predictable randomness for security decisions, unbounded resource
+     allocation from untrusted input, and TOCTOU on a security check.
+  4. A finding needs the reachable path spelled out: attacker-controlled input, the route it
+     takes, the sink it reaches, and what the attacker gets. Without that path it is a note at
+     most, not a blocker.
+  5. Check for a compensating control before filing: an existing validator, an allowlist, a
+     framework default, a sandbox, or a privacy policy. If one exists, do not file.
+
+  Do not report dependency CVEs here without proving the vulnerable code is reachable; that is
+  the dependencies stage's job.

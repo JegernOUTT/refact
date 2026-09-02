@@ -10,40 +10,36 @@ import {
 } from "../../ui";
 import { useOpenFileInApp } from "../../../hooks/useOpenFileInApp";
 import {
-  agentStatusTone,
+  isHypothesis,
+  severityOrder,
   severityTone,
-  tierLabel,
-  tierOrder,
-  type ReviewAgentCoverage,
-  type ReviewEvidence,
+  stageStatusLabel,
+  stageStatusTone,
   type ReviewFinding,
-  type ReviewRankTier,
   type ReviewReport,
+  type ReviewSeverity,
+  type StageRun,
 } from "./reviewReportJson";
 import styles from "./ReviewReportView.module.css";
 
 const DEFAULT_FINDING_LIMIT = 12;
-const CHECK_LIMIT = 30;
 
-function locationLabel(
-  path: string,
-  line1: number | null,
-  line2: number | null,
-): string {
-  if (line1 === null) return path || "Unknown location";
-  return `${path || "Unknown file"}:${line1}${
-    line2 !== null && line2 !== line1 ? `-${line2}` : ""
-  }`;
-}
-
-function confidenceLabel(confidence: number): string {
-  const percent = confidence <= 1 ? confidence * 100 : confidence;
-  return `${Math.round(percent)}% confidence`;
+function locationLabel(finding: ReviewFinding): string {
+  const file = finding.file || "Unknown file";
+  if (finding.line_end !== finding.line_start) {
+    return `${file}:${finding.line_start}-${finding.line_end}`;
+  }
+  return `${file}:${finding.line_start}`;
 }
 
 function humanizeDuration(durationMs: number): string {
   if (durationMs < 1000) return `${Math.round(durationMs)} ms`;
-  return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)} s`;
+  const seconds = Math.round(durationMs / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(
+    2,
+    "0",
+  )}s`;
 }
 
 function middleTruncate(value: string, limit = 28): string {
@@ -52,34 +48,13 @@ function middleTruncate(value: string, limit = 28): string {
   return `${value.slice(0, side)}…${value.slice(-side)}`;
 }
 
-function EvidenceRow({ evidence }: { evidence: ReviewEvidence }) {
-  return (
-    <li className={styles.evidenceRow}>
-      <div className={styles.chipRow}>
-        <Chip>{evidence.kind}</Chip>
-        {evidence.path !== null && (
-          <span className={styles.evidencePath} title={evidence.path}>
-            {locationLabel(evidence.path, evidence.line1, evidence.line2)}
-          </span>
-        )}
-      </div>
-      {evidence.content.length > 0 && (
-        <pre className={`${styles.evidenceContent} scrollX`}>
-          {evidence.content}
-        </pre>
-      )}
-    </li>
-  );
-}
-
 function FindingCard({ finding }: { finding: ReviewFinding }) {
   const { canOpen, openFile } = useOpenFileInApp();
+  const label = locationLabel(finding);
   const hasDetails =
-    finding.impact !== null ||
-    finding.remediation !== null ||
     finding.evidence.length > 0 ||
-    finding.checks_performed.length > 0;
-  const label = locationLabel(finding.file, finding.line1, finding.line2);
+    finding.fix !== null ||
+    finding.locations.length > 0;
 
   return (
     <Surface as="li" className={styles.finding} variant="glass">
@@ -88,14 +63,16 @@ function FindingCard({ finding }: { finding: ReviewFinding }) {
           {finding.severity}
         </Badge>
         <Badge size="xs" tone="muted" variant="outline">
-          {finding.category}
+          {finding.reported_by.length > 0
+            ? finding.reported_by.join("+")
+            : finding.stage}
         </Badge>
         {finding.file.length > 0 ? (
           <button
             className={canOpen ? styles.fileLink : styles.filePlain}
             disabled={!canOpen}
             onClick={() =>
-              openFile({ path: finding.file, line: finding.line1 ?? undefined })
+              openFile({ path: finding.file, line: finding.line_start })
             }
             type="button"
           >
@@ -104,55 +81,45 @@ function FindingCard({ finding }: { finding: ReviewFinding }) {
         ) : (
           <span className={styles.filePlain}>{label}</span>
         )}
-        <span className={styles.confidence}>
-          {confidenceLabel(finding.confidence)}
-        </span>
       </div>
       <p className={styles.claim}>{finding.claim || "No claim provided"}</p>
-      {finding.sources.length > 0 && (
-        <div className={styles.chipRow}>
-          {finding.sources.map((source, index) => (
-            <Chip key={`${source}-${index}`}>{source}</Chip>
-          ))}
-        </div>
-      )}
+      <div className={styles.chipRow}>
+        {finding.reproduction !== null && (
+          <Chip>repro: {finding.reproduction}</Chip>
+        )}
+        {!finding.evidence_present && <Chip>evidence not found in file</Chip>}
+        {!finding.introduced_by_diff && <Chip>pre-existing</Chip>}
+        {finding.out_of_scope && <Chip>out of scope</Chip>}
+        {finding.disputed !== null && (
+          <Chip>disputed: {finding.disputed.reason}</Chip>
+        )}
+      </div>
       {hasDetails && (
         <details className={styles.details}>
           <summary>Details</summary>
           <div className={styles.detailsBody}>
-            {finding.impact !== null && (
-              <div>
-                <span className={styles.detailLabel}>Impact</span>
-                <p>{finding.impact}</p>
-              </div>
-            )}
-            {finding.remediation !== null && (
-              <div>
-                <span className={styles.detailLabel}>Remediation</span>
-                <p>{finding.remediation}</p>
-              </div>
-            )}
             {finding.evidence.length > 0 && (
               <div>
                 <span className={styles.detailLabel}>Evidence</span>
-                <ul className={styles.evidenceList}>
-                  {finding.evidence.map((evidence, index) => (
-                    <EvidenceRow
-                      evidence={evidence}
-                      key={`${evidence.kind}-${
-                        evidence.path ?? "none"
-                      }-${index}`}
-                    />
-                  ))}
-                </ul>
+                <pre className={`${styles.evidenceContent} scrollX`}>
+                  {finding.evidence}
+                </pre>
               </div>
             )}
-            {finding.checks_performed.length > 0 && (
+            {finding.fix !== null && (
               <div>
-                <span className={styles.detailLabel}>Checks</span>
+                <span className={styles.detailLabel}>Fix</span>
+                <p>{finding.fix}</p>
+              </div>
+            )}
+            {finding.locations.length > 0 && (
+              <div>
+                <span className={styles.detailLabel}>Also at</span>
                 <div className={styles.chipRow}>
-                  {finding.checks_performed.map((check, index) => (
-                    <Chip key={`${check}-${index}`}>{check}</Chip>
+                  {finding.locations.map((location, index) => (
+                    <Chip key={`${location.file}-${index}`}>
+                      {`${location.file}:${location.line_start}-${location.line_end}`}
+                    </Chip>
                   ))}
                 </div>
               </div>
@@ -166,10 +133,10 @@ function FindingCard({ finding }: { finding: ReviewFinding }) {
 
 function FindingSection({
   findings,
-  tier,
+  title,
 }: {
   findings: ReviewFinding[];
-  tier: ReviewRankTier;
+  title: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const listId = useId();
@@ -181,7 +148,7 @@ function FindingSection({
   return (
     <section className={styles.section}>
       <div className={styles.sectionHeader}>
-        <h3 className={styles.sectionTitle}>{tierLabel(tier)}</h3>
+        <h3 className={styles.sectionTitle}>{title}</h3>
         <Badge size="xs" tone="muted" variant="outline">
           {findings.length}
         </Badge>
@@ -205,14 +172,48 @@ function FindingSection({
   );
 }
 
-function agentDotStatus(status: ReviewAgentCoverage["status"]) {
-  if (status === "ran") return "success" as const;
+function stageDotStatus(status: StageRun["status"]) {
+  if (status === "ok") return "success" as const;
   if (status === "failed") return "error" as const;
+  if (status === "timed_out") return "warning" as const;
   return "idle" as const;
 }
 
-const agentColumns: DataTableColumn<ReviewAgentCoverage>[] = [
-  { id: "agent", header: "Agent", cell: (row) => row.agent || "—" },
+function coverageLabel(stage: StageRun): string {
+  const parts: string[] = [];
+  if (stage.coverage.files_read.length > 0) {
+    parts.push(`${stage.coverage.files_read.length} files`);
+  }
+  if (stage.coverage.commands_run.length > 0) {
+    const failed = stage.coverage.commands_run.filter(
+      (command) => command.exit !== 0,
+    ).length;
+    parts.push(`${stage.coverage.commands_run.length} cmds (${failed} failed)`);
+  }
+  if (stage.coverage.tools_unavailable.length > 0) {
+    parts.push(`unavailable: ${stage.coverage.tools_unavailable.join(", ")}`);
+  }
+  if (stage.coverage.stopped_early !== null) {
+    parts.push(`stopped: ${stage.coverage.stopped_early}`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : "—";
+}
+
+const stageColumns: DataTableColumn<StageRun>[] = [
+  { id: "stage", header: "Stage", cell: (row) => row.name || "—" },
+  {
+    id: "status",
+    header: "Status",
+    cell: (row) => (
+      <span className={styles.status}>
+        <StatusDot status={stageDotStatus(row.status)} />
+        <Badge size="xs" tone={stageStatusTone(row.status)} variant="outline">
+          {stageStatusLabel(row.status)}
+        </Badge>
+      </span>
+    ),
+  },
+  { id: "reason", header: "Reason", cell: (row) => row.reason ?? "—" },
   {
     id: "model",
     header: "Model",
@@ -223,34 +224,9 @@ const agentColumns: DataTableColumn<ReviewAgentCoverage>[] = [
     ),
   },
   {
-    id: "status",
-    header: "Status",
-    cell: (row) => (
-      <span className={styles.status}>
-        <StatusDot status={agentDotStatus(row.status)} />
-        <Badge size="xs" tone={agentStatusTone(row.status)} variant="outline">
-          {row.status}
-        </Badge>
-      </span>
-    ),
-  },
-  { id: "reason", header: "Reason", cell: (row) => row.reason ?? "—" },
-  {
-    id: "candidates",
-    header: "Candidates",
-    cell: (row) => row.candidates,
-    align: "end",
-  },
-  {
-    id: "survived",
-    header: "Survived",
-    cell: (row) => row.survived,
-    align: "end",
-  },
-  {
-    id: "steps",
-    header: "Steps",
-    cell: (row) => row.steps ?? "—",
+    id: "findings",
+    header: "Findings",
+    cell: (row) => row.findings,
     align: "end",
   },
   {
@@ -259,116 +235,104 @@ const agentColumns: DataTableColumn<ReviewAgentCoverage>[] = [
     cell: (row) => humanizeDuration(row.duration_ms),
     align: "end",
   },
+  { id: "coverage", header: "Coverage", cell: coverageLabel },
 ];
 
 export const ReviewReportView: React.FC<{ report: ReviewReport }> = ({
   report,
 }) => {
-  const grouped = useMemo(
+  const { facts, hypotheses, reproduced } = useMemo(() => {
+    const facts = report.findings.filter((finding) => !isHypothesis(finding));
+    return {
+      facts,
+      hypotheses: report.findings.filter(isHypothesis),
+      reproduced: facts.filter((finding) => finding.reproduction !== null)
+        .length,
+    };
+  }, [report.findings]);
+  const bySeverity = useMemo(
     () =>
-      tierOrder.map((tier) => ({
-        tier,
-        findings: report.findings.filter(
-          (finding) => finding.rank_tier === tier,
-        ),
+      severityOrder.map((severity: ReviewSeverity) => ({
+        severity,
+        findings: facts.filter((finding) => finding.severity === severity),
       })),
-    [report.findings],
+    [facts],
   );
-  const verdict = grouped
-    .filter((group) => group.findings.length > 0)
-    .map((group) => `${group.findings.length} ${tierLabel(group.tier)}`)
-    .join(" · ");
-  const mechanicalFailed =
-    report.pipeline?.stopped_reason === "mechanical_checks_failed";
-  const failedChecks = mechanicalFailed
-    ? report.pipeline?.mechanical?.checks.filter(
-        (check) => check.exit_status !== 0,
-      ) ?? []
-    : [];
-  const shownChecks = report.checks_performed.slice(0, CHECK_LIMIT);
-  const hiddenChecks = report.checks_performed.length - shownChecks.length;
+  const incomplete = report.stages.filter((stage) => stage.status !== "ok");
 
   return (
     <div className={styles.report} data-testid="review-report">
       <Surface className={styles.header} variant="surface-2">
         <div className={styles.headerStrip}>
-          {report.pipeline?.depth && (
-            <Badge tone="accent">{report.pipeline.depth}</Badge>
+          <Badge tone="accent">{report.depth}</Badge>
+          <span>
+            {report.scope.requested_files} requested →{" "}
+            {report.scope.reviewed_files} reviewed ({report.scope.mode})
+          </span>
+          {report.diff.base !== null && (
+            <span className={styles.mono}>
+              {report.diff.base}..{report.diff.head ?? "HEAD"} ·{" "}
+              {report.diff.changed_files} files, {report.diff.hunks} hunks
+            </span>
           )}
-          <span>{report.scope.files_reviewed.length} files reviewed</span>
-          {report.scope.focus && (
+          <span>{humanizeDuration(report.duration_ms)}</span>
+          {report.scope.focus !== null && (
             <span className={styles.truncated} title={report.scope.focus}>
               Focus: {report.scope.focus}
             </span>
           )}
-          {report.scope.diff_base && (
-            <span className={styles.mono}>Base: {report.scope.diff_base}</span>
-          )}
         </div>
-        <p className={styles.verdict}>Verdict: {verdict || "no findings"}</p>
-        {report.summary && <p className={styles.summary}>{report.summary}</p>}
+        <p className={styles.verdict}>
+          {facts.length} supported ({reproduced} reproduced) ·{" "}
+          {hypotheses.length} hypotheses · {report.duplicates_merged} duplicates
+          merged · {report.scope.out_of_scope_findings} out of scope
+        </p>
+        {incomplete.length > 0 && (
+          <p className={styles.summary}>
+            Partial review: {incomplete.length} stage(s) did not complete —
+            absence of findings there is not evidence of absence.
+          </p>
+        )}
       </Surface>
 
-      {mechanicalFailed && (
-        <div className={styles.dangerCallout} role="alert">
-          <strong>Mechanical checks failed</strong>
-          {failedChecks.length === 0 && (
-            <span>No failed check details were reported.</span>
-          )}
-          {failedChecks.map((check, index) => (
-            <div className={styles.failedCheck} key={`${check.name}-${index}`}>
-              <span>
-                {check.name || "Check"} · exit {check.exit_status}
-              </span>
-              {check.output_excerpt && (
-                <pre className={`${styles.failureOutput} scrollX`}>
-                  {check.output_excerpt}
-                </pre>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {report.assumed_intent && (
-        <div className={styles.intent}>
-          <strong>Assumed intent</strong>
-          <span>{report.assumed_intent}</span>
-        </div>
-      )}
-
-      {grouped
+      {bySeverity
         .filter((group) => group.findings.length > 0)
         .map((group) => (
           <FindingSection
             findings={group.findings}
-            key={group.tier}
-            tier={group.tier}
+            key={group.severity}
+            title={group.severity}
           />
         ))}
 
-      {report.pipeline && report.pipeline.agents.length > 0 && (
+      {facts.length === 0 && (
+        <p className={styles.summary}>No supported findings.</p>
+      )}
+
+      {hypotheses.length > 0 && (
+        <FindingSection
+          findings={hypotheses}
+          title="Hypotheses — unverified, you decide"
+        />
+      )}
+
+      {report.stages.length > 0 && (
         <section className={styles.section}>
-          <h3 className={styles.sectionTitle}>Agent coverage</h3>
+          <h3 className={styles.sectionTitle}>Stage coverage</h3>
           <DataTable
-            caption="Agent coverage"
-            columns={agentColumns}
-            getRowId={(agent, index) => `${agent.agent}-${index}`}
-            rows={report.pipeline.agents}
+            caption="Stage coverage"
+            columns={stageColumns}
+            getRowId={(stage, index) => `${stage.name}-${index}`}
+            rows={report.stages}
           />
         </section>
       )}
 
-      {report.checks_performed.length > 0 && (
-        <details className={styles.checks}>
-          <summary>Checks performed ({report.checks_performed.length})</summary>
-          <div className={styles.chipRow}>
-            {shownChecks.map((check, index) => (
-              <Chip key={`${check}-${index}`}>{check}</Chip>
-            ))}
-            {hiddenChecks > 0 && <Chip>+{hiddenChecks} more</Chip>}
-          </div>
-        </details>
+      {report.scratch_dir !== null && (
+        <p className={styles.summary}>
+          Raw per-stage output:{" "}
+          <span className={styles.mono}>{report.scratch_dir}</span>
+        </p>
       )}
     </div>
   );

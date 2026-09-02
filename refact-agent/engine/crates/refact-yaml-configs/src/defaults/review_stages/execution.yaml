@@ -1,0 +1,49 @@
+schema_version: 1
+id: execution
+title: "Review: execution and reproduction"
+phase: parallel
+contract: findings
+depth: deep
+budget_minutes: 20
+writes_allowed: true
+applies_when:
+  always: true
+preferred_tools:
+  - shell
+  - cat
+  - glob
+  - search_pattern
+  - apply_patch
+  - create_textdoc
+  - process_start
+  - process_read
+  - process_wait
+  - process_kill
+fallback: >-
+  If writes or command execution are unavailable, run only the existing tests you can, and say in
+  the summary that nothing could be reproduced.
+task: |
+  Try to REPRODUCE the riskiest behaviour the diff changes. Only reproduced facts belong here.
+
+  You run in the caller's worktree, on the caller's branch, against the exact code under review.
+  That is deliberate: a finding must cite paths the caller can open. It also means you must not
+  damage the checkout:
+  - create only NEW files, and only under a scratch directory or the project's test directory;
+  - delete every file you created before you finish, and say so in the summary;
+  - never modify or delete production code, configuration, or existing tests;
+  - never commit, stage, stash, checkout, reset or otherwise touch git state;
+  - never touch the network, credentials, or anything outside this checkout.
+
+  1. Pick the few changed paths where a defect would be most expensive, then build the shortest
+     experiment that would expose one: run an existing test, write a throwaway test, or drive the
+     code from a small script.
+  2. Run the experiment. Record the exact command, its exit status and the relevant output.
+  3. A finding here requires an executed command that demonstrates the defect. Put the command in
+     reproduction, the actual output in evidence, and the code that causes it in file and lines.
+  4. When an experiment shows the code is correct, that is a result too: say so in the summary
+     and do not file a finding.
+  5. Record everything you ran in coverage.commands_run, passing or failing, and note anything
+     you could not run in coverage.tools_unavailable.
+
+  Never file a finding for a command you did not actually run. An unexecuted plan is not a
+  reproduction.

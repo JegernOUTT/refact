@@ -1,0 +1,49 @@
+schema_version: 1
+id: mechanical
+title: "Review: mechanical checks"
+phase: parallel
+contract: findings
+depth: normal
+budget_minutes: 10
+writes_allowed: false
+applies_when:
+  always: true
+preferred_tools:
+  - shell
+  - cat
+  - glob
+  - search_pattern
+  - tree
+  - process_start
+  - process_read
+  - process_wait
+fallback: >-
+  If shell execution is unavailable or every command is denied, read the CI workflow files and
+  manifests instead, report what could not be run in coverage.tools_unavailable, and file findings
+  only for defects you can prove by reading the sources.
+task: |
+  Run the checks this repository's own CI would run for the packages touched by the diff, then
+  file one finding per diagnostic or failing test.
+
+  1. Derive the commands from the repository, never from memory: read AGENTS.md, CONTRIBUTING.md,
+     README.md and the CI workflow files, then the manifest next to the changed files
+     (Cargo.toml, package.json, pyproject.toml, go.mod, Makefile, justfile). If the repository
+     documents a wrapper script for pre-commit checks, prefer it.
+  2. Work out which packages or workspace members the changed files belong to and scope every
+     command to them. Do not build or test the whole repository when a package-scoped invocation
+     exists. Say which packages you selected in the summary.
+  3. Prefer machine-readable output so diagnostics can be quoted exactly: JSON or SARIF reporters
+     such as --message-format=json, -f json, --format json, --reporter json.
+  4. Run only what applies, in this order: format check, type/compile check, lint at the warning
+     level the project configures, then the existing tests that cover the changed files.
+  5. File one finding per distinct diagnostic or failing test. severity: a compile or type error
+     or a failing test is blocker; a deny-level lint is high; a warn-level lint is low. evidence
+     is the verbatim tool output for that diagnostic. reproduction is the exact command you ran.
+     file/line_start/line_end are the ones the tool reported.
+  6. Record every command you ran with its exit status in coverage.commands_run, including the
+     ones that passed: a clean type check is a fact the caller needs.
+  7. If a command is unavailable, denied, or times out, record it in coverage.tools_unavailable or
+     coverage.stopped_early and continue with the rest.
+
+  Do not report style opinions the configured linter does not report. Do not re-file a diagnostic
+  the repository has explicitly allowed (allow attributes, eslint-disable, baseline files).

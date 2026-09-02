@@ -1,0 +1,41 @@
+schema_version: 1
+id: tests
+title: "Review: test adequacy"
+phase: parallel
+contract: findings
+depth: deep
+budget_minutes: 12
+writes_allowed: false
+applies_when:
+  always: true
+preferred_tools:
+  - shell
+  - cat
+  - glob
+  - search_pattern
+  - process_start
+  - process_read
+  - process_wait
+fallback: >-
+  If tests cannot be executed, review the test sources statically and say in the summary that no
+  test was actually run.
+task: |
+  Decide whether the changed behaviour is actually tested, and prove your answer by running the
+  tests that exist.
+
+  1. Find the tests that cover the changed code: by path convention, by symbol name, by fixture,
+     by the test the repository's CI runs for this package.
+  2. Run them, scoped to the package the diff touches. Record every command and exit status in
+     coverage.commands_run. A failing existing test is a blocker finding with the failure output
+     as evidence and the command as reproduction.
+  3. File a finding for each changed behaviour with no test: name the behaviour, the file where
+     the test belongs, and write the assertion the test should make. Be concrete enough that a
+     developer can paste it.
+  4. Report tests that cannot fail: assertions on constants, mocks asserting on themselves,
+     snapshot updates that hide a behaviour change, tests skipped or ignored by the diff,
+     assertions removed by the diff, and error paths asserted only for "does not panic".
+  5. Report missing negative, boundary, timeout, retry, cancellation and concurrency cases when
+     the changed code has those paths.
+
+  A change that is fully covered is a real result: say which tests cover it and return no
+  findings.
