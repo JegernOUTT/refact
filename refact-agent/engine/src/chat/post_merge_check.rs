@@ -47,6 +47,7 @@ pub struct PostMergeCheckResult {
 pub enum PostMergeCommand {
     Verify {
         cwd: Option<PathBuf>,
+        env: Vec<(String, String)>,
         argv: Vec<String>,
     },
     Git(Vec<String>),
@@ -83,7 +84,7 @@ impl PostMergeCommandRunner for SystemPostMergeCommandRunner {
         timeout: Duration,
     ) -> PostMergeCommandOutput {
         match command {
-            PostMergeCommand::Verify { cwd, argv } => {
+            PostMergeCommand::Verify { cwd, env, argv } => {
                 let label = argv.join(" ");
                 if argv.is_empty() {
                     return PostMergeCommandOutput {
@@ -98,6 +99,7 @@ impl PostMergeCommandRunner for SystemPostMergeCommandRunner {
                     workspace_root,
                     &label,
                     cwd,
+                    env,
                     argv,
                     timeout,
                     Duration::from_secs(10),
@@ -232,7 +234,7 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
     let mut parsed = Vec::new();
     for command in commands {
         match parse_verification_argv(&command) {
-            Ok((cwd, argv)) => {
+            Ok(verification) => {
                 if let Err(reason) = command_policy.check(&command) {
                     return Ok(failed_without_revert(
                         Some(command),
@@ -240,7 +242,7 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
                         format!("Denied by shell policy: {}", reason),
                     ));
                 }
-                parsed.push((command, cwd, argv));
+                parsed.push((command, verification));
             }
             Err(reason) => {
                 return Ok(failed_without_revert(
@@ -258,12 +260,16 @@ pub async fn post_merge_check_with_runner<R: PostMergeCommandRunner>(
         output: String::new(),
         outcome: VerificationOutcome::Passed,
     };
-    for (next_command, cwd, argv) in parsed {
+    for (next_command, verified) in parsed {
         command = next_command;
         verification = runner
             .run(
                 &request.workspace_root,
-                PostMergeCommand::Verify { cwd, argv },
+                PostMergeCommand::Verify {
+                    cwd: verified.cwd,
+                    env: verified.env,
+                    argv: verified.argv,
+                },
                 request.timeout,
             )
             .await;
@@ -1042,6 +1048,7 @@ mod tests {
             runner.calls,
             vec![PostMergeCommand::Verify {
                 cwd: None,
+                env: Vec::new(),
                 argv: vec!["cargo".to_string(), "test".to_string(), "--lib".to_string()]
             }]
         );
@@ -1074,6 +1081,7 @@ mod tests {
             runner.calls,
             vec![PostMergeCommand::Verify {
                 cwd: Some(PathBuf::from("refact-agent/engine")),
+                env: Vec::new(),
                 argv: vec!["cargo".to_string(), "check".to_string()]
             }]
         );
@@ -1103,6 +1111,7 @@ mod tests {
             runner.calls,
             vec![PostMergeCommand::Verify {
                 cwd: None,
+                env: Vec::new(),
                 argv: vec!["dotnet".to_string(), "test".to_string()]
             }]
         );

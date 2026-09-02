@@ -117,6 +117,7 @@ trait VerificationCommandRunner: Send {
         worktree: &Path,
         command: &str,
         cwd: Option<PathBuf>,
+        env: Vec<(String, String)>,
         argv: Vec<String>,
     ) -> VerificationResult;
 }
@@ -132,9 +133,10 @@ impl VerificationCommandRunner for SystemVerificationCommandRunner {
         worktree: &Path,
         command: &str,
         cwd: Option<PathBuf>,
+        env: Vec<(String, String)>,
         argv: Vec<String>,
     ) -> VerificationResult {
-        run_verification_argv(self.gcx.clone(), worktree, command, cwd, argv).await
+        run_verification_argv(self.gcx.clone(), worktree, command, cwd, env, argv).await
     }
 }
 
@@ -499,7 +501,7 @@ async fn run_verification_command_with_runner<R: VerificationCommandRunner>(
     policy: &VerifyCommandPolicy,
     runner: &mut R,
 ) -> VerificationResult {
-    let (cwd, argv) = match parse_verification_argv(command) {
+    let parsed = match parse_verification_argv(command) {
         Ok(parsed) => parsed,
         Err(reason) => {
             return VerificationResult {
@@ -520,7 +522,9 @@ async fn run_verification_command_with_runner<R: VerificationCommandRunner>(
             outcome: VerificationOutcome::PolicyDenied,
         };
     }
-    runner.run(worktree, command, cwd, argv).await
+    runner
+        .run(worktree, command, parsed.cwd, parsed.env, parsed.argv)
+        .await
 }
 
 async fn run_verification_argv(
@@ -528,6 +532,7 @@ async fn run_verification_argv(
     worktree: &Path,
     command: &str,
     cwd: Option<PathBuf>,
+    env: Vec<(String, String)>,
     argv: Vec<String>,
 ) -> VerificationResult {
     run_verification_argv_impl(
@@ -535,6 +540,7 @@ async fn run_verification_argv(
         worktree,
         command,
         cwd,
+        env,
         argv,
         VERIFY_TIMEOUT,
         DRAIN_TIMEOUT,
@@ -547,6 +553,7 @@ pub(crate) async fn run_verification_argv_impl(
     worktree: &Path,
     command: &str,
     cwd: Option<PathBuf>,
+    env: Vec<(String, String)>,
     argv: Vec<String>,
     timeout: Duration,
     drain_timeout: Duration,
@@ -576,7 +583,7 @@ pub(crate) async fn run_verification_argv_impl(
             source: ExecSource::Verifier,
             command: CommandKind::Argv(&argv),
             cwd: Some(effective_cwd),
-            env: HashMap::new(),
+            env: env.into_iter().collect::<HashMap<String, String>>(),
             chat_mode: None,
             escalation: None,
         },
@@ -780,7 +787,13 @@ mod tests {
 
     #[derive(Default)]
     struct MockVerificationRunner {
-        calls: Vec<(PathBuf, String, Option<PathBuf>, Vec<String>)>,
+        calls: Vec<(
+            PathBuf,
+            String,
+            Option<PathBuf>,
+            Vec<(String, String)>,
+            Vec<String>,
+        )>,
     }
 
     #[async_trait]
@@ -790,10 +803,11 @@ mod tests {
             worktree: &Path,
             command: &str,
             cwd: Option<PathBuf>,
+            env: Vec<(String, String)>,
             argv: Vec<String>,
         ) -> VerificationResult {
             self.calls
-                .push((worktree.to_path_buf(), command.to_string(), cwd, argv));
+                .push((worktree.to_path_buf(), command.to_string(), cwd, env, argv));
             VerificationResult {
                 command: command.to_string(),
                 exit_code: Some(0),
@@ -1221,7 +1235,30 @@ mod tests {
             runner.calls[0].2,
             Some(PathBuf::from("refact-agent/engine"))
         );
-        assert_eq!(runner.calls[0].3, vec!["cargo", "check"]);
+        assert!(runner.calls[0].3.is_empty());
+        assert_eq!(runner.calls[0].4, vec!["cargo", "check"]);
+    }
+
+    #[tokio::test]
+    async fn verifier_threads_env_prefix_to_the_runner() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runner = MockVerificationRunner::default();
+
+        let result = run_verification_command_with_runner(
+            temp.path(),
+            "cd ui && FLEXUS_PYTHON=/abs/py pnpm typecheck",
+            &VerifyCommandPolicy::permissive(),
+            &mut runner,
+        )
+        .await;
+
+        assert!(result.passed, "{}", result.output_tail);
+        assert_eq!(runner.calls[0].2, Some(PathBuf::from("ui")));
+        assert_eq!(
+            runner.calls[0].3,
+            vec![("FLEXUS_PYTHON".to_string(), "/abs/py".to_string())]
+        );
+        assert_eq!(runner.calls[0].4, vec!["pnpm", "typecheck"]);
     }
 
     #[tokio::test]
@@ -1356,7 +1393,7 @@ mod tests {
         .await;
 
         assert!(result.passed, "{}", result.output_tail);
-        assert_eq!(runner.calls[0].3, vec!["mycompany-verify", "--all"]);
+        assert_eq!(runner.calls[0].4, vec!["mycompany-verify", "--all"]);
     }
 
     #[tokio::test]
@@ -1421,6 +1458,7 @@ mod tests {
             worktree.path(),
             "cargo check",
             Some(outside.path().to_path_buf()),
+            Vec::new(),
             vec!["cargo".to_string(), "check".to_string()],
             Duration::from_secs(30),
             DRAIN_TIMEOUT,
@@ -1444,6 +1482,7 @@ mod tests {
                 temp.path(),
                 "cat",
                 None,
+                Vec::new(),
                 vec!["cat".to_string()],
                 Duration::from_secs(30),
                 DRAIN_TIMEOUT,
@@ -1466,6 +1505,7 @@ mod tests {
             temp.path(),
             "sleep 30",
             None,
+            Vec::new(),
             vec!["sleep".to_string(), "30".to_string()],
             Duration::from_millis(200),
             DRAIN_TIMEOUT,
@@ -1492,6 +1532,7 @@ mod tests {
                 temp.path(),
                 "bash -c 'sleep 60 &'",
                 None,
+                Vec::new(),
                 vec![
                     "bash".to_string(),
                     "-c".to_string(),

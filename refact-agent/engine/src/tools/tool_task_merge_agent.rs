@@ -81,7 +81,7 @@ fn append_post_merge_check_message(
     }
     if result.outcome != VerificationOutcome::CommandFailed {
         let label = match result.outcome {
-            VerificationOutcome::Rejected => "rejected by the command filter",
+            VerificationOutcome::Rejected => "could not be run as a command",
             VerificationOutcome::PolicyDenied => "denied by command policy",
             VerificationOutcome::InfrastructureFailed => {
                 "could not run due to infrastructure failure"
@@ -1879,7 +1879,7 @@ mod worktree_merge_tool_tests {
         for (outcome, expected) in [
             (
                 VerificationOutcome::Rejected,
-                "rejected by the command filter",
+                "could not be run as a command",
             ),
             (
                 VerificationOutcome::PolicyDenied,

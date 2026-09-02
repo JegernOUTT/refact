@@ -22,10 +22,9 @@ const COMMAND_HINTS: &[&str] = &[
 // like `make` and `go` are also ordinary English verbs, so a bare line containing any of these is
 // treated as prose rather than a command.
 const PROSE_TOKENS: &[&str] = &[
-    "a", "all", "an", "and", "any", "are", "be", "been", "but", "can", "each", "every", "for",
-    "from", "if", "in", "into", "is", "it", "its", "must", "of", "on", "or", "our", "should",
-    "sure", "that", "the", "their", "then", "these", "they", "this", "those", "through", "to",
-    "was", "we", "were", "when", "will", "with", "would", "you", "your",
+    "a", "an", "and", "are", "be", "been", "but", "can", "if", "is", "it", "its", "must", "of",
+    "or", "our", "should", "sure", "that", "the", "their", "then", "these", "they", "this",
+    "those", "through", "was", "we", "were", "when", "will", "would", "you", "your",
 ];
 
 #[derive(Clone, Debug)]
@@ -70,21 +69,27 @@ impl VerifyCommandPolicy {
     }
 }
 
-pub(crate) fn parse_verification_argv(
-    command: &str,
-) -> Result<(Option<PathBuf>, Vec<String>), String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ParsedVerification {
+    pub(crate) cwd: Option<PathBuf>,
+    pub(crate) env: Vec<(String, String)>,
+    pub(crate) argv: Vec<String>,
+}
+
+pub(crate) fn parse_verification_argv(command: &str) -> Result<ParsedVerification, String> {
     let command = command.trim();
     if command.is_empty() {
         return Err("empty command".to_string());
     }
-    reject_metacharacters(command)?;
+    reject_global_metacharacters(command)?;
     let tokens =
         shell_words::split(command).map_err(|error| format!("malformed quoting: {}", error))?;
     if tokens.is_empty() {
         return Err("empty command".to_string());
     }
 
-    let (cwd, argv_tokens) = if tokens.len() >= 4 && tokens[0] == "cd" && tokens[2] == "&&" {
+    let (cwd, rest) = if tokens.len() >= 4 && tokens[0] == "cd" && tokens[2] == "&&" {
+        validate_argv_token(&tokens[1])?;
         validate_cd_dir(&tokens[1])?;
         (Some(PathBuf::from(&tokens[1])), &tokens[3..])
     } else {
@@ -93,13 +98,61 @@ pub(crate) fn parse_verification_argv(
         }
         (None, tokens.as_slice())
     };
-    if argv_tokens.is_empty() {
+    if rest.is_empty() {
         return Err("missing command after cd prefix".to_string());
     }
-    if argv_tokens.iter().any(|token| token.contains('&')) {
+    if rest.iter().any(|token| token.contains('&')) {
         return Err("ampersand is only allowed in a leading cd prefix".to_string());
     }
-    Ok((cwd, argv_tokens.to_vec()))
+
+    let boundary = rest
+        .iter()
+        .position(|token| !is_assignment_token(token))
+        .unwrap_or(rest.len());
+    let (assignment_tokens, argv_tokens) = rest.split_at(boundary);
+    if argv_tokens.is_empty() {
+        return Err("missing command after environment assignments".to_string());
+    }
+    let mut env = Vec::with_capacity(assignment_tokens.len());
+    for token in assignment_tokens {
+        let (key, value) = token
+            .split_once('=')
+            .ok_or_else(|| "malformed environment assignment".to_string())?;
+        validate_assignment_value(value)?;
+        env.push((key.to_string(), expand_assignment_value(value)));
+    }
+    for token in argv_tokens {
+        validate_argv_token(token)?;
+    }
+    Ok(ParsedVerification {
+        cwd,
+        env,
+        argv: argv_tokens.to_vec(),
+    })
+}
+
+fn is_assignment_token(token: &str) -> bool {
+    let Some((key, _)) = token.split_once('=') else {
+        return false;
+    };
+    is_env_name(key)
+}
+
+fn is_env_name(name: &str) -> bool {
+    !name.is_empty() && env_name_len(name.as_bytes()) == name.len()
+}
+
+fn env_name_len(bytes: &[u8]) -> usize {
+    if !bytes
+        .first()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+    {
+        return 0;
+    }
+    bytes
+        .iter()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_')
+        .count()
 }
 
 pub(crate) fn verification_commands(card: &BoardCard) -> Vec<String> {
@@ -176,19 +229,21 @@ fn looks_like_command(command: &str) -> bool {
     let Ok(tokens) = shell_words::split(command) else {
         return false;
     };
-    if tokens
+    let rest = if tokens.first().is_some_and(|token| token == "cd")
+        && tokens.get(2).is_some_and(|token| token == "&&")
+    {
+        tokens.get(3..).unwrap_or_default()
+    } else {
+        tokens.as_slice()
+    };
+    if rest
         .iter()
+        .filter(|token| !is_assignment_token(token))
         .any(|token| PROSE_TOKENS.contains(&token.to_ascii_lowercase().as_str()))
     {
         return false;
     }
-    let program = if tokens.first().is_some_and(|token| token == "cd")
-        && tokens.get(2).is_some_and(|token| token == "&&")
-    {
-        tokens.get(3)
-    } else {
-        tokens.first()
-    };
+    let program = rest.iter().find(|token| !is_assignment_token(token));
     program.is_some_and(|program| COMMAND_HINTS.contains(&program.as_str()))
 }
 
@@ -204,7 +259,7 @@ fn push_expanded_unique(commands: &mut Vec<String>, command: &str) {
 }
 
 fn split_safe_chain(command: &str) -> Result<Vec<String>, String> {
-    reject_metacharacters(command)?;
+    reject_global_metacharacters(command)?;
     let tokens = shell_words::split(command).map_err(|error| error.to_string())?;
     let separators = tokens.iter().filter(|token| token.as_str() == "&&").count();
     if separators == 0 {
@@ -242,26 +297,73 @@ fn push_unique(commands: &mut Vec<String>, command: String) {
     }
 }
 
-fn reject_metacharacters(command: &str) -> Result<(), String> {
+fn reject_global_metacharacters(command: &str) -> Result<(), String> {
     if command.contains('\n') || command.contains('\r') {
         return Err("newlines are not allowed".to_string());
     }
-    if command.contains("$(") || command.contains("${") || command.contains('`') {
+    if command.contains("$(") || command.contains('`') {
         return Err("command substitution is not allowed".to_string());
     }
-    for character in command.chars() {
-        match character {
-            '$' => return Err("dollar expansion is not allowed".to_string()),
-            '(' | ')' | '{' | '}' => return Err("shell grouping is not allowed".to_string()),
-            '*' | '?' | '[' | ']' => return Err("globs are not allowed".to_string()),
-            '~' => return Err("home expansion is not allowed".to_string()),
-            ';' => return Err("command separators are not allowed".to_string()),
-            '|' => return Err("pipes are not allowed".to_string()),
-            '<' | '>' => return Err("redirects are not allowed".to_string()),
-            _ => {}
-        }
+    Ok(())
+}
+
+fn reject_shell_character(character: char) -> Result<(), String> {
+    match character {
+        '$' => Err("dollar expansion is not allowed".to_string()),
+        '(' | ')' | '{' | '}' => Err("shell grouping is not allowed".to_string()),
+        '*' | '?' | '[' | ']' => Err("globs are not allowed".to_string()),
+        '~' => Err("home expansion is not allowed".to_string()),
+        ';' => Err("command separators are not allowed".to_string()),
+        '|' => Err("pipes are not allowed".to_string()),
+        '<' | '>' => Err("redirects are not allowed".to_string()),
+        _ => Ok(()),
+    }
+}
+
+fn validate_argv_token(token: &str) -> Result<(), String> {
+    for character in token.chars() {
+        reject_shell_character(character)?;
     }
     Ok(())
+}
+
+// Assignment values allow a bare `$NAME` reference only; `${...}` and `$(...)` stay rejected so a
+// value can never introduce shell parsing beyond a single variable lookup we expand ourselves.
+fn validate_assignment_value(value: &str) -> Result<(), String> {
+    let mut rest = value;
+    while let Some(character) = rest.chars().next() {
+        if character == '$' {
+            let name_len = env_name_len(rest[1..].as_bytes());
+            if name_len == 0 {
+                return Err("dollar expansion is not allowed".to_string());
+            }
+            rest = &rest[1 + name_len..];
+            continue;
+        }
+        reject_shell_character(character)?;
+        rest = &rest[character.len_utf8()..];
+    }
+    Ok(())
+}
+
+fn expand_assignment_value(value: &str) -> String {
+    let mut expanded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(character) = rest.chars().next() {
+        let name_len = if character == '$' {
+            env_name_len(rest[1..].as_bytes())
+        } else {
+            0
+        };
+        if name_len > 0 {
+            expanded.push_str(&std::env::var(&rest[1..1 + name_len]).unwrap_or_default());
+            rest = &rest[1 + name_len..];
+        } else {
+            expanded.push(character);
+            rest = &rest[character.len_utf8()..];
+        }
+    }
+    expanded
 }
 
 fn validate_cd_dir(dir: &str) -> Result<(), String> {
@@ -290,9 +392,124 @@ mod tests {
     fn parses_quoted_arguments_and_cwd() {
         let parsed =
             parse_verification_argv("cd \"dir with spaces\" && cargo test \"named test\"").unwrap();
-        assert_eq!(parsed.0, Some(PathBuf::from("dir with spaces")));
-        assert_eq!(parsed.1, vec!["cargo", "test", "named test"]);
+        assert_eq!(parsed.cwd, Some(PathBuf::from("dir with spaces")));
+        assert!(parsed.env.is_empty());
+        assert_eq!(parsed.argv, vec!["cargo", "test", "named test"]);
         assert!(parse_verification_argv("cargo test '").is_err());
+    }
+
+    #[test]
+    fn parses_env_assignment_prefix_with_cd_and_expansion() {
+        let real_path = std::env::var("PATH").unwrap_or_default();
+        let parsed = parse_verification_argv(
+            "cd flexus_frontend && FLEXUS_PYTHON=/abs/py PATH=/abs/tools:$PATH pnpm typecheck",
+        )
+        .unwrap();
+        assert_eq!(parsed.cwd, Some(PathBuf::from("flexus_frontend")));
+        assert_eq!(
+            parsed.env,
+            vec![
+                ("FLEXUS_PYTHON".to_string(), "/abs/py".to_string()),
+                ("PATH".to_string(), format!("/abs/tools:{}", real_path)),
+            ]
+        );
+        assert_eq!(parsed.argv, vec!["pnpm", "typecheck"]);
+    }
+
+    #[test]
+    fn parses_simple_env_prefix() {
+        let parsed = parse_verification_argv("FOO=bar cargo test").unwrap();
+        assert_eq!(parsed.cwd, None);
+        assert_eq!(parsed.env, vec![("FOO".to_string(), "bar".to_string())]);
+        assert_eq!(parsed.argv, vec!["cargo", "test"]);
+    }
+
+    #[test]
+    fn assignment_after_program_is_a_plain_argument() {
+        let parsed = parse_verification_argv("cargo test FOO=bar").unwrap();
+        assert!(parsed.env.is_empty());
+        assert_eq!(parsed.argv, vec!["cargo", "test", "FOO=bar"]);
+    }
+
+    #[test]
+    fn assignments_without_a_program_are_rejected() {
+        let error = parse_verification_argv("FOO=bar").unwrap_err();
+        assert_eq!(error, "missing command after environment assignments");
+    }
+
+    #[test]
+    fn dollar_stays_rejected_in_argv_tokens_and_substitutions() {
+        for command in [
+            "cargo test $HOME",
+            "cargo test `date`",
+            "cargo test $(rm -rf /)",
+            "FOO=$(evil) cargo test",
+            "FOO=${HOME} cargo test",
+            "FOO=$ cargo test",
+        ] {
+            assert!(parse_verification_argv(command).is_err(), "{command}");
+        }
+    }
+
+    #[test]
+    fn positional_and_malformed_dollar_refs_are_rejected() {
+        for command in [
+            "FOO=$1 cargo test",
+            "FOO=$- cargo test",
+            "FOO=a$ cargo test",
+            "FOO=$/etc cargo test",
+        ] {
+            assert!(parse_verification_argv(command).is_err(), "{command}");
+        }
+    }
+
+    #[test]
+    fn common_targets_that_collide_with_english_are_still_commands() {
+        for command in [
+            "make all",
+            "cargo test -- all",
+            "make install",
+            "go build ./...",
+        ] {
+            assert!(looks_like_command(command), "{command}");
+        }
+        assert!(looks_like_command("FOO=that pnpm test"));
+        assert!(!looks_like_command("make sure the tests pass"));
+        assert!(!looks_like_command("go through the migration list"));
+    }
+
+    #[test]
+    fn env_prefixes_survive_chain_splitting() {
+        let segments = split_safe_chain("cd ui && FOO=bar pnpm test && BAR=baz pnpm lint").unwrap();
+        assert_eq!(segments.len(), 2);
+        let expected = [
+            ("FOO", "bar", vec!["pnpm", "test"]),
+            ("BAR", "baz", vec!["pnpm", "lint"]),
+        ];
+        for (segment, (key, value, argv)) in segments.iter().zip(expected) {
+            let parsed = parse_verification_argv(segment).unwrap();
+            assert_eq!(parsed.cwd, Some(PathBuf::from("ui")), "{segment}");
+            assert_eq!(
+                parsed.env,
+                vec![(key.to_string(), value.to_string())],
+                "{segment}"
+            );
+            assert_eq!(parsed.argv, argv, "{segment}");
+        }
+    }
+
+    #[test]
+    fn unset_variable_expands_to_empty_string() {
+        let parsed = parse_verification_argv("FOO=$DEFINITELY_UNSET_VAR_XYZ cargo test").unwrap();
+        assert_eq!(parsed.env, vec![("FOO".to_string(), String::new())]);
+        assert_eq!(parsed.argv, vec!["cargo", "test"]);
+    }
+
+    #[test]
+    fn env_prefixed_command_is_recognised_by_extraction() {
+        assert!(looks_like_command("FOO=bar pnpm test"));
+        assert!(looks_like_command("cd ui && FOO=bar pnpm test"));
+        assert!(!looks_like_command("FOO=bar notatool test"));
     }
 
     #[test]
@@ -323,7 +540,7 @@ mod tests {
             assert!(parsed.is_ok(), "{command}: {:?}", parsed.err());
         }
         assert_eq!(
-            parse_verification_argv("go test ./...").unwrap().1,
+            parse_verification_argv("go test ./...").unwrap().argv,
             vec!["go", "test", "./..."]
         );
     }
