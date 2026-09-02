@@ -130,9 +130,9 @@ fn engine_registered_tool_names() -> std::collections::HashSet<String> {
         .expect("refact-tui crate must have an engine root");
     let registry_source = read_source(&engine_root.join("src/tools/tools_list.rs"));
     let registry_source = registry_source
-        .split("#[cfg(test)]")
-        .next()
-        .expect("engine registry source must have a production section");
+        .split_once(INLINE_TEST_BOUNDARY)
+        .map(|(production, _)| production)
+        .unwrap_or(&registry_source);
     let constructor_re =
         Regex::new(r"Box::new\s*\(\s*crate::tools::(?:[A-Za-z0-9_]+::)+(Tool[A-Za-z0-9_]+)")
             .expect("valid tool constructor regex");
