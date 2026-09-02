@@ -1195,6 +1195,7 @@ mod tests {
             "claude-sonnet-4-7",
             "claude-sonnet-5",
             "claude-fable-5",
+            "claude-fable-5-1",
             "claude-haiku-4-7",
         ] {
             let controls = anthropic_controls_for(id);

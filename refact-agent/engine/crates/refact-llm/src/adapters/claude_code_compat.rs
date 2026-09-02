@@ -6,8 +6,8 @@ use sha2::{Digest, Sha256};
 
 use crate::canonical::ClaudeCodeIdentity;
 
-pub const CC_VERSION: &str = "2.1.126";
-pub const USER_AGENT: &str = "claude-cli/2.1.126 (external, cli)";
+pub const CC_VERSION: &str = "2.1.258";
+pub const USER_AGENT: &str = "claude-cli/2.1.258 (external, cli)";
 pub const SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 pub const MCP_TOOL_PREFIX: &str = "t_";
 
@@ -749,6 +749,30 @@ mod tests {
     fn test_extract_first_user_text_empty() {
         let messages = json!([{"role": "assistant", "content": "hi"}]);
         assert_eq!(extract_first_user_text(&messages), "");
+    }
+
+    #[test]
+    fn user_agent_embeds_cc_version() {
+        assert_eq!(
+            USER_AGENT,
+            format!("claude-cli/{} (external, cli)", CC_VERSION)
+        );
+    }
+
+    #[test]
+    fn cc_version_is_at_least_the_minimum_supported_by_current_models() {
+        let parts: Vec<u32> = CC_VERSION
+            .split('.')
+            .map(|part| {
+                part.parse::<u32>()
+                    .expect("CC_VERSION must be numeric dotted")
+            })
+            .collect();
+        assert_eq!(parts.len(), 3, "CC_VERSION must be major.minor.patch");
+        assert!(
+            (parts[0], parts[1], parts[2]) >= (2, 1, 251),
+            "CC_VERSION {CC_VERSION} is below 2.1.251; Anthropic rejects newer models with older clients"
+        );
     }
 
     #[test]

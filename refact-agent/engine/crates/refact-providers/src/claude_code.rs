@@ -978,6 +978,7 @@ mod tests {
             refact_core::model_caps::model_caps_from_models_dev_catalog(&catalog).unwrap();
 
         for model_id in [
+            "claude-fable-5-1",
             "claude-opus-4-7",
             "claude-sonnet-4-6",
             "claude-opus-4-6",
