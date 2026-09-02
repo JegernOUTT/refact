@@ -246,6 +246,7 @@ pub async fn load_stage_catalog(gcx: Arc<GlobalContext>) -> Vec<StageSpec> {
     stages
 }
 
+#[derive(Debug)]
 pub struct StageSelection {
     pub scheduled: Vec<StageSpec>,
     pub skipped: Vec<(String, String)>,

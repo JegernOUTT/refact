@@ -373,15 +373,24 @@ mod tests {
     fn review_runner_every_stage_runs_in_the_caller_worktree() {
         let meta = WorktreeMeta {
             id: "wt-1".to_string(),
-            branch: "refact/chat/abc".to_string(),
-            ..Default::default()
+            kind: "chat".to_string(),
+            root: std::path::PathBuf::from("/tmp/wt-1"),
+            source_workspace_root: std::path::PathBuf::from("/tmp/workspace"),
+            repo_root: std::path::PathBuf::from("/tmp/workspace"),
+            branch: Some("refact/chat/abc".to_string()),
+            base_branch: None,
+            base_commit: None,
+            task_id: None,
+            card_id: None,
+            agent_id: None,
+            enforce: false,
         };
 
         let inherited = inherited_worktree(&ctx_with_worktree(Some(meta.clone())));
 
         assert_eq!(inherited.as_ref().map(|w| w.id.as_str()), Some("wt-1"));
         assert_eq!(
-            inherited.map(|w| w.branch),
+            inherited.and_then(|w| w.branch),
             Some("refact/chat/abc".to_string())
         );
         assert!(inherited_worktree(&ctx_with_worktree(None)).is_none());
