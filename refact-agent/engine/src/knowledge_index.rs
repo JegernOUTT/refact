@@ -272,22 +272,10 @@ async fn knowledge_dirs_for_index(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
 }
 
 async fn knowledge_watch_roots(gcx: Arc<GlobalContext>) -> Vec<PathBuf> {
-    let mut roots: Vec<PathBuf> = get_project_dirs(gcx.clone())
-        .await
-        .into_iter()
-        .filter_map(|dir| {
-            let refact_dir = dir.join(".refact");
-            refact_dir
-                .is_dir()
-                .then_some(refact_dir)
-                .or_else(|| dir.is_dir().then_some(dir))
-        })
-        .collect();
-    if gcx.config_dir.is_dir() {
-        roots.push(gcx.config_dir.clone());
+    let roots = knowledge_dir_candidates(gcx).await;
+    for root in &roots {
+        let _ = tokio::fs::create_dir_all(root).await;
     }
-    roots.sort();
-    roots.dedup();
     roots
 }
 
@@ -689,6 +677,22 @@ mod tests {
             .await
             .card_for_path(&path)
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn knowledge_watch_roots_match_knowledge_dirs_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+
+        let roots = knowledge_watch_roots(gcx.clone()).await;
+        let expected = knowledge_dir_candidates(gcx.clone()).await;
+
+        assert_eq!(roots, expected);
+        assert!(!roots.contains(&dir.path().to_path_buf()));
+        for root in roots {
+            assert!(root.exists());
+        }
     }
 
     #[cfg(unix)]

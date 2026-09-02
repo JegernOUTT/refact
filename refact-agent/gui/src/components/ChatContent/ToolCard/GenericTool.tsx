@@ -1,6 +1,6 @@
 import { Settings } from "lucide-react";
-import React, { useMemo } from "react";
-import { Badge, Box, Flex } from "@radix-ui/themes";
+import React, { useMemo, useState } from "react";
+import { Badge, Box, Button, Flex } from "@radix-ui/themes";
 import { ToolCard, ToolStatus } from "./ToolCard";
 import { useStoredOpen } from "../useStoredOpen";
 import { useAppSelector } from "../../../hooks/useAppSelector";
@@ -22,6 +22,9 @@ import styles from "./GenericTool.module.css";
 interface GenericToolProps {
   toolCall: ToolCall;
 }
+
+const DEFAULT_RESULT_HEAD_CHARS = 30_000;
+const DEFAULT_RESULT_TAIL_CHARS = 10_000;
 
 function formatArgs(argsStr: string): string {
   try {
@@ -66,9 +69,33 @@ function looksLikeMarkdown(text: string): boolean {
   return false;
 }
 
+function capToolResult(text: string): {
+  rendered: string;
+  hiddenChars: number;
+  capped: boolean;
+} {
+  const maxChars = DEFAULT_RESULT_HEAD_CHARS + DEFAULT_RESULT_TAIL_CHARS;
+  if (text.length <= maxChars) {
+    return { rendered: text, hiddenChars: 0, capped: false };
+  }
+
+  const hiddenChars = text.length - maxChars;
+  return {
+    rendered: `${text.slice(
+      0,
+      DEFAULT_RESULT_HEAD_CHARS,
+    )}\n… output capped in UI (${hiddenChars} chars hidden) …\n${text.slice(
+      -DEFAULT_RESULT_TAIL_CHARS,
+    )}`,
+    hiddenChars,
+    capped: true,
+  };
+}
+
 export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
   const storeKey = toolCall.id ? `tc:${toolCall.id}` : undefined;
   const [isOpen, handleToggle] = useStoredOpen(storeKey);
+  const [showFullOutput, setShowFullOutput] = useState(false);
   const threadId = useThreadId();
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, threadId),
@@ -121,6 +148,13 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
 
   const shouldRenderMarkdown =
     content && content.length <= 50000 && looksLikeMarkdown(content);
+  const cappedResult = useMemo(
+    () => (content ? capToolResult(content) : null),
+    [content],
+  );
+  const renderedContent =
+    content && showFullOutput ? content : cappedResult?.rendered ?? content;
+  const isCappedByDefault = Boolean(cappedResult?.capped && !showFullOutput);
 
   return (
     <>
@@ -170,13 +204,35 @@ export const GenericTool: React.FC<GenericToolProps> = ({ toolCall }) => {
           <Box className={styles.section}>
             <Box className={styles.sectionLabel}>Result</Box>
             <Box className={styles.resultContent}>
-              {shouldRenderMarkdown ? (
+              {isCappedByDefault && cappedResult ? (
+                <Box mb="2">
+                  <Badge variant="soft" color="gray">
+                    Showing first {DEFAULT_RESULT_HEAD_CHARS.toLocaleString()}{" "}
+                    and last {DEFAULT_RESULT_TAIL_CHARS.toLocaleString()} chars
+                    ({cappedResult.hiddenChars.toLocaleString()} hidden)
+                  </Badge>
+                </Box>
+              ) : null}
+              {cappedResult?.capped ? (
+                <Box mb="2">
+                  <Button
+                    type="button"
+                    size="1"
+                    variant="soft"
+                    color="gray"
+                    onClick={() => setShowFullOutput((value) => !value)}
+                  >
+                    {showFullOutput ? "Show capped output" : "Show full output"}
+                  </Button>
+                </Box>
+              ) : null}
+              {renderedContent && shouldRenderMarkdown && !isCappedByDefault ? (
                 <Box className={styles.markdownContent}>
-                  <Markdown>{content}</Markdown>
+                  <Markdown>{renderedContent}</Markdown>
                 </Box>
               ) : (
                 <ShikiCodeBlock showLineNumbers={false}>
-                  {content}
+                  {renderedContent}
                 </ShikiCodeBlock>
               )}
             </Box>

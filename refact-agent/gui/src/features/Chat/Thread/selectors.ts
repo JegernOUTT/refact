@@ -457,38 +457,126 @@ export const selectPrivacyStepContextById = createSelector(
 export const selectModel = (state: RootState) =>
   selectModelById(state, state.chat.current_thread_id);
 
+const visibleMessagesSelectors = new Map<
+  string,
+  ReturnType<typeof createSelector<[typeof selectMessagesById], ChatMessages>>
+>();
+
+function getVisibleMessagesSelector(threadId: string) {
+  let selector = visibleMessagesSelectors.get(threadId);
+  if (!selector) {
+    selector = createSelector(
+      [selectMessagesById],
+      (messages): ChatMessages => {
+        const visible = messages.filter(
+          (message) =>
+            message.role !== "event" &&
+            message.role !== "plan" &&
+            !isGoalMessage(message),
+        );
+        return visible.length > 0 ? visible : EMPTY_MESSAGES;
+      },
+    );
+    visibleMessagesSelectors.set(threadId, selector);
+  }
+  return selector;
+}
+
 export const selectVisibleMessages = (
   state: RootState,
   threadId: string,
-): ChatMessages =>
-  selectMessagesById(state, threadId).filter(
-    (message) =>
-      message.role !== "event" &&
-      message.role !== "plan" &&
-      !isGoalMessage(message),
-  );
+): ChatMessages => getVisibleMessagesSelector(threadId)(state, threadId);
+
+const eventLogSelectors = new Map<
+  string,
+  ReturnType<typeof createSelector<[typeof selectMessagesById], EventMessage[]>>
+>();
+
+function getEventLogSelector(threadId: string) {
+  let selector = eventLogSelectors.get(threadId);
+  if (!selector) {
+    selector = createSelector(
+      [selectMessagesById],
+      (messages): EventMessage[] => {
+        const eventMessages = messages.flatMap((message) => {
+          if (!isEventMessage(message)) return EMPTY_EVENT_MESSAGES;
+          const metadata = getEventMetadata(message);
+          if (
+            !metadata ||
+            metadata.subkind === "plan_delta" ||
+            metadata.subkind === "goal_delta" ||
+            metadata.subkind === "goal_pursuit"
+          ) {
+            return EMPTY_EVENT_MESSAGES;
+          }
+          return [normalizeEventMessageMetadata(message)];
+        });
+        return eventMessages.length > 0 ? eventMessages : EMPTY_EVENT_MESSAGES;
+      },
+    );
+    eventLogSelectors.set(threadId, selector);
+  }
+  return selector;
+}
 
 export const selectEventLog = (
   state: RootState,
   threadId: string,
-): EventMessage[] => {
-  const eventMessages = selectMessagesById(state, threadId).flatMap(
-    (message) => {
-      if (!isEventMessage(message)) return [];
-      const metadata = getEventMetadata(message);
-      if (
-        !metadata ||
-        metadata.subkind === "plan_delta" ||
-        metadata.subkind === "goal_delta" ||
-        metadata.subkind === "goal_pursuit"
-      ) {
-        return [];
-      }
-      return [normalizeEventMessageMetadata(message)];
-    },
-  );
-  return eventMessages.length > 0 ? eventMessages : EMPTY_EVENT_MESSAGES;
-};
+): EventMessage[] => getEventLogSelector(threadId)(state, threadId);
+
+export const selectMessagesCountById = createSelector(
+  [selectMessagesById],
+  (messages) => messages.length,
+);
+
+export const selectHasMessagesById = createSelector(
+  [selectMessagesById],
+  (messages) => messages.length > 0,
+);
+
+export const selectLastMessageById = createSelector(
+  [selectMessagesById],
+  (messages) => messages.at(-1),
+);
+
+export const selectLastAssistantMessageById = createSelector(
+  [selectMessagesById],
+  (messages) => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (isAssistantMessage(message)) return message;
+    }
+    return undefined;
+  },
+);
+
+export const selectLastAssistantUsageById = createSelector(
+  [selectLastAssistantMessageById],
+  (message) => message?.usage,
+);
+
+const SERVER_EXECUTED_TOOL_NAMES = new Set([
+  "web",
+  "web_search",
+  "chrome",
+  "mcp_fetch_fetch",
+  "mcp_playwright_browser_click",
+  "mcp_playwright_browser_navigate",
+  "mcp_playwright_browser_snapshot",
+]);
+
+export const selectHasServerExecutedToolsInLastAssistantById = createSelector(
+  [selectLastAssistantMessageById],
+  (message) => {
+    if ((message?.server_executed_tools?.length ?? 0) > 0) return true;
+    return Boolean(
+      message?.tool_calls?.some((toolCall) => {
+        if (toolCall.id?.startsWith("srvtoolu_")) return true;
+        return SERVER_EXECUTED_TOOL_NAMES.has(toolCall.function.name ?? "");
+      }),
+    );
+  },
+);
 
 /**
  * Memoized on the messages array reference: both plan selectors below are

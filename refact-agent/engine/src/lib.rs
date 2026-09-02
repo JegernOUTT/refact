@@ -57,6 +57,7 @@ pub mod agents;
 pub mod app_state;
 pub mod background_tasks;
 pub mod buddy;
+pub mod cache_maintenance;
 pub mod caps;
 pub mod cli_dispatch;
 pub mod daemon;

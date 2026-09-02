@@ -4,6 +4,7 @@ import { useMemo } from "react";
 
 import { Badge, EmptyState, SegmentedControl } from "../../components/ui";
 import { useAppDispatch, useAppSelector } from "../../hooks";
+import { useIsDocumentVisible } from "../../hooks/useIsDocumentVisible";
 import {
   useGetBackgroundAgentsQuery,
   type BackgroundAgentSummary,
@@ -45,13 +46,14 @@ function AgentsSectionContents({
   onNavigate?: (chatId: string) => void;
 }) {
   const dispatch = useAppDispatch();
+  const visible = useIsDocumentVisible();
   const tab = useAppSelector(selectAgentsPanelTab);
   const agentPool = useAppSelector((state) => selectBackgroundAgentPool(state));
   const activeAgents = useAppSelector((state) =>
     selectActiveBackgroundAgents(state, chatId),
   );
   const { data: fetchedAgents } = useGetBackgroundAgentsQuery(chatId, {
-    pollingInterval: 30_000,
+    pollingInterval: visible ? 30_000 : 0,
     refetchOnFocus: true,
   });
 

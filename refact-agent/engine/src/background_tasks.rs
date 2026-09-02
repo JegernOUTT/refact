@@ -1,14 +1,55 @@
 use std::iter::IntoIterator;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use std::vec;
 use tokio::task::JoinHandle;
 
 const ABORT_TIMEOUT: Duration = Duration::from_secs(10);
+const CACHE_MAINTENANCE_START_DELAY: Duration = Duration::from_secs(2 * 60);
+const CACHE_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 use crate::global_context::GlobalContext;
 use crate::knowledge_index::{build_knowledge_index, knowledge_index_watcher_background_task};
+
+async fn wait_for_shutdown(gcx: Arc<GlobalContext>) {
+    while !gcx.shutdown_flag.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn cache_maintenance_background_task(
+    gcx: Arc<GlobalContext>,
+    app: crate::app_state::AppState,
+) {
+    let mut delay = CACHE_MAINTENANCE_START_DELAY;
+    loop {
+        if gcx.shutdown_flag.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = wait_for_shutdown(gcx.clone()) => return,
+        }
+        if gcx.shutdown_flag.load(Ordering::SeqCst) {
+            return;
+        }
+        let spill_dir = gcx.cache_dir.join("exec");
+        if let Err(error) = refact_exec::spill::sweep_spill_dir(&spill_dir).await {
+            tracing::warn!("exec spill maintenance failed: {error}");
+        }
+        if let Err(error) = crate::cache_maintenance::sweep_logs_dir(&gcx.cache_dir).await {
+            tracing::warn!("log cache maintenance failed: {error}");
+        }
+        let removed =
+            crate::integrations::browser_runtime::sweep_registered_browser_profiles(&app).await;
+        if removed > 0 {
+            tracing::info!("removed {removed} stale browser profiles");
+        }
+        delay = CACHE_MAINTENANCE_INTERVAL;
+    }
+}
 
 pub struct BackgroundTasksHolder {
     tasks: Vec<JoinHandle<()>>,
@@ -54,6 +95,7 @@ pub async fn start_full_soak_background_tasks(gcx: Arc<GlobalContext>) -> Backgr
     let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     let goal_monitor_app = app_state.clone();
     let background_agent_monitor_app = app_state.clone();
+    let cache_maintenance_app = app_state.clone();
     let background_agent_monitor_shutdown = gcx.shutdown_flag.clone();
     let trajectory_index_coordinator = gcx.trajectory_index_coordinator.clone();
     let trajectory_index_shutdown = gcx.shutdown_flag.clone();
@@ -78,6 +120,10 @@ pub async fn start_full_soak_background_tasks(gcx: Arc<GlobalContext>) -> Backgr
         tokio::spawn(crate::agents::monitor::run_background_agent_monitor(
             background_agent_monitor_app,
             background_agent_monitor_shutdown,
+        )),
+        tokio::spawn(cache_maintenance_background_task(
+            gcx.clone(),
+            cache_maintenance_app,
         )),
         tokio::spawn({
             let gcx = gcx.clone();
@@ -107,6 +153,7 @@ pub async fn start_background_tasks(
     let app_state = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     let goal_monitor_app = app_state.clone();
     let background_agent_monitor_app = app_state.clone();
+    let cache_maintenance_app = app_state.clone();
     let background_agent_monitor_shutdown = gcx.shutdown_flag.clone();
     let trajectory_index_coordinator = gcx.trajectory_index_coordinator.clone();
     let trajectory_index_shutdown = gcx.shutdown_flag.clone();
@@ -130,6 +177,10 @@ pub async fn start_background_tasks(
             gcx.clone(),
         )),
         tokio::spawn(crate::knowledge_graph::cleanup_inactive_memories_on_startup(gcx.clone())),
+        tokio::spawn(cache_maintenance_background_task(
+            gcx.clone(),
+            cache_maintenance_app,
+        )),
         tokio::spawn(crate::trajectory_memos::trajectory_memos_background_task(
             gcx.clone(),
         )),

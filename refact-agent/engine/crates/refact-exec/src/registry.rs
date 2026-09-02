@@ -105,6 +105,18 @@ struct ExecProcessRecord {
     process_group_isolated: bool,
 }
 
+async fn remove_spill_file(path: Option<std::path::PathBuf>) {
+    let Some(path) = path else { return };
+    if let Err(error) = tokio::fs::remove_file(&path).await {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(
+                "failed to remove exec spill file {}: {error}",
+                path.display()
+            );
+        }
+    }
+}
+
 impl ExecProcessRecord {
     fn new(meta: ExecProcessMeta, transcript_limit_bytes: usize, capture_raw: bool) -> Self {
         let process_id = meta.process_id.clone();
@@ -867,6 +879,20 @@ impl ExecRegistry {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub async fn set_spill_max_bytes_for_test(
+        &self,
+        process_id: &ExecProcessId,
+        max_bytes: usize,
+    ) -> Result<(), String> {
+        let mut records = self.records.lock().await;
+        let record = records
+            .get_mut(process_id)
+            .ok_or_else(|| format!("process not found: {process_id}"))?;
+        record.transcript.set_spill_max_bytes_for_test(max_bytes);
+        Ok(())
+    }
+
     pub async fn write_stdin(
         &self,
         process_id: &ExecProcessId,
@@ -1404,7 +1430,7 @@ impl ExecRegistry {
         &self,
         process_id: &ExecProcessId,
     ) -> Option<ExecProcessSnapshot> {
-        let (snapshot, terminal) = {
+        let (snapshot, terminal, spill_path) = {
             let mut records = self.records.lock().await;
             let record = records.get(process_id)?;
             if !record.snapshot.status.is_terminal() {
@@ -1414,26 +1440,30 @@ impl ExecRegistry {
             (
                 record.snapshot,
                 record.runtime.map(|runtime| runtime.terminal),
+                record.transcript.disk_log_path().cloned(),
             )
         };
         if let Some(terminal) = terminal {
             terminal.notify_waiters();
         }
+        remove_spill_file(spill_path).await;
         Some(snapshot)
     }
 
     async fn remove_record(&self, process_id: &ExecProcessId) -> Option<ExecProcessSnapshot> {
-        let (snapshot, terminal) = {
+        let (snapshot, terminal, spill_path) = {
             let mut records = self.records.lock().await;
             let record = records.remove(process_id)?;
             (
                 record.snapshot,
                 record.runtime.map(|runtime| runtime.terminal),
+                record.transcript.disk_log_path().cloned(),
             )
         };
         if let Some(terminal) = terminal {
             terminal.notify_waiters();
         }
+        remove_spill_file(spill_path).await;
         Some(snapshot)
     }
 
@@ -1787,6 +1817,15 @@ mod tests {
     use crate::spill::SpillTarget;
     use crate::transcript::DEFAULT_MAX_BYTES;
     use crate::types::{ExecMode, ExecOwnerMeta, ExecStatusKind};
+
+    #[tokio::test]
+    async fn removing_spill_path_deletes_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("spill.log");
+        tokio::fs::write(&path, b"spill").await.unwrap();
+        remove_spill_file(Some(path.clone())).await;
+        assert!(!path.exists());
+    }
 
     struct BlockingWriter;
 

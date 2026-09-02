@@ -1,8 +1,13 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use crate::caps::resolve_chat_model;
+use crate::chat::perf_diagnostics::{self, PerfComponent, PerfOutcome};
+use crate::custom_error::YamlError;
 use crate::global_context::{try_load_caps_quickly_if_not_present, GlobalContext};
+use crate::integrations::integr_abstract::IntegrationTrait;
 use crate::integrations::running_integrations::load_integrations;
 use crate::yaml_configs::customization_registry::{
     get_project_registry, should_expose_subagent_as_config_tool,
@@ -18,6 +23,112 @@ use super::tools_description::{Tool, ToolDesc, ToolGroup, ToolGroupCategory, Too
 ///
 /// The tool list is FIXED for the entire session (cache-safe).
 const MCP_LAZY_THRESHOLD: usize = 15;
+
+type LoadedIntegrations = indexmap::IndexMap<String, Box<dyn IntegrationTrait + Send + Sync>>;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct IntegrationToolsCacheKey {
+    config_dir: PathBuf,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct IntegrationToolsCache {
+    integrations: tokio::sync::RwLock<HashMap<IntegrationToolsCacheKey, Arc<LoadedIntegrations>>>,
+    yaml_errors: tokio::sync::RwLock<HashMap<IntegrationToolsCacheKey, Arc<Vec<YamlError>>>>,
+    build_locks: tokio::sync::Mutex<HashMap<IntegrationToolsCacheKey, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl IntegrationToolsCache {
+    async fn acquire_build_lock(
+        &self,
+        key: &IntegrationToolsCacheKey,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.build_locks.lock().await;
+        locks
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    async fn get(&self, key: &IntegrationToolsCacheKey) -> Option<Arc<LoadedIntegrations>> {
+        self.integrations.read().await.get(key).cloned()
+    }
+
+    async fn insert(
+        &self,
+        key: IntegrationToolsCacheKey,
+        integrations: Arc<LoadedIntegrations>,
+        yaml_errors: Arc<Vec<YamlError>>,
+    ) {
+        let mut cached = self.integrations.write().await;
+        cached.retain(|existing, _| existing.config_dir != key.config_dir);
+        cached.insert(key.clone(), integrations);
+        drop(cached);
+        let mut errors = self.yaml_errors.write().await;
+        errors.retain(|existing, _| existing.config_dir != key.config_dir);
+        errors.insert(key, yaml_errors);
+    }
+}
+
+fn integration_tools_cache() -> &'static IntegrationToolsCache {
+    static CACHE: std::sync::OnceLock<IntegrationToolsCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(IntegrationToolsCache::default)
+}
+
+#[cfg(test)]
+type TestIntegrationFactory =
+    Arc<dyn Fn(Arc<GlobalContext>) -> (LoadedIntegrations, Vec<YamlError>) + Send + Sync>;
+
+#[cfg(test)]
+static TEST_INTEGRATION_FACTORY: std::sync::OnceLock<
+    tokio::sync::Mutex<HashMap<PathBuf, TestIntegrationFactory>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn test_integration_factory(
+) -> &'static tokio::sync::Mutex<HashMap<PathBuf, TestIntegrationFactory>> {
+    TEST_INTEGRATION_FACTORY.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+}
+
+async fn load_integrations_cached(gcx: Arc<GlobalContext>) -> Arc<LoadedIntegrations> {
+    let key = IntegrationToolsCacheKey {
+        config_dir: gcx.config_dir.clone(),
+        generation: gcx
+            .tool_catalog_generations
+            .integrations
+            .load(Ordering::Acquire),
+    };
+    let cache = integration_tools_cache();
+    if let Some(integrations) = cache.get(&key).await {
+        return integrations;
+    }
+    let build_lock = cache.acquire_build_lock(&key).await;
+    let _build_guard = build_lock.lock().await;
+    if let Some(integrations) = cache.get(&key).await {
+        return integrations;
+    }
+    #[cfg(test)]
+    if let Some(factory) = test_integration_factory()
+        .lock()
+        .await
+        .get(&gcx.config_dir)
+        .cloned()
+    {
+        let (integrations, yaml_errors) = factory(gcx);
+        let integrations = Arc::new(integrations);
+        cache
+            .insert(key, integrations.clone(), Arc::new(yaml_errors))
+            .await;
+        return integrations;
+    }
+    let (integrations, yaml_errors) = load_integrations(gcx, &["**/*".to_string()]).await;
+    let integrations = Arc::new(integrations);
+    cache
+        .insert(key, integrations.clone(), Arc::new(yaml_errors))
+        .await;
+    integrations
+}
 
 /// Result of applying MCP lazy-loading logic on a tool list.
 pub struct ToolsForMode {
@@ -755,10 +866,10 @@ pub async fn get_integration_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
 
     let mut mcp_groups = HashMap::new();
 
-    let (integrations_map, _yaml_errors) =
-        load_integrations(gcx.clone(), &["**/*".to_string()]).await;
-    for (name, integr) in integrations_map {
-        for tool in integr.integr_tools(&name).await {
+    let span = perf_diagnostics::span(PerfComponent::ToolIntegrationToolsBuild, None, None);
+    let integrations_map = load_integrations_cached(gcx.clone()).await;
+    for (name, integr) in integrations_map.iter() {
+        for tool in integr.integr_tools(name).await {
             let tool_desc = tool.tool_description();
             if tool_desc.name.starts_with("mcp") {
                 let mcp_server_name = std::path::Path::new(&tool_desc.source.config_path)
@@ -796,6 +907,8 @@ pub async fn get_integration_tools(gcx: Arc<GlobalContext>) -> Vec<ToolGroup> {
         tool_group.retain_available_tools(gcx.clone()).await;
     }
 
+    span.finish_tool(PerfOutcome::Success, 1, tool_groups.len() as u64, None);
+
     tool_groups
 }
 
@@ -824,6 +937,8 @@ async fn get_config_subagent_tools(gcx: Arc<GlobalContext>) -> ToolGroup {
 mod tests {
     use std::collections::HashMap;
     use std::collections::HashSet;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use std::path::Path;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -835,6 +950,7 @@ mod tests {
     };
 
     use super::*;
+
     fn desc_with_source(name: &str, source: ToolSource) -> ToolDesc {
         ToolDesc {
             name: name.to_string(),
@@ -882,6 +998,125 @@ mod tests {
     }
 
     struct TestTool(ToolDesc);
+
+    #[derive(Clone)]
+    struct IntegrationTestState {
+        loads: Arc<AtomicUsize>,
+        tool_builds: Arc<AtomicUsize>,
+    }
+
+    struct IntegrationTestTool {
+        desc: ToolDesc,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for IntegrationTestTool {
+        async fn tool_execute(
+            &mut self,
+            _ccx: Arc<tokio::sync::Mutex<crate::at_commands::at_commands::AtCommandsContext>>,
+            _tool_call_id: &String,
+            _args: &HashMap<String, serde_json::Value>,
+        ) -> Result<(bool, Vec<crate::call_validation::ContextEnum>), String> {
+            unreachable!("test tools are only used to build the catalog")
+        }
+
+        fn tool_description(&self) -> ToolDesc {
+            self.desc.clone()
+        }
+    }
+
+    struct TestIntegration {
+        state: IntegrationTestState,
+        config_path: String,
+    }
+
+    #[async_trait::async_trait]
+    impl IntegrationTrait for TestIntegration {
+        fn integr_schema(&self) -> &str {
+            "type: object"
+        }
+
+        async fn integr_settings_apply(
+            &mut self,
+            _gcx: Arc<GlobalContext>,
+            config_path: String,
+            _value: &serde_json::Value,
+        ) -> Result<(), serde_json::Error> {
+            self.config_path = config_path;
+            Ok(())
+        }
+
+        fn integr_settings_as_json(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+
+        fn integr_common(&self) -> crate::integrations::integr_abstract::IntegrationCommon {
+            Default::default()
+        }
+
+        async fn integr_tools(&self, integr_name: &str) -> Vec<Box<dyn Tool + Send>> {
+            let build_number = self.state.tool_builds.fetch_add(1, Ordering::SeqCst);
+            vec![Box::new(IntegrationTestTool {
+                desc: ToolDesc {
+                    name: format!("{integr_name}_tool"),
+                    experimental: false,
+                    allow_parallel: true,
+                    description: format!("build {build_number}"),
+                    input_schema: serde_json::json!({"type":"object"}),
+                    output_schema: None,
+                    annotations: None,
+                    display_name: format!("{integr_name}_tool"),
+                    source: ToolSource {
+                        source_type: ToolSourceType::Integration,
+                        config_path: self.config_path.clone(),
+                    },
+                },
+            })]
+        }
+    }
+
+    fn write_test_integration_config(config_dir: &std::path::Path) {
+        let dir = config_dir.join("integrations.d");
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|error| panic!("failed to create config dir: {error}"));
+        std::fs::write(
+            dir.join("cmdline.yaml"),
+            "name: cmdline\ncommand: echo test\ntools:\n  cmdline:\n    enabled: true\n",
+        )
+        .unwrap_or_else(|error| panic!("failed to write integration config: {error}"));
+    }
+
+    async fn integration_test_gcx() -> Arc<GlobalContext> {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        write_test_integration_config(&gcx.config_dir);
+        gcx
+    }
+
+    async fn with_test_integration_factory<T>(
+        config_dir: PathBuf,
+        state: IntegrationTestState,
+        f: impl std::future::Future<Output = T>,
+    ) -> T {
+        let factory: TestIntegrationFactory = Arc::new(move |_gcx: Arc<GlobalContext>| {
+            state.loads.fetch_add(1, Ordering::SeqCst);
+            let mut integrations: LoadedIntegrations = indexmap::IndexMap::new();
+            integrations.insert(
+                "cmdline".to_string(),
+                Box::new(TestIntegration {
+                    state: state.clone(),
+                    config_path: "cmdline.yaml".to_string(),
+                }),
+            );
+            (integrations, Vec::new())
+        });
+        test_integration_factory()
+            .lock()
+            .await
+            .insert(config_dir.clone(), factory);
+        let result = f.await;
+        test_integration_factory().lock().await.remove(&config_dir);
+        result
+    }
 
     #[async_trait::async_trait]
     impl Tool for TestTool {
@@ -973,6 +1208,37 @@ mod tests {
             "openai_codex",
             &builtin_desc("mcp_call")
         ));
+    }
+
+    #[tokio::test]
+    async fn integration_loading_is_cached_within_generation() {
+        let state = IntegrationTestState {
+            loads: Arc::new(AtomicUsize::new(0)),
+            tool_builds: Arc::new(AtomicUsize::new(0)),
+        };
+        let gcx = integration_test_gcx().await;
+
+        with_test_integration_factory(gcx.config_dir.clone(), state.clone(), async {
+            let first = get_tools_for_mode(gcx.clone(), "agent", None).await;
+            let second = get_tools_for_mode(gcx.clone(), "agent", None).await;
+            assert!(!first.is_empty());
+            assert!(!second.is_empty());
+        })
+        .await;
+
+        assert_eq!(state.loads.load(Ordering::SeqCst), 1);
+        assert_eq!(state.tool_builds.load(Ordering::SeqCst), 2);
+
+        gcx.tool_catalog_generations.advance_integrations();
+
+        with_test_integration_factory(gcx.config_dir.clone(), state.clone(), async {
+            let third = get_tools_for_mode(gcx, "agent", None).await;
+            assert!(!third.is_empty());
+        })
+        .await;
+
+        assert_eq!(state.loads.load(Ordering::SeqCst), 2);
+        assert_eq!(state.tool_builds.load(Ordering::SeqCst), 3);
     }
 
     #[test]

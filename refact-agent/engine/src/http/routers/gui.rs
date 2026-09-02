@@ -17,6 +17,7 @@ use crate::http::GuiPublicOriginCandidates;
 
 #[derive(RustEmbed)]
 #[folder = "assets/chat/"]
+#[exclude = "*.map"]
 pub(crate) struct ChatGuiAsset;
 
 pub(crate) const INDEX_PATH: &str = "index.html";

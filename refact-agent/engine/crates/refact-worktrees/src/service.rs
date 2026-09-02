@@ -107,13 +107,28 @@ impl WorktreeService {
     async fn load_registry_pruning_missing_records(&self) -> Result<WorktreeRegistry, String> {
         let _guard = registry_write_lock().lock().await;
         let mut registry = self.load_registry_unlocked().await?;
+        let source_root = self.source_workspace_root.clone();
+        let git_roots = tokio::task::spawn_blocking(move || {
+            git::prune_worktrees(&source_root)?;
+            Ok::<HashSet<PathBuf>, String>(
+                git::list_git_worktrees(&source_root)
+                    .into_iter()
+                    .filter_map(|entry| normalized_path_key(&entry.root).ok())
+                    .collect(),
+            )
+        })
+        .await
+        .map_err(|error| format!("Git worktree reconciliation task failed: {error}"))??;
         let before = registry.records.len();
         let mut retained = Vec::with_capacity(registry.records.len());
         for record in registry.records.drain(..) {
-            if tokio::fs::try_exists(&record.meta.root)
+            let exists = tokio::fs::try_exists(&record.meta.root)
                 .await
-                .unwrap_or(true)
-            {
+                .unwrap_or(true);
+            let registered_in_git = normalized_path_key(&record.meta.root)
+                .map(|root| git_roots.contains(&root))
+                .unwrap_or(true);
+            if exists || registered_in_git {
                 retained.push(record);
             }
         }

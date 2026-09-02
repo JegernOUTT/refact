@@ -2039,6 +2039,20 @@ pub async fn find_trajectory_path(gcx: Arc<GlobalContext>, chat_id: &str) -> Opt
         .map(|candidate| candidate.path)
 }
 
+pub(crate) async fn find_trajectory_parent_id(
+    gcx: Arc<GlobalContext>,
+    chat_id: &str,
+) -> Option<Option<String>> {
+    let candidate = find_trajectory_file(gcx, chat_id).await?;
+    let trajectory = candidate.json.as_object()?;
+    Some(
+        trajectory
+            .get("parent_id")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string()),
+    )
+}
+
 pub async fn find_trajectory_or_buddy_path(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
@@ -2198,6 +2212,16 @@ async fn read_existing_trajectory_object(
 
 #[cfg(test)]
 static TRAJECTORY_METADATA_DISK_READS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+fn reset_test_trajectory_watcher_task() {
+    let mut guard = TRAJECTORY_WATCHER_TASK
+        .get_or_init(|| StdMutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(handle) = guard.take() {
+        handle.abort();
+    }
+}
 
 fn is_known_trajectory_top_level_key(key: &str) -> bool {
     matches!(
@@ -3533,9 +3557,19 @@ struct TrajectoryMetadataCacheEntry {
     chat_id: String,
     metadata: serde_json::Map<String, serde_json::Value>,
     stamp: TrajectoryFileStamp,
+    last_access: u64,
 }
 
 const MAX_CACHED_TRAJECTORY_METADATA: usize = 256;
+
+static TRAJECTORY_METADATA_CACHE_ACCESS_COUNTER: OnceLock<std::sync::atomic::AtomicU64> =
+    OnceLock::new();
+
+fn next_trajectory_metadata_cache_access_stamp() -> u64 {
+    TRAJECTORY_METADATA_CACHE_ACCESS_COUNTER
+        .get_or_init(|| std::sync::atomic::AtomicU64::new(1))
+        .fetch_add(1, Ordering::Relaxed)
+}
 
 fn trajectory_metadata_cache(
 ) -> &'static StdMutex<std::collections::HashMap<PathBuf, TrajectoryMetadataCacheEntry>> {
@@ -3565,12 +3599,18 @@ fn store_trajectory_metadata_cache_entry(path: &Path, entry: TrajectoryMetadataC
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if !cache.contains_key(path) {
         while cache.len() >= MAX_CACHED_TRAJECTORY_METADATA {
-            let Some(victim) = cache.keys().next().cloned() else {
+            let Some(victim) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_access)
+                .map(|(path, _)| path.clone())
+            else {
                 break;
             };
             cache.remove(&victim);
         }
     }
+    let mut entry = entry;
+    entry.last_access = next_trajectory_metadata_cache_access_stamp();
     cache.insert(path.to_path_buf(), entry);
 }
 
@@ -3595,12 +3635,17 @@ async fn cached_existing_trajectory_object(
 ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
     let stamp = trajectory_file_stamp(path).await;
     if let Some(stamp) = stamp.as_ref() {
-        let cached = trajectory_metadata_cache()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(path)
-            .filter(|entry| entry.chat_id == chat_id && &entry.stamp == stamp)
-            .map(|entry| entry.metadata.clone());
+        let cached = {
+            let mut cache = trajectory_metadata_cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(entry) = cache.get_mut(path) {
+                entry.last_access = next_trajectory_metadata_cache_access_stamp();
+                (entry.chat_id == chat_id && &entry.stamp == stamp).then(|| entry.metadata.clone())
+            } else {
+                None
+            }
+        };
         if cached.is_some() {
             return Ok(cached);
         }
@@ -3615,6 +3660,7 @@ async fn cached_existing_trajectory_object(
                     chat_id: chat_id.to_string(),
                     metadata: preservable_trajectory_metadata(metadata),
                     stamp,
+                    last_access: 0,
                 },
             );
         }
@@ -3641,6 +3687,7 @@ async fn cache_written_trajectory_metadata(
             chat_id: chat_id.to_string(),
             metadata,
             stamp: stamp.clone(),
+            last_access: 0,
         },
     );
     Some(stamp)
@@ -3931,6 +3978,7 @@ async fn save_trajectory_snapshot_inner(
     write_cache: Option<Arc<AMutex<DetachedTrajectoryWriteCache>>>,
 ) -> Result<(), String> {
     validate_trajectory_id(&snapshot.chat_id).map_err(|e| e.message)?;
+    let chat_id = snapshot.chat_id.clone();
     let app = AppState::from_gcx(gcx.clone()).await;
     let existing_no_meta_path = if snapshot.task_meta.is_none() && snapshot.buddy_meta.is_none() {
         find_normal_trajectory_path(gcx.clone(), &snapshot.chat_id).await
@@ -4016,6 +4064,8 @@ async fn save_trajectory_snapshot_inner(
             ));
         }
     };
+    let metric_scan_span = perf_diagnostics::is_enabled()
+        .then(|| perf_diagnostics::span(PerfComponent::TrajectoryMetricScan, Some(&chat_id), None));
     let metric_scan = tokio::task::spawn_blocking(move || {
         let background_messages_json = retain_background_messages.then(|| messages_json.clone());
         let line_changes =
@@ -4033,6 +4083,19 @@ async fn save_trajectory_snapshot_inner(
         )
     })
     .await;
+    if let Some(span) = metric_scan_span {
+        span.finish(
+            if metric_scan.is_ok() {
+                PerfOutcome::Success
+            } else {
+                PerfOutcome::Failure
+            },
+            None,
+            Some(message_count as u64),
+            Some(snapshot.version),
+            None,
+        );
+    }
     let (messages_json, background_messages_json, line_changes, task_progress, token_totals) =
         match metric_scan {
             Ok(result) => result,
@@ -4520,7 +4583,19 @@ async fn commit_trajectory_snapshot_for_session(
         let session = session_arc.lock().await;
         session.trajectory_save_mutex.clone()
     };
+    let save_mutex_wait_span = perf_diagnostics::is_enabled().then(|| {
+        perf_diagnostics::span(PerfComponent::TrajectorySaveMutexWait, Some(&chat_id), None)
+    });
     let _save_guard = save_mutex.lock().await;
+    if let Some(span) = save_mutex_wait_span {
+        span.finish(
+            PerfOutcome::Success,
+            None,
+            Some(message_count),
+            Some(saved_version),
+            None,
+        );
+    }
     {
         let session = session_arc.lock().await;
         if !session.trajectory_commit_can_write(saved_version) {
@@ -5461,7 +5536,19 @@ async fn refresh_trajectory_index_entry_for_path(
 
 async fn remove_stale_trajectory_index_entries(gcx: Arc<GlobalContext>, chat_id: &str) {
     let app = AppState::from_gcx(gcx.clone()).await;
-    for dir in list_trajectory_dirs(&gcx).await {
+    let dirs = match find_trajectory_file(gcx.clone(), chat_id).await {
+        Some(candidate) => index_dir_for_trajectory_file(gcx.clone(), &candidate.path)
+            .await
+            .map(|dir| vec![dir])
+            .unwrap_or_else(|| Vec::new()),
+        None => Vec::new(),
+    };
+    let dirs = if dirs.is_empty() {
+        list_trajectory_dirs(&gcx).await
+    } else {
+        dirs
+    };
+    for dir in dirs {
         let entries = match trajectory_index::list_trajectory_entries_with_rollout_for(
             &app.chat.trajectory_index_coordinator,
             &dir,
@@ -5933,12 +6020,24 @@ async fn process_trajectory_watcher_change(
     process_trajectory_change_for_source(gcx, &chat_id, is_remove, Some(source)).await;
 }
 
+static TRAJECTORY_WATCHER_TASK: OnceLock<StdMutex<Option<tokio::task::JoinHandle<()>>>> =
+    OnceLock::new();
+
 pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
+    let watcher_task = TRAJECTORY_WATCHER_TASK.get_or_init(|| StdMutex::new(None));
+    {
+        let guard = watcher_task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.as_ref().is_some_and(|handle| !handle.is_finished()) {
+            return;
+        }
+    }
     let gcx_weak = Arc::downgrade(&gcx);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TrajectoryWatcherMessage>(2048);
     let dropped_events = Arc::new(AtomicUsize::new(0));
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let trajectories_dirs = get_all_trajectories_dirs_from_weak(&gcx_weak).await;
         let task_roots = get_all_task_roots_from_weak(&gcx_weak).await;
         if trajectories_dirs.is_empty() && task_roots.is_empty() {
@@ -6122,6 +6221,10 @@ pub fn start_trajectory_watcher(gcx: Arc<GlobalContext>) {
             }
         }
     });
+    let mut guard = watcher_task
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(handle);
 }
 
 pub fn validate_trajectory_id(id: &str) -> Result<(), ScratchError> {
@@ -10426,6 +10529,204 @@ mod tests {
             resolved, agent_dir,
             "a task agent index must not be relocated to the shared agents/ folder"
         );
+    }
+
+    #[tokio::test]
+    async fn find_trajectory_parent_id_reports_root_child_and_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+
+        save_trajectory_snapshot(
+            gcx.clone(),
+            test_snapshot(
+                "root-parent-id-chat",
+                "Root",
+                vec![ChatMessage::new("user".to_string(), "root".to_string())],
+            ),
+        )
+        .await
+        .unwrap();
+
+        let mut child = test_snapshot(
+            "child-parent-id-chat",
+            "Child",
+            vec![ChatMessage::new("user".to_string(), "child".to_string())],
+        );
+        child.parent_id = Some("root-parent-id-chat".to_string());
+        save_trajectory_snapshot(gcx.clone(), child).await.unwrap();
+
+        assert_eq!(
+            find_trajectory_parent_id(gcx.clone(), "root-parent-id-chat").await,
+            Some(None)
+        );
+        assert_eq!(
+            find_trajectory_parent_id(gcx.clone(), "child-parent-id-chat").await,
+            Some(Some("root-parent-id-chat".to_string()))
+        );
+        assert_eq!(
+            find_trajectory_parent_id(gcx, "missing-parent-id-chat").await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_stale_entries_targets_only_the_owning_index_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+
+        let root_dir = dir.path().join(".refact").join("trajectories");
+        let task_dir = dir
+            .path()
+            .join(".refact")
+            .join("tasks")
+            .join("task-1")
+            .join("trajectories");
+        tokio::fs::create_dir_all(&root_dir).await.unwrap();
+        tokio::fs::create_dir_all(&task_dir).await.unwrap();
+
+        let stale_id = "scoped-stale-entry-chat";
+        let stale_path = root_dir.join(format!("{stale_id}.json"));
+        let stale_value = serde_json::json!({
+            "id": stale_id,
+            "title": "Stale",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:01Z",
+            "model": "test-model",
+            "mode": "agent",
+            "tool_use": "agent",
+            "messages": []
+        });
+        tokio::fs::write(&stale_path, stale_value.to_string())
+            .await
+            .unwrap();
+        trajectory_index::upsert_trajectory_index_entry_from_owned_value_with_rollout(
+            &app.chat.trajectory_index_coordinator,
+            &root_dir,
+            &stale_path,
+            stale_value,
+            None,
+        )
+        .await
+        .unwrap();
+        tokio::fs::remove_file(&stale_path).await.unwrap();
+
+        let fresh_id = "other-dir-chat";
+        let fresh_path = task_dir.join(format!("{fresh_id}.json"));
+        let fresh_value = serde_json::json!({
+            "id": fresh_id,
+            "title": "Fresh",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:01Z",
+            "model": "test-model",
+            "mode": "agent",
+            "tool_use": "agent",
+            "messages": []
+        });
+        tokio::fs::write(&fresh_path, fresh_value.to_string())
+            .await
+            .unwrap();
+        trajectory_index::upsert_trajectory_index_entry_from_owned_value_with_rollout(
+            &app.chat.trajectory_index_coordinator,
+            &task_dir,
+            &fresh_path,
+            fresh_value,
+            None,
+        )
+        .await
+        .unwrap();
+
+        remove_stale_trajectory_index_entries(gcx.clone(), stale_id).await;
+
+        let root_entries = trajectory_index::list_trajectory_entries_with_rollout_for(
+            &app.chat.trajectory_index_coordinator,
+            &root_dir,
+            None,
+            trajectory_index::TrajectoryIndexListingCaller::StaleEntryCleanup,
+        )
+        .await
+        .unwrap();
+        let task_entries = trajectory_index::list_trajectory_entries_with_rollout_for(
+            &app.chat.trajectory_index_coordinator,
+            &task_dir,
+            None,
+            trajectory_index::TrajectoryIndexListingCaller::StaleEntryCleanup,
+        )
+        .await
+        .unwrap();
+
+        assert!(root_entries.iter().all(|entry| entry.id != stale_id));
+        assert_eq!(task_entries.len(), 1);
+        assert_eq!(task_entries[0].id, fresh_id);
+    }
+
+    #[test]
+    fn trajectory_metadata_cache_lru_evicts_oldest_path() {
+        let mut cache = trajectory_metadata_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.clear();
+        drop(cache);
+
+        for index in 0..MAX_CACHED_TRAJECTORY_METADATA {
+            let path = PathBuf::from(format!("/tmp/trajectory-meta-{index}.json"));
+            store_trajectory_metadata_cache_entry(
+                &path,
+                TrajectoryMetadataCacheEntry {
+                    chat_id: format!("chat-{index}"),
+                    metadata: serde_json::Map::new(),
+                    stamp: TrajectoryFileStamp {
+                        len: index as u64,
+                        modified: SystemTime::UNIX_EPOCH,
+                    },
+                    last_access: 0,
+                },
+            );
+        }
+
+        let oldest = PathBuf::from("/tmp/trajectory-meta-0.json");
+        let newest = PathBuf::from(format!(
+            "/tmp/trajectory-meta-{}.json",
+            MAX_CACHED_TRAJECTORY_METADATA - 1
+        ));
+        let extra = PathBuf::from("/tmp/trajectory-meta-extra.json");
+        store_trajectory_metadata_cache_entry(
+            &extra,
+            TrajectoryMetadataCacheEntry {
+                chat_id: "chat-extra".to_string(),
+                metadata: serde_json::Map::new(),
+                stamp: TrajectoryFileStamp {
+                    len: 999,
+                    modified: SystemTime::UNIX_EPOCH,
+                },
+                last_access: 0,
+            },
+        );
+
+        let cache = trajectory_metadata_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(!cache.contains_key(&oldest));
+        assert!(cache.contains_key(&newest));
+        assert!(cache.contains_key(&extra));
+    }
+
+    #[tokio::test]
+    async fn start_trajectory_watcher_is_idempotent_while_running() {
+        reset_test_trajectory_watcher_task();
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+
+        start_trajectory_watcher(gcx.clone());
+        start_trajectory_watcher(gcx);
+
+        let guard = TRAJECTORY_WATCHER_TASK
+            .get_or_init(|| StdMutex::new(None))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(guard.as_ref().is_some_and(|handle| !handle.is_finished()));
+
+        drop(guard);
+        reset_test_trajectory_watcher_task();
     }
 
     #[test]

@@ -209,7 +209,16 @@ pub fn profile_lock_is_live(profile_dir: &Path) -> Option<u32> {
 }
 
 pub const STALE_PROFILE_MIN_AGE: Duration = Duration::from_secs(600);
+pub const STALE_REGULAR_PROFILE_MIN_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub const STALE_PROFILE_SWEEP_LIMIT: usize = 256;
+
+fn profile_min_age(name: &str) -> Duration {
+    if name.starts_with("subchat-") {
+        STALE_PROFILE_MIN_AGE
+    } else {
+        STALE_REGULAR_PROFILE_MIN_AGE
+    }
+}
 
 fn live_chrome_profile_dirs() -> Option<Vec<String>> {
     #[cfg(target_os = "linux")]
@@ -244,6 +253,13 @@ fn live_chrome_profile_dirs() -> Option<Vec<String>> {
 }
 
 pub fn sweep_stale_browser_profiles(cache_dir: &Path) -> usize {
+    sweep_stale_browser_profiles_excluding(cache_dir, &[])
+}
+
+pub fn sweep_stale_browser_profiles_excluding(
+    cache_dir: &Path,
+    registered_profiles: &[PathBuf],
+) -> usize {
     let Some(live_dirs) = live_chrome_profile_dirs() else {
         return 0;
     };
@@ -258,25 +274,27 @@ pub fn sweep_stale_browser_profiles(cache_dir: &Path) -> usize {
         }
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("subchat-") || !path.is_dir() {
+        if !path.is_dir() {
             continue;
         }
         let path_str = path.to_string_lossy().to_string();
+        if registered_profiles
+            .iter()
+            .any(|registered| registered == &path)
+        {
+            continue;
+        }
         if live_dirs.iter().any(|dir| dir == &path_str) {
             continue;
         }
         if profile_lock_is_live(&path).is_some() {
             continue;
         }
+        let min_age = profile_min_age(&name);
         let recently_used = entry
             .metadata()
             .and_then(|meta| meta.modified())
-            .map(|modified| {
-                modified
-                    .elapsed()
-                    .map(|age| age < STALE_PROFILE_MIN_AGE)
-                    .unwrap_or(true)
-            })
+            .map(|modified| modified.elapsed().map(|age| age < min_age).unwrap_or(true))
             .unwrap_or(true);
         if recently_used {
             continue;
@@ -294,6 +312,23 @@ pub fn sweep_stale_browser_profiles(cache_dir: &Path) -> usize {
         }
     }
     removed
+}
+
+pub async fn sweep_registered_browser_profiles(app: &crate::app_state::AppState) -> usize {
+    let runtimes: Vec<_> = {
+        let runtimes = app.integrations.browser_runtimes.lock().await;
+        runtimes.values().cloned().collect()
+    };
+    let mut registered = Vec::with_capacity(runtimes.len());
+    for runtime in runtimes {
+        registered.push(runtime.lock().await.profile_dir.clone());
+    }
+    let cache_dir = app.gcx.cache_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        sweep_stale_browser_profiles_excluding(&cache_dir, &registered)
+    })
+    .await
+    .unwrap_or(0)
 }
 
 pub fn describe_launch_failure(error: &str, profile_dir: &Path) -> String {
@@ -1071,6 +1106,15 @@ mod tests {
         assert_eq!(sweep_stale_browser_profiles(cache.path()), 0);
         assert!(recent.exists());
         assert!(keep.exists());
+    }
+
+    #[test]
+    fn regular_profiles_have_seven_day_retention() {
+        assert_eq!(profile_min_age("subchat-one"), Duration::from_secs(600));
+        assert_eq!(
+            profile_min_age("chat-one"),
+            Duration::from_secs(7 * 24 * 60 * 60)
+        );
     }
 
     #[test]

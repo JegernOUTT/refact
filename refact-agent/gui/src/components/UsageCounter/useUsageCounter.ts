@@ -1,7 +1,8 @@
 import { useMemo } from "react";
 import {
-  selectMessagesById,
   selectEffectiveMaxContextTokensById,
+  selectLastAssistantMessageById,
+  selectMessagesCountById,
   useThreadId,
 } from "../../features/Chat/Thread";
 import { useAppSelector } from "../../hooks/useAppSelector";
@@ -11,28 +12,23 @@ import {
   getCacheReadTokens,
   mergeUsages,
 } from "../../utils/calculateUsageInputTokens";
-import { isAssistantMessage } from "../../services/refact";
 
 export function useUsageCounter() {
   const chatId = useThreadId();
-  const messages = useAppSelector((state) => selectMessagesById(state, chatId));
   const maxContextTokens = useAppSelector((state) =>
     selectEffectiveMaxContextTokensById(state, chatId),
   );
+  const messageCount = useAppSelector((state) =>
+    selectMessagesCountById(state, chatId),
+  );
+  const lastAssistantMessage = useAppSelector((state) =>
+    selectLastAssistantMessageById(state, chatId),
+  );
 
-  const { assistantMessages, currentThreadUsage, lastAssistantMessage } =
-    useMemo(() => {
-      const assistants = messages.filter(isAssistantMessage);
-      const mergedUsage = mergeUsages(assistants.map((msg) => msg.usage));
-      const lastAssistant =
-        assistants.length > 0 ? assistants[assistants.length - 1] : undefined;
-
-      return {
-        assistantMessages: assistants,
-        currentThreadUsage: mergedUsage,
-        lastAssistantMessage: lastAssistant,
-      };
-    }, [messages]);
+  const currentThreadUsage = useMemo(
+    () => mergeUsages(lastAssistantMessage ? [lastAssistantMessage.usage] : []),
+    [lastAssistantMessage],
+  );
 
   // Check if the last message has server-executed tools (like web_search)
   // These can cause temporary inflated token counts during streaming.
@@ -65,28 +61,24 @@ export function useUsageCounter() {
   // Deterministic fallback: scan backwards through assistant messages for first message with input tokens > 0
   // Include cache tokens for accurate context size (prompt_tokens + cache_creation + cache_read)
   const currentSessionTokens = useMemo(() => {
-    for (let i = assistantMessages.length - 1; i >= 0; i--) {
-      const usage = assistantMessages[i]?.usage;
-      if (!usage) continue;
-      const promptTokens = usage.prompt_tokens;
-      const cacheCreation = getCacheCreationTokens(usage);
-      const cacheRead = getCacheReadTokens(usage);
-      const total = promptTokens + cacheCreation + cacheRead;
-      if (total > 0) return total;
-    }
-    return 0;
-  }, [assistantMessages]);
+    const usage = lastAssistantMessage?.usage;
+    if (!usage) return 0;
+    return (
+      usage.prompt_tokens +
+      getCacheCreationTokens(usage) +
+      getCacheReadTokens(usage)
+    );
+  }, [lastAssistantMessage]);
 
   const isContextFromPreviousMessage = useMemo(() => {
-    if (assistantMessages.length === 0) return false;
-    const lastMsg = assistantMessages[assistantMessages.length - 1];
-    const usage = lastMsg.usage;
+    if (!lastAssistantMessage) return false;
+    const usage = lastAssistantMessage.usage;
     const lastTotal =
       (usage?.prompt_tokens ?? 0) +
       getCacheCreationTokens(usage) +
       getCacheReadTokens(usage);
     return lastTotal === 0 && currentSessionTokens > 0;
-  }, [assistantMessages, currentSessionTokens]);
+  }, [lastAssistantMessage, currentSessionTokens]);
 
   const tokenPercentage = useMemo(() => {
     if (!maxContextTokens || maxContextTokens === 0) return 0;
@@ -107,8 +99,8 @@ export function useUsageCounter() {
   }, [tokenPercentage, hasServerExecutedTools]);
 
   const shouldShow = useMemo(() => {
-    return messages.length > 0;
-  }, [messages.length]);
+    return messageCount > 0;
+  }, [messageCount]);
 
   // Don't mark context as full when server-executed tools are present
   // Claude's web_search can report inflated token counts during streaming

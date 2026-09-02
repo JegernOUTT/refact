@@ -20,6 +20,7 @@ use crate::types::{
 
 pub const DEFAULT_MAX_BYTES: usize = 512 * 1024;
 pub const DEFAULT_SPILL_THRESHOLD_BYTES: usize = 256 * 1024;
+pub const DEFAULT_SPILL_MAX_BYTES: usize = 100 * 1024 * 1024;
 pub const FOREGROUND_STDOUT_CAPTURE_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub const FOREGROUND_STDERR_CAPTURE_MAX_BYTES: usize = 4 * 1024 * 1024;
 
@@ -51,6 +52,9 @@ pub struct ExecTranscript {
     last_spill_error: Option<String>,
     pre_spill_buffer: String,
     spill_started: bool,
+    spill_bytes: usize,
+    spill_max_bytes: usize,
+    spill_truncated: bool,
 }
 
 struct SpillState {
@@ -271,6 +275,9 @@ impl ExecTranscript {
             last_spill_error: None,
             pre_spill_buffer: String::new(),
             spill_started: false,
+            spill_bytes: 0,
+            spill_max_bytes: DEFAULT_SPILL_MAX_BYTES,
+            spill_truncated: false,
         }
     }
 
@@ -342,14 +349,24 @@ impl ExecTranscript {
     }
 
     fn prepare_spill_append(&mut self, text: &str) -> Option<SpillAppend> {
-        if text.is_empty() {
+        if text.is_empty() || self.spill_truncated {
             return None;
         }
         let state = self.spill.as_ref()?.clone();
         if self.spill_started {
+            let remaining = self.spill_max_bytes.saturating_sub(self.spill_bytes);
+            if remaining == 0 {
+                self.spill_truncated = true;
+                return None;
+            }
+            let kept = truncate_to_char_boundary(text, remaining);
+            self.spill_bytes = self.spill_bytes.saturating_add(kept.len());
+            if kept.len() < text.len() {
+                self.spill_truncated = true;
+            }
             return Some(SpillAppend {
                 state,
-                text: text.to_string(),
+                text: kept.to_string(),
             });
         }
         if self.total_bytes_appended.saturating_add(text.len()) <= self.spill_threshold_bytes {
@@ -359,10 +376,18 @@ impl ExecTranscript {
         self.spill_started = true;
         let mut full_text = std::mem::take(&mut self.pre_spill_buffer);
         full_text.push_str(text);
+        let kept = truncate_to_char_boundary(&full_text, self.spill_max_bytes);
+        self.spill_bytes = kept.len();
+        self.spill_truncated = kept.len() < full_text.len();
         Some(SpillAppend {
             state,
-            text: full_text,
+            text: kept.to_string(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_spill_max_bytes_for_test(&mut self, max_bytes: usize) {
+        self.spill_max_bytes = max_bytes;
     }
 
     pub(crate) fn record_spill_result(&mut self, result: &Result<PathBuf, String>) {
@@ -516,6 +541,24 @@ async fn create_spill_writer(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn spill_cap_stops_file_growth() {
+        let temp = tempfile::tempdir().unwrap();
+        let process_id = ExecProcessId("exec_spill_cap".to_string());
+        let target = SpillTarget::with_root(temp.path().to_path_buf(), "chat-cap", &process_id);
+        let mut transcript =
+            ExecTranscript::new_with_spill(process_id, 4096, Some("chat-cap".to_string()), 1);
+        transcript.set_spill_target_for_test(target.clone());
+        transcript.set_spill_max_bytes_for_test(10);
+        let (_, append) = transcript.append_chunk(ExecOutputStream::Stdout, "12345678".to_string());
+        append.unwrap().write().await.unwrap();
+        let (_, append) = transcript.append_chunk(ExecOutputStream::Stdout, "abcdefgh".to_string());
+        append.unwrap().write().await.unwrap();
+        let (_, append) = transcript.append_chunk(ExecOutputStream::Stdout, "ignored".to_string());
+        assert!(append.is_none());
+        assert_eq!(std::fs::metadata(target.path()).unwrap().len(), 10);
+    }
+
     use super::*;
     use crate::spill::SpillTarget;
 

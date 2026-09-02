@@ -210,8 +210,70 @@ pub async fn codegraph_db_path(gcx: Arc<GlobalContext>) -> PathBuf {
     }
 }
 
+const STALE_STORE_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+fn newest_mtime_in_dir(dir: &Path) -> Option<std::time::SystemTime> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    entries
+        .flatten()
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(|metadata| metadata.is_file())
+        .filter_map(|metadata| metadata.modified().ok())
+        .max()
+}
+
+pub fn sweep_stale_codegraph_stores(
+    active_db_path: &Path,
+    now: std::time::SystemTime,
+) -> Vec<PathBuf> {
+    let Some(active_dir) = active_db_path.parent() else {
+        return Vec::new();
+    };
+    let Some(stores_root) = active_dir.parent() else {
+        return Vec::new();
+    };
+    if stores_root.file_name().and_then(|name| name.to_str()) != Some("codegraph") {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(stores_root) else {
+        return Vec::new();
+    };
+    let mut removed = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == active_dir || !path.is_dir() {
+            continue;
+        }
+        if !path.join(CODEGRAPH_DB_FILE).is_file() {
+            continue;
+        }
+        let stale = newest_mtime_in_dir(&path)
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > STALE_STORE_MAX_AGE);
+        if stale && std::fs::remove_dir_all(&path).is_ok() {
+            removed.push(path);
+        }
+    }
+    removed
+}
+
 pub async fn codegraph_init(gcx: Arc<GlobalContext>) {
     let db_path = codegraph_db_path(gcx.clone()).await;
+    let sweep_path = db_path.clone();
+    let sweep = tokio::task::spawn_blocking(move || {
+        sweep_stale_codegraph_stores(&sweep_path, std::time::SystemTime::now())
+    })
+    .await;
+    match sweep {
+        Ok(removed) if !removed.is_empty() => {
+            info!(
+                "codegraph: removed {} stale store(s): {removed:?}",
+                removed.len()
+            );
+        }
+        Ok(_) => {}
+        Err(err) => warn!("codegraph: stale store sweep failed: {err}"),
+    }
     match CodeGraphService::open(db_path.clone()) {
         Ok(service) => {
             *gcx.codegraph.lock().await = Some(Arc::new(service));
@@ -619,5 +681,41 @@ mod tests {
 
         assert!(service.all_paths().await.unwrap().is_empty());
         assert!(service.all_files_with_text().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_store_sweep_removes_only_old_unopened_stores() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("codegraph");
+        let active = root.join("active-hash");
+        let old = root.join("old-hash");
+        let fresh = root.join("fresh-hash");
+        let no_db = root.join("no-db-hash");
+        for dir in [&active, &old, &fresh, &no_db] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        for dir in [&active, &old, &fresh] {
+            std::fs::write(dir.join(CODEGRAPH_DB_FILE), b"db").unwrap();
+        }
+        std::fs::write(no_db.join("stray.txt"), b"x").unwrap();
+        let now = std::time::SystemTime::now();
+        let ancient = now - STALE_STORE_MAX_AGE - Duration::from_secs(60 * 60);
+        for dir in [&active, &old, &no_db] {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                filetime::set_file_mtime(
+                    entry.path(),
+                    filetime::FileTime::from_system_time(ancient),
+                )
+                .unwrap();
+            }
+        }
+
+        let removed = sweep_stale_codegraph_stores(&active.join(CODEGRAPH_DB_FILE), now);
+
+        assert_eq!(removed, vec![old.clone()]);
+        assert!(active.exists());
+        assert!(fresh.exists());
+        assert!(no_db.exists());
+        assert!(!old.exists());
     }
 }

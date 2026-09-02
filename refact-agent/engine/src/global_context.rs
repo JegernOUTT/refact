@@ -297,6 +297,59 @@ impl Default for EngineGlobalConfig {
     }
 }
 
+#[cfg(test)]
+static TEST_TEMP_DIRS: std::sync::OnceLock<std::sync::Mutex<Vec<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn test_temp_dir_is_safe(path: &std::path::Path) -> bool {
+    let temp_dir = std::env::temp_dir();
+    if !path.starts_with(&temp_dir) {
+        return false;
+    }
+    let Ok(path) = path.canonicalize() else {
+        return false;
+    };
+    let Ok(temp_dir) = temp_dir.canonicalize() else {
+        return false;
+    };
+    path.starts_with(&temp_dir)
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("refact-"))
+}
+
+#[cfg(test)]
+extern "C" fn remove_test_temp_dirs_at_exit() {
+    let Some(dirs) = TEST_TEMP_DIRS.get() else {
+        return;
+    };
+    let dirs = dirs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    for dir in dirs.iter() {
+        if test_temp_dir_is_safe(dir) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+#[cfg(test)]
+fn register_test_temp_dir(path: &std::path::Path) -> bool {
+    if !test_temp_dir_is_safe(path) {
+        return false;
+    }
+    let dirs = TEST_TEMP_DIRS.get_or_init(|| {
+        unsafe {
+            libc::atexit(remove_test_temp_dirs_at_exit);
+        }
+        std::sync::Mutex::new(Vec::new())
+    });
+    dirs.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(path.to_path_buf());
+    true
+}
+
 pub struct GlobalContext {
     pub shutdown_flag: Arc<AtomicBool>,
     pub lsp_tcp_client_count: Arc<AtomicUsize>,
@@ -1025,6 +1078,45 @@ pub mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_gcx_temp_directories_are_registered_for_exit_cleanup() {
+        let gcx = make_test_gcx().await;
+        let cache_dir = gcx.cache_dir.clone();
+        let config_dir = gcx.config_dir.clone();
+        assert!(cache_dir.exists());
+        assert!(config_dir.exists());
+        drop(gcx);
+        assert!(cache_dir.exists());
+        assert!(config_dir.exists());
+        let registered = TEST_TEMP_DIRS
+            .get()
+            .map(|dirs| {
+                dirs.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+            })
+            .unwrap_or_default();
+        assert!(registered.contains(&cache_dir));
+        assert!(registered.contains(&config_dir));
+    }
+
+    #[test]
+    fn test_temp_dir_registration_rejects_unsafe_paths() {
+        let unprefixed = std::env::temp_dir().join(format!("other-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&unprefixed).unwrap();
+        assert!(!register_test_temp_dir(&unprefixed));
+        std::fs::remove_dir_all(&unprefixed).unwrap();
+
+        let outside = std::env::current_dir()
+            .unwrap()
+            .join(format!("refact-outside-{}", uuid::Uuid::new_v4()));
+        if !outside.starts_with(std::env::temp_dir()) {
+            std::fs::create_dir_all(&outside).unwrap();
+            assert!(!register_test_temp_dir(&outside));
+            std::fs::remove_dir_all(outside).unwrap();
+        }
+    }
+
     pub async fn make_test_gcx() -> Arc<GlobalContext> {
         let cache_dir = std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4()));
         let config_dir = std::env::temp_dir().join(format!("refact-cfg-{}", uuid::Uuid::new_v4()));
@@ -1039,6 +1131,8 @@ pub mod tests {
 
         let _ = std::fs::create_dir_all(&cache_dir);
         let _ = std::fs::create_dir_all(&config_dir);
+        register_test_temp_dir(&cache_dir);
+        register_test_temp_dir(&config_dir);
         let user_activity = crate::buddy::user_activity::UserActivityRing::load(&cache_dir).await;
         let agents =
             BackgroundAgentRegistry::new(cache_dir.join(".refact").join("background_agents"))

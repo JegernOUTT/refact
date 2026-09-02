@@ -36,7 +36,26 @@ pub struct BackgroundAgentRegistry {
     records: RwLock<HashMap<String, BackgroundAgent>>,
     runtime: RwLock<HashMap<String, AgentRuntime>>,
     storage_root: PathBuf,
+    write_state: Mutex<RegistryWriteState>,
 }
+
+struct RegistryWriteState {
+    pending: bool,
+    last_write: Option<Instant>,
+    flush_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Default for RegistryWriteState {
+    fn default() -> Self {
+        Self {
+            pending: false,
+            last_write: None,
+            flush_task: None,
+        }
+    }
+}
+
+const WRITE_DEBOUNCE: Duration = Duration::from_secs(2);
 
 impl BackgroundAgentRegistry {
     pub async fn new(storage_root: PathBuf) -> Result<Arc<Self>, String> {
@@ -49,6 +68,7 @@ impl BackgroundAgentRegistry {
             records: RwLock::new(records),
             runtime: RwLock::new(HashMap::new()),
             storage_root,
+            write_state: Mutex::new(RegistryWriteState::default()),
         }))
     }
 
@@ -105,8 +125,10 @@ impl BackgroundAgentRegistry {
         let inbox = Arc::new(Mutex::new(VecDeque::new()));
         {
             let mut records = self.records.write().await;
-            storage::save_record(&self.storage_root, &record).await?;
             records.insert(agent_id.clone(), record.clone());
+            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
+            drop(records);
+            self.flush_records(snapshot).await?;
         }
         {
             let mut runtime = self.runtime.write().await;
@@ -123,11 +145,11 @@ impl BackgroundAgentRegistry {
     }
 
     pub async fn mark_running(
-        &self,
+        self: &Arc<Self>,
         agent_id: &str,
         child_chat_id: String,
     ) -> Result<BackgroundAgent, String> {
-        self.update_record_if_not_terminal(agent_id, |record, now| {
+        self.update_record_if_not_terminal(agent_id, false, |record, now| {
             record.status = BgAgentStatus::Running;
             record.child_chat_id = Some(child_chat_id);
             record.started_at = Some(now);
@@ -139,12 +161,12 @@ impl BackgroundAgentRegistry {
     }
 
     pub async fn update_progress(
-        &self,
+        self: &Arc<Self>,
         agent_id: &str,
         progress: String,
         step_count: u32,
     ) -> Result<BackgroundAgent, String> {
-        self.update_record_if_not_terminal(agent_id, |record, now| {
+        self.update_record_if_not_terminal(agent_id, true, |record, now| {
             record.progress = Some(progress);
             record.step_count = step_count;
             record.last_activity = Some(now.to_rfc3339());
@@ -154,13 +176,13 @@ impl BackgroundAgentRegistry {
     }
 
     pub async fn update_activity(
-        &self,
+        self: &Arc<Self>,
         agent_id: &str,
         progress: Option<String>,
         step_count: Option<u32>,
         current_tool: Option<Option<String>>,
     ) -> Result<BackgroundAgent, String> {
-        self.update_record_if_not_terminal(agent_id, |record, now| {
+        self.update_record_if_not_terminal(agent_id, true, |record, now| {
             if let Some(progress) = progress {
                 record.progress = Some(progress);
             }
@@ -323,8 +345,10 @@ impl BackgroundAgentRegistry {
             updated.error = None;
             updated.finished_at = Some(now);
             touch_record(&mut updated, now);
-            storage::save_record(&self.storage_root, &updated).await?;
             records.insert(agent_id.to_string(), updated.clone());
+            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
+            drop(records);
+            self.flush_records(snapshot).await?;
             updated
         };
         if let Some(notify) = self.notify_for(agent_id).await {
@@ -359,8 +383,10 @@ impl BackgroundAgentRegistry {
             updated.result_payload_path = Some(result_payload_path);
             updated.finished_at = Some(now);
             touch_record(&mut updated, now);
-            storage::save_record(&self.storage_root, &updated).await?;
             records.insert(agent_id.to_string(), updated.clone());
+            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
+            drop(records);
+            self.flush_records(snapshot).await?;
             updated
         };
         if let Some(notify) = self.notify_for(agent_id).await {
@@ -398,8 +424,10 @@ impl BackgroundAgentRegistry {
             updated.result_payload_path = Some(result_payload_path);
             updated.finished_at = Some(now);
             touch_record(&mut updated, now);
-            storage::save_record(&self.storage_root, &updated).await?;
             records.insert(agent_id.to_string(), updated.clone());
+            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
+            drop(records);
+            self.flush_records(snapshot).await?;
             updated
         };
         if let Some(notify) = self.notify_for(agent_id).await {
@@ -430,8 +458,10 @@ impl BackgroundAgentRegistry {
             updated.current_tool = None;
             updated.finished_at = Some(now);
             touch_record(&mut updated, now);
-            storage::save_record(&self.storage_root, &updated).await?;
             records.insert(agent_id.to_string(), updated.clone());
+            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
+            drop(records);
+            self.flush_records(snapshot).await?;
             updated
         };
         if let Some(notify) = self.notify_for(agent_id).await {
@@ -442,10 +472,10 @@ impl BackgroundAgentRegistry {
     }
 
     pub async fn mark_waiting_for_approval(
-        &self,
+        self: &Arc<Self>,
         agent_id: &str,
     ) -> Result<BackgroundAgent, String> {
-        self.update_record_if_not_terminal(agent_id, |record, _| {
+        self.update_record_if_not_terminal(agent_id, false, |record, _| {
             record.status = BgAgentStatus::WaitingForApproval;
             Ok(())
         })
@@ -488,8 +518,10 @@ impl BackgroundAgentRegistry {
             updated.completion_pushed_at = pushed.then_some(now);
             updated.deferred_at = deferred.then_some(now);
             touch_record(&mut updated, now);
-            storage::save_record(&self.storage_root, &updated).await?;
             records.insert(agent_id.to_string(), updated);
+            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
+            drop(records);
+            self.flush_records(snapshot).await?;
         }
         if let Some(notify) = self.notify_for(agent_id).await {
             notify.notify_waiters();
@@ -641,7 +673,12 @@ impl BackgroundAgentRegistry {
             .get_mut(agent_id)
             .ok_or_else(|| "agent not found".to_string())?;
         record.last_update_at = last_update_at;
-        storage::save_record(&self.storage_root, record).await
+        if record.finished_at.is_some() {
+            record.finished_at = Some(last_update_at);
+        }
+        let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
+        drop(records);
+        self.flush_records(snapshot).await
     }
 
     #[doc(hidden)]
@@ -655,7 +692,9 @@ impl BackgroundAgentRegistry {
             .get_mut(agent_id)
             .ok_or_else(|| "agent not found".to_string())?;
         record.deferred_at = Some(deferred_at);
-        storage::save_record(&self.storage_root, record).await
+        let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
+        drop(records);
+        self.flush_records(snapshot).await
     }
 
     #[doc(hidden)]
@@ -665,7 +704,9 @@ impl BackgroundAgentRegistry {
             .get_mut(agent_id)
             .ok_or_else(|| "agent not found".to_string())?;
         record.result_summary = None;
-        storage::save_record(&self.storage_root, record).await
+        let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
+        drop(records);
+        self.flush_records(snapshot).await
     }
 
     pub async fn get(
@@ -867,8 +908,10 @@ impl BackgroundAgentRegistry {
             let now = Utc::now();
             update(&mut updated, now)?;
             touch_record(&mut updated, now);
-            storage::save_record(&self.storage_root, &updated).await?;
             records.insert(agent_id.to_string(), updated.clone());
+            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
+            drop(records);
+            self.flush_records(snapshot).await?;
             updated
         };
         if let Some(notify) = self.notify_for(agent_id).await {
@@ -878,8 +921,9 @@ impl BackgroundAgentRegistry {
     }
 
     async fn update_record_if_not_terminal<F>(
-        &self,
+        self: &Arc<Self>,
         agent_id: &str,
+        debounce_write: bool,
         update: F,
     ) -> Result<BackgroundAgent, String>
     where
@@ -898,8 +942,11 @@ impl BackgroundAgentRegistry {
             let now = Utc::now();
             update(&mut updated, now)?;
             touch_record(&mut updated, now);
-            storage::save_record(&self.storage_root, &updated).await?;
             records.insert(agent_id.to_string(), updated.clone());
+            let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
+            drop(records);
+            self.schedule_or_flush_records(snapshot, !debounce_write)
+                .await?;
             updated
         };
         if let Some(notify) = self.notify_for(agent_id).await {
@@ -918,6 +965,58 @@ impl BackgroundAgentRegistry {
 
     async fn retire_runtime(&self, agent_id: &str) {
         self.runtime.write().await.remove(agent_id);
+    }
+
+    #[doc(hidden)]
+    pub async fn flush_pending_writes_for_test(&self) -> Result<(), String> {
+        let snapshot: Vec<BackgroundAgent> = self.records.read().await.values().cloned().collect();
+        self.flush_records(snapshot).await
+    }
+
+    async fn flush_records(&self, records: Vec<BackgroundAgent>) -> Result<(), String> {
+        storage::save_all(&self.storage_root, records).await?;
+        let mut write_state = self.write_state.lock().await;
+        write_state.pending = false;
+        write_state.last_write = Some(Instant::now());
+        if let Some(handle) = write_state.flush_task.take() {
+            handle.abort();
+        }
+        Ok(())
+    }
+
+    async fn schedule_or_flush_records(
+        self: &Arc<Self>,
+        snapshot: Vec<BackgroundAgent>,
+        force_flush: bool,
+    ) -> Result<(), String> {
+        if force_flush {
+            return self.flush_records(snapshot).await;
+        }
+        let mut write_state = self.write_state.lock().await;
+        let now = Instant::now();
+        let should_flush_now = write_state
+            .last_write
+            .map(|last| now.duration_since(last) >= WRITE_DEBOUNCE)
+            .unwrap_or(true);
+        if should_flush_now {
+            drop(write_state);
+            return self.flush_records(snapshot).await;
+        }
+        write_state.pending = true;
+        if write_state.flush_task.is_none() {
+            let registry = Arc::clone(self);
+            let wait_for = WRITE_DEBOUNCE
+                .checked_sub(now.duration_since(write_state.last_write.unwrap_or(now)))
+                .unwrap_or(Duration::ZERO);
+            write_state.flush_task = Some(tokio::spawn(async move {
+                tokio::time::sleep(wait_for).await;
+                let records = registry.records.read().await;
+                let snapshot: Vec<BackgroundAgent> = records.values().cloned().collect();
+                drop(records);
+                let _ = registry.flush_records(snapshot).await;
+            }));
+        }
+        Ok(())
     }
 }
 
@@ -1107,6 +1206,63 @@ mod tests {
         assert!(
             chrono::DateTime::parse_from_rfc3339(updated.last_activity.as_deref().unwrap()).is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn rapid_progress_updates_are_debounced_to_one_persisted_write() {
+        let (temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+        let records_path = temp.path().join("agents").join("records.json");
+        let baseline = tokio::fs::read_to_string(&records_path).await.unwrap();
+
+        let mut last = None;
+        for step in 1..=5 {
+            last = Some(
+                registry
+                    .update_progress(&record.agent_id, format!("step {step}"), step)
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        let persisted_before_flush = tokio::fs::read_to_string(&records_path).await.unwrap();
+        assert_eq!(persisted_before_flush, baseline);
+
+        registry.flush_pending_writes_for_test().await.unwrap();
+
+        let persisted = storage::load_all(&temp.path().join("agents"))
+            .await
+            .unwrap();
+        assert_eq!(persisted.get(&record.agent_id), last.as_ref());
+    }
+
+    #[tokio::test]
+    async fn old_terminal_records_are_pruned_on_write() {
+        let (temp, registry) = registry().await;
+        let (old, _, _) = registry.create(request("parent")).await.unwrap();
+        registry
+            .mark_failed(&old.agent_id, "boom".to_string())
+            .await
+            .unwrap();
+        registry
+            .set_last_update_at_for_test(&old.agent_id, Utc::now() - TimeDelta::days(8))
+            .await
+            .unwrap();
+        let (recent, _, _) = registry.create(request("parent")).await.unwrap();
+        registry
+            .mark_completed(&recent.agent_id, completion())
+            .await
+            .unwrap();
+        let (live, _, _) = registry.create(request("parent")).await.unwrap();
+
+        registry.flush_pending_writes_for_test().await.unwrap();
+
+        let persisted = storage::load_all(&temp.path().join("agents"))
+            .await
+            .unwrap();
+        assert!(!persisted.contains_key(&old.agent_id));
+        assert!(persisted.contains_key(&recent.agent_id));
+        assert!(persisted.contains_key(&live.agent_id));
     }
 
     #[tokio::test]

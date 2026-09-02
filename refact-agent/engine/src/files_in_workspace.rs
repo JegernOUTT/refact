@@ -712,6 +712,7 @@ pub struct DocumentsState {
     file_event_debounce_notify: Arc<Notify>,
     branch_head_debounce: Arc<StdMutex<HashMap<PathBuf, PendingBranchHeadChange>>>,
     branch_head_debounce_tasks: Arc<StdMutex<HashMap<PathBuf, tokio::task::JoinHandle<()>>>>,
+    watch_registration_tasks: Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 async fn mem_overwrite_or_create_document(
@@ -755,6 +756,7 @@ impl DocumentsState {
             file_event_debounce_notify: Arc::new(Notify::new()),
             branch_head_debounce: Arc::new(StdMutex::new(HashMap::new())),
             branch_head_debounce_tasks: Arc::new(StdMutex::new(HashMap::new())),
+            watch_registration_tasks: Arc::new(StdMutex::new(Vec::new())),
         }
     }
 }
@@ -2558,10 +2560,12 @@ async fn flush_debounced_file_event_worker(gcx: Arc<GlobalContext>) {
 pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
     async fn update_directory_watch_registration(
         gcx: Arc<GlobalContext>,
-        indexing_everywhere: &IndexingEverywhere,
-        path: &Path,
+        indexing_everywhere: Arc<IndexingEverywhere>,
+        path: PathBuf,
         should_watch: bool,
     ) {
+        let indexing_everywhere = indexing_everywhere.as_ref();
+        let path = path.as_path();
         let watcher_lock = {
             gcx.documents_state
                 .fs_watcher
@@ -2625,6 +2629,26 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
         }
     }
 
+    fn spawn_watch_registration(
+        gcx: Arc<GlobalContext>,
+        indexing_everywhere: Arc<IndexingEverywhere>,
+        path: PathBuf,
+        should_watch: bool,
+    ) {
+        let tasks = gcx.documents_state.watch_registration_tasks.clone();
+        let handle = tokio::spawn(update_directory_watch_registration(
+            gcx,
+            indexing_everywhere,
+            path,
+            should_watch,
+        ));
+        let mut tasks = tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(handle);
+    }
+
     async fn on_file_change(gcx_weak: Weak<GlobalContext>, event: Event) {
         let gcx = match gcx_weak.clone().upgrade() {
             Some(gcx) => gcx,
@@ -2639,26 +2663,18 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
         .filter(|path| path.is_dir());
         let maybe_removed_dir = match &event.kind {
             EventKind::Remove(RemoveKind::Folder) => event.paths.first().cloned(),
-            EventKind::Modify(ModifyKind::Name(_)) => event.paths.first().cloned(),
+            EventKind::Modify(ModifyKind::Name(_))
+                if event.paths.len() == 2 && event.paths[1].is_dir() =>
+            {
+                event.paths.first().cloned()
+            }
             _ => None,
         };
-        if let Some(path) = maybe_removed_dir.as_deref() {
-            update_directory_watch_registration(
-                gcx.clone(),
-                indexing_everywhere_arc.as_ref(),
-                path,
-                false,
-            )
-            .await;
+        if let Some(path) = maybe_removed_dir {
+            spawn_watch_registration(gcx.clone(), indexing_everywhere_arc.clone(), path, false);
         }
-        if let Some(path) = maybe_created_dir.as_deref() {
-            update_directory_watch_registration(
-                gcx.clone(),
-                indexing_everywhere_arc.as_ref(),
-                path,
-                true,
-            )
-            .await;
+        if let Some(path) = maybe_created_dir {
+            spawn_watch_registration(gcx.clone(), indexing_everywhere_arc.clone(), path, true);
         }
         if event.paths.iter().any(|p| path_triggers_registry_reload(p)) {
             crate::yaml_configs::customization_registry::invalidate_all_registry_caches(
@@ -3322,8 +3338,8 @@ mod tests {
         assert!(!entries.iter().any(|(path, _)| path == Path::new("dist")));
     }
 
-    #[tokio::test]
-    async fn watch_plan_runtime_created_directory_under_mixed_parent_is_watched() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_created_directory_under_non_recursive_root_is_watched_end_to_end() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let temp = tempfile::tempdir().unwrap();
         let root = normalized(temp.path());
@@ -3339,49 +3355,39 @@ mod tests {
         );
         *gcx.documents_state.workspace_folders.lock().unwrap() = vec![root.clone()];
         *gcx.documents_state.workspace_vcs_roots.lock().unwrap() = vec![root.clone()];
-
-        let created_dir = root.join("src").join("runtime");
-        std::fs::create_dir_all(&created_dir).unwrap();
+        let service = Arc::new(crate::codegraph::CodeGraphService::open_in_memory().unwrap());
+        *gcx.codegraph.lock().await = Some(service.clone());
 
         let indexing_everywhere = IndexingEverywhere::default();
         assert_eq!(
-            classify_watch_subtree(&root, &created_dir, &indexing_everywhere),
-            WatchSubtreeClass::CleanSubtree,
-            "a runtime-created directory under a mixed parent must be classified as watchable, \
-             otherwise the dynamic registration hook would silently skip it"
-        );
-        assert!(
-            !path_is_excluded_from_watch(&root, &created_dir, &indexing_everywhere),
-            "runtime-created source directory must not be excluded"
+            classify_watch_subtree(&root, &root, &indexing_everywhere),
+            WatchSubtreeClass::Mixed,
+            "root must be non-recursive so that only the dynamic hook can cover new dirs"
         );
 
-        let create_event =
-            notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::Folder))
-                .add_path(created_dir.clone());
-        file_watcher_event(create_event, Arc::downgrade(&gcx)).await;
+        watcher_init(gcx.clone()).await;
 
+        let created_dir = root.join("runtime");
+        std::fs::create_dir_all(&created_dir).unwrap();
         let runtime_file = created_dir.join("new.rs");
-        write_file(
-            &runtime_file,
-            "pub fn runtime() {}
+        let expected = normalized(&runtime_file).to_string_lossy().to_string();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seen = false;
+        while !seen && Instant::now() < deadline {
+            write_file(
+                &runtime_file,
+                "pub fn runtime() {}
 ",
-        );
-        let modify_event =
-            notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Any))
-                .add_path(runtime_file.clone());
-        file_watcher_event(modify_event, Arc::downgrade(&gcx)).await;
-
-        let queued = gcx
-            .documents_state
-            .file_event_debounce
-            .lock()
-            .unwrap()
-            .get(&normalized(&runtime_file))
-            .cloned();
+            );
+            tokio::time::sleep(FILE_EVENT_DEBOUNCE_WINDOW + Duration::from_millis(80)).await;
+            seen = service.drain_batch(10).contains(&expected);
+        }
         assert!(
-            queued.is_some(),
-            "runtime-created directory file should be tracked"
+            seen,
+            "file inside a runtime-created directory never produced an event: the dynamic \
+             watch registration did not happen, or the notify thread deadlocked"
         );
+
         gcx.shutdown_flag.store(true, Ordering::Relaxed);
         gcx.documents_state.file_event_debounce_notify.notify_one();
     }

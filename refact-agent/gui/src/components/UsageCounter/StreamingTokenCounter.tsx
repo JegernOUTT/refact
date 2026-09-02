@@ -6,15 +6,12 @@ import classNames from "classnames";
 import { useAppSelector } from "../../hooks/useAppSelector";
 import {
   selectIsStreamingById,
+  selectLastAssistantMessageById,
+  selectLastMessageById,
   selectIsWaitingById,
-  selectMessagesById,
   useThreadId,
 } from "../../features/Chat/Thread";
-import {
-  AssistantMessage,
-  isAssistantMessage,
-  isUserMessage,
-} from "../../services/refact";
+import { AssistantMessage, isUserMessage } from "../../services/refact";
 import { formatNumberToFixed } from "../../utils/formatNumberToFixed";
 
 import styles from "./StreamingTokenCounter.module.css";
@@ -22,13 +19,6 @@ import styles from "./StreamingTokenCounter.module.css";
 function estimateTokensFromLength(length: number): number {
   if (length <= 0) return 0;
   return Math.ceil(length / 4);
-}
-
-function findLastIndex<T>(arr: T[], pred: (x: T) => boolean): number {
-  for (let i = arr.length - 1; i >= 0; i--) {
-    if (pred(arr[i])) return i;
-  }
-  return -1;
 }
 
 function getTextLength(message: AssistantMessage | null): number {
@@ -58,7 +48,12 @@ export const StreamingTokenCounter: React.FC = () => {
   const isWaiting = useAppSelector((state) =>
     selectIsWaitingById(state, chatId),
   );
-  const messages = useAppSelector((state) => selectMessagesById(state, chatId));
+  const lastMessage = useAppSelector((state) =>
+    selectLastMessageById(state, chatId),
+  );
+  const lastAssistantMessage = useAppSelector((state) =>
+    selectLastAssistantMessageById(state, chatId),
+  );
 
   const [visible, setVisible] = useState(() => isStreaming || isWaiting);
   const [displayTokens, setDisplayTokens] = useState(0);
@@ -66,24 +61,13 @@ export const StreamingTokenCounter: React.FC = () => {
   const prevTokensRef = useRef(0);
   const hideTimerRef = useRef<number | null>(null);
 
-  const lastAssistantIdx = useMemo(
-    () => findLastIndex(messages, isAssistantMessage),
-    [messages],
-  );
-  const lastUserIdx = useMemo(
-    () => findLastIndex(messages, isUserMessage),
-    [messages],
-  );
-
   const waitingForNewAssistant =
-    (isWaiting || isStreaming) && lastUserIdx > lastAssistantIdx;
+    (isWaiting || isStreaming) &&
+    Boolean(lastMessage && isUserMessage(lastMessage));
 
-  const activeAssistantMessage = useMemo((): AssistantMessage | null => {
-    if (waitingForNewAssistant) return null;
-    if (lastAssistantIdx < 0) return null;
-    const msg = messages[lastAssistantIdx];
-    return isAssistantMessage(msg) ? msg : null;
-  }, [messages, lastAssistantIdx, waitingForNewAssistant]);
+  const activeAssistantMessage: AssistantMessage | null = waitingForNewAssistant
+    ? null
+    : lastAssistantMessage ?? null;
 
   const usage = activeAssistantMessage?.usage;
 

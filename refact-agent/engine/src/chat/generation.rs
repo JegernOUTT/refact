@@ -2201,12 +2201,11 @@ pub async fn run_llm_generation(
         session.thread.frozen_request_prefix.clone()
     };
     if installed_frozen_prefix {
-        maybe_save_trajectory_with_intent(
+        maybe_save_trajectory_background_with_intent(
             app.clone(),
             session_arc.clone(),
             TrajectoryCommitIntent::Checkpoint,
-        )
-        .await;
+        );
     }
 
     let model_n_ctx = if model_rec.base.n_ctx > 0 {
@@ -2430,62 +2429,14 @@ async fn run_streaming_generation(
             supports_temperature: model_rec.supports_temperature,
         };
 
-        let token_count_started_at = perf_diagnostics::is_enabled()
-            .then(|| {
-                matches!(
-                    model_rec
-                        .base
-                        .tokenizer
-                        .trim()
-                        .to_ascii_lowercase()
-                        .as_str(),
-                    refact_core::model_caps::ANTHROPIC_CLOUD_TOKENIZER
-                        | refact_core::model_caps::CLAUDE_CLOUD_TOKENIZER_ALIAS
-                )
-            })
-            .filter(|uses_cloud_token_count| *uses_cloud_token_count)
-            .map(|_| Instant::now());
-        let cloud_input_usage = crate::chat::cloud_token_count::try_count_input_tokens(
-            &app.gcx,
-            &app.runtime.http_client,
-            &llm_request,
-            &model_rec.base,
-        )
-        .await;
-        if let Some(started_at) = token_count_started_at {
-            perf_diagnostics::record(
-                PerfComponent::StreamTokenCountRequest,
-                Some(&chat_id),
-                PerfOutcome::Success,
-                started_at
-                    .elapsed()
-                    .as_micros()
-                    .try_into()
-                    .unwrap_or(u64::MAX),
-                None,
-                None,
-                None,
+        let mut cloud_input_usage_task =
+            crate::chat::cloud_token_count::spawn_input_token_count_task(
+                app.gcx.clone(),
+                app.runtime.http_client.clone(),
+                &llm_request,
+                &model_rec.base,
+                Some(chat_id.clone()),
             );
-        }
-        if let Some(count) = cloud_input_usage.as_ref() {
-            let usage = &count.usage;
-            let context_limit = llm_request.params.n_ctx.unwrap_or(model_rec.base.n_ctx);
-            let output_token_reserve = count.output_token_reserve;
-            if crate::chat::cloud_token_count::cloud_input_exceeds_context(
-                usage,
-                context_limit,
-                output_token_reserve,
-            ) {
-                return Err(LlmStreamError::from(
-                    crate::chat::cloud_token_count::cloud_context_limit_message(
-                        usage,
-                        &model_rec.base,
-                        context_limit,
-                        output_token_reserve,
-                    ),
-                ));
-            }
-        }
 
         enum CollectorEventPayload {
             DeltaOps(Vec<DeltaOp>),
@@ -2707,6 +2658,27 @@ async fn run_streaming_generation(
             stream_prepare_started_at,
         )
         .await;
+        let mut cloud_input_usage = None;
+        if stream_outcome.is_err() {
+            if let Some(mut handle) = cloud_input_usage_task.take() {
+                match tokio::time::timeout(std::time::Duration::from_secs(2), &mut handle).await {
+                    Ok(Ok(usage)) => cloud_input_usage = usage,
+                    Ok(Err(_)) => {}
+                    Err(_) => handle.abort(),
+                }
+            }
+        } else if let Some(handle) = cloud_input_usage_task.take() {
+            match handle.await {
+                Ok(usage) => {
+                    cloud_input_usage = usage;
+                }
+                Err(err) => {
+                    if !err.is_cancelled() {
+                        tracing::warn!(error = %err, "cloud token count task failed");
+                    }
+                }
+            }
+        }
         drop(collector);
         let _ = emitter_task.await;
 

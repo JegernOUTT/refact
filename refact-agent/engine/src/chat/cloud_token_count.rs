@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use reqwest::header::{HeaderMap, ACCEPT, CONTENT_TYPE};
 use serde_json::Value;
+use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::call_validation::ChatUsage;
@@ -11,6 +12,7 @@ use crate::llm::adapter::{AdapterSettings, HttpParts, LlmWireAdapter};
 use crate::llm::LlmRequest;
 use crate::privacy::destinations::clear_for_model;
 use refact_core::model_caps::{ANTHROPIC_CLOUD_TOKENIZER, CLAUDE_CLOUD_TOKENIZER_ALIAS};
+use super::perf_diagnostics;
 
 const CLOUD_TOKEN_COUNT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -23,6 +25,42 @@ enum CloudTokenizerKind {
 pub struct CloudInputTokenCount {
     pub usage: ChatUsage,
     pub output_token_reserve: usize,
+}
+
+pub fn spawn_input_token_count_task(
+    gcx: SharedGlobalContext,
+    client: reqwest::Client,
+    req: &LlmRequest,
+    model_rec: &BaseModelRecord,
+    chat_id: Option<String>,
+) -> Option<JoinHandle<Option<CloudInputTokenCount>>> {
+    let cloud_tokenizer_kind = cloud_tokenizer_kind(&model_rec.tokenizer)?;
+    let started_at = perf_diagnostics::is_enabled().then(std::time::Instant::now);
+    let req = req.clone();
+    let model_rec = model_rec.clone();
+    Some(tokio::spawn(async move {
+        let result = match cloud_tokenizer_kind {
+            CloudTokenizerKind::Anthropic => {
+                try_count_input_tokens(&gcx, &client, &req, &model_rec).await
+            }
+        };
+        if let Some(started_at) = started_at {
+            perf_diagnostics::record(
+                perf_diagnostics::PerfComponent::StreamTokenCountRequest,
+                chat_id.as_deref(),
+                perf_diagnostics::PerfOutcome::Success,
+                started_at
+                    .elapsed()
+                    .as_micros()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+                None,
+                None,
+                None,
+            );
+        }
+        result
+    }))
 }
 
 fn cloud_tokenizer_kind(tokenizer: &str) -> Option<CloudTokenizerKind> {
@@ -423,5 +461,17 @@ mod tests {
 
         assert!(!cloud_input_exceeds_context(&usage, 100, 10));
         assert!(cloud_input_exceeds_context(&usage, 100, 11));
+    }
+
+    #[tokio::test]
+    async fn spawn_input_token_count_task_returns_none_for_unsupported_tokenizer() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let model = base_model(
+            "tiktoken",
+            WireFormat::OpenaiChatCompletions,
+            "https://api.openai.com/v1/chat/completions",
+        );
+        let task = spawn_input_token_count_task(gcx, reqwest::Client::new(), &req(), &model, None);
+        assert!(task.is_none());
     }
 }

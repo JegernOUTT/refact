@@ -702,6 +702,26 @@ fn find_function_calls_close_tag(text: &str) -> Option<usize> {
     text.find(FUNCTION_CALLS_CLOSE_TAG)
 }
 
+fn json_value_size_estimate(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null => 4,
+        serde_json::Value::Bool(_) => 5,
+        serde_json::Value::Number(_) => 8,
+        serde_json::Value::String(text) => text.len().saturating_add(2),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(json_value_size_estimate)
+            .fold(2usize, |acc, size| {
+                acc.saturating_add(size).saturating_add(1)
+            }),
+        serde_json::Value::Object(map) => map.iter().fold(2usize, |acc, (key, value)| {
+            acc.saturating_add(key.len())
+                .saturating_add(4)
+                .saturating_add(json_value_size_estimate(value))
+        }),
+    }
+}
+
 fn split_with_partial_literal_suffix<'a>(text: &'a str, tag: &str) -> (&'a str, &'a str) {
     let max_len = tag.len().saturating_sub(1).min(text.len());
     for len in (1..=max_len).rev() {
@@ -1905,7 +1925,7 @@ async fn run_llm_websocket_request<C: StreamCollector>(
     tracing::info!(
         prewarm = should_prewarm,
         has_previous_request = session.last_request_body.is_some(),
-        body_bytes = http_parts.body.to_string().len(),
+        body_bytes = json_value_size_estimate(&http_parts.body),
         thread_name,
         "OpenAI Codex WebSocket request starting"
     );
@@ -2444,8 +2464,8 @@ pub(crate) async fn run_llm_stream_with_prepare_started<C: StreamCollector>(
                 .as_micros()
                 .try_into()
                 .unwrap_or(u64::MAX),
-            None,
-            None,
+            Some(json_value_size_estimate(&http_parts.body) as u64),
+            Some(params.llm_request.messages.len() as u64),
             None,
         );
     }
@@ -2572,7 +2592,7 @@ pub(crate) async fn run_llm_stream_with_prepare_started<C: StreamCollector>(
                 .unwrap_or("websocket_not_attempted"),
             model = %params.llm_request.model_id,
             messages_count = params.llm_request.messages.len(),
-            body_bytes = http_parts.body.to_string().len(),
+            body_bytes = json_value_size_estimate(&http_parts.body),
             "OpenAI Codex HTTP SSE request starting"
         );
     }

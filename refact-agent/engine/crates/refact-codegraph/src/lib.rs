@@ -360,19 +360,6 @@ impl CodeGraphService {
         self.initial_index_done.load(Ordering::Relaxed)
     }
 
-    pub async fn wait_until_ready(&self, timeout_ms: u64) -> bool {
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        loop {
-            if self.is_initial_index_done() && self.queue_len() == 0 {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return self.is_initial_index_done();
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-
     pub fn db_path(&self) -> &Path {
         &self.db_path
     }

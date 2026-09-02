@@ -318,6 +318,54 @@ function rebuildMessageIndexById(
   return index;
 }
 
+function setIndexedMessage(
+  rt: Draft<ChatThreadRuntime>,
+  index: number,
+  message: ChatMessages[number],
+) {
+  rt.message_index_by_id ??= rebuildMessageIndexById(rt.thread.messages);
+  const previous = rt.thread.messages[index];
+  const previousId = "message_id" in previous ? previous.message_id : undefined;
+  const nextId = "message_id" in message ? message.message_id : undefined;
+
+  rt.thread.messages[index] = message;
+
+  if (previousId && previousId !== nextId) {
+    rt.message_index_by_id[previousId] = -1;
+  }
+  if (nextId) {
+    rt.message_index_by_id[nextId] = index;
+  }
+}
+
+function appendIndexedMessage(
+  rt: Draft<ChatThreadRuntime>,
+  message: ChatMessages[number],
+) {
+  rt.message_index_by_id ??= rebuildMessageIndexById(rt.thread.messages);
+  const index = rt.thread.messages.length;
+  rt.thread.messages.push(message);
+  if ("message_id" in message && message.message_id) {
+    rt.message_index_by_id[message.message_id] = index;
+  }
+}
+
+function removeIndexedMessage(rt: Draft<ChatThreadRuntime>, index: number) {
+  rt.message_index_by_id ??= rebuildMessageIndexById(rt.thread.messages);
+  const existing = rt.thread.messages[index];
+  if ("message_id" in existing && existing.message_id) {
+    rt.message_index_by_id[existing.message_id] = -1;
+  }
+
+  if (index === rt.thread.messages.length - 1) {
+    rt.thread.messages.pop();
+    return;
+  }
+
+  rt.thread.messages.splice(index, 1);
+  rt.message_index_by_id = rebuildMessageIndexById(rt.thread.messages);
+}
+
 function findMessageIndexById(
   rt: Draft<ChatThreadRuntime>,
   messageId: string,
@@ -1804,13 +1852,10 @@ export const chatReducer = createReducer(initialState, (builder) => {
                 extra: msg.extra ?? existing.extra,
                 finish_reason: msg.finish_reason ?? existing.finish_reason,
               };
-              rt.thread.messages[existingIdx] = merged;
+              setIndexedMessage(rt, existingIdx, merged);
             } else {
-              rt.thread.messages[existingIdx] = msg;
+              setIndexedMessage(rt, existingIdx, msg);
             }
-            rt.message_index_by_id = rebuildMessageIndexById(
-              rt.thread.messages,
-            );
             rt.last_applied_seq = event.seq;
             break;
           }
@@ -1819,8 +1864,12 @@ export const chatReducer = createReducer(initialState, (builder) => {
           0,
           Math.min(event.index, rt.thread.messages.length),
         );
-        rt.thread.messages.splice(clampedIndex, 0, msg);
-        rt.message_index_by_id = rebuildMessageIndexById(rt.thread.messages);
+        if (clampedIndex === rt.thread.messages.length) {
+          appendIndexedMessage(rt, msg);
+        } else {
+          rt.thread.messages.splice(clampedIndex, 0, msg);
+          rt.message_index_by_id = rebuildMessageIndexById(rt.thread.messages);
+        }
         rt.last_applied_seq = event.seq;
         break;
       }
@@ -1851,8 +1900,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
         }
         const idx = findMessageIndexById(rt, event.message_id);
         if (idx >= 0) {
-          rt.thread.messages[idx] = normalizeMessage(event.message);
-          rt.message_index_by_id = rebuildMessageIndexById(rt.thread.messages);
+          setIndexedMessage(rt, idx, normalizeMessage(event.message));
         }
         rt.last_applied_seq = event.seq;
         break;
@@ -1868,10 +1916,10 @@ export const chatReducer = createReducer(initialState, (builder) => {
         if (eventSeq != null && lastSeq != null && eventSeq <= lastSeq) {
           break;
         }
-        rt.thread.messages = rt.thread.messages.filter(
-          (m) => !("message_id" in m) || m.message_id !== event.message_id,
-        );
-        rt.message_index_by_id = rebuildMessageIndexById(rt.thread.messages);
+        const idx = findMessageIndexById(rt, event.message_id);
+        if (idx >= 0) {
+          removeIndexedMessage(rt, idx);
+        }
         rt.last_applied_seq = event.seq;
         break;
       }

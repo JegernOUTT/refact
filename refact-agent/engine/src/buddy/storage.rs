@@ -20,6 +20,54 @@ const MEMORY_OPS_COMPACT_KEEP_DAYS: i64 = 7;
 const MEMORY_OPS_PENDING_TTL_DAYS: i64 = 30;
 
 static MEMORY_OPS_IO_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+const MEMORY_OPS_COMPACT_TRIGGER_BYTES: u64 = 8 * 1024 * 1024;
+
+#[derive(Clone, PartialEq, Eq)]
+struct MemoryOpsFileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+struct MemoryOpsCacheEntry {
+    root: PathBuf,
+    stamp: MemoryOpsFileStamp,
+    state: MemoryOpsState,
+}
+
+static MEMORY_OPS_CACHE: std::sync::Mutex<Option<MemoryOpsCacheEntry>> =
+    std::sync::Mutex::new(None);
+
+async fn memory_ops_file_stamp(project_root: &Path) -> Option<MemoryOpsFileStamp> {
+    let metadata = fs::metadata(memory_ops_path(project_root)).await.ok()?;
+    Some(MemoryOpsFileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+fn cached_memory_ops_state(
+    project_root: &Path,
+    stamp: &MemoryOpsFileStamp,
+) -> Option<MemoryOpsState> {
+    let cache = MEMORY_OPS_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache
+        .as_ref()
+        .filter(|entry| entry.root == project_root && &entry.stamp == stamp)
+        .map(|entry| entry.state.clone())
+}
+
+fn store_memory_ops_state(project_root: &Path, stamp: MemoryOpsFileStamp, state: &MemoryOpsState) {
+    let mut cache = MEMORY_OPS_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *cache = Some(MemoryOpsCacheEntry {
+        root: project_root.to_path_buf(),
+        stamp,
+        state: state.clone(),
+    });
+}
 
 fn memory_ops_path(project_root: &Path) -> PathBuf {
     project_root.join(".refact/buddy/memory_ops.jsonl")
@@ -352,10 +400,32 @@ pub async fn enqueue_memory_op(
     project_root: &Path,
     op: MemoryLifecycleOp,
 ) -> Result<MemoryOpsState, String> {
+    enqueue_memory_op_with_compact_threshold(project_root, op, MEMORY_OPS_COMPACT_TRIGGER_BYTES)
+        .await
+}
+
+async fn enqueue_memory_op_with_compact_threshold(
+    project_root: &Path,
+    op: MemoryLifecycleOp,
+    compact_threshold_bytes: u64,
+) -> Result<MemoryOpsState, String> {
     let _guard = MEMORY_OPS_IO_LOCK.lock().await;
     let incoming_has_key = !op.idempotency_key.trim().is_empty();
-    let (records, malformed_lines) = read_memory_ops_records_locked(project_root).await;
-    let current = MemoryOpsState::from_records_with_malformed(records, malformed_lines);
+    let stamp = memory_ops_file_stamp(project_root).await;
+    let current = match stamp
+        .as_ref()
+        .and_then(|stamp| cached_memory_ops_state(project_root, stamp))
+    {
+        Some(state) => state,
+        None => {
+            let (records, malformed_lines) = read_memory_ops_records_locked(project_root).await;
+            let state = MemoryOpsState::from_records_with_malformed(records, malformed_lines);
+            if let Some(stamp) = stamp {
+                store_memory_ops_state(project_root, stamp, &state);
+            }
+            state
+        }
+    };
     if let Some(existing) = current.matching_op(&op) {
         if !memory_op_duplicate_should_replace(existing.status, op.status) {
             return Ok(current);
@@ -390,6 +460,8 @@ pub async fn enqueue_memory_op(
     file.flush()
         .await
         .map_err(|e| format!("Failed to flush memory ops queue {:?}: {}", path, e))?;
+    drop(file);
+    archive_memory_ops_if_oversized_locked(project_root, compact_threshold_bytes).await?;
     Ok(load_memory_ops(project_root).await)
 }
 
@@ -430,9 +502,20 @@ pub async fn save_drafts(
 }
 
 pub async fn load_memory_ops(project_root: &Path) -> MemoryOpsState {
+    let stamp = memory_ops_file_stamp(project_root).await;
+    if let Some(state) = stamp
+        .as_ref()
+        .and_then(|stamp| cached_memory_ops_state(project_root, stamp))
+    {
+        return state;
+    }
     let read = read_memory_ops_file(project_root).await;
     let malformed_lines = read.malformed.len().min(u32::MAX as usize) as u32;
-    MemoryOpsState::from_records_with_malformed(read.records, malformed_lines)
+    let state = MemoryOpsState::from_records_with_malformed(read.records, malformed_lines);
+    if let Some(stamp) = stamp {
+        store_memory_ops_state(project_root, stamp, &state);
+    }
+    state
 }
 
 pub async fn load_memory_ops_repairing(project_root: &Path) -> MemoryOpsState {
@@ -562,6 +645,13 @@ pub async fn archive_memory_ops_if_oversized(
     threshold_bytes: u64,
 ) -> Result<bool, String> {
     let _guard = MEMORY_OPS_IO_LOCK.lock().await;
+    archive_memory_ops_if_oversized_locked(project_root, threshold_bytes).await
+}
+
+async fn archive_memory_ops_if_oversized_locked(
+    project_root: &Path,
+    threshold_bytes: u64,
+) -> Result<bool, String> {
     let path = memory_ops_path(project_root);
     let metadata = match fs::metadata(&path).await {
         Ok(metadata) => metadata,
@@ -1335,6 +1425,66 @@ mod tests {
         );
         let state = load_memory_ops(root).await;
         assert_eq!(state.ops, vec![keep.normalized()]);
+    }
+
+    #[tokio::test]
+    async fn enqueue_compacts_oversized_queue_on_the_write_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let stale = op_with_time(
+            "op-stale",
+            MemorySource::MemoryGarden,
+            MemoryOpStatus::Applied,
+            Utc::now() - chrono::Duration::days(30),
+        );
+        write_memory_ops_records_for_test(root, vec![stale]).await;
+        let before = tokio::fs::metadata(memory_ops_path(root))
+            .await
+            .unwrap()
+            .len();
+
+        let fresh = op_with_time(
+            "op-fresh",
+            MemorySource::MemoryGarden,
+            MemoryOpStatus::Pending,
+            Utc::now(),
+        );
+        let state = enqueue_memory_op_with_compact_threshold(root, fresh.clone(), 1)
+            .await
+            .unwrap();
+
+        assert!(memory_ops_backup_path(root).exists());
+        let after = tokio::fs::metadata(memory_ops_path(root))
+            .await
+            .unwrap()
+            .len();
+        assert!(after < before + 64);
+        assert_eq!(state.ops, vec![fresh.clone().normalized()]);
+        assert_eq!(load_memory_ops(root).await.ops, vec![fresh.normalized()]);
+    }
+
+    #[tokio::test]
+    async fn load_memory_ops_serves_unchanged_file_from_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let op = op_with_time(
+            "op-cached",
+            MemorySource::MemoryGarden,
+            MemoryOpStatus::Pending,
+            Utc::now(),
+        );
+        write_memory_ops_records_for_test(root, vec![op.clone()]).await;
+        let first = load_memory_ops(root).await;
+        assert_eq!(first.ops, vec![op.clone().normalized()]);
+
+        let path = memory_ops_path(root);
+        let stamp = memory_ops_file_stamp(root).await.unwrap();
+        let cached = cached_memory_ops_state(root, &stamp);
+        assert_eq!(cached.as_ref().map(|state| &state.ops), Some(&first.ops));
+
+        tokio::fs::write(&path, "not json\n").await.unwrap();
+        let reread = load_memory_ops(root).await;
+        assert!(reread.ops.is_empty());
     }
 
     #[tokio::test]

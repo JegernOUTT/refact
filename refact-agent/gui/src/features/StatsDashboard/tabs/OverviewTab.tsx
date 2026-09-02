@@ -27,6 +27,7 @@ import { Spinner } from "../../../components/Spinner";
 import { ErrorCallout } from "../../../components/Callout";
 import { StatCard } from "../components/StatCard";
 import { StatSection } from "../components/StatSection";
+import { useIsDocumentVisible } from "../../../hooks/useIsDocumentVisible";
 import {
   formatCostDisplay,
   formatCostPrecise,
@@ -191,8 +192,9 @@ const ProviderQuotaCard: React.FC<{ snapshot: ProviderQuotaSnapshot }> = ({
 };
 
 const ProviderQuotaSection: React.FC = () => {
+  const visible = useIsDocumentVisible();
   const { data, isLoading, isError } = useGetProviderQuotasQuery(undefined, {
-    pollingInterval: 5 * 60_000,
+    pollingInterval: visible ? 5 * 60_000 : 0,
   });
   const snapshots = (data?.quotas ?? []).filter(
     (snapshot) => snapshot.available,

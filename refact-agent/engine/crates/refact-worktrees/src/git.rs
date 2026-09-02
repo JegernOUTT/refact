@@ -460,6 +460,10 @@ pub fn list_git_worktrees(source_root: &Path) -> Vec<GitWorktreeEntry> {
     entries
 }
 
+pub fn prune_worktrees(source_root: &Path) -> Result<(), String> {
+    run_git(source_root, &["worktree", "prune"]).map(|_| ())
+}
+
 fn parse_numstat(output: &str) -> HashMap<String, (Option<usize>, Option<usize>)> {
     output
         .lines()

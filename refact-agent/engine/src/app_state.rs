@@ -1098,71 +1098,90 @@ impl ToolRegistry for AppToolRegistry {
             let cgcx = ccx.lock().await;
             cgcx.app.gcx.clone()
         };
-        let tools = self
-            .fresh_mutable_tools(
-                gcx.clone(),
-                mode,
-                model_id,
-                catalog,
-                PerfComponent::ToolMutableVectorBuild,
-            )
+        let pool = self
+            .acquire_turn_tool_pool(mode, model_id, None, catalog)
             .await;
-        let resolved = crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
-        for mut tool in tools {
-            let desc = tool.tool_description();
-            if desc.name == tool_name || desc.name == resolved.as_str() {
-                let mut coerced_args: HashMap<String, serde_json::Value> =
-                    args.into_iter().collect();
-                let coercion_notes = refact_tool_api::coerce_hashmap_to_schema(
-                    &mut coerced_args,
-                    &catalog_desc.input_schema,
-                );
-                if !coercion_notes.is_empty() {
-                    tracing::info!(
-                        "Coerced arguments for tool {}: {:?}",
-                        desc.name,
-                        coercion_notes
-                    );
-                }
-                {
-                    let mut cgcx = ccx.lock().await;
-                    cgcx.app = AppState::from_gcx(gcx.clone()).await;
-                }
-                let tool_call_id = tool_call_id.to_string();
-                lookup_span.finish_tool(PerfOutcome::Success, 1, 1, None);
-                let runtime_span = perf_diagnostics::span(PerfComponent::ToolRuntime, None, None);
-                let result = tool.tool_execute(ccx, &tool_call_id, &coerced_args).await;
-                let result = match result {
-                    Ok(result) => {
-                        runtime_span.finish_tool(PerfOutcome::Success, 1, 1, None);
-                        result
-                    }
-                    Err(error) => {
-                        runtime_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
-                        return Err(error);
-                    }
-                };
-                let mut messages = Vec::new();
-                let mut context_files = Vec::new();
-                for item in result.1 {
-                    match item {
-                        crate::call_validation::ContextEnum::ChatMessage(message) => {
-                            messages.push(message)
-                        }
-                        crate::call_validation::ContextEnum::ContextFile(file) => {
-                            context_files.push(file)
-                        }
+        let leased = match pool.as_ref() {
+            Some(pool) => {
+                self.take_turn_tool(pool, gcx.clone(), mode, model_id, catalog, tool_name)
+                    .await?
+            }
+            None => {
+                let tools = self
+                    .fresh_mutable_tools(
+                        gcx.clone(),
+                        mode,
+                        model_id,
+                        catalog,
+                        PerfComponent::ToolMutableVectorBuild,
+                    )
+                    .await;
+                let resolved =
+                    crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
+                let mut found = None;
+                for mut candidate in tools {
+                    let name = candidate.tool_description().name;
+                    if name == tool_name || name == resolved.as_str() {
+                        found = Some(candidate);
+                        break;
                     }
                 }
-                return Ok(Some(ToolExecutionResult {
-                    had_corrections: result.0,
-                    messages,
-                    context_files,
-                }));
+                found
+            }
+        };
+        let Some(mut tool) = leased else {
+            lookup_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
+            return Ok(None);
+        };
+        let mut coerced_args: HashMap<String, serde_json::Value> = args.into_iter().collect();
+        let coercion_notes = refact_tool_api::coerce_hashmap_to_schema(
+            &mut coerced_args,
+            &catalog_desc.input_schema,
+        );
+        if !coercion_notes.is_empty() {
+            tracing::info!(
+                "Coerced arguments for tool {}: {:?}",
+                tool.tool_description().name,
+                coercion_notes
+            );
+        }
+        {
+            let mut cgcx = ccx.lock().await;
+            cgcx.app = AppState::from_gcx(gcx.clone()).await;
+        }
+        let tool_call_id = tool_call_id.to_string();
+        lookup_span.finish_tool(PerfOutcome::Success, 1, 1, None);
+        let runtime_span = perf_diagnostics::span(PerfComponent::ToolRuntime, None, None);
+        let result = tool.tool_execute(ccx, &tool_call_id, &coerced_args).await;
+        let result = match result {
+            Ok(result) => {
+                runtime_span.finish_tool(PerfOutcome::Success, 1, 1, None);
+                result
+            }
+            Err(error) => {
+                runtime_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
+                if let Some(pool) = pool.as_ref() {
+                    Self::app_turn_tool_pool(pool)?.return_tool(tool).await;
+                }
+                return Err(error);
+            }
+        };
+        if let Some(pool) = pool.as_ref() {
+            Self::app_turn_tool_pool(pool)?.return_tool(tool).await;
+        }
+        let mut messages = Vec::new();
+        let mut context_files = Vec::new();
+        for item in result.1 {
+            match item {
+                crate::call_validation::ContextEnum::ChatMessage(message) => messages.push(message),
+                crate::call_validation::ContextEnum::ContextFile(file) => context_files.push(file),
             }
         }
-        lookup_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
-        Ok(None)
+        Ok(Some(ToolExecutionResult {
+            had_corrections: result.0,
+            messages,
+            context_files,
+        }))
     }
 
     async fn execute_tool_with_catalog_and_pool(
@@ -1236,17 +1255,11 @@ impl ToolRegistry for AppToolRegistry {
             }
             Err(error) => {
                 runtime_span.finish_tool(PerfOutcome::Failure, 1, 1, None);
-                Self::app_turn_tool_pool(pool)
-                    .expect("pool was validated before tool lease")
-                    .return_tool(tool)
-                    .await;
+                Self::app_turn_tool_pool(pool)?.return_tool(tool).await;
                 return Err(error);
             }
         };
-        Self::app_turn_tool_pool(pool)
-            .expect("pool was validated before tool lease")
-            .return_tool(tool)
-            .await;
+        Self::app_turn_tool_pool(pool)?.return_tool(tool).await;
         let mut messages = Vec::new();
         let mut context_files = Vec::new();
         for item in result.1 {

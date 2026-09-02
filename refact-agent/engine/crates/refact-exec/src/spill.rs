@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
@@ -7,6 +8,69 @@ use tokio::io::AsyncWriteExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 use crate::types::ExecProcessId;
+
+pub const SPILL_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+pub const SPILL_DIR_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SpillSweepSummary {
+    pub removed_files: usize,
+    pub removed_bytes: u64,
+}
+
+pub async fn sweep_spill_dir(root: &Path) -> Result<SpillSweepSummary, String> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || sweep_spill_dir_blocking(&root, SystemTime::now()))
+        .await
+        .map_err(|error| format!("exec spill sweep task failed: {error}"))?
+}
+
+fn sweep_spill_dir_blocking(root: &Path, now: SystemTime) -> Result<SpillSweepSummary, String> {
+    let mut files = Vec::new();
+    let Ok(chat_dirs) = std::fs::read_dir(root) else {
+        return Ok(SpillSweepSummary::default());
+    };
+    for chat_dir in chat_dirs.flatten() {
+        let Ok(meta) = std::fs::symlink_metadata(chat_dir.path()) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(chat_dir.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() || !meta.is_file() {
+                continue;
+            }
+            let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            files.push((path, modified, meta.len()));
+        }
+    }
+    files.sort_by_key(|(_, modified, _)| *modified);
+    let mut total: u64 = files.iter().map(|(_, _, size)| *size).sum();
+    let mut summary = SpillSweepSummary::default();
+    for (path, modified, size) in files {
+        let old = now
+            .duration_since(modified)
+            .map(|age| age > SPILL_MAX_AGE)
+            .unwrap_or(false);
+        if !old && total <= SPILL_DIR_MAX_BYTES {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(size);
+            summary.removed_files += 1;
+            summary.removed_bytes = summary.removed_bytes.saturating_add(size);
+        }
+    }
+    Ok(summary)
+}
 
 #[derive(Debug, Clone)]
 pub struct SpillTarget {
@@ -233,6 +297,22 @@ mod tests {
     use std::path::Component;
 
     use super::*;
+
+    #[tokio::test]
+    async fn sweep_removes_files_over_age_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let chat = temp.path().join("chat_test");
+        std::fs::create_dir_all(&chat).unwrap();
+        let file = chat.join("process_test.log");
+        std::fs::write(&file, b"old").unwrap();
+        let summary = sweep_spill_dir_blocking(
+            temp.path(),
+            SystemTime::now() + SPILL_MAX_AGE + Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(summary.removed_files, 1);
+        assert!(!file.exists());
+    }
 
     #[tokio::test]
     async fn spill_target_writes_with_hashed_path_components() {

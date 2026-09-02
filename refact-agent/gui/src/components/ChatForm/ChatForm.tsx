@@ -115,9 +115,9 @@ import { MicrophoneButton, MicrophoneButtonRef } from "./MicrophoneButton";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
 import {
   selectChatErrorById,
+  selectHasMessagesById,
   selectIsStreamingById,
   selectIsWaitingById,
-  selectMessagesById,
   selectQueuedItemsById,
   selectThreadImagesById,
   selectThreadModeById,
@@ -201,7 +201,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const clearComposerPointerDownRef = React.useRef<number | null>(null);
   const isOnline = useIsOnline();
   const { isContextFull } = useUsageCounter();
-  const messages = useAppSelector((state) => selectMessagesById(state, chatId));
+  const hasMessages = useAppSelector((state) =>
+    selectHasMessagesById(state, chatId),
+  );
   const queuedItems = useAppSelector((state) =>
     selectQueuedItemsById(state, chatId),
   );
@@ -241,12 +243,12 @@ export const ChatForm: React.FC<ChatFormProps> = ({
 
   const disableSend = useMemo(() => {
     if (allDisabled) return true;
-    if (messages.length === 0) return false;
+    if (!hasMessages) return false;
     if (isContextFull) return true;
     return isWaiting || isStreaming || !isOnline;
   }, [
     allDisabled,
-    messages.length,
+    hasMessages,
     isWaiting,
     isStreaming,
     isOnline,
@@ -908,7 +910,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
                     attachedImages.length > 0 ||
                     textFiles.length > 0
                   }
-                  hasMessages={messages.length > 0}
+                  hasMessages={hasMessages}
                   queuedCount={queuedItems.length}
                   onSend={() => handleSubmit("after_flow")}
                   onSendImmediately={handleSendImmediately}

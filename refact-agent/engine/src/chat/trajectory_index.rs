@@ -26,7 +26,13 @@ pub const TRAJECTORY_INDEX_COORDINATOR_ENV: &str = "REFACT_TRAJECTORY_INDEX_COOR
 pub const TRAJECTORY_INDEX_LOCK_ORDER: &str =
     "release_global_and_session_locks_before_trajectory_index_io";
 
-const MAX_CACHED_TRAJECTORY_DIRECTORIES: usize = 256;
+const MAX_CACHED_TRAJECTORY_DIRECTORIES: usize = 1024;
+
+static TRAJECTORY_INDEX_CACHE_ACCESS_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn next_trajectory_index_cache_access_stamp() -> u64 {
+    TRAJECTORY_INDEX_CACHE_ACCESS_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
@@ -377,6 +383,7 @@ static TRAJECTORY_INDEX_LOCKS: std::sync::OnceLock<AMutex<HashMap<String, Arc<AM
 struct CachedLegacyTrajectoryIndex {
     index: TrajectoryIndex,
     generation: DirectoryGeneration,
+    last_access: u64,
 }
 
 static LEGACY_TRAJECTORY_INDEX_CACHE: std::sync::OnceLock<
@@ -398,12 +405,30 @@ async fn cache_legacy_trajectory_index(dir: &Path, index: TrajectoryIndex) {
     };
     let mut cache = legacy_trajectory_index_cache().lock().await;
     let key = dir.to_path_buf();
+    let last_access = next_trajectory_index_cache_access_stamp();
+    if let Some(entry) = cache.get_mut(&key) {
+        entry.index = index;
+        entry.generation = generation;
+        entry.last_access = last_access;
+        return;
+    }
     if !cache.contains_key(&key) && cache.len() >= MAX_CACHED_TRAJECTORY_DIRECTORIES {
-        if let Some(stale) = cache.keys().next().cloned() {
+        if let Some(stale) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_access)
+            .map(|(path, _)| path.clone())
+        {
             cache.remove(&stale);
         }
     }
-    cache.insert(key, CachedLegacyTrajectoryIndex { index, generation });
+    cache.insert(
+        key,
+        CachedLegacyTrajectoryIndex {
+            index,
+            generation,
+            last_access,
+        },
+    );
 }
 
 async fn invalidate_legacy_trajectory_index_cache(dir: &Path) {
@@ -446,6 +471,7 @@ struct TrajectoryIndexDirectoryState {
     generation: Option<DirectoryGeneration>,
     loaded: bool,
     recovery_flush_required: bool,
+    last_access: u64,
     next_sequence: u64,
     pending: Vec<PendingTrajectoryIndexMutation>,
 }
@@ -550,13 +576,23 @@ impl TrajectoryIndexCoordinator {
         let key = dir.to_path_buf();
         let mut directories = self.directories.lock().await;
         if let Some(state) = directories.get(&key) {
+            if let Ok(mut state_guard) = state.try_lock() {
+                state_guard.last_access = next_trajectory_index_cache_access_stamp();
+            }
             return Ok(state.clone());
         }
         if directories.len() >= MAX_CACHED_TRAJECTORY_DIRECTORIES {
-            let stale = directories.iter().find_map(|(path, state)| {
-                let state = state.try_lock().ok()?;
-                state.pending.is_empty().then(|| path.clone())
-            });
+            let stale = directories
+                .iter()
+                .filter_map(|(path, state)| {
+                    let state = state.try_lock().ok()?;
+                    state
+                        .pending
+                        .is_empty()
+                        .then_some((path.clone(), state.last_access))
+                })
+                .min_by_key(|(_, last_access)| *last_access)
+                .map(|(path, _)| path);
             let Some(stale) = stale else {
                 return Err(
                     "Trajectory index directory cache is full with pending writes".to_string(),
@@ -564,7 +600,10 @@ impl TrajectoryIndexCoordinator {
             };
             directories.remove(&stale);
         }
-        let state = Arc::new(AMutex::new(TrajectoryIndexDirectoryState::default()));
+        let state = Arc::new(AMutex::new(TrajectoryIndexDirectoryState {
+            last_access: next_trajectory_index_cache_access_stamp(),
+            ..Default::default()
+        }));
         directories.insert(key, state.clone());
         Ok(state)
     }
@@ -1721,13 +1760,18 @@ async fn write_trajectory_index_atomic_owned_inner(
             path
         )
     })??;
-    fs::write(&tmp_path, content).await.map_err(|e| {
-        format!(
-            "Failed to write temporary trajectory index {:?}: {e}",
+    if let Err(error) = fs::write(&tmp_path, content).await {
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err(format!(
+            "Failed to write temporary trajectory index {:?}: {error}",
             tmp_path
-        )
-    })?;
-    crate::chat::trajectories::atomic_write_file(&tmp_path, &path).await
+        ));
+    }
+    if let Err(error) = crate::chat::trajectories::atomic_write_file(&tmp_path, &path).await {
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub fn index_entry_file_name_is_valid(file_name: &str) -> bool {
@@ -2406,11 +2450,15 @@ async fn list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
     source_hint: Option<TrajectorySourceIdentity>,
     listing_counter_scope: &TrajectoryIndexListingCounterScope,
 ) -> Result<Vec<TrajectoryIndexEntry>, String> {
-    let cached = legacy_trajectory_index_cache()
-        .lock()
-        .await
-        .get(dir)
-        .cloned();
+    let cached = {
+        let mut cache = legacy_trajectory_index_cache().lock().await;
+        if let Some(entry) = cache.get_mut(dir) {
+            entry.last_access = next_trajectory_index_cache_access_stamp();
+            Some(entry.clone())
+        } else {
+            None
+        }
+    };
     if let Some(cached) = cached {
         if let Ok(true) =
             cached_index_is_fresh(dir, cached.index.clone(), cached.generation.clone()).await
@@ -3410,6 +3458,75 @@ mod tests {
         let snapshot = coordinator.snapshot(&dir, None).await.unwrap();
         assert_eq!(snapshot.entries.len(), 1);
         assert_eq!(snapshot.entries[0].id, "chat-1");
+    }
+
+    #[tokio::test]
+    async fn legacy_cache_lru_evicts_oldest_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        legacy_trajectory_index_cache().lock().await.clear();
+
+        for index in 0..MAX_CACHED_TRAJECTORY_DIRECTORIES {
+            let dir = temp.path().join(format!("dir-{index}"));
+            cache_legacy_trajectory_index(&dir, TrajectoryIndex::default()).await;
+        }
+
+        let oldest = temp.path().join("dir-0");
+        let newest = temp
+            .path()
+            .join(format!("dir-{}", MAX_CACHED_TRAJECTORY_DIRECTORIES - 1));
+        let extra = temp.path().join("dir-extra");
+        cache_legacy_trajectory_index(&extra, TrajectoryIndex::default()).await;
+
+        let cache = legacy_trajectory_index_cache().lock().await;
+        assert!(!cache.contains_key(&oldest));
+        assert!(cache.contains_key(&newest));
+        assert!(cache.contains_key(&extra));
+    }
+
+    #[tokio::test]
+    async fn coordinator_directory_state_lru_evicts_oldest_clean_directory() {
+        let coordinator = TrajectoryIndexCoordinator::new();
+        let temp = tempfile::tempdir().unwrap();
+
+        for index in 0..MAX_CACHED_TRAJECTORY_DIRECTORIES {
+            let dir = temp.path().join(format!("dir-{index}"));
+            coordinator.directory_state(&dir).await.unwrap();
+        }
+
+        let extra = temp.path().join("dir-extra");
+        coordinator.directory_state(&extra).await.unwrap();
+
+        let directories = coordinator.directories.lock().await;
+        assert!(!directories.contains_key(&temp.path().join("dir-0")));
+        assert!(directories.contains_key(
+            &temp
+                .path()
+                .join(format!("dir-{}", MAX_CACHED_TRAJECTORY_DIRECTORIES - 1))
+        ));
+        assert!(directories.contains_key(&extra));
+    }
+
+    #[tokio::test]
+    async fn write_trajectory_index_atomic_owned_inner_cleans_temp_file_on_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        fs::create_dir_all(&dir).await.unwrap();
+        fs::create_dir_all(trajectory_index_path(&dir))
+            .await
+            .unwrap();
+
+        let error = write_trajectory_index_atomic_owned_inner(&dir, TrajectoryIndex::default())
+            .await
+            .unwrap_err();
+        assert!(error.contains("Failed to rename"));
+
+        let mut entries = tokio::fs::read_dir(&dir).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            assert!(!entry
+                .file_name()
+                .to_string_lossy()
+                .contains(".index.json.tmp-"));
+        }
     }
 
     #[tokio::test]

@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use super::perf_diagnostics::{PerfComponent, PerfEvent};
+use super::trajectory_index::trajectory_index_listing_counters;
 
 pub const PERFORMANCE_TELEMETRY_SCHEMA_VERSION: u8 = 1;
 const HISTOGRAM_BUCKETS: usize = 64;
@@ -15,6 +16,7 @@ struct ComponentCounters {
     success_count: AtomicU64,
     failure_count: AtomicU64,
     skipped_count: AtomicU64,
+    cancelled_count: AtomicU64,
     min_us: AtomicU64,
     max_us: AtomicU64,
     histogram: [AtomicU64; HISTOGRAM_BUCKETS],
@@ -31,6 +33,7 @@ impl ComponentCounters {
             success_count: AtomicU64::new(0),
             failure_count: AtomicU64::new(0),
             skipped_count: AtomicU64::new(0),
+            cancelled_count: AtomicU64::new(0),
             min_us: AtomicU64::new(u64::MAX),
             max_us: AtomicU64::new(0),
             histogram: array::from_fn(|_| AtomicU64::new(0)),
@@ -48,6 +51,9 @@ impl ComponentCounters {
             }
             "failure" => {
                 self.failure_count.fetch_add(1, Ordering::Relaxed);
+            }
+            "cancelled" => {
+                self.cancelled_count.fetch_add(1, Ordering::Relaxed);
             }
             _ => {
                 self.skipped_count.fetch_add(1, Ordering::Relaxed);
@@ -74,6 +80,7 @@ impl ComponentCounters {
         self.success_count.store(0, Ordering::Relaxed);
         self.failure_count.store(0, Ordering::Relaxed);
         self.skipped_count.store(0, Ordering::Relaxed);
+        self.cancelled_count.store(0, Ordering::Relaxed);
         self.min_us.store(u64::MAX, Ordering::Relaxed);
         self.max_us.store(0, Ordering::Relaxed);
         for bucket in &self.histogram {
@@ -98,6 +105,7 @@ impl ComponentCounters {
             success_count: self.success_count.load(Ordering::Relaxed),
             failure_count: self.failure_count.load(Ordering::Relaxed),
             skipped_count: self.skipped_count.load(Ordering::Relaxed),
+            cancelled_count: self.cancelled_count.load(Ordering::Relaxed),
             min_us: (sample_count > 0).then(|| self.min_us.load(Ordering::Relaxed)),
             max_us: (sample_count > 0).then(|| self.max_us.load(Ordering::Relaxed)),
             p50_us: percentile_bucket_us(&histogram, sample_count, 50),
@@ -169,6 +177,11 @@ impl PerformanceTelemetry {
         let _guard = lock_read(&self.state_lock);
         let now_ms = now_ms();
         let collection_started_at_ms = self.collection_started_at_ms.load(Ordering::Relaxed);
+        let listing_counters = trajectory_index_listing_counters();
+        let listing_calls = listing_counters
+            .calls_by_caller
+            .iter()
+            .fold(0_u64, |total, (_, calls)| total.saturating_add(*calls));
         PerformanceTelemetrySnapshot {
             schema_version: PERFORMANCE_TELEMETRY_SCHEMA_VERSION,
             enabled: self.enabled(),
@@ -195,6 +208,8 @@ impl PerformanceTelemetry {
                     PerfComponent::SseSerialize,
                     PerfComponent::SseBroadcast,
                     PerfComponent::SseLagged,
+                    PerfComponent::TrajectorySaveMutexWait,
+                    PerfComponent::TrajectoryMetricScan,
                 ]),
                 tool_stages: self.aggregate_components(&[
                     PerfComponent::ToolConfirmationWait,
@@ -216,17 +231,14 @@ impl PerformanceTelemetry {
                     PerfComponent::ToolResultMerge,
                     PerfComponent::ToolSessionMergeEvents,
                     PerfComponent::ToolCheckpointScheduling,
+                    PerfComponent::ToolIntegrationToolsBuild,
                 ]),
                 index_watcher_vecdb_amplification: IndexWatcherVecdbAmplification {
-                    trajectory_index_operations_per_commit: self.ratio(
-                        &[
-                            PerfComponent::TrajectoryIndexLockWait,
-                            PerfComponent::TrajectoryIndexRead,
-                            PerfComponent::TrajectoryIndexWrite,
-                            PerfComponent::TrajectoryIndexRebuild,
-                        ],
-                        PerfComponent::TrajectoryCommit,
+                    trajectory_index_reads_per_listing_call: ratio_counts(
+                        listing_counters.index_reads,
+                        listing_calls,
                     ),
+                    calls_by_caller: listing_counters.calls_by_caller,
                     watcher_rebuilds_per_commit: self.ratio(
                         &[PerfComponent::TrajectoryIndexRebuild],
                         PerfComponent::TrajectoryCommit,
@@ -280,7 +292,7 @@ impl PerformanceTelemetry {
     }
 
     pub fn fixed_storage_words(&self) -> usize {
-        self.components.len() * (11 + HISTOGRAM_BUCKETS)
+        self.components.len() * (12 + HISTOGRAM_BUCKETS)
     }
 
     fn aggregate_components(&self, components: &[PerfComponent]) -> PerformanceComponentAggregate {
@@ -348,6 +360,7 @@ pub struct PerformanceComponentAggregate {
     pub success_count: u64,
     pub failure_count: u64,
     pub skipped_count: u64,
+    pub cancelled_count: u64,
     pub min_us: Option<u64>,
     pub max_us: Option<u64>,
     pub p50_us: Option<u64>,
@@ -369,7 +382,8 @@ pub struct PerformanceTelemetryRollups {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct IndexWatcherVecdbAmplification {
-    pub trajectory_index_operations_per_commit: f64,
+    pub trajectory_index_reads_per_listing_call: f64,
+    pub calls_by_caller: Vec<(&'static str, u64)>,
     pub watcher_rebuilds_per_commit: f64,
     pub vecdb_searches_per_enrichment_attempt: f64,
     pub aggregate: PerformanceComponentAggregate,
@@ -380,6 +394,7 @@ struct AggregateAccumulator {
     success_count: u64,
     failure_count: u64,
     skipped_count: u64,
+    cancelled_count: u64,
     min_us: u64,
     max_us: u64,
     histogram: [u64; HISTOGRAM_BUCKETS],
@@ -396,6 +411,7 @@ impl Default for AggregateAccumulator {
             success_count: 0,
             failure_count: 0,
             skipped_count: 0,
+            cancelled_count: 0,
             min_us: 0,
             max_us: 0,
             histogram: [0; HISTOGRAM_BUCKETS],
@@ -420,6 +436,9 @@ impl AggregateAccumulator {
         self.skipped_count = self
             .skipped_count
             .saturating_add(component.skipped_count.load(Ordering::Relaxed));
+        self.cancelled_count = self
+            .cancelled_count
+            .saturating_add(component.cancelled_count.load(Ordering::Relaxed));
         if sample_count > 0 {
             self.min_us = if self.min_us == 0 {
                 component.min_us.load(Ordering::Relaxed)
@@ -452,6 +471,7 @@ impl AggregateAccumulator {
             success_count: self.success_count,
             failure_count: self.failure_count,
             skipped_count: self.skipped_count,
+            cancelled_count: self.cancelled_count,
             min_us: (self.sample_count > 0).then_some(self.min_us),
             max_us: (self.sample_count > 0).then_some(self.max_us),
             p50_us: percentile_bucket_us(&self.histogram, self.sample_count, 50),
@@ -462,6 +482,14 @@ impl AggregateAccumulator {
             item_count_sum: self.item_count_sum,
             batch_size_sum: self.batch_size_sum,
         }
+    }
+}
+
+fn ratio_counts(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
     }
 }
 
@@ -598,6 +626,14 @@ mod tests {
             None,
             None,
         ));
+        telemetry.record(&event(
+            PerfComponent::ToolRuntime,
+            PerfOutcome::Cancelled,
+            2_000,
+            None,
+            None,
+            None,
+        ));
 
         let snapshot = telemetry.snapshot();
         let aggregate = snapshot
@@ -605,19 +641,35 @@ mod tests {
             .iter()
             .find(|component| component.component == Some("tool.runtime"))
             .unwrap();
-        assert_eq!(aggregate.sample_count, 3);
+        assert_eq!(aggregate.sample_count, 4);
         assert_eq!(aggregate.success_count, 1);
         assert_eq!(aggregate.failure_count, 1);
         assert_eq!(aggregate.skipped_count, 1);
+        assert_eq!(aggregate.cancelled_count, 1);
         assert_eq!(aggregate.min_us, Some(10));
-        assert_eq!(aggregate.max_us, Some(1_000));
+        assert_eq!(aggregate.max_us, Some(2_000));
         assert_eq!(aggregate.p50_us, Some(127));
-        assert_eq!(aggregate.p95_us, Some(1_023));
-        assert_eq!(aggregate.p99_us, Some(1_023));
+        assert_eq!(aggregate.p95_us, Some(2_047));
+        assert_eq!(aggregate.p99_us, Some(2_047));
         assert_eq!(aggregate.size_bytes_sum, 12);
         assert_eq!(aggregate.item_count_sum, 5);
         assert_eq!(aggregate.batch_size_sum, 3);
-        assert_eq!(snapshot.rollups.tool_stages.sample_count, 3);
+        assert_eq!(snapshot.rollups.tool_stages.sample_count, 4);
+        assert_eq!(snapshot.rollups.tool_stages.cancelled_count, 1);
+        let rendered = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(rendered["components"][25]["cancelled_count"], 1);
+        assert!(rendered["rollups"]["index_watcher_vecdb_amplification"]
+            ["trajectory_index_reads_per_listing_call"]
+            .is_number());
+        assert!(
+            rendered["rollups"]["index_watcher_vecdb_amplification"]["calls_by_caller"].is_array()
+        );
+    }
+
+    #[test]
+    fn listing_read_ratio_handles_zero_and_nonzero_call_counts() {
+        assert_eq!(ratio_counts(4, 2), 2.0);
+        assert_eq!(ratio_counts(4, 0), 0.0);
     }
 
     #[test]

@@ -85,10 +85,13 @@ pub enum PerfComponent {
     StreamRequestSend,
     StreamProviderTtft,
     StreamFirstContentDelta,
+    TrajectorySaveMutexWait,
+    TrajectoryMetricScan,
+    ToolIntegrationToolsBuild,
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 70] = [
+    pub const ALL: [Self; 73] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -159,6 +162,9 @@ impl PerfComponent {
         Self::StreamRequestSend,
         Self::StreamProviderTtft,
         Self::StreamFirstContentDelta,
+        Self::TrajectorySaveMutexWait,
+        Self::TrajectoryMetricScan,
+        Self::ToolIntegrationToolsBuild,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -233,6 +239,9 @@ impl PerfComponent {
             Self::TrajectoryIndexCoordinatorFlush => "trajectory.index_coordinator_flush",
             Self::TrajectoryIndexEnqueue => "trajectory.index_enqueue",
             Self::TrajectoryIndexCacheHit => "trajectory.index_cache_hit",
+            Self::TrajectorySaveMutexWait => "trajectory.save_mutex_wait",
+            Self::TrajectoryMetricScan => "trajectory.metric_scan",
+            Self::ToolIntegrationToolsBuild => "tool.integration_tools_build",
         }
     }
 
@@ -259,6 +268,7 @@ pub enum PerfOutcome {
     Success,
     Failure,
     Skipped,
+    Cancelled,
 }
 
 impl PerfOutcome {
@@ -267,6 +277,7 @@ impl PerfOutcome {
             Self::Success => "success",
             Self::Failure => "failure",
             Self::Skipped => "skipped",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -414,6 +425,7 @@ pub struct ActivePerfSpan {
     accumulated_us: u64,
     chat_id_hash: Option<String>,
     path_hash: Option<String>,
+    finished: bool,
 }
 
 pub enum PerfSpan {
@@ -481,7 +493,7 @@ impl PerfSpan {
     }
 
     fn finish_with_metrics(
-        self,
+        mut self,
         outcome: PerfOutcome,
         size_bytes: Option<u64>,
         item_count: Option<u64>,
@@ -490,9 +502,10 @@ impl PerfSpan {
         batch_size: Option<u64>,
         execution_class: Option<u8>,
     ) {
-        let Self::Active(active) = self else {
+        let Self::Active(active) = &mut self else {
             return;
         };
+        active.finished = true;
         let elapsed_us = active.accumulated_us.saturating_add(
             active
                 .active_started_us
@@ -512,8 +525,42 @@ impl PerfSpan {
             batch_size,
             execution_class,
             estimated_tokens: None,
-            chat_id_hash: active.chat_id_hash,
-            path_hash: active.path_hash,
+            chat_id_hash: active.chat_id_hash.take(),
+            path_hash: active.path_hash.take(),
+        });
+    }
+}
+
+impl Drop for PerfSpan {
+    fn drop(&mut self) {
+        let Self::Active(active) = self else {
+            return;
+        };
+        if active.finished {
+            return;
+        }
+        active.finished = true;
+        let elapsed_us = active.accumulated_us.saturating_add(
+            active
+                .active_started_us
+                .map(|started_us| active.recorder.clock.now_us().saturating_sub(started_us))
+                .unwrap_or(0),
+        );
+        active.recorder.sink.record(PerfEvent {
+            schema_version: PERFORMANCE_DIAGNOSTICS_SCHEMA_VERSION,
+            component: active.component.as_str(),
+            component_index: active.component.index() as u8,
+            outcome: PerfOutcome::Cancelled.as_str(),
+            elapsed_us,
+            size_bytes: None,
+            item_count: None,
+            trajectory_version: None,
+            queue_depth: None,
+            batch_size: None,
+            execution_class: None,
+            estimated_tokens: None,
+            chat_id_hash: active.chat_id_hash.take(),
+            path_hash: active.path_hash.take(),
         });
     }
 }
@@ -689,6 +736,7 @@ fn span_with_recorder(
         component,
         chat_id_hash,
         path_hash,
+        finished: false,
     })
 }
 
@@ -879,6 +927,50 @@ mod tests {
     }
 
     #[test]
+    fn dropping_unfinished_span_records_cancelled_active_time_once() {
+        let _lock = PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let clock = Arc::new(TestClock::new(100));
+        let sink = Arc::new(MemoryPerfSink::new());
+        let recorder = Arc::new(PerfRecorder::with_salt(
+            clock.clone(),
+            sink.clone(),
+            [8; 32],
+        ));
+        let mut span = span_with_recorder(Some(recorder), PerfComponent::ToolRuntime, None, None);
+
+        clock.advance(7);
+        span.pause();
+        clock.advance(100);
+        drop(span);
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].outcome, PerfOutcome::Cancelled.as_str());
+        assert_eq!(events[0].elapsed_us, 7);
+        assert!(events[0].elapsed_us > 0);
+    }
+
+    #[test]
+    fn finishing_span_does_not_record_cancelled_on_drop() {
+        let _lock = PERF_RECORDER_TEST_LOCK.lock().unwrap();
+        let clock = Arc::new(TestClock::new(100));
+        let sink = Arc::new(MemoryPerfSink::new());
+        let recorder = Arc::new(PerfRecorder::with_salt(
+            clock.clone(),
+            sink.clone(),
+            [9; 32],
+        ));
+        let span = span_with_recorder(Some(recorder), PerfComponent::ToolRuntime, None, None);
+
+        clock.advance(11);
+        span.finish(PerfOutcome::Success, None, None, None, None);
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].outcome, PerfOutcome::Success.as_str());
+    }
+
+    #[test]
     fn record_accepts_injected_elapsed_time_without_a_cross_turn_span() {
         let _lock = PERF_RECORDER_TEST_LOCK.lock().unwrap();
         let clock = Arc::new(TestClock::new(100));
@@ -988,6 +1080,9 @@ mod tests {
             "trajectory.index_coordinator_flush",
             "trajectory.index_enqueue",
             "trajectory.index_cache_hit",
+            "trajectory.save_mutex_wait",
+            "trajectory.metric_scan",
+            "tool.integration_tools_build",
         ]
         .into_iter()
         .collect();
@@ -1018,9 +1113,13 @@ mod tests {
         assert!(labels.contains(&"enrichment.vecdb_lock_wait"));
         assert!(labels.contains(&"enrichment.fallback"));
         assert!(labels.contains(&"enrichment.insertion_stale"));
+        assert!(labels.contains(&"trajectory.save_mutex_wait"));
+        assert!(labels.contains(&"trajectory.metric_scan"));
+        assert!(labels.contains(&"tool.integration_tools_build"));
         assert_eq!(PerfOutcome::Success.as_str(), "success");
         assert_eq!(PerfOutcome::Failure.as_str(), "failure");
         assert_eq!(PerfOutcome::Skipped.as_str(), "skipped");
+        assert_eq!(PerfOutcome::Cancelled.as_str(), "cancelled");
     }
 
     #[test]
