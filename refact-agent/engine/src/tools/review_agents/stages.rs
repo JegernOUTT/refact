@@ -353,6 +353,10 @@ mod tests {
             .any(|spec| spec.writes_allowed));
     }
 
+    // search_semantic is gated on vecdb, which a test gcx has no cheap way to provide, so it is
+    // exempt here; every other stage tool must resolve against the real registry.
+    const VECDB_GATED_STAGE_TOOLS: &[&str] = &["search_semantic"];
+
     #[tokio::test]
     async fn review_stage_catalog_references_only_registered_tools() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
@@ -368,6 +372,9 @@ mod tests {
         let mut missing = Vec::new();
         for spec in embedded_catalog() {
             for tool in spec.tools() {
+                if VECDB_GATED_STAGE_TOOLS.contains(&tool.as_str()) {
+                    continue;
+                }
                 if !registered.contains(&tool) {
                     missing.push(format!("{}: {tool}", spec.id));
                 }
