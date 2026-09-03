@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -176,7 +176,7 @@ impl ProviderRuntime {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ModelTypeDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -347,6 +347,157 @@ impl ProviderDefaults {
                 let _ = std::fs::remove_file(&temp_path);
                 format!("Failed to rename temp file to defaults.yaml: {}", e)
             })
+    }
+}
+
+pub const PROJECT_CONFIG_DIR: &str = ".refact";
+pub const PROJECT_MODEL_DEFAULTS_FILE: &str = "model_defaults.yaml";
+
+pub fn project_model_defaults_path(project_root: &Path) -> PathBuf {
+    project_root
+        .join(PROJECT_CONFIG_DIR)
+        .join(PROJECT_MODEL_DEFAULTS_FILE)
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ProjectModelDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<ModelTypeDefaults>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_model_2: Option<ModelTypeDefaults>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_planner_agent_model: Option<ModelTypeDefaults>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_light: Option<ModelTypeDefaults>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_thinking: Option<ModelTypeDefaults>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_buddy: Option<ModelTypeDefaults>,
+}
+
+fn normalize_project_slot(slot: &mut Option<ModelTypeDefaults>) {
+    let Some(value) = slot.as_mut() else {
+        return;
+    };
+    clear_legacy_refact_model_field(&mut value.model);
+    clear_invalid_generic_gpt56_model_field(&mut value.model);
+    let keep = value
+        .model
+        .as_deref()
+        .is_some_and(|model| !model.trim().is_empty());
+    if !keep {
+        *slot = None;
+    }
+}
+
+impl ProjectModelDefaults {
+    fn slots_mut(&mut self) -> [&mut Option<ModelTypeDefaults>; 6] {
+        [
+            &mut self.chat,
+            &mut self.chat_model_2,
+            &mut self.task_planner_agent_model,
+            &mut self.chat_light,
+            &mut self.chat_thinking,
+            &mut self.chat_buddy,
+        ]
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chat.is_none()
+            && self.chat_model_2.is_none()
+            && self.task_planner_agent_model.is_none()
+            && self.chat_light.is_none()
+            && self.chat_thinking.is_none()
+            && self.chat_buddy.is_none()
+    }
+
+    pub fn normalize(&mut self) {
+        for slot in self.slots_mut() {
+            normalize_project_slot(slot);
+        }
+    }
+
+    pub async fn load(project_root: &Path) -> Result<Self, String> {
+        let path = project_model_defaults_path(project_root);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => {
+                let mut defaults: Self = serde_yaml::from_str(&content)
+                    .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+                defaults.normalize();
+                Ok(defaults)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(format!("Failed to read {}: {}", path.display(), e)),
+        }
+    }
+
+    pub async fn save(&self, project_root: &Path) -> Result<(), String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let path = project_model_defaults_path(project_root);
+        let mut normalized = self.clone();
+        normalized.normalize();
+
+        if normalized.is_empty() {
+            return match tokio::fs::remove_file(&path).await {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(format!("Failed to remove {}: {}", path.display(), e)),
+            };
+        }
+
+        let project_config_dir = project_root.join(PROJECT_CONFIG_DIR);
+        tokio::fs::create_dir_all(&project_config_dir)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to create {} directory: {}",
+                    project_config_dir.display(),
+                    e
+                )
+            })?;
+
+        let content = serde_yaml::to_string(&normalized)
+            .map_err(|e| format!("Failed to serialize project model defaults: {}", e))?;
+        let temp_path = project_config_dir.join(format!(
+            "{}.tmp.{}.{}",
+            PROJECT_MODEL_DEFAULTS_FILE,
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+
+        tokio::fs::write(&temp_path, &content)
+            .await
+            .map_err(|e| format!("Failed to write {}: {}", temp_path.display(), e))?;
+
+        tokio::fs::rename(&temp_path, &path).await.map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            format!("Failed to rename temp file to {}: {}", path.display(), e)
+        })
+    }
+}
+
+impl ProviderDefaults {
+    pub fn apply_project_overrides(&mut self, project: &ProjectModelDefaults) {
+        let mut project = project.clone();
+        project.normalize();
+        let targets: [(&mut ModelTypeDefaults, Option<ModelTypeDefaults>); 6] = [
+            (&mut self.chat, project.chat),
+            (&mut self.chat_model_2, project.chat_model_2),
+            (
+                &mut self.task_planner_agent_model,
+                project.task_planner_agent_model,
+            ),
+            (&mut self.chat_light, project.chat_light),
+            (&mut self.chat_thinking, project.chat_thinking),
+            (&mut self.chat_buddy, project.chat_buddy),
+        ];
+        for (target, override_slot) in targets {
+            if let Some(slot) = override_slot {
+                *target = slot;
+            }
+        }
     }
 }
 
@@ -1076,8 +1227,9 @@ pub fn set_model_enabled_impl(enabled_models: &mut Vec<String>, model_id: &str, 
 mod tests {
     use super::{
         CredentialSpec, CustomModelConfig, DEFAULT_CREDENTIAL_REFRESH_INTERVAL_MS,
-        DEFAULT_CREDENTIAL_TIMEOUT_MS, LiveModelFields, ModelTypeDefaults, ProviderDefaults,
-        available_model_from_catalog_and_live, merge_custom_models,
+        DEFAULT_CREDENTIAL_TIMEOUT_MS, LiveModelFields, ModelTypeDefaults, ProjectModelDefaults,
+        ProviderDefaults, available_model_from_catalog_and_live, merge_custom_models,
+        project_model_defaults_path,
     };
     use crate::model_caps::ModelCapabilities;
     use std::collections::{HashMap, HashSet};
@@ -1304,6 +1456,146 @@ mod tests {
             defaults.defaults_for_model("shared/model", "shared/model", "shared/model", "", "", "");
 
         assert_eq!(selected.temperature, Some(0.1));
+    }
+
+    fn project_slot(model: &str) -> Option<ModelTypeDefaults> {
+        Some(ModelTypeDefaults {
+            model: Some(model.to_string()),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn apply_project_overrides_replaces_slot_wholesale_and_ignores_modelless_slots() {
+        let mut defaults = ProviderDefaults {
+            chat: ModelTypeDefaults {
+                model: Some("openai/gpt-5".to_string()),
+                temperature: Some(0.1),
+                reasoning_effort: Some("high".to_string()),
+                ..Default::default()
+            },
+            chat_light: ModelTypeDefaults {
+                model: Some("openai/gpt-5-mini".to_string()),
+                temperature: Some(0.5),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = ProjectModelDefaults {
+            chat: project_slot("anthropic/claude-sonnet"),
+            chat_light: Some(ModelTypeDefaults {
+                temperature: Some(0.9),
+                ..Default::default()
+            }),
+            chat_thinking: project_slot("  "),
+            ..Default::default()
+        };
+
+        defaults.apply_project_overrides(&project);
+
+        assert_eq!(
+            defaults.chat.model.as_deref(),
+            Some("anthropic/claude-sonnet")
+        );
+        assert_eq!(defaults.chat.temperature, None);
+        assert_eq!(defaults.chat.reasoning_effort, None);
+        assert_eq!(
+            defaults.chat_light.model.as_deref(),
+            Some("openai/gpt-5-mini")
+        );
+        assert_eq!(defaults.chat_light.temperature, Some(0.5));
+        assert_eq!(defaults.chat_thinking, ModelTypeDefaults::default());
+    }
+
+    #[test]
+    fn apply_project_overrides_with_empty_project_is_a_no_op() {
+        let original = ProviderDefaults {
+            chat: ModelTypeDefaults {
+                model: Some("openai/gpt-5".to_string()),
+                temperature: Some(0.3),
+                ..Default::default()
+            },
+            completion_model: Some("openai/completion".to_string()),
+            ..Default::default()
+        };
+        let mut defaults = original.clone();
+
+        defaults.apply_project_overrides(&ProjectModelDefaults::default());
+
+        assert_eq!(defaults.chat, original.chat);
+        assert_eq!(defaults.completion_model, original.completion_model);
+    }
+
+    #[test]
+    fn project_model_defaults_serde_defaults_and_skips_absent_slots() {
+        let parsed: ProjectModelDefaults = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(parsed, ProjectModelDefaults::default());
+        assert!(parsed.is_empty());
+
+        let defaults = ProjectModelDefaults {
+            chat: project_slot("openai/gpt-5"),
+            ..Default::default()
+        };
+        let serialized = serde_json::to_value(&defaults).unwrap();
+        assert_eq!(serialized["chat"]["model"].as_str(), Some("openai/gpt-5"));
+        assert!(serialized.get("chat_light").is_none());
+        assert!(serialized.get("chat_buddy").is_none());
+    }
+
+    #[test]
+    fn project_model_defaults_normalize_drops_blank_and_legacy_models() {
+        let mut defaults = ProjectModelDefaults {
+            chat: project_slot("openai/gpt-5"),
+            chat_model_2: project_slot(""),
+            task_planner_agent_model: Some(ModelTypeDefaults {
+                temperature: Some(0.4),
+                ..Default::default()
+            }),
+            chat_light: project_slot("refact/legacy"),
+            chat_thinking: project_slot("  openai/gpt-5-thinking  "),
+            chat_buddy: project_slot("gpt-5.6"),
+        };
+
+        defaults.normalize();
+
+        assert_eq!(
+            defaults.chat.as_ref().unwrap().model.as_deref(),
+            Some("openai/gpt-5")
+        );
+        assert!(defaults.chat_model_2.is_none());
+        assert!(defaults.task_planner_agent_model.is_none());
+        assert!(defaults.chat_light.is_none());
+        assert_eq!(
+            defaults.chat_thinking.as_ref().unwrap().model.as_deref(),
+            Some("openai/gpt-5-thinking")
+        );
+        assert!(defaults.chat_buddy.is_none());
+    }
+
+    #[tokio::test]
+    async fn project_model_defaults_save_load_round_trip_and_empty_save_removes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        assert_eq!(
+            ProjectModelDefaults::load(root).await.unwrap(),
+            ProjectModelDefaults::default()
+        );
+
+        let defaults = ProjectModelDefaults {
+            chat: project_slot("openai/gpt-5"),
+            chat_light: project_slot("openai/gpt-5-mini"),
+            ..Default::default()
+        };
+        defaults.save(root).await.unwrap();
+
+        let path = project_model_defaults_path(root);
+        assert!(path.exists());
+        assert_eq!(ProjectModelDefaults::load(root).await.unwrap(), defaults);
+
+        ProjectModelDefaults::default().save(root).await.unwrap();
+        assert!(!path.exists());
+        assert!(ProjectModelDefaults::default().save(root).await.is_ok());
     }
 
     #[test]

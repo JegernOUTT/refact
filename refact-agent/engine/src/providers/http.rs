@@ -44,6 +44,7 @@ async fn invalidate_caps(gcx: Arc<GlobalContext>) {
     gcx.tool_catalog_generations.advance_capabilities();
 }
 use crate::providers::config::ProviderDefaults;
+use refact_core::provider_types::{ProjectModelDefaults, project_model_defaults_path};
 use crate::providers::config_store;
 use refact_providers::identity::{provider_identity_from_yaml, validate_provider_instance_id};
 use crate::providers::instance::ProviderInstance;
@@ -1159,6 +1160,73 @@ pub async fn handle_v1_defaults_update(
     if let Some(draft_id) = req.draft_id.as_deref() {
         consume_defaults_draft(gcx.clone(), draft_id).await?;
     }
+
+    invalidate_caps(gcx).await;
+
+    json_response(StatusCode::OK, &json!({"success": true}))
+}
+
+async fn project_defaults_root(gcx: Arc<GlobalContext>) -> Option<std::path::PathBuf> {
+    crate::files_correction::get_project_dirs(gcx)
+        .await
+        .into_iter()
+        .next()
+}
+
+pub async fn handle_v1_project_defaults_get(
+    State(app): State<AppState>,
+) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
+    let Some(root) = project_defaults_root(gcx).await else {
+        return json_response(
+            StatusCode::OK,
+            &json!({
+                "project_available": false,
+                "project_root": Value::Null,
+                "path": Value::Null,
+                "defaults": ProjectModelDefaults::default(),
+            }),
+        );
+    };
+
+    let defaults = ProjectModelDefaults::load(&root)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+
+    json_response(
+        StatusCode::OK,
+        &json!({
+            "project_available": true,
+            "project_root": root.to_string_lossy(),
+            "path": project_model_defaults_path(&root).to_string_lossy(),
+            "defaults": defaults,
+        }),
+    )
+}
+
+pub async fn handle_v1_project_defaults_update(
+    State(app): State<AppState>,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Response<Body>, ScratchError> {
+    let gcx = app.gcx.clone();
+    let defaults: ProjectModelDefaults = serde_json::from_slice(&body_bytes).map_err(|e| {
+        ScratchError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("Invalid JSON: {}", e),
+        )
+    })?;
+
+    let Some(root) = project_defaults_root(gcx.clone()).await else {
+        return Err(ScratchError::new(
+            StatusCode::BAD_REQUEST,
+            "no project directory is open, cannot save project model defaults".to_string(),
+        ));
+    };
+
+    defaults
+        .save(&root)
+        .await
+        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     invalidate_caps(gcx).await;
 

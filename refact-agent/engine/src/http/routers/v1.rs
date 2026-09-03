@@ -62,6 +62,7 @@ use crate::providers::http::{
     handle_v1_provider_model_provider_update, handle_v1_provider_model_toggle,
     handle_v1_provider_models, handle_v1_provider_oauth_callback,
     handle_v1_provider_oauth_exchange, handle_v1_provider_oauth_logout,
+    handle_v1_project_defaults_get, handle_v1_project_defaults_update,
     handle_v1_provider_oauth_start, handle_v1_provider_remove_custom_model,
     handle_v1_provider_remove_custom_model_post, handle_v1_provider_schema,
     handle_v1_provider_quota, handle_v1_provider_quotas, handle_v1_provider_update,
@@ -520,6 +521,8 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         )
         .route("/defaults", get(handle_v1_defaults_get))
         .route("/defaults", post(handle_v1_defaults_update))
+        .route("/project-defaults", get(handle_v1_project_defaults_get))
+        .route("/project-defaults", post(handle_v1_project_defaults_update))
         .route("/openrouter/health", get(handle_v1_openrouter_health))
         .route("/google-gemini/health", get(handle_v1_google_gemini_health))
         .route(

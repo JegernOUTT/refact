@@ -43,6 +43,7 @@ export const TRAJECTORY_MODE_TRANSITION_APPLY_URL =
 // Providers & Models (new provider system)
 export const PROVIDERS_URL = "/v1/providers";
 export const PROVIDER_DEFAULTS_URL = "/v1/defaults";
+export const PROJECT_MODEL_DEFAULTS_URL = "/v1/project-defaults";
 // Legacy - kept for backward compatibility
 export const CONFIGURED_PROVIDERS_URL = "/v1/providers";
 export const PROVIDER_TEMPLATES_URL = "/v1/provider-templates";

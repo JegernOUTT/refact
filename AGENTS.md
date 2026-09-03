@@ -267,7 +267,7 @@ use the retired `delegate` tool. Legacy delegate records remain displayable for 
 |---|---|---|
 | User config | `~/.config/refact/` | `default_privacy.yaml`, `providers.d/*.yaml` |
 | Cache | `~/.cache/refact/` | Shadow repos, logs, telemetry, integrations |
-| Project | `.refact/` | `trajectories/`, `knowledge/`, `tasks/`, `integrations.d/` |
+| Project | `.refact/` | `trajectories/`, `knowledge/`, `tasks/`, `integrations.d/`, `model_defaults.yaml` (per-project model slot overrides) |
 | System prompts | `refact-agent/engine/yaml_configs/defaults/` | Modes, subagents, toolbox commands; `%MODELS_INFO%` expands to the configured model/access snapshot when enabled |
 
 ### AGENTS.md Scoping Rules

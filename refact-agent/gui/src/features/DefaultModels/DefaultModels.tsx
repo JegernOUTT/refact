@@ -19,6 +19,7 @@ import { Spinner } from "../../components/Spinner";
 import { ModelSelector } from "../../components/Chat/ModelSelector";
 import type { SamplingValues } from "../../components/ModelSamplingParams";
 import {
+  Badge,
   Button,
   FieldSlider,
   FieldSwitch,
@@ -31,8 +32,12 @@ import {
 
 import {
   useGetDefaultsQuery,
+  useGetProjectDefaultsQuery,
   useUpdateDefaultsMutation,
+  useUpdateProjectDefaultsMutation,
   type ModelTypeDefaults,
+  type ProjectModelDefaults,
+  type ProjectModelSlotKey,
   type ProviderDefaults,
 } from "../../services/refact/providers";
 import { useGetCapsQuery } from "../../services/refact/caps";
@@ -53,13 +58,9 @@ type DefaultModelsProps = {
   embedded?: boolean;
 };
 
-type ModelTypeKey =
-  | "chat"
-  | "chat_model_2"
-  | "task_planner_agent_model"
-  | "chat_light"
-  | "chat_thinking"
-  | "chat_buddy";
+type ModelTypeKey = ProjectModelSlotKey;
+
+type ModelDefaultsScope = "global" | "project";
 
 const MODEL_TYPE_LABELS: Record<
   ModelTypeKey,
@@ -106,6 +107,8 @@ const MODEL_TYPE_LABELS: Record<
 
 const MODEL_TYPE_KEYS = Object.keys(MODEL_TYPE_LABELS) as ModelTypeKey[];
 
+const SERVER_DEFAULT_LABEL = "Server default";
+
 function formatTokens(tokens: number): string {
   if (tokens >= 1000000) {
     return `${(tokens / 1000000).toFixed(tokens % 1000000 === 0 ? 0 : 1)}M`;
@@ -118,7 +121,16 @@ const ModelTypeSection: React.FC<{
   config: ModelTypeDefaults;
   capsDefault: string;
   onChange: (key: ModelTypeKey, config: ModelTypeDefaults) => void;
-}> = ({ typeKey, config, capsDefault, onChange }) => {
+  allowUnset?: boolean;
+  leading?: React.ReactNode;
+}> = ({
+  typeKey,
+  config,
+  capsDefault,
+  onChange,
+  allowUnset = true,
+  leading,
+}) => {
   const { title, description } = MODEL_TYPE_LABELS[typeKey];
   const { data: capsData } = useGetCapsQuery(undefined);
 
@@ -160,10 +172,15 @@ const ModelTypeSection: React.FC<{
   return (
     <div className={`${styles.content} rf-enter`}>
       <SettingsGroup title={title} description={description}>
+        {leading}
         <SettingItem
           className="rf-enter"
           title="Model"
-          description="Choose the model override for this slot, or leave it empty to use the server default."
+          description={
+            allowUnset
+              ? "Choose the model override for this slot, or leave it empty to use the server default."
+              : "Choose the model used for this slot in the current project."
+          }
           control={
             <div className={styles.selectorWrap} title={effectiveModel}>
               <ModelSelector
@@ -172,7 +189,7 @@ const ModelTypeSection: React.FC<{
                 defaultValue={capsDefault}
                 showLabel={false}
                 compact={false}
-                allowUnset
+                allowUnset={allowUnset}
                 unsetLabel="None"
               />
             </div>
@@ -312,6 +329,24 @@ const ModelTypeSection: React.FC<{
   );
 };
 
+function describeInheritedSlot(
+  config: ModelTypeDefaults,
+  capsDefault: string,
+): string {
+  const parts: string[] = [
+    config.model ?? (capsDefault || SERVER_DEFAULT_LABEL),
+  ];
+  if (config.boost_reasoning) {
+    parts.push(`Reasoning: ${config.reasoning_effort ?? "on"}`);
+  } else {
+    parts.push("Reasoning: off");
+  }
+  if (config.max_new_tokens != null) {
+    parts.push(`Max tokens: ${config.max_new_tokens}`);
+  }
+  return parts.join(" · ");
+}
+
 export const DefaultModels: React.FC<DefaultModelsProps> = ({
   backFromDefaultModels,
   host,
@@ -327,12 +362,16 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
     refetch,
   } = useGetDefaultsQuery(undefined);
   const { data: capsData, refetch: refetchCaps } = useGetCapsQuery(undefined);
+  const { data: projectDefaults, isLoading: projectLoading } =
+    useGetProjectDefaultsQuery(undefined);
   const {
     data: draft,
     isLoading: draftLoading,
     error: draftError,
   } = useGetDraftQuery(draftId ?? skipToken);
   const [updateDefaults, { isLoading: isSaving }] = useUpdateDefaultsMutation();
+  const [updateProjectDefaults, { isLoading: isSavingProject }] =
+    useUpdateProjectDefaultsMutation();
 
   const capsDefaults = useMemo(
     () => ({
@@ -359,12 +398,31 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
   const [hasChanges, setHasChanges] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [draftExpired, setDraftExpired] = useState(false);
+  const [scope, setScope] = useState<ModelDefaultsScope>("global");
+  const [localProjectDefaults, setLocalProjectDefaults] =
+    useState<ProjectModelDefaults>({});
+  const [hasProjectChanges, setHasProjectChanges] = useState(false);
+
+  const projectAvailable = projectDefaults?.project_available ?? false;
 
   useEffect(() => {
     if (draftError) {
       setDraftExpired(true);
     }
   }, [draftError]);
+
+  useEffect(() => {
+    if (projectDefaults) {
+      setLocalProjectDefaults(projectDefaults.defaults);
+      setHasProjectChanges(false);
+    }
+  }, [projectDefaults]);
+
+  useEffect(() => {
+    if (!projectAvailable) {
+      setScope("global");
+    }
+  }, [projectAvailable]);
 
   useEffect(() => {
     if (defaults) {
@@ -419,19 +477,81 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
     [],
   );
 
+  const handleProjectTypeChange = useCallback(
+    (key: ModelTypeKey, config: ModelTypeDefaults) => {
+      setLocalProjectDefaults((prev) => ({
+        ...prev,
+        [key]: config,
+      }));
+      setHasProjectChanges(true);
+      setSaveError(null);
+    },
+    [],
+  );
+
+  const handleProjectOverrideToggle = useCallback(
+    (key: ModelTypeKey, enabled: boolean) => {
+      setLocalProjectDefaults((prev) => {
+        if (!enabled) {
+          const next: ProjectModelDefaults = {};
+          for (const slotKey of MODEL_TYPE_KEYS) {
+            const slot = prev[slotKey];
+            if (slotKey !== key && slot) {
+              next[slotKey] = slot;
+            }
+          }
+          return next;
+        }
+        const globalSlot = localDefaults[key] ?? {};
+        return {
+          ...prev,
+          [key]: {
+            ...globalSlot,
+            model: globalSlot.model ?? (capsDefaults[key] || undefined),
+          },
+        };
+      });
+      setHasProjectChanges(true);
+      setSaveError(null);
+    },
+    [capsDefaults, localDefaults],
+  );
+
   const handleSave = useCallback(async () => {
     try {
-      const payload = draftId
-        ? { ...localDefaults, draft_id: draftId }
-        : localDefaults;
-      await updateDefaults(payload).unwrap();
+      if (hasChanges) {
+        const payload = draftId
+          ? { ...localDefaults, draft_id: draftId }
+          : localDefaults;
+        await updateDefaults(payload).unwrap();
+      }
+      if (hasProjectChanges) {
+        const payload: ProjectModelDefaults = {};
+        for (const key of MODEL_TYPE_KEYS) {
+          const slot = localProjectDefaults[key];
+          if (slot?.model) {
+            payload[key] = slot;
+          }
+        }
+        await updateProjectDefaults(payload).unwrap();
+      }
       void refetchCaps();
       setHasChanges(false);
+      setHasProjectChanges(false);
       setSaveError(null);
     } catch {
       setSaveError("Failed to save defaults. Please try again.");
     }
-  }, [draftId, localDefaults, refetchCaps, updateDefaults]);
+  }, [
+    draftId,
+    hasChanges,
+    hasProjectChanges,
+    localDefaults,
+    localProjectDefaults,
+    refetchCaps,
+    updateDefaults,
+    updateProjectDefaults,
+  ]);
 
   if (isLoading || draftLoading) {
     return <Spinner spinning />;
@@ -464,11 +584,14 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
     ? activeSection
     : "chat";
 
+  const isSavingAny = isSaving || isSavingProject;
+  const isDirty = hasChanges || hasProjectChanges;
+
   const saveAction = (
     <Button
       onClick={() => void handleSave()}
-      disabled={!hasChanges || isSaving}
-      loading={isSaving}
+      disabled={!isDirty || isSavingAny}
+      loading={isSavingAny}
       variant="primary"
     >
       Save Changes
@@ -507,14 +630,122 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
     </Tabs.List>
   );
 
+  const scopeGroup = (
+    <SettingsGroup title="Configuration scope">
+      <SettingItem
+        className="rf-enter"
+        title="Scope"
+        description={
+          scope === "global"
+            ? "Global settings apply across projects."
+            : "Project settings apply only to the currently open project."
+        }
+        control={
+          <SegmentedControl
+            name="model-defaults-scope"
+            value={scope}
+            options={[
+              { value: "global", label: "Global" },
+              {
+                value: "project",
+                label: "This project",
+                disabled: projectLoading || !projectAvailable,
+              },
+            ]}
+            onValueChange={(value) => {
+              setScope(value as ModelDefaultsScope);
+              setSaveError(null);
+            }}
+          />
+        }
+      />
+    </SettingsGroup>
+  );
+
+  const renderProjectSlot = (key: ModelTypeKey) => {
+    const projectSlot = localProjectDefaults[key];
+    const globalSlot = localDefaults[key] ?? {};
+    const overrideSwitch = (
+      <SettingItem
+        className="rf-enter"
+        title="Override for this project"
+        description="Use a project-specific model and parameters for this slot instead of the global default."
+        control={
+          <FieldSwitch
+            aria-label="Override for this project"
+            checked={projectSlot !== undefined}
+            onChange={(checked) => handleProjectOverrideToggle(key, checked)}
+          />
+        }
+      />
+    );
+
+    if (projectSlot === undefined) {
+      return (
+        <div className={`${styles.content} rf-enter`}>
+          <SettingsGroup
+            title={MODEL_TYPE_LABELS[key].title}
+            description={MODEL_TYPE_LABELS[key].description}
+          >
+            {overrideSwitch}
+            <SettingItem
+              className="rf-enter"
+              title="Inherited from global"
+              description={describeInheritedSlot(globalSlot, capsDefaults[key])}
+              control={<Badge tone="muted">Global</Badge>}
+            />
+          </SettingsGroup>
+        </div>
+      );
+    }
+
+    return (
+      <>
+        <ModelTypeSection
+          typeKey={key}
+          config={projectSlot}
+          capsDefault={capsDefaults[key]}
+          onChange={handleProjectTypeChange}
+          allowUnset={false}
+          leading={overrideSwitch}
+        />
+        {projectSlot.model ? null : (
+          <div className={`${styles.notice} ${styles.noticeWarning} rf-enter`}>
+            <Icon icon={AlertTriangle} size="sm" tone="warning" />
+            <span>Pick a model to activate this override.</span>
+          </div>
+        )}
+      </>
+    );
+  };
+
+  const renderGlobalSlot = (key: ModelTypeKey) => {
+    const projectModel = localProjectDefaults[key]?.model;
+
+    return (
+      <>
+        {projectModel ? (
+          <div className={`${styles.notice} ${styles.noticeAccent} rf-enter`}>
+            <Icon icon={Info} size="sm" tone="accent" />
+            <span>
+              This project overrides this slot with {projectModel}. Switch to
+              “This project” to change it.
+            </span>
+          </div>
+        ) : null}
+        <ModelTypeSection
+          typeKey={key}
+          config={localDefaults[key] ?? {}}
+          capsDefault={capsDefaults[key]}
+          onChange={handleModelTypeChange}
+        />
+      </>
+    );
+  };
+
   const roleTabContents = MODEL_TYPE_KEYS.map((key) => (
     <Tabs.Content key={key} value={key} className={styles.roleTabContent}>
-      <ModelTypeSection
-        typeKey={key}
-        config={localDefaults[key] ?? {}}
-        capsDefault={capsDefaults[key]}
-        onChange={handleModelTypeChange}
-      />
+      {scope === "project" ? renderProjectSlot(key) : renderGlobalSlot(key)}
     </Tabs.Content>
   ));
 
@@ -551,6 +782,7 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
             subNav={roleTabsList}
           >
             {notices}
+            {scopeGroup}
             {roleTabContents}
           </SettingsSection>
         </Tabs>
@@ -573,6 +805,7 @@ export const DefaultModels: React.FC<DefaultModelsProps> = ({
             subNav={roleTabsList}
           >
             {notices}
+            {scopeGroup}
             {roleTabContents}
           </SettingsSection>
         </Tabs>

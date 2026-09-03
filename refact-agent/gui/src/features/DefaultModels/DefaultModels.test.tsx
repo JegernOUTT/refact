@@ -8,6 +8,8 @@ import { reducer as configReducer } from "../Config/configSlice";
 vi.mock("../../services/refact/providers", () => ({
   useGetDefaultsQuery: vi.fn(),
   useUpdateDefaultsMutation: vi.fn(),
+  useGetProjectDefaultsQuery: vi.fn(),
+  useUpdateProjectDefaultsMutation: vi.fn(),
 }));
 
 vi.mock("../../services/refact/caps", () => ({
@@ -78,7 +80,13 @@ vi.mock("../../components/Spinner", () => ({
 import { DefaultModels } from "./DefaultModels";
 import {
   useGetDefaultsQuery,
+  useGetProjectDefaultsQuery,
   useUpdateDefaultsMutation,
+  useUpdateProjectDefaultsMutation,
+} from "../../services/refact/providers";
+import type {
+  ProjectModelDefaults,
+  ProviderDefaults,
 } from "../../services/refact/providers";
 import { useGetCapsQuery } from "../../services/refact/caps";
 import { useGetDraftQuery } from "../../services/refact/buddy";
@@ -101,12 +109,22 @@ const baseCaps = {
   chat_buddy_model: "",
 };
 
-function setupMocks(overrides: { draftData?: unknown } = {}) {
+function setupMocks(
+  overrides: {
+    draftData?: unknown;
+    defaults?: ProviderDefaults;
+    projectAvailable?: boolean;
+    projectDefaults?: ProjectModelDefaults;
+  } = {},
+) {
   const updateDefaults = vi
     .fn()
     .mockReturnValue({ unwrap: vi.fn().mockResolvedValue({}) });
+  const updateProjectDefaults = vi
+    .fn()
+    .mockReturnValue({ unwrap: vi.fn().mockResolvedValue({}) });
   (useGetDefaultsQuery as ReturnType<typeof vi.fn>).mockReturnValue({
-    data: baseDefaults,
+    data: overrides.defaults ?? baseDefaults,
     isLoading: false,
     isSuccess: true,
     isError: false,
@@ -116,6 +134,19 @@ function setupMocks(overrides: { draftData?: unknown } = {}) {
     updateDefaults,
     { isLoading: false },
   ]);
+  (useGetProjectDefaultsQuery as ReturnType<typeof vi.fn>).mockReturnValue({
+    data: {
+      project_available: overrides.projectAvailable ?? false,
+      project_root: overrides.projectAvailable === true ? "/work/repo" : null,
+      path:
+        overrides.projectAvailable === true ? "/work/repo/models.yaml" : null,
+      defaults: overrides.projectDefaults ?? {},
+    },
+    isLoading: false,
+  });
+  (
+    useUpdateProjectDefaultsMutation as ReturnType<typeof vi.fn>
+  ).mockReturnValue([updateProjectDefaults, { isLoading: false }]);
   (useGetCapsQuery as ReturnType<typeof vi.fn>).mockReturnValue({
     data: baseCaps,
     refetch: vi.fn(),
@@ -125,7 +156,7 @@ function setupMocks(overrides: { draftData?: unknown } = {}) {
     isLoading: false,
     error: undefined,
   });
-  return { updateDefaults };
+  return { updateDefaults, updateProjectDefaults };
 }
 
 const defaultProps = {
@@ -294,6 +325,83 @@ describe("DefaultModels — standalone (not embedded)", () => {
   });
 });
 
+describe("DefaultModels — configuration scope", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("renders the scope control with This project disabled when no project is available", () => {
+    setupMocks();
+    render(<DefaultModels {...defaultProps} embedded />);
+    expect(screen.getByRole("radio", { name: "Global" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "This project" })).toBeDisabled();
+  });
+
+  it("shows the override switch and inherited summary in project scope", () => {
+    setupMocks({
+      projectAvailable: true,
+      defaults: { ...baseDefaults, chat: { model: "global-chat-model" } },
+    });
+    render(<DefaultModels {...defaultProps} embedded />);
+    fireEvent.click(screen.getByRole("radio", { name: "This project" }));
+    expect(
+      screen.getByRole("switch", { name: "Override for this project" }),
+    ).not.toBeChecked();
+    expect(screen.getByText("Inherited from global")).toBeInTheDocument();
+    expect(screen.getByText(/global-chat-model/)).toBeInTheDocument();
+    expect(screen.getAllByText("Global").length).toBeGreaterThan(1);
+  });
+
+  it("enabling the override pre-fills from the global slot and enables Save", () => {
+    setupMocks({
+      projectAvailable: true,
+      defaults: { ...baseDefaults, chat: { model: "global-chat-model" } },
+    });
+    render(<DefaultModels {...defaultProps} embedded />);
+    fireEvent.click(screen.getByRole("radio", { name: "This project" }));
+    fireEvent.click(
+      screen.getByRole("switch", { name: "Override for this project" }),
+    );
+    expect(screen.getAllByTestId("model-selector")[0]).toHaveAttribute(
+      "data-value",
+      "global-chat-model",
+    );
+    expect(
+      screen.getByRole("button", { name: "Save Changes" }),
+    ).not.toBeDisabled();
+  });
+
+  it("saving in project scope calls updateProjectDefaults only", async () => {
+    const { updateDefaults, updateProjectDefaults } = setupMocks({
+      projectAvailable: true,
+      defaults: { ...baseDefaults, chat: { model: "global-chat-model" } },
+    });
+    render(<DefaultModels {...defaultProps} embedded />);
+    fireEvent.click(screen.getByRole("radio", { name: "This project" }));
+    fireEvent.click(
+      screen.getByRole("switch", { name: "Override for this project" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+    await waitFor(() =>
+      expect(updateProjectDefaults).toHaveBeenCalledWith({
+        chat: { model: "global-chat-model" },
+      }),
+    );
+    expect(updateDefaults).not.toHaveBeenCalled();
+  });
+
+  it("shows the project override notice in global scope", () => {
+    setupMocks({
+      projectAvailable: true,
+      projectDefaults: { chat: { model: "project-chat-model" } },
+    });
+    render(<DefaultModels {...defaultProps} embedded />);
+    expect(
+      screen.getByText(/This project overrides this slot with/),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("DefaultModels — loading state", () => {
   it("shows spinner while loading defaults", () => {
     (useGetDefaultsQuery as ReturnType<typeof vi.fn>).mockReturnValue({
@@ -307,6 +415,13 @@ describe("DefaultModels — loading state", () => {
       vi.fn(),
       { isLoading: false },
     ]);
+    (useGetProjectDefaultsQuery as ReturnType<typeof vi.fn>).mockReturnValue({
+      data: undefined,
+      isLoading: true,
+    });
+    (
+      useUpdateProjectDefaultsMutation as ReturnType<typeof vi.fn>
+    ).mockReturnValue([vi.fn(), { isLoading: false }]);
     (useGetCapsQuery as ReturnType<typeof vi.fn>).mockReturnValue({
       data: undefined,
       refetch: vi.fn(),

@@ -43,6 +43,11 @@
   border-color: var(--rf-color-danger);
 }
 
+.noticeWarning {
+  color: var(--rf-color-warning);
+  border-color: var(--rf-color-warning);
+}
+
 .noticeAccent {
   color: var(--rf-color-accent);
   border-color: var(--rf-border-strong);

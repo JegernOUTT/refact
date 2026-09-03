@@ -662,6 +662,9 @@ pub async fn try_load_caps_quickly_if_not_present(
         .as_secs();
     let caps_last_attempted_ts;
     let latest_provider_mtime = get_latest_provider_mtime(&config_dir).await.unwrap_or(0);
+    let (project_defaults_root, project_defaults_mtime) =
+        crate::caps::project_model_defaults_state(gcx.clone()).await;
+    let latest_provider_mtime = latest_provider_mtime.max(project_defaults_mtime);
 
     {
         // gcx is not locked, but a specialized async mutex is, up until caps are saved
@@ -676,6 +679,7 @@ pub async fn try_load_caps_quickly_if_not_present(
             let mut caps_state = caps_state.write().await;
             if caps_state.last_attempted_ts + max_age < now
                 || latest_provider_mtime >= caps_state.last_attempted_ts
+                || caps_state.project_root_changed(&project_defaults_root)
             {
                 caps_state.caps = None;
                 caps_state.last_attempted_ts = 0;
@@ -704,6 +708,7 @@ pub async fn try_load_caps_quickly_if_not_present(
             match caps_result {
                 Ok(caps) => {
                     caps_state.caps = Some(caps.clone());
+                    caps_state.loaded_project_root = Some(project_defaults_root);
                     caps_state.last_error = "".to_string();
                     gcx.tool_catalog_generations.advance_capabilities();
                     Ok(caps)
@@ -868,6 +873,7 @@ pub async fn create_global_context(
             last_error: String::new(),
             last_attempted_ts: 0,
             models_dev_startup_refresh_attempted: false,
+            loaded_project_root: None,
         })),
         tokenizer_state: Arc::new(StdRwLock::new(TokenizerState {
             map: HashMap::new(),
@@ -1197,6 +1203,7 @@ pub mod tests {
                 last_error: String::new(),
                 last_attempted_ts: 0,
                 models_dev_startup_refresh_attempted: true,
+                loaded_project_root: None,
             })),
             tokenizer_state: Arc::new(StdRwLock::new(TokenizerState {
                 map: HashMap::new(),

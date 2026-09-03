@@ -8162,6 +8162,203 @@ async fn defaults_update_without_draft_id_still_saves() {
     assert_eq!(saved.chat.model.as_deref(), Some("openai/gpt-4o"));
 }
 
+async fn make_project_defaults_app(
+    project_dir: Option<&std::path::Path>,
+) -> (tempfile::TempDir, crate::app_state::AppState) {
+    let dir = tempfile::tempdir().unwrap();
+    let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+        std::env::temp_dir().join(format!("refact-test-{}", uuid::Uuid::new_v4())),
+        dir.path().to_path_buf(),
+    )
+    .await;
+    if let Some(project_dir) = project_dir {
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![project_dir.to_path_buf()];
+    }
+    let app = crate::app_state::AppState::from_gcx(gcx).await;
+    (dir, app)
+}
+
+async fn read_project_defaults_body(response: hyper::Response<hyper::Body>) -> serde_json::Value {
+    let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn project_defaults_update_writes_file_and_get_returns_it() {
+    use crate::providers::http::{handle_v1_project_defaults_get, handle_v1_project_defaults_update};
+    use hyper::body::Bytes;
+    use hyper::StatusCode;
+
+    let project = tempfile::tempdir().unwrap();
+    let (_config, app) = make_project_defaults_app(Some(project.path())).await;
+
+    let body = serde_json::json!({
+        "chat": { "model": "openai/gpt-4o" },
+        "chat_light": { "model": "openai/gpt-4o-mini" }
+    });
+    let response = handle_v1_project_defaults_update(
+        axum::extract::State(app.clone()),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let saved_path = project.path().join(".refact").join("model_defaults.yaml");
+    assert!(saved_path.exists());
+
+    let response = handle_v1_project_defaults_get(axum::extract::State(app.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = read_project_defaults_body(response).await;
+    assert_eq!(payload["project_available"], serde_json::json!(true));
+    assert_eq!(
+        payload["project_root"].as_str(),
+        Some(project.path().to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        payload["path"].as_str(),
+        Some(saved_path.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        payload["defaults"]["chat"]["model"].as_str(),
+        Some("openai/gpt-4o")
+    );
+    assert_eq!(
+        payload["defaults"]["chat_light"]["model"].as_str(),
+        Some("openai/gpt-4o-mini")
+    );
+}
+
+#[tokio::test]
+async fn project_defaults_update_with_empty_defaults_removes_file() {
+    use crate::providers::http::{handle_v1_project_defaults_get, handle_v1_project_defaults_update};
+    use hyper::body::Bytes;
+    use hyper::StatusCode;
+
+    let project = tempfile::tempdir().unwrap();
+    let (_config, app) = make_project_defaults_app(Some(project.path())).await;
+    let saved_path = project.path().join(".refact").join("model_defaults.yaml");
+
+    handle_v1_project_defaults_update(
+        axum::extract::State(app.clone()),
+        Bytes::from(serde_json::json!({"chat": {"model": "openai/gpt-4o"}}).to_string()),
+    )
+    .await
+    .unwrap();
+    assert!(saved_path.exists());
+
+    let response = handle_v1_project_defaults_update(
+        axum::extract::State(app.clone()),
+        Bytes::from(serde_json::json!({}).to_string()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!saved_path.exists());
+
+    let response = handle_v1_project_defaults_get(axum::extract::State(app.clone()))
+        .await
+        .unwrap();
+    let payload = read_project_defaults_body(response).await;
+    assert_eq!(payload["project_available"], serde_json::json!(true));
+    assert_eq!(payload["defaults"], serde_json::json!({}));
+}
+
+#[tokio::test]
+async fn project_defaults_update_drops_slot_without_model() {
+    use crate::providers::http::handle_v1_project_defaults_get;
+    use crate::providers::http::handle_v1_project_defaults_update;
+    use hyper::body::Bytes;
+
+    let project = tempfile::tempdir().unwrap();
+    let (_config, app) = make_project_defaults_app(Some(project.path())).await;
+
+    let body = serde_json::json!({
+        "chat": { "model": "openai/gpt-4o" },
+        "chat_thinking": { "temperature": 0.4 },
+        "chat_buddy": { "model": "  " }
+    });
+    handle_v1_project_defaults_update(
+        axum::extract::State(app.clone()),
+        Bytes::from(body.to_string()),
+    )
+    .await
+    .unwrap();
+
+    let response = handle_v1_project_defaults_get(axum::extract::State(app.clone()))
+        .await
+        .unwrap();
+    let payload = read_project_defaults_body(response).await;
+    assert_eq!(
+        payload["defaults"]["chat"]["model"].as_str(),
+        Some("openai/gpt-4o")
+    );
+    assert!(payload["defaults"].get("chat_thinking").is_none());
+    assert!(payload["defaults"].get("chat_buddy").is_none());
+}
+
+#[tokio::test]
+async fn project_defaults_get_without_workspace_reports_unavailable() {
+    use crate::providers::http::handle_v1_project_defaults_get;
+    use hyper::StatusCode;
+
+    let (_config, app) = make_project_defaults_app(None).await;
+
+    let response = handle_v1_project_defaults_get(axum::extract::State(app.clone()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = read_project_defaults_body(response).await;
+    assert_eq!(payload["project_available"], serde_json::json!(false));
+    assert!(payload["project_root"].is_null());
+    assert!(payload["path"].is_null());
+    assert_eq!(payload["defaults"], serde_json::json!({}));
+}
+
+#[tokio::test]
+async fn project_defaults_update_with_invalid_json_returns_422() {
+    use crate::providers::http::handle_v1_project_defaults_update;
+    use hyper::body::Bytes;
+    use hyper::StatusCode;
+
+    let project = tempfile::tempdir().unwrap();
+    let (_config, app) = make_project_defaults_app(Some(project.path())).await;
+
+    let err = handle_v1_project_defaults_update(
+        axum::extract::State(app.clone()),
+        Bytes::from("{not json"),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.status_code, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(!project
+        .path()
+        .join(".refact")
+        .join("model_defaults.yaml")
+        .exists());
+}
+
+#[tokio::test]
+async fn project_defaults_update_without_workspace_returns_bad_request() {
+    use crate::providers::http::handle_v1_project_defaults_update;
+    use hyper::body::Bytes;
+    use hyper::StatusCode;
+
+    let (_config, app) = make_project_defaults_app(None).await;
+
+    let err = handle_v1_project_defaults_update(
+        axum::extract::State(app.clone()),
+        Bytes::from(serde_json::json!({"chat": {"model": "openai/gpt-4o"}}).to_string()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.status_code, StatusCode::BAD_REQUEST);
+}
+
 #[test]
 fn accepted_opportunity_does_not_become_expired() {
     use super::opportunities::OpportunityQueue;

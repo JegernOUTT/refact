@@ -20,3 +20,6 @@ itertools.workspace = true
 md5.workspace = true
 regex.workspace = true
 tokio = { version = "1.43.0", features = ["fs", "io-std", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true

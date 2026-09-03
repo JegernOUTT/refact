@@ -11,7 +11,8 @@ use crate::caps::providers::{
     CapsProvider,
 };
 use refact_core::provider_types::{
-    CredentialSpec, ImageTokenMode, ModelTypeDefaults, ProviderDefaults, is_legacy_refact_model,
+    CredentialSpec, ImageTokenMode, ModelTypeDefaults, ProjectModelDefaults, ProviderDefaults,
+    is_legacy_refact_model, project_model_defaults_path,
 };
 use crate::caps::model_caps::{get_model_caps, resolve_model_caps, ModelCapabilities};
 use refact_core::provider_types::AvailableModel;
@@ -785,6 +786,26 @@ async fn take_models_dev_startup_refresh_flag(gcx: Arc<GlobalContext>) -> bool {
     }
 }
 
+pub async fn project_model_defaults_state(
+    gcx: Arc<GlobalContext>,
+) -> (Option<std::path::PathBuf>, u64) {
+    let project_root = crate::files_correction::get_project_dirs(gcx)
+        .await
+        .into_iter()
+        .next();
+    let Some(root) = project_root.as_deref() else {
+        return (None, 0);
+    };
+    let mtime = tokio::fs::metadata(project_model_defaults_path(root))
+        .await
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    (project_root, mtime)
+}
+
 #[allow(deprecated)]
 pub async fn load_caps(
     _cmdline: crate::global_context::CommandLine,
@@ -848,8 +869,27 @@ pub async fn load_caps(
     apply_model_caps_to_all_chat_models(&mut caps);
     remove_legacy_refact_models_from_caps(&mut caps);
 
+    let project_root = crate::files_correction::get_project_dirs(gcx.clone())
+        .await
+        .into_iter()
+        .next();
+
     match ProviderDefaults::load(&config_dir).await {
-        Ok(user_defaults) => {
+        Ok(mut user_defaults) => {
+            if let Some(root) = project_root.as_deref() {
+                match ProjectModelDefaults::load(root).await {
+                    Ok(project_defaults) => {
+                        user_defaults.apply_project_overrides(&project_defaults);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to load project model defaults from {}: {}",
+                            project_model_defaults_path(root).display(),
+                            e
+                        );
+                    }
+                }
+            }
             apply_user_default_chat_model(
                 &mut caps.defaults.chat_default_model,
                 &user_defaults.chat,

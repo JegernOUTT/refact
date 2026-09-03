@@ -1,7 +1,11 @@
 import { RootState } from "../../app/store";
 import { hasProperty } from "../../utils";
 import { isDetailMessage } from "./commands";
-import { PROVIDERS_URL, PROVIDER_DEFAULTS_URL } from "./consts";
+import {
+  PROVIDERS_URL,
+  PROVIDER_DEFAULTS_URL,
+  PROJECT_MODEL_DEFAULTS_URL,
+} from "./consts";
 import { buildApiUrlFromState } from "./apiUrl";
 import { createApi, fetchBaseQuery } from "@reduxjs/toolkit/query/react";
 import { capsApi } from "./caps";
@@ -472,6 +476,25 @@ export type ProviderDefaultsUpdateRequest = ProviderDefaults & {
   draft_id?: string;
 };
 
+export type ProjectModelSlotKey =
+  | "chat"
+  | "chat_model_2"
+  | "task_planner_agent_model"
+  | "chat_light"
+  | "chat_thinking"
+  | "chat_buddy";
+
+export type ProjectModelDefaults = Partial<
+  Record<ProjectModelSlotKey, ModelTypeDefaults>
+>;
+
+export type ProjectModelDefaultsResponse = {
+  project_available: boolean;
+  project_root: string | null;
+  path: string | null;
+  defaults: ProjectModelDefaults;
+};
+
 export type OAuthStartMode = "callback" | "manual_code" | "device";
 
 export type OAuthStartResponse = {
@@ -552,6 +575,7 @@ export const providersApi = createApi({
     "AVAILABLE_MODELS",
     "QUOTA",
     "DEFAULTS",
+    "PROJECT_DEFAULTS",
   ],
   baseQuery: fetchBaseQuery({
     prepareHeaders: (headers, { getState }) => {
@@ -1716,6 +1740,67 @@ export const providersApi = createApi({
         return { data: { success: true } };
       },
     }),
+
+    getProjectDefaults: builder.query<ProjectModelDefaultsResponse, undefined>({
+      providesTags: ["PROJECT_DEFAULTS"],
+      queryFn: async (_args, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(state, PROJECT_MODEL_DEFAULTS_URL);
+
+        const result = await baseQuery({
+          ...extraOptions,
+          method: "GET",
+          url,
+          credentials: "same-origin",
+          redirect: "follow",
+        });
+
+        if (result.error) {
+          return { error: result.error };
+        }
+
+        if (!isProjectModelDefaultsResponse(result.data)) {
+          return {
+            meta: result.meta,
+            error: {
+              error: "Invalid response from /v1/project-defaults",
+              data: result.data,
+              status: "CUSTOM_ERROR",
+            },
+          };
+        }
+
+        return { data: result.data };
+      },
+    }),
+
+    updateProjectDefaults: builder.mutation<
+      { success: boolean },
+      ProjectModelDefaults
+    >({
+      invalidatesTags: ["PROJECT_DEFAULTS"],
+      queryFn: async (defaults, api, extraOptions, baseQuery) => {
+        const state = api.getState() as RootState;
+        const url = buildApiUrlFromState(state, PROJECT_MODEL_DEFAULTS_URL);
+
+        const result = await baseQuery({
+          ...extraOptions,
+          method: "POST",
+          url,
+          body: defaults,
+          credentials: "same-origin",
+          redirect: "follow",
+        });
+
+        if (result.error) {
+          return { error: result.error };
+        }
+
+        api.dispatch(capsApi.util.resetApiState());
+
+        return { data: { success: true } };
+      },
+    }),
   }),
   refetchOnMountOrArgChange: true,
 });
@@ -2101,6 +2186,25 @@ function isProviderDefaults(data: unknown): data is ProviderDefaults {
   return true;
 }
 
+function isProjectModelDefaults(data: unknown): data is ProjectModelDefaults {
+  if (typeof data !== "object" || data === null) return false;
+  return Object.values(data).every((value) => isModelTypeDefaults(value));
+}
+
+function isProjectModelDefaultsResponse(
+  data: unknown,
+): data is ProjectModelDefaultsResponse {
+  if (typeof data !== "object" || data === null) return false;
+  if (
+    !hasProperty(data, "project_available") ||
+    typeof data.project_available !== "boolean"
+  )
+    return false;
+  if (!hasProperty(data, "defaults") || !isProjectModelDefaults(data.defaults))
+    return false;
+  return true;
+}
+
 export const providersEndpoints = providersApi.endpoints;
 
 export const {
@@ -2128,6 +2232,8 @@ export const {
   useDeleteProviderMutation,
   useGetDefaultsQuery,
   useUpdateDefaultsMutation,
+  useGetProjectDefaultsQuery,
+  useUpdateProjectDefaultsMutation,
   useOauthStartMutation,
   useOauthExchangeMutation,
   useOauthLogoutMutation,
