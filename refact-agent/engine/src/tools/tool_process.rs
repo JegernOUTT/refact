@@ -2007,7 +2007,12 @@ mod tests {
     async fn wait_for_output(gcx: Arc<GlobalContext>, process_id: &ExecProcessId, needle: &str) {
         for _ in 0..40 {
             let read = gcx.exec_registry.read(process_id, 0, None).await;
-            if read.chunks.iter().any(|chunk| chunk.text.contains(needle)) {
+            let transcript = read
+                .chunks
+                .iter()
+                .map(|chunk| chunk.text.as_str())
+                .collect::<String>();
+            if transcript.contains(needle) {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;

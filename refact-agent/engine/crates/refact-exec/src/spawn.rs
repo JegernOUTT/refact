@@ -833,6 +833,15 @@ async fn monitor_process(
                 let drain_timeout = output_drain_timeout.unwrap_or(EXIT_PUMP_DRAIN_TIMEOUT);
                 if finish_pumps_with_timeout(stdout_task, stderr_task, drain_timeout).await {
                     terminal_status
+                } else if child.lock().await.is_pty() {
+                    // The drain timeout detects a descendant holding the pipes, which is a pipe
+                    // condition. A pty ends its output when the console closes, and closing it can
+                    // outlast the drain, so a slow close must not fail a process that exited fine.
+                    tracing::warn!(
+                        "pty output drain timed out after {:.3}s for {process_id}; keeping the exit status",
+                        drain_timeout.as_secs_f64()
+                    );
+                    terminal_status
                 } else {
                     if let Err(error) = kill_and_reap_observed(&child, &observation).await {
                         tracing::warn!("exec kill/reap after output drain timeout failed for {process_id}: {error}");
@@ -871,7 +880,13 @@ async fn wait_for_readiness(
         }
         let read = registry.read(process_id, 0, None).await;
         if let Some(keyword) = readiness.wait_keyword.as_ref() {
-            if read.chunks.iter().any(|chunk| chunk.text.contains(keyword)) {
+            // A keyword can straddle two reads, so match the transcript rather than each chunk.
+            let transcript = read
+                .chunks
+                .iter()
+                .map(|chunk| chunk.text.as_str())
+                .collect::<String>();
+            if transcript.contains(keyword) {
                 return Ok(());
             }
         }
