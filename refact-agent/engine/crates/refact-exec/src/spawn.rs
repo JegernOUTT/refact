@@ -403,52 +403,92 @@ fn pump_output(
     }))
 }
 
-fn pump_blocking_output(
+fn drain_reader_into_registry(
     registry: ExecRegistry,
     process_id: crate::types::ExecProcessId,
     stream: ExecOutputStream,
     mut reader: Box<dyn Read + Send>,
     progress_tx: Option<mpsc::UnboundedSender<crate::types::ExecOutputChunk>>,
-) -> AbortOnDropTask {
-    AbortOnDropTask(tokio::task::spawn_blocking(move || {
-        let mut buffer = [0; PIPE_READ_BYTES];
-        let mut decoder = Utf8ChunkDecoder::default();
-        let append_raw = |raw_text: String| {
-            if raw_text.is_empty() {
-                return;
-            }
-            let text = output_to_text(raw_text.as_bytes());
-            if let Ok(chunk) = futures::executor::block_on(registry.append_output_with_raw(
-                &process_id,
-                stream.clone(),
-                text,
-                &raw_text,
-            )) {
-                if !chunk.text.is_empty() {
-                    if let Some(progress_tx) = progress_tx.as_ref() {
-                        let _ = progress_tx.send(chunk);
-                    }
-                }
-            }
-        };
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => {
-                    if let Some(raw_text) = decoder.finish() {
-                        append_raw(raw_text);
-                    }
-                    break;
-                }
-                Ok(bytes_read) => {
-                    append_raw(decoder.decode(&buffer[..bytes_read]));
-                }
-                Err(error) => {
-                    tracing::warn!("exec output pump failed for {process_id}: {error}");
-                    break;
+) {
+    let mut buffer = [0; PIPE_READ_BYTES];
+    let mut decoder = Utf8ChunkDecoder::default();
+    let append_raw = |raw_text: String| {
+        if raw_text.is_empty() {
+            return;
+        }
+        let text = output_to_text(raw_text.as_bytes());
+        if let Ok(chunk) = futures::executor::block_on(registry.append_output_with_raw(
+            &process_id,
+            stream.clone(),
+            text,
+            &raw_text,
+        )) {
+            if !chunk.text.is_empty() {
+                if let Some(progress_tx) = progress_tx.as_ref() {
+                    let _ = progress_tx.send(chunk);
                 }
             }
         }
+    };
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => {
+                if let Some(raw_text) = decoder.finish() {
+                    append_raw(raw_text);
+                }
+                break;
+            }
+            Ok(bytes_read) => {
+                append_raw(decoder.decode(&buffer[..bytes_read]));
+            }
+            Err(error) => {
+                tracing::warn!("exec output pump failed for {process_id}: {error}");
+                break;
+            }
+        }
+    }
+}
+
+fn pump_blocking_output(
+    registry: ExecRegistry,
+    process_id: crate::types::ExecProcessId,
+    stream: ExecOutputStream,
+    reader: Box<dyn Read + Send>,
+    progress_tx: Option<mpsc::UnboundedSender<crate::types::ExecOutputChunk>>,
+) -> AbortOnDropTask {
+    AbortOnDropTask(tokio::task::spawn_blocking(move || {
+        drain_reader_into_registry(registry, process_id, stream, reader, progress_tx)
     }))
+}
+
+// A pty reader only reaches EOF once the pty is closed, and the registry entry that owns the pty
+// is what the reader keeps alive. On the blocking pool that is a cycle: runtime shutdown waits for
+// blocking tasks, the registry can never drop, and the pty never closes. An owned thread is not
+// awaited by shutdown, so the drop chain completes and the read then ends.
+fn pump_pty_output(
+    registry: ExecRegistry,
+    process_id: crate::types::ExecProcessId,
+    stream: ExecOutputStream,
+    reader: Box<dyn Read + Send>,
+    progress_tx: Option<mpsc::UnboundedSender<crate::types::ExecOutputChunk>>,
+) -> AbortOnDropTask {
+    let (finished_tx, finished_rx) = tokio::sync::oneshot::channel::<()>();
+    let pump_process_id = process_id.clone();
+    let spawned = std::thread::Builder::new()
+        .name("refact-pty-pump".to_string())
+        .spawn(move || {
+            drain_reader_into_registry(registry, process_id, stream, reader, progress_tx);
+            let _ = finished_tx.send(());
+        });
+    match spawned {
+        Ok(_) => AbortOnDropTask(tokio::spawn(async move {
+            let _ = finished_rx.await;
+        })),
+        Err(error) => {
+            tracing::warn!("pty output pump thread failed for {pump_process_id}: {error}");
+            AbortOnDropTask(tokio::spawn(async {}))
+        }
+    }
 }
 
 async fn finish_pumps_with_timeout(
@@ -1076,7 +1116,7 @@ impl ExecRegistry {
             )
             .await?;
         }
-        let stdout_task = pump_blocking_output(
+        let stdout_task = pump_pty_output(
             self.clone(),
             process_id.clone(),
             ExecOutputStream::Combined,
@@ -1438,7 +1478,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let stdout_task = pump_blocking_output(
+        let stdout_task = pump_pty_output(
             registry.clone(),
             process_id.clone(),
             ExecOutputStream::Combined,
