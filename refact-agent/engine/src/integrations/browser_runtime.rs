@@ -49,10 +49,32 @@ pub fn pid_is_alive(pid: u32) -> bool {
         }
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        type Handle = *mut std::ffi::c_void;
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const STILL_ACTIVE: u32 = 259;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> Handle;
+            fn GetExitCodeProcess(process: Handle, exit_code: *mut u32) -> i32;
+            fn CloseHandle(handle: Handle) -> i32;
+        }
+
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if process.is_null() {
+            return false;
+        }
+        let mut exit_code = 0;
+        let is_alive = unsafe { GetExitCodeProcess(process, &mut exit_code) != 0 }
+            && exit_code == STILL_ACTIVE;
+        unsafe { CloseHandle(process) };
+        is_alive
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
-        true
+        false
     }
 }
 

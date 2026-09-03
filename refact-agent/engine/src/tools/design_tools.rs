@@ -1273,7 +1273,7 @@ pub fn discover_design_token_files(root: &Path) -> Vec<String> {
                     .ok()
                     .and_then(|value| value.to_str())
                 {
-                    found.push(relative.to_string());
+                    found.push(relative.replace('\\', "/"));
                 }
             }
         }

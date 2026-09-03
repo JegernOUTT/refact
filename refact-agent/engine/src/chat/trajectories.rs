@@ -3550,7 +3550,7 @@ struct DetachedTrajectoryWriteCache {
 #[derive(Clone, PartialEq, Eq)]
 struct TrajectoryFileStamp {
     len: u64,
-    modified: SystemTime,
+    modified_unix_ms: i64,
 }
 
 #[derive(Clone)]
@@ -3580,6 +3580,10 @@ fn trajectory_metadata_cache(
     CACHE.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
 }
 
+fn trajectory_metadata_cache_key(path: &Path) -> PathBuf {
+    crate::files_correction::canonicalize_normalized_path(path.to_path_buf())
+}
+
 fn preservable_trajectory_metadata(
     source: &serde_json::Map<String, serde_json::Value>,
 ) -> serde_json::Map<String, serde_json::Value> {
@@ -3595,10 +3599,11 @@ fn preservable_trajectory_metadata(
 }
 
 fn store_trajectory_metadata_cache_entry(path: &Path, entry: TrajectoryMetadataCacheEntry) {
+    let path = trajectory_metadata_cache_key(path);
     let mut cache = trajectory_metadata_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !cache.contains_key(path) {
+    if !cache.contains_key(&path) {
         while cache.len() >= MAX_CACHED_TRAJECTORY_METADATA {
             let Some(victim) = cache
                 .iter()
@@ -3612,7 +3617,7 @@ fn store_trajectory_metadata_cache_entry(path: &Path, entry: TrajectoryMetadataC
     }
     let mut entry = entry;
     entry.last_access = next_trajectory_metadata_cache_access_stamp();
-    cache.insert(path.to_path_buf(), entry);
+    cache.insert(path, entry);
 }
 
 async fn trajectory_file_stamp(path: &Path) -> Option<TrajectoryFileStamp> {
@@ -3622,7 +3627,14 @@ async fn trajectory_file_stamp(path: &Path) -> Option<TrajectoryFileStamp> {
     }
     Some(TrajectoryFileStamp {
         len: metadata.len(),
-        modified: metadata.modified().ok()?,
+        modified_unix_ms: metadata
+            .modified()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_millis()
+            .try_into()
+            .ok()?,
     })
 }
 
@@ -3634,13 +3646,14 @@ async fn cached_existing_trajectory_object(
     path: &Path,
     chat_id: &str,
 ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
+    let cache_key = trajectory_metadata_cache_key(path);
     let stamp = trajectory_file_stamp(path).await;
     if let Some(stamp) = stamp.as_ref() {
         let cached = {
             let mut cache = trajectory_metadata_cache()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(entry) = cache.get_mut(path) {
+            if let Some(entry) = cache.get_mut(&cache_key) {
                 entry.last_access = next_trajectory_metadata_cache_access_stamp();
                 (entry.chat_id == chat_id && &entry.stamp == stamp).then(|| entry.metadata.clone())
             } else {
@@ -3669,7 +3682,7 @@ async fn cached_existing_trajectory_object(
             trajectory_metadata_cache()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(path);
+                .remove(&cache_key);
         }
     }
     Ok(metadata)
@@ -10751,7 +10764,7 @@ mod tests {
                     metadata: serde_json::Map::new(),
                     stamp: TrajectoryFileStamp {
                         len: index as u64,
-                        modified: SystemTime::UNIX_EPOCH,
+                        modified_unix_ms: 0,
                     },
                     last_access: 0,
                 },
@@ -10771,7 +10784,7 @@ mod tests {
                 metadata: serde_json::Map::new(),
                 stamp: TrajectoryFileStamp {
                     len: 999,
-                    modified: SystemTime::UNIX_EPOCH,
+                    modified_unix_ms: 0,
                 },
                 last_access: 0,
             },

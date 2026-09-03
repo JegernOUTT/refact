@@ -8215,11 +8215,19 @@ async fn project_defaults_update_writes_file_and_get_returns_it() {
     assert_eq!(payload["project_available"], serde_json::json!(true));
     assert_eq!(
         payload["project_root"].as_str(),
-        Some(project.path().to_string_lossy().as_ref())
+        Some(
+            dunce::simplified(&std::fs::canonicalize(project.path()).unwrap())
+                .to_string_lossy()
+                .as_ref()
+        )
     );
     assert_eq!(
         payload["path"].as_str(),
-        Some(saved_path.to_string_lossy().as_ref())
+        Some(
+            dunce::simplified(&std::fs::canonicalize(&saved_path).unwrap())
+                .to_string_lossy()
+                .as_ref()
+        )
     );
     assert_eq!(
         payload["defaults"]["chat"]["model"].as_str(),

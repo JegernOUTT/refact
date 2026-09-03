@@ -573,7 +573,7 @@ impl TrajectoryIndexCoordinator {
         &self,
         dir: &Path,
     ) -> Result<Arc<AMutex<TrajectoryIndexDirectoryState>>, String> {
-        let key = dir.to_path_buf();
+        let key = crate::files_correction::canonicalize_normalized_path(dir.to_path_buf());
         let mut directories = self.directories.lock().await;
         if let Some(state) = directories.get(&key) {
             if let Ok(mut state_guard) = state.try_lock() {
@@ -1739,6 +1739,14 @@ async fn write_trajectory_index_atomic_owned_inner(
     dir: &Path,
     index: TrajectoryIndex,
 ) -> Result<(), String> {
+    write_trajectory_index_atomic_owned_inner_with_rename_failure(dir, index, false).await
+}
+
+async fn write_trajectory_index_atomic_owned_inner_with_rename_failure(
+    dir: &Path,
+    index: TrajectoryIndex,
+    force_rename_failure: bool,
+) -> Result<(), String> {
     fs::create_dir_all(dir)
         .await
         .map_err(|e| format!("Failed to create trajectory directory {:?}: {e}", dir))?;
@@ -1767,7 +1775,12 @@ async fn write_trajectory_index_atomic_owned_inner(
             tmp_path
         ));
     }
-    if let Err(error) = crate::chat::trajectories::atomic_write_file(&tmp_path, &path).await {
+    let rename_result = if force_rename_failure {
+        Err("Failed to rename: injected rename failure".to_string())
+    } else {
+        crate::chat::trajectories::atomic_write_file(&tmp_path, &path).await
+    };
+    if let Err(error) = rename_result {
         let _ = fs::remove_file(&tmp_path).await;
         return Err(error);
     }
@@ -3511,13 +3524,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("trajectories");
         fs::create_dir_all(&dir).await.unwrap();
-        fs::create_dir_all(trajectory_index_path(&dir))
-            .await
-            .unwrap();
-
-        let error = write_trajectory_index_atomic_owned_inner(&dir, TrajectoryIndex::default())
-            .await
-            .unwrap_err();
+        let error = write_trajectory_index_atomic_owned_inner_with_rename_failure(
+            &dir,
+            TrajectoryIndex::default(),
+            true,
+        )
+        .await
+        .unwrap_err();
         assert!(error.contains("Failed to rename"));
 
         let mut entries = tokio::fs::read_dir(&dir).await.unwrap();

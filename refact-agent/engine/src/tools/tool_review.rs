@@ -16,9 +16,7 @@ use crate::tools::review_agents::config::{
 };
 use crate::tools::review_agents::prompts::{build_adversarial_prompt, build_stage_prompt};
 use crate::tools::review_agents::runner::{merge_metering, now_ms, StageCtx, StageJob};
-use crate::tools::review_agents::stages::{
-    load_stage_catalog, select_stages, StagePhase, StageSpec,
-};
+use crate::tools::review_agents::stages::{load_stage_catalog, select_stages, StagePhase, StageSpec};
 use crate::tools::review_agents::{run_stage_jobs, ScheduleParams, StageExecutor, SubchatExecutor};
 use crate::tools::review_evidence::verify_evidence;
 use crate::tools::review_merge::{merge_findings, rank_findings};
@@ -161,11 +159,7 @@ fn markdown_cell(value: &str) -> String {
 }
 
 fn scratch_dir(gcx_project: Option<&Path>, review_id: &str) -> Option<PathBuf> {
-    gcx_project.map(|root| {
-        root.join(".refact")
-            .join("review_scratch")
-            .join(review_id)
-    })
+    gcx_project.map(|root| root.join(".refact").join("review_scratch").join(review_id))
 }
 
 async fn write_scratch(dir: &Path, stage: &str, payload: &Value) {
@@ -228,7 +222,10 @@ async fn plan_jobs(
     for spec in specs {
         let overrides = cfg.settings.stage_override(&spec.id);
         if overrides.enabled == Some(false) {
-            rows.push(StageRun::not_run(&spec.id, "disabled in review_agents.yaml"));
+            rows.push(StageRun::not_run(
+                &spec.id,
+                "disabled in review_agents.yaml",
+            ));
             continue;
         }
         let stage_slots = match overrides.model_slot {
@@ -261,7 +258,9 @@ async fn plan_jobs(
                 prompt: build_stage_prompt(
                     &spec,
                     scope,
-                    (spec.id == BROWSER_STAGE).then_some(browser_scenario).flatten(),
+                    (spec.id == BROWSER_STAGE)
+                        .then_some(browser_scenario)
+                        .flatten(),
                 ),
             });
         }
@@ -269,7 +268,11 @@ async fn plan_jobs(
     StagePlan { jobs, rows }
 }
 
-fn apply_verdicts(findings: &mut [ReviewFinding], stage: &str, verdicts: &[crate::tools::review_agents::contract::Verdict]) -> usize {
+fn apply_verdicts(
+    findings: &mut [ReviewFinding],
+    stage: &str,
+    verdicts: &[crate::tools::review_agents::contract::Verdict],
+) -> usize {
     let mut disputed = 0;
     for verdict in verdicts {
         if verdict.supported {
@@ -445,11 +448,7 @@ pub fn render_review_markdown(report: &ReviewReport) -> String {
         if bucket.is_empty() {
             continue;
         }
-        output.push_str(&format!(
-            "\n\n### {} ({})",
-            severity.as_str(),
-            bucket.len()
-        ));
+        output.push_str(&format!("\n\n### {} ({})", severity.as_str(), bucket.len()));
         for finding in bucket {
             output.push_str(&render_finding(finding));
         }
@@ -662,7 +661,10 @@ async fn run_review(
         }
         let overrides = cfg.settings.stage_override(&spec.id);
         if overrides.enabled == Some(false) {
-            stage_rows.push(StageRun::not_run(&spec.id, "disabled in review_agents.yaml"));
+            stage_rows.push(StageRun::not_run(
+                &spec.id,
+                "disabled in review_agents.yaml",
+            ));
             continue;
         }
         let slot = overrides.model_slot.unwrap_or(cfg.settings.model_slot);
@@ -702,8 +704,10 @@ async fn run_review(
 
     let mut scope_summary = scope.summary();
     scope_summary.requested_files = requested_count;
-    scope_summary.out_of_scope_findings =
-        findings.iter().filter(|finding| finding.out_of_scope).count();
+    scope_summary.out_of_scope_findings = findings
+        .iter()
+        .filter(|finding| finding.out_of_scope)
+        .count();
 
     Ok(ReviewReport {
         depth: depth.as_str().to_string(),
@@ -980,7 +984,10 @@ mod tests {
 
         let with_scenario = parse_args(&args_map(vec![
             ("browser", json!(true)),
-            ("browser_scenario", json!("open /settings, expect no console errors")),
+            (
+                "browser_scenario",
+                json!("open /settings, expect no console errors"),
+            ),
         ]))
         .unwrap();
         assert_eq!(
@@ -1015,7 +1022,10 @@ mod tests {
         assert!(scheduled.is_empty());
         assert_eq!(
             skipped,
-            vec![("browser".to_string(), "no browser_scenario given".to_string())]
+            vec![(
+                "browser".to_string(),
+                "no browser_scenario given".to_string()
+            )]
         );
 
         let mut scheduled = Vec::new();
@@ -1136,10 +1146,13 @@ mod tests {
         let mut hypothesis = finding("rf-2", ReviewSeverity::Low);
         hypothesis.reproduction = None;
         hypothesis.evidence_present = false;
-        hypothesis.file = "/repo/src/other.rs".to_string();
-        let report = report(vec![finding("rf-1", ReviewSeverity::High), hypothesis], vec![]);
+        hypothesis.file = crate::test_paths::abs_str("repo/src/other.rs");
+        let report = report(
+            vec![finding("rf-1", ReviewSeverity::High), hypothesis],
+            vec![],
+        );
 
-        let (refs, truncated) = review_refs(&report, &[PathBuf::from("/repo")]);
+        let (refs, truncated) = review_refs(&report, &[crate::test_paths::abs("repo")]);
 
         assert!(!truncated);
         let refs = refs.as_array().unwrap();

@@ -2656,7 +2656,7 @@ pub async fn file_watcher_event(event: Event, gcx_weak: Weak<GlobalContext>) {
         };
         let indexing_everywhere_arc = reload_indexing_everywhere_if_needed(gcx.clone()).await;
         let maybe_created_dir = match &event.kind {
-            EventKind::Create(CreateKind::Folder) => event.paths.first().cloned(),
+            EventKind::Create(CreateKind::Folder | CreateKind::Any) => event.paths.first().cloned(),
             EventKind::Modify(ModifyKind::Name(_)) => event.paths.last().cloned(),
             _ => None,
         }
