@@ -22,13 +22,21 @@ pub const SHELL_WITHHELD_MESSAGE: &str = "Output withheld by user privacy policy
 pub const SHELL_APPROVAL_MESSAGE: &str =
     "Output awaiting user approval — this command read guarded files.";
 
+const INHERITED_ZONE_NOTE: &str = "\nEntries marked inherited carry a session-derived label taken from an earlier guarded read in this chat rather than from a configured rule, and they clear when the session ends or via POST /v1/privacy/derived/clear.";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellReadDecision {
     Pass,
     Ask,
 }
 
-pub type DerivedPrivacyZones = Arc<RwLock<HashMap<PathBuf, String>>>;
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DerivedZone {
+    pub zone: String,
+    pub origin: Option<String>,
+}
+
+pub type DerivedPrivacyZones = Arc<RwLock<HashMap<PathBuf, DerivedZone>>>;
 
 pub fn new_derived_privacy_zones() -> DerivedPrivacyZones {
     Arc::new(RwLock::new(HashMap::new()))
@@ -68,7 +76,7 @@ pub fn shell_observation_needed_for_session(
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .values()
-        .cloned()
+        .map(|derived| derived.zone.clone())
         .collect::<Vec<_>>();
     let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
     derived_zone_names.iter().any(|name| {
@@ -193,7 +201,7 @@ fn zone_for_record_path(
             candidates
                 .iter()
                 .filter_map(|candidate| derived_zones.get(candidate))
-                .map(String::as_str),
+                .map(|derived| derived.zone.as_str()),
         )
         .map(str::to_string)
     };
@@ -212,6 +220,30 @@ fn zone_for_record_path(
     } else {
         static_zone.name.clone()
     }
+}
+
+pub fn derived_zone_for_path(
+    gcx: &Arc<GlobalContext>,
+    path: &Path,
+    derived_zones: &DerivedPrivacyZones,
+) -> Option<DerivedZone> {
+    let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
+    derived_zone_for_path_with(gcx, path, &mappings, derived_zones)
+}
+
+fn derived_zone_for_path_with(
+    gcx: &Arc<GlobalContext>,
+    path: &Path,
+    mappings: &[crate::files_correction::RegisteredWorktreePathMapping],
+    derived_zones: &DerivedPrivacyZones,
+) -> Option<DerivedZone> {
+    let candidates = record_path_candidates(gcx, path, mappings);
+    let derived_zones = derived_zones
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    candidates
+        .iter()
+        .find_map(|candidate| derived_zones.get(candidate).cloned())
 }
 
 fn record_path_candidates(
@@ -436,17 +468,23 @@ pub async fn apply_shell_observation(
                 (Some(ShellBehavior::Withhold), _) => Some(ShellBehavior::Withhold),
                 (_, ShellBehavior::Ask) => Some(ShellBehavior::Ask),
             });
-    let guarded = guarded_read_list(&offending);
+    let origins = offending_record_origins(gcx, &offending, derived_zones);
+    let guarded = guarded_read_list(&offending, &origins);
+    let inherited_note = if origins.is_empty() {
+        ""
+    } else {
+        INHERITED_ZONE_NOTE
+    };
     let target = destination.id.0.as_str();
     match behavior {
         Some(ShellBehavior::Deny) => Err(format!(
-            "Denied by user privacy policy — the command read guarded files, so its output was discarded:\n{guarded}\nThe command already ran; re-running it unchanged will be denied again. Scope it so it does not read those paths, or ask the user to relax the zone."
+            "Denied by user privacy policy — the command read guarded files, so its output was discarded:\n{guarded}\nThe command already ran; re-running it unchanged will be denied again. Scope it so it does not read those paths, or ask the user to relax the zone.{inherited_note}"
         )),
         Some(ShellBehavior::Withhold) => {
             retain_local_shell_output(
                 message,
                 &format!(
-                    "Output withheld by user privacy policy — the command ran, but its output cannot be sent to \"{target}\" because it read guarded files:\n{guarded}\nAny side effects already happened, so do not re-run it just to retry. To see output, re-run it scoped so it does not read those paths, or ask the user to allow these zones for \"{target}\"."
+                    "Output withheld by user privacy policy — the command ran, but its output cannot be sent to \"{target}\" because it read guarded files:\n{guarded}\nAny side effects already happened, so do not re-run it just to retry. To see output, re-run it scoped so it does not read those paths, or ask the user to allow these zones for \"{target}\".{inherited_note}"
                 ),
                 false,
             );
@@ -456,7 +494,7 @@ pub async fn apply_shell_observation(
             retain_local_shell_output(
                 message,
                 &format!(
-                    "Output awaiting user approval — the command ran, but its output stays hidden until the user approves it, because it read guarded files:\n{guarded}"
+                    "Output awaiting user approval — the command ran, but its output stays hidden until the user approves it, because it read guarded files:\n{guarded}{inherited_note}"
                 ),
                 true,
             );
@@ -464,6 +502,41 @@ pub async fn apply_shell_observation(
         }
         None => Ok(ShellReadDecision::Pass),
     }
+}
+
+fn offending_record_origins(
+    gcx: &Arc<GlobalContext>,
+    offending: &[(&FileRecord, ShellBehavior)],
+    derived_zones: &DerivedPrivacyZones,
+) -> HashMap<String, String> {
+    if offending.is_empty()
+        || derived_zones
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+    {
+        return HashMap::new();
+    }
+    let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
+    let mut origins = HashMap::new();
+    for (record, _) in offending {
+        if origins.contains_key(&record.path) {
+            continue;
+        }
+        let derived = derived_zone_for_path_with(
+            gcx,
+            Path::new(record.path.as_str()),
+            &mappings,
+            derived_zones,
+        );
+        if let Some(origin) = derived
+            .filter(|derived| derived.zone == record.zone)
+            .and_then(|derived| derived.origin)
+        {
+            origins.insert(record.path.clone(), origin);
+        }
+    }
+    origins
 }
 
 async fn classify_observed_access(
@@ -486,7 +559,10 @@ async fn classify_observed_access(
 
 const MAX_LISTED_GUARDED_READS: usize = 5;
 
-fn guarded_read_list(offending: &[(&FileRecord, ShellBehavior)]) -> String {
+fn guarded_read_list(
+    offending: &[(&FileRecord, ShellBehavior)],
+    origins: &HashMap<String, String>,
+) -> String {
     let mut listed: Vec<String> = Vec::new();
     let mut seen: Vec<(&str, &str)> = Vec::new();
     let mut hidden = 0usize;
@@ -497,7 +573,13 @@ fn guarded_read_list(offending: &[(&FileRecord, ShellBehavior)]) -> String {
         }
         seen.push(key);
         if listed.len() < MAX_LISTED_GUARDED_READS {
-            listed.push(format!("  - {} (zone \"{}\")", record.path, record.zone));
+            listed.push(match origins.get(&record.path) {
+                Some(origin) => format!(
+                    "  - {} (zone \"{}\", inherited from \"{origin}\")",
+                    record.path, record.zone
+                ),
+                None => format!("  - {} (zone \"{}\")", record.path, record.zone),
+            });
         } else {
             hidden += 1;
         }
@@ -726,6 +808,25 @@ fn is_taintable_write_target(path: &Path) -> bool {
     std::fs::metadata(path)
         .map(|metadata| metadata.is_file())
         .unwrap_or(false)
+        && !is_vcs_metadata_churn(path)
+}
+
+fn is_vcs_metadata_churn(path: &Path) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    components
+        .iter()
+        .enumerate()
+        .any(|(index, name)| match *name {
+            ".hg" | ".svn" => true,
+            ".git" => components.get(index + 1) != Some(&"objects"),
+            _ => false,
+        })
 }
 
 fn inherit_observed_write_zones(
@@ -745,6 +846,10 @@ fn inherit_observed_write_zones(
     ) else {
         return Ok(());
     };
+    let origin = reads
+        .iter()
+        .find(|record| record.zone == zone_name)
+        .map(|record| record.path.clone());
     let mappings = registered_worktree_path_mappings(gcx.cache_dir.as_path());
     let mut derived_zones = derived_zones
         .write()
@@ -756,10 +861,18 @@ fn inherit_observed_write_zones(
         for candidate in record_path_candidates(gcx, &path, &mappings) {
             let replace = derived_zones
                 .get(&candidate)
-                .map(|current| compare_named_zones(&compiled, zone_name, current) == Ordering::Less)
+                .map(|current| {
+                    compare_named_zones(&compiled, zone_name, &current.zone) == Ordering::Less
+                })
                 .unwrap_or(true);
             if replace {
-                derived_zones.insert(candidate, zone_name.to_string());
+                derived_zones.insert(
+                    candidate,
+                    DerivedZone {
+                        zone: zone_name.to_string(),
+                        origin: origin.clone(),
+                    },
+                );
             }
         }
     }
@@ -994,10 +1107,13 @@ mod tests {
         )
         .await;
         let derived_zones = new_derived_privacy_zones();
-        derived_zones
-            .write()
-            .unwrap()
-            .insert(file.clone(), "derived-earlier".to_string());
+        derived_zones.write().unwrap().insert(
+            file.clone(),
+            DerivedZone {
+                zone: "derived-earlier".to_string(),
+                origin: None,
+            },
+        );
 
         let record = file_record(&gcx, &file, Attribution::Observed, &derived_zones).unwrap();
 
@@ -1034,6 +1150,157 @@ mod tests {
             !tainted.keys().any(|path| path == Path::new("/dev/null")),
             "shared character devices must never inherit a guarded zone"
         );
+    }
+
+    #[tokio::test]
+    async fn vcs_metadata_writes_do_not_inherit_guarded_zone() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = temp.path().join("secret.txt");
+        std::fs::write(&secret, "secret").unwrap();
+        let commit_editmsg = temp.path().join(".git").join("COMMIT_EDITMSG");
+        let object = temp
+            .path()
+            .join(".git")
+            .join("objects")
+            .join("ab")
+            .join("cd");
+        std::fs::create_dir_all(commit_editmsg.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+        std::fs::write(&commit_editmsg, "message").unwrap();
+        std::fs::write(&object, "object").unwrap();
+        let gcx = gcx_with_policy(&secret, &[], ShellBehavior::Withhold).await;
+        let derived_zones = new_derived_privacy_zones();
+        let destination = provider_destination("untrusted/model");
+        let mut commit_message = tool_message("committed");
+
+        apply_shell_observation(
+            &gcx,
+            "git commit",
+            temp.path(),
+            &destination,
+            ObservationStatus::Observed(ObservedAccess {
+                reads: vec![secret.clone()],
+                writes: vec![commit_editmsg.clone(), object.clone()],
+            }),
+            &derived_zones,
+            &mut commit_message,
+        )
+        .await
+        .unwrap();
+
+        {
+            let tainted = derived_zones.read().unwrap();
+            assert!(
+                !tainted.keys().any(|path| path == commit_editmsg.as_path()),
+                "version-control churn must never inherit a guarded zone"
+            );
+            assert!(
+                tainted.keys().any(|path| path == object.as_path()),
+                "git object files can hold real content and stay taintable"
+            );
+        }
+
+        let mut next_commit = tool_message("second commit");
+        apply_shell_observation(
+            &gcx,
+            "git commit",
+            temp.path(),
+            &destination,
+            ObservationStatus::Observed(ObservedAccess {
+                reads: vec![commit_editmsg],
+                writes: Vec::new(),
+            }),
+            &derived_zones,
+            &mut next_commit,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(next_commit.content.content_text_only(), "second commit");
+        assert!(next_commit.extra.get("privacy").is_none());
+    }
+
+    #[tokio::test]
+    async fn inherited_zone_is_reported_with_its_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = temp.path().join("secret.txt");
+        let derived = temp.path().join("derived.txt");
+        std::fs::write(&secret, "secret").unwrap();
+        std::fs::write(&derived, "copy").unwrap();
+        let gcx = gcx_with_policy(&secret, &[], ShellBehavior::Withhold).await;
+        let derived_zones = new_derived_privacy_zones();
+        let destination = provider_destination("untrusted/model");
+        let mut copy_message = tool_message("copied");
+
+        apply_shell_observation(
+            &gcx,
+            "cat secret.txt > derived.txt",
+            temp.path(),
+            &destination,
+            ObservationStatus::Observed(ObservedAccess {
+                reads: vec![secret.clone()],
+                writes: vec![derived.clone()],
+            }),
+            &derived_zones,
+            &mut copy_message,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            derived_zone_for_path(&gcx, &derived, &derived_zones)
+                .and_then(|zone| zone.origin)
+                .unwrap(),
+            secret.to_string_lossy()
+        );
+
+        let mut read_message = tool_message("derived secret");
+        apply_shell_observation(
+            &gcx,
+            "cat derived.txt",
+            temp.path(),
+            &destination,
+            ObservationStatus::Observed(ObservedAccess {
+                reads: vec![derived.clone()],
+                writes: Vec::new(),
+            }),
+            &derived_zones,
+            &mut read_message,
+        )
+        .await
+        .unwrap();
+
+        let withheld = read_message.content.content_text_only();
+        assert!(withheld.starts_with("Output withheld by user privacy policy"));
+        assert!(withheld.contains(&format!(
+            "(zone \"secrets\", inherited from \"{}\")",
+            secret.to_string_lossy()
+        )));
+        assert!(withheld.contains("session-derived label"));
+
+        let mut plain_message = tool_message("secret output");
+        apply_shell_observation(
+            &gcx,
+            "cat secret.txt",
+            temp.path(),
+            &destination,
+            ObservationStatus::Observed(ObservedAccess {
+                reads: vec![secret.clone()],
+                writes: Vec::new(),
+            }),
+            &derived_zones,
+            &mut plain_message,
+        )
+        .await
+        .unwrap();
+
+        let plain = plain_message.content.content_text_only();
+        assert!(plain.contains(&format!(
+            "  - {} (zone \"secrets\")",
+            secret.to_string_lossy()
+        )));
+        assert!(!plain.contains("inherited from"));
+        assert!(!plain.contains("session-derived label"));
     }
 
     #[tokio::test]

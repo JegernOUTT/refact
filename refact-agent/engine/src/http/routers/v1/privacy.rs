@@ -15,6 +15,7 @@ use crate::call_validation::ChatMessage;
 use crate::custom_error::ScratchError;
 use crate::files_correction::registered_worktree_path_mappings;
 use crate::files_in_workspace::strictest_zone_for_path;
+use crate::privacy::records::DerivedPrivacyZones;
 
 #[derive(Debug, Serialize)]
 pub struct PrivacyPolicyResponse {
@@ -62,6 +63,37 @@ pub struct PrivacyInspectResponse {
     pub records: Vec<FileRecord>,
     pub blocked: Vec<PrivacyBlockedRecord>,
     pub refusal: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrivacyDerivedRequest {
+    pub chat_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PrivacyDerivedEntry {
+    pub path: String,
+    pub zone: String,
+    pub origin: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PrivacyDerivedResponse {
+    pub chat_id: String,
+    pub entries: Vec<PrivacyDerivedEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrivacyDerivedClearRequest {
+    pub chat_id: String,
+    #[serde(default)]
+    pub paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PrivacyDerivedClearResponse {
+    pub cleared: usize,
+    pub remaining: usize,
 }
 
 struct AuditedMessages {
@@ -174,6 +206,70 @@ pub async fn handle_v1_privacy_inspect(
         blocked,
         refusal,
     }))
+}
+
+pub async fn handle_v1_privacy_derived(
+    State(app): State<AppState>,
+    Json(request): Json<PrivacyDerivedRequest>,
+) -> Result<Json<PrivacyDerivedResponse>, ScratchError> {
+    let derived_zones = session_derived_zones(&app, &request.chat_id).await?;
+    let mut entries = {
+        let derived = derived_zones
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        derived
+            .iter()
+            .map(|(path, derived)| PrivacyDerivedEntry {
+                path: path.to_string_lossy().into_owned(),
+                zone: derived.zone.clone(),
+                origin: derived.origin.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(Json(PrivacyDerivedResponse {
+        chat_id: request.chat_id,
+        entries,
+    }))
+}
+
+pub async fn handle_v1_privacy_derived_clear(
+    State(app): State<AppState>,
+    Json(request): Json<PrivacyDerivedClearRequest>,
+) -> Result<Json<PrivacyDerivedClearResponse>, ScratchError> {
+    let derived_zones = session_derived_zones(&app, &request.chat_id).await?;
+    let requested = request.paths.unwrap_or_default();
+    let mut derived = derived_zones
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let before = derived.len();
+    if requested.is_empty() {
+        derived.clear();
+    } else {
+        for path in requested {
+            derived.remove(std::path::Path::new(path.as_str()));
+        }
+    }
+    let remaining = derived.len();
+    Ok(Json(PrivacyDerivedClearResponse {
+        cleared: before.saturating_sub(remaining),
+        remaining,
+    }))
+}
+
+async fn session_derived_zones(
+    app: &AppState,
+    chat_id: &str,
+) -> Result<DerivedPrivacyZones, ScratchError> {
+    let session = {
+        let sessions = app.gcx.chat_sessions.read().await;
+        sessions.get(chat_id).cloned()
+    }
+    .ok_or_else(|| {
+        ScratchError::new(StatusCode::NOT_FOUND, "Chat session not found".to_string())
+    })?;
+    let derived_zones = session.lock().await.derived_privacy_zones.clone();
+    Ok(derived_zones)
 }
 
 async fn build_policy_response(app: &AppState) -> Result<PrivacyPolicyResponse, ScratchError> {
@@ -686,6 +782,76 @@ mod tests {
         );
         assert_eq!(response["observation"]["runtime_available"], false);
         assert_eq!(response["observation"]["last_error"], "ptrace denied");
+    }
+
+    #[tokio::test]
+    async fn privacy_derived_lists_sorted_entries_and_clears_them() {
+        let (_cache, _config, app) = test_app().await;
+        let session = ChatSession::new("chat-derived".to_string());
+        session.derived_privacy_zones.write().unwrap().insert(
+            std::path::PathBuf::from("/proj/b.txt"),
+            crate::privacy::records::DerivedZone {
+                zone: "secrets".to_string(),
+                origin: Some("/proj/secret.env".to_string()),
+            },
+        );
+        session.derived_privacy_zones.write().unwrap().insert(
+            std::path::PathBuf::from("/proj/a.txt"),
+            crate::privacy::records::DerivedZone {
+                zone: "secrets".to_string(),
+                origin: None,
+            },
+        );
+        app.gcx
+            .chat_sessions
+            .write()
+            .await
+            .insert("chat-derived".to_string(), Arc::new(AMutex::new(session)));
+        let router = crate::http::routers::make_refact_http_server(app);
+
+        let (status, listed) = json_request(
+            router.clone(),
+            post_json("/v1/privacy/derived", json!({"chat_id": "chat-derived"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed["chat_id"], "chat-derived");
+        assert_eq!(listed["entries"][0]["path"], "/proj/a.txt");
+        assert_eq!(listed["entries"][0]["zone"], "secrets");
+        assert!(listed["entries"][0]["origin"].is_null());
+        assert_eq!(listed["entries"][1]["path"], "/proj/b.txt");
+        assert_eq!(listed["entries"][1]["origin"], "/proj/secret.env");
+
+        let (status, cleared) = json_request(
+            router.clone(),
+            post_json(
+                "/v1/privacy/derived/clear",
+                json!({"chat_id": "chat-derived", "paths": ["/proj/a.txt"]}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cleared["cleared"], 1);
+        assert_eq!(cleared["remaining"], 1);
+
+        let (status, cleared) = json_request(
+            router.clone(),
+            post_json(
+                "/v1/privacy/derived/clear",
+                json!({"chat_id": "chat-derived"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cleared["cleared"], 1);
+        assert_eq!(cleared["remaining"], 0);
+
+        let (status, _) = json_request(
+            router,
+            post_json("/v1/privacy/derived", json!({"chat_id": "missing"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

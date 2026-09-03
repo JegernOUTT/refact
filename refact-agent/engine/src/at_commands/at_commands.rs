@@ -1,9 +1,7 @@
 use indexmap::IndexMap;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::RwLock as StdRwLock;
 use tokio::sync::mpsc;
 
 use async_trait::async_trait;
@@ -43,7 +41,7 @@ pub struct AtCommandsContext {
     pub current_model: String,
     pub task_meta: Option<TaskMeta>,
     pub execution_scope: Option<ExecutionScope>,
-    pub derived_privacy_zones: Arc<StdRwLock<HashMap<PathBuf, String>>>,
+    pub derived_privacy_zones: crate::privacy::records::DerivedPrivacyZones,
     pub subchat_depth: usize,
     pub tool_access_bypass: bool,
     pub background_agent_id: Option<String>,
@@ -166,7 +164,7 @@ impl AtCommandsContext {
                 let session = session.lock().await;
                 session.derived_privacy_zones.clone()
             }
-            None => Arc::new(StdRwLock::new(HashMap::new())),
+            None => crate::privacy::records::new_derived_privacy_zones(),
         };
         let background_agent_id = if !chat_id.starts_with("subchat-") {
             None

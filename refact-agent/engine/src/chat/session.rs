@@ -400,7 +400,7 @@ impl ChatSession {
         let (event_tx, _) = broadcast::channel(limits().event_channel_capacity);
         Self {
             chat_id: chat_id.clone(),
-            derived_privacy_zones: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {
                 id: chat_id,
                 ..Default::default()
@@ -524,7 +524,7 @@ impl ChatSession {
             .collect();
         Self {
             chat_id,
-            derived_privacy_zones: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread,
             messages,
             runtime,

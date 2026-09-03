@@ -360,6 +360,11 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         )
         .route("/privacy/status", get(privacy::handle_v1_privacy_status))
         .route("/privacy/inspect", post(privacy::handle_v1_privacy_inspect))
+        .route("/privacy/derived", post(privacy::handle_v1_privacy_derived))
+        .route(
+            "/privacy/derived/clear",
+            post(privacy::handle_v1_privacy_derived_clear),
+        )
         .route(
             "/project-configs/rescan",
             post(handle_v1_project_configs_rescan),

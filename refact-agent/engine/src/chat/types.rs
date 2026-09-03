@@ -1,8 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::RwLock as StdRwLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, Notify, Mutex as AMutex};
 
@@ -284,7 +282,7 @@ impl TrajectoryCommitIntent {
 
 pub struct ChatSession {
     pub chat_id: String,
-    pub derived_privacy_zones: Arc<StdRwLock<HashMap<PathBuf, String>>>,
+    pub derived_privacy_zones: crate::privacy::records::DerivedPrivacyZones,
     pub thread: ThreadParams,
     pub messages: Vec<ChatMessage>,
     pub runtime: RuntimeState,
