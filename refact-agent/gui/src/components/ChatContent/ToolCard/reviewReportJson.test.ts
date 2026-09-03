@@ -95,6 +95,46 @@ describe("parseReviewReport", () => {
     expect(report?.duplicates_merged).toBe(2);
   });
 
+  test("parses outcome, dropped files, trace ids, and null scratch dir", () => {
+    const report = parseReviewReport(
+      reportValue({
+        outcome: "partial",
+        scope: { dropped_files: ["src/skipped.ts", "src/other.ts"] },
+        stages: [
+          {
+            name: "tests",
+            status: "timed_out",
+            reason: "stage budget",
+            trace_chat_id: "chat-abc-123",
+          },
+        ],
+        scratch_dir: null,
+      }),
+    );
+
+    expect(report?.outcome).toBe("partial");
+    expect(report?.scope.dropped_files).toEqual([
+      "src/skipped.ts",
+      "src/other.ts",
+    ]);
+    expect(report?.stages[0].trace_chat_id).toBe("chat-abc-123");
+    expect(report?.scratch_dir).toBeNull();
+  });
+
+  test("legacy payloads without outcome parse to a null outcome", () => {
+    const report = parseReviewReport(reportValue());
+
+    expect(report?.outcome).toBeNull();
+    expect(report?.scope.dropped_files).toEqual([]);
+    expect(report?.stages[0].trace_chat_id).toBeNull();
+  });
+
+  test("an unknown outcome string fails closed to inconclusive", () => {
+    const report = parseReviewReport(reportValue({ outcome: "sparkling" }));
+
+    expect(report?.outcome).toBe("inconclusive");
+  });
+
   test.each([
     ["not an object", "nope"],
     ["missing findings", { scope: {}, stages: [] }],

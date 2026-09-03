@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::{mine_history, push_head_or_empty, CommitRecord, GitIntel};
+use crate::{
+    changed_files_with_stats, config, mine_history, push_head_or_empty, CommitRecord, GitIntel,
+};
 use git2::{Commit, Oid, Repository, Sort};
 use serde::{Deserialize, Serialize};
-
-const MAX_FILES_PER_COMMIT_FOR_COCHANGE: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GitTier {
@@ -25,12 +25,13 @@ pub struct IncrementalConfig {
 
 impl Default for IncrementalConfig {
     fn default() -> Self {
+        let limits = config::limits();
         Self {
             tier: GitTier::Full,
             since_ts: None,
             seen_oids: HashSet::new(),
-            max_commits: 500,
-            deep_walk_limit: 20_000,
+            max_commits: limits.max_commits,
+            deep_walk_limit: limits.deep_walk_limit,
         }
     }
 }
@@ -45,10 +46,12 @@ pub fn mine_incremental(repo_path: &Path, cfg: &IncrementalConfig) -> Result<Git
         .set_sorting(Sort::TIME)
         .map_err(|e| format!("git sort: {e}"))?;
 
+    let max_files_for_cochange = config::limits().max_files_per_commit_for_cochange;
     let mut intel = GitIntel::default();
     let mut walked = 0usize;
     for oid in revwalk {
         if walked >= cfg.deep_walk_limit || intel.commits_analyzed as usize >= cfg.max_commits {
+            intel.history_truncated = true;
             break;
         }
         walked += 1;
@@ -74,8 +77,10 @@ pub fn mine_incremental(repo_path: &Path, cfg: &IncrementalConfig) -> Result<Git
             oid_string,
             &mut intel,
             cfg.tier == GitTier::Full,
+            max_files_for_cochange,
         );
     }
+    intel.commits_walked = walked;
 
     Ok(intel)
 }
@@ -167,6 +172,14 @@ pub fn merge_intel(base: &mut GitIntel, delta: &GitIntel) {
     }
 
     base.commits_analyzed = base.commits_analyzed.saturating_add(delta.commits_analyzed);
+    base.commits_walked = base.commits_walked.saturating_add(delta.commits_walked);
+    base.commits_excluded_by_size = base
+        .commits_excluded_by_size
+        .saturating_add(delta.commits_excluded_by_size);
+    base.commits_with_unreadable_diff = base
+        .commits_with_unreadable_diff
+        .saturating_add(delta.commits_with_unreadable_diff);
+    base.history_truncated = base.history_truncated || delta.history_truncated;
     base.commit_records
         .extend(delta.commit_records.iter().cloned());
     base.commit_records.sort_by(|a, b| {
@@ -215,11 +228,14 @@ fn mine_from_revwalk(
     max_commits: usize,
     include_co_change: bool,
 ) -> Result<GitIntel, String> {
+    let max_files_for_cochange = config::limits().max_files_per_commit_for_cochange;
     let mut intel = GitIntel::default();
     for (i, oid) in revwalk.enumerate() {
         if i >= max_commits {
+            intel.history_truncated = true;
             break;
         }
+        intel.commits_walked = intel.commits_walked.saturating_add(1);
         let oid = oid.map_err(|e| format!("git oid: {e}"))?;
         let commit = repo
             .find_commit(oid)
@@ -230,6 +246,7 @@ fn mine_from_revwalk(
             oid.to_string(),
             &mut intel,
             include_co_change,
+            max_files_for_cochange,
         );
     }
     Ok(intel)
@@ -241,12 +258,17 @@ fn collect_commit(
     oid: String,
     intel: &mut GitIntel,
     include_co_change: bool,
+    max_files_for_cochange: usize,
 ) {
     let author = commit.author().email().unwrap_or("unknown").to_string();
     let committer = commit.committer().email().unwrap_or("unknown").to_string();
     let ts = commit.time().seconds();
     let message = commit.message().unwrap_or("").to_string();
-    let file_stats = changed_files_with_stats(repo, commit);
+    let diff = changed_files_with_stats(repo, commit);
+    if diff.diff_failed {
+        intel.commits_with_unreadable_diff = intel.commits_with_unreadable_diff.saturating_add(1);
+    }
+    let file_stats = diff.files;
     let files: Vec<String> = file_stats.iter().map(|(path, _, _)| path.clone()).collect();
 
     if intel.last_commit_id.is_none() {
@@ -267,12 +289,16 @@ fn collect_commit(
             .or_default() += 1;
     }
 
-    if include_co_change && files.len() <= MAX_FILES_PER_COMMIT_FOR_COCHANGE {
-        for a in 0..files.len() {
-            for b in (a + 1)..files.len() {
-                let key = (files[a].clone(), files[b].clone());
-                *intel.co_change.entry(key).or_default() += 1;
+    if include_co_change {
+        if files.len() <= max_files_for_cochange {
+            for a in 0..files.len() {
+                for b in (a + 1)..files.len() {
+                    let key = (files[a].clone(), files[b].clone());
+                    *intel.co_change.entry(key).or_default() += 1;
+                }
             }
+        } else {
+            intel.commits_excluded_by_size = intel.commits_excluded_by_size.saturating_add(1);
         }
     }
 
@@ -284,50 +310,6 @@ fn collect_commit(
         message,
         files: file_stats,
     });
-}
-
-fn changed_files_with_stats(repo: &Repository, commit: &Commit) -> Vec<(String, u32, u32)> {
-    let tree = match commit.tree() {
-        Ok(t) => t,
-        Err(_) => return vec![],
-    };
-    let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
-    let diff = match repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None) {
-        Ok(d) => d,
-        Err(_) => return vec![],
-    };
-    let mut files: HashMap<String, (u32, u32)> = HashMap::new();
-    for delta in diff.deltas() {
-        if let Some(path) = delta.new_file().path().or_else(|| delta.old_file().path()) {
-            files.entry(path.to_string_lossy().to_string()).or_default();
-        }
-    }
-
-    let _ = diff.foreach(
-        &mut |_delta, _progress| true,
-        None,
-        None,
-        Some(&mut |delta, _hunk, line| {
-            let Some(path) = delta.new_file().path().or_else(|| delta.old_file().path()) else {
-                return true;
-            };
-            let entry = files.entry(path.to_string_lossy().to_string()).or_default();
-            match line.origin() {
-                '+' => entry.0 = entry.0.saturating_add(1),
-                '-' => entry.1 = entry.1.saturating_add(1),
-                _ => {}
-            }
-            true
-        }),
-    );
-
-    let mut files: Vec<(String, u32, u32)> = files
-        .into_iter()
-        .map(|(path, (added, deleted))| (path, added, deleted))
-        .collect();
-    files.sort();
-    files.dedup();
-    files
 }
 
 #[cfg(test)]
@@ -562,6 +544,20 @@ mod tests {
     }
 
     #[test]
+    fn merge_intel_sums_unreadable_diff_counts_across_shards() {
+        let mut base = GitIntel::default();
+        base.commits_with_unreadable_diff = 1;
+        let mut delta = GitIntel::default();
+        delta.commits_with_unreadable_diff = 2;
+
+        merge_intel(&mut base, &delta);
+        assert_eq!(base.commits_with_unreadable_diff, 3);
+
+        merge_intel(&mut base, &GitIntel::default());
+        assert_eq!(base.commits_with_unreadable_diff, 3);
+    }
+
+    #[test]
     fn incremental_noop_when_head_unchanged() {
         let dir = fixture_repo();
         let base = mine_history(dir.path(), 100).unwrap();
@@ -697,6 +693,10 @@ mod tests {
             last_commit_id: Some("base".into()),
             author_commit_counts: HashMap::from([("base@x.com".into(), 1)]),
             fix_commit_counts: HashMap::from([("base.rs".into(), 1)]),
+            history_truncated: false,
+            commits_walked: 1,
+            commits_excluded_by_size: 0,
+            commits_with_unreadable_diff: 0,
         };
         let delta = GitIntel {
             file_churn: HashMap::from([("delta.rs".into(), 2)]),
@@ -717,6 +717,10 @@ mod tests {
             last_commit_id: Some("delta".into()),
             author_commit_counts: HashMap::from([("delta@x.com".into(), 2)]),
             fix_commit_counts: HashMap::from([("delta.rs".into(), 2)]),
+            history_truncated: true,
+            commits_walked: 2,
+            commits_excluded_by_size: 1,
+            commits_with_unreadable_diff: 2,
         };
 
         merge_intel(&mut base, &delta);
@@ -739,6 +743,10 @@ mod tests {
             .any(|record| record.oid.as_deref() == Some("delta")));
         assert_eq!(base.last_commit_id.as_deref(), Some("delta"));
         assert_eq!(base.author_commit_counts.get("delta@x.com"), Some(&2));
+        assert!(base.history_truncated);
+        assert_eq!(base.commits_walked, 3);
+        assert_eq!(base.commits_excluded_by_size, 1);
+        assert_eq!(base.commits_with_unreadable_diff, 2);
         assert_eq!(base.fix_commit_counts.get("delta.rs"), Some(&2));
         assert_eq!(base.fix_commit_counts.get("base.rs"), Some(&1));
     }

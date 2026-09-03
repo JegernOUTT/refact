@@ -49,6 +49,7 @@ pub struct ReviewSettings {
     pub variants: usize,
     pub stage_budget_minutes: u64,
     pub writes_stage_budget_minutes: u64,
+    pub idle_timeout_secs: u64,
     pub deadline_secs: u64,
     pub max_steps: usize,
     pub max_files: usize,
@@ -65,8 +66,9 @@ impl Default for ReviewSettings {
             default_depth: "normal".to_string(),
             parallel_depth: 4,
             variants: 1,
-            stage_budget_minutes: 6,
-            writes_stage_budget_minutes: 20,
+            stage_budget_minutes: 30,
+            writes_stage_budget_minutes: 45,
+            idle_timeout_secs: 360,
             deadline_secs: 1800,
             max_steps: 40,
             max_files: 60,
@@ -202,8 +204,9 @@ mod tests {
         assert_eq!(settings.default_depth, "normal");
         assert_eq!(settings.parallel_depth, 4);
         assert_eq!(settings.variants, 1);
-        assert_eq!(settings.stage_budget_minutes, 6);
-        assert_eq!(settings.writes_stage_budget_minutes, 20);
+        assert_eq!(settings.stage_budget_minutes, 30);
+        assert_eq!(settings.writes_stage_budget_minutes, 45);
+        assert_eq!(settings.idle_timeout_secs, 360);
         assert_eq!(settings.deadline_secs, 1800);
         assert_eq!(settings.model_slot, ModelSlot::Chat);
     }
@@ -254,7 +257,8 @@ stages:
             Some(ModelSlot::Light)
         );
         assert!(settings.stage_override("diff").enabled.is_none());
-        assert_eq!(settings.stage_budget_minutes, 6);
+        assert_eq!(settings.stage_budget_minutes, 30);
+        assert_eq!(settings.idle_timeout_secs, 360);
     }
 
     #[test]

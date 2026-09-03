@@ -34,11 +34,40 @@ fn should_connect_usages(batches_since: u32, elapsed: Duration) -> bool {
     batches_since >= CONNECT_EVERY_BATCHES || elapsed >= Duration::from_secs(CONNECT_EVERY_SECS)
 }
 
-fn completion_message(counts: &Counts) -> String {
-    format!(
+fn completion_message(counts: &Counts, parse_failures: usize) -> String {
+    let base = format!(
         "codegraph: index complete — {} nodes, {} edges, {} files",
         counts.nodes, counts.edges, counts.files
-    )
+    );
+    if parse_failures == 0 {
+        base
+    } else {
+        format!("{base}, {parse_failures} files failed to parse (symbols may be missing)")
+    }
+}
+
+const PARSE_FAILURE_SAMPLE: usize = 10;
+
+async fn report_parse_failures(service: &Arc<CodeGraphService>) {
+    let count = service.run_parse_failures();
+    if count == 0 {
+        return;
+    }
+    match service
+        .parse_failures(refact_codegraph::PARSE_FAILURE_REPORT_LIMIT)
+        .await
+    {
+        Ok(failures) => {
+            let sample = failures
+                .iter()
+                .take(PARSE_FAILURE_SAMPLE)
+                .map(|failure| format!("{} ({})", failure.path, failure.reason))
+                .collect::<Vec<_>>()
+                .join(", ");
+            warn!("codegraph: {count} files failed to parse during this run; sample: {sample}");
+        }
+        Err(err) => warn!("codegraph: {count} files failed to parse; listing them failed: {err}"),
+    }
 }
 
 fn path_is_genuinely_absent(path: &Path) -> bool {
@@ -343,9 +372,11 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
             }
             if !service.is_initial_index_done() {
                 service.mark_initial_index_done();
+                report_parse_failures(&service).await;
+                let parse_failures = service.run_parse_failures();
                 match service.counts().await {
                     Ok(counts) => {
-                        info!("{}", completion_message(&counts));
+                        info!("{}", completion_message(&counts, parse_failures));
                     }
                     Err(err) => {
                         error!("codegraph: index complete counts failed: {err}");
@@ -471,8 +502,12 @@ mod tests {
         };
 
         assert_eq!(
-            completion_message(&counts),
+            completion_message(&counts, 0),
             "codegraph: index complete — 11 nodes, 22 edges, 3 files"
+        );
+        assert_eq!(
+            completion_message(&counts, 4),
+            "codegraph: index complete — 11 nodes, 22 edges, 3 files, 4 files failed to parse (symbols may be missing)"
         );
     }
 

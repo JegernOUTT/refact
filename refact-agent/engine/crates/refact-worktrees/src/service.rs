@@ -564,6 +564,8 @@ impl WorktreeService {
             stats: diff.stats,
             patch: diff.patch,
             patch_truncated: diff.patch_truncated,
+            patch_shown_bytes: diff.patch_shown_bytes,
+            patch_total_bytes: diff.patch_total_bytes,
         })
     }
 

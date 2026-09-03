@@ -47,9 +47,16 @@ pub struct CoverageSummary {
     pub kinds: Vec<String>,
     pub total_bytes: usize,
     pub used_bytes: usize,
-    pub used_percentage: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_percentage: Option<f64>,
     pub unused_ranges: Vec<CoverageRange>,
     pub unused_ranges_truncated: bool,
+    #[serde(default)]
+    pub unmeasured: bool,
+    #[serde(default)]
+    pub unmeasured_resources: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -61,6 +68,10 @@ pub struct CoverageResourceDetail {
     pub total_bytes: usize,
     pub used_ranges: Vec<CoverageRange>,
     pub unused_ranges: Vec<CoverageRange>,
+    #[serde(default)]
+    pub unmeasured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -70,6 +81,8 @@ pub struct CoverageArtifact {
     pub path: PathBuf,
     pub bytes: usize,
     pub resource_count: usize,
+    #[serde(default)]
+    pub unmeasured_resource_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -213,12 +226,15 @@ impl CoverageManager {
                     .call_method(Profiler::TakePreciseCoverage(None))
                     .map_err(|error| format!("Failed to take JavaScript coverage: {error}"))?;
                 for script in coverage.result {
-                    let source = tab
-                        .call_method(Debugger::GetScriptSource {
-                            script_id: script.script_id.clone(),
-                        })
-                        .ok()
-                        .map(|result| result.script_source);
+                    let (source, source_error) = match tab.call_method(Debugger::GetScriptSource {
+                        script_id: script.script_id.clone(),
+                    }) {
+                        Ok(result) => (Some(result.script_source), None),
+                        Err(error) => (
+                            None,
+                            Some(format!("Failed to fetch script source: {error}")),
+                        ),
+                    };
                     let total = source
                         .as_ref()
                         .map(String::len)
@@ -245,6 +261,7 @@ impl CoverageManager {
                         source,
                         total,
                         used,
+                        source_error,
                     ));
                 }
             }
@@ -265,12 +282,15 @@ impl CoverageManager {
                     }
                 }
                 for (style_sheet_id, url) in style_sheets {
-                    let source = tab
-                        .call_method(CSS::GetStyleSheetText {
-                            style_sheet_id: style_sheet_id.clone(),
-                        })
-                        .ok()
-                        .map(|result| result.text);
+                    let (source, source_error) = match tab.call_method(CSS::GetStyleSheetText {
+                        style_sheet_id: style_sheet_id.clone(),
+                    }) {
+                        Ok(result) => (Some(result.text), None),
+                        Err(error) => (
+                            None,
+                            Some(format!("Failed to fetch style sheet text: {error}")),
+                        ),
+                    };
                     let total = source.as_ref().map(String::len).unwrap_or_else(|| {
                         ranges_by_sheet
                             .get(&style_sheet_id)
@@ -283,6 +303,7 @@ impl CoverageManager {
                         source,
                         total,
                         ranges_by_sheet.remove(&style_sheet_id).unwrap_or_default(),
+                        source_error,
                     ));
                 }
             }
@@ -299,6 +320,10 @@ impl CoverageManager {
         }
         let resources = collection?;
         let summaries = summarize_by_url(&resources);
+        let unmeasured_resource_count = resources
+            .iter()
+            .filter(|resource| resource.unmeasured)
+            .count();
         std::fs::create_dir_all(artifacts_dir).map_err(|error| {
             format!(
                 "Failed to create browser artifacts directory {}: {error}",
@@ -329,6 +354,7 @@ impl CoverageManager {
                 path,
                 bytes: body.len(),
                 resource_count: resources.len(),
+                unmeasured_resource_count,
             },
         })
     }
@@ -401,7 +427,9 @@ fn resource_detail(
     source: Option<String>,
     total: usize,
     used: Vec<CoverageRange>,
+    source_error: Option<String>,
 ) -> CoverageResourceDetail {
+    let unmeasured = source_error.is_some();
     let used_ranges = merge_ranges(&used, total);
     CoverageResourceDetail {
         url,
@@ -410,6 +438,8 @@ fn resource_detail(
         total_bytes: total,
         unused_ranges: invert_ranges(&used_ranges, total),
         used_ranges,
+        unmeasured,
+        source_error,
     }
 }
 
@@ -527,6 +557,8 @@ pub fn summarize_by_url(resources: &[CoverageResourceDetail]) -> Vec<CoverageSum
         total: usize,
         used: Vec<CoverageRange>,
         kinds: Vec<String>,
+        resources: usize,
+        unmeasured_resources: usize,
     }
     let mut aggregates: BTreeMap<String, Aggregate> = BTreeMap::new();
     for resource in resources {
@@ -539,6 +571,10 @@ pub fn summarize_by_url(resources: &[CoverageResourceDetail]) -> Vec<CoverageSum
                 end: offset + range.end,
             }));
         aggregate.total += resource.total_bytes;
+        aggregate.resources += 1;
+        if resource.unmeasured {
+            aggregate.unmeasured_resources += 1;
+        }
         if !aggregate.kinds.contains(&resource.kind) {
             aggregate.kinds.push(resource.kind.clone());
         }
@@ -551,18 +587,31 @@ pub fn summarize_by_url(resources: &[CoverageResourceDetail]) -> Vec<CoverageSum
             let mut unused_ranges = invert_ranges(&used, aggregate.total);
             let unused_ranges_truncated = unused_ranges.len() > MAX_SUMMARY_UNUSED_RANGES;
             unused_ranges.truncate(MAX_SUMMARY_UNUSED_RANGES);
+            let unmeasured = aggregate.unmeasured_resources > 0;
+            let notice = unmeasured.then(|| {
+                format!(
+                    "coverage unmeasured: {} of {} resource(s) failed source retrieval, no \
+                     percentage is reported",
+                    aggregate.unmeasured_resources, aggregate.resources
+                )
+            });
             CoverageSummary {
                 url,
                 kinds: aggregate.kinds,
                 total_bytes: aggregate.total,
                 used_bytes,
-                used_percentage: if aggregate.total == 0 {
-                    0.0
+                used_percentage: if unmeasured {
+                    None
+                } else if aggregate.total == 0 {
+                    Some(0.0)
                 } else {
-                    used_bytes as f64 * 100.0 / aggregate.total as f64
+                    Some(used_bytes as f64 * 100.0 / aggregate.total as f64)
                 },
                 unused_ranges,
                 unused_ranges_truncated,
+                unmeasured,
+                unmeasured_resources: aggregate.unmeasured_resources,
+                notice,
             }
         })
         .collect()
@@ -604,6 +653,7 @@ mod tests {
                 Some("0123456789".to_string()),
                 10,
                 vec![CoverageRange { start: 0, end: 5 }],
+                None,
             ),
             resource_detail(
                 "https://example.com/app".to_string(),
@@ -611,17 +661,99 @@ mod tests {
                 Some("abcdefghij".to_string()),
                 10,
                 vec![CoverageRange { start: 5, end: 10 }],
+                None,
             ),
         ];
         let summary = summarize_by_url(&resources).pop().unwrap();
         assert_eq!(summary.total_bytes, 20);
         assert_eq!(summary.used_bytes, 10);
-        assert_eq!(summary.used_percentage, 50.0);
+        assert_eq!(summary.used_percentage, Some(50.0));
+        assert!(!summary.unmeasured);
+        assert_eq!(summary.unmeasured_resources, 0);
+        assert_eq!(summary.notice, None);
         assert_eq!(summary.kinds, vec!["js", "css"]);
         assert_eq!(
             summary.unused_ranges,
             vec![CoverageRange { start: 5, end: 15 }]
         );
+    }
+
+    #[test]
+    fn failed_source_fetch_is_unmeasured_not_a_computed_percentage() {
+        let failed = resource_detail(
+            "https://example.com/broken.js".to_string(),
+            "js",
+            None,
+            120,
+            vec![CoverageRange { start: 0, end: 60 }],
+            Some("Failed to fetch script source: connection closed".to_string()),
+        );
+        let genuinely_empty = resource_detail(
+            "https://example.com/empty.js".to_string(),
+            "js",
+            Some(String::new()),
+            0,
+            vec![],
+            None,
+        );
+
+        assert!(failed.unmeasured);
+        assert!(failed.source_error.is_some());
+        assert!(!genuinely_empty.unmeasured);
+        assert_eq!(genuinely_empty.source_error, None);
+
+        let summaries = summarize_by_url(&[failed, genuinely_empty]);
+        let broken = summaries
+            .iter()
+            .find(|summary| summary.url.ends_with("broken.js"))
+            .unwrap();
+        let empty = summaries
+            .iter()
+            .find(|summary| summary.url.ends_with("empty.js"))
+            .unwrap();
+
+        assert_eq!(broken.used_percentage, None);
+        assert!(broken.unmeasured);
+        assert_eq!(broken.unmeasured_resources, 1);
+        assert!(broken
+            .notice
+            .as_ref()
+            .is_some_and(|notice| notice.contains("coverage unmeasured")));
+        assert_eq!(empty.used_percentage, Some(0.0));
+        assert!(!empty.unmeasured);
+        assert_eq!(empty.notice, None);
+    }
+
+    #[test]
+    fn one_failed_resource_does_not_stop_the_other_resources() {
+        let resources = vec![
+            resource_detail(
+                "https://example.com/broken.js".to_string(),
+                "js",
+                None,
+                100,
+                vec![CoverageRange { start: 0, end: 50 }],
+                Some("Failed to fetch script source: boom".to_string()),
+            ),
+            resource_detail(
+                "https://example.com/good.js".to_string(),
+                "js",
+                Some("0123456789".to_string()),
+                10,
+                vec![CoverageRange { start: 0, end: 5 }],
+                None,
+            ),
+        ];
+
+        let summaries = summarize_by_url(&resources);
+
+        assert_eq!(summaries.len(), 2);
+        let good = summaries
+            .iter()
+            .find(|summary| summary.url.ends_with("good.js"))
+            .unwrap();
+        assert_eq!(good.used_percentage, Some(50.0));
+        assert!(!good.unmeasured);
     }
 
     #[test]

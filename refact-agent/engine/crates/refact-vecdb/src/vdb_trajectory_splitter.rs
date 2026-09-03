@@ -5,9 +5,12 @@ use refact_core::chunk_utils::official_text_hashing_function;
 use refact_core::memory_plane::{MemoryPlaneFileKind, MemoryPlaneRoots};
 use refact_core::vecdb_types::SplitResult;
 
+use crate::vdb_thread::vecdb_trajectory_split_bytes;
+
 const MESSAGES_PER_CHUNK: usize = 4;
-const MAX_CONTENT_PER_MESSAGE: usize = 2000;
 const OVERLAP_MESSAGES: usize = 1;
+const MAX_PARTS_PER_MESSAGE: usize = 8;
+const CHARS_PER_TOKEN: usize = 4;
 const LLM_SEGMENT_SUMMARY_KIND: &str = "llm_segment_summary";
 // Keep in sync with refact_chat_history::trajectory_ops::COMPRESSION_REPORT_ROLE;
 // refact-vecdb intentionally has no dependency on the chat-history crate.
@@ -15,6 +18,7 @@ const COMPRESSION_REPORT_ROLE: &str = "compression_report";
 
 pub struct TrajectoryFileSplitter {
     max_tokens: usize,
+    split_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -22,6 +26,8 @@ struct ExtractedMessage {
     index: usize,
     role: String,
     content: String,
+    part: usize,
+    total_parts: usize,
 }
 
 struct MessageChunk {
@@ -32,7 +38,17 @@ struct MessageChunk {
 
 impl TrajectoryFileSplitter {
     pub fn new(max_tokens: usize) -> Self {
-        Self { max_tokens }
+        let split_bytes = vecdb_trajectory_split_bytes()
+            .min(max_tokens.saturating_mul(CHARS_PER_TOKEN))
+            .max(1);
+        Self {
+            max_tokens,
+            split_bytes,
+        }
+    }
+
+    pub fn split_bytes(&self) -> usize {
+        self.split_bytes
     }
 
     pub async fn split(&self, text: &str, path: &PathBuf) -> Result<Vec<SplitResult>, String> {
@@ -61,11 +77,14 @@ impl TrajectoryFileSplitter {
 
         let mut results = Vec::new();
 
+        let indexed_messages = extracted
+            .iter()
+            .map(|message| message.index)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         let metadata_text = format!(
             "Trajectory: {}\nTitle: {}\nMessages: {}",
-            trajectory_id,
-            title,
-            extracted.len()
+            trajectory_id, title, indexed_messages
         );
         results.push(SplitResult {
             file_path: path.clone(),
@@ -110,24 +129,55 @@ impl TrajectoryFileSplitter {
                 if content.trim().is_empty() {
                     return None;
                 }
-                let truncated = if content.len() > MAX_CONTENT_PER_MESSAGE {
-                    let end = content
-                        .char_indices()
-                        .take_while(|(i, _)| *i < MAX_CONTENT_PER_MESSAGE)
-                        .last()
-                        .map(|(i, c)| i + c.len_utf8())
-                        .unwrap_or(MAX_CONTENT_PER_MESSAGE.min(content.len()));
-                    format!("{}...", &content[..end])
-                } else {
-                    content
-                };
-                Some(ExtractedMessage {
-                    index: idx,
-                    role,
-                    content: truncated,
-                })
+                let parts = self.split_message_content(&content);
+                let total_parts = parts.len();
+                Some(
+                    parts
+                        .into_iter()
+                        .enumerate()
+                        .map(move |(part, content)| ExtractedMessage {
+                            index: idx,
+                            role: role.clone(),
+                            content,
+                            part,
+                            total_parts,
+                        })
+                        .collect::<Vec<_>>(),
+                )
             })
+            .flatten()
             .collect()
+    }
+
+    fn split_message_content(&self, content: &str) -> Vec<String> {
+        if content.len() <= self.split_bytes {
+            return vec![content.to_string()];
+        }
+        let mut parts = Vec::new();
+        let mut start = 0;
+        while start < content.len() && parts.len() < MAX_PARTS_PER_MESSAGE {
+            let mut end = start.saturating_add(self.split_bytes).min(content.len());
+            while end > start && !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end == start {
+                break;
+            }
+            parts.push(content[start..end].to_string());
+            start = end;
+        }
+        if start < content.len() {
+            let marker = format!(
+                "... (truncated: showing {} of {} bytes; raise vecdb_trajectory_split_bytes in settings)",
+                start,
+                content.len()
+            );
+            match parts.last_mut() {
+                Some(last) => last.push_str(&marker),
+                None => parts.push(marker),
+            }
+        }
+        parts
     }
 
     fn should_skip_message(&self, msg: &Value, role: &str) -> bool {
@@ -181,7 +231,7 @@ impl TrajectoryFileSplitter {
             let end_idx = (i + MESSAGES_PER_CHUNK).min(messages.len());
             let chunk_messages = &messages[i..end_idx];
             let text = self.format_chunk(chunk_messages);
-            let estimated_tokens = text.len() / 4;
+            let estimated_tokens = text.len() / CHARS_PER_TOKEN;
             if estimated_tokens > self.max_tokens && chunk_messages.len() > 1 {
                 for msg in chunk_messages {
                     chunks.push(MessageChunk {
@@ -213,7 +263,12 @@ impl TrajectoryFileSplitter {
                     "system" => "SYSTEM",
                     _ => &msg.role,
                 };
-                vec![format!("[{}]:", role), msg.content.clone(), String::new()]
+                let header = if msg.total_parts > 1 {
+                    format!("[{} part {}/{}]:", role, msg.part + 1, msg.total_parts)
+                } else {
+                    format!("[{}]:", role)
+                };
+                vec![header, msg.content.clone(), String::new()]
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -240,6 +295,14 @@ pub fn is_trajectory_file(path: &PathBuf, roots: &MemoryPlaneRoots) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    static SPLIT_BYTES_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_split_bytes() -> std::sync::MutexGuard<'static, ()> {
+        SPLIT_BYTES_GUARD
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn split_texts(results: &[SplitResult]) -> Vec<String> {
         results
@@ -327,6 +390,84 @@ mod tests {
 
         assert!(!text.contains("legacy top-level summary must not be indexed"));
         assert!(text.contains("malformed compression metadata remains normal assistant"));
+    }
+
+    #[tokio::test]
+    async fn long_message_is_split_into_multiple_indexed_chunks() {
+        let _guard = lock_split_bytes();
+        let tail = "TAIL_MARKER_UNIQUE";
+        let content = format!("{}{}", "a".repeat(40_000), tail);
+        let trajectory = json!({
+            "id": "traj-long",
+            "title": "Long message",
+            "messages": [{"role": "user", "content": content}]
+        });
+        let splitter = TrajectoryFileSplitter::new(4_096);
+        let results = splitter
+            .split(
+                &trajectory.to_string(),
+                &PathBuf::from(".refact/trajectories/traj-long.json"),
+            )
+            .await
+            .unwrap();
+        let text = split_texts(&results).join("\n");
+
+        assert_eq!(splitter.split_bytes(), 16_384);
+        assert!(results.len() > 2);
+        assert!(text.contains(tail));
+        assert!(text.contains("part 1/3"));
+        assert!(text.contains("part 3/3"));
+        assert!(!text.contains("truncated: showing"));
+    }
+
+    #[tokio::test]
+    async fn truncation_marker_reports_shown_and_total_bytes() {
+        let _guard = lock_split_bytes();
+        let total = super::MAX_PARTS_PER_MESSAGE * 16_384 + 5_000;
+        let content = "b".repeat(total);
+        let trajectory = json!({
+            "id": "traj-huge",
+            "title": "Huge message",
+            "messages": [{"role": "user", "content": content}]
+        });
+        let splitter = TrajectoryFileSplitter::new(1_000_000);
+        let results = splitter
+            .split(
+                &trajectory.to_string(),
+                &PathBuf::from(".refact/trajectories/traj-huge.json"),
+            )
+            .await
+            .unwrap();
+        let text = split_texts(&results).join("\n");
+
+        let shown = super::MAX_PARTS_PER_MESSAGE * splitter.split_bytes();
+        assert!(text.contains(&format!(
+            "... (truncated: showing {} of {} bytes; raise vecdb_trajectory_split_bytes in settings)",
+            shown, total
+        )));
+    }
+
+    #[test]
+    fn install_vecdb_trajectory_split_bytes_changes_effective_split_size() {
+        let _guard = lock_split_bytes();
+        let original = crate::vdb_thread::vecdb_trajectory_split_bytes();
+        assert_eq!(
+            original,
+            crate::vdb_thread::DEFAULT_VECDB_TRAJECTORY_SPLIT_BYTES
+        );
+        assert_eq!(
+            TrajectoryFileSplitter::new(1_000_000).split_bytes(),
+            crate::vdb_thread::DEFAULT_VECDB_TRAJECTORY_SPLIT_BYTES
+        );
+
+        crate::vdb_thread::install_vecdb_trajectory_split_bytes(4_096);
+        assert_eq!(TrajectoryFileSplitter::new(1_000_000).split_bytes(), 4_096);
+
+        crate::vdb_thread::install_vecdb_trajectory_split_bytes(original);
+        assert_eq!(
+            TrajectoryFileSplitter::new(1_000_000).split_bytes(),
+            original
+        );
     }
 
     #[test]

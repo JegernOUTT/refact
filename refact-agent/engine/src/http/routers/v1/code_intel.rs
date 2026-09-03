@@ -771,6 +771,7 @@ pub async fn handle_v1_code_intel_git_risk(
     json_response(&GitRiskResponse {
         commits_analyzed: intel.commits_analyzed,
         agent_authored_pct: intel.agent_authored_pct(),
+        history_truncation: intel.history_truncation(),
         hotspots,
         ownership,
         co_change,

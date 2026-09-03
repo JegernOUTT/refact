@@ -857,6 +857,7 @@ mod tests {
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
+            soft_abort: false,
             background_agent_id: Some(child.agent_id.clone()),
             subchat_depth: 1,
             final_step_force_answer: false,

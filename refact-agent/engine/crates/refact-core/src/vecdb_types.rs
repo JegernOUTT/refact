@@ -107,6 +107,10 @@ pub struct VecDbStatus {
     pub queue_additions: bool,
     pub vecdb_max_files_hit: bool,
     pub vecdb_errors: IndexMap<String, usize>,
+    #[serde(default)]
+    pub cache_writes_failed: usize,
+    #[serde(default)]
+    pub vectors_missing_from_cache: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]

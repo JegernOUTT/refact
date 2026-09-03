@@ -21,7 +21,6 @@ use crate::worktrees::types::{WorktreeRecordView, WorktreeReference};
 
 const DEFAULT_MAX_LINES: usize = 300;
 const GIT_DIFF_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_GIT_OUTPUT_BYTES: usize = 1024 * 1024;
 const UNTRACKED_PER_FILE_CAP_BYTES: usize = 64 * 1024;
 const UNTRACKED_TOTAL_CAP_BYTES: usize = 256 * 1024;
 const UNTRACKED_BINARY_PROBE_BYTES: usize = 8 * 1024;
@@ -519,6 +518,13 @@ where
     tokio::time::timeout(timeout, fut).await.map_err(|_| ())
 }
 
+fn git_output_cap_notice(shown_bytes: usize, total_bytes: usize, limit: usize) -> String {
+    format!(
+        "\n... ⚠️ showing {} of {}+ git output bytes (limit: agent_diff_max_output_bytes = {}). 💡 Raise agent_diff_max_output_bytes in trajectory settings or narrow the diff with a path filter.\n",
+        shown_bytes, total_bytes, limit
+    )
+}
+
 async fn run_git(worktree: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
 
@@ -539,9 +545,11 @@ async fn run_git(worktree: &Path, args: &[&str], timeout: Duration) -> Result<St
 
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
+    let max_output_bytes = crate::runtime_settings::current().agent_diff_max_output_bytes;
     let mut buf = Vec::with_capacity(64 * 1024);
     let mut chunk = [0u8; 8192];
     let mut capped = false;
+    let mut seen_bytes: usize = 0;
 
     let read_result = run_with_timeout(
         async {
@@ -553,10 +561,10 @@ async fn run_git(worktree: &Path, args: &[&str], timeout: Duration) -> Result<St
                 if n == 0 {
                     break;
                 }
-                if buf.len() + n > MAX_GIT_OUTPUT_BYTES {
-                    let remaining = MAX_GIT_OUTPUT_BYTES - buf.len();
+                seen_bytes = seen_bytes.saturating_add(n);
+                if buf.len() + n > max_output_bytes {
+                    let remaining = max_output_bytes.saturating_sub(buf.len());
                     buf.extend_from_slice(&chunk[..remaining]);
-                    buf.extend_from_slice(b"\n... (truncated by byte cap)\n");
                     capped = true;
                     break;
                 }
@@ -587,6 +595,10 @@ async fn run_git(worktree: &Path, args: &[&str], timeout: Duration) -> Result<St
     }
 
     if capped {
+        let shown = buf.len();
+        buf.extend_from_slice(
+            git_output_cap_notice(shown, seen_bytes.max(shown), max_output_bytes).as_bytes(),
+        );
         return String::from_utf8(buf).map_err(|e| format!("git output not utf-8: {e}"));
     }
 
@@ -1054,7 +1066,9 @@ mod tests {
         assert_eq!(legacy.refish, "task-commit");
     }
     use crate::tasks::types::{TaskBoard, TaskMeta, TaskStatus};
+    use crate::tools::settings_guard::SettingsGuard;
     use crate::tools::tools_description::Tool;
+    use serial_test::serial;
     use crate::worktrees::types::CreateWorktreeRequest;
     use std::process::Command as StdCommand;
 
@@ -1892,7 +1906,57 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn agent_diff_output_byte_cap_honours_installed_setting_and_is_loud() {
+        let _guard = SettingsGuard::install(|settings| {
+            settings.agent_diff_max_output_bytes = 8_192;
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        init_repo(repo);
+        std::fs::write(repo.join("big.txt"), "a".repeat(200_000)).unwrap();
+        run_git(repo, &["add", "big.txt"]);
+        run_git(repo, &["commit", "-m", "add big"]);
+        std::fs::write(repo.join("big.txt"), "b".repeat(200_000)).unwrap();
+
+        let output = super::run_git(repo, &["diff", "HEAD", "--text"], GIT_DIFF_TIMEOUT)
+            .await
+            .unwrap();
+
+        assert!(
+            output.len() <= 8_192 + 400,
+            "output {} bytes exceeds the installed cap plus notice overhead",
+            output.len()
+        );
+        assert!(
+            output.contains("agent_diff_max_output_bytes = 8192")
+                && output.contains("git output bytes"),
+            "expected a quantified byte-cap notice naming the setting, got tail: {}",
+            &output[output.len().saturating_sub(400)..]
+        );
+    }
+
+    #[test]
+    fn git_output_cap_notice_quantifies_shown_and_total() {
+        let notice = git_output_cap_notice(1_048_576, 3_000_000, 1_048_576);
+        assert!(
+            notice.contains("showing 1048576 of 3000000+ git output bytes"),
+            "{}",
+            notice
+        );
+        assert!(
+            notice.contains("agent_diff_max_output_bytes = 1048576"),
+            "{}",
+            notice
+        );
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
     async fn run_git_truncates_output_at_byte_cap() {
+        let _guard = SettingsGuard::install(|settings| {
+            settings.agent_diff_max_output_bytes = 200_000;
+        });
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path();
         init_repo(repo);
@@ -1907,12 +1971,14 @@ mod tests {
             .await
             .unwrap();
 
+        let limit = crate::runtime_settings::current().agent_diff_max_output_bytes;
         assert!(
-            output.contains("truncated by byte cap"),
-            "expected truncation footer"
+            output.contains("agent_diff_max_output_bytes ="),
+            "expected a quantified truncation footer, got tail: {}",
+            &output[output.len().saturating_sub(400)..]
         );
         assert!(
-            output.len() <= MAX_GIT_OUTPUT_BYTES + 64,
+            output.len() <= limit + 400,
             "output {} bytes exceeds cap + overhead",
             output.len()
         );

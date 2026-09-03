@@ -1403,6 +1403,7 @@ async fn spawn_background_agent_returns_immediately_with_child_chat_id_and_emits
                     messages,
                     metering: serde_json::Map::new(),
                     chat_id: config.chat_id,
+                    aborted: false,
                 })
             })
         }))
@@ -1523,6 +1524,7 @@ async fn more_than_eight_background_agents_can_run_for_one_parent() {
                     messages,
                     metering: serde_json::Map::new(),
                     chat_id: config.chat_id,
+                    aborted: false,
                 })
             })
         }))
@@ -1669,6 +1671,7 @@ async fn spawn_with_empty_assistant_response_uses_no_text_summary() {
                     messages,
                     metering: serde_json::Map::new(),
                     chat_id: config.chat_id,
+                    aborted: false,
                 })
             })
         }));
@@ -1734,6 +1737,7 @@ async fn spawn_seed_installs_hidden_plan_goal_and_caps_steps() {
                     messages,
                     metering: serde_json::Map::new(),
                     chat_id: config.chat_id,
+                    aborted: false,
                 })
             })
         }))
@@ -1847,6 +1851,7 @@ async fn stub_spawn_runner(
         messages,
         metering: serde_json::Map::new(),
         chat_id: config.chat_id,
+        aborted: false,
     })
 }
 

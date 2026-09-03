@@ -3,6 +3,7 @@ import {
   Bot,
   Cable,
   Chrome,
+  Gauge,
   Paintbrush,
   Plug,
   ScanSearch,
@@ -20,6 +21,7 @@ export type SettingsSectionId =
   | "shell"
   | "indexing"
   | "browser"
+  | "limits"
   | "providers"
   | "models"
   | "customization"
@@ -40,6 +42,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   { id: "shell", label: "Shell", icon: Terminal },
   { id: "indexing", label: "Indexing", icon: ScanSearch },
   { id: "browser", label: "Browser", icon: Chrome },
+  { id: "limits", label: "Limits & Budgets", icon: Gauge },
   { id: "providers", label: "Providers", icon: Plug },
   { id: "models", label: "Models", icon: Bot },
   { id: "customization", label: "Customization", icon: Paintbrush },

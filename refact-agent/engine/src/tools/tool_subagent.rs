@@ -952,6 +952,7 @@ mod tests {
                         messages,
                         metering: Map::new(),
                         chat_id: Some("ignored".to_string()),
+                        aborted: false,
                     })
                 })
             },
@@ -1017,6 +1018,7 @@ mod tests {
                         messages,
                         metering: Map::new(),
                         chat_id: Some("ignored".to_string()),
+                        aborted: false,
                     })
                 })
             }));

@@ -175,12 +175,14 @@ mod tests {
             mode: ScopeMode::Strict,
             requested: vec![file.to_path_buf()],
             files: vec![file.to_path_buf()],
+            dropped_files: vec![],
             changed_files: vec![],
             focus: None,
             plan: None,
             base: None,
             head: None,
             diff_patch: None,
+            patch_total_bytes: 0,
             hunks: DiffHunks::default(),
             repo_root: Some(root.to_path_buf()),
             expansion: None,
@@ -271,7 +273,12 @@ mod tests {
         std::fs::write(&path, FILE).unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
         let scope = scope_for(temp.path(), &path);
-        let mut findings = vec![finding("lib.rs", 5, 7, "5: fn two() {\n6:     return Ok(());")];
+        let mut findings = vec![finding(
+            "lib.rs",
+            5,
+            7,
+            "5: fn two() {\n6:     return Ok(());",
+        )];
 
         verify_evidence(gcx, &scope, &mut findings).await;
 

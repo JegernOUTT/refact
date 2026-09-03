@@ -9,6 +9,7 @@ use refact_core::chunk_utils::{official_text_hashing_function, count_text_tokens
 use refact_core::chat_types::{
     ChatContent, ChatMessage, ContextFile, PostprocessSettings, SearchResult, format_search_results,
 };
+use crate::config::limits;
 use crate::pp_context_files::postprocess_context_files;
 use crate::pp_context_provider::PPContextTrait;
 use crate::pp_plain_text::postprocess_plain_text;
@@ -19,7 +20,6 @@ fn canonical_path_simple(path: &str) -> PathBuf {
 }
 
 const MIN_CONTEXT_SIZE: usize = 8192;
-const MAX_TOOL_BUDGET: usize = 32768;
 
 #[derive(Debug)]
 pub struct ToolBudget {
@@ -35,10 +35,11 @@ impl ToolBudget {
                 n_ctx, MIN_CONTEXT_SIZE
             ));
         }
-        let total = (n_ctx / 2).max(4096).min(MAX_TOOL_BUDGET);
+        let pp_limits = limits();
+        let total = (n_ctx / 2).max(4096).min(pp_limits.max_tool_budget_tokens);
         Ok(Self {
             tokens_for_code: total,
-            tokens_for_text: total * 30 / 100,
+            tokens_for_text: total * pp_limits.tokens_for_text_percent / 100,
         })
     }
 }
@@ -528,7 +529,6 @@ async fn postprocess_context_file_results(
 }
 
 const MIN_PER_FILE_BUDGET: usize = 50;
-const MAX_PER_FILE_BUDGET: usize = 32768;
 
 async fn fill_skip_pp_files_with_budget(
     ctx: Arc<dyn PPContextTrait>,
@@ -567,7 +567,8 @@ async fn fill_skip_pp_files_with_budget(
         );
     }
 
-    let per_file_budget = (tokens_limit / files.len()).min(MAX_PER_FILE_BUDGET);
+    let max_per_file_budget = limits().max_per_file_budget_tokens;
+    let per_file_budget = (tokens_limit / files.len()).min(max_per_file_budget);
     let mut result = Vec::new();
     let mut notes = Vec::new();
 
@@ -600,8 +601,9 @@ async fn fill_skip_pp_files_with_budget(
 
             let tokens = count_text_tokens_with_fallback(tokenizer.clone(), &cf.file_content);
             if tokens > per_file_budget {
-                // Simple line-based truncation for prefilled content (markdown/instructions)
+                let total_lines = cf.file_content.lines().count();
                 let mut truncated = String::new();
+                let mut kept_lines = 0usize;
                 for line in cf.file_content.lines() {
                     let candidate = if truncated.is_empty() {
                         line.to_string()
@@ -612,11 +614,18 @@ async fn fill_skip_pp_files_with_budget(
                         > per_file_budget
                     {
                         if !truncated.is_empty() {
-                            truncated.push_str("\n\n... (content truncated to fit token budget)");
+                            truncated.push_str("\n\n");
+                            truncated.push_str(&per_file_truncation_marker(
+                                kept_lines,
+                                total_lines,
+                                tokens,
+                                per_file_budget,
+                            ));
                         }
                         break;
                     }
                     truncated = candidate;
+                    kept_lines += 1;
                 }
                 cf.file_content = truncated;
             }
@@ -789,11 +798,45 @@ fn format_lines_with_numbers(lines: &[&str], start: usize, end: usize) -> String
         .join("\n")
 }
 
+fn format_thousands(value: usize) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn per_file_truncation_marker(
+    shown_lines: usize,
+    total_lines: usize,
+    total_tokens: usize,
+    budget_tokens: usize,
+) -> String {
+    format!(
+        "... (truncated: showing {} of {} lines, {} of {} tokens to fit the token budget; raise pp_max_per_file_budget_tokens in settings)",
+        format_thousands(shown_lines),
+        format_thousands(total_lines),
+        format_thousands(budget_tokens),
+        format_thousands(total_tokens)
+    )
+}
+
+fn prefix_truncation_marker(shown_chars: usize, total_chars: usize) -> String {
+    format!(
+        "\n... (content truncated: showing {} of {} chars to fit the token budget; raise pp_max_per_file_budget_tokens in settings)",
+        format_thousands(shown_chars),
+        format_thousands(total_chars)
+    )
+}
+
 fn truncate_text_prefix_to_token_budget(
     text: &str,
     tokenizer: Option<Arc<Tokenizer>>,
     tokens_limit: usize,
-    marker: &str,
 ) -> String {
     if text.is_empty() || tokens_limit == 0 {
         return String::new();
@@ -804,15 +847,16 @@ fn truncate_text_prefix_to_token_budget(
     }
 
     let chars: Vec<char> = text.chars().collect();
+    let total_chars = chars.len();
     let mut low = 0usize;
-    let mut high = chars.len();
+    let mut high = total_chars;
     let mut best_prefix = 0usize;
 
     while low <= high {
         let mid = low + (high - low) / 2;
         let prefix: String = chars[..mid].iter().collect();
-        let candidate = if mid < chars.len() {
-            format!("{}{}", prefix, marker)
+        let candidate = if mid < total_chars {
+            format!("{}{}", prefix, prefix_truncation_marker(mid, total_chars))
         } else {
             prefix
         };
@@ -829,8 +873,8 @@ fn truncate_text_prefix_to_token_budget(
     }
 
     let mut out: String = chars[..best_prefix].iter().collect();
-    if best_prefix < chars.len() {
-        out.push_str(marker);
+    if best_prefix < total_chars {
+        out.push_str(&prefix_truncation_marker(best_prefix, total_chars));
     }
     out
 }
@@ -862,7 +906,13 @@ fn truncate_file_head_tail(
         };
 
         let truncation_marker = if tail_start > head_end {
-            format!("\n... ({} lines omitted) ...\n", tail_start - head_end)
+            let shown = total_lines - (tail_start - head_end);
+            format!(
+                "\n... ({} lines omitted; showing {} of {} lines to fit the token budget; raise pp_max_per_file_budget_tokens in settings) ...\n",
+                format_thousands(tail_start - head_end),
+                format_thousands(shown),
+                format_thousands(total_lines)
+            )
         } else {
             String::new()
         };
@@ -879,7 +929,6 @@ fn truncate_file_head_tail(
                 &full_content,
                 tokenizer.clone(),
                 tokens_limit,
-                "\n... (content truncated to fit token budget)",
             );
         }
 
@@ -893,6 +942,7 @@ fn truncate_file_head_tail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{install_postprocessing_limits, PostprocessingLimits};
     use refact_core::chat_types::{ChatToolCall, ChatToolFunction};
 
     fn make_context_file(name: &str, line1: usize, line2: usize) -> ContextFile {
@@ -974,6 +1024,9 @@ mod tests {
 
     #[test]
     fn test_tool_budget_from_n_ctx() {
+        let _guard = crate::config::test_limits_lock();
+        install_postprocessing_limits(PostprocessingLimits::default());
+
         let budget = ToolBudget::try_from_n_ctx(8192).unwrap();
         assert_eq!(budget.tokens_for_code, 4096);
         assert_eq!(budget.tokens_for_text, 1228);
@@ -982,10 +1035,52 @@ mod tests {
         assert!(budget_small.is_err());
         assert!(budget_small.unwrap_err().contains("below minimum"));
 
-        // Large context models are capped at MAX_TOOL_BUDGET (32768) to prevent bloated context
         let budget_large = ToolBudget::try_from_n_ctx(128000).unwrap();
-        assert_eq!(budget_large.tokens_for_code, 32768);
-        assert_eq!(budget_large.tokens_for_text, 9830);
+        assert_eq!(budget_large.tokens_for_code, 64000);
+        assert_eq!(budget_large.tokens_for_text, 19200);
+    }
+
+    #[test]
+    fn test_tool_budget_respects_installed_ceiling() {
+        let _guard = crate::config::test_limits_lock();
+        install_postprocessing_limits(PostprocessingLimits::default());
+        assert_eq!(
+            ToolBudget::try_from_n_ctx(1_000_000)
+                .unwrap()
+                .tokens_for_code,
+            131_072
+        );
+
+        install_postprocessing_limits(PostprocessingLimits {
+            max_tool_budget_tokens: 262_144,
+            ..PostprocessingLimits::default()
+        });
+        let raised = ToolBudget::try_from_n_ctx(1_000_000).unwrap();
+
+        install_postprocessing_limits(PostprocessingLimits::default());
+        assert_eq!(raised.tokens_for_code, 262_144);
+        assert_eq!(raised.tokens_for_text, 262_144 * 30 / 100);
+    }
+
+    #[test]
+    fn test_truncation_markers_are_quantified() {
+        let marker = per_file_truncation_marker(412, 3180, 9000, 1200);
+        assert!(marker.contains("showing 412 of 3,180 lines"));
+        assert!(marker.contains("1,200 of 9,000 tokens"));
+        assert!(marker.contains("pp_max_per_file_budget_tokens"));
+
+        let prefix_marker = prefix_truncation_marker(100, 48213);
+        assert!(prefix_marker.contains("showing 100 of 48,213 chars"));
+        assert!(prefix_marker.contains("pp_max_per_file_budget_tokens"));
+    }
+
+    #[test]
+    fn test_head_tail_marker_reports_shown_and_total() {
+        let lines: Vec<&str> = (0..100).map(|_| "content").collect();
+        let result = truncate_file_head_tail(&lines, 0, 100, None, 50);
+        assert!(result.contains("lines omitted"));
+        assert!(result.contains("of 100 lines"));
+        assert!(result.contains("pp_max_per_file_budget_tokens"));
     }
 
     #[test]

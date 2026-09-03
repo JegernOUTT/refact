@@ -179,6 +179,95 @@ function stageDotStatus(status: StageRun["status"]) {
   return "idle" as const;
 }
 
+function stageIncompleteLabel(stage: StageRun): string {
+  const status = stageStatusLabel(stage.status);
+  const reason = stage.reason !== null ? `: ${stage.reason}` : "";
+  return `${stage.name || "unnamed stage"} — ${status}${reason}`;
+}
+
+function OutcomeBanner({
+  incomplete,
+  report,
+}: {
+  incomplete: StageRun[];
+  report: ReviewReport;
+}) {
+  if (report.outcome === "inconclusive") {
+    return (
+      <div
+        className={styles.dangerCallout}
+        data-testid="review-outcome-banner"
+        role="alert"
+      >
+        <p className={styles.calloutTitle}>
+          Review inconclusive — no stage completed and nothing was verified.
+          This is not a pass.
+        </p>
+        {incomplete.length > 0 && (
+          <ul className={styles.calloutList}>
+            {incomplete.map((stage, index) => (
+              <li key={`${stage.name}-${index}`}>
+                {stageIncompleteLabel(stage)}
+                {stage.trace_chat_id !== null && (
+                  <>
+                    {" "}
+                    <span className={styles.mono}>
+                      trace: {stage.trace_chat_id}
+                    </span>
+                  </>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  }
+  if (report.outcome === "partial") {
+    const completed = report.stages.length - incomplete.length;
+    return (
+      <div
+        className={styles.warningCallout}
+        data-testid="review-outcome-banner"
+        role="status"
+      >
+        <p className={styles.calloutTitle}>
+          Partial review: {completed} of {report.stages.length} stages completed
+          — findings may be incomplete.
+        </p>
+        {incomplete.length > 0 && (
+          <ul className={styles.calloutList}>
+            {incomplete.map((stage, index) => (
+              <li key={`${stage.name}-${index}`}>
+                {stageIncompleteLabel(stage)}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  }
+  return null;
+}
+
+function DroppedFiles({ files }: { files: string[] }) {
+  if (files.length === 0) return null;
+  return (
+    <details className={styles.details} data-testid="review-dropped-files">
+      <summary>
+        {files.length} file{files.length === 1 ? "" : "s"} were not reviewed
+      </summary>
+      <ul className={styles.droppedList}>
+        {files.map((file, index) => (
+          <li className={styles.mono} key={`${file}-${index}`}>
+            {file}
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
 function coverageLabel(stage: StageRun): string {
   const parts: string[] = [];
   if (stage.coverage.files_read.length > 0) {
@@ -213,7 +302,22 @@ const stageColumns: DataTableColumn<StageRun>[] = [
       </span>
     ),
   },
-  { id: "reason", header: "Reason", cell: (row) => row.reason ?? "—" },
+  {
+    id: "reason",
+    header: "Reason",
+    cell: (row) => {
+      const showTrace =
+        row.trace_chat_id !== null &&
+        (row.status === "failed" || row.status === "timed_out");
+      if (!showTrace) return row.reason ?? "—";
+      return (
+        <span className={styles.reasonCell}>
+          {row.reason ?? "—"}{" "}
+          <span className={styles.mono}>trace: {row.trace_chat_id}</span>
+        </span>
+      );
+    },
+  },
   {
     id: "model",
     header: "Model",
@@ -262,6 +366,7 @@ export const ReviewReportView: React.FC<{ report: ReviewReport }> = ({
 
   return (
     <div className={styles.report} data-testid="review-report">
+      <OutcomeBanner incomplete={incomplete} report={report} />
       <Surface className={styles.header} variant="surface-2">
         <div className={styles.headerStrip}>
           <Badge tone="accent">{report.depth}</Badge>
@@ -287,12 +392,13 @@ export const ReviewReportView: React.FC<{ report: ReviewReport }> = ({
           {hypotheses.length} hypotheses · {report.duplicates_merged} duplicates
           merged · {report.scope.out_of_scope_findings} out of scope
         </p>
-        {incomplete.length > 0 && (
+        {incomplete.length > 0 && report.outcome === null && (
           <p className={styles.summary}>
             Partial review: {incomplete.length} stage(s) did not complete —
             absence of findings there is not evidence of absence.
           </p>
         )}
+        <DroppedFiles files={report.scope.dropped_files} />
       </Surface>
 
       {bySeverity
@@ -305,7 +411,7 @@ export const ReviewReportView: React.FC<{ report: ReviewReport }> = ({
           />
         ))}
 
-      {facts.length === 0 && (
+      {facts.length === 0 && report.outcome !== "inconclusive" && (
         <p className={styles.summary}>No supported findings.</p>
       )}
 

@@ -318,6 +318,10 @@ pub struct WorktreeDiffResponse {
     pub stats: WorktreeDiffStats,
     pub patch: String,
     pub patch_truncated: bool,
+    #[serde(default)]
+    pub patch_shown_bytes: usize,
+    #[serde(default)]
+    pub patch_total_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

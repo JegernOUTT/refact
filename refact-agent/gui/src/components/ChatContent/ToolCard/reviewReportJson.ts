@@ -2,12 +2,14 @@ import type { BadgeTone } from "../../ui";
 
 export type ReviewSeverity = "blocker" | "high" | "medium" | "low" | "note";
 export type StageStatus = "ok" | "timed_out" | "failed" | "not_run";
+export type ReviewOutcome = "reviewed" | "partial" | "inconclusive";
 
 export interface ReviewScope {
   mode: string;
   requested_files: number;
   reviewed_files: number;
   files: string[];
+  dropped_files: string[];
   focus: string | null;
   expansion: string | null;
   out_of_scope_findings: number;
@@ -40,6 +42,7 @@ export interface StageRun {
   duration_ms: number;
   findings: number;
   summary: string | null;
+  trace_chat_id: string | null;
   coverage: StageCoverage;
 }
 
@@ -77,6 +80,7 @@ export interface ReviewFinding {
 
 export interface ReviewReport {
   depth: string;
+  outcome: ReviewOutcome | null;
   scope: ReviewScope;
   diff: ReviewDiff;
   stages: StageRun[];
@@ -99,6 +103,12 @@ const stageStatuses: readonly StageStatus[] = [
   "timed_out",
   "failed",
   "not_run",
+];
+
+const reviewOutcomes: readonly ReviewOutcome[] = [
+  "reviewed",
+  "partial",
+  "inconclusive",
 ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -137,6 +147,13 @@ function memberOf<T extends string>(
     : fallback;
 }
 
+function normalizeOutcome(value: unknown): ReviewOutcome | null {
+  // Legacy payloads carry no outcome: render them as before, no banner.
+  if (typeof value !== "string") return null;
+  // New payloads fail closed: an unknown outcome must not look like a pass.
+  return memberOf(value, reviewOutcomes, "inconclusive");
+}
+
 function normalizeCommand(value: unknown): CommandRun | null {
   if (!isRecord(value)) return null;
   return { cmd: stringValue(value.cmd), exit: numberValue(value.exit) };
@@ -173,6 +190,7 @@ function normalizeStage(value: unknown): StageRun | null {
     duration_ms: numberValue(value.duration_ms),
     findings: numberValue(value.findings),
     summary: nullableString(value.summary),
+    trace_chat_id: nullableString(value.trace_chat_id),
     coverage: normalizeCoverage(value.coverage),
   };
 }
@@ -230,6 +248,7 @@ function normalizeScope(value: unknown): ReviewScope {
       requested_files: 0,
       reviewed_files: 0,
       files: [],
+      dropped_files: [],
       focus: null,
       expansion: null,
       out_of_scope_findings: 0,
@@ -240,6 +259,7 @@ function normalizeScope(value: unknown): ReviewScope {
     requested_files: numberValue(value.requested_files),
     reviewed_files: numberValue(value.reviewed_files),
     files: stringArray(value.files),
+    dropped_files: stringArray(value.dropped_files),
     focus: nullableString(value.focus),
     expansion: nullableString(value.expansion),
     out_of_scope_findings: numberValue(value.out_of_scope_findings),
@@ -263,6 +283,7 @@ export function parseReviewReport(value: unknown): ReviewReport | null {
   if (!isRecord(value.scope) || !Array.isArray(value.stages)) return null;
   return {
     depth: stringValue(value.depth, "normal"),
+    outcome: normalizeOutcome(value.outcome),
     scope: normalizeScope(value.scope),
     diff: normalizeDiff(value.diff),
     stages: value.stages

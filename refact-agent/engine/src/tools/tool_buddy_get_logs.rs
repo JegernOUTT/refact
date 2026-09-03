@@ -11,7 +11,17 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType
 
 const MAX_LINES: usize = 500;
 const DEFAULT_LINES: usize = 50;
-const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
+
+pub(crate) fn log_tail_truncation_notice(
+    shown_bytes: u64,
+    total_bytes: u64,
+    limit: usize,
+) -> String {
+    format!(
+        "⚠️ showing the last {} of {} log bytes (limit: get_logs_max_tail_bytes = {}). 💡 Raise get_logs_max_tail_bytes in trajectory settings to read more of the log.",
+        shown_bytes, total_bytes, limit
+    )
+}
 
 static REDACT_PATTERNS: &[&str] = &[
     r"sk-[a-zA-Z0-9]{20,}",
@@ -111,7 +121,9 @@ impl Tool for ToolBuddyGetLogs {
             resolve_log_dir(&cache_dir)
         };
 
-        let log_content = read_log_content(&log_path).await?;
+        let log_tail = read_log_content_with_notice(&log_path).await?;
+        let log_content = log_tail.text;
+        let tail_notice = log_tail.notice;
 
         let filtered: Vec<&str> = log_content
             .lines()
@@ -134,7 +146,7 @@ impl Tool for ToolBuddyGetLogs {
             .map(|l| redact_sensitive(l))
             .collect();
 
-        let output = if tail.is_empty() {
+        let mut output = if tail.is_empty() {
             "No log lines found matching the criteria.".to_string()
         } else {
             format!(
@@ -143,6 +155,9 @@ impl Tool for ToolBuddyGetLogs {
                 tail.join("\n")
             )
         };
+        if let Some(notice) = tail_notice {
+            output = format!("{}\n\n{}", notice, output);
+        }
 
         Ok((
             false,
@@ -237,7 +252,16 @@ pub fn resolve_log_dir(cache_dir: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
-pub(crate) async fn read_bounded_log_tail(log_path: &std::path::Path) -> Result<String, String> {
+pub(crate) struct BoundedLogTail {
+    pub text: String,
+    pub notice: Option<String>,
+}
+
+pub(crate) async fn read_bounded_log_tail_with_notice(
+    log_path: &std::path::Path,
+) -> Result<BoundedLogTail, String> {
+    let limit = crate::runtime_settings::current().get_logs_max_tail_bytes;
+    let max_bytes = limit as u64;
     let mut file = tokio::fs::File::open(log_path)
         .await
         .map_err(|e| format!("failed to read log file {:?}: {}", log_path, e))?;
@@ -246,7 +270,7 @@ pub(crate) async fn read_bounded_log_tail(log_path: &std::path::Path) -> Result<
         .await
         .map_err(|e| format!("failed to stat log file {:?}: {}", log_path, e))?
         .len();
-    let start = len.saturating_sub(MAX_LOG_TAIL_BYTES);
+    let start = len.saturating_sub(max_bytes);
     file.seek(std::io::SeekFrom::Start(start))
         .await
         .map_err(|e| format!("failed to seek log file {:?}: {}", log_path, e))?;
@@ -260,12 +284,23 @@ pub(crate) async fn read_bounded_log_tail(log_path: &std::path::Path) -> Result<
             text = text[pos + 1..].to_string();
         }
     }
-    Ok(text)
+    let notice = if start > 0 {
+        Some(log_tail_truncation_notice(text.len() as u64, len, limit))
+    } else {
+        None
+    };
+    Ok(BoundedLogTail { text, notice })
 }
 
-async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> {
+pub(crate) async fn read_bounded_log_tail(log_path: &std::path::Path) -> Result<String, String> {
+    Ok(read_bounded_log_tail_with_notice(log_path).await?.text)
+}
+
+pub(crate) async fn read_log_content_with_notice(
+    log_path: &std::path::Path,
+) -> Result<BoundedLogTail, String> {
     if log_path.is_file() {
-        return read_bounded_log_tail(log_path).await;
+        return read_bounded_log_tail_with_notice(log_path).await;
     }
 
     if log_path.is_dir() {
@@ -301,7 +336,7 @@ async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> 
         });
 
         if let Some((newest, _)) = files.first() {
-            return read_bounded_log_tail(newest).await;
+            return read_bounded_log_tail_with_notice(newest).await;
         }
     }
 
@@ -309,8 +344,15 @@ async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> 
 }
 
 #[cfg(test)]
+async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> {
+    Ok(read_log_content_with_notice(log_path).await?.text)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::settings_guard::SettingsGuard;
+    use serial_test::serial;
 
     #[test]
     fn test_buddy_get_logs_redaction() {
@@ -367,18 +409,67 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn get_logs_tail_bytes_setting_changes_bytes_read_and_notice() {
+        let _guard = SettingsGuard::install(|settings| {
+            settings.get_logs_max_tail_bytes = 4_096;
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rustbinary.2026-07-01");
+        let content = format!("old-start\n{}\nrecent-tail", "x".repeat(20_000));
+        let total = content.len();
+        tokio::fs::write(&path, content).await.unwrap();
+
+        let tail = read_bounded_log_tail_with_notice(&path).await.unwrap();
+
+        assert!(
+            tail.text.len() <= 4_096,
+            "tail {} bytes exceeds installed cap",
+            tail.text.len()
+        );
+        assert!(!tail.text.contains("old-start"));
+        assert!(tail.text.contains("recent-tail"));
+        let notice = tail.notice.expect("expected a truncation notice");
+        assert!(
+            notice.contains(&format!("of {} log bytes", total))
+                && notice.contains("get_logs_max_tail_bytes = 4096"),
+            "expected a quantified log-tail notice, got: {}",
+            notice
+        );
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn get_logs_tail_emits_no_notice_when_whole_log_fits() {
+        let _guard = SettingsGuard::install(|settings| {
+            settings.get_logs_max_tail_bytes = 1_048_576;
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rustbinary.2026-07-01");
+        tokio::fs::write(&path, "line one\nline two\n")
+            .await
+            .unwrap();
+
+        let tail = read_bounded_log_tail_with_notice(&path).await.unwrap();
+
+        assert_eq!(tail.text, "line one\nline two\n");
+        assert!(tail.notice.is_none());
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
     async fn large_file_tail_does_not_read_whole_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rustbinary.2026-07-01");
         let content = format!(
             "old-start\n{}\nrecent-tail",
-            "x".repeat(MAX_LOG_TAIL_BYTES as usize + 1024)
+            "x".repeat(crate::runtime_settings::current().get_logs_max_tail_bytes + 1024)
         );
         tokio::fs::write(&path, content).await.unwrap();
 
         let tail = read_log_content(&path).await.unwrap();
 
-        assert!(tail.len() <= MAX_LOG_TAIL_BYTES as usize);
+        assert!(tail.len() <= crate::runtime_settings::current().get_logs_max_tail_bytes);
         assert!(!tail.contains("old-start"));
         assert!(tail.contains("recent-tail"));
     }

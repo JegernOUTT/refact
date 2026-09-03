@@ -75,5 +75,12 @@ CREATE TABLE IF NOT EXISTS file_hashes (
     hash TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS parse_failures (
+    path              TEXT PRIMARY KEY,
+    lang              TEXT NOT NULL DEFAULT '',
+    reason            TEXT NOT NULL DEFAULT '',
+    symbols_recovered INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_code USING fts5(path UNINDEXED, text);
 "#;

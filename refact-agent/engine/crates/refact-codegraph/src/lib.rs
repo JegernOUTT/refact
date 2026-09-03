@@ -1,5 +1,6 @@
 pub mod analytics;
 pub mod communities;
+pub mod config;
 pub mod dead_code;
 pub mod extract;
 pub mod facade;
@@ -22,7 +23,9 @@ use tokio::sync::Mutex as AMutex;
 use tokio::sync::Notify;
 use tracing::debug;
 
-pub use store::{Counts, Store, WalCheckpointMode, WalCheckpointResult};
+pub use store::{Counts, IndexedFile, ParseFailure, Store, WalCheckpointMode, WalCheckpointResult};
+
+pub const PARSE_FAILURE_REPORT_LIMIT: i64 = 50;
 
 pub fn lang_from_path(path: &str) -> &'static str {
     match Path::new(path)
@@ -61,7 +64,7 @@ pub struct CachedGraphAnalytics {
     pub data: analytics::GraphData,
     pub analytics: analytics::GraphAnalytics,
     pub communities: Vec<communities::Community>,
-    pub dead_code: Vec<dead_code::DeadSymbol>,
+    pub dead_code: dead_code::DeadCodeResult,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +94,8 @@ pub struct IndexReadiness {
     pub pending_refs: i64,
     pub cross_file_edges: i64,
     pub cross_file_ready: bool,
+    pub parse_failures: i64,
+    pub parse_failure_paths: Vec<String>,
 }
 
 pub struct CodeGraphService {
@@ -106,6 +111,7 @@ pub struct CodeGraphService {
     scoped_analytics_cache: AMutex<ScopedAnalyticsCache>,
     analytics_rebuild_count: AtomicUsize,
     scoped_analytics_rebuild_count: AtomicUsize,
+    run_parse_failures: AtomicUsize,
 }
 
 fn normalize_indexed_path(path: &str) -> String {
@@ -329,6 +335,7 @@ impl CodeGraphService {
             }),
             analytics_rebuild_count: AtomicUsize::new(0),
             scoped_analytics_rebuild_count: AtomicUsize::new(0),
+            run_parse_failures: AtomicUsize::new(0),
         })
     }
 
@@ -349,6 +356,7 @@ impl CodeGraphService {
             }),
             analytics_rebuild_count: AtomicUsize::new(0),
             scoped_analytics_rebuild_count: AtomicUsize::new(0),
+            run_parse_failures: AtomicUsize::new(0),
         })
     }
 
@@ -470,25 +478,32 @@ impl CodeGraphService {
         self.scoped_analytics_rebuild_count.load(Ordering::Relaxed)
     }
 
-    pub async fn index_file(&self, path: &str, text: &str, lang: &str) -> Result<(), String> {
+    pub async fn index_file(
+        &self,
+        path: &str,
+        text: &str,
+        lang: &str,
+    ) -> Result<IndexedFile, String> {
         let store = self.store.lock().await;
-        let (_file_id, changed) = store.index_file_graph(path, text, lang)?;
+        let indexed = store.index_file_graph(path, text, lang)?;
         drop(store);
-        if changed {
+        self.record_run_parse_failures(std::slice::from_ref(&indexed));
+        if indexed.changed {
             self.bump_graph_generation();
         }
-        Ok(())
+        Ok(indexed)
     }
 
     pub async fn index_files_batch(
         &self,
         entries: &[(String, String, String)],
-    ) -> Result<Vec<(i64, bool)>, String> {
+    ) -> Result<Vec<IndexedFile>, String> {
         let store = self.store.lock().await;
         let results = store.index_files_batch(entries)?;
-        let changed = results.iter().any(|(_, changed)| *changed);
+        let changed = results.iter().any(|indexed| indexed.changed);
         Self::checkpoint_wal_failure_tolerant(&store, WalCheckpointMode::Passive);
         drop(store);
+        self.record_run_parse_failures(&results);
         if changed {
             self.bump_graph_generation();
         }
@@ -550,12 +565,18 @@ impl CodeGraphService {
 
     pub async fn index_readiness(&self) -> Result<IndexReadiness, String> {
         let queued = self.queue_len();
-        let (dirty_paths, pending_refs, cross_file_edges) = self
-            .with_read_store(|store| {
+        let (dirty_paths, pending_refs, cross_file_edges, parse_failures, parse_failure_paths) =
+            self.with_read_store(|store| {
                 Ok((
                     store.dirty_path_count()? as i64,
                     store.pending_ref_count()?,
                     store.cross_file_edge_count()?,
+                    store.parse_failure_count()?,
+                    store
+                        .parse_failures(PARSE_FAILURE_REPORT_LIMIT)?
+                        .into_iter()
+                        .map(|failure| failure.path)
+                        .collect::<Vec<_>>(),
                 ))
             })
             .await?;
@@ -565,7 +586,38 @@ impl CodeGraphService {
             pending_refs,
             cross_file_edges,
             cross_file_ready: queued == 0 && dirty_paths == 0,
+            parse_failures,
+            parse_failure_paths,
         })
+    }
+
+    pub async fn parse_failure_count(&self) -> Result<i64, String> {
+        self.with_read_store(|store| store.parse_failure_count())
+            .await
+    }
+
+    pub async fn parse_failures(&self, limit: i64) -> Result<Vec<ParseFailure>, String> {
+        self.with_read_store(|store| store.parse_failures(limit))
+            .await
+    }
+
+    pub fn run_parse_failures(&self) -> usize {
+        self.run_parse_failures.load(Ordering::Relaxed)
+    }
+
+    pub fn reset_run_parse_failures(&self) {
+        self.run_parse_failures.store(0, Ordering::Relaxed);
+    }
+
+    fn record_run_parse_failures(&self, indexed: &[IndexedFile]) {
+        let failures = indexed
+            .iter()
+            .filter(|entry| entry.parse_failure.is_some())
+            .count();
+        if failures > 0 {
+            self.run_parse_failures
+                .fetch_add(failures, Ordering::Relaxed);
+        }
     }
 
     pub async fn meta_get(&self, key: &str) -> Result<Option<String>, String> {
@@ -760,7 +812,7 @@ impl CodeGraphService {
         communities::execution_flows_from_data(&cached.data, max_flows)
     }
 
-    pub async fn dead_code(&self) -> Result<Vec<dead_code::DeadSymbol>, String> {
+    pub async fn dead_code(&self) -> Result<dead_code::DeadCodeResult, String> {
         Ok(self.cached_graph_analytics().await?.dead_code.clone())
     }
 
@@ -1262,6 +1314,69 @@ mod tests {
         assert_eq!(
             resolve_indexed_paths(&["missing.rs".to_string()], &indexed),
             vec!["missing.rs".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn indexer_continues_past_parse_failure_and_reports_the_count() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+        let entries = vec![
+            (
+                "src/good.rs".to_string(),
+                "pub fn good() {}\n".to_string(),
+                "rust".to_string(),
+            ),
+            (
+                "src/broken.rs".to_string(),
+                "fn broken( { ; ) } !!!\n".to_string(),
+                "rust".to_string(),
+            ),
+            (
+                "src/also_good.rs".to_string(),
+                "pub fn also_good() {}\n".to_string(),
+                "rust".to_string(),
+            ),
+        ];
+
+        let results = service.index_files_batch(&entries).await.unwrap();
+
+        assert_eq!(results.len(), 3, "one bad file must not abort the batch");
+        assert_eq!(service.run_parse_failures(), 1);
+        assert_eq!(service.parse_failure_count().await.unwrap(), 1);
+        let readiness = service.index_readiness().await.unwrap();
+        assert_eq!(readiness.parse_failures, 1);
+        assert_eq!(
+            readiness.parse_failure_paths,
+            vec!["src/broken.rs".to_string()]
+        );
+        assert_eq!(service.all_paths().await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn empty_file_and_failed_file_are_not_conflated_by_the_service() {
+        let service = CodeGraphService::open_in_memory().unwrap();
+
+        let empty = service
+            .index_file("src/empty.rs", "// nothing\n", "rust")
+            .await
+            .unwrap();
+        assert!(empty.parse_failure.is_none());
+        assert_eq!(service.parse_failure_count().await.unwrap(), 0);
+
+        let broken = service
+            .index_file("src/broken.rs", "fn broken( { ; ) } !!!\n", "rust")
+            .await
+            .unwrap();
+        assert!(broken.parse_failure.is_some());
+        assert_eq!(service.parse_failure_count().await.unwrap(), 1);
+        assert_eq!(service.run_parse_failures(), 1);
+
+        service.reset_run_parse_failures();
+        assert_eq!(service.run_parse_failures(), 0);
+        assert_eq!(
+            service.parse_failure_count().await.unwrap(),
+            1,
+            "resetting the per-run counter must not erase the persisted record"
         );
     }
 

@@ -213,6 +213,24 @@ pub struct Counts {
     pub fts_docs: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParseFailure {
+    pub path: String,
+    #[serde(default)]
+    pub lang: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub symbols_recovered: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedFile {
+    pub file_id: i64,
+    pub changed: bool,
+    pub parse_failure: Option<ParseFailure>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolData {
     pub node_id: i64,
@@ -275,7 +293,13 @@ pub struct Store {
 impl Store {
     pub fn open(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            match std::fs::create_dir_all(parent) {
+                Ok(()) => {}
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
+                Err(err) => {
+                    return Err(format!("codegraph create store dir {parent:?}: {err}"));
+                }
+            }
         }
         let conn = Connection::open(path).map_err(|e| format!("codegraph open {path:?}: {e}"))?;
         let conn = if Self::schema_mismatch(&conn)? {
@@ -1055,6 +1079,59 @@ impl Store {
         )
     }
 
+    fn record_parse_failure_on(
+        conn: &Connection,
+        path: &str,
+        lang: &str,
+        reason: &str,
+        symbols_recovered: i64,
+    ) -> Result<(), String> {
+        conn.execute(
+            "INSERT INTO parse_failures(path, lang, reason, symbols_recovered) \
+             VALUES(?1, ?2, ?3, ?4) \
+             ON CONFLICT(path) DO UPDATE SET lang = excluded.lang, reason = excluded.reason, \
+             symbols_recovered = excluded.symbols_recovered",
+            params![path, lang, reason, symbols_recovered],
+        )
+        .map_err(|e| format!("codegraph record parse failure {path}: {e}"))?;
+        Ok(())
+    }
+
+    fn clear_parse_failure_on(conn: &Connection, path: &str) -> Result<(), String> {
+        conn.execute("DELETE FROM parse_failures WHERE path = ?1", params![path])
+            .map_err(|e| format!("codegraph clear parse failure {path}: {e}"))?;
+        Ok(())
+    }
+
+    pub fn parse_failure_count(&self) -> Result<i64, String> {
+        self.scalar_i64("SELECT COUNT(*) FROM parse_failures")
+    }
+
+    pub fn parse_failures(&self, limit: i64) -> Result<Vec<ParseFailure>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT path, lang, reason, symbols_recovered FROM parse_failures \
+                 ORDER BY path LIMIT ?1",
+            )
+            .map_err(|e| format!("codegraph parse_failures prepare: {e}"))?;
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                Ok(ParseFailure {
+                    path: row.get(0)?,
+                    lang: row.get(1)?,
+                    reason: row.get(2)?,
+                    symbols_recovered: row.get(3)?,
+                })
+            })
+            .map_err(|e| format!("codegraph parse_failures query: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("codegraph parse_failures row: {e}"))?);
+        }
+        Ok(out)
+    }
+
     fn mark_path_dirty_on(conn: &Connection, path: &str) -> Result<(), String> {
         conn.execute(
             "INSERT OR IGNORE INTO dirty_paths(path) VALUES(?1)",
@@ -1200,6 +1277,7 @@ impl Store {
             .map_err(|e| format!("codegraph remove nodes: {e}"))?;
         conn.execute("DELETE FROM fts_code WHERE path = ?1", params![path])
             .map_err(|e| format!("codegraph remove fts: {e}"))?;
+        Self::clear_parse_failure_on(conn, path)?;
         if delete_hash {
             conn.execute("DELETE FROM file_hashes WHERE path = ?1", params![path])
                 .map_err(|e| format!("codegraph remove file hash: {e}"))?;
@@ -1407,7 +1485,7 @@ impl Store {
     pub fn index_files_batch(
         &self,
         entries: &[(String, String, String)],
-    ) -> Result<Vec<(i64, bool)>, String> {
+    ) -> Result<Vec<IndexedFile>, String> {
         let started = Instant::now();
         let tx = self
             .conn
@@ -1419,17 +1497,29 @@ impl Store {
             if Self::stored_file_hash_on(&tx, path)?.as_deref() == Some(hash.as_str()) {
                 if let Some(file_id) = Self::file_node_id_on(&tx, path)? {
                     debug!("codegraph: index_files_batch hash-skip {path}");
-                    out.push((file_id, false));
+                    out.push(IndexedFile {
+                        file_id,
+                        changed: false,
+                        parse_failure: None,
+                    });
                     continue;
                 }
             }
-            let file_id = Self::index_file_graph_on(&tx, path, text, lang, &hash)?;
-            out.push((file_id, true));
+            let (file_id, parse_failure) = Self::index_file_graph_on(&tx, path, text, lang, &hash)?;
+            out.push(IndexedFile {
+                file_id,
+                changed: true,
+                parse_failure,
+            });
         }
         tx.commit()
             .map_err(|e| format!("codegraph index_files_batch commit: {e}"))?;
+        let parse_failures = out
+            .iter()
+            .filter(|indexed| indexed.parse_failure.is_some())
+            .count();
         debug!(
-            "codegraph: indexed batch of {} files in {}ms",
+            "codegraph: indexed batch of {} files in {}ms, {parse_failures} parse failures",
             entries.len(),
             started.elapsed().as_millis()
         );
@@ -1468,17 +1558,38 @@ impl Store {
         text: &str,
         lang: &str,
         hash: &str,
-    ) -> Result<i64, String> {
-        let (symbols, refs) = extract_symbols(lang, text);
+    ) -> Result<(i64, Option<ParseFailure>), String> {
+        let (symbols, refs, parse_failure) = match extract_symbols(lang, text) {
+            Ok((symbols, refs)) => (symbols, refs, None),
+            Err(err) => {
+                let failure = ParseFailure {
+                    path: path.to_string(),
+                    lang: err.lang.clone(),
+                    reason: err.reason.clone(),
+                    symbols_recovered: err.symbols.len() as i64,
+                };
+                (err.symbols, err.refs, Some(failure))
+            }
+        };
         let routes = refact_codegraph_parsers::frameworks::detect_routes(lang, text);
         debug!(
-            "codegraph: index_file_graph {path}: {} symbols, {} refs, {} routes",
+            "codegraph: index_file_graph {path}: {} symbols, {} refs, {} routes, parse_failed={}",
             symbols.len(),
             refs.len(),
-            routes.len()
+            routes.len(),
+            parse_failure.is_some()
         );
 
         let file_id = Self::index_file_on(conn, path, text, lang, hash)?;
+        if let Some(failure) = &parse_failure {
+            Self::record_parse_failure_on(
+                conn,
+                path,
+                &failure.lang,
+                &failure.reason,
+                failure.symbols_recovered,
+            )?;
+        }
 
         let mut resolver = Resolver::new();
         for symbol in &symbols {
@@ -1565,7 +1676,7 @@ impl Store {
             Self::add_pending_ref_on(conn, route_id, &route.handler, "route_handler", 0)?;
         }
 
-        Ok(file_id)
+        Ok((file_id, parse_failure))
     }
 
     pub fn index_file_graph(
@@ -1573,22 +1684,48 @@ impl Store {
         path: &str,
         text: &str,
         lang: &str,
-    ) -> Result<(i64, bool), String> {
+    ) -> Result<IndexedFile, String> {
         let hash = content_hash(text, lang);
         if self.stored_file_hash(path)?.as_deref() == Some(hash.as_str()) {
             if let Some(file_id) = self.file_node_id(path)? {
                 debug!("codegraph: index_file_graph hash-skip {path}");
-                return Ok((file_id, false));
+                return Ok(IndexedFile {
+                    file_id,
+                    changed: false,
+                    parse_failure: self.parse_failure_for_path(path)?,
+                });
             }
         }
         let tx = self
             .conn
             .unchecked_transaction()
             .map_err(|e| format!("codegraph index_file_graph transaction: {e}"))?;
-        let file_id = Self::index_file_graph_on(&tx, path, text, lang, &hash)?;
+        let (file_id, parse_failure) = Self::index_file_graph_on(&tx, path, text, lang, &hash)?;
         tx.commit()
             .map_err(|e| format!("codegraph index_file_graph commit: {e}"))?;
-        Ok((file_id, true))
+        Ok(IndexedFile {
+            file_id,
+            changed: true,
+            parse_failure,
+        })
+    }
+
+    pub fn parse_failure_for_path(&self, path: &str) -> Result<Option<ParseFailure>, String> {
+        self.conn
+            .query_row(
+                "SELECT path, lang, reason, symbols_recovered FROM parse_failures WHERE path = ?1",
+                params![path],
+                |row| {
+                    Ok(ParseFailure {
+                        path: row.get(0)?,
+                        lang: row.get(1)?,
+                        reason: row.get(2)?,
+                        symbols_recovered: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| format!("codegraph parse_failure_for_path {path}: {e}"))
     }
 
     pub fn counts(&self) -> Result<Counts, String> {
@@ -2469,7 +2606,12 @@ fn helper() {}
         let individual = Store::open_in_memory().unwrap();
         let mut individual_results = Vec::new();
         for (path, text, lang) in &entries {
-            individual_results.push(individual.index_file_graph(path, text, lang).unwrap().1);
+            individual_results.push(
+                individual
+                    .index_file_graph(path, text, lang)
+                    .unwrap()
+                    .changed,
+            );
         }
         let batch = Store::open_in_memory().unwrap();
 
@@ -2478,7 +2620,7 @@ fn helper() {}
         assert_eq!(
             batch_results
                 .iter()
-                .map(|(_, changed)| *changed)
+                .map(|indexed| indexed.changed)
                 .collect::<Vec<_>>(),
             individual_results
         );
@@ -2491,6 +2633,104 @@ fn helper() {}
         assert_eq!(
             file_hash_signature(&batch),
             file_hash_signature(&individual)
+        );
+    }
+
+    #[test]
+    fn parse_failure_is_distinguishable_from_genuine_emptiness() {
+        let store = Store::open_in_memory().unwrap();
+
+        let empty = store
+            .index_file_graph("src/empty.rs", "// no symbols at all\n", "rust")
+            .unwrap();
+        let broken = store
+            .index_file_graph("src/broken.rs", "fn broken( { ; ) } !!!\n", "rust")
+            .unwrap();
+
+        assert!(empty.parse_failure.is_none());
+        let failure = broken
+            .parse_failure
+            .expect("malformed file must be flagged");
+        assert_eq!(failure.path, "src/broken.rs");
+        assert_eq!(failure.lang, "rust");
+        assert!(!failure.reason.is_empty());
+        assert_eq!(store.parse_failure_count().unwrap(), 1);
+        assert_eq!(
+            store
+                .parse_failures(10)
+                .unwrap()
+                .into_iter()
+                .map(|failure| failure.path)
+                .collect::<Vec<_>>(),
+            vec!["src/broken.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn batch_continues_past_parse_failure_and_counts_it() {
+        let store = Store::open_in_memory().unwrap();
+        let entries = vec![
+            (
+                "src/good_a.rs".to_string(),
+                "pub fn good_a() {}\n".to_string(),
+                "rust".to_string(),
+            ),
+            (
+                "src/broken.rs".to_string(),
+                "fn broken( { ; ) } !!!\n".to_string(),
+                "rust".to_string(),
+            ),
+            (
+                "src/good_b.rs".to_string(),
+                "pub fn good_b() {}\n".to_string(),
+                "rust".to_string(),
+            ),
+        ];
+
+        let results = store.index_files_batch(&entries).unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|indexed| indexed.changed));
+        assert_eq!(
+            results
+                .iter()
+                .filter(|indexed| indexed.parse_failure.is_some())
+                .count(),
+            1
+        );
+        assert_eq!(store.parse_failure_count().unwrap(), 1);
+        assert_eq!(node_count(&store, "src/good_a.rs", "good_a"), 1);
+        assert_eq!(node_count(&store, "src/good_b.rs", "good_b"), 1);
+    }
+
+    #[test]
+    fn reindexing_a_fixed_file_clears_its_parse_failure() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .index_file_graph("src/m.rs", "fn broken( { ; ) } !!!\n", "rust")
+            .unwrap();
+        assert_eq!(store.parse_failure_count().unwrap(), 1);
+
+        let fixed = store
+            .index_file_graph("src/m.rs", "pub fn fixed() {}\n", "rust")
+            .unwrap();
+
+        assert!(fixed.parse_failure.is_none());
+        assert_eq!(store.parse_failure_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn hash_skip_still_reports_a_previously_recorded_parse_failure() {
+        let store = Store::open_in_memory().unwrap();
+        let src = "fn broken( { ; ) } !!!\n";
+        store.index_file_graph("src/m.rs", src, "rust").unwrap();
+
+        let skipped = store.index_file_graph("src/m.rs", src, "rust").unwrap();
+
+        assert!(!skipped.changed);
+        assert!(
+            skipped.parse_failure.is_some(),
+            "a hash-skipped broken file must not look freshly clean"
         );
     }
 
@@ -2517,8 +2757,8 @@ fn helper() {}
 
         let second = store.index_files_batch(&entries).unwrap();
 
-        assert!(first.iter().all(|(_, changed)| *changed));
-        assert!(second.iter().all(|(_, changed)| !*changed));
+        assert!(first.iter().all(|indexed| indexed.changed));
+        assert!(second.iter().all(|indexed| !indexed.changed));
         assert_eq!(store.counts().unwrap(), counts);
         assert_eq!(edge_signature(&store), edges);
         assert_eq!(file_hash_signature(&store), hashes);
@@ -2529,17 +2769,17 @@ fn helper() {}
     fn identical_content_uses_hash_skip_without_dirtying() {
         let store = Store::open_in_memory().unwrap();
         let src = "fn a() { b(); }\nfn b() {}\n";
-        let (first_id, first_changed) = store.index_file_graph("src/m.rs", src, "rust").unwrap();
+        let first_indexed = store.index_file_graph("src/m.rs", src, "rust").unwrap();
         store.connect_usages().unwrap();
         assert!(!store.has_dirty_paths().unwrap());
         let first = store.counts().unwrap();
 
-        let (second_id, second_changed) = store.index_file_graph("src/m.rs", src, "rust").unwrap();
+        let second_indexed = store.index_file_graph("src/m.rs", src, "rust").unwrap();
         let second = store.counts().unwrap();
 
-        assert_eq!(first_id, second_id);
-        assert!(first_changed);
-        assert!(!second_changed);
+        assert_eq!(first_indexed.file_id, second_indexed.file_id);
+        assert!(first_indexed.changed);
+        assert!(!second_indexed.changed);
         assert_eq!(first, second);
         assert!(!store.has_dirty_paths().unwrap());
     }

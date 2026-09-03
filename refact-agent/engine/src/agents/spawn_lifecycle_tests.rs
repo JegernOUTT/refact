@@ -135,6 +135,7 @@ fn completed_result(mut messages: Vec<ChatMessage>, config: SubchatConfig) -> Su
         messages,
         metering: serde_json::Map::new(),
         chat_id: config.chat_id,
+        aborted: false,
     }
 }
 
@@ -767,6 +768,7 @@ async fn registered_subagent_session_mirrors_runner_messages_while_generating() 
                     messages: final_messages,
                     metering: serde_json::Map::new(),
                     chat_id: config.chat_id,
+                    aborted: false,
                 })
             })
         }))

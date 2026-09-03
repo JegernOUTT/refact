@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,15 +16,19 @@ use crate::tools::review_agents::config::{
     load_review_config, slot_model_id, stage_subchat_spec, ReviewConfig,
 };
 use crate::tools::review_agents::prompts::{build_adversarial_prompt, build_stage_prompt};
-use crate::tools::review_agents::runner::{merge_metering, now_ms, StageCtx, StageJob};
+use crate::tools::review_agents::runner::{
+    merge_metering, now_ms, stage_trace_chat_id, StageCtx, StageJob,
+};
 use crate::tools::review_agents::stages::{load_stage_catalog, select_stages, StagePhase, StageSpec};
-use crate::tools::review_agents::{run_stage_jobs, ScheduleParams, StageExecutor, SubchatExecutor};
+use crate::tools::review_agents::{
+    run_stage_jobs, ScheduleParams, StageExecutor, SubchatExecutor, HARVEST_GRACE,
+};
 use crate::tools::review_evidence::verify_evidence;
 use crate::tools::review_merge::{merge_findings, rank_findings};
 use crate::tools::review_scope::{build_review_scope, DiffAttribution, ReviewScope, ScopeRequest};
 use crate::tools::review_types::{
-    Dispute, ReviewDepth, ReviewFinding, ReviewReport, ReviewSeverity, ScopeMode, StageRun,
-    StageStatusKind,
+    Dispute, ReviewDepth, ReviewFinding, ReviewOutcome, ReviewReport, ReviewSeverity, ScopeMode,
+    StageRun, StageStatusKind,
 };
 use crate::tools::subagent_phases::resolve_gathered_file_path;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
@@ -162,13 +167,14 @@ fn scratch_dir(gcx_project: Option<&Path>, review_id: &str) -> Option<PathBuf> {
     gcx_project.map(|root| root.join(".refact").join("review_scratch").join(review_id))
 }
 
-async fn write_scratch(dir: &Path, stage: &str, payload: &Value) {
+async fn write_scratch(dir: &Path, stage: &str, payload: &Value) -> bool {
     if tokio::fs::create_dir_all(dir).await.is_err() {
-        return;
+        return false;
     }
     let path = dir.join(format!("{stage}.json"));
-    if let Ok(text) = serde_json::to_string_pretty(payload) {
-        let _ = tokio::fs::write(path, text).await;
+    match serde_json::to_string_pretty(payload) {
+        Ok(text) => tokio::fs::write(path, text).await.is_ok(),
+        Err(_) => false,
     }
 }
 
@@ -208,9 +214,11 @@ struct StagePlan {
     rows: Vec<StageRun>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn plan_jobs(
     gcx: Arc<GlobalContext>,
     cfg: &ReviewConfig,
+    review_id: &str,
     scope: &ReviewScope,
     specs: Vec<StageSpec>,
     variants: usize,
@@ -250,6 +258,7 @@ async fn plan_jobs(
             if index > 0 && spec.writes_allowed {
                 continue;
             }
+            let trace_chat_id = stage_trace_chat_id(review_id, &label);
             jobs.push(StageJob {
                 spec: spec.clone(),
                 label,
@@ -262,6 +271,15 @@ async fn plan_jobs(
                         .then_some(browser_scenario)
                         .flatten(),
                 ),
+                trace_chat_id,
+                budget: Duration::from_secs(
+                    overrides
+                        .budget_minutes
+                        .unwrap_or(spec.budget_minutes)
+                        .max(1)
+                        * 60,
+                ),
+                abort: Arc::new(AtomicBool::new(false)),
             });
         }
     }
@@ -302,6 +320,11 @@ fn stage_line(run: &StageRun) -> String {
     let mut line = format!("{} {status}", run.name);
     if let Some(reason) = run.reason.as_deref() {
         line.push_str(&format!(" ({})", markdown_cell(reason)));
+    }
+    if run.status != StageStatusKind::Ok {
+        if let Some(trace) = run.trace_chat_id.as_deref() {
+            line.push_str(&format!(" [transcript {}]", markdown_cell(trace)));
+        }
     }
     line
 }
@@ -384,10 +407,31 @@ fn render_finding(finding: &ReviewFinding) -> String {
     line
 }
 
+fn incomplete_stage_lines(report: &ReviewReport) -> String {
+    report
+        .incomplete_stages()
+        .into_iter()
+        .map(|run| {
+            format!(
+                "\n- {}: {} ({})",
+                run.name,
+                run.status.as_str(),
+                markdown_cell(run.reason.as_deref().unwrap_or("no reason reported"))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 pub fn render_review_markdown(report: &ReviewReport) -> String {
     let scope = &report.scope;
+    let badge = match report.outcome {
+        ReviewOutcome::Reviewed => "",
+        ReviewOutcome::Partial => " ⚠️ PARTIAL",
+        ReviewOutcome::Inconclusive => " ⚠️ INCONCLUSIVE",
+    };
     let mut header = format!(
-        "## Review · {} file(s) requested → {} reviewed ({}",
+        "## Review{badge} · {} file(s) requested → {} reviewed ({}",
         scope.requested_files, scope.reviewed_files, scope.mode
     );
     if let Some(expansion) = scope.expansion.as_deref() {
@@ -454,7 +498,29 @@ pub fn render_review_markdown(report: &ReviewReport) -> String {
         }
     }
     if facts.is_empty() {
-        output.push_str("\n\n### No supported findings");
+        let completed = report.completed_stages();
+        let incomplete = report.stages.len() - completed;
+        match report.outcome {
+            ReviewOutcome::Reviewed => output.push_str("\n\n### No supported findings"),
+            ReviewOutcome::Inconclusive => {
+                output.push_str(&format!(
+                    "\n\n### Nothing was checked — this is NOT a pass\n\nEvery stage of this review ended without producing a result, so no part of the change was actually reviewed. Do not read the empty findings list as approval. Incomplete stage(s) ({incomplete}):{}",
+                    incomplete_stage_lines(report)
+                ));
+            }
+            ReviewOutcome::Partial => {
+                output.push_str(&format!(
+                    "\n\n### No supported findings from the {completed} stage(s) that completed\n\n{incomplete} stage(s) did not complete, so their part of the change was not reviewed:{}",
+                    incomplete_stage_lines(report)
+                ));
+            }
+        }
+    } else if report.outcome != ReviewOutcome::Reviewed {
+        let incomplete = report.stages.len() - report.completed_stages();
+        output.push_str(&format!(
+            "\n\n### Stages that did not complete ({incomplete}){}",
+            incomplete_stage_lines(report)
+        ));
     }
 
     if !hypotheses.is_empty() {
@@ -476,6 +542,15 @@ pub fn render_review_markdown(report: &ReviewReport) -> String {
         output.push_str("\n\n### Stage coverage");
         for line in coverage {
             output.push_str(&line);
+        }
+    }
+    if !scope.dropped_files.is_empty() {
+        output.push_str(&format!(
+            "\n\n### Files not reviewed ({})",
+            scope.dropped_files.len()
+        ));
+        for file in &scope.dropped_files {
+            output.push_str(&format!("\n- {}", markdown_cell(file)));
         }
     }
     if let Some(dir) = report.scratch_dir.as_deref() {
@@ -584,6 +659,7 @@ async fn run_review(
     let plan = plan_jobs(
         gcx.clone(),
         &cfg,
+        &ctx.review_id,
         &scope,
         parallel,
         variants,
@@ -597,15 +673,17 @@ async fn run_review(
             .parallel_depth
             .unwrap_or(cfg.settings.parallel_depth)
             .max(1),
-        stage_budget: Duration::from_secs(
+        stage_ceiling: Duration::from_secs(
             args.stage_budget_minutes
                 .unwrap_or(cfg.settings.stage_budget_minutes)
                 .max(1)
                 * 60,
         ),
-        writes_stage_budget: Duration::from_secs(
+        writes_stage_ceiling: Duration::from_secs(
             cfg.settings.writes_stage_budget_minutes.max(1) * 60,
         ),
+        idle_timeout: Duration::from_secs(cfg.settings.idle_timeout_secs),
+        grace: HARVEST_GRACE,
         deadline: Some(
             tokio::time::Instant::now()
                 + Duration::from_secs(
@@ -629,10 +707,11 @@ async fn run_review(
     });
 
     let mut findings: Vec<ReviewFinding> = Vec::new();
+    let mut scratch_written = false;
     for product in run_stage_jobs(executor.clone(), plan.jobs, schedule).await {
         merge_metering(metering, product.metering);
         if let (Some(dir), Some(raw)) = (scratch.as_ref(), product.raw.as_ref()) {
-            write_scratch(
+            scratch_written |= write_scratch(
                 dir,
                 &product.run.name,
                 &json!({"run": product.run, "raw": raw}),
@@ -676,19 +755,28 @@ async fn run_review(
             }
         };
         let prompt = build_adversarial_prompt(&spec, &scope, &findings);
+        let label = spec.id.clone();
+        let budget = Duration::from_secs(
+            overrides
+                .budget_minutes
+                .unwrap_or(spec.budget_minutes)
+                .max(1)
+                * 60,
+        );
         let job = StageJob {
             spec: Arc::new(spec),
-            label: String::new(),
+            trace_chat_id: stage_trace_chat_id(&ctx.review_id, &label),
+            label,
             subchat: stage_subchat_spec(&cfg.base_params, &cfg.settings, model),
             max_steps: overrides.max_steps.unwrap_or(cfg.settings.max_steps).max(1),
             prompt,
+            budget,
+            abort: Arc::new(AtomicBool::new(false)),
         };
-        let label = job.spec.id.clone();
-        let job = StageJob { label, ..job };
         for mut product in run_stage_jobs(executor.clone(), vec![job], schedule).await {
             merge_metering(metering, std::mem::take(&mut product.metering));
             if let (Some(dir), Some(raw)) = (scratch.as_ref(), product.raw.as_ref()) {
-                write_scratch(
+                scratch_written |= write_scratch(
                     dir,
                     &product.run.name,
                     &json!({"run": product.run, "raw": raw}),
@@ -709,16 +797,21 @@ async fn run_review(
         .filter(|finding| finding.out_of_scope)
         .count();
 
-    Ok(ReviewReport {
+    let mut report = ReviewReport {
         depth: depth.as_str().to_string(),
+        outcome: ReviewOutcome::Inconclusive,
         scope: scope_summary,
         diff: scope.diff_summary(),
         stages: stage_rows,
         findings,
         duration_ms: now_ms().saturating_sub(started),
         duplicates_merged,
-        scratch_dir: scratch.map(|dir| dir.to_string_lossy().to_string()),
-    })
+        scratch_dir: scratch
+            .filter(|_| scratch_written)
+            .map(|dir| dir.to_string_lossy().to_string()),
+    };
+    report.outcome = report.derive_outcome();
+    Ok(report)
 }
 
 #[async_trait]
@@ -911,8 +1004,9 @@ mod tests {
     }
 
     fn report(findings: Vec<ReviewFinding>, stages: Vec<StageRun>) -> ReviewReport {
-        ReviewReport {
+        let mut report = ReviewReport {
             depth: "normal".to_string(),
+            outcome: ReviewOutcome::Inconclusive,
             scope: ReviewScopeSummary {
                 mode: "strict".to_string(),
                 requested_files: 12,
@@ -921,6 +1015,7 @@ mod tests {
                 focus: None,
                 expansion: Some("+2 dependency edges".to_string()),
                 out_of_scope_findings: 1,
+                dropped_files: vec![],
             },
             diff: ReviewDiffSummary {
                 base: Some("1a2b3c".to_string()),
@@ -933,7 +1028,9 @@ mod tests {
             duration_ms: 252_000,
             duplicates_merged: 3,
             scratch_dir: Some(".refact/review_scratch/rv-1".to_string()),
-        }
+        };
+        report.outcome = report.derive_outcome();
+        report
     }
 
     #[test]
@@ -1078,7 +1175,7 @@ mod tests {
         ));
 
         assert!(markdown.starts_with(
-            "## Review · 12 file(s) requested → 14 reviewed (strict, +2 dependency edges) · base 1a2b3c..HEAD (7 changed file(s), 31 hunk(s)) · depth normal · 4m12s"
+            "## Review ⚠️ PARTIAL · 12 file(s) requested → 14 reviewed (strict, +2 dependency edges) · base 1a2b3c..HEAD (7 changed file(s), 31 hunk(s)) · depth normal · 4m12s"
         ));
         assert!(markdown.contains("Stages: mechanical ok 3m12s · dependencies timed out 6m00s (stage budget) · execution not run (depth normal)"));
         assert!(markdown.contains("Findings: 2 supported (2 with a reproduction) · 1 hypotheses · 3 duplicate(s) merged · 0 pre-existing · 1 out of scope"));
@@ -1101,8 +1198,81 @@ mod tests {
             vec![StageRun::ok("diff", Some("m".to_string()), 1000)],
         ));
 
+        assert!(markdown.starts_with("## Review · 12 file(s) requested"));
         assert!(markdown.contains("### No supported findings"));
         assert!(!markdown.contains("### Hypotheses"));
+        assert!(!markdown.contains("INCONCLUSIVE"));
+    }
+
+    #[test]
+    fn tool_review_render_marks_an_all_stages_dead_review_inconclusive_not_clean() {
+        let markdown = render_review_markdown(&report(
+            vec![],
+            vec![
+                StageRun::timed_out("diff", None, 360_000, "no activity for 120s")
+                    .with_trace_chat_id(Some("subchat-rv-1-diff".to_string())),
+                StageRun::timed_out("security", None, 360_000, "no activity for 120s")
+                    .with_trace_chat_id(Some("subchat-rv-1-security".to_string())),
+                StageRun::failed("spec", None, 12, "output_contract"),
+            ],
+        ));
+
+        assert!(markdown.starts_with("## Review ⚠️ INCONCLUSIVE · 12 file(s) requested"));
+        assert!(
+            !markdown.contains("### No supported findings"),
+            "an inconclusive review must never render the clean-bill header: {markdown}"
+        );
+        assert!(markdown.contains("### Nothing was checked — this is NOT a pass"));
+        assert!(markdown.contains("Do not read the empty findings list as approval"));
+        assert!(markdown.contains("Incomplete stage(s) (3):"));
+        assert!(markdown.contains("- diff: timed out (no activity for 120s)"));
+        assert!(markdown.contains("- spec: failed (output_contract)"));
+        assert!(markdown.contains("[transcript subchat-rv-1-diff]"));
+    }
+
+    #[test]
+    fn tool_review_render_partial_says_how_many_stages_completed() {
+        let markdown = render_review_markdown(&report(
+            vec![],
+            vec![
+                StageRun::ok("diff", Some("m".to_string()), 1000),
+                StageRun::timed_out("security", None, 360_000, "stage budget"),
+            ],
+        ));
+
+        assert!(markdown.starts_with("## Review ⚠️ PARTIAL · 12 file(s) requested"));
+        assert!(!markdown.contains("### No supported findings\n"));
+        assert!(markdown.contains("### No supported findings from the 1 stage(s) that completed"));
+        assert!(markdown.contains("1 stage(s) did not complete"));
+        assert!(markdown.contains("- security: timed out (stage budget)"));
+    }
+
+    #[test]
+    fn tool_review_render_lists_files_that_were_never_reviewed() {
+        let mut with_dropped = report(
+            vec![],
+            vec![StageRun::ok("diff", Some("m".to_string()), 1000)],
+        );
+        with_dropped.scope.dropped_files = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+
+        let markdown = render_review_markdown(&with_dropped);
+
+        assert!(markdown.contains("### Files not reviewed (2)"));
+        assert!(markdown.contains("\n- src/a.rs"));
+        assert!(markdown.contains("\n- src/b.rs"));
+    }
+
+    #[test]
+    fn tool_review_render_omits_the_scratch_path_when_nothing_was_written() {
+        let mut nothing_written = report(
+            vec![],
+            vec![StageRun::timed_out("diff", None, 1000, "stage budget")],
+        );
+        nothing_written.scratch_dir = None;
+
+        let markdown = render_review_markdown(&nothing_written);
+
+        assert!(!markdown.contains("Raw per-stage output"));
     }
 
     #[test]

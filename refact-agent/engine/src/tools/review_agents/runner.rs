@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -68,6 +68,41 @@ pub struct StageJob {
     pub subchat: ExplicitSubchatSpec,
     pub max_steps: usize,
     pub prompt: String,
+    pub trace_chat_id: String,
+    pub budget: std::time::Duration,
+    pub abort: Arc<AtomicBool>,
+}
+
+pub fn stage_trace_chat_id(review_id: &str, label: &str) -> String {
+    let slug: String = label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("subchat-{review_id}-{slug}")
+}
+
+pub fn monitor_ctx(
+    ctx: &StageCtx,
+    activity: Arc<AtomicU64>,
+) -> (StageCtx, tokio::task::JoinHandle<()>) {
+    let (monitor_tx, mut monitor_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let parent_tx = ctx.subchat_tx.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some(message) = monitor_rx.recv().await {
+            activity.store(now_ms(), Ordering::Relaxed);
+            let sender = parent_tx.lock().await;
+            let _ = sender.send(message);
+        }
+    });
+    let mut monitored = ctx.clone();
+    monitored.subchat_tx = Arc::new(AMutex::new(monitor_tx));
+    (monitored, forwarder)
 }
 
 pub struct StageProduct {
@@ -95,19 +130,27 @@ pub fn inherited_worktree(ctx: &StageCtx) -> Option<WorktreeMeta> {
 }
 
 pub async fn run_stage(gcx: Arc<GlobalContext>, ctx: StageCtx, job: StageJob) -> StageProduct {
+    let trace_chat_id = job.trace_chat_id.clone();
+    let mut product = run_stage_inner(gcx, ctx, job).await;
+    product.run = product.run.with_trace_chat_id(Some(trace_chat_id));
+    product
+}
+
+async fn run_stage_inner(gcx: Arc<GlobalContext>, ctx: StageCtx, job: StageJob) -> StageProduct {
     let started = now_ms();
     let model = job.subchat.model.clone();
     let label = job.label.clone();
     let mut metering = serde_json::Map::new();
     let worktree = inherited_worktree(&ctx);
 
+    let trace_chat_id = job.trace_chat_id.clone();
     let attribution = format!("review_{}", job.spec.id);
-    let config = match resolve_subchat_config_with_explicit_params(
+    let mut config = match resolve_subchat_config_with_explicit_params(
         gcx.clone(),
         &attribution,
         &job.subchat,
         true,
-        None,
+        Some(trace_chat_id.clone()),
         Some(job.spec.display_title()),
         Some(ctx.chat_id.clone()),
         Some("review_stage".to_string()),
@@ -120,7 +163,7 @@ pub async fn run_stage(gcx: Arc<GlobalContext>, ctx: StageCtx, job: StageJob) ->
         worktree,
         Some(ctx.tool_call_id.clone()),
         Some(ctx.subchat_tx.clone()),
-        Some(ctx.abort_flag.clone()),
+        Some(job.abort.clone()),
         ctx.depth + 1,
     )
     .await
@@ -135,6 +178,7 @@ pub async fn run_stage(gcx: Arc<GlobalContext>, ctx: StageCtx, job: StageJob) ->
             ));
         }
     };
+    config.soft_abort = true;
 
     let messages = vec![
         ChatMessage {
@@ -170,6 +214,9 @@ pub async fn run_stage(gcx: Arc<GlobalContext>, ctx: StageCtx, job: StageJob) ->
 
     let parsed = match parsed {
         Ok(parsed) => Ok(parsed),
+        Err(first_error) if job.abort.load(Ordering::SeqCst) => {
+            Err(format!("output_contract: {first_error}"))
+        }
         Err(first_error) => {
             tracing::info!("review: {label} broke the output contract ({first_error}), repairing");
             let mut retry_messages = result.messages.clone();
@@ -184,7 +231,7 @@ pub async fn run_stage(gcx: Arc<GlobalContext>, ctx: StageCtx, job: StageJob) ->
                 retry_messages,
                 ctx.tool_call_id.clone(),
                 ctx.subchat_tx.clone(),
-                ctx.abort_flag.clone(),
+                job.abort.clone(),
                 ctx.depth,
                 ctx.task_meta.clone(),
                 ctx.worktree.clone(),
@@ -225,12 +272,8 @@ pub async fn run_stage(gcx: Arc<GlobalContext>, ctx: StageCtx, job: StageJob) ->
             product
         }
         Err(reason) => {
-            let mut product = StageProduct::empty(StageRun::failed(
-                &label,
-                Some(model),
-                duration,
-                &reason,
-            ));
+            let mut product =
+                StageProduct::empty(StageRun::failed(&label, Some(model), duration, &reason));
             product.metering = metering;
             product.raw = Some(text);
             product
@@ -243,7 +286,7 @@ enum Parsed {
     Verdicts(VerdictOutput),
 }
 
-fn findings_product(
+pub(crate) fn findings_product(
     label: &str,
     job: &StageJob,
     output: StageOutput,
@@ -351,6 +394,9 @@ mod tests {
             },
             max_steps: 10,
             prompt: String::new(),
+            trace_chat_id: stage_trace_chat_id("rv-1", stage_id),
+            budget: std::time::Duration::from_secs(60),
+            abort: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -422,6 +468,42 @@ mod tests {
             Some("checked (1 malformed entries skipped)".to_string())
         );
         assert_eq!(summary_with_rejections(String::new(), &[]), None);
+    }
+
+    #[test]
+    fn review_runner_trace_chat_id_is_deterministic_and_slug_safe() {
+        assert_eq!(
+            stage_trace_chat_id("rv-b08fc869", "diff"),
+            "subchat-rv-b08fc869-diff"
+        );
+        assert_eq!(
+            stage_trace_chat_id("rv-1", "impact@thinking"),
+            "subchat-rv-1-impact-thinking"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_runner_monitor_ctx_forwards_messages_and_stamps_activity() {
+        let (parent_tx, mut parent_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let mut ctx = ctx_with_worktree(None);
+        ctx.subchat_tx = Arc::new(AMutex::new(parent_tx));
+        let activity = Arc::new(AtomicU64::new(1));
+
+        let (monitored, forwarder) = monitor_ctx(&ctx, activity.clone());
+        monitored
+            .subchat_tx
+            .lock()
+            .await
+            .send(serde_json::json!({"subchat_id": "progress"}))
+            .unwrap();
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), parent_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(received["subchat_id"], "progress");
+        assert!(activity.load(Ordering::Relaxed) > 1);
+        forwarder.abort();
     }
 
     #[test]

@@ -21,6 +21,8 @@ pub struct WorktreeDiffParts {
     pub stats: WorktreeDiffStats,
     pub patch: String,
     pub patch_truncated: bool,
+    pub patch_shown_bytes: usize,
+    pub patch_total_bytes: usize,
 }
 
 pub struct PreflightMergeResult {
@@ -531,54 +533,69 @@ fn list_untracked(path: &Path) -> Vec<WorktreeDiffFile> {
         .collect()
 }
 
-fn push_bounded(target: &mut String, text: &str, max_bytes: usize, truncated: &mut bool) {
-    if *truncated || target.len() >= max_bytes {
-        *truncated = true;
-        return;
-    }
-    let remaining = max_bytes - target.len();
-    if text.len() <= remaining {
-        target.push_str(text);
-        return;
-    }
-    let mut end = remaining;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    target.push_str(&text[..end]);
-    target.push_str("\n");
-    *truncated = true;
+struct PatchAccumulator {
+    text: String,
+    truncated: bool,
+    total_bytes: usize,
+    max_bytes: usize,
 }
 
-fn append_patch_section(
-    patch: &mut String,
-    title: &str,
-    body: &str,
-    max_bytes: usize,
-    truncated: &mut bool,
-) {
+impl PatchAccumulator {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            text: String::new(),
+            truncated: false,
+            total_bytes: 0,
+            max_bytes,
+        }
+    }
+
+    fn push(&mut self, text: &str) {
+        self.total_bytes = self.total_bytes.saturating_add(text.len());
+        if self.truncated || self.text.len() >= self.max_bytes {
+            self.truncated = true;
+            return;
+        }
+        let remaining = self.max_bytes - self.text.len();
+        if text.len() <= remaining {
+            self.text.push_str(text);
+            return;
+        }
+        let mut end = remaining;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.text.push_str(&text[..end]);
+        self.text.push_str("\n");
+        self.truncated = true;
+    }
+
+    fn account_unread(&mut self, bytes: usize) {
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        if bytes > 0 {
+            self.truncated = true;
+        }
+    }
+
+    fn shown_bytes(&self) -> usize {
+        self.text.len()
+    }
+}
+
+fn append_patch_section(patch: &mut PatchAccumulator, title: &str, body: &str) {
     if body.trim().is_empty() {
         return;
     }
-    push_bounded(patch, &format!("\n## {}\n", title), max_bytes, truncated);
-    push_bounded(patch, body, max_bytes, truncated);
+    patch.push(&format!("\n## {}\n", title));
+    patch.push(body);
     if !body.ends_with('\n') {
-        push_bounded(patch, "\n", max_bytes, truncated);
+        patch.push("\n");
     }
 }
 
-fn append_untracked_patch(
-    root: &Path,
-    files: &[WorktreeDiffFile],
-    patch: &mut String,
-    max_bytes: usize,
-    truncated: &mut bool,
-) {
+fn append_untracked_patch(root: &Path, files: &[WorktreeDiffFile], patch: &mut PatchAccumulator) {
     const MAX_UNTRACKED_PREVIEW_BYTES: usize = 64_000;
     for file in files {
-        if *truncated {
-            return;
-        }
         let file_path = root.join(&file.path);
         let Ok(metadata) = std::fs::symlink_metadata(&file_path) else {
             continue;
@@ -598,8 +615,6 @@ fn append_untracked_patch(
                     file.path,
                     target.to_string_lossy()
                 ),
-                max_bytes,
-                truncated,
             );
             continue;
         }
@@ -616,18 +631,8 @@ fn append_untracked_patch(
                 "diff --git a/{} b/{}\nnew file mode 100644\n--- /dev/null\n+++ b/{}\n@@\n",
                 file.path, file.path, file.path
             ),
-            max_bytes,
-            truncated,
         );
-        if *truncated {
-            return;
-        }
-        let remaining = max_bytes.saturating_sub(patch.len());
-        let read_cap = remaining.min(MAX_UNTRACKED_PREVIEW_BYTES);
-        if read_cap == 0 {
-            *truncated = true;
-            return;
-        }
+        let read_cap = MAX_UNTRACKED_PREVIEW_BYTES;
         let mut buffer = Vec::new();
         let mut reader = source.by_ref().take(read_cap as u64 + 1);
         if reader.read_to_end(&mut buffer).is_err() {
@@ -639,16 +644,13 @@ fn append_untracked_patch(
         }
         let content = String::from_utf8_lossy(&buffer);
         for line in content.lines() {
-            push_bounded(patch, "+", max_bytes, truncated);
-            push_bounded(patch, line, max_bytes, truncated);
-            push_bounded(patch, "\n", max_bytes, truncated);
-            if *truncated {
-                return;
-            }
+            patch.push("+");
+            patch.push(line);
+            patch.push("\n");
         }
         if over_limit {
-            *truncated = true;
-            return;
+            let unread = (metadata.len() as usize).saturating_sub(read_cap);
+            patch.account_unread(unread);
         }
     }
 }
@@ -680,8 +682,7 @@ pub fn diff_for_path(
     discover_repo(root)?;
     let mut files = Vec::new();
     let mut stats = WorktreeDiffStats::default();
-    let mut patch = String::new();
-    let mut patch_truncated = false;
+    let mut patch = PatchAccumulator::new(max_patch_bytes);
 
     let committed_base = resolve_diff_base(root, base_commit, base_branch)?;
     if let Some(base) = committed_base {
@@ -692,13 +693,7 @@ pub fn diff_for_path(
         stats.committed_files = committed.len();
         files.extend(committed);
         let committed_patch = run_git(root, &["diff", "--no-ext-diff", &range])?;
-        append_patch_section(
-            &mut patch,
-            "committed",
-            &committed_patch,
-            max_patch_bytes,
-            &mut patch_truncated,
-        );
+        append_patch_section(&mut patch, "committed", &committed_patch);
     }
 
     let staged_name_status = run_git_lossy(root, &["diff", "--cached", "--name-status"]);
@@ -707,13 +702,7 @@ pub fn diff_for_path(
     stats.staged_files = staged.len();
     files.extend(staged);
     let staged_patch = run_git_lossy(root, &["diff", "--no-ext-diff", "--cached"]);
-    append_patch_section(
-        &mut patch,
-        "staged",
-        &staged_patch,
-        max_patch_bytes,
-        &mut patch_truncated,
-    );
+    append_patch_section(&mut patch, "staged", &staged_patch);
 
     let unstaged_name_status = run_git_lossy(root, &["diff", "--name-status"]);
     let unstaged_numstat = run_git_lossy(root, &["diff", "--numstat"]);
@@ -721,42 +710,34 @@ pub fn diff_for_path(
     stats.unstaged_files = unstaged.len();
     files.extend(unstaged);
     let unstaged_patch = run_git_lossy(root, &["diff", "--no-ext-diff"]);
-    append_patch_section(
-        &mut patch,
-        "unstaged",
-        &unstaged_patch,
-        max_patch_bytes,
-        &mut patch_truncated,
-    );
+    append_patch_section(&mut patch, "unstaged", &unstaged_patch);
 
     let untracked = list_untracked(root);
     stats.untracked_files = untracked.len();
-    append_untracked_patch(
-        root,
-        &untracked,
-        &mut patch,
-        max_patch_bytes,
-        &mut patch_truncated,
-    );
+    append_untracked_patch(root, &untracked, &mut patch);
     files.extend(untracked);
     stats.files_changed = files.len();
     stats.additions = files.iter().filter_map(|file| file.additions).sum();
     stats.deletions = files.iter().filter_map(|file| file.deletions).sum();
 
+    let patch_truncated = patch.truncated;
+    let patch_shown_bytes = patch.shown_bytes();
+    let patch_total_bytes = patch.total_bytes.max(patch_shown_bytes);
+    let mut patch_text = patch.text;
     if patch_truncated {
-        push_bounded(
-            &mut patch,
-            "\n[patch truncated]\n",
-            max_patch_bytes.saturating_add(128),
-            &mut false,
-        );
+        patch_text.push_str(&format!(
+            "\n[patch truncated: showing {} of {} bytes]\n",
+            patch_shown_bytes, patch_total_bytes
+        ));
     }
 
     Ok(WorktreeDiffParts {
         files,
         stats,
-        patch,
+        patch: patch_text,
         patch_truncated,
+        patch_shown_bytes,
+        patch_total_bytes,
     })
 }
 
@@ -1269,4 +1250,59 @@ pub fn diff_head_to_workdir_as_string(
     })
     .map_err(|e| format!("Failed to print diff: {}", e))?;
     Ok(diff_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(root: &Path, args: &[&str]) {
+        run_git(root, args).unwrap_or_else(|e| panic!("git {:?} failed: {}", args, e));
+    }
+
+    #[test]
+    fn diff_for_path_truncation_marker_reports_shown_and_total_bytes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        run(root, &["init", "--initial-branch=main"]);
+        run(root, &["config", "user.email", "test@example.com"]);
+        run(root, &["config", "user.name", "test"]);
+        std::fs::write(root.join("seed.txt"), "seed\n").expect("write seed");
+        run(root, &["add", "."]);
+        run(root, &["commit", "-m", "seed"]);
+
+        let big = (0..4000)
+            .map(|i| format!("line {}\n", i))
+            .collect::<String>();
+        std::fs::write(root.join("big.txt"), big).expect("write big");
+
+        let diff = diff_for_path(root, None, None, 1_000).expect("diff");
+
+        assert!(diff.patch_truncated);
+        assert!(diff.patch_total_bytes > diff.patch_shown_bytes);
+        assert!(diff.patch.contains(&format!(
+            "[patch truncated: showing {} of {} bytes]",
+            diff.patch_shown_bytes, diff.patch_total_bytes
+        )));
+    }
+
+    #[test]
+    fn diff_for_path_untruncated_patch_reports_equal_counts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        run(root, &["init", "--initial-branch=main"]);
+        run(root, &["config", "user.email", "test@example.com"]);
+        run(root, &["config", "user.name", "test"]);
+        std::fs::write(root.join("seed.txt"), "seed\n").expect("write seed");
+        run(root, &["add", "."]);
+        run(root, &["commit", "-m", "seed"]);
+        std::fs::write(root.join("small.txt"), "small\n").expect("write small");
+
+        let diff = diff_for_path(root, None, None, 1_000_000).expect("diff");
+
+        assert!(!diff.patch_truncated);
+        assert!(!diff.patch.contains("[patch truncated"));
+        assert_eq!(diff.patch_shown_bytes, diff.patch.len());
+        assert_eq!(diff.patch_shown_bytes, diff.patch_total_bytes);
+    }
 }

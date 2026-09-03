@@ -2,9 +2,12 @@ use crate::tools::review_agents::stages::{StageContract, StageSpec};
 use crate::tools::review_scope::ReviewScope;
 use crate::tools::review_types::ReviewFinding;
 
-const DIFF_CHAR_CAP: usize = 24000;
-const MAX_LISTED_FILES: usize = 60;
+const MAX_LISTED_FILES: usize = 400;
 const MAX_LISTED_FINDINGS: usize = 60;
+
+fn diff_char_cap() -> usize {
+    crate::runtime_settings::current().review_diff_char_cap
+}
 
 pub const REVIEW_SYSTEM_PROMPT: &str = r#"You are one stage of a code review. You investigate with tools and report what you can prove.
 
@@ -62,24 +65,44 @@ fn push_file_list(prompt: &mut String, heading: &str, files: &[String]) {
     if files.is_empty() {
         return;
     }
-    prompt.push_str(&format!("\n# {heading}\n"));
+    prompt.push_str(&format!("\n# {heading} ({})\n", files.len()));
     for file in files.iter().take(MAX_LISTED_FILES) {
         prompt.push_str(&format!("- {file}\n"));
     }
     if files.len() > MAX_LISTED_FILES {
-        prompt.push_str(&format!("… and {} more\n", files.len() - MAX_LISTED_FILES));
+        prompt.push_str(&format!(
+            "⚠️ showing {MAX_LISTED_FILES} of {} paths; the remaining {} are not listed here.\n",
+            files.len(),
+            files.len() - MAX_LISTED_FILES
+        ));
     }
 }
 
-fn truncate_at_char_boundary(text: &str, cap: usize) -> String {
-    if text.len() <= cap {
-        return text.to_string();
-    }
-    let mut end = cap;
+fn file_boundary_before(text: &str, cap: usize) -> usize {
+    let mut end = cap.min(text.len());
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}\n[diff truncated]", &text[..end])
+    let head = &text[..end];
+    match head.rfind("\ndiff --git ") {
+        Some(index) => index + 1,
+        None => end,
+    }
+}
+
+fn truncate_diff(text: &str, cap: usize, total_bytes: usize) -> String {
+    if text.len() <= cap {
+        return text.to_string();
+    }
+    let end = file_boundary_before(text, cap);
+    let total = total_bytes.max(text.len());
+    format!(
+        "{}\n⚠️ showing {} of {} bytes (limit: review_diff_char_cap = {}). 💡 Raise review_diff_char_cap in trajectory settings to hand the whole diff to every review stage; the omitted files are listed above and you can read them with cat or git diff.",
+        &text[..end],
+        end,
+        total,
+        cap
+    )
 }
 
 fn scope_block(scope: &ReviewScope) -> String {
@@ -97,11 +120,16 @@ fn scope_block(scope: &ReviewScope) -> String {
         .map(|path| path.to_string_lossy().to_string())
         .collect();
     push_file_list(&mut prompt, "Files changed by the diff", &changed);
+    push_file_list(
+        &mut prompt,
+        "Files NOT reviewed (dropped by the max_files cap)",
+        &scope.dropped_file_strings(),
+    );
     if let Some(patch) = scope.diff_patch.as_deref() {
         let base = scope.base.as_deref().unwrap_or("unknown");
         prompt.push_str(&format!(
             "\n# Diff under review (base {base})\n```diff\n{}\n```\n",
-            truncate_at_char_boundary(patch, DIFF_CHAR_CAP)
+            truncate_diff(patch, diff_char_cap(), scope.patch_total_bytes)
         ));
     } else {
         prompt.push_str(
@@ -121,19 +149,22 @@ fn scope_block(scope: &ReviewScope) -> String {
     prompt
 }
 
-pub fn build_stage_prompt(
-    spec: &StageSpec,
-    scope: &ReviewScope,
-    scenario: Option<&str>,
-) -> String {
+pub fn build_stage_prompt(spec: &StageSpec, scope: &ReviewScope, scenario: Option<&str>) -> String {
     let mut prompt = format!("# Your job this run: {}\n{}\n", spec.id, spec.task.trim());
     if let Some(scenario) = scenario.map(str::trim).filter(|value| !value.is_empty()) {
         prompt.push_str(&format!(
             "\n# Scenario the caller requires you to run\nThis is authoritative. Drive exactly this and report what you observed; do not substitute a scenario of your own.\n{scenario}\n"
         ));
     }
-    if let Some(fallback) = spec.fallback.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
-        prompt.push_str(&format!("\n# If a preferred tool is unavailable\n{fallback}\n"));
+    if let Some(fallback) = spec
+        .fallback
+        .as_deref()
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+    {
+        prompt.push_str(&format!(
+            "\n# If a preferred tool is unavailable\n{fallback}\n"
+        ));
     }
     if !spec.preferred_tools.is_empty() {
         prompt.push_str(&format!(
@@ -200,12 +231,14 @@ mod tests {
             mode,
             requested: vec![PathBuf::from("src/lib.rs")],
             files: vec![PathBuf::from("src/lib.rs")],
+            dropped_files: vec![],
             changed_files: vec![PathBuf::from("src/lib.rs")],
             focus: Some("browser lifecycle".to_string()),
             plan: Some("must never leak a profile".to_string()),
             base: Some("abc123".to_string()),
             head: Some("def456".to_string()),
             diff_patch: Some("@@ -1,2 +1,3 @@\n+let value = 1;\n".to_string()),
+            patch_total_bytes: 0,
             hunks: DiffHunks::default(),
             repo_root: None,
             expansion: None,
@@ -260,7 +293,11 @@ mod tests {
 
     #[test]
     fn review_prompt_uses_verdict_contract_for_the_adversarial_stage() {
-        let prompt = build_adversarial_prompt(&stage("adversarial"), &scope(ScopeMode::Broad), &[finding()]);
+        let prompt = build_adversarial_prompt(
+            &stage("adversarial"),
+            &scope(ScopeMode::Broad),
+            &[finding()],
+        );
 
         assert!(prompt.contains("rf-1234abcd"));
         assert!(prompt.contains("src/lib.rs:10-12"));
@@ -271,13 +308,55 @@ mod tests {
     }
 
     #[test]
-    fn review_prompt_truncates_a_huge_diff_on_a_char_boundary() {
-        let mut huge = scope(ScopeMode::Broad);
-        huge.diff_patch = Some("é".repeat(DIFF_CHAR_CAP));
+    fn review_prompt_truncates_a_huge_diff_on_a_file_boundary_and_quantifies_it() {
+        let first = format!("diff --git a/a.rs b/a.rs\n{}", "+é\n".repeat(200));
+        let second = format!("diff --git a/b.rs b/b.rs\n{}", "+x\n".repeat(200));
+        let patch = format!("{first}{second}");
+        let total = patch.len();
 
-        let prompt = build_stage_prompt(&stage("diff"), &huge, None);
+        let rendered = truncate_diff(&patch, first.len() + 20, total + 5_000);
 
-        assert!(prompt.contains("[diff truncated]"));
+        assert!(rendered.starts_with("diff --git a/a.rs b/a.rs"));
+        assert!(!rendered.contains("diff --git a/b.rs b/b.rs"));
+        assert!(rendered.contains(&format!(
+            "⚠️ showing {} of {} bytes (limit: review_diff_char_cap = {})",
+            first.len(),
+            total + 5_000,
+            first.len() + 20
+        )));
+        assert!(rendered.contains("💡 Raise review_diff_char_cap in trajectory settings"));
+        assert!(!rendered.contains("[diff truncated]"));
+    }
+
+    #[test]
+    fn review_prompt_keeps_a_diff_that_fits_under_the_cap_intact() {
+        let patch = "diff --git a/a.rs b/a.rs\n+one\n";
+
+        assert_eq!(truncate_diff(patch, 4_096, patch.len()), patch);
+    }
+
+    #[test]
+    fn review_prompt_reads_the_diff_cap_from_the_runtime_setting() {
+        assert_eq!(
+            diff_char_cap(),
+            crate::runtime_settings::current().review_diff_char_cap
+        );
+        assert!(diff_char_cap() >= 4_096);
+    }
+
+    #[test]
+    fn review_prompt_names_the_files_that_were_dropped_from_scope() {
+        let mut truncated = scope(ScopeMode::Strict);
+        truncated.dropped_files = vec![
+            PathBuf::from("src/dropped_a.rs"),
+            PathBuf::from("src/dropped_b.rs"),
+        ];
+
+        let prompt = build_stage_prompt(&stage("diff"), &truncated, None);
+
+        assert!(prompt.contains("# Files NOT reviewed (dropped by the max_files cap) (2)"));
+        assert!(prompt.contains("- src/dropped_a.rs"));
+        assert!(prompt.contains("- src/dropped_b.rs"));
     }
 
     #[test]
@@ -291,8 +370,10 @@ mod tests {
         assert!(prompt.contains("# Scenario the caller requires you to run"));
         assert!(prompt.contains("open /settings, toggle dark mode"));
         assert!(prompt.contains("do not substitute a scenario of your own"));
-        assert!(!build_stage_prompt(&stage("browser"), &scope(ScopeMode::Broad), Some("   "))
-            .contains("# Scenario the caller requires"));
+        assert!(
+            !build_stage_prompt(&stage("browser"), &scope(ScopeMode::Broad), Some("   "))
+                .contains("# Scenario the caller requires")
+        );
     }
 
     #[test]

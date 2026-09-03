@@ -392,6 +392,7 @@ async fn run_summary_subchat(
         parent_tool_call_id: Some(tool_call_id),
         parent_subchat_tx: Some(parent_subchat_tx),
         abort_flag: Some(abort_flag),
+        soft_abort: false,
         background_agent_id: None,
         subchat_depth: parent_depth + 1,
         final_step_force_answer: false,

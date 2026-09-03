@@ -13,6 +13,8 @@ export function settingsSectionToPage(section: SettingsSectionId): Page {
       return { name: "indexing settings" };
     case "browser":
       return { name: "browser settings" };
+    case "limits":
+      return { name: "limits settings" };
     case "providers":
       return { name: "providers page" };
     case "models":
@@ -42,6 +44,8 @@ export function settingsPageToSection(page: Page): SettingsSectionId | null {
       return "indexing";
     case "browser settings":
       return "browser";
+    case "limits settings":
+      return "limits";
     case "providers page":
       return "providers";
     case "default models":

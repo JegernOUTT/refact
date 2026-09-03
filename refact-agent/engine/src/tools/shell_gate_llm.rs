@@ -142,6 +142,7 @@ async fn validate_command_inner(
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
+            soft_abort: false,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,

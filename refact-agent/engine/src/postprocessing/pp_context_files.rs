@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 
 pub use refact_postprocessing::pp_context_files::{
-    FileLine, PPFile, pp_color_lines, DEBUG, MAX_LINE_LENGTH, RESERVE_FOR_QUESTION_AND_FOLLOWUP,
+    FileLine, PPFile, pp_color_lines, max_line_length, DEBUG, RESERVE_FOR_QUESTION_AND_FOLLOWUP,
 };
 use refact_core::chat_types::{ContextFile, PostprocessSettings};
 

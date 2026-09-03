@@ -9,7 +9,6 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use uuid::Uuid;
 
 use crate::buddy::drafts::{draft_kind_str, DraftCreateError, DraftTarget, DraftValidationError};
@@ -1255,8 +1254,9 @@ pub(crate) async fn read_recent_log_lines(
         // both found; the joined filename is only an anchor whose parent is the resolved dir.
         crate::tools::tool_buddy_get_logs::resolve_log_dir(&cache_dir).join("refact.log")
     };
-    let log_content = read_log_content(&log_path).await?;
-    let tail: Vec<String> = log_content
+    let log_tail = read_log_content_with_notice(&log_path).await?;
+    let tail: Vec<String> = log_tail
+        .text
         .lines()
         .rev()
         .take(max_lines)
@@ -1265,10 +1265,12 @@ pub(crate) async fn read_recent_log_lines(
         .into_iter()
         .rev()
         .collect();
-    Ok(tail.join("\n"))
+    let joined = tail.join("\n");
+    Ok(match log_tail.notice {
+        Some(notice) => format!("{}\n{}", notice, joined),
+        None => joined,
+    })
 }
-
-const MAX_LOG_TAIL_BYTES: u64 = 256 * 1024;
 
 const MEMORY_KEY_SAVE_INSTRUCTION: &str = concat!(
     "When saving findings with buddy_memory_create, ",
@@ -1284,35 +1286,12 @@ pub(crate) fn is_log_candidate(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-async fn read_bounded_log_tail(log_path: &std::path::Path) -> Result<String, String> {
-    let mut file = tokio::fs::File::open(log_path)
-        .await
-        .map_err(|e| format!("failed to read log file {:?}: {}", log_path, e))?;
-    let len = file
-        .metadata()
-        .await
-        .map_err(|e| format!("failed to stat log file {:?}: {}", log_path, e))?
-        .len();
-    let start = len.saturating_sub(MAX_LOG_TAIL_BYTES);
-    file.seek(std::io::SeekFrom::Start(start))
-        .await
-        .map_err(|e| format!("failed to seek log file {:?}: {}", log_path, e))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .await
-        .map_err(|e| format!("failed to read log file {:?}: {}", log_path, e))?;
-    let mut text = String::from_utf8_lossy(&bytes).into_owned();
-    if start > 0 {
-        if let Some(pos) = text.find('\n') {
-            text = text[pos + 1..].to_string();
-        }
-    }
-    Ok(text)
-}
-
-pub(crate) async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> {
+pub(crate) async fn read_log_content_with_notice(
+    log_path: &std::path::Path,
+) -> Result<crate::tools::tool_buddy_get_logs::BoundedLogTail, String> {
     if log_path.is_file() {
-        return read_bounded_log_tail(log_path).await;
+        return crate::tools::tool_buddy_get_logs::read_bounded_log_tail_with_notice(log_path)
+            .await;
     }
     let log_dir = log_path.parent().unwrap_or(log_path);
     let mut entries = tokio::fs::read_dir(log_dir)
@@ -1334,9 +1313,17 @@ pub(crate) async fn read_log_content(log_path: &std::path::Path) -> Result<Strin
     }
     files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     let Some((newest, _)) = files.first() else {
-        return Ok(String::new());
+        return Ok(crate::tools::tool_buddy_get_logs::BoundedLogTail {
+            text: String::new(),
+            notice: None,
+        });
     };
-    read_bounded_log_tail(newest).await
+    crate::tools::tool_buddy_get_logs::read_bounded_log_tail_with_notice(newest).await
+}
+
+#[cfg(test)]
+pub(crate) async fn read_log_content(log_path: &std::path::Path) -> Result<String, String> {
+    Ok(read_log_content_with_notice(log_path).await?.text)
 }
 
 pub(crate) fn cap_text_to_chars(s: &str, max: usize) -> String {

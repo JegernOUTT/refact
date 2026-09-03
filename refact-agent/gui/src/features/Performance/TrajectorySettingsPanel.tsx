@@ -27,6 +27,8 @@ type SettingsGroup = {
   names: string[];
 };
 
+const OPTIMIZATIONS_GROUP_TITLE = "Performance optimizations";
+
 const SETTINGS_GROUPS: SettingsGroup[] = [
   {
     title: "Retention",
@@ -68,7 +70,68 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     ],
   },
   {
-    title: "Performance optimizations",
+    title: "Tool output budgets",
+    description:
+      "How much tool output post-processing keeps per turn. Raising these sends more code to the model, which improves answers and increases token spend and latency.",
+    names: [
+      "pp_max_tool_budget_tokens",
+      "pp_max_per_file_budget_tokens",
+      "pp_max_line_length_chars",
+      "pp_tokens_for_text_percent",
+    ],
+  },
+  {
+    title: "File and log reading",
+    description:
+      "Caps on how much the file, log, diff, and process tools may read in one call. Raising these gives the model more complete context and increases token spend and memory use.",
+    names: [
+      "cat_max_input_paths",
+      "cat_max_lines",
+      "cat_max_file_bytes",
+      "cat_max_expanded_files",
+      "get_logs_max_tail_bytes",
+      "agent_diff_max_output_bytes",
+      "process_subscribe_preview_bytes",
+    ],
+  },
+  {
+    title: "Search and history",
+    description:
+      "How much trajectory history and planner Q&A text is previewed and indexed. Raising these makes recall richer and increases indexing work and token spend.",
+    names: [
+      "hist_search_preview_chars",
+      "vecdb_trajectory_split_bytes",
+      "planner_qna_question_limit",
+      "planner_qna_answer_limit",
+    ],
+  },
+  {
+    title: "Git intelligence",
+    description:
+      "How much repository history git intelligence walks. Raising these produces better co-change and ownership signals and makes analysis slower and more CPU intensive.",
+    names: [
+      "git_intel_max_commits",
+      "git_intel_deep_walk_limit",
+      "git_intel_max_files_per_commit_cochange",
+      "git_intel_max_files_per_commit_entropy",
+    ],
+  },
+  {
+    title: "Code graph",
+    description:
+      "Result caps for code graph analyses. Raising these surfaces more findings per run and makes each run slower and its output larger.",
+    names: ["codegraph_dead_code_max_results", "codegraph_exec_flow_max_nodes"],
+  },
+  {
+    title: "Code review",
+    description:
+      "How much diff the review pipeline reads. Raising these lets review see larger changes in full and increases token spend per review.",
+    names: ["review_diff_char_cap", "review_max_diff_patch_bytes"],
+  },
+  {
+    // Kept last on purpose: this is the only group of on/off toggles, and it is
+    // looked up by title (never by index) below.
+    title: OPTIMIZATIONS_GROUP_TITLE,
     description:
       "These optimizations are enabled by default. Disabling one reduces performance; restart-required changes take effect after the next engine restart.",
     names: [
@@ -80,6 +143,11 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     ],
   },
 ];
+
+const OPTIMIZATION_NAMES = new Set(
+  SETTINGS_GROUPS.find((group) => group.title === OPTIMIZATIONS_GROUP_TITLE)
+    ?.names ?? [],
+);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -238,7 +306,7 @@ export function TrajectorySettingsPanel() {
     const localError = validationErrors.get(field.name);
     const backendError = backendErrorForField(field.name, saveError);
     const restartRequired = field.apply_mode === "restart_required";
-    const optimization = SETTINGS_GROUPS[4].names.includes(field.name);
+    const optimization = OPTIMIZATION_NAMES.has(field.name);
     const description = [
       rangeHint(field),
       `Default: ${valueToInput(data?.defaults[field.name] ?? null) || "—"}.`,

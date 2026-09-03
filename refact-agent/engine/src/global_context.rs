@@ -507,11 +507,7 @@ impl GlobalContext {
 async fn load_engine_global_config(
     config_dir: &PathBuf,
     cmdline: &CommandLine,
-) -> (
-    SchedulerConfig,
-    HooksConfig,
-    TerminalSecurityConfig,
-) {
+) -> (SchedulerConfig, HooksConfig, TerminalSecurityConfig) {
     let path = if cmdline.privacy_yaml.is_empty() {
         config_dir.join("privacy.yaml")
     } else {
@@ -538,11 +534,7 @@ async fn load_engine_global_config(
     let scheduler = config
         .scheduler
         .with_startup_overrides(cmdline.no_scheduler);
-    (
-        scheduler,
-        config.hooks,
-        config.terminal_security,
-    )
+    (scheduler, config.hooks, config.terminal_security)
 }
 
 impl ShutdownAccess for GlobalContext {

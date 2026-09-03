@@ -17,8 +17,6 @@ use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType
 
 const ASK_PREFIX: &str = "[ASK:";
 const REPLY_PREFIX: &str = "[REPLY:";
-const QUESTION_LIMIT: usize = 800;
-const ANSWER_LIMIT: usize = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuestionUrgency {
@@ -105,6 +103,29 @@ fn required_string(args: &HashMap<String, Value>, key: &str) -> Result<String, S
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
+}
+
+fn qna_truncation_notice(kind: &str, shown: usize, total: usize, setting: &str) -> String {
+    format!(
+        "⚠️ showing {} of {} {} characters (limit: {} = {}). 💡 Raise {} in trajectory settings or shorten the {}.",
+        shown, total, kind, setting, shown, setting, kind
+    )
+}
+
+fn truncate_chars_with_notice(
+    value: &str,
+    max_chars: usize,
+    kind: &str,
+    setting: &str,
+) -> (String, Option<String>) {
+    let total = value.chars().count();
+    if total <= max_chars {
+        return (value.to_string(), None);
+    }
+    (
+        truncate_chars(value, max_chars),
+        Some(qna_truncation_notice(kind, max_chars, total, setting)),
+    )
 }
 
 fn make_question_id() -> String {
@@ -341,7 +362,13 @@ impl Tool for ToolAgentAskPlanner {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let (gcx, task_id, card_id, planner_chat_id) = agent_scope(&ccx).await?;
-        let question = truncate_chars(&required_string(args, "question")?, QUESTION_LIMIT);
+        let question_limit = crate::runtime_settings::current().planner_qna_question_limit;
+        let (question, question_notice) = truncate_chars_with_notice(
+            &required_string(args, "question")?,
+            question_limit,
+            "question",
+            "planner_qna_question_limit",
+        );
         let urgency = QuestionUrgency::parse(args.get("urgency"))?;
         let question_id = make_question_id();
         let message = format!(
@@ -415,7 +442,7 @@ impl Tool for ToolAgentAskPlanner {
             ""
         };
 
-        let output = format!(
+        let mut output = format!(
             "Question recorded for planner.\n\n- card_id: `{}`\n- question_id: `{}`\n- urgency: `{}`\n\nPlanner reply instruction: call `planner_reply(card_id=\"{}\", question_id=\"{}\", answer=\"...\")`.{}",
             card_id,
             question_id,
@@ -424,6 +451,9 @@ impl Tool for ToolAgentAskPlanner {
             question_id,
             wake_note
         );
+        if let Some(notice) = question_notice {
+            output = format!("{}\n\n{}", notice, output);
+        }
         Ok((false, vec![tool_message(tool_call_id, output)]))
     }
 
@@ -478,7 +508,13 @@ impl Tool for ToolPlannerReply {
         let task_id = planner_task_id(&ccx, args, "planner_reply").await?;
         let card_id = required_string(args, "card_id")?;
         let question_id = required_question_id(args)?;
-        let answer = truncate_chars(&required_string(args, "answer")?, ANSWER_LIMIT);
+        let answer_limit = crate::runtime_settings::current().planner_qna_answer_limit;
+        let (answer, answer_notice) = truncate_chars_with_notice(
+            &required_string(args, "answer")?,
+            answer_limit,
+            "answer",
+            "planner_qna_answer_limit",
+        );
         let gcx = ccx.lock().await.app.gcx.clone();
 
         let card_id_for_update = card_id.clone();
@@ -502,10 +538,13 @@ impl Tool for ToolPlannerReply {
         })
         .await?;
 
-        let output = format!(
+        let mut output = format!(
             "Reply delivered to card `{}` for question `{}`.\n\nAnswer: {}",
             card_id, question_id, answer
         );
+        if let Some(notice) = answer_notice {
+            output = format!("{}\n\n{}", notice, output);
+        }
         Ok((false, vec![tool_message(tool_call_id, output)]))
     }
 
@@ -569,7 +608,9 @@ mod tests {
     use crate::app_state::AppState;
     use crate::chat::types::TaskMeta as ThreadTaskMeta;
     use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus};
+    use crate::tools::settings_guard::SettingsGuard;
     use crate::tools::tools_description::Tool;
+    use serial_test::serial;
 
     fn args(items: &[(&str, Value)]) -> HashMap<String, Value> {
         items
@@ -864,5 +905,115 @@ mod tests {
             .starts_with("[NOTIFY-FAILED:blocking_question]"));
         assert!(output.contains("question_id"));
         assert!(output.contains("Planner wake-up failed"));
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn planner_qna_question_limit_setting_truncates_and_is_loud() {
+        let _guard = SettingsGuard::install(|settings| {
+            settings.planner_qna_question_limit = 32;
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(temp.path(), vec![test_card("T-41", "QnA", vec![])]).await;
+        let ccx = task_ccx(gcx.clone(), "agents", Some("T-41")).await;
+        let long_question = "q".repeat(200);
+
+        let output = output_text(
+            ToolAgentAskPlanner::new()
+                .tool_execute(
+                    ccx,
+                    &"call".to_string(),
+                    &args(&[
+                        ("question", json!(long_question)),
+                        ("urgency", json!("info")),
+                    ]),
+                )
+                .await
+                .unwrap(),
+        );
+
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-41").unwrap();
+        let recorded = &card.status_updates[0].message;
+        assert!(
+            recorded.matches('q').count() == 32,
+            "expected the question truncated to 32 chars, got: {}",
+            recorded
+        );
+        assert!(
+            output.contains("showing 32 of 200 question characters")
+                && output.contains("planner_qna_question_limit = 32"),
+            "expected a quantified question-truncation notice, got: {}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn planner_qna_answer_limit_setting_truncates_and_is_loud() {
+        let _guard = SettingsGuard::install(|settings| {
+            settings.planner_qna_answer_limit = 16;
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(
+            temp.path(),
+            vec![test_card(
+                "T-42",
+                "QnA",
+                vec![StatusUpdate {
+                    timestamp: Utc::now().to_rfc3339(),
+                    message: "[ASK:abcdabcd] Which one? (urgency=info)".to_string(),
+                }],
+            )],
+        )
+        .await;
+        let ccx = task_ccx(gcx.clone(), "planner", Some("T-42")).await;
+        let long_answer = "a".repeat(120);
+
+        let output = output_text(
+            ToolPlannerReply::new()
+                .tool_execute(
+                    ccx,
+                    &"call".to_string(),
+                    &args(&[
+                        ("card_id", json!("T-42")),
+                        ("question_id", json!("abcdabcd")),
+                        ("answer", json!(long_answer)),
+                    ]),
+                )
+                .await
+                .unwrap(),
+        );
+
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        let card = board.get_card("T-42").unwrap();
+        let recorded = card
+            .status_updates
+            .iter()
+            .find(|update| update.message.starts_with("[REPLY:"))
+            .expect("reply update");
+        assert!(recorded.message.ends_with(&"a".repeat(16)));
+        assert!(!recorded.message.ends_with(&"a".repeat(17)));
+        assert!(
+            output.contains("showing 16 of 120 answer characters")
+                && output.contains("planner_qna_answer_limit = 16"),
+            "expected a quantified answer-truncation notice, got: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn qna_truncation_notice_quantifies_shown_and_total() {
+        let notice = qna_truncation_notice("question", 800, 2_048, "planner_qna_question_limit");
+        assert!(
+            notice.contains("showing 800 of 2048 question characters"),
+            "{}",
+            notice
+        );
+        assert!(
+            notice.contains("planner_qna_question_limit = 800"),
+            "{}",
+            notice
+        );
     }
 }

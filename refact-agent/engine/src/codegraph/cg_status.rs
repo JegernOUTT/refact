@@ -16,6 +16,23 @@ pub struct CodeGraphStatus {
     pub eta_seconds: Option<u64>,
     pub state: String,
     pub error: String,
+    #[serde(default)]
+    pub parse_failures: i64,
+    #[serde(default)]
+    pub parse_failure_paths: Vec<String>,
+    #[serde(default)]
+    pub parse_failure_note: String,
+}
+
+fn parse_failure_note(parse_failures: i64) -> String {
+    if parse_failures == 0 {
+        String::new()
+    } else {
+        format!(
+            "{parse_failures} file(s) failed to parse and may be missing symbols in the index; \
+             see parse_failure_paths"
+        )
+    }
 }
 
 pub async fn get_codegraph_status(gcx: Arc<GlobalContext>) -> CodeGraphStatus {
@@ -36,6 +53,9 @@ pub async fn get_codegraph_status(gcx: Arc<GlobalContext>) -> CodeGraphStatus {
             eta_seconds: None,
             state: state.to_string(),
             error,
+            parse_failures: 0,
+            parse_failure_paths: Vec::new(),
+            parse_failure_note: String::new(),
         };
     };
 
@@ -58,6 +78,9 @@ pub async fn get_codegraph_status(gcx: Arc<GlobalContext>) -> CodeGraphStatus {
                 eta_seconds: eta_seconds(queued, throughput_files_per_min),
                 state: "error".to_string(),
                 error,
+                parse_failures: 0,
+                parse_failure_paths: Vec::new(),
+                parse_failure_note: String::new(),
             };
         }
     };
@@ -80,6 +103,9 @@ pub async fn get_codegraph_status(gcx: Arc<GlobalContext>) -> CodeGraphStatus {
                 eta_seconds,
                 state: "error".to_string(),
                 error,
+                parse_failures: readiness.parse_failures,
+                parse_failure_paths: readiness.parse_failure_paths.clone(),
+                parse_failure_note: parse_failure_note(readiness.parse_failures),
             };
         }
     };
@@ -101,6 +127,9 @@ pub async fn get_codegraph_status(gcx: Arc<GlobalContext>) -> CodeGraphStatus {
         eta_seconds,
         state: state.to_string(),
         error,
+        parse_failures: readiness.parse_failures,
+        parse_failure_paths: readiness.parse_failure_paths,
+        parse_failure_note: parse_failure_note(readiness.parse_failures),
     }
 }
 

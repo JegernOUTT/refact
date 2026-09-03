@@ -479,6 +479,29 @@ fn trajectory_settings_fields() -> Vec<TrajectorySettingField> {
         live_bool("trajectory_watcher_self_write_enabled"),
         restart_bool("tool_catalog_snapshots_enabled"),
         restart_bool("vecdb_path_coalescing_enabled"),
+        live_usize("pp_max_tool_budget_tokens", 4_096, 2_000_000),
+        live_usize("pp_max_per_file_budget_tokens", 1_024, 2_000_000),
+        live_usize("pp_max_line_length_chars", 80, 1_000_000),
+        live_usize("pp_tokens_for_text_percent", 1, 100),
+        live_usize("git_intel_max_commits", 100, 1_000_000),
+        live_usize("git_intel_deep_walk_limit", 100, 5_000_000),
+        live_usize("git_intel_max_files_per_commit_cochange", 10, 100_000),
+        live_usize("git_intel_max_files_per_commit_entropy", 5, 100_000),
+        live_usize("codegraph_dead_code_max_results", 50, 1_000_000),
+        live_usize("codegraph_exec_flow_max_nodes", 50, 1_000_000),
+        live_usize("vecdb_trajectory_split_bytes", 256, 1_048_576),
+        live_usize("cat_max_input_paths", 1, 100_000),
+        live_usize("cat_max_lines", 100, 1_000_000),
+        live_usize("cat_max_file_bytes", 4_096, 268_435_456),
+        live_usize("cat_max_expanded_files", 1, 100_000),
+        live_usize("get_logs_max_tail_bytes", 4_096, 268_435_456),
+        live_usize("planner_qna_question_limit", 200, 1_000_000),
+        live_usize("planner_qna_answer_limit", 200, 1_000_000),
+        live_usize("hist_search_preview_chars", 100, 100_000),
+        live_usize("agent_diff_max_output_bytes", 4_096, 268_435_456),
+        live_usize("process_subscribe_preview_bytes", 50, 100_000),
+        live_usize("review_diff_char_cap", 4_096, 8_388_608),
+        live_usize("review_max_diff_patch_bytes", 4_096, 268_435_456),
     ]
 }
 
@@ -538,6 +561,85 @@ mod tests {
         AppState::from_gcx(gcx).await
     }
 
+    /// The field metadata table and `runtime_settings::validate` are two
+    /// hand-maintained parallel lists. If they drift, the GUI either blocks
+    /// values the engine accepts or offers values the engine rejects with a
+    /// 400. This test is the only thing keeping them in agreement.
+    #[test]
+    fn trajectory_settings_fields_match_struct_and_validate_bounds() {
+        let defaults = crate::runtime_settings::TrajectoryRuntimeSettings::default();
+        let defaults_json = serde_json::to_value(&defaults).unwrap();
+        let serialized_names: std::collections::BTreeSet<String> = defaults_json
+            .as_object()
+            .expect("settings serialize as a JSON object")
+            .keys()
+            .cloned()
+            .collect();
+
+        let fields = trajectory_settings_fields();
+        let field_names: std::collections::BTreeSet<String> =
+            fields.iter().map(|field| field.name.to_string()).collect();
+        assert_eq!(
+            field_names.len(),
+            fields.len(),
+            "trajectory_settings_fields() contains duplicate names"
+        );
+        assert_eq!(
+            field_names, serialized_names,
+            "trajectory_settings_fields() must list exactly the serialized settings fields"
+        );
+
+        // Every advertised min/max must be precisely what validate() enforces.
+        for field in &fields {
+            let (minimum, maximum) = match (field.minimum, field.maximum) {
+                (Some(minimum), Some(maximum)) => (minimum, maximum),
+                _ => {
+                    assert_eq!(
+                        field.value_type, "boolean",
+                        "{} has no bounds but is not a boolean",
+                        field.name
+                    );
+                    continue;
+                }
+            };
+            assert_eq!(field.value_type, "integer");
+            assert!(minimum < maximum, "{} has an empty range", field.name);
+
+            let with_value = |value: u64| {
+                let mut json = defaults_json.clone();
+                json[field.name] = serde_json::json!(value);
+                let settings: crate::runtime_settings::TrajectoryRuntimeSettings =
+                    serde_json::from_value(json).unwrap_or_else(|e| {
+                        panic!("{} is not settable to {value}: {e}", field.name)
+                    });
+                crate::runtime_settings::validate(&settings)
+            };
+            let range_error = format!("{} must be between {} and {}", field.name, minimum, maximum);
+
+            // Boundaries are accepted (a cross-field rule may still complain,
+            // but never about this field's range).
+            for accepted in [minimum, maximum] {
+                if let Err(error) = with_value(accepted) {
+                    assert!(
+                        !error.starts_with(&range_error),
+                        "{} rejects in-range value {accepted}: {error}",
+                        field.name
+                    );
+                }
+            }
+            // Just outside the boundaries is rejected with exactly these bounds.
+            for rejected in [minimum - 1, maximum + 1] {
+                let error = with_value(rejected).unwrap_err();
+                assert_eq!(
+                    error,
+                    format!("{range_error}; got {rejected}"),
+                    "{} bounds disagree between fields() and validate()",
+                    field.name
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     #[serial(runtime_settings)]
     async fn trajectory_settings_defaults_round_trip_and_persist() {
@@ -551,7 +653,7 @@ mod tests {
             initial.config,
             crate::runtime_settings::TrajectoryRuntimeSettings::default()
         );
-        assert_eq!(initial.fields.len(), 24);
+        assert_eq!(initial.fields.len(), 47);
         assert!(initial
             .fields
             .iter()

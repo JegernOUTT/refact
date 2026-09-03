@@ -40,7 +40,7 @@ impl ToolRm {
         }
     }
 
-    fn parse_recursive(args: &HashMap<String, Value>) -> Result<(bool, Option<u32>, bool), String> {
+    fn parse_recursive(args: &HashMap<String, Value>) -> Result<(bool, bool), String> {
         let recursive = match args.get("recursive") {
             Some(Value::Null) | None => false,
             Some(value) => match refact_tool_api::coerce_bool(value) {
@@ -49,15 +49,11 @@ impl ToolRm {
                 None => return Err(format!("Expected boolean for 'recursive', got {:?}", value)),
             },
         };
-        let max_depth = match args.get("max_depth") {
-            Some(Value::Number(n)) => n.as_u64().map(|v| v as u32),
-            _ => None,
-        };
         let dry_run = args
             .get("dry_run")
             .and_then(refact_tool_api::coerce_bool)
             .unwrap_or(false);
-        Ok((recursive, max_depth, dry_run))
+        Ok((recursive, dry_run))
     }
 }
 
@@ -72,7 +68,7 @@ impl Tool for ToolRm {
             Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
             _ => return Ok("".to_string()),
         };
-        let (recursive, _, dry_run) = Self::parse_recursive(args).unwrap_or((false, None, false));
+        let (recursive, dry_run) = Self::parse_recursive(args).unwrap_or((false, false));
         Ok(format!(
             "rm {} {} {}",
             if recursive { "-r" } else { "" },
@@ -138,7 +134,7 @@ impl Tool for ToolRm {
             );
         }
 
-        let (recursive, _max_depth, dry_run) = Self::parse_recursive(args)?;
+        let (recursive, dry_run) = Self::parse_recursive(args)?;
         let (gcx, execution_scope, top_n) = {
             let cgcx = ccx.lock().await;
             (
@@ -371,9 +367,41 @@ impl Tool for ToolRm {
             experimental: false,
             allow_parallel: false,
             description: "Deletes a file or directory. Use recursive=true for directories. Set dry_run=true to preview without deletion.".to_string(),
-            input_schema: json_schema_from_params(&[("path", "string", "Absolute or relative path of the file or directory to delete."), ("recursive", "boolean", "If true and target is a directory, delete recursively. Defaults to false."), ("dry_run", "boolean", "If true, only report what would be done without deleting."), ("max_depth", "number", "(Optional) Maximum depth (currently unused).")], &["path"]),
+            input_schema: json_schema_from_params(&[("path", "string", "Absolute or relative path of the file or directory to delete."), ("recursive", "boolean", "If true and target is a directory, delete recursively. Defaults to false."), ("dry_run", "boolean", "If true, only report what would be done without deleting.")], &["path"]),
             output_schema: None,
             annotations: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rm_schema_no_longer_advertises_max_depth() {
+        let schema = ToolRm {
+            config_path: String::new(),
+        }
+        .tool_description()
+        .input_schema;
+        let rendered = serde_json::to_string(&schema).unwrap();
+
+        assert!(
+            !rendered.contains("max_depth"),
+            "the dead max_depth arg is still advertised: {}",
+            rendered
+        );
+        assert!(rendered.contains("recursive") && rendered.contains("dry_run"));
+    }
+
+    #[test]
+    fn rm_parse_recursive_ignores_removed_max_depth_arg() {
+        let args = HashMap::from_iter([
+            ("recursive".to_string(), Value::Bool(true)),
+            ("max_depth".to_string(), serde_json::json!(3)),
+        ]);
+
+        assert_eq!(ToolRm::parse_recursive(&args).unwrap(), (true, false));
     }
 }

@@ -15,6 +15,13 @@ pub struct ToolSearchTrajectories {
     pub config_path: String,
 }
 
+fn hist_search_preview_notice(shown: usize, total: usize, limit: usize) -> String {
+    format!(
+        "\n⚠️ showing {} of {} preview characters (limit: hist_search_preview_chars = {}). 💡 Raise hist_search_preview_chars in trajectory settings or call get_trajectory_context() to expand.",
+        shown, total, limit
+    )
+}
+
 #[async_trait]
 impl Tool for ToolSearchTrajectories {
     fn tool_description(&self) -> ToolDesc {
@@ -59,6 +66,7 @@ impl Tool for ToolSearchTrajectories {
         let output = if memories.is_empty() {
             "No relevant trajectories found.".to_string()
         } else {
+            let preview_chars = crate::runtime_settings::current().hist_search_preview_chars;
             let mut result = format!("Found {} relevant trajectories:\n\n", memories.len());
             for m in memories.iter() {
                 result.push_str("───────────────────────────────────────\n");
@@ -73,10 +81,15 @@ impl Tool for ToolSearchTrajectories {
                     result.push_str(&format!("📍 Messages: {}-{}\n", start, end));
                 }
                 result.push_str("\n");
-                let preview: String = m.content.chars().take(400).collect();
+                let total_chars = m.content.chars().count();
+                let preview: String = m.content.chars().take(preview_chars).collect();
                 result.push_str(&preview);
-                if m.content.len() > 400 {
-                    result.push_str("...");
+                if total_chars > preview_chars {
+                    result.push_str(&hist_search_preview_notice(
+                        preview_chars,
+                        total_chars,
+                        preview_chars,
+                    ));
                 }
                 result.push_str("\n\n");
             }
@@ -100,5 +113,51 @@ impl Tool for ToolSearchTrajectories {
 
     fn tool_depends_on(&self) -> Vec<String> {
         vec![]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::settings_guard::SettingsGuard;
+    use serial_test::serial;
+
+    #[test]
+    #[serial(runtime_settings)]
+    fn hist_search_preview_chars_setting_is_read_from_settings() {
+        let _guard = SettingsGuard::install(|settings| {
+            settings.hist_search_preview_chars = 25;
+        });
+
+        assert_eq!(
+            crate::runtime_settings::current().hist_search_preview_chars,
+            25
+        );
+        let notice = hist_search_preview_notice(25, 900, 25);
+        assert!(
+            notice.contains("showing 25 of 900 preview characters"),
+            "{}",
+            notice
+        );
+        assert!(
+            notice.contains("hist_search_preview_chars = 25"),
+            "{}",
+            notice
+        );
+    }
+
+    #[test]
+    fn hist_search_preview_notice_quantifies_shown_and_total() {
+        let notice = hist_search_preview_notice(400, 12_345, 400);
+        assert!(
+            notice.contains("showing 400 of 12345 preview characters"),
+            "{}",
+            notice
+        );
+        assert!(
+            notice.contains("hist_search_preview_chars = 400"),
+            "{}",
+            notice
+        );
     }
 }

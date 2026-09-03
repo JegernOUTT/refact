@@ -8,8 +8,11 @@ use tokio::sync::Mutex as AMutex;
 use crate::global_context::GlobalContext;
 use crate::tools::review_types::{ReviewDiffSummary, ReviewScopeSummary, ScopeMode};
 
-const MAX_DIFF_PATCH_BYTES: usize = 512 * 1024;
 const ADJACENT_EXPANSION_CAP: usize = 40;
+
+fn max_diff_patch_bytes() -> usize {
+    crate::runtime_settings::current().review_max_diff_patch_bytes
+}
 
 const GENERATED_MARKERS: &[&str] = &[
     "/node_modules/",
@@ -72,7 +75,11 @@ impl DiffHunks {
             if let Some(rest) = line.strip_prefix("+++ ") {
                 let path = rest.trim();
                 current = (path != "/dev/null").then(|| {
-                    normalize_path(path.strip_prefix("b/").unwrap_or(path).trim_end_matches('\t'))
+                    normalize_path(
+                        path.strip_prefix("b/")
+                            .unwrap_or(path)
+                            .trim_end_matches('\t'),
+                    )
                 });
                 continue;
             }
@@ -121,7 +128,10 @@ fn parse_new_hunk_range(header: &str) -> Option<(u32, u32)> {
     let spec = plus.split(&[' ', '@'][..]).next()?;
     let mut parts = spec.split(',');
     let start: u32 = parts.next()?.trim().parse().ok()?;
-    let count: u32 = parts.next().and_then(|v| v.trim().parse().ok()).unwrap_or(1);
+    let count: u32 = parts
+        .next()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1);
     Some((start, start + count.saturating_sub(1).max(0)))
 }
 
@@ -130,12 +140,14 @@ pub struct ReviewScope {
     pub mode: ScopeMode,
     pub requested: Vec<PathBuf>,
     pub files: Vec<PathBuf>,
+    pub dropped_files: Vec<PathBuf>,
     pub changed_files: Vec<PathBuf>,
     pub focus: Option<String>,
     pub plan: Option<String>,
     pub base: Option<String>,
     pub head: Option<String>,
     pub diff_patch: Option<String>,
+    pub patch_total_bytes: usize,
     pub hunks: DiffHunks,
     pub repo_root: Option<PathBuf>,
     pub expansion: Option<String>,
@@ -158,6 +170,13 @@ impl ReviewScope {
             .collect()
     }
 
+    pub fn dropped_file_strings(&self) -> Vec<String> {
+        self.dropped_files
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect()
+    }
+
     pub fn summary(&self) -> ReviewScopeSummary {
         ReviewScopeSummary {
             mode: self.mode.as_str().to_string(),
@@ -167,6 +186,7 @@ impl ReviewScope {
             focus: self.focus.clone(),
             expansion: self.expansion.clone(),
             out_of_scope_findings: 0,
+            dropped_files: self.dropped_file_strings(),
         }
     }
 
@@ -289,13 +309,13 @@ pub async fn build_review_scope(gcx: Arc<GlobalContext>, request: ScopeRequest) 
     let max_files = max_files.max(1);
     let repo_root = repo_root_for_scope(gcx.as_ref(), &requested);
 
-    let (base, head, changed_files, diff_patch) = match repo_root.as_ref() {
+    let (base, head, changed_files, diff_patch, patch_total_bytes) = match repo_root.as_ref() {
         Some(root) => {
             let base = resolve_base(root, base.as_deref()).await;
             let head = git_output(root, &["rev-parse", "--short", "HEAD"]).await;
+            let max_patch_bytes = max_diff_patch_bytes();
             match base.as_ref().and_then(|base| {
-                refact_worktrees::git::diff_for_path(root, Some(base), None, MAX_DIFF_PATCH_BYTES)
-                    .ok()
+                refact_worktrees::git::diff_for_path(root, Some(base), None, max_patch_bytes).ok()
             }) {
                 Some(diff) => {
                     let mut seen = HashSet::new();
@@ -309,13 +329,14 @@ pub async fn build_review_scope(gcx: Arc<GlobalContext>, request: ScopeRequest) 
                         })
                         .filter(|path| seen.insert(path.clone()))
                         .collect::<Vec<_>>();
+                    let total = diff.patch_total_bytes.max(diff.patch_shown_bytes);
                     let patch = (!diff.patch.trim().is_empty()).then_some(diff.patch);
-                    (base, head, changed, patch)
+                    (base, head, changed, patch, total)
                 }
-                None => (base, head, Vec::new(), None),
+                None => (base, head, Vec::new(), None, 0),
             }
         }
-        None => (None, None, Vec::new(), None),
+        None => (None, None, Vec::new(), None, 0),
     };
 
     let hunks = diff_patch
@@ -349,11 +370,13 @@ pub async fn build_review_scope(gcx: Arc<GlobalContext>, request: ScopeRequest) 
         }
         expansion = note;
     }
+    let mut dropped_files: Vec<PathBuf> = Vec::new();
     if files.len() > max_files {
-        files.truncate(max_files);
+        dropped_files = files.split_off(max_files);
+        let dropped = dropped_files.len();
         expansion = Some(match expansion {
-            Some(note) => format!("{note}, truncated to {max_files} files"),
-            None => format!("truncated to {max_files} files"),
+            Some(note) => format!("{note}, truncated to {max_files} files, {dropped} not reviewed"),
+            None => format!("truncated to {max_files} files, {dropped} not reviewed"),
         });
     }
 
@@ -361,6 +384,7 @@ pub async fn build_review_scope(gcx: Arc<GlobalContext>, request: ScopeRequest) 
         mode,
         requested,
         files,
+        dropped_files,
         changed_files,
         focus: focus
             .map(|value| value.trim().to_string())
@@ -371,6 +395,7 @@ pub async fn build_review_scope(gcx: Arc<GlobalContext>, request: ScopeRequest) 
         base,
         head,
         diff_patch,
+        patch_total_bytes,
         hunks,
         repo_root,
         expansion,
@@ -431,8 +456,7 @@ impl DiffAttribution {
         if branch_commits.is_empty() {
             return HashSet::new();
         }
-        let Some(blame) =
-            git_output(root, &["blame", "--line-porcelain", "--", file.trim()]).await
+        let Some(blame) = git_output(root, &["blame", "--line-porcelain", "--", file.trim()]).await
         else {
             return HashSet::new();
         };
@@ -518,15 +542,15 @@ mod tests {
             mode: ScopeMode::Strict,
             requested: vec![],
             files: vec![],
+            dropped_files: vec![],
             changed_files: vec![],
             focus: None,
             plan: None,
             base: Some(base),
             head: None,
             diff_patch: None,
-            hunks: DiffHunks::parse(
-                "--- a/moved.rs\n+++ b/moved.rs\n@@ -0,0 +1,1 @@\n+alpha\n",
-            ),
+            patch_total_bytes: 0,
+            hunks: DiffHunks::parse("--- a/moved.rs\n+++ b/moved.rs\n@@ -0,0 +1,1 @@\n+alpha\n"),
             repo_root: Some(temp.path().to_path_buf()),
             expansion: None,
         };
@@ -601,6 +625,38 @@ mod tests {
             .as_deref()
             .is_some_and(|patch| patch.contains("changed.rs")));
         assert!(!scope.hunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn review_scope_records_every_file_it_dropped_to_the_max_files_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        init_repo(temp.path());
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
+        let requested: Vec<PathBuf> = (0..5)
+            .map(|index| temp.path().join(format!("file{index}.rs")))
+            .collect();
+
+        let scope = build_review_scope(
+            gcx,
+            ScopeRequest {
+                requested: requested.clone(),
+                mode: ScopeMode::Strict,
+                base: None,
+                focus: None,
+                plan: None,
+                max_files: 3,
+            },
+        )
+        .await;
+
+        assert_eq!(scope.files.len(), 3);
+        assert_eq!(scope.dropped_files, requested[3..].to_vec());
+        assert_eq!(scope.summary().dropped_files.len(), 2);
+        assert!(scope
+            .expansion
+            .as_deref()
+            .is_some_and(|note| note.contains("2 not reviewed")));
     }
 
     #[test]

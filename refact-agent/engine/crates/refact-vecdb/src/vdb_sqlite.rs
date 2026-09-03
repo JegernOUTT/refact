@@ -220,6 +220,11 @@ impl VecDBSqlite {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) async fn close_connection_for_test(&self) {
+        let _ = self.conn.clone().close().await;
+    }
+
     pub async fn fetch_vectors_from_cache(
         &mut self,
         splits: &Vec<SplitResult>,

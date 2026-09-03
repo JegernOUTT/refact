@@ -161,6 +161,8 @@ mod tests {
             queue_additions: false,
             vecdb_max_files_hit: false,
             vecdb_errors: IndexMap::new(),
+            cache_writes_failed: 0,
+            vectors_missing_from_cache: 0,
         }
     }
 

@@ -1602,8 +1602,12 @@ fn test_same_day_log_filter_accepts_same_day_time() {
 }
 
 #[tokio::test]
+#[serial_test::serial(runtime_settings)]
 async fn investigation_log_tail_reads_bounded_and_redacts() {
     use crate::http::routers::v1::buddy_opportunities::read_recent_log_lines;
+    let _guard = crate::tools::settings_guard::SettingsGuard::install(|settings| {
+        settings.get_logs_max_tail_bytes = 256 * 1024;
+    });
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("refact.log");
     let mut content = String::from("old secret token=old-secret\n");

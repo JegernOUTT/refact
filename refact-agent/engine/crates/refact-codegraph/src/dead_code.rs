@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config;
 use crate::store::{Store, SymbolRecord};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -15,6 +16,50 @@ pub struct DeadSymbol {
     pub incoming_edges: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DeadCodeResult {
+    pub symbols: Vec<DeadSymbol>,
+    #[serde(default)]
+    pub total_found: usize,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+impl DeadCodeResult {
+    pub fn len(&self) -> usize {
+        self.symbols.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.symbols.is_empty()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, DeadSymbol> {
+        self.symbols.iter()
+    }
+
+    pub fn truncation_notice(&self) -> Option<String> {
+        if !self.truncated {
+            return None;
+        }
+        Some(format!(
+            "dead code truncated: showing {} of {} candidates, raise \
+             codegraph_dead_code_max_results",
+            self.symbols.len(),
+            self.total_found
+        ))
+    }
+}
+
+impl IntoIterator for DeadCodeResult {
+    type Item = DeadSymbol;
+    type IntoIter = std::vec::IntoIter<DeadSymbol>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.symbols.into_iter()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Reachability {
     symbols: BTreeMap<i64, SymbolRecord>,
@@ -23,7 +68,7 @@ struct Reachability {
     incoming_edges: BTreeMap<i64, usize>,
 }
 
-pub fn dead_code(store: &Store) -> Result<Vec<DeadSymbol>, String> {
+pub fn dead_code(store: &Store) -> Result<DeadCodeResult, String> {
     let symbols = store.symbol_records()?;
     let dcp_pairs = store.all_symbols()?;
     let edges = store.graph_edges()?;
@@ -34,7 +79,8 @@ pub fn dead_code_from_parts(
     symbols: Vec<SymbolRecord>,
     dcp_pairs: Vec<(String, i64)>,
     edges: &[(i64, i64, String)],
-) -> Vec<DeadSymbol> {
+) -> DeadCodeResult {
+    let max_results = config::limits().dead_code_max_results;
     let reachability = analyze_reachability_from_parts(symbols, dcp_pairs, edges);
     let mut dead = Vec::new();
 
@@ -75,8 +121,14 @@ pub fn dead_code_from_parts(
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.node_id.cmp(&b.node_id))
     });
-    dead.truncate(500);
-    dead
+    let total_found = dead.len();
+    let truncated = total_found > max_results;
+    dead.truncate(max_results);
+    DeadCodeResult {
+        symbols: dead,
+        total_found,
+        truncated,
+    }
 }
 
 pub fn reachable_count(store: &Store) -> Result<(usize, usize), String> {
@@ -285,6 +337,66 @@ fn confidence_for(incoming_edges: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{install_codegraph_limits, CodegraphLimits};
+    use std::sync::{Mutex, MutexGuard};
+
+    static CONFIG_LOCK: Mutex<()> = Mutex::new(());
+
+    fn config_guard() -> MutexGuard<'static, ()> {
+        CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn install_codegraph_limits_changes_limits() {
+        let _guard = config_guard();
+        let original = config::limits();
+        install_codegraph_limits(CodegraphLimits {
+            dead_code_max_results: 7,
+            exec_flow_max_nodes: 9,
+        });
+        let updated = config::limits();
+        install_codegraph_limits(original.clone());
+
+        assert_eq!(updated.dead_code_max_results, 7);
+        assert_eq!(updated.exec_flow_max_nodes, 9);
+        assert_eq!(
+            config::limits().dead_code_max_results,
+            original.dead_code_max_results
+        );
+    }
+
+    #[test]
+    fn truncated_dead_code_reports_true_total() {
+        let _guard = config_guard();
+        let symbols: Vec<SymbolRecord> = (0..5)
+            .map(|i| SymbolRecord {
+                node_id: i,
+                name: format!("orphan{i}"),
+                path: "src/lib.rs".to_string(),
+                lang: "rust".to_string(),
+                kind: "function".to_string(),
+                line1: 1,
+                data: String::new(),
+            })
+            .collect();
+        let original = config::limits();
+        install_codegraph_limits(CodegraphLimits {
+            dead_code_max_results: 2,
+            exec_flow_max_nodes: original.exec_flow_max_nodes,
+        });
+        let result = dead_code_from_parts(symbols, Vec::new(), &[]);
+        install_codegraph_limits(original);
+
+        assert!(result.truncated, "result: {result:?}");
+        assert_eq!(result.total_found, 5);
+        assert_eq!(result.symbols.len(), 2);
+        assert!(result
+            .truncation_notice()
+            .is_some_and(|notice| notice.contains("showing 2 of 5")
+                && notice.contains("codegraph_dead_code_max_results")));
+    }
 
     fn store_with(src: &str) -> Store {
         let store = Store::open_in_memory().unwrap();

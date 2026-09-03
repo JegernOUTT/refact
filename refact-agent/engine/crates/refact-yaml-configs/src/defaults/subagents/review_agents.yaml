@@ -16,10 +16,14 @@ subchat:
 
 prompts:
   guardrails: |
-    Review complete. Present the findings to the user as the report presents them: supported
-    findings first, hypotheses clearly marked as unverified, and the stage coverage line so the
-    user knows what was not checked. Do not upgrade a hypothesis into a fact, and do not hide a
-    stage that timed out or failed.
+    The review tool has returned. Read its outcome marker before you say anything about the code.
+    If the report is marked INCONCLUSIVE, nothing was checked: say so plainly, name the stages that
+    died and their reasons, and do NOT present it as a clean review. If it is marked PARTIAL, say
+    which stages completed and which did not, and scope every statement to what actually ran.
+    Only a report with no marker is a completed review.
+    Present the findings as the report presents them: supported findings first, hypotheses clearly
+    marked as unverified, and the stage coverage line so the user knows what was not checked. Do
+    not upgrade a hypothesis into a fact, and do not hide a stage that timed out or failed.
 
 tools: []
 
@@ -27,8 +31,9 @@ review:
   default_depth: normal
   parallel_depth: 4
   variants: 1
-  stage_budget_minutes: 6
-  writes_stage_budget_minutes: 20
+  stage_budget_minutes: 30
+  writes_stage_budget_minutes: 45
+  idle_timeout_secs: 360
   deadline_secs: 1800
   max_steps: 40
   max_files: 60

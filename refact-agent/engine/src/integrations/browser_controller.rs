@@ -2428,14 +2428,21 @@ fn execute_instrumentation_step(
                     .coverage_manager
                     .stop(&tab, &runtime.artifacts_dir)?;
                 let resource_count = stopped.artifact.resource_count;
-                Ok(StepResult::success(
-                    idx,
-                    format!("Stopped coverage for {resource_count} resource(s)"),
+                let unmeasured = stopped.artifact.unmeasured_resource_count;
+                let message = if unmeasured > 0 {
+                    format!(
+                        "Stopped coverage for {resource_count} resource(s), {unmeasured} \
+                         unmeasured (source retrieval failed, no percentage reported)"
+                    )
+                } else {
+                    format!("Stopped coverage for {resource_count} resource(s)")
+                };
+                Ok(
+                    StepResult::success(idx, message).with_data(serde_json::json!({
+                        "coverage": stopped.summaries,
+                        "artifact": stopped.artifact,
+                    })),
                 )
-                .with_data(serde_json::json!({
-                    "coverage": stopped.summaries,
-                    "artifact": stopped.artifact,
-                })))
             }
             BrowserStep::AddVirtualAuthenticator {
                 protocol,

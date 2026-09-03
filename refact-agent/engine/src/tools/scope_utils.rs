@@ -997,6 +997,8 @@ mod worktree_scope_read_tools {
                 queue_additions: false,
                 vecdb_max_files_hit: false,
                 vecdb_errors: Default::default(),
+                cache_writes_failed: 0,
+                vectors_missing_from_cache: 0,
             })
         }
 

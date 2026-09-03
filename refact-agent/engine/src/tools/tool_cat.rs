@@ -37,12 +37,27 @@ pub struct ToolCat {
 }
 
 const CAT_MAX_IMAGES_CNT: usize = 10;
-const CAT_MAX_LINES: usize = 2000;
-const CAT_MAX_INPUT_PATHS: usize = 128;
-const CAT_MAX_EXPANDED_FILES: usize = 512;
-const CAT_MAX_RANGE_SPAN: usize = CAT_MAX_LINES;
-const CAT_MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 const CAT_MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+const CAT_EXPANSION_PROBE_FACTOR: usize = 4;
+
+struct CatLimits {
+    max_input_paths: usize,
+    max_lines: usize,
+    max_expanded_files: usize,
+    max_file_bytes: usize,
+}
+
+impl CatLimits {
+    fn current() -> Self {
+        let settings = crate::runtime_settings::current();
+        Self {
+            max_input_paths: settings.cat_max_input_paths,
+            max_lines: settings.cat_max_lines,
+            max_expanded_files: settings.cat_max_expanded_files,
+            max_file_bytes: settings.cat_max_file_bytes,
+        }
+    }
+}
 
 type CatLineRange = (usize, usize);
 
@@ -67,7 +82,8 @@ struct CatResolvedPath {
 
 fn parse_cat_args(
     args: &HashMap<String, Value>,
-) -> Result<(Vec<CatPathRequest>, Vec<String>), String> {
+    max_input_paths: usize,
+) -> Result<(Vec<CatPathRequest>, Vec<String>, Vec<String>), String> {
     fn try_parse_line_range(s: &str) -> Result<Option<(usize, usize)>, String> {
         let s = s.trim();
 
@@ -125,8 +141,15 @@ fn parse_cat_args(
         });
     }
 
-    if paths.len() > CAT_MAX_INPUT_PATHS {
-        paths.truncate(CAT_MAX_INPUT_PATHS);
+    let mut notices = Vec::new();
+    if paths.len() > max_input_paths {
+        notices.push(format!(
+            "⚠️ showing {} of {} requested paths (limit: cat_max_input_paths = {}). 💡 Raise cat_max_input_paths in trajectory settings or call cat() again for the rest.",
+            max_input_paths,
+            paths.len(),
+            max_input_paths
+        ));
+        paths.truncate(max_input_paths);
     }
 
     let symbols = match args.get("symbols") {
@@ -144,7 +167,7 @@ fn parse_cat_args(
         None => vec![],
     };
 
-    Ok((paths, symbols))
+    Ok((paths, symbols, notices))
 }
 
 #[async_trait]
@@ -173,7 +196,8 @@ impl Tool for ToolCat {
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
         let mut corrections = false;
-        let (paths, symbols) = parse_cat_args(args)?;
+        let limits = CatLimits::current();
+        let (paths, symbols, mut input_notices) = parse_cat_args(args, limits.max_input_paths)?;
         let (gcx, execution_scope) = {
             let cgcx = ccx.lock().await;
             (cgcx.app.gcx.clone(), cgcx.execution_scope.clone())
@@ -181,11 +205,13 @@ impl Tool for ToolCat {
         let (
             filenames_present,
             symbols_not_found,
-            not_found_messages,
+            mut not_found_messages,
             context_enums,
             multimodal,
             scope_notices,
-        ) = paths_and_symbols_to_cat_with_path_ranges(ccx.clone(), paths, symbols).await;
+        ) = paths_and_symbols_to_cat_with_path_ranges(ccx.clone(), paths, symbols, &limits).await;
+        input_notices.append(&mut not_found_messages);
+        let not_found_messages = input_notices;
 
         let mut content = format_scope_notices(&scope_notices);
         if !filenames_present.is_empty() {
@@ -306,7 +332,25 @@ impl Tool for ToolCat {
 fn expansion_capped_from_messages(messages: &[String]) -> bool {
     messages
         .iter()
-        .any(|message| message.contains("directory expansion produced more than"))
+        .any(|message| message.contains("directory expansion:"))
+}
+
+fn expansion_cap_notice(
+    shown: usize,
+    seen_total: usize,
+    total_is_lower_bound: bool,
+    limit: usize,
+) -> String {
+    let total = seen_total.max(shown);
+    let total_text = if total_is_lower_bound {
+        format!("{}+", total)
+    } else {
+        total.to_string()
+    };
+    format!(
+        "⚠️ directory expansion: showing {} of {} files (limit: cat_max_expanded_files = {}). 💡 Narrow the path, cat() specific files, or raise cat_max_expanded_files in trajectory settings.",
+        shown, total_text, limit
+    )
 }
 
 // todo: we can extract if from pipe, however PathBuf does not implement it
@@ -400,10 +444,13 @@ async fn load_image(
     MultimodalElement::new(f_type.clone(), m_content)
 }
 
-fn clamp_cat_line_range(line_range: Option<CatLineRange>) -> Option<CatLineRange> {
+fn clamp_cat_line_range(
+    line_range: Option<CatLineRange>,
+    max_range_span: usize,
+) -> Option<CatLineRange> {
     line_range.map(|(start, end)| {
         let start = start.max(1);
-        let max_end = start.saturating_add(CAT_MAX_RANGE_SPAN.saturating_sub(1));
+        let max_end = start.saturating_add(max_range_span.saturating_sub(1));
         (start, end.min(max_end))
     })
 }
@@ -530,6 +577,7 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
     ccx: Arc<AMutex<AtCommandsContext>>,
     paths: Vec<CatPathRequest>,
     arg_symbols: Vec<String>,
+    limits: &CatLimits,
 ) -> (
     Vec<String>,
     Vec<String>,
@@ -562,12 +610,18 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
     let mut seen_by_path = HashMap::new();
     let mut expanded_files_count: usize = 0;
     let mut expansion_capped = false;
+    let mut expansion_seen_files: usize = 0;
+    let mut expansion_total_is_lower_bound = false;
+    let expansion_probe_budget = limits
+        .max_expanded_files
+        .saturating_mul(CAT_EXPANSION_PROBE_FACTOR)
+        .saturating_add(1);
 
     for request in paths {
         if aborted() {
             break;
         }
-        let line_range = clamp_cat_line_range(request.line_range);
+        let line_range = clamp_cat_line_range(request.line_range, limits.max_lines);
         let p = request.path;
         if execution_scope
             .as_ref()
@@ -584,20 +638,22 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
                 Ok(Some(resolved)) => {
                     scope_notices.extend(resolved.notices);
                     if resolved.path.is_dir() {
-                        let remaining = CAT_MAX_EXPANDED_FILES.saturating_sub(expanded_files_count);
                         match list_scoped_files_under_dir_limited_for_model_context(
                             gcx.clone(),
                             &resolved.path,
                             false,
-                            remaining.saturating_add(1),
+                            expansion_probe_budget,
                             Some(&abort_flag),
                         )
                         .await
                         {
                             Ok(listing) => {
                                 expansion_capped |= listing.truncated;
+                                expansion_total_is_lower_bound |= listing.truncated;
+                                expansion_seen_files =
+                                    expansion_seen_files.saturating_add(listing.files.len());
                                 for file in listing.files {
-                                    if expanded_files_count >= CAT_MAX_EXPANDED_FILES {
+                                    if expanded_files_count >= limits.max_expanded_files {
                                         expansion_capped = true;
                                         break;
                                     }
@@ -690,18 +746,19 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
             let path_buf = PathBuf::from(candidate);
             let indexing_everywhere =
                 crate::files_blocklist::reload_indexing_everywhere_if_needed(gcx.clone()).await;
-            let remaining = CAT_MAX_EXPANDED_FILES.saturating_sub(expanded_files_count);
             let listing = ls_files_limited(
                 &indexing_everywhere,
                 &path_buf,
                 false,
-                remaining.saturating_add(1),
+                expansion_probe_budget,
                 Some(&abort_flag),
             )
             .unwrap_or_default();
             expansion_capped |= listing.truncated;
+            expansion_total_is_lower_bound |= listing.truncated;
+            expansion_seen_files = expansion_seen_files.saturating_add(listing.files.len());
             for file in listing.files {
-                if expanded_files_count >= CAT_MAX_EXPANDED_FILES {
+                if expanded_files_count >= limits.max_expanded_files {
                     expansion_capped = true;
                     break;
                 }
@@ -719,9 +776,11 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
     }
 
     if expansion_capped {
-        not_found_messages.push(format!(
-            "⚠️ directory expansion produced more than {} files, showing the first {}. 💡 Narrow the path or cat() specific files.",
-            CAT_MAX_EXPANDED_FILES, CAT_MAX_EXPANDED_FILES
+        not_found_messages.push(expansion_cap_notice(
+            expanded_files_count,
+            expansion_seen_files,
+            expansion_total_is_lower_bound,
+            limits.max_expanded_files,
         ));
     }
 
@@ -869,7 +928,7 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
                 gcx.clone(),
                 &path_buf,
                 &read_context,
-                Some(CAT_MAX_FILE_BYTES),
+                Some(limits.max_file_bytes),
             )
             .await
             {
@@ -884,19 +943,19 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
                                     "⚠️ line {} is beyond file end ({} lines). 💡 Use cat('{}:1-{}')",
                                     start, total_lines, p, total_lines
                                 ));
-                                (1, total_lines.min(CAT_MAX_LINES))
+                                (1, total_lines.min(limits.max_lines))
                             } else {
                                 (start, end)
                             }
                         }
                         None => {
-                            if total_lines > CAT_MAX_LINES {
+                            if total_lines > limits.max_lines {
                                 not_found_messages.push(format!(
-                                    "⚠️ {} has {} lines, showing first {} lines. 💡 Use cat('{}:START-END') to read specific line ranges",
-                                    p, total_lines, CAT_MAX_LINES, p
+                                    "⚠️ {} has {} lines, showing first {} lines (limit: cat_max_lines = {}). 💡 Use cat('{}:START-END') to read specific line ranges or raise cat_max_lines in trajectory settings",
+                                    p, total_lines, limits.max_lines, limits.max_lines, p
                                 ));
                             }
-                            (1, total_lines.min(CAT_MAX_LINES))
+                            (1, total_lines.min(limits.max_lines))
                         }
                     };
 
@@ -918,8 +977,8 @@ async fn paths_and_symbols_to_cat_with_path_ranges(
                         filenames_present
                             .push(refact_core::chat_types::normalize_file_name(p.clone()));
                         not_found_messages.push(format!(
-                            "⚠️ {} exceeds the {} byte read limit and was skipped. 💡 Use cat('{}:START-END') to read a specific line range.",
-                            p, CAT_MAX_FILE_BYTES, p
+                            "⚠️ {} exceeds the {} byte read limit and was skipped (limit: cat_max_file_bytes = {}). 💡 Use cat('{}:START-END') to read a specific line range or raise cat_max_file_bytes in trajectory settings.",
+                            p, limits.max_file_bytes, limits.max_file_bytes, p
                         ));
                     } else {
                         not_found_messages.push(format!("{}: {}", p, e));
@@ -952,6 +1011,8 @@ mod tests {
     use super::*;
     use crate::app_state::AppState;
     use crate::privacy::{FilePrivacySettings, PrivacySettings};
+    use crate::tools::settings_guard::SettingsGuard;
+    use serial_test::serial;
 
     async fn ccx_for_root(root: &std::path::Path) -> Arc<AMutex<AtCommandsContext>> {
         ccx_for_root_with_blocked(root, vec![]).await
@@ -1210,39 +1271,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_cat_directory_expansion_is_bounded() {
+    #[serial(runtime_settings)]
+    async fn tool_cat_directory_expansion_honours_installed_setting() {
+        let _guard = SettingsGuard::install(|settings| {
+            settings.cat_max_expanded_files = 3;
+        });
         let temp = tempfile::Builder::new()
             .prefix("refact-tool-cat-")
             .tempdir()
             .unwrap();
         let dir = temp.path().join("many");
         std::fs::create_dir_all(&dir).unwrap();
-        let total = CAT_MAX_EXPANDED_FILES + 5;
-        for i in 0..total {
-            let f = dir.join(format!("f{:04}.rs", i));
-            std::fs::write(&f, "line 1\n").unwrap();
+        for i in 0..8 {
+            std::fs::write(dir.join(format!("f{:04}.rs", i)), "line 1\n").unwrap();
         }
         let ccx = ccx_for_root(temp.path()).await;
 
         let results = run_cat(ccx, dir.to_string_lossy().to_string()).await;
 
         let emitted = context_file_ranges(&results).len();
-        assert!(
-            emitted <= CAT_MAX_EXPANDED_FILES,
-            "directory expansion was not bounded: emitted {} > cap {}",
-            emitted,
-            CAT_MAX_EXPANDED_FILES
-        );
+        assert_eq!(emitted, 3, "{}", tool_text(&results));
         let text = tool_text(&results);
         assert!(
-            text.contains("directory expansion produced more than"),
-            "expected an expansion-cap notice, got: {}",
+            text.contains("directory expansion: showing 3 of 8 files")
+                && text.contains("cat_max_expanded_files = 3"),
+            "expected a quantified expansion-cap notice, got: {}",
             text
         );
     }
 
     #[tokio::test]
-    async fn tool_cat_large_file_is_bounded() {
+    #[serial(runtime_settings)]
+    async fn tool_cat_large_file_cap_honours_installed_setting() {
+        let _guard = SettingsGuard::install(|settings| {
+            settings.cat_max_file_bytes = 4_096;
+        });
         let temp = tempfile::Builder::new()
             .prefix("refact-tool-cat-")
             .tempdir()
@@ -1250,8 +1313,8 @@ mod tests {
         let big = temp.path().join("big.rs");
         std::fs::create_dir_all(big.parent().unwrap()).unwrap();
         let chunk = "x".repeat(1024);
-        let mut content = String::with_capacity(CAT_MAX_FILE_BYTES + 4096);
-        while content.len() <= CAT_MAX_FILE_BYTES + 2048 {
+        let mut content = String::with_capacity(16_384);
+        while content.len() <= 8_192 {
             content.push_str(&chunk);
             content.push('\n');
         }
@@ -1270,10 +1333,101 @@ mod tests {
         );
         let text = tool_text(&results);
         assert!(
-            text.contains("exceeds the") && text.contains("byte read limit"),
-            "expected an oversized-file notice, got: {}",
+            text.contains("exceeds the 4096 byte read limit")
+                && text.contains("cat_max_file_bytes = 4096"),
+            "expected an oversized-file notice naming the setting, got: {}",
             text
         );
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn tool_cat_max_lines_setting_changes_emitted_range_and_notice() {
+        let _guard = SettingsGuard::install(|settings| {
+            settings.cat_max_lines = 100;
+        });
+        let temp = tempfile::Builder::new()
+            .prefix("refact-tool-cat-")
+            .tempdir()
+            .unwrap();
+        let file = temp.path().join("long.rs");
+        write_lines(&file, 250);
+        let ccx = ccx_for_root(temp.path()).await;
+
+        let results = run_cat(ccx, file.to_string_lossy().to_string()).await;
+
+        assert_eq!(
+            context_file_ranges(&results),
+            vec![(normalized(&file), 1, 100)],
+            "{}",
+            tool_text(&results)
+        );
+        let text = tool_text(&results);
+        assert!(
+            text.contains("has 250 lines, showing first 100 lines")
+                && text.contains("cat_max_lines = 100"),
+            "expected a quantified line-cap notice, got: {}",
+            text
+        );
+    }
+
+    #[tokio::test]
+    #[serial(runtime_settings)]
+    async fn tool_cat_input_path_cap_honours_installed_setting_and_is_loud() {
+        let _guard = SettingsGuard::install(|settings| {
+            settings.cat_max_input_paths = 2;
+        });
+        let temp = tempfile::Builder::new()
+            .prefix("refact-tool-cat-")
+            .tempdir()
+            .unwrap();
+        let files = (0..5)
+            .map(|i| {
+                let file = temp.path().join(format!("f{i}.rs"));
+                write_lines(&file, 3);
+                file
+            })
+            .collect::<Vec<_>>();
+        let ccx = ccx_for_root(temp.path()).await;
+
+        let joined = files
+            .iter()
+            .map(|file| file.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let results = run_cat(ccx, joined).await;
+
+        assert_eq!(context_file_ranges(&results).len(), 2);
+        let text = tool_text(&results);
+        assert!(
+            text.contains("showing 2 of 5 requested paths")
+                && text.contains("cat_max_input_paths = 2"),
+            "expected a quantified input-path cap notice, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn cat_max_range_span_follows_cat_max_lines() {
+        assert_eq!(clamp_cat_line_range(Some((1, 10_000)), 100), Some((1, 100)));
+        assert_eq!(
+            clamp_cat_line_range(Some((5, 10_000)), 1_000),
+            Some((5, 1_004))
+        );
+    }
+
+    #[test]
+    fn expansion_cap_notice_quantifies_shown_and_total() {
+        let notice = expansion_cap_notice(512, 700, false, 512);
+        assert!(notice.contains("showing 512 of 700 files"), "{}", notice);
+        assert!(
+            notice.contains("cat_max_expanded_files = 512"),
+            "{}",
+            notice
+        );
+
+        let probed = expansion_cap_notice(512, 2_049, true, 512);
+        assert!(probed.contains("showing 512 of 2049+ files"), "{}", probed);
     }
 
     #[tokio::test]

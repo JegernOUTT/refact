@@ -84,7 +84,11 @@ fn absorb(survivor: &mut ReviewFinding, other: ReviewFinding) {
     survivor.evidence_present |= other.evidence_present;
     survivor.introduced_by_diff |= other.introduced_by_diff;
     survivor.out_of_scope &= other.out_of_scope;
-    for stage in other.reported_by.iter().chain(std::iter::once(&other.stage)) {
+    for stage in other
+        .reported_by
+        .iter()
+        .chain(std::iter::once(&other.stage))
+    {
         if !survivor.reported_by.contains(stage) {
             survivor.reported_by.push(stage.clone());
         }
@@ -182,7 +186,12 @@ mod tests {
     fn review_merge_collapses_two_stages_and_keeps_both_locations() {
         let mut first = finding("diff", "src/lib.rs", 10, "The error arm returns success");
         first.evidence_present = true;
-        let mut second = finding("impact", "src/lib.rs", 40, "the error arm returns success again");
+        let mut second = finding(
+            "impact",
+            "src/lib.rs",
+            40,
+            "the error arm returns success again",
+        );
         second.reproduction = Some("cargo test -p thing".to_string());
         second.severity = ReviewSeverity::Blocker;
         second.fix = Some("propagate".to_string());
@@ -206,7 +215,12 @@ mod tests {
         let findings = vec![
             finding("diff", "src/a.rs", 10, "The lock is taken twice"),
             finding("diff", "src/b.rs", 10, "The lock is taken twice"),
-            finding("security", "src/a.rs", 400, "Secrets are logged in plain text"),
+            finding(
+                "security",
+                "src/a.rs",
+                400,
+                "Secrets are logged in plain text",
+            ),
         ];
 
         let (merged, count) = merge_findings(findings);
@@ -240,7 +254,12 @@ mod tests {
         let mut drifted = first.clone();
         drifted.line_start = 40;
         drifted.line_end = 42;
-        let other = finding("diff", "src/lib.rs", 10, "A totally different concern entirely");
+        let other = finding(
+            "diff",
+            "src/lib.rs",
+            10,
+            "A totally different concern entirely",
+        );
 
         assert_eq!(stable_finding_id(&first), stable_finding_id(&drifted));
         assert_ne!(stable_finding_id(&first), stable_finding_id(&other));

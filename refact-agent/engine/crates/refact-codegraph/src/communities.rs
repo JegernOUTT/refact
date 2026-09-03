@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::analytics::GraphData;
+use crate::config;
 use crate::store::Store;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -20,6 +21,24 @@ pub struct ExecFlow {
     pub reached: usize,
     pub depth: usize,
     pub nodes: Vec<i64>,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub node_cap: usize,
+}
+
+impl ExecFlow {
+    pub fn truncation_notice(&self) -> Option<String> {
+        if !self.truncated {
+            return None;
+        }
+        Some(format!(
+            "execution flow truncated: showing {} of at least {}+ reachable nodes, raise \
+             codegraph_exec_flow_max_nodes",
+            self.nodes.len(),
+            self.node_cap
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -368,9 +387,10 @@ pub fn execution_flows_from_data(
         }
     }
 
+    let node_cap = config::limits().exec_flow_max_nodes;
     let mut flows = Vec::new();
     for entry_id in entries {
-        let (nodes, depth) = bfs_flow(entry_id, &out, 500);
+        let (nodes, depth, truncated) = bfs_flow(entry_id, &out, node_cap);
         let reached = nodes.len().saturating_sub(1);
         flows.push(ExecFlow {
             entry: names.get(&entry_id).cloned().unwrap_or_default(),
@@ -378,6 +398,8 @@ pub fn execution_flows_from_data(
             reached,
             depth,
             nodes,
+            truncated,
+            node_cap,
         });
     }
 
@@ -391,11 +413,12 @@ pub fn execution_flows_from_data(
     Ok(flows)
 }
 
-fn bfs_flow(entry_id: i64, out: &BTreeMap<i64, Vec<i64>>, cap: usize) -> (Vec<i64>, usize) {
+fn bfs_flow(entry_id: i64, out: &BTreeMap<i64, Vec<i64>>, cap: usize) -> (Vec<i64>, usize, bool) {
     let mut seen = BTreeSet::new();
     let mut order = Vec::new();
     let mut queue = VecDeque::new();
     let mut max_depth = 0usize;
+    let mut truncated = false;
 
     seen.insert(entry_id);
     order.push(entry_id);
@@ -404,11 +427,20 @@ fn bfs_flow(entry_id: i64, out: &BTreeMap<i64, Vec<i64>>, cap: usize) -> (Vec<i6
     while let Some((node, depth)) = queue.pop_front() {
         max_depth = max_depth.max(depth);
         if seen.len() >= cap {
+            if out
+                .get(&node)
+                .is_some_and(|targets| targets.iter().any(|target| !seen.contains(target)))
+            {
+                truncated = true;
+            }
             continue;
         }
         if let Some(targets) = out.get(&node) {
             for &target in targets {
                 if seen.len() >= cap {
+                    if !seen.contains(&target) {
+                        truncated = true;
+                    }
                     break;
                 }
                 if seen.insert(target) {
@@ -419,7 +451,7 @@ fn bfs_flow(entry_id: i64, out: &BTreeMap<i64, Vec<i64>>, cap: usize) -> (Vec<i6
         }
     }
 
-    (order, max_depth)
+    (order, max_depth, truncated)
 }
 
 #[cfg(test)]

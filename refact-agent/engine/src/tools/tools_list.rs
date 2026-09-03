@@ -330,7 +330,6 @@ pub(crate) fn builtin_system_tools(config_path: String) -> Vec<Box<dyn Tool + Se
     vec![
         Box::new(crate::tools::tool_shell::ToolShell {
             cfg: crate::tools::tool_shell::SettingsShell {
-                timeout: "10".to_string(),
                 output_filter: crate::postprocessing::pp_command_output::OutputFilter::default(),
             },
             config_path: config_path.clone(),
@@ -1390,6 +1389,8 @@ mod tests {
                 queue_additions: false,
                 vecdb_max_files_hit: false,
                 vecdb_errors: Default::default(),
+                cache_writes_failed: 0,
+                vectors_missing_from_cache: 0,
             })
         }
 

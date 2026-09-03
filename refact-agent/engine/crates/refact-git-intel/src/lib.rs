@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod blame;
 pub mod change_risk;
+pub mod config;
 pub mod coupling;
 pub mod incremental;
 pub mod paths;
@@ -15,8 +16,6 @@ pub mod provenance;
 pub use incremental::mine_history_incremental;
 pub use provenance::{classify_commit, AgentProvenance};
 
-const MAX_FILES_PER_COMMIT_FOR_COCHANGE: usize = 200;
-const MAX_FILES_PER_COMMIT_FOR_ENTROPY: usize = 30;
 const TEMPORAL_HALFLIFE_DAYS: f64 = 180.0;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -32,6 +31,14 @@ pub struct GitIntel {
     pub last_commit_id: Option<String>,
     #[serde(default)]
     pub author_commit_counts: HashMap<String, u32>,
+    #[serde(default)]
+    pub history_truncated: bool,
+    #[serde(default)]
+    pub commits_walked: usize,
+    #[serde(default)]
+    pub commits_excluded_by_size: usize,
+    #[serde(default)]
+    pub commits_with_unreadable_diff: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -76,15 +83,31 @@ pub struct Ownership {
     pub share: f64,
 }
 
-fn changed_files_with_stats(repo: &Repository, commit: &Commit) -> Vec<(String, u32, u32)> {
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct CommitDiff {
+    pub files: Vec<(String, u32, u32)>,
+    pub diff_failed: bool,
+}
+
+pub(crate) fn changed_files_with_stats(repo: &Repository, commit: &Commit) -> CommitDiff {
     let tree = match commit.tree() {
         Ok(t) => t,
-        Err(_) => return vec![],
+        Err(_) => {
+            return CommitDiff {
+                files: vec![],
+                diff_failed: true,
+            }
+        }
     };
     let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
     let diff = match repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None) {
         Ok(d) => d,
-        Err(_) => return vec![],
+        Err(_) => {
+            return CommitDiff {
+                files: vec![],
+                diff_failed: true,
+            }
+        }
     };
     let mut files: HashMap<String, (u32, u32)> = HashMap::new();
     for delta in diff.deltas() {
@@ -93,7 +116,7 @@ fn changed_files_with_stats(repo: &Repository, commit: &Commit) -> Vec<(String, 
         }
     }
 
-    let _ = diff.foreach(
+    let line_stats = diff.foreach(
         &mut |_delta, _progress| true,
         None,
         None,
@@ -117,7 +140,10 @@ fn changed_files_with_stats(repo: &Repository, commit: &Commit) -> Vec<(String, 
         .collect();
     files.sort();
     files.dedup();
-    files
+    CommitDiff {
+        files,
+        diff_failed: line_stats.is_err(),
+    }
 }
 
 fn is_word_byte(byte: u8) -> bool {
@@ -273,11 +299,14 @@ fn mine_history_from_revwalk(
     revwalk: Revwalk,
     max_commits: usize,
 ) -> Result<GitIntel, String> {
+    let limits = config::limits();
     let mut intel = GitIntel::default();
     for (i, oid) in revwalk.enumerate() {
         if i >= max_commits {
+            intel.history_truncated = true;
             break;
         }
+        intel.commits_walked = intel.commits_walked.saturating_add(1);
         let oid = oid.map_err(|e| format!("git oid: {e}"))?;
         let commit = repo
             .find_commit(oid)
@@ -290,7 +319,12 @@ fn mine_history_from_revwalk(
         let committer = commit.committer().email().unwrap_or("unknown").to_string();
         let ts = commit.time().seconds();
         let message = commit.message().unwrap_or("").to_string();
-        let file_stats = changed_files_with_stats(repo, &commit);
+        let diff = changed_files_with_stats(repo, &commit);
+        if diff.diff_failed {
+            intel.commits_with_unreadable_diff =
+                intel.commits_with_unreadable_diff.saturating_add(1);
+        }
+        let file_stats = diff.files;
         let files: Vec<String> = file_stats.iter().map(|(path, _, _)| path.clone()).collect();
         let is_fix_commit = is_fix_commit_message(&message);
 
@@ -315,7 +349,7 @@ fn mine_history_from_revwalk(
                 .or_default();
             *author_count = author_count.saturating_add(1);
         }
-        if files.len() <= MAX_FILES_PER_COMMIT_FOR_COCHANGE {
+        if files.len() <= limits.max_files_per_commit_for_cochange {
             for a in 0..files.len() {
                 for b in (a + 1)..files.len() {
                     let key = (files[a].clone(), files[b].clone());
@@ -323,6 +357,8 @@ fn mine_history_from_revwalk(
                     *count = count.saturating_add(1);
                 }
             }
+        } else {
+            intel.commits_excluded_by_size = intel.commits_excluded_by_size.saturating_add(1);
         }
         intel.commit_records.push(CommitRecord {
             oid: Some(oid_string),
@@ -336,7 +372,89 @@ fn mine_history_from_revwalk(
     Ok(intel)
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryTruncation {
+    #[serde(default)]
+    pub history_truncated: bool,
+    #[serde(default)]
+    pub commits_walked: usize,
+    #[serde(default)]
+    pub commits_analyzed: u32,
+    #[serde(default)]
+    pub commits_excluded_by_size: usize,
+    #[serde(default)]
+    pub commits_excluded_from_entropy: usize,
+    #[serde(default)]
+    pub commits_with_unreadable_diff: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
 impl GitIntel {
+    pub fn commits_excluded_from_entropy(&self) -> usize {
+        let max_files = config::limits().max_files_per_commit_for_entropy;
+        self.commit_records
+            .iter()
+            .filter(|commit| commit.files.len() > max_files)
+            .count()
+    }
+
+    pub fn history_truncation(&self) -> HistoryTruncation {
+        let commits_excluded_from_entropy = self.commits_excluded_from_entropy();
+        HistoryTruncation {
+            history_truncated: self.history_truncated,
+            commits_walked: self.commits_walked,
+            commits_analyzed: self.commits_analyzed,
+            commits_excluded_by_size: self.commits_excluded_by_size,
+            commits_excluded_from_entropy,
+            commits_with_unreadable_diff: self.commits_with_unreadable_diff,
+            notice: self.truncation_notice(commits_excluded_from_entropy),
+        }
+    }
+
+    fn truncation_notice(&self, commits_excluded_from_entropy: usize) -> Option<String> {
+        let limits = config::limits();
+        let mut parts = Vec::new();
+        if self.history_truncated {
+            parts.push(format!(
+                "history truncated: showing {} of at least {}+ commits, raise git_intel_max_commits \
+                 or git_intel_deep_walk_limit",
+                self.commits_analyzed,
+                self.commits_walked.max(self.commits_analyzed as usize)
+            ));
+        }
+        if self.commits_excluded_by_size > 0 {
+            parts.push(format!(
+                "co-change skipped {} of {} commits touching more than {} files, raise \
+                 git_intel_max_files_per_commit_cochange",
+                self.commits_excluded_by_size,
+                self.commits_analyzed,
+                limits.max_files_per_commit_for_cochange
+            ));
+        }
+        if commits_excluded_from_entropy > 0 {
+            parts.push(format!(
+                "change entropy skipped {} of {} commits touching more than {} files, raise \
+                 git_intel_max_files_per_commit_entropy",
+                commits_excluded_from_entropy,
+                self.commit_records.len(),
+                limits.max_files_per_commit_for_entropy
+            ));
+        }
+        if self.commits_with_unreadable_diff > 0 {
+            parts.push(format!(
+                "churn incomplete: {} of {} commits had an unreadable diff and contributed no file \
+                 churn, ownership or co-change data",
+                self.commits_with_unreadable_diff, self.commits_analyzed
+            ));
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("; "))
+        }
+    }
+
     pub fn prior_defects(&self, path: &str) -> u32 {
         self.fix_commit_counts.get(path).copied().unwrap_or(0)
     }
@@ -554,10 +672,11 @@ impl GitIntel {
     }
 
     pub fn change_entropy_at(&self, now_ts: i64) -> HashMap<String, f64> {
+        let max_files = config::limits().max_files_per_commit_for_entropy;
         let mut out = HashMap::new();
         for commit in &self.commit_records {
             let n = commit.files.len();
-            if n == 0 || n > MAX_FILES_PER_COMMIT_FOR_ENTROPY {
+            if n == 0 || n > max_files {
                 continue;
             }
             let contribution = temporal_weight(now_ts, commit.ts) * (n as f64).log2() / n as f64;
@@ -834,6 +953,15 @@ mod tests {
     use super::*;
     use git2::{Repository, Signature, Time};
     use std::path::Path;
+    use std::sync::{Mutex, MutexGuard};
+
+    static CONFIG_LOCK: Mutex<()> = Mutex::new(());
+
+    fn config_guard() -> MutexGuard<'static, ()> {
+        CONFIG_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn commit_files(repo: &Repository, files: &[(&str, &str)], msg: &str, name: &str, email: &str) {
         commit_files_at(repo, files, msg, name, email, 1_700_000_000);
@@ -1134,6 +1262,44 @@ mod tests {
     }
 
     #[test]
+    fn truncation_notice_mentions_unreadable_diffs_when_nonzero() {
+        let _guard = config_guard();
+        let mut intel = GitIntel::default();
+        intel.commits_analyzed = 7;
+        intel.commits_with_unreadable_diff = 2;
+
+        let truncation = intel.history_truncation();
+        assert_eq!(truncation.commits_with_unreadable_diff, 2);
+        let notice = truncation.notice.unwrap();
+        assert!(notice.contains("churn incomplete: 2 of 7 commits had an unreadable diff"));
+    }
+
+    #[test]
+    fn truncation_notice_omits_unreadable_diffs_at_zero() {
+        let _guard = config_guard();
+        let mut intel = GitIntel::default();
+        intel.commits_analyzed = 7;
+
+        let truncation = intel.history_truncation();
+        assert_eq!(truncation.commits_with_unreadable_diff, 0);
+        assert!(truncation.notice.is_none());
+    }
+
+    #[test]
+    fn truncation_notice_joins_unreadable_diff_part_with_other_parts() {
+        let _guard = config_guard();
+        let mut intel = GitIntel::default();
+        intel.commits_analyzed = 5;
+        intel.commits_walked = 50;
+        intel.history_truncated = true;
+        intel.commits_with_unreadable_diff = 1;
+
+        let notice = intel.history_truncation().notice.unwrap();
+        assert!(notice.contains("history truncated"));
+        assert!(notice.contains("; churn incomplete: 1 of 5 commits had an unreadable diff"));
+    }
+
+    #[test]
     fn mine_history_records_commit_metadata_and_line_stats() {
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
@@ -1169,7 +1335,84 @@ mod tests {
     }
 
     #[test]
+    fn install_git_intel_limits_changes_limits() {
+        let _guard = config_guard();
+        let original = config::limits();
+        config::install_git_intel_limits(config::GitIntelLimits {
+            max_commits: 11,
+            deep_walk_limit: 22,
+            max_files_per_commit_for_cochange: 33,
+            max_files_per_commit_for_entropy: 44,
+        });
+        let updated = config::limits();
+        config::install_git_intel_limits(original.clone());
+
+        assert_eq!(updated.max_commits, 11);
+        assert_eq!(updated.deep_walk_limit, 22);
+        assert_eq!(updated.max_files_per_commit_for_cochange, 33);
+        assert_eq!(updated.max_files_per_commit_for_entropy, 44);
+        assert_eq!(config::limits().max_commits, original.max_commits);
+    }
+
+    #[test]
+    fn revwalk_stopped_by_max_commits_reports_history_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        for i in 0..3 {
+            commit_files_at(
+                &repo,
+                &[("a.rs", &format!("{i}\n"))],
+                &format!("commit {i}"),
+                "Alice",
+                "alice@x.com",
+                1_700_000_000 + i,
+            );
+        }
+
+        let truncated = mine_history(dir.path(), 2).unwrap();
+        let complete = mine_history(dir.path(), 10).unwrap();
+
+        assert!(truncated.history_truncated);
+        assert_eq!(truncated.commits_analyzed, 2);
+        assert_eq!(truncated.commits_walked, 2);
+        assert!(!complete.history_truncated);
+        assert_eq!(complete.commits_analyzed, 3);
+        let truncation = truncated.history_truncation();
+        assert!(truncation.history_truncated);
+        assert!(truncation
+            .notice
+            .is_some_and(|notice| notice.contains("showing 2 of")
+                && notice.contains("git_intel_max_commits")));
+    }
+
+    #[test]
+    fn oversized_commits_excluded_from_cochange_are_counted() {
+        let _guard = config_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let names: Vec<String> = (0..5).map(|i| format!("f{i}.txt")).collect();
+        let files: Vec<(&str, &str)> = names.iter().map(|s| (s.as_str(), "x\n")).collect();
+        commit_files(&repo, &files, "many files", "Alice", "alice@x.com");
+
+        let original = config::limits();
+        config::install_git_intel_limits(config::GitIntelLimits {
+            max_files_per_commit_for_cochange: 2,
+            ..original.clone()
+        });
+        let intel = mine_history(dir.path(), 10).unwrap();
+        config::install_git_intel_limits(original);
+
+        assert_eq!(intel.commits_excluded_by_size, 1);
+        assert!(intel.co_change_pairs(1).is_empty());
+        assert!(intel
+            .history_truncation()
+            .notice
+            .is_some_and(|notice| notice.contains("git_intel_max_files_per_commit_cochange")));
+    }
+
+    #[test]
     fn huge_commits_are_kept_but_not_co_changed() {
+        let _guard = config_guard();
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
         let names: Vec<String> = (0..201).map(|i| format!("f{i}.txt")).collect();
@@ -1181,9 +1424,17 @@ mod tests {
             "Alice",
             "alice@x.com",
         );
+        let original = config::limits();
+        config::install_git_intel_limits(config::GitIntelLimits {
+            max_files_per_commit_for_cochange: 200,
+            ..original.clone()
+        });
         let intel = mine_history(dir.path(), 10).unwrap();
+        config::install_git_intel_limits(original);
+
         assert_eq!(intel.commit_records[0].files.len(), 201);
         assert!(intel.co_change_pairs(1).is_empty());
+        assert_eq!(intel.commits_excluded_by_size, 1);
     }
 
     #[test]
@@ -1215,6 +1466,7 @@ mod tests {
 
     #[test]
     fn change_entropy_skips_large_commits() {
+        let _guard = config_guard();
         let mut intel = GitIntel::default();
         intel.commit_records = vec![
             CommitRecord {
@@ -1234,9 +1486,18 @@ mod tests {
                 files: (0..31).map(|i| (format!("l{i}.rs"), 1, 0)).collect(),
             },
         ];
+        let original = config::limits();
+        config::install_git_intel_limits(config::GitIntelLimits {
+            max_files_per_commit_for_entropy: 30,
+            ..original.clone()
+        });
         let entropy = intel.change_entropy_at(100);
+        let excluded = intel.commits_excluded_from_entropy();
+        config::install_git_intel_limits(original);
+
         assert!((entropy["a.rs"] - 0.5).abs() < 1e-9);
         assert!(!entropy.contains_key("l0.rs"));
+        assert_eq!(excluded, 1);
     }
 
     #[test]

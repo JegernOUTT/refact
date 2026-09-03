@@ -122,7 +122,14 @@ export interface CodegraphOverviewResult extends BaseResult {
   partial: boolean;
   warning?: string;
   communities: { label: string; member_count: number; cohesion: number }[];
-  execution_flows: { entry: string; reaches: number; depth: number }[];
+  execution_flows: {
+    entry: string;
+    reaches: number;
+    depth: number;
+    truncated?: boolean;
+    node_cap?: number;
+  }[];
+  execution_flow_truncation?: string;
   dead_code: {
     name: string;
     path: string;
@@ -221,9 +228,18 @@ export interface AnalysisFinding {
   line: number;
   detail: string;
 }
+export interface HistoryTruncation {
+  history_truncated: boolean;
+  commits_walked: number;
+  commits_analyzed: number;
+  commits_excluded_by_size: number;
+  commits_excluded_from_entropy: number;
+  notice?: string;
+}
 export interface GitRiskResult extends BaseResult {
   commits_analyzed: number;
   agent_authored_pct: number;
+  history_truncation?: HistoryTruncation;
   hotspots: {
     path: string;
     churn: number;
@@ -312,6 +328,8 @@ export interface DeadCodeResult extends BaseResult {
   }[];
   shown: number;
   total_candidates: number;
+  analysis_total_found?: number;
+  analysis_truncated?: boolean;
   index_state: {
     queued: number;
     dirty_paths: number;
@@ -479,6 +497,13 @@ type Built = {
   index: AnalysisMetric[];
   sections: SectionInput[];
 };
+function truncationNotices(value: Record<string, unknown>): string[] {
+  const history = rec(value, "history_truncation");
+  return [
+    history && str(history, "notice"),
+    str(value, "execution_flow_truncation"),
+  ].filter((notice): notice is string => notice !== null && notice !== "");
+}
 function mapRows(
   values: unknown[] | null,
   mapper: (value: Record<string, unknown>) => RowInput | null,
@@ -603,12 +628,19 @@ function overview(value: Record<string, unknown>): Built | null {
     const title = str(item, "entry");
     const reaches = num(item, "reaches");
     const depth = num(item, "depth");
+    const flowTruncated = bool(item, "truncated") === true;
+    const nodeCap = num(item, "node_cap");
     return title === null || reaches === null || depth === null
       ? null
       : {
           title,
-          detail: `Reaches ${reaches} nodes at depth ${depth}`,
+          detail: flowTruncated
+            ? `Reaches at least ${reaches} nodes at depth ${depth}, stopped at the ${
+                nodeCap ?? reaches
+              }-node cap`
+            : `Reaches ${reaches} nodes at depth ${depth}`,
           metrics: [metric("reaches", reaches), metric("depth", depth)],
+          tags: flowTruncated ? ["truncated"] : [],
         };
   });
   const deadRows = mapRows(arr(value, "dead_code"), (item) => {
@@ -822,9 +854,15 @@ function gitRisk(value: Record<string, unknown>): Built | null {
     !recent
   )
     return null;
+  const history = rec(value, "history_truncation");
+  const historyTruncated =
+    history && bool(history, "history_truncated") === true;
   return {
     facts: [
-      metric("Commits analyzed", commits),
+      metric(
+        "Commits analyzed",
+        historyTruncated ? `${commits} (truncated)` : commits,
+      ),
       metric("Agent authored %", Math.round(authored * 1000) / 10),
     ],
     index: [],
@@ -1013,8 +1051,15 @@ function deadCode(value: Record<string, unknown>): Built | null {
     });
     groups.set(path, rows);
   }
+  const analysisTotal = num(value, "analysis_total_found");
   return {
-    facts: [metric("Shown", shown), metric("Matching", total)],
+    facts: [
+      metric("Shown", shown),
+      metric("Matching", total),
+      ...(bool(value, "analysis_truncated") === true
+        ? [metric("Detected before truncation", analysisTotal ?? total)]
+        : []),
+    ],
     index: objectMetrics(index),
     sections: Array.from(groups, ([title, rows]) => ({
       title,
@@ -1571,9 +1616,16 @@ export function buildAnalysisReport(
   else if (toolName === "code_map") built = codeMap(value);
   else if (toolName === "design_system") built = designSystem(value);
   else built = designTool(value, toolName);
+  const warningText = typeof warningValue === "string" ? warningValue : null;
+  const warnings = [
+    ...(warningText === null ? [] : [warningText]),
+    ...truncationNotices(value).filter(
+      (notice) => warningText === null || !warningText.includes(notice),
+    ),
+  ];
   if (!built && truncatedValue === true)
     return {
-      warnings: typeof warningValue === "string" ? [warningValue] : [],
+      warnings,
       headline,
       indexState: [],
       indexStateRaw: null,
@@ -1611,7 +1663,7 @@ export function buildAnalysisReport(
     ...section.rows.flatMap((row) => row.paths),
   ]);
   return {
-    warnings: typeof warningValue === "string" ? [warningValue] : [],
+    warnings,
     headline,
     indexState: built.index,
     indexStateRaw: null,

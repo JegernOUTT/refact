@@ -4,6 +4,9 @@ pub mod prompts;
 pub mod runner;
 pub mod stages;
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,12 +16,24 @@ use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 use crate::global_context::GlobalContext;
-use crate::tools::review_agents::runner::{now_ms, run_stage, StageCtx, StageJob, StageProduct};
+use crate::tools::review_agents::runner::{
+    monitor_ctx, now_ms, run_stage, StageCtx, StageJob, StageProduct,
+};
 use crate::tools::review_types::StageRun;
+
+pub const WATCHDOG_POLL: Duration = Duration::from_secs(5);
+pub const MIN_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const HARVEST_GRACE: Duration = Duration::from_secs(10);
+
+type BoxedProduct = Pin<Box<dyn Future<Output = StageProduct> + Send>>;
 
 #[async_trait]
 pub trait StageExecutor: Send + Sync {
-    async fn execute(&self, job: StageJob) -> StageProduct;
+    async fn execute(&self, job: StageJob, activity: Arc<AtomicU64>) -> StageProduct;
+
+    fn abort_flag(&self) -> Option<Arc<AtomicBool>> {
+        None
+    }
 }
 
 pub struct SubchatExecutor {
@@ -28,68 +43,185 @@ pub struct SubchatExecutor {
 
 #[async_trait]
 impl StageExecutor for SubchatExecutor {
-    async fn execute(&self, job: StageJob) -> StageProduct {
-        run_stage(self.gcx.clone(), self.ctx.clone(), job).await
+    async fn execute(&self, job: StageJob, activity: Arc<AtomicU64>) -> StageProduct {
+        let (ctx, forwarder) = monitor_ctx(&self.ctx, activity);
+        let product = run_stage(self.gcx.clone(), ctx, job).await;
+        forwarder.abort();
+        product
+    }
+
+    fn abort_flag(&self) -> Option<Arc<AtomicBool>> {
+        Some(self.ctx.abort_flag.clone())
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScheduleParams {
     pub parallel_depth: usize,
-    pub stage_budget: Duration,
-    pub writes_stage_budget: Duration,
+    pub stage_ceiling: Duration,
+    pub writes_stage_ceiling: Duration,
+    pub idle_timeout: Duration,
+    pub grace: Duration,
     pub deadline: Option<Instant>,
 }
 
 impl ScheduleParams {
     fn budget_for(&self, job: &StageJob) -> Duration {
-        let configured = Duration::from_secs(job.spec.budget_minutes.max(1) * 60);
         let ceiling = if job.spec.writes_allowed {
-            self.writes_stage_budget
+            self.writes_stage_ceiling
         } else {
-            self.stage_budget
+            self.stage_ceiling
         };
-        configured.min(ceiling.max(Duration::from_secs(60)))
+        job.budget
+            .max(Duration::from_secs(60))
+            .min(ceiling.max(Duration::from_secs(60)))
+    }
+
+    fn idle_limit(&self) -> Duration {
+        self.idle_timeout.max(MIN_IDLE_TIMEOUT)
     }
 }
 
-fn timed_out(label: &str, budget: Duration, started: u64) -> StageProduct {
+fn stage_product(run: StageRun) -> StageProduct {
     StageProduct {
-        run: StageRun::timed_out(
+        run,
+        findings: vec![],
+        verdicts: vec![],
+        metering: serde_json::Map::new(),
+        raw: None,
+    }
+}
+
+fn timed_out(label: &str, trace: &str, budget: Duration, started: u64) -> StageProduct {
+    stage_product(
+        StageRun::timed_out(
             label,
             None,
             now_ms().saturating_sub(started),
-            &format!("stage budget of {}s exceeded", budget.as_secs()),
-        ),
-        findings: vec![],
-        verdicts: vec![],
-        metering: serde_json::Map::new(),
-        raw: None,
-    }
+            &format!("hard stage ceiling of {}s exceeded", budget.as_secs()),
+        )
+        .with_trace_chat_id(Some(trace.to_string())),
+    )
+}
+
+fn idle_timed_out(label: &str, trace: &str, idle_ms: u64, started: u64) -> StageProduct {
+    stage_product(
+        StageRun::timed_out(
+            label,
+            None,
+            now_ms().saturating_sub(started),
+            &format!(
+                "no activity for {}s; the stage stopped responding",
+                idle_ms / 1000
+            ),
+        )
+        .with_trace_chat_id(Some(trace.to_string())),
+    )
 }
 
 fn deadline_hit(label: &str) -> StageProduct {
-    StageProduct {
-        run: StageRun::not_run(label, "review deadline reached before the stage started"),
-        findings: vec![],
-        verdicts: vec![],
-        metering: serde_json::Map::new(),
-        raw: None,
-    }
+    stage_product(StageRun::not_run(
+        label,
+        "review deadline reached before the stage started",
+    ))
 }
 
-fn panicked(label: &str, started: u64) -> StageProduct {
-    StageProduct {
-        run: StageRun::failed(
+fn cancelled_before_start(label: &str) -> StageProduct {
+    stage_product(StageRun::not_run(
+        label,
+        "review cancelled before the stage started",
+    ))
+}
+
+fn deadline_during(label: &str, trace: &str, started: u64) -> StageProduct {
+    stage_product(
+        StageRun::timed_out(
+            label,
+            None,
+            now_ms().saturating_sub(started),
+            "review deadline reached while the stage was running",
+        )
+        .with_trace_chat_id(Some(trace.to_string())),
+    )
+}
+
+fn panicked(label: &str, trace: &str, started: u64) -> StageProduct {
+    stage_product(
+        StageRun::failed(
             label,
             None,
             now_ms().saturating_sub(started),
             "stage panicked",
-        ),
-        findings: vec![],
-        verdicts: vec![],
-        metering: serde_json::Map::new(),
-        raw: None,
+        )
+        .with_trace_chat_id(Some(trace.to_string())),
+    )
+}
+
+fn salvaged(mut product: StageProduct, kill: StageRun) -> StageProduct {
+    product.run.status = kill.status;
+    product.run.reason = match (kill.reason, product.run.reason.take()) {
+        (Some(kill_reason), Some(original)) if original != kill_reason => {
+            Some(format!("{kill_reason}; {original}"))
+        }
+        (kill_reason, original) => kill_reason.or(original),
+    };
+    product.run.summary = Some(match product.run.summary.take() {
+        Some(summary) => format!("{summary}; salvaged from partial run"),
+        None => "salvaged from partial run".to_string(),
+    });
+    product
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn watch_stage(
+    label: String,
+    trace: String,
+    budget: Duration,
+    idle_limit: Duration,
+    poll: Duration,
+    grace: Duration,
+    deadline: Option<Instant>,
+    activity: Arc<AtomicU64>,
+    abort: Arc<AtomicBool>,
+    parent_abort: Option<Arc<AtomicBool>>,
+    work: BoxedProduct,
+) -> StageProduct {
+    let started = now_ms();
+    activity.store(started, Ordering::Relaxed);
+    let budget_ms = budget.as_millis() as u64;
+    let idle_limit_ms = idle_limit.as_millis() as u64;
+    let poll = poll.max(Duration::from_millis(1));
+    tokio::pin!(work);
+    let fallback = loop {
+        tokio::select! {
+            product = &mut work => {
+                abort.store(true, Ordering::SeqCst);
+                return product;
+            }
+            _ = tokio::time::sleep(poll) => {
+                if parent_abort
+                    .as_ref()
+                    .is_some_and(|parent| parent.load(Ordering::SeqCst))
+                {
+                    abort.store(true, Ordering::SeqCst);
+                }
+                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                    break deadline_during(&label, &trace, started);
+                }
+                let idle_ms = now_ms().saturating_sub(activity.load(Ordering::Relaxed));
+                if idle_ms > idle_limit_ms {
+                    break idle_timed_out(&label, &trace, idle_ms, started);
+                }
+                if now_ms().saturating_sub(started) > budget_ms {
+                    break timed_out(&label, &trace, budget, started);
+                }
+            }
+        }
+    };
+    abort.store(true, Ordering::SeqCst);
+    match tokio::time::timeout(grace.max(Duration::from_millis(1)), &mut work).await {
+        Ok(product) => salvaged(product, fallback.run),
+        Err(_) => fallback,
     }
 }
 
@@ -99,47 +231,66 @@ pub async fn run_stage_jobs(
     params: ScheduleParams,
 ) -> Vec<StageProduct> {
     let semaphore = Arc::new(Semaphore::new(params.parallel_depth.max(1)));
+    let idle_limit = params.idle_limit();
+    let poll = WATCHDOG_POLL
+        .min(idle_limit / 2)
+        .max(Duration::from_millis(1));
+    let parent_abort = executor.abort_flag();
     let futures = jobs.into_iter().map(|job| {
         let executor = executor.clone();
         let semaphore = semaphore.clone();
+        let parent_abort = parent_abort.clone();
         async move {
             let label = job.label.clone();
+            let trace = job.trace_chat_id.clone();
             let budget = params.budget_for(&job);
+            let abort = job.abort.clone();
             let Ok(_permit) = semaphore.acquire_owned().await else {
+                abort.store(true, Ordering::SeqCst);
                 return deadline_hit(&label);
             };
+            if parent_abort
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::SeqCst))
+            {
+                abort.store(true, Ordering::SeqCst);
+                return cancelled_before_start(&label);
+            }
             if params
                 .deadline
                 .is_some_and(|deadline| Instant::now() >= deadline)
             {
+                abort.store(true, Ordering::SeqCst);
                 return deadline_hit(&label);
             }
+            let activity = Arc::new(AtomicU64::new(now_ms()));
+            let panic_label = label.clone();
+            let panic_trace = trace.clone();
+            let stamp = activity.clone();
             let started = now_ms();
-            let work = std::panic::AssertUnwindSafe(executor.execute(job)).catch_unwind();
-            tokio::select! {
-                result = work => match result {
+            let work: BoxedProduct = Box::pin(async move {
+                match std::panic::AssertUnwindSafe(executor.execute(job, stamp))
+                    .catch_unwind()
+                    .await
+                {
                     Ok(product) => product,
-                    Err(_) => panicked(&label, started),
-                },
-                _ = tokio::time::sleep(budget) => timed_out(&label, budget, started),
-                _ = async {
-                    match params.deadline {
-                        Some(deadline) => tokio::time::sleep_until(deadline).await,
-                        None => std::future::pending().await,
-                    }
-                } => StageProduct {
-                    run: StageRun::timed_out(
-                        &label,
-                        None,
-                        now_ms().saturating_sub(started),
-                        "review deadline reached while the stage was running",
-                    ),
-                    findings: vec![],
-                    verdicts: vec![],
-                    metering: serde_json::Map::new(),
-                    raw: None,
-                },
-            }
+                    Err(_) => panicked(&panic_label, &panic_trace, started),
+                }
+            });
+            watch_stage(
+                label,
+                trace,
+                budget,
+                idle_limit,
+                poll,
+                params.grace,
+                params.deadline,
+                activity,
+                abort,
+                parent_abort,
+                work,
+            )
+            .await
         }
     });
     futures::future::join_all(futures).await
@@ -153,6 +304,7 @@ mod tests {
     use crate::call_validation::{ChatModelType, SubchatParameters};
     use crate::llm::params::CacheControl;
     use crate::subchat::ExplicitSubchatSpec;
+    use crate::tools::review_agents::runner::stage_trace_chat_id;
     use crate::tools::review_agents::stages::embedded_catalog;
     use crate::tools::review_types::StageStatusKind;
 
@@ -161,11 +313,11 @@ mod tests {
             embedded_catalog()
                 .into_iter()
                 .find(|spec| spec.id == stage_id)
-                .unwrap(),
+                .expect("stage id is present in the embedded catalog"),
         )
     }
 
-    fn job(label: &str, stage_id: &str) -> StageJob {
+    fn job_with_budget(label: &str, stage_id: &str, budget: Duration) -> StageJob {
         StageJob {
             spec: spec_for(stage_id),
             label: label.to_string(),
@@ -185,14 +337,23 @@ mod tests {
             },
             max_steps: 5,
             prompt: String::new(),
+            trace_chat_id: stage_trace_chat_id("rv-1", label),
+            budget,
+            abort: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn job(label: &str, stage_id: &str) -> StageJob {
+        job_with_budget(label, stage_id, Duration::from_secs(6 * 60))
     }
 
     fn params(parallel_depth: usize) -> ScheduleParams {
         ScheduleParams {
             parallel_depth,
-            stage_budget: Duration::from_secs(60),
-            writes_stage_budget: Duration::from_secs(60),
+            stage_ceiling: Duration::from_secs(60),
+            writes_stage_ceiling: Duration::from_secs(60),
+            idle_timeout: Duration::from_secs(120),
+            grace: Duration::from_millis(40),
             deadline: None,
         }
     }
@@ -205,7 +366,7 @@ mod tests {
 
     #[async_trait]
     impl StageExecutor for CountingExecutor {
-        async fn execute(&self, job: StageJob) -> StageProduct {
+        async fn execute(&self, job: StageJob, _activity: Arc<AtomicU64>) -> StageProduct {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(active, Ordering::SeqCst);
             tokio::time::sleep(self.delay).await;
@@ -224,7 +385,7 @@ mod tests {
 
     #[async_trait]
     impl StageExecutor for HangingExecutor {
-        async fn execute(&self, _job: StageJob) -> StageProduct {
+        async fn execute(&self, _job: StageJob, _activity: Arc<AtomicU64>) -> StageProduct {
             tokio::time::sleep(Duration::from_secs(3600)).await;
             unreachable!()
         }
@@ -234,9 +395,16 @@ mod tests {
 
     #[async_trait]
     impl StageExecutor for PanickingExecutor {
-        async fn execute(&self, _job: StageJob) -> StageProduct {
+        async fn execute(&self, _job: StageJob, _activity: Arc<AtomicU64>) -> StageProduct {
             panic!("stage exploded");
         }
+    }
+
+    fn never_finishing() -> BoxedProduct {
+        Box::pin(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            unreachable!()
+        })
     }
 
     #[tokio::test]
@@ -246,10 +414,17 @@ mod tests {
             peak: AtomicUsize::new(0),
             delay: Duration::from_millis(30),
         });
-        let jobs: Vec<StageJob> = ["mechanical", "diff", "impact", "spec", "security", "simplicity"]
-            .iter()
-            .map(|id| job(id, id))
-            .collect();
+        let jobs: Vec<StageJob> = [
+            "mechanical",
+            "diff",
+            "impact",
+            "spec",
+            "security",
+            "simplicity",
+        ]
+        .iter()
+        .map(|id| job(id, id))
+        .collect();
 
         let products = run_stage_jobs(executor.clone(), jobs, params(2)).await;
 
@@ -264,20 +439,27 @@ mod tests {
     #[tokio::test]
     async fn review_scheduler_turns_a_hung_stage_into_a_timed_out_row() {
         let mut schedule = params(4);
-        schedule.stage_budget = Duration::from_millis(60);
-        schedule.writes_stage_budget = Duration::from_millis(60);
+        schedule.stage_ceiling = Duration::from_millis(60);
+        schedule.writes_stage_ceiling = Duration::from_millis(60);
 
-        let products =
-            run_stage_jobs(Arc::new(HangingExecutor), vec![job("diff", "diff")], schedule).await;
+        let products = run_stage_jobs(
+            Arc::new(HangingExecutor),
+            vec![job("diff", "diff")],
+            schedule,
+        )
+        .await;
 
         assert_eq!(products[0].run.status, StageStatusKind::TimedOut);
         assert!(products[0]
             .run
             .reason
             .as_deref()
-            .unwrap()
-            .contains("stage budget"));
+            .is_some_and(|reason| reason.contains("hard stage ceiling")));
         assert_eq!(products[0].run.name, "diff");
+        assert_eq!(
+            products[0].run.trace_chat_id.as_deref(),
+            Some("subchat-rv-1-diff")
+        );
     }
 
     #[tokio::test]
@@ -291,6 +473,10 @@ mod tests {
 
         assert_eq!(products[0].run.status, StageStatusKind::Failed);
         assert_eq!(products[0].run.reason.as_deref(), Some("stage panicked"));
+        assert_eq!(
+            products[0].run.trace_chat_id.as_deref(),
+            Some("subchat-rv-1-spec")
+        );
     }
 
     #[tokio::test]
@@ -305,7 +491,11 @@ mod tests {
 
         let products = run_stage_jobs(
             executor,
-            vec![job("diff", "diff"), job("spec", "spec"), job("impact", "impact")],
+            vec![
+                job("diff", "diff"),
+                job("spec", "spec"),
+                job("impact", "impact"),
+            ],
             schedule,
         )
         .await;
@@ -323,22 +513,279 @@ mod tests {
     fn review_scheduler_budget_respects_both_stage_and_global_ceilings() {
         let schedule = ScheduleParams {
             parallel_depth: 4,
-            stage_budget: Duration::from_secs(300),
-            writes_stage_budget: Duration::from_secs(1200),
+            stage_ceiling: Duration::from_secs(300),
+            writes_stage_ceiling: Duration::from_secs(1200),
+            idle_timeout: Duration::from_secs(120),
+            grace: HARVEST_GRACE,
             deadline: None,
         };
 
         assert_eq!(
-            schedule.budget_for(&job("mechanical", "mechanical")),
+            schedule.budget_for(&job_with_budget(
+                "mechanical",
+                "mechanical",
+                Duration::from_secs(900)
+            )),
             Duration::from_secs(300)
         );
         assert_eq!(
-            schedule.budget_for(&job("execution", "execution")),
+            schedule.budget_for(&job_with_budget(
+                "execution",
+                "execution",
+                Duration::from_secs(1800)
+            )),
             Duration::from_secs(1200)
         );
         assert_eq!(
-            schedule.budget_for(&job("spec", "spec")),
-            Duration::from_secs(300).min(Duration::from_secs(6 * 60))
+            schedule.budget_for(&job_with_budget("spec", "spec", Duration::from_secs(120))),
+            Duration::from_secs(120)
         );
+        assert_eq!(
+            schedule.budget_for(&job_with_budget("spec", "spec", Duration::from_secs(5))),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn review_scheduler_idle_limit_never_drops_below_the_floor() {
+        let mut schedule = params(1);
+        schedule.idle_timeout = Duration::from_secs(1);
+        assert_eq!(schedule.idle_limit(), MIN_IDLE_TIMEOUT);
+
+        schedule.idle_timeout = Duration::from_secs(300);
+        assert_eq!(schedule.idle_limit(), Duration::from_secs(300));
+    }
+
+    #[tokio::test]
+    async fn review_watchdog_kills_a_silent_stage() {
+        let activity = Arc::new(AtomicU64::new(now_ms()));
+        let abort = Arc::new(AtomicBool::new(false));
+
+        let product = watch_stage(
+            "diff".to_string(),
+            "subchat-rv-1-diff".to_string(),
+            Duration::from_secs(600),
+            Duration::from_millis(60),
+            Duration::from_millis(10),
+            Duration::from_millis(40),
+            None,
+            activity,
+            abort.clone(),
+            None,
+            never_finishing(),
+        )
+        .await;
+
+        assert_eq!(product.run.status, StageStatusKind::TimedOut);
+        assert!(abort.load(Ordering::SeqCst));
+        assert!(product
+            .run
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("stopped responding")));
+        assert_eq!(
+            product.run.trace_chat_id.as_deref(),
+            Some("subchat-rv-1-diff")
+        );
+        assert!(product.findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn review_watchdog_keeps_an_actively_working_stage_alive_past_the_idle_limit() {
+        let activity = Arc::new(AtomicU64::new(now_ms()));
+        let abort = Arc::new(AtomicBool::new(false));
+        let heartbeat = activity.clone();
+        let work: BoxedProduct = Box::pin(async move {
+            for _ in 0..10 {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                heartbeat.store(now_ms(), Ordering::Relaxed);
+            }
+            StageProduct {
+                run: StageRun::ok("diff", Some("m".to_string()), 300),
+                findings: vec![],
+                verdicts: vec![],
+                metering: serde_json::Map::new(),
+                raw: None,
+            }
+        });
+
+        let product = watch_stage(
+            "diff".to_string(),
+            "subchat-rv-1-diff".to_string(),
+            Duration::from_secs(600),
+            Duration::from_millis(60),
+            Duration::from_millis(10),
+            Duration::from_millis(40),
+            None,
+            activity,
+            abort.clone(),
+            None,
+            work,
+        )
+        .await;
+
+        assert_eq!(product.run.status, StageStatusKind::Ok);
+        assert!(product.run.reason.is_none());
+        assert!(abort.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn review_watchdog_hard_ceiling_still_stops_a_busy_stage() {
+        let activity = Arc::new(AtomicU64::new(now_ms()));
+        let abort = Arc::new(AtomicBool::new(false));
+        let heartbeat = activity.clone();
+        let work: BoxedProduct = Box::pin(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                heartbeat.store(now_ms(), Ordering::Relaxed);
+            }
+        });
+
+        let product = watch_stage(
+            "diff".to_string(),
+            "subchat-rv-1-diff".to_string(),
+            Duration::from_millis(80),
+            Duration::from_secs(600),
+            Duration::from_millis(10),
+            Duration::from_millis(40),
+            None,
+            activity,
+            abort.clone(),
+            None,
+            work,
+        )
+        .await;
+
+        assert_eq!(product.run.status, StageStatusKind::TimedOut);
+        assert!(abort.load(Ordering::SeqCst));
+        assert!(product
+            .run
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("hard stage ceiling")));
+    }
+
+    #[tokio::test]
+    async fn review_watchdog_salvages_findings_from_a_soft_aborted_stage() {
+        let activity = Arc::new(AtomicU64::new(now_ms()));
+        let abort = Arc::new(AtomicBool::new(false));
+        let stage_abort = abort.clone();
+        let salvage_job = job("diff", "diff");
+        let work: BoxedProduct = Box::pin(async move {
+            while !stage_abort.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let transcript = r#"{"findings":[{"title":"t","severity":"high","file":"src/lib.rs","line_start":4,"line_end":6,"claim":"c","evidence":"e","reproduction":null,"fix":null}],"summary":"partial","coverage":{"files_read":["src/lib.rs"],"commands_run":[]}}"#;
+            let output = crate::tools::review_agents::contract::parse_stage_output(transcript)
+                .expect("the salvage transcript carries a valid contract block");
+            crate::tools::review_agents::runner::findings_product(
+                "diff",
+                &salvage_job,
+                output,
+                "m".to_string(),
+                77,
+            )
+        });
+
+        let product = watch_stage(
+            "diff".to_string(),
+            "subchat-rv-1-diff".to_string(),
+            Duration::from_millis(80),
+            Duration::from_secs(600),
+            Duration::from_millis(10),
+            Duration::from_secs(2),
+            None,
+            activity,
+            abort.clone(),
+            None,
+            work,
+        )
+        .await;
+
+        assert_eq!(product.run.status, StageStatusKind::TimedOut);
+        assert!(product
+            .run
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("hard stage ceiling")));
+        assert_eq!(product.findings.len(), 1);
+        assert_eq!(product.findings[0].title, "t");
+        assert_eq!(product.run.findings, 1);
+        assert_eq!(product.run.coverage.files_read, ["src/lib.rs"]);
+        assert!(product
+            .run
+            .summary
+            .as_deref()
+            .is_some_and(|summary| summary.contains("salvaged from partial run")));
+        assert!(abort.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn review_watchdog_parent_abort_propagates_to_the_stage_flag() {
+        let activity = Arc::new(AtomicU64::new(now_ms()));
+        let abort = Arc::new(AtomicBool::new(false));
+        let parent = Arc::new(AtomicBool::new(true));
+        let stage_abort = abort.clone();
+        let work: BoxedProduct = Box::pin(async move {
+            while !stage_abort.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            StageProduct {
+                run: StageRun::ok("diff", Some("m".to_string()), 5),
+                findings: vec![],
+                verdicts: vec![],
+                metering: serde_json::Map::new(),
+                raw: None,
+            }
+        });
+
+        let product = watch_stage(
+            "diff".to_string(),
+            "subchat-rv-1-diff".to_string(),
+            Duration::from_secs(600),
+            Duration::from_secs(600),
+            Duration::from_millis(10),
+            Duration::from_secs(2),
+            None,
+            activity,
+            abort.clone(),
+            Some(parent),
+            work,
+        )
+        .await;
+
+        assert!(abort.load(Ordering::SeqCst));
+        assert_eq!(product.run.status, StageStatusKind::Ok);
+    }
+
+    #[tokio::test]
+    async fn review_scheduler_leaves_no_stage_abort_flag_unset() {
+        let mut schedule = params(1);
+        schedule.stage_ceiling = Duration::from_millis(60);
+        schedule.writes_stage_ceiling = Duration::from_millis(60);
+        schedule.deadline = Some(Instant::now() + Duration::from_millis(500));
+        let executor = Arc::new(CountingExecutor {
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            delay: Duration::from_millis(10),
+        });
+        let jobs = vec![job("diff", "diff"), job("spec", "spec")];
+        let mut hanging = job("impact", "impact");
+        hanging.abort = Arc::new(AtomicBool::new(false));
+        let flags: Vec<Arc<AtomicBool>> = jobs
+            .iter()
+            .map(|job| job.abort.clone())
+            .chain([hanging.abort.clone()])
+            .collect();
+
+        let products = run_stage_jobs(
+            executor,
+            jobs.into_iter().chain([hanging]).collect(),
+            schedule,
+        )
+        .await;
+
+        assert_eq!(products.len(), 3);
+        assert!(flags.iter().all(|flag| flag.load(Ordering::SeqCst)));
     }
 }

@@ -121,6 +121,10 @@ export interface BrowserSettingsPage {
   name: "browser settings";
 }
 
+export interface LimitsSettingsPage {
+  name: "limits settings";
+}
+
 export interface BuddyPage {
   name: "buddy";
   draftId?: string;
@@ -164,7 +168,8 @@ export type Page =
   | PrivacySettingsPage
   | ShellSettingsPage
   | IndexingSettingsPage
-  | BrowserSettingsPage;
+  | BrowserSettingsPage
+  | LimitsSettingsPage;
 
 export function isIntegrationSetupPage(
   page: Page,

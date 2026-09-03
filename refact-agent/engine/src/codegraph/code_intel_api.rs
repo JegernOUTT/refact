@@ -208,6 +208,7 @@ pub struct GitFindingResponse {
 pub struct GitRiskResponse {
     pub commits_analyzed: u32,
     pub agent_authored_pct: f64,
+    pub history_truncation: refact_git_intel::HistoryTruncation,
     pub hotspots: Vec<GitHotspotResponse>,
     pub ownership: Vec<GitOwnershipResponse>,
     pub co_change: Vec<GitCoChangeResponse>,
@@ -281,6 +282,8 @@ pub struct OverviewExecutionFlow {
     pub entry: String,
     pub reaches: usize,
     pub depth: usize,
+    pub truncated: bool,
+    pub node_cap: usize,
 }
 
 #[derive(Serialize)]

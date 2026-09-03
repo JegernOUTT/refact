@@ -44,8 +44,6 @@ use crate::worktrees::scope::ExecutionScope;
 #[derive(Deserialize, Serialize, Clone, Default)]
 pub struct SettingsShell {
     #[serde(default)]
-    pub timeout: String,
-    #[serde(default)]
     pub output_filter: OutputFilter,
 }
 

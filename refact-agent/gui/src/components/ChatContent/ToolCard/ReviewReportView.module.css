@@ -68,6 +68,7 @@
 }
 
 .dangerCallout,
+.warningCallout,
 .intent {
   display: grid;
   min-width: 0;
@@ -81,6 +82,40 @@
   background: color-mix(in oklab, var(--rf-color-danger) 10%, transparent);
   border: var(--rf-hairline) solid
     color-mix(in oklab, var(--rf-color-danger) 42%, transparent);
+}
+
+.warningCallout {
+  color: var(--rf-color-warning);
+  background: color-mix(in oklab, var(--rf-color-warning) 10%, transparent);
+  border: var(--rf-hairline) solid
+    color-mix(in oklab, var(--rf-color-warning) 42%, transparent);
+}
+
+.calloutTitle {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-weight: var(--rf-weight-bold);
+}
+
+.calloutList,
+.droppedList {
+  display: grid;
+  min-width: 0;
+  gap: var(--rf-space-1);
+  margin: 0;
+  padding-inline-start: var(--rf-space-4);
+  font-size: var(--rf-text-1);
+  overflow-wrap: anywhere;
+}
+
+.droppedList {
+  padding-block-start: var(--rf-space-2);
+  color: var(--rf-color-muted);
+}
+
+.reasonCell {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .intent {
@@ -245,7 +280,8 @@
 }
 
 @media (prefers-reduced-transparency: reduce) {
-  .dangerCallout {
+  .dangerCallout,
+  .warningCallout {
     background: var(--rf-surface-2);
   }
 }

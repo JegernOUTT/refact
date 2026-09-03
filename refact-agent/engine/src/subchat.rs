@@ -403,6 +403,7 @@ pub struct SubchatConfig {
     pub parent_tool_call_id: Option<String>,
     pub parent_subchat_tx: Option<Arc<AMutex<mpsc::UnboundedSender<Value>>>>,
     pub abort_flag: Option<Arc<AtomicBool>>,
+    pub soft_abort: bool,
     pub background_agent_id: Option<String>,
     pub subchat_depth: usize,
     pub final_step_force_answer: bool,
@@ -585,6 +586,7 @@ pub struct SubchatResult {
     /// Intentionally public API - callers may use it for trajectory linking.
     #[allow(dead_code)]
     pub chat_id: Option<String>,
+    pub aborted: bool,
 }
 
 struct AuditedSubchatReport(Vec<(usize, refact_privacy::FileRecord)>);
@@ -1203,6 +1205,7 @@ pub async fn resolve_subchat_config_with_parent(
         parent_tool_call_id,
         parent_subchat_tx,
         abort_flag,
+        soft_abort: false,
         background_agent_id: None,
         subchat_depth,
         final_step_force_answer: false,
@@ -1331,6 +1334,7 @@ pub async fn resolve_subchat_config_with_explicit_params(
         parent_tool_call_id,
         parent_subchat_tx,
         abort_flag,
+        soft_abort: false,
         background_agent_id: None,
         subchat_depth,
         final_step_force_answer: false,
@@ -1705,8 +1709,8 @@ pub async fn run_subchat(
         ))
         .await
     };
-    let mut current_messages = match current_messages_result {
-        Ok(messages) => messages,
+    let (mut current_messages, aborted) = match current_messages_result {
+        Ok((messages, aborted)) => (messages, aborted),
         Err(e) => {
             save_failed_subchat_trajectory(gcx.clone(), &chat_id, &config, &progress_messages, &e)
                 .await;
@@ -1762,6 +1766,7 @@ pub async fn run_subchat(
         messages: current_messages,
         metering,
         chat_id: if config.stateful { Some(chat_id) } else { None },
+        aborted,
     })
 }
 
@@ -1998,6 +2003,10 @@ mod convert_results_tests {
     }
 }
 
+fn is_abort_error(err: &str) -> bool {
+    err.eq_ignore_ascii_case("aborted")
+}
+
 fn is_aborted(abort_flag: &Option<Arc<AtomicBool>>) -> bool {
     abort_flag
         .as_ref()
@@ -2029,11 +2038,14 @@ async fn run_subchat_loop(
     tools_policy: &ToolsPolicy,
     usage: &mut ChatUsage,
     progress: &SubchatProgressMessages,
-) -> Result<Vec<ChatMessage>, String> {
+) -> Result<(Vec<ChatMessage>, bool), String> {
     let mut context_limit_compact_count = 0usize;
     let mut empty_choice_retry_count = 0usize;
     for step in 0..config.max_steps {
         if is_aborted(&config.abort_flag) {
+            if config.soft_abort {
+                return Ok((messages, true));
+            }
             return Err("Aborted".to_string());
         }
         emit_subchat_progress(config, SubchatProgress::Step(step + 1));
@@ -2100,7 +2112,12 @@ async fn run_subchat_loop(
                         empty_choice_retry_count, MAX_EMPTY_CHOICE_RETRIES, err,
                     );
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    if config.soft_abort && is_abort_error(&err) {
+                        return Ok((messages, true));
+                    }
+                    return Err(err);
+                }
             }
         };
 
@@ -2132,6 +2149,9 @@ async fn run_subchat_loop(
         persist_subchat_progress(&ccx, config, progress, &messages).await;
 
         if is_aborted(&config.abort_flag) {
+            if config.soft_abort {
+                return Ok((messages, true));
+            }
             return Err("Aborted".to_string());
         }
     }
@@ -2153,7 +2173,7 @@ async fn run_subchat_loop(
         persist_subchat_progress(&ccx, config, progress, &messages).await;
     }
 
-    Ok(messages)
+    Ok((messages, is_aborted(&config.abort_flag)))
 }
 
 async fn run_forced_final_answer_turn(
@@ -2226,7 +2246,12 @@ async fn run_forced_final_answer_turn(
                     empty_choice_retry_count, MAX_EMPTY_CHOICE_RETRIES, err,
                 );
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                if config.soft_abort && is_abort_error(&err) {
+                    return Ok(messages);
+                }
+                return Err(err);
+            }
         }
     };
 
@@ -2244,13 +2269,16 @@ async fn run_subchat_with_wrap_up(
     wrap_up: &WrapUpConfig,
     usage: &mut ChatUsage,
     progress: &SubchatProgressMessages,
-) -> Result<Vec<ChatMessage>, String> {
+) -> Result<(Vec<ChatMessage>, bool), String> {
     let mut step_n = 0;
     let mut context_limit_compact_count = 0usize;
     let mut empty_choice_retry_count = 0usize;
 
     loop {
         if is_aborted(&config.abort_flag) {
+            if config.soft_abort {
+                return Ok((messages, true));
+            }
             return Err("Aborted".to_string());
         }
 
@@ -2345,7 +2373,12 @@ async fn run_subchat_with_wrap_up(
                         empty_choice_retry_count, MAX_EMPTY_CHOICE_RETRIES, err,
                     );
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    if config.soft_abort && is_abort_error(&err) {
+                        return Ok((messages, true));
+                    }
+                    return Err(err);
+                }
             }
         };
 
@@ -2375,11 +2408,17 @@ async fn run_subchat_with_wrap_up(
         step_n += 1;
 
         if is_aborted(&config.abort_flag) {
+            if config.soft_abort {
+                return Ok((messages, true));
+            }
             return Err("Aborted".to_string());
         }
     }
 
     if is_aborted(&config.abort_flag) {
+        if config.soft_abort {
+            return Ok((messages, true));
+        }
         return Err("Aborted".to_string());
     }
 
@@ -2454,14 +2493,22 @@ async fn run_subchat_with_wrap_up(
                 )
                 .await;
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                if config.soft_abort && is_abort_error(&err) {
+                    return Ok((messages, true));
+                }
+                return Err(err);
+            }
         }
     };
     update_usage_from_messages(usage, &final_results);
     let gcx = ccx.lock().await.global_context.clone();
     emit_usage_progress(&gcx, config, &final_results).await;
 
-    Ok(final_results.into_iter().next().unwrap_or_default())
+    Ok((
+        final_results.into_iter().next().unwrap_or_default(),
+        is_aborted(&config.abort_flag),
+    ))
 }
 
 fn truncate_args(s: &str, max: usize) -> String {
@@ -3317,6 +3364,7 @@ mod subchat_tests {
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
+            soft_abort: false,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
@@ -3324,6 +3372,136 @@ mod subchat_tests {
             step_progress: None,
             trace_parent: TraceParent::unattributed(),
         }
+    }
+
+    async fn abort_test_ccx(
+    ) -> Arc<tokio::sync::Mutex<crate::at_commands::at_commands::AtCommandsContext>> {
+        let gcx = make_test_gcx().await;
+        Arc::new(tokio::sync::Mutex::new(
+            crate::at_commands::at_commands::AtCommandsContext::new(
+                gcx,
+                4096,
+                1,
+                false,
+                vec![],
+                "subchat-abort-test".to_string(),
+                None,
+                "model".to_string(),
+                None,
+                None,
+            )
+            .await,
+        ))
+    }
+
+    fn aborted_config(soft_abort: bool) -> SubchatConfig {
+        let mut config = test_subchat_config();
+        config.abort_flag = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
+        config.soft_abort = soft_abort;
+        config
+    }
+
+    #[test]
+    fn abort_error_detection_matches_stream_and_loop_variants() {
+        assert!(super::is_abort_error("Aborted"));
+        assert!(super::is_abort_error("aborted"));
+        assert!(!super::is_abort_error("aborted by user"));
+        assert!(!super::is_abort_error("context length exceeded"));
+    }
+
+    #[tokio::test]
+    async fn soft_abort_returns_accumulated_messages_with_aborted_flag() {
+        let ccx = abort_test_ccx().await;
+        let config = aborted_config(true);
+        let messages = vec![ChatMessage::new("user".to_string(), "hi".to_string())];
+        let mut usage = crate::call_validation::ChatUsage::default();
+        let progress = Arc::new(StdMutex::new(Vec::new()));
+        let result = super::run_subchat_loop(
+            ccx,
+            &config,
+            messages,
+            &ToolsPolicy::None,
+            &mut usage,
+            &progress,
+        )
+        .await;
+        let (out, aborted) = result.expect("soft abort must return Ok");
+        assert!(aborted);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].role, "user");
+        assert_eq!(out[0].content.content_text_only(), "hi");
+    }
+
+    #[tokio::test]
+    async fn hard_abort_still_returns_aborted_error() {
+        let ccx = abort_test_ccx().await;
+        let config = aborted_config(false);
+        let messages = vec![ChatMessage::new("user".to_string(), "hi".to_string())];
+        let mut usage = crate::call_validation::ChatUsage::default();
+        let progress = Arc::new(StdMutex::new(Vec::new()));
+        let result = super::run_subchat_loop(
+            ccx,
+            &config,
+            messages,
+            &ToolsPolicy::None,
+            &mut usage,
+            &progress,
+        )
+        .await;
+        assert_eq!(result.err(), Some("Aborted".to_string()));
+    }
+
+    #[tokio::test]
+    async fn wrap_up_soft_abort_returns_accumulated_messages() {
+        let ccx = abort_test_ccx().await;
+        let config = aborted_config(true);
+        let wrap_up = super::WrapUpConfig {
+            depth: 1,
+            tokens_cnt: 1000,
+            prompt: "wrap up".to_string(),
+        };
+        let messages = vec![ChatMessage::new("user".to_string(), "hi".to_string())];
+        let mut usage = crate::call_validation::ChatUsage::default();
+        let progress = Arc::new(StdMutex::new(Vec::new()));
+        let result = super::run_subchat_with_wrap_up(
+            ccx,
+            &config,
+            messages,
+            &ToolsPolicy::None,
+            &wrap_up,
+            &mut usage,
+            &progress,
+        )
+        .await;
+        let (out, aborted) = result.expect("soft abort must return Ok");
+        assert!(aborted);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].content.content_text_only(), "hi");
+    }
+
+    #[tokio::test]
+    async fn wrap_up_hard_abort_still_returns_aborted_error() {
+        let ccx = abort_test_ccx().await;
+        let config = aborted_config(false);
+        let wrap_up = super::WrapUpConfig {
+            depth: 1,
+            tokens_cnt: 1000,
+            prompt: "wrap up".to_string(),
+        };
+        let messages = vec![ChatMessage::new("user".to_string(), "hi".to_string())];
+        let mut usage = crate::call_validation::ChatUsage::default();
+        let progress = Arc::new(StdMutex::new(Vec::new()));
+        let result = super::run_subchat_with_wrap_up(
+            ccx,
+            &config,
+            messages,
+            &ToolsPolicy::None,
+            &wrap_up,
+            &mut usage,
+            &progress,
+        )
+        .await;
+        assert_eq!(result.err(), Some("Aborted".to_string()));
     }
 
     #[test]
@@ -4042,6 +4220,7 @@ mod subchat_tests {
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
+            soft_abort: false,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
@@ -4108,6 +4287,7 @@ mod subchat_tests {
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
+            soft_abort: false,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
@@ -4168,6 +4348,7 @@ mod subchat_tests {
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
+            soft_abort: false,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
@@ -4412,6 +4593,7 @@ mod subchat_tests {
             parent_tool_call_id: None,
             parent_subchat_tx: None,
             abort_flag: None,
+            soft_abort: false,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,

@@ -53,6 +53,31 @@ pub fn install_vecdb_path_coalescing_setting(enabled: bool) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = enabled;
 }
 
+pub const VECDB_TRAJECTORY_SPLIT_BYTES_ENV: &str = "REFACT_VECDB_TRAJECTORY_SPLIT_BYTES";
+pub const DEFAULT_VECDB_TRAJECTORY_SPLIT_BYTES: usize = 16_384;
+pub const MIN_VECDB_TRAJECTORY_SPLIT_BYTES: usize = 256;
+static VECDB_TRAJECTORY_SPLIT_BYTES_CONFIG: std::sync::LazyLock<std::sync::RwLock<usize>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(DEFAULT_VECDB_TRAJECTORY_SPLIT_BYTES));
+
+pub fn vecdb_trajectory_split_bytes() -> usize {
+    std::env::var(VECDB_TRAJECTORY_SPLIT_BYTES_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            *VECDB_TRAJECTORY_SPLIT_BYTES_CONFIG
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        })
+        .max(MIN_VECDB_TRAJECTORY_SPLIT_BYTES)
+}
+
+pub fn install_vecdb_trajectory_split_bytes(value: usize) {
+    *VECDB_TRAJECTORY_SPLIT_BYTES_CONFIG
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        value.max(MIN_VECDB_TRAJECTORY_SPLIT_BYTES);
+}
+
 fn memory_plane_file_kind(
     path: &PathBuf,
     roots: &MemoryPlaneRoots,
@@ -406,14 +431,26 @@ async fn vectorize_batch_from_q(
     }
 
     if send_to_cache.len() > 0 {
-        match vecdb_handler_arc
+        let cached_count = send_to_cache.len();
+        if let Err(e) = vecdb_handler_arc
             .lock()
             .await
             .cache_add_new_records(send_to_cache)
             .await
         {
-            Err(e) => warn!("Error adding records to the cacheDB: {}", e),
-            _ => {}
+            warn!("Error adding records to the cacheDB: {}", e);
+            let mut vstatus_locked = vstatus.lock().await;
+            vstatus_locked.cache_writes_failed =
+                vstatus_locked.cache_writes_failed.saturating_add(1);
+            vstatus_locked.vectors_missing_from_cache = vstatus_locked
+                .vectors_missing_from_cache
+                .saturating_add(cached_count);
+            let reason = format!("cache write failed: {e}");
+            vstatus_locked
+                .vecdb_errors
+                .entry(reason)
+                .and_modify(|counter| *counter += 1)
+                .or_insert(1);
         }
     }
 
@@ -428,6 +465,7 @@ async fn from_splits_to_vecdb_records_applying_cache(
     run_actual_model_on_these: &mut Vec<SplitResult>,
     vecdb_handler_arc: Arc<AMutex<VecDBSqlite>>,
     group_size: usize,
+    vstatus: Arc<AMutex<VecDbStatus>>,
 ) {
     while !splits.is_empty() {
         let batch: Vec<SplitResult> = splits
@@ -438,23 +476,35 @@ async fn from_splits_to_vecdb_records_applying_cache(
             .await
             .fetch_vectors_from_cache(&batch)
             .await;
-        if let Ok(vectors) = vectors_maybe {
-            for (split, maybe_vector) in batch.iter().zip(vectors.iter()) {
-                if maybe_vector.is_none() {
-                    run_actual_model_on_these.push(split.clone());
-                    continue;
+        match vectors_maybe {
+            Ok(vectors) => {
+                for (split, maybe_vector) in batch.iter().zip(vectors.iter()) {
+                    if maybe_vector.is_none() {
+                        run_actual_model_on_these.push(split.clone());
+                        continue;
+                    }
+                    ready_to_vecdb.push(VecdbRecord {
+                        vector: maybe_vector.clone(),
+                        file_path: split.file_path.clone(),
+                        start_line: split.start_line,
+                        end_line: split.end_line,
+                        distance: -1.0,
+                        usefulness: 0.0,
+                    });
                 }
-                ready_to_vecdb.push(VecdbRecord {
-                    vector: maybe_vector.clone(),
-                    file_path: split.file_path.clone(),
-                    start_line: split.start_line,
-                    end_line: split.end_line,
-                    distance: -1.0,
-                    usefulness: 0.0,
-                });
             }
-        } else if let Err(err) = vectors_maybe {
-            tracing::error!("{}", err);
+            Err(err) => {
+                tracing::error!("{}", err);
+                {
+                    let mut vstatus_locked = vstatus.lock().await;
+                    vstatus_locked
+                        .vecdb_errors
+                        .entry(format!("cache read failed: {err}"))
+                        .and_modify(|counter| *counter += 1)
+                        .or_insert(1);
+                }
+                run_actual_model_on_these.extend(batch);
+            }
         }
     }
 }
@@ -811,6 +861,7 @@ async fn vectorize_thread(
             &mut run_actual_model_on_these,
             vecdb_handler_arc.clone(),
             10,
+            vstatus.clone(),
         )
         .await;
         if let Some(generation) = regular_generation {
@@ -839,6 +890,8 @@ impl FileVectorizerService {
             queue_additions: true,
             vecdb_max_files_hit: false,
             vecdb_errors: IndexMap::new(),
+            cache_writes_failed: 0,
+            vectors_missing_from_cache: 0,
         }));
         FileVectorizerService {
             vecdb_handler: vecdb_handler.clone(),
@@ -1308,6 +1361,180 @@ mod tests {
         assert_eq!(reads.load(Ordering::SeqCst), 1);
         assert_eq!(embedding_requests.load(Ordering::SeqCst), 1);
         assert!(handler.lock().await.size().await.unwrap() > 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn test_embedding_model() -> refact_core::vecdb_types::EmbeddingModelConfig {
+        refact_core::vecdb_types::EmbeddingModelConfig {
+            model_id: "embedding/test".to_string(),
+            endpoint: String::new(),
+            endpoint_style: "openai".to_string(),
+            embedding_endpoint_style: "openai".to_string(),
+            api_key: String::new(),
+            model_name: "test".to_string(),
+            embedding_size: 1,
+            dimensions: None,
+            query_prefix: String::new(),
+            document_prefix: String::new(),
+            rejection_threshold: 1.0,
+            embedding_batch: 16,
+            n_ctx: 64,
+        }
+    }
+
+    fn test_split(text: &str) -> SplitResult {
+        SplitResult {
+            file_path: PathBuf::from("/workspace/project/.refact/knowledge/note.md"),
+            window_text: text.to_string(),
+            window_text_hash: refact_core::chunk_utils::official_text_hashing_function(text),
+            start_line: 0,
+            end_line: 0,
+            symbol_path: String::new(),
+        }
+    }
+
+    async fn test_handler(root: &PathBuf) -> VecDBSqlite {
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+                sqlite_vec::sqlite3_vec_init as *const (),
+            )));
+        }
+        VecDBSqlite::init(
+            &root.join("vecdb"),
+            root,
+            "test",
+            1,
+            &vdb_emb_aux::create_emb_table_name(&vec!["workspace".to_string()]),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn empty_vstatus() -> Arc<AMutex<VecDbStatus>> {
+        Arc::new(AMutex::new(VecDbStatus {
+            files_unprocessed: 0,
+            files_total: 0,
+            requests_made_since_start: 0,
+            vectors_made_since_start: 0,
+            db_size: 0,
+            db_cache_size: 0,
+            state: "starting".to_string(),
+            queue_additions: false,
+            vecdb_max_files_hit: false,
+            vecdb_errors: IndexMap::new(),
+            cache_writes_failed: 0,
+            vectors_missing_from_cache: 0,
+        }))
+    }
+
+    #[tokio::test]
+    async fn cache_write_failure_counts_into_status_and_keeps_batch_ok() {
+        let root =
+            std::env::temp_dir().join(format!("refact-vecdb-wfail-{}", uuid::Uuid::new_v4()));
+        let handler = test_handler(&root).await;
+        handler.close_connection_for_test().await;
+        let vecdb_handler_arc = Arc::new(AMutex::new(handler));
+        let vstatus = empty_vstatus();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/embeddings", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 4096];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut request)
+                .await
+                .unwrap();
+            let response_body = "{\"data\":[{\"embedding\":[0.25]}]}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes())
+                .await
+                .unwrap();
+        });
+
+        let mut embedding_model = test_embedding_model();
+        embedding_model.endpoint = endpoint;
+        let constants = VecdbConstants {
+            embedding_model,
+            embedding_credential_resolver: None,
+            tokenizer: None,
+            splitter_window_size: 32,
+            vecdb_max_files: 10,
+        };
+
+        let mut run_actual_model_on_these = vec![test_split("note body")];
+        let mut ready_to_vecdb: Vec<VecdbRecord> = vec![];
+        let result = vectorize_batch_from_q(
+            &mut run_actual_model_on_these,
+            &mut ready_to_vecdb,
+            vstatus.clone(),
+            Arc::new(AMutex::new(reqwest::Client::new())),
+            &constants,
+            vecdb_handler_arc,
+        )
+        .await;
+        server.await.unwrap();
+
+        assert!(result.is_ok());
+        assert_eq!(ready_to_vecdb.len(), 1);
+        let vstatus_locked = vstatus.lock().await;
+        assert_eq!(vstatus_locked.cache_writes_failed, 1);
+        assert_eq!(vstatus_locked.vectors_missing_from_cache, 1);
+        assert_eq!(
+            vstatus_locked
+                .vecdb_errors
+                .keys()
+                .filter(|reason| reason.starts_with("cache write failed:"))
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn cache_read_failure_requeues_batch_instead_of_dropping_it() {
+        let root =
+            std::env::temp_dir().join(format!("refact-vecdb-rfail-{}", uuid::Uuid::new_v4()));
+        let handler = test_handler(&root).await;
+        handler.close_connection_for_test().await;
+        let vecdb_handler_arc = Arc::new(AMutex::new(handler));
+        let vstatus = empty_vstatus();
+
+        let mut splits = vec![test_split("first split"), test_split("second split")];
+        let mut ready_to_vecdb: Vec<VecdbRecord> = vec![];
+        let mut run_actual_model_on_these: Vec<SplitResult> = vec![];
+        from_splits_to_vecdb_records_applying_cache(
+            &mut splits,
+            &mut ready_to_vecdb,
+            &mut run_actual_model_on_these,
+            vecdb_handler_arc,
+            10,
+            vstatus.clone(),
+        )
+        .await;
+
+        assert!(splits.is_empty());
+        assert!(ready_to_vecdb.is_empty());
+        assert_eq!(run_actual_model_on_these.len(), 2);
+        assert_eq!(
+            run_actual_model_on_these
+                .iter()
+                .map(|split| split.window_text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first split", "second split"]
+        );
+        let vstatus_locked = vstatus.lock().await;
+        assert_eq!(
+            vstatus_locked
+                .vecdb_errors
+                .keys()
+                .filter(|reason| reason.starts_with("cache read failed:"))
+                .count(),
+            1
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

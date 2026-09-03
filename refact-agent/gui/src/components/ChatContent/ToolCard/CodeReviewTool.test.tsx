@@ -107,6 +107,62 @@ function reviewReport() {
   };
 }
 
+function inconclusiveReport() {
+  return {
+    depth: "deep",
+    outcome: "inconclusive",
+    scope: {
+      mode: "strict",
+      requested_files: 2,
+      reviewed_files: 0,
+      files: [],
+      dropped_files: ["src/cache.ts", "src/other.ts"],
+      focus: null,
+      expansion: null,
+      out_of_scope_findings: 0,
+    },
+    diff: { base: "abc123", head: "HEAD", changed_files: 2, hunks: 7 },
+    stages: [
+      {
+        name: "diff",
+        model: null,
+        status: "timed_out",
+        reason: "stage budget of 360s exceeded",
+        duration_ms: 360000,
+        findings: 0,
+        summary: null,
+        trace_chat_id: "trace-diff-1",
+        coverage: {
+          files_read: [],
+          commands_run: [],
+          tools_unavailable: [],
+          stopped_early: null,
+        },
+      },
+      {
+        name: "tests",
+        model: null,
+        status: "timed_out",
+        reason: "stage budget of 360s exceeded",
+        duration_ms: 360000,
+        findings: 0,
+        summary: null,
+        trace_chat_id: "trace-tests-2",
+        coverage: {
+          files_read: [],
+          commands_run: [],
+          tools_unavailable: [],
+          stopped_early: null,
+        },
+      },
+    ],
+    findings: [],
+    duration_ms: 720000,
+    duplicates_merged: 0,
+    scratch_dir: null,
+  };
+}
+
 function message(
   content: string,
   extra?: Record<string, unknown>,
@@ -156,6 +212,80 @@ describe("CodeReviewTool", () => {
         "Partial review: 1 stage(s) did not complete — absence of findings there is not evidence of absence.",
       ),
     ).toBeInTheDocument();
+  });
+
+  test("legacy report without outcome renders unchanged, with no banner", () => {
+    renderReview(
+      message("## Review · 2 file(s) requested", {
+        review_report: reviewReport(),
+      }),
+    );
+
+    expect(
+      screen.queryByTestId("review-outcome-banner"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("review-dropped-files"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Partial review: 1 stage(s) did not complete — absence of findings there is not evidence of absence.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  test("an inconclusive report shows an error banner and no clean summary", () => {
+    renderReview(
+      message("## Review · 2 file(s) requested", {
+        review_report: inconclusiveReport(),
+      }),
+    );
+
+    const banner = screen.getByTestId("review-outcome-banner");
+    expect(banner).toHaveAttribute("role", "alert");
+    expect(banner).toHaveTextContent(
+      "Review inconclusive — no stage completed and nothing was verified. This is not a pass.",
+    );
+    expect(banner).toHaveTextContent(
+      "diff — timed out: stage budget of 360s exceeded",
+    );
+    expect(banner).toHaveTextContent("trace: trace-diff-1");
+    expect(banner).toHaveTextContent("trace: trace-tests-2");
+    expect(
+      screen.queryByText("No supported findings."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        /absence of findings there is not evidence of absence/,
+      ),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("review-dropped-files")).toHaveTextContent(
+      "2 files were not reviewed",
+    );
+    expect(screen.getByText("src/cache.ts")).toBeInTheDocument();
+    expect(screen.getByText("src/other.ts")).toBeInTheDocument();
+  });
+
+  test("a partial report shows a warning banner with completed stage counts", () => {
+    renderReview(
+      message("## Review · 2 file(s) requested", {
+        review_report: { ...reviewReport(), outcome: "partial" },
+      }),
+    );
+
+    const banner = screen.getByTestId("review-outcome-banner");
+    expect(banner).toHaveAttribute("role", "status");
+    expect(banner).toHaveTextContent(
+      "Partial review: 1 of 2 stages completed — findings may be incomplete.",
+    );
+    expect(banner).toHaveTextContent(
+      "tests — timed out: stage budget of 360s exceeded",
+    );
+    expect(
+      screen.queryByText(
+        "Partial review: 1 stage(s) did not complete — absence of findings there is not evidence of absence.",
+      ),
+    ).not.toBeInTheDocument();
   });
 
   test("falls back to markdown without a report", () => {

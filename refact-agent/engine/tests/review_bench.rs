@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use refact_lsp::tools::review_types::{
-    ReviewDiffSummary, ReviewFinding, ReviewReport, ReviewScopeSummary, ReviewSeverity,
+    ReviewDiffSummary, ReviewFinding, ReviewOutcome, ReviewReport, ReviewScopeSummary,
+    ReviewSeverity,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
@@ -293,6 +294,7 @@ fn finding(
 fn report(findings: Vec<ReviewFinding>) -> ReviewReport {
     ReviewReport {
         depth: "normal".to_string(),
+        outcome: ReviewOutcome::Reviewed,
         scope: ReviewScopeSummary::default(),
         diff: ReviewDiffSummary::default(),
         stages: vec![],

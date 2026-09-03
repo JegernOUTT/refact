@@ -9,6 +9,7 @@ use refact_core::chat_types::{ContextFile, PostprocessSettings};
 use refact_core::ast_types::AstDefinition;
 use refact_core::custom_error::{first_n_chars, last_n_chars};
 use refact_core::chunk_utils::count_text_tokens_with_fallback;
+use crate::config::limits;
 use crate::pp_context_provider::PPContextTrait;
 use crate::pp_utils::{
     color_with_gradient_type, colorize_comments_up, colorize_if_more_useful, colorize_minus_one,
@@ -17,8 +18,11 @@ use crate::pp_utils::{
 };
 
 pub const RESERVE_FOR_QUESTION_AND_FOLLOWUP: usize = 1024;
-pub const MAX_LINE_LENGTH: usize = 10_000;
 pub const DEBUG: usize = 0;
+
+pub fn max_line_length() -> usize {
+    limits().max_line_length_chars
+}
 
 #[derive(Debug)]
 pub struct PPFile {
@@ -46,11 +50,17 @@ fn collect_lines_from_files(
     settings: &PostprocessSettings,
 ) -> IndexMap<String, Vec<FileLine>> {
     let mut lines_in_files = IndexMap::new();
+    let max_line_length = limits().max_line_length_chars;
     for file_ref in files {
         for (line_n, line) in file_ref.file_content.lines().enumerate() {
-            let truncated_line = if line.len() > MAX_LINE_LENGTH {
-                let boundary = line.floor_char_boundary(MAX_LINE_LENGTH);
-                format!("{}...", &line[..boundary])
+            let truncated_line = if line.len() > max_line_length {
+                let boundary = line.floor_char_boundary(max_line_length);
+                format!(
+                    "{}... (line truncated: {} of {} chars; raise pp_max_line_length_chars in settings)",
+                    &line[..boundary],
+                    boundary,
+                    line.len()
+                )
             } else {
                 line.to_string()
             };
@@ -342,6 +352,7 @@ async fn pp_limit_and_merge(
         bv.partial_cmp(&av).unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    let total_lines_considered = lines_by_useful.len();
     let mut tokens_count = 0;
     let mut lines_take_cnt = 0;
     let mut lines_skipped_by_budget = 0;
@@ -433,7 +444,11 @@ async fn pp_limit_and_merge(
             anything = true;
             last_taken_line = i;
             if i > prev_line + 1 {
-                out.push_str("...\n");
+                out.push_str(&format!(
+                    "... ({} lines omitted of {} total; raise pp_max_tool_budget_tokens in settings)\n",
+                    i - prev_line - 1,
+                    total_line_count
+                ));
             }
             out.push_str(&format!(
                 "{:4} | {}\n",
@@ -443,7 +458,11 @@ async fn pp_limit_and_merge(
             prev_line = i;
         }
         if total_line_count > prev_line + 1 {
-            out.push_str("...\n");
+            out.push_str(&format!(
+                "... ({} trailing lines omitted of {} total; raise pp_max_tool_budget_tokens in settings)\n",
+                total_line_count - prev_line - 1,
+                total_line_count
+            ));
         }
         if DEBUG >= 2 {
             info!("file {:?}:\n{}", cpath, out);
@@ -483,8 +502,12 @@ async fn pp_limit_and_merge(
     let mut notes = Vec::new();
     if lines_skipped_by_budget > 0 {
         notes.push(format!(
-            "⚠️ {} lines skipped due to token budget",
-            lines_skipped_by_budget
+            "⚠️ token budget: showing {} of {} lines, {} skipped ({} of ~{} tokens); raise pp_max_tool_budget_tokens in settings",
+            lines_take_cnt,
+            total_lines_considered,
+            lines_skipped_by_budget,
+            tokens_count,
+            tokens_limit
         ));
     }
     if files_skipped_by_limit > 0 {

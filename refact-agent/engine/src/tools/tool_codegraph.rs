@@ -1019,6 +1019,10 @@ pub struct DeadCodeReport {
     pub entries: Vec<DeadCodeEntry>,
     #[serde(skip)]
     pub total_candidates: usize,
+    #[serde(default)]
+    pub analysis_total_found: usize,
+    #[serde(default)]
+    pub analysis_truncated: bool,
     pub index_state: DeadCodeIndexState,
     pub partial: bool,
     pub warning: Option<String>,
@@ -1067,7 +1071,7 @@ async fn dead_code_report_with_roots(
         .ok_or_else(|| "codegraph is not available".to_string())?;
     let readiness = service.index_readiness().await?;
     let index_state = dead_code_index_state(&readiness);
-    let warning = dead_code_partial_warning(&index_state);
+    let mut warning = dead_code_partial_warning(&index_state);
     let dead = match analytics_scope_root {
         Some(root) => {
             let cached = service.cached_graph_analytics().await?;
@@ -1086,9 +1090,15 @@ async fn dead_code_report_with_roots(
             .ok(),
         None => None,
     };
+    let analysis_total_found = dead.total_found;
+    let analysis_truncated = dead.truncated;
+    let analysis_notice = dead.truncation_notice();
+    let history_notice = intel
+        .as_ref()
+        .and_then(|intel| intel.history_truncation().notice);
     let now_ts = current_unix_ts();
     let facts = {
-        let dead = dead.clone();
+        let dead = dead.symbols.clone();
         let git_root = git_root.map(Path::to_path_buf);
         let indexed_root = indexed_root.map(Path::to_path_buf);
         let intel = intel.clone();
@@ -1106,7 +1116,7 @@ async fn dead_code_report_with_roots(
     };
     let min_confidence = min_confidence.clamp(0.0, 1.0);
     let limit = limit.clamp(1, DEAD_CODE_MAX_LIMIT);
-    let mut entries = enrich_dead_symbols_with_facts(dead, &facts)
+    let mut entries = enrich_dead_symbols_with_facts(dead.symbols, &facts)
         .into_iter()
         .filter(|entry| entry.confidence >= min_confidence)
         .filter(|entry| {
@@ -1115,9 +1125,17 @@ async fn dead_code_report_with_roots(
         .collect::<Vec<_>>();
     let total_candidates = entries.len();
     entries.truncate(limit);
+    for notice in [analysis_notice, history_notice].into_iter().flatten() {
+        warning = Some(match warning {
+            Some(existing) => format!("{existing}; {notice}"),
+            None => notice,
+        });
+    }
     Ok(DeadCodeReport {
         entries,
         total_candidates,
+        analysis_total_found,
+        analysis_truncated,
         index_state,
         partial: !readiness.cross_file_ready,
         warning,
@@ -2502,6 +2520,7 @@ pub(crate) fn git_risk_response(
     GitRiskResponse {
         commits_analyzed: intel.commits_analyzed,
         agent_authored_pct: intel.agent_authored_pct(),
+        history_truncation: intel.history_truncation(),
         hotspots,
         ownership,
         co_change,
@@ -2510,6 +2529,26 @@ pub(crate) fn git_risk_response(
         findings,
         recent_commit_risks: assembly.recent_commit_risks.clone(),
     }
+}
+
+pub(crate) fn execution_flow_truncation_notice(
+    flows: &[refact_codegraph::communities::ExecFlow],
+) -> Option<String> {
+    let truncated = flows.iter().filter(|flow| flow.truncated).count();
+    if truncated == 0 {
+        return None;
+    }
+    let node_cap = flows
+        .iter()
+        .filter(|flow| flow.truncated)
+        .map(|flow| flow.node_cap)
+        .min()
+        .unwrap_or_default();
+    Some(format!(
+        "execution flow truncated: {truncated} of {} flows stopped at the {node_cap}-node cap, \
+         raise codegraph_exec_flow_max_nodes",
+        flows.len()
+    ))
 }
 
 pub struct ToolCodegraphOverview {
@@ -2524,6 +2563,8 @@ struct OverviewToolResponse {
     warning: Option<String>,
     communities: Vec<OverviewCommunity>,
     execution_flows: Vec<OverviewExecutionFlow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    execution_flow_truncation: Option<String>,
     dead_code: Vec<OverviewDeadSymbol>,
     entry_points: Vec<String>,
     api_contract_files: Vec<String>,
@@ -2558,7 +2599,7 @@ impl Tool for ToolCodegraphOverview {
         let graph = view.data.clone();
         let analytics = &view.analytics;
         let overview = analytics.overview.truncated(15);
-        let warning = pr_blast_partial_warning(&index_state);
+        let mut warning = pr_blast_partial_warning(&index_state);
         let mut communities = view.communities.clone();
         communities.sort_by(|a, b| b.members.len().cmp(&a.members.len()));
         let community_count = communities.len();
@@ -2571,16 +2612,21 @@ impl Tool for ToolCodegraphOverview {
                 cohesion: community.cohesion,
             })
             .collect();
-        let execution_flows = refact_codegraph::communities::execution_flows_from_data(&graph, 5)
-            .unwrap_or_default()
+        let flows =
+            refact_codegraph::communities::execution_flows_from_data(&graph, 5).unwrap_or_default();
+        let execution_flow_truncation = execution_flow_truncation_notice(&flows);
+        let execution_flows = flows
             .into_iter()
             .map(|flow| OverviewExecutionFlow {
                 entry: flow.entry,
                 reaches: flow.reached,
                 depth: flow.depth,
+                truncated: flow.truncated,
+                node_cap: flow.node_cap,
             })
             .collect();
-        let mut dead = view.dead_code.clone();
+        let dead_code_truncation = view.dead_code.truncation_notice();
+        let mut dead = view.dead_code.symbols.clone();
         dead.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
         let dead_code_count = dead.len();
         let dead_code = dead
@@ -2634,6 +2680,15 @@ impl Tool for ToolCodegraphOverview {
             .collect();
         api_files.sort();
         api_files.truncate(15);
+        for notice in [execution_flow_truncation.clone(), dead_code_truncation]
+            .into_iter()
+            .flatten()
+        {
+            warning = Some(match warning {
+                Some(existing) => format!("{existing}; {notice}"),
+                None => notice,
+            });
+        }
         let data = OverviewToolResponse {
             overview: OverviewResponse {
                 counts: CodeIntelCounts {
@@ -2683,14 +2738,18 @@ impl Tool for ToolCodegraphOverview {
             warning,
             communities,
             execution_flows,
+            execution_flow_truncation,
             dead_code,
             entry_points,
             api_contract_files: api_files,
         };
-        let summary = format!(
+        let mut summary = format!(
             "Code graph: {} nodes, {} edges, {} components",
             data.overview.counts.nodes, data.overview.counts.edges, data.overview.component_count
         );
+        if let Some(notice) = data.warning.as_ref() {
+            summary.push_str(&format!("; {notice}"));
+        }
         Ok((
             false,
             tool_message(
@@ -3155,9 +3214,16 @@ impl Tool for ToolDeadCode {
         .await?;
         let shown = report.entries.len();
         let total_candidates = report.total_candidates;
-        let summary = format!(
-            "Dead code candidates: {shown} shown of {total_candidates} matching candidates"
+        let mut summary = format!(
+            "Dead code candidates: showing {shown} of {total_candidates} matching candidates"
         );
+        if report.analysis_truncated {
+            summary.push_str(&format!(
+                "; analysis truncated: showing {} of {} detected candidates, raise \
+                 codegraph_dead_code_max_results",
+                total_candidates, report.analysis_total_found
+            ));
+        }
         Ok((
             false,
             match requested_path {
@@ -3587,11 +3653,14 @@ impl Tool for ToolGitRisk {
         )
         .await;
         let response = git_risk_response(&intel, &assembly);
-        let summary = format!(
+        let mut summary = format!(
             "Git risk over {} commits: {} hotspots",
             intel.commits_analyzed,
             response.hotspots.len()
         );
+        if let Some(notice) = response.history_truncation.notice.as_ref() {
+            summary.push_str(&format!("; {notice}"));
+        }
         Ok((
             false,
             tool_message(

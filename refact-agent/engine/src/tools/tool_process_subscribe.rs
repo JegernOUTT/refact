@@ -34,7 +34,6 @@ const TRUNCATION_MARKER: &str = "[truncated]";
 const MIN_MAX_LINE_BYTES: usize = TRUNCATION_MARKER.len();
 const RATE_LIMIT_PER_SECOND: usize = 10;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
-const SUMMARY_PREVIEW_BYTES: usize = 200;
 
 pub struct ToolProcessSubscribe {
     pub config_path: String,
@@ -290,6 +289,7 @@ struct SubscriptionState {
     event_count: usize,
     recent_event_times: VecDeque<Instant>,
     active_summary: Option<SummaryBuilder>,
+    preview_bytes: usize,
 }
 
 impl SubscriptionState {
@@ -304,6 +304,7 @@ impl SubscriptionState {
             event_count: 0,
             recent_event_times: VecDeque::new(),
             active_summary: None,
+            preview_bytes: crate::runtime_settings::current().process_subscribe_preview_bytes,
         }
     }
 
@@ -390,7 +391,7 @@ impl SubscriptionState {
         if self.event_count >= self.max_events {
             return;
         }
-        self.active_summary = Some(SummaryBuilder::new(now, line));
+        self.active_summary = Some(SummaryBuilder::new(now, line, self.preview_bytes));
         self.event_count += 1;
     }
 
@@ -438,22 +439,24 @@ struct SummaryBuilder {
     line_count: usize,
     first_line: String,
     last_line: String,
+    preview_bytes: usize,
 }
 
 impl SummaryBuilder {
-    fn new(started_at: Instant, line: String) -> Self {
-        let preview = preview_line(&line);
+    fn new(started_at: Instant, line: String, preview_bytes: usize) -> Self {
+        let preview = preview_line(&line, preview_bytes);
         Self {
             started_at,
             line_count: 1,
             first_line: preview.clone(),
             last_line: preview,
+            preview_bytes,
         }
     }
 
     fn add_line(&mut self, line: String) {
         self.line_count += 1;
-        self.last_line = preview_line(&line);
+        self.last_line = preview_line(&line, self.preview_bytes);
     }
 
     fn into_event(self) -> SubscribeEvent {
@@ -491,8 +494,18 @@ fn truncate_string_to_byte_limit(value: &mut String, max_bytes: usize) {
     value.truncate(end);
 }
 
-fn preview_line(line: &str) -> String {
-    prefix_by_bytes(line, SUMMARY_PREVIEW_BYTES).to_string()
+fn preview_line(line: &str, max_bytes: usize) -> String {
+    let prefix = prefix_by_bytes(line, max_bytes);
+    if prefix.len() == line.len() {
+        return prefix.to_string();
+    }
+    format!(
+        "{}⚠️ showing {} of {} line bytes (limit: process_subscribe_preview_bytes = {}). 💡 Raise process_subscribe_preview_bytes in trajectory settings.",
+        prefix,
+        prefix.len(),
+        line.len(),
+        max_bytes
+    )
 }
 
 fn line_matches(regex_filter: Option<&Regex>, line: &str) -> bool {
@@ -717,6 +730,8 @@ mod tests {
     use crate::chat::types::{ChatSession, SessionState};
     use crate::exec::{ExecMode, ExecOwnerMeta, ExecSpawnRequest};
     use crate::global_context::GlobalContext;
+    use crate::tools::settings_guard::SettingsGuard;
+    use serial_test::serial;
 
     async fn test_context(
         chat_id: &str,
@@ -1126,5 +1141,38 @@ mod tests {
             .map(|tool| tool.tool_description().name)
             .collect::<Vec<_>>();
         assert!(names.contains(&"process_subscribe".to_string()));
+    }
+
+    #[test]
+    #[serial(runtime_settings)]
+    fn process_subscribe_preview_bytes_setting_changes_preview_and_is_loud() {
+        let _guard = SettingsGuard::install(|settings| {
+            settings.process_subscribe_preview_bytes = 20;
+        });
+        let mut state = SubscriptionState::new(None, 100, DEFAULT_MAX_LINE_BYTES);
+        assert_eq!(state.preview_bytes, 20);
+
+        let long_line = "z".repeat(300);
+        state.add_summary_line(long_line, Instant::now());
+        let summary = state.active_summary.take().expect("summary builder");
+
+        assert!(
+            summary.first_line.starts_with(&"z".repeat(20)),
+            "expected the preview cut at 20 bytes, got: {}",
+            summary.first_line
+        );
+        assert!(
+            summary.first_line.contains("showing 20 of 300 line bytes")
+                && summary
+                    .first_line
+                    .contains("process_subscribe_preview_bytes = 20"),
+            "expected a quantified preview-truncation marker, got: {}",
+            summary.first_line
+        );
+    }
+
+    #[test]
+    fn process_subscribe_preview_line_is_unmarked_when_it_fits() {
+        assert_eq!(preview_line("short line", 200), "short line");
     }
 }

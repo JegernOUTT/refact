@@ -150,6 +150,8 @@ pub struct StageRun {
     pub summary: Option<String>,
     #[serde(default)]
     pub coverage: StageCoverage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_chat_id: Option<String>,
 }
 
 impl StageRun {
@@ -163,6 +165,7 @@ impl StageRun {
             findings: 0,
             summary: None,
             coverage: StageCoverage::default(),
+            trace_chat_id: None,
         }
     }
 
@@ -189,6 +192,13 @@ impl StageRun {
 
     pub fn not_run(name: &str, reason: &str) -> Self {
         Self::base(name, StageStatusKind::NotRun, Some(reason.to_string()))
+    }
+
+    pub fn with_trace_chat_id(mut self, trace_chat_id: Option<String>) -> Self {
+        self.trace_chat_id = trace_chat_id
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        self
     }
 
     pub fn is_complete(&self) -> bool {
@@ -269,6 +279,8 @@ pub struct ReviewScopeSummary {
     pub expansion: Option<String>,
     #[serde(default)]
     pub out_of_scope_findings: usize,
+    #[serde(default)]
+    pub dropped_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,10 +294,36 @@ pub struct ReviewDiffSummary {
     pub hunks: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewOutcome {
+    Reviewed,
+    Partial,
+    Inconclusive,
+}
+
+impl Default for ReviewOutcome {
+    fn default() -> Self {
+        Self::Inconclusive
+    }
+}
+
+impl ReviewOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Reviewed => "reviewed",
+            Self::Partial => "partial",
+            Self::Inconclusive => "inconclusive",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ReviewReport {
     pub depth: String,
+    #[serde(default)]
+    pub outcome: ReviewOutcome,
     pub scope: ReviewScopeSummary,
     pub diff: ReviewDiffSummary,
     pub stages: Vec<StageRun>,
@@ -332,6 +370,38 @@ impl ReviewReport {
             .filter(|stage| !stage.is_complete())
             .collect()
     }
+
+    pub fn completed_stages(&self) -> usize {
+        self.stages
+            .iter()
+            .filter(|stage| stage.is_complete())
+            .count()
+    }
+
+    pub fn derive_outcome(&self) -> ReviewOutcome {
+        let attempted: Vec<&StageRun> = self
+            .stages
+            .iter()
+            .filter(|stage| Self::counts_for_outcome(stage))
+            .collect();
+        let completed = attempted.iter().filter(|stage| stage.is_complete()).count();
+        if completed == 0 {
+            return ReviewOutcome::Inconclusive;
+        }
+        if completed < attempted.len() {
+            return ReviewOutcome::Partial;
+        }
+        ReviewOutcome::Reviewed
+    }
+
+    fn counts_for_outcome(stage: &StageRun) -> bool {
+        match stage.status {
+            StageStatusKind::NotRun => stage.reason.as_deref().is_some_and(|reason| {
+                reason.starts_with("review deadline") || reason.starts_with("review cancelled")
+            }),
+            _ => true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -369,6 +439,7 @@ mod tests {
         hypothesis.severity = ReviewSeverity::Note;
         let report = ReviewReport {
             depth: "deep".to_string(),
+            outcome: ReviewOutcome::Partial,
             scope: ReviewScopeSummary {
                 mode: "strict".to_string(),
                 requested_files: 12,
@@ -377,6 +448,7 @@ mod tests {
                 focus: Some("browser lifecycle".to_string()),
                 expansion: Some("+2 dependency edges".to_string()),
                 out_of_scope_findings: 1,
+                dropped_files: vec!["src/dropped.rs".to_string()],
             },
             diff: ReviewDiffSummary {
                 base: Some("1a2b3c".to_string()),
@@ -386,7 +458,8 @@ mod tests {
             },
             stages: vec![
                 StageRun::ok("diff", Some("model-a".to_string()), 4010),
-                StageRun::timed_out("dependencies", None, 360000, "stage_budget"),
+                StageRun::timed_out("dependencies", None, 360000, "stage_budget")
+                    .with_trace_chat_id(Some("subchat-dep".to_string())),
                 StageRun::failed("spec", None, 10, "output_contract"),
                 StageRun::not_run("browser", "applies_when"),
             ],
@@ -397,6 +470,10 @@ mod tests {
         };
 
         let value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["outcome"], "partial");
+        assert_eq!(value["stages"][1]["trace_chat_id"], "subchat-dep");
+        assert!(value["stages"][0].get("trace_chat_id").is_none());
+        assert_eq!(value["scope"]["dropped_files"][0], "src/dropped.rs");
         assert_eq!(value["findings"][0]["severity"], "high");
         assert_eq!(value["findings"][1]["severity"], "note");
         assert_eq!(value["stages"][0]["status"], "ok");
@@ -430,6 +507,7 @@ mod tests {
 
         let report = ReviewReport {
             depth: "normal".to_string(),
+            outcome: ReviewOutcome::Reviewed,
             scope: ReviewScopeSummary::default(),
             diff: ReviewDiffSummary::default(),
             stages: vec![],
@@ -456,7 +534,10 @@ mod tests {
 
     #[test]
     fn review_severity_parses_current_and_legacy_words_and_rejects_junk() {
-        assert_eq!(ReviewSeverity::parse("blocker"), Some(ReviewSeverity::Blocker));
+        assert_eq!(
+            ReviewSeverity::parse("blocker"),
+            Some(ReviewSeverity::Blocker)
+        );
         assert_eq!(
             ReviewSeverity::parse(" CRITICAL "),
             Some(ReviewSeverity::Blocker)
@@ -467,22 +548,27 @@ mod tests {
         assert!(ReviewSeverity::Low.rank() > ReviewSeverity::Note.rank());
     }
 
-    #[test]
-    fn review_stage_rows_record_incomplete_stages() {
-        let report = ReviewReport {
+    fn report_with_stages(stages: Vec<StageRun>) -> ReviewReport {
+        ReviewReport {
             depth: "normal".to_string(),
+            outcome: ReviewOutcome::Inconclusive,
             scope: ReviewScopeSummary::default(),
             diff: ReviewDiffSummary::default(),
-            stages: vec![
-                StageRun::ok("diff", None, 1),
-                StageRun::timed_out("tests", None, 2, "stage_budget"),
-                StageRun::not_run("browser", "applies_when"),
-            ],
+            stages,
             findings: vec![],
             duration_ms: 0,
             duplicates_merged: 0,
             scratch_dir: None,
-        };
+        }
+    }
+
+    #[test]
+    fn review_stage_rows_record_incomplete_stages() {
+        let report = report_with_stages(vec![
+            StageRun::ok("diff", None, 1),
+            StageRun::timed_out("tests", None, 2, "stage_budget"),
+            StageRun::not_run("browser", "applies_when"),
+        ]);
 
         let incomplete: Vec<&str> = report
             .incomplete_stages()
@@ -490,6 +576,71 @@ mod tests {
             .map(|stage| stage.name.as_str())
             .collect();
         assert_eq!(incomplete, ["tests", "browser"]);
+        assert_eq!(report.completed_stages(), 1);
+    }
+
+    #[test]
+    fn review_outcome_is_inconclusive_when_no_stage_reached_ok() {
+        let all_dead = report_with_stages(vec![
+            StageRun::timed_out("diff", None, 1, "stage_budget"),
+            StageRun::failed("spec", None, 2, "output_contract"),
+            StageRun::not_run("browser", "applies_when"),
+        ]);
+        let partial = report_with_stages(vec![
+            StageRun::ok("diff", None, 1),
+            StageRun::timed_out("spec", None, 2, "stage_budget"),
+        ]);
+        let reviewed = report_with_stages(vec![
+            StageRun::ok("diff", None, 1),
+            StageRun::ok("spec", None, 2),
+        ]);
+
+        assert_eq!(all_dead.derive_outcome(), ReviewOutcome::Inconclusive);
+        assert_eq!(partial.derive_outcome(), ReviewOutcome::Partial);
+        assert_eq!(reviewed.derive_outcome(), ReviewOutcome::Reviewed);
+    }
+
+    #[test]
+    fn review_outcome_ignores_deliberate_skips_but_counts_starved_stages() {
+        let default_depth_run = report_with_stages(vec![
+            StageRun::ok("diff", None, 1),
+            StageRun::ok("spec", None, 2),
+            StageRun::not_run("tests", "depth normal"),
+            StageRun::not_run("concurrency", "opt-in stage"),
+        ]);
+        let deadline_starved = report_with_stages(vec![
+            StageRun::ok("diff", None, 1),
+            StageRun::not_run("spec", "review deadline reached before the stage started"),
+        ]);
+        let cancelled = report_with_stages(vec![
+            StageRun::ok("diff", None, 1),
+            StageRun::not_run("spec", "review cancelled before the stage started"),
+        ]);
+
+        assert_eq!(default_depth_run.derive_outcome(), ReviewOutcome::Reviewed);
+        assert_eq!(deadline_starved.derive_outcome(), ReviewOutcome::Partial);
+        assert_eq!(cancelled.derive_outcome(), ReviewOutcome::Partial);
+        assert_eq!(
+            report_with_stages(vec![]).derive_outcome(),
+            ReviewOutcome::Inconclusive
+        );
+    }
+
+    #[test]
+    fn review_outcome_defaults_to_inconclusive_for_payloads_without_the_field() {
+        let value = serde_json::json!({
+            "depth": "normal",
+            "scope": {"mode": "broad", "requested_files": 0, "reviewed_files": 0},
+            "diff": {"changed_files": 0, "hunks": 0},
+            "stages": [],
+            "findings": [],
+            "duration_ms": 0
+        });
+
+        let report: ReviewReport = serde_json::from_value(value).unwrap();
+
+        assert_eq!(report.outcome, ReviewOutcome::Inconclusive);
+        assert!(report.scope.dropped_files.is_empty());
     }
 
     #[test]

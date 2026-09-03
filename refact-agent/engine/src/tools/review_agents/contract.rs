@@ -18,7 +18,9 @@ impl fmt::Display for ContractError {
         match self {
             Self::NoJson => write!(formatter, "no JSON object found in the final answer"),
             Self::InvalidJson(reason) => write!(formatter, "invalid JSON: {reason}"),
-            Self::WrongShape(reason) => write!(formatter, "JSON does not match the contract: {reason}"),
+            Self::WrongShape(reason) => {
+                write!(formatter, "JSON does not match the contract: {reason}")
+            }
         }
     }
 }
@@ -348,7 +350,10 @@ mod tests {
 
     #[test]
     fn review_contract_reports_unparseable_output() {
-        assert_eq!(parse_stage_output("no json here"), Err(ContractError::NoJson));
+        assert_eq!(
+            parse_stage_output("no json here"),
+            Err(ContractError::NoJson)
+        );
         assert!(matches!(
             parse_stage_output("```json\n{oops}\n```"),
             Err(ContractError::InvalidJson(_))

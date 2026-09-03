@@ -128,6 +128,8 @@ export type WorktreeDiffResponse = {
   stats: WorktreeDiffStats;
   patch: string;
   patch_truncated: boolean;
+  patch_shown_bytes?: number;
+  patch_total_bytes?: number;
 };
 
 export type GetWorktreeDiffRequest = GetWorktreeRequest & {
