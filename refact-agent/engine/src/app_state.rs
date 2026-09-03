@@ -1119,7 +1119,7 @@ impl ToolRegistry for AppToolRegistry {
                 let resolved =
                     crate::llm::adapters::claude_code_compat::cc_resolve_tool_name(tool_name);
                 let mut found = None;
-                for mut candidate in tools {
+                for candidate in tools {
                     let name = candidate.tool_description().name;
                     if name == tool_name || name == resolved.as_str() {
                         found = Some(candidate);

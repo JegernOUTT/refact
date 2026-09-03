@@ -325,7 +325,7 @@ pub async fn build_review_scope(gcx: Arc<GlobalContext>, request: ScopeRequest) 
 
     let mut files: Vec<PathBuf> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut push = |files: &mut Vec<PathBuf>, seen: &mut HashSet<String>, path: &PathBuf| {
+    let push = |files: &mut Vec<PathBuf>, seen: &mut HashSet<String>, path: &PathBuf| {
         let key = normalize_path(&path.to_string_lossy());
         if !key.is_empty() && seen.insert(key) {
             files.push(path.clone());
