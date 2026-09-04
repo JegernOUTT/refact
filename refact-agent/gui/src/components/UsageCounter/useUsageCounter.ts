@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import {
   selectEffectiveMaxContextTokensById,
   selectLastAssistantMessageById,
+  selectLastAssistantMessageWithTokensById,
   selectMessagesCountById,
   useThreadId,
 } from "../../features/Chat/Thread";
@@ -23,6 +24,9 @@ export function useUsageCounter() {
   );
   const lastAssistantMessage = useAppSelector((state) =>
     selectLastAssistantMessageById(state, chatId),
+  );
+  const lastMessageWithTokens = useAppSelector((state) =>
+    selectLastAssistantMessageWithTokensById(state, chatId),
   );
 
   const currentThreadUsage = useMemo(
@@ -58,17 +62,18 @@ export function useUsageCounter() {
     });
   }, [currentThreadUsage]);
 
-  // Deterministic fallback: scan backwards through assistant messages for first message with input tokens > 0
+  // The newest assistant message reports no usage until its stream ends, so read the last message
+  // that actually reported input tokens instead of dropping to zero between turns.
   // Include cache tokens for accurate context size (prompt_tokens + cache_creation + cache_read)
   const currentSessionTokens = useMemo(() => {
-    const usage = lastAssistantMessage?.usage;
+    const usage = lastMessageWithTokens?.usage;
     if (!usage) return 0;
     return (
       usage.prompt_tokens +
       getCacheCreationTokens(usage) +
       getCacheReadTokens(usage)
     );
-  }, [lastAssistantMessage]);
+  }, [lastMessageWithTokens]);
 
   const isContextFromPreviousMessage = useMemo(() => {
     if (!lastAssistantMessage) return false;

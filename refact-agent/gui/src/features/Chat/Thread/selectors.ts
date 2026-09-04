@@ -2,6 +2,10 @@ import type { RootState } from "../../../app/store";
 import { createSelector } from "@reduxjs/toolkit";
 import { isToolName } from "../../../utils/toolNameAliases";
 import {
+  getCacheCreationTokens,
+  getCacheReadTokens,
+} from "../../../utils/calculateUsageInputTokens";
+import {
   isAssistantMessage,
   isDiffMessage,
   isToolMessage,
@@ -553,6 +557,27 @@ export const selectLastAssistantMessageById = createSelector(
 export const selectLastAssistantUsageById = createSelector(
   [selectLastAssistantMessageById],
   (message) => message?.usage,
+);
+
+// The newest assistant message carries no usage until its stream ends, so reading only that one
+// makes the context size drop to zero between turns. Fall back to the last message that reported
+// input tokens.
+export const selectLastAssistantMessageWithTokensById = createSelector(
+  [selectMessagesById],
+  (messages) => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (!isAssistantMessage(message)) continue;
+      const usage = message.usage;
+      if (!usage) continue;
+      const total =
+        usage.prompt_tokens +
+        getCacheCreationTokens(usage) +
+        getCacheReadTokens(usage);
+      if (total > 0) return message;
+    }
+    return undefined;
+  },
 );
 
 const SERVER_EXECUTED_TOOL_NAMES = new Set([
