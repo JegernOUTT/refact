@@ -10751,6 +10751,8 @@ mod tests {
         assert_eq!(task_entries[0].id, fresh_id);
     }
 
+    // Clears the process-wide metadata cache, so it must not run beside the tests that read it.
+    #[serial(trajectory_perf)]
     #[test]
     fn trajectory_metadata_cache_lru_evicts_oldest_path() {
         let mut cache = trajectory_metadata_cache()
@@ -10775,11 +10777,11 @@ mod tests {
             );
         }
 
-        let oldest = PathBuf::from("/tmp/trajectory-meta-0.json");
-        let newest = PathBuf::from(format!(
+        let oldest = trajectory_metadata_cache_key(&PathBuf::from("/tmp/trajectory-meta-0.json"));
+        let newest = trajectory_metadata_cache_key(&PathBuf::from(format!(
             "/tmp/trajectory-meta-{}.json",
             MAX_CACHED_TRAJECTORY_METADATA - 1
-        ));
+        )));
         let extra = PathBuf::from("/tmp/trajectory-meta-extra.json");
         store_trajectory_metadata_cache_entry(
             &extra,
@@ -10794,6 +10796,7 @@ mod tests {
             },
         );
 
+        let extra = trajectory_metadata_cache_key(&extra);
         let cache = trajectory_metadata_cache()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

@@ -13,6 +13,8 @@ pub const TERMINAL_RETENTION_DAYS: i64 = 7;
 pub const MAX_RECORDS: usize = 2000;
 
 static TMP_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+const RENAME_ATTEMPTS: usize = 5;
+const RENAME_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
 // A shared temp name makes concurrent savers steal each other's file: the first rename moves it
 // away and the second fails with ENOENT.
@@ -29,20 +31,37 @@ fn tmp_path_for(dest_path: &Path) -> PathBuf {
     }
 }
 
+// Windows rename already replaces the destination, so deleting it first only opened a window for
+// a concurrent saver to lose the file and then be denied access to it.
 async fn atomic_write_file(tmp_path: &Path, dest_path: &Path) -> Result<(), String> {
-    #[cfg(windows)]
-    if dest_path.exists() {
-        fs::remove_file(dest_path)
-            .await
-            .map_err(|e| format!("Failed to remove existing file: {e}"))?;
+    let mut last_error = None;
+    for attempt in 0..RENAME_ATTEMPTS {
+        match fs::rename(tmp_path, dest_path).await {
+            Ok(()) => return Ok(()),
+            Err(e) if is_transient_rename_error(&e) && attempt + 1 < RENAME_ATTEMPTS => {
+                last_error = Some(e);
+                tokio::time::sleep(RENAME_RETRY_DELAY).await;
+            }
+            Err(e) => {
+                last_error = Some(e);
+                break;
+            }
+        }
     }
-    if let Err(e) = fs::rename(tmp_path, dest_path).await {
-        let _ = fs::remove_file(tmp_path).await;
-        return Err(format!(
-            "Failed to rename {tmp_path:?} to {dest_path:?}: {e}"
-        ));
-    }
-    Ok(())
+    let _ = fs::remove_file(tmp_path).await;
+    let error = last_error
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "unknown rename failure".to_string());
+    Err(format!(
+        "Failed to rename {tmp_path:?} to {dest_path:?}: {error}"
+    ))
+}
+
+fn is_transient_rename_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(5) | Some(32) | Some(33) | Some(1224)
+    )
 }
 
 fn record_terminal_timestamp(record: &BackgroundAgent) -> Option<DateTime<Utc>> {

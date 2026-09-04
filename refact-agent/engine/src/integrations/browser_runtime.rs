@@ -1076,14 +1076,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dead_pid = 4_294_000_001u32;
         assert!(!pid_is_alive(dead_pid));
+        // Chrome only writes the SingletonLock symlink on unix, so the lock-derived assertions
+        // cannot run elsewhere; liveness itself is checked on every platform above.
         #[cfg(unix)]
-        std::os::unix::fs::symlink(
-            format!("hostname-{dead_pid}"),
-            dir.path().join("SingletonLock"),
-        )
-        .unwrap();
-        assert_eq!(profile_lock_pid(dir.path()), Some(dead_pid));
-        assert_eq!(profile_lock_is_live(dir.path()), None);
+        {
+            std::os::unix::fs::symlink(
+                format!("hostname-{dead_pid}"),
+                dir.path().join("SingletonLock"),
+            )
+            .unwrap();
+            assert_eq!(profile_lock_pid(dir.path()), Some(dead_pid));
+            assert_eq!(profile_lock_is_live(dir.path()), None);
+        }
     }
 
     #[test]
