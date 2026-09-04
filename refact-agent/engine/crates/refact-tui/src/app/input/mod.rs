@@ -1,12 +1,15 @@
 use super::*;
 use crate::ui::SurfaceLayer;
+use crossterm::event::{MouseEvent, MouseEventKind};
+
+const WHEEL_SCROLL_ROWS: usize = 3;
 
 mod approval;
 mod ask;
 mod board;
 mod browser;
 mod history;
-mod main;
+pub(crate) mod main;
 mod overlay;
 mod picker;
 mod settings;
@@ -14,6 +17,21 @@ mod vim;
 mod worktree;
 
 impl App {
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.native_scrollback {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.scroll_offset = self.scroll_offset.saturating_add(WHEEL_SCROLL_ROWS);
+            }
+            MouseEventKind::ScrollDown => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(WHEEL_SCROLL_ROWS);
+            }
+            _ => {}
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
         if key.kind != KeyEventKind::Press {
             return AppAction::None;

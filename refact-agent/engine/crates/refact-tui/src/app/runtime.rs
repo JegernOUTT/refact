@@ -503,17 +503,13 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
                 }
             }
             RuntimeEvent::Input(Event::Paste(text)) => app.handle_paste(&text),
+            RuntimeEvent::Input(Event::Mouse(mouse)) => app.handle_mouse(mouse),
             RuntimeEvent::Input(Event::FocusGained) => app.set_terminal_focus(true),
             RuntimeEvent::Input(Event::FocusLost) => app.set_terminal_focus(false),
-            RuntimeEvent::Input(Event::Resize(width, _)) => {
-                if !app.note_terminal_resize_width(width) {
-                    app.note_terminal_height_resize();
-                }
-            }
+            RuntimeEvent::Input(Event::Resize(_, _)) => app.note_terminal_resize(),
             RuntimeEvent::Frame => {
                 app.run_stream_commit_tick();
             }
-            RuntimeEvent::Input(_) => {}
             RuntimeEvent::Chat { generation, event } => {
                 if let Some(action) = subscriptions.apply_chat_event(&mut app, generation, event) {
                     run_action(
@@ -723,6 +719,7 @@ pub async fn run(options: TuiOptions) -> Result<(), TuiError> {
 
 fn apply_terminal_mode(app: &mut App, terminal: &TerminalSession) {
     app.set_native_scrollback(terminal.mode() == crate::terminal::TerminalMode::Inline);
+    app.set_enhanced_keys_supported(terminal.enhanced_keys_supported());
 }
 
 fn spawn_history_save_task(request: HistorySaveRequest, tx: mpsc::Sender<RuntimeEvent>) {
@@ -1803,6 +1800,9 @@ fn schedule_next_frame(app: &App, frame_requester: &FrameRequester) {
     }
     if let Some(resize_delay) = app.resize_reflow_delay() {
         delay = Some(min_frame_delay(delay, resize_delay));
+    }
+    if let Some(remaining) = app.ctrl_c_quit_armed() {
+        delay = Some(min_frame_delay(delay, remaining));
     }
     if let Some(delay) = delay {
         if delay.is_zero() {

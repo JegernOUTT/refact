@@ -476,7 +476,7 @@ impl App {
         ));
         self.clear_stream_controllers();
         self.rendered_state_cursor = 0;
-        self.rendered_state_keys.clear();
+        self.clear_rendered_state_keys();
         self.reset_session_surfaces();
         self.usage = None;
         self.model = None;
@@ -522,7 +522,7 @@ impl App {
         self.set_session_state(SessionState::Idle);
         self.clear_stream_controllers();
         self.rendered_state_cursor = 0;
-        self.rendered_state_keys.truncate(1);
+        self.truncate_rendered_state_keys(1);
         self.reset_session_surfaces();
         self.usage = None;
         self.retry_hint = None;
@@ -555,7 +555,7 @@ impl App {
         self.set_session_state(SessionState::Idle);
         self.clear_stream_controllers();
         self.rendered_state_cursor = 0;
-        self.rendered_state_keys.truncate(1);
+        self.truncate_rendered_state_keys(1);
         self.reset_session_surfaces();
         self.usage = None;
         self.retry_hint = None;

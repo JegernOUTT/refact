@@ -12,16 +12,18 @@ use std::thread;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture,
+    EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode as crossterm_disable_raw_mode, enable_raw_mode as crossterm_enable_raw_mode,
-    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+    supports_keyboard_enhancement, BeginSynchronizedUpdate, EndSynchronizedUpdate,
+    EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::{Backend, CrosstermBackend, WindowSize};
 use ratatui::buffer::Cell;
-use ratatui::layout::{Position, Size};
+use ratatui::layout::{Position, Rect, Size};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -137,13 +139,33 @@ impl<W: Write> Backend for StdoutBackend<W> {
     fn flush(&mut self) -> io::Result<()> {
         Backend::flush(&mut self.inner)
     }
+
+    fn scroll_region_up(
+        &mut self,
+        region: std::ops::Range<u16>,
+        line_count: u16,
+    ) -> io::Result<()> {
+        self.inner.scroll_region_up(region, line_count)
+    }
+
+    fn scroll_region_down(
+        &mut self,
+        region: std::ops::Range<u16>,
+        line_count: u16,
+    ) -> io::Result<()> {
+        self.inner.scroll_region_down(region, line_count)
+    }
 }
 
 pub const TARGET_FRAME_INTERVAL: Duration = MIN_FRAME_INTERVAL;
 
 const MIN_FRAME_INTERVAL: Duration = Duration::from_nanos(8_333_334);
-const INLINE_VIEWPORT_HEIGHT: u16 = 12;
+const STARTUP_VIEWPORT_HEIGHT: u16 = 1;
+const KEYBOARD_ENHANCEMENT_FLAGS: KeyboardEnhancementFlags =
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        .union(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS);
 const FALLBACK_ENV: &str = "REFACT_TUI_ALT_SCREEN";
+const ENHANCED_KEYS_ENV: &str = "REFACT_TUI_ENHANCED_KEYS";
 const TITLE_ENV: &str = "REFACT_TUI_TERMINAL_TITLE";
 const DEFAULT_TERMINAL_TITLE: &str = "refact";
 const MAX_TERMINAL_TITLE_CHARS: usize = 80;
@@ -391,6 +413,7 @@ fn osc2_title_sequence(title: &str) -> Vec<u8> {
 
 pub struct TerminalSession {
     terminal: RefactTerminal,
+    alt_terminal: Option<RefactTerminal>,
     guard: TerminalRestoreGuard<CrosstermTerminalOps<io::Stdout>>,
     last_title: Option<String>,
 }
@@ -419,10 +442,11 @@ impl TerminalSession {
             title_config,
         );
         guard.initialize()?;
-        install_panic_restore_hook(mode, title_config);
-        let terminal = build_terminal(mode)?;
+        install_panic_restore_hook(mode, title_config, guard.enhanced_keys);
+        let terminal = build_terminal(mode, STARTUP_VIEWPORT_HEIGHT)?;
         Ok(Self {
             terminal,
+            alt_terminal: None,
             guard,
             last_title: None,
         })
@@ -430,6 +454,93 @@ impl TerminalSession {
 
     pub fn terminal_mut(&mut self) -> &mut RefactTerminal {
         &mut self.terminal
+    }
+
+    pub fn draw_target(&mut self) -> &mut RefactTerminal {
+        self.alt_terminal.as_mut().unwrap_or(&mut self.terminal)
+    }
+
+    pub fn alt_screen_active(&self) -> bool {
+        self.alt_terminal.is_some()
+    }
+
+    pub fn enter_alt_screen(&mut self) -> io::Result<()> {
+        if self.guard.mode != TerminalMode::Inline || self.alt_terminal.is_some() {
+            return Ok(());
+        }
+        self.guard
+            .apply_start_step(TerminalStep::EnterAlternateScreen)?;
+        let mut terminal = Terminal::new(StdoutBackend::new(Position::ORIGIN))?;
+        terminal.clear()?;
+        self.alt_terminal = Some(terminal);
+        Ok(())
+    }
+
+    pub fn leave_alt_screen(&mut self) -> io::Result<()> {
+        if self.alt_terminal.take().is_none() {
+            return Ok(());
+        }
+        self.guard
+            .apply_stop_step(TerminalStep::LeaveAlternateScreen)
+    }
+
+    pub fn size(&self) -> io::Result<Size> {
+        self.terminal.size()
+    }
+
+    pub fn enhanced_keys_supported(&self) -> bool {
+        self.guard.enhanced_keys
+    }
+
+    pub fn viewport_area(&mut self) -> Rect {
+        self.terminal.get_frame().area()
+    }
+
+    pub fn set_inline_height(&mut self, height: u16) -> io::Result<bool> {
+        if self.guard.mode != TerminalMode::Inline {
+            return Ok(false);
+        }
+        let screen = self.terminal.size()?;
+        let height = height.clamp(1, screen.height.max(1));
+        let current = self.viewport_area();
+        if current.height == height && current.width == screen.width {
+            return Ok(false);
+        }
+        let top = current.y.min(screen.height.saturating_sub(1));
+        {
+            let backend = self.terminal.backend_mut();
+            backend.set_cursor_position(Position { x: 0, y: current.y })?;
+            backend.clear_region(ratatui::backend::ClearType::AfterCursor)?;
+            backend.set_cursor_position(Position { x: 0, y: top })?;
+            Backend::flush(backend)?;
+        }
+        self.terminal =
+            build_terminal_with_cursor(TerminalMode::Inline, Position { x: 0, y: top }, height)?;
+        Ok(true)
+    }
+
+    pub fn begin_synchronized_update(&mut self) -> io::Result<()> {
+        execute!(self.terminal.backend_mut(), BeginSynchronizedUpdate)
+    }
+
+    pub fn end_synchronized_update(&mut self) -> io::Result<()> {
+        execute!(self.terminal.backend_mut(), EndSynchronizedUpdate)
+    }
+
+    pub fn restart_screen(&mut self, height: u16) -> io::Result<()> {
+        if self.guard.mode != TerminalMode::Inline {
+            return self.terminal.clear();
+        }
+        let screen = self.terminal.size()?;
+        let height = height.clamp(1, screen.height.max(1));
+        {
+            let backend = self.terminal.backend_mut();
+            backend.set_cursor_position(Position::ORIGIN)?;
+            backend.clear_region(ratatui::backend::ClearType::All)?;
+            Backend::flush(backend)?;
+        }
+        self.terminal = build_terminal_with_cursor(TerminalMode::Inline, Position::ORIGIN, height)?;
+        Ok(())
     }
 
     pub fn write_clipboard(
@@ -487,28 +598,36 @@ impl TerminalSession {
         self.last_title = None;
         self.terminal.clear()
     }
-
-    pub fn clear_for_resize_reflow(&mut self) -> io::Result<()> {
-        execute!(self.terminal.backend_mut(), Clear(ClearType::Purge))?;
-        self.terminal = build_terminal(self.guard.mode)?;
-        Ok(())
-    }
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
+        if self.guard.mode == TerminalMode::Inline && self.alt_terminal.is_none() {
+            let bottom = self.viewport_area().bottom().saturating_sub(1);
+            let backend = self.terminal.backend_mut();
+            let _ = backend.set_cursor_position(Position { x: 0, y: bottom });
+            let _ = backend.write_all(b"\r\n");
+            let _ = Backend::flush(backend);
+        }
         self.guard.restore();
     }
 }
 
-fn install_panic_restore_hook(mode: TerminalMode, title_config: TerminalTitleConfig) {
+fn install_panic_restore_hook(
+    mode: TerminalMode,
+    title_config: TerminalTitleConfig,
+    enhanced_keys: bool,
+) {
     if !terminal_panic_hook_installed() {
         return;
     }
     let previous_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
         let mut ops = CrosstermTerminalOps::new(io::stdout());
-        restore_terminal_state(&mut ops, RestoreState::started(mode, title_config.active()));
+        restore_terminal_state(
+            &mut ops,
+            RestoreState::started(mode, title_config.active(), enhanced_keys),
+        );
         previous_hook(panic_info);
     }));
 }
@@ -670,18 +789,20 @@ struct RestoreState {
     mouse_capture: bool,
     focus_change: bool,
     bracketed_paste: bool,
+    keyboard_enhancement: bool,
     cursor_hidden: bool,
     title_pushed: bool,
 }
 
 impl RestoreState {
-    fn started(mode: TerminalMode, title_pushed: bool) -> Self {
+    fn started(mode: TerminalMode, title_pushed: bool, keyboard_enhancement: bool) -> Self {
         Self {
             raw_mode: true,
-            alternate_screen: mode == TerminalMode::AlternateScreen,
-            mouse_capture: true,
+            alternate_screen: true,
+            mouse_capture: mode == TerminalMode::AlternateScreen,
             focus_change: true,
             bracketed_paste: true,
+            keyboard_enhancement,
             cursor_hidden: true,
             title_pushed,
         }
@@ -695,8 +816,10 @@ enum TerminalStep {
     EnableMouseCapture,
     EnableFocusChange,
     EnableBracketedPaste,
+    PushKeyboardEnhancement,
     HideCursor,
     ShowCursor,
+    PopKeyboardEnhancement,
     DisableBracketedPaste,
     DisableFocusChange,
     DisableMouseCapture,
@@ -709,6 +832,7 @@ enum TerminalStep {
 trait TerminalOps {
     fn apply(&mut self, step: TerminalStep) -> io::Result<()>;
     fn set_title(&mut self, title: &str) -> io::Result<()>;
+    fn detect_keyboard_enhancement(&mut self) -> bool;
 }
 
 struct CrosstermTerminalOps<W: Write> {
@@ -729,8 +853,15 @@ impl<W: Write> TerminalOps for CrosstermTerminalOps<W> {
             TerminalStep::EnableMouseCapture => execute!(self.writer, EnableMouseCapture),
             TerminalStep::EnableFocusChange => execute!(self.writer, EnableFocusChange),
             TerminalStep::EnableBracketedPaste => execute!(self.writer, EnableBracketedPaste),
+            TerminalStep::PushKeyboardEnhancement => execute!(
+                self.writer,
+                PushKeyboardEnhancementFlags(KEYBOARD_ENHANCEMENT_FLAGS)
+            ),
             TerminalStep::HideCursor => execute!(self.writer, Hide),
             TerminalStep::ShowCursor => execute!(self.writer, Show),
+            TerminalStep::PopKeyboardEnhancement => {
+                execute!(self.writer, PopKeyboardEnhancementFlags)
+            }
             TerminalStep::DisableBracketedPaste => execute!(self.writer, DisableBracketedPaste),
             TerminalStep::DisableFocusChange => execute!(self.writer, DisableFocusChange),
             TerminalStep::DisableMouseCapture => execute!(self.writer, DisableMouseCapture),
@@ -751,6 +882,16 @@ impl<W: Write> TerminalOps for CrosstermTerminalOps<W> {
         self.writer.write_all(&osc2_title_sequence(title))?;
         self.writer.flush()
     }
+
+    fn detect_keyboard_enhancement(&mut self) -> bool {
+        match std::env::var(ENHANCED_KEYS_ENV)
+            .ok()
+            .and_then(|value| title_enabled_from_value(&value))
+        {
+            Some(forced) => forced,
+            None => supports_keyboard_enhancement().unwrap_or(false),
+        }
+    }
 }
 
 struct TerminalRestoreGuard<O: TerminalOps> {
@@ -759,6 +900,8 @@ struct TerminalRestoreGuard<O: TerminalOps> {
     active: bool,
     state: RestoreState,
     title_config: TerminalTitleConfig,
+    enhanced_keys: bool,
+    enhanced_keys_probed: bool,
 }
 
 impl<O: TerminalOps> TerminalRestoreGuard<O> {
@@ -778,6 +921,8 @@ impl<O: TerminalOps> TerminalRestoreGuard<O> {
             active: true,
             state: RestoreState::default(),
             title_config,
+            enhanced_keys: false,
+            enhanced_keys_probed: false,
         }
     }
 
@@ -786,12 +931,19 @@ impl<O: TerminalOps> TerminalRestoreGuard<O> {
             let _ = self.apply_start_step(TerminalStep::PushTitle);
         }
         self.apply_start_step(TerminalStep::EnableRawMode)?;
+        if !self.enhanced_keys_probed {
+            self.enhanced_keys = self.ops.detect_keyboard_enhancement();
+            self.enhanced_keys_probed = true;
+        }
         if self.mode == TerminalMode::AlternateScreen {
             self.apply_start_step(TerminalStep::EnterAlternateScreen)?;
+            self.apply_start_step(TerminalStep::EnableMouseCapture)?;
         }
-        self.apply_start_step(TerminalStep::EnableMouseCapture)?;
         self.apply_start_step(TerminalStep::EnableFocusChange)?;
         self.apply_start_step(TerminalStep::EnableBracketedPaste)?;
+        if self.enhanced_keys {
+            let _ = self.apply_start_step(TerminalStep::PushKeyboardEnhancement);
+        }
         self.apply_start_step(TerminalStep::HideCursor)
     }
 
@@ -803,15 +955,25 @@ impl<O: TerminalOps> TerminalRestoreGuard<O> {
             TerminalStep::EnableMouseCapture => self.state.mouse_capture = true,
             TerminalStep::EnableFocusChange => self.state.focus_change = true,
             TerminalStep::EnableBracketedPaste => self.state.bracketed_paste = true,
+            TerminalStep::PushKeyboardEnhancement => self.state.keyboard_enhancement = true,
             TerminalStep::HideCursor => self.state.cursor_hidden = true,
             TerminalStep::PushTitle => self.state.title_pushed = true,
             TerminalStep::ShowCursor
+            | TerminalStep::PopKeyboardEnhancement
             | TerminalStep::DisableBracketedPaste
             | TerminalStep::DisableFocusChange
             | TerminalStep::DisableMouseCapture
             | TerminalStep::LeaveAlternateScreen
             | TerminalStep::DisableRawMode
             | TerminalStep::PopTitle => {}
+        }
+        Ok(())
+    }
+
+    fn apply_stop_step(&mut self, step: TerminalStep) -> io::Result<()> {
+        self.ops.apply(step)?;
+        if step == TerminalStep::LeaveAlternateScreen {
+            self.state.alternate_screen = false;
         }
         Ok(())
     }
@@ -855,6 +1017,9 @@ fn restore_terminal_state<O: TerminalOps>(ops: &mut O, state: RestoreState) {
     if state.cursor_hidden {
         let _ = ops.apply(TerminalStep::ShowCursor);
     }
+    if state.keyboard_enhancement {
+        let _ = ops.apply(TerminalStep::PopKeyboardEnhancement);
+    }
     if state.bracketed_paste {
         let _ = ops.apply(TerminalStep::DisableBracketedPaste);
     }
@@ -884,6 +1049,7 @@ fn restore_terminal_ops<O: TerminalOps>(ops: &mut O) -> io::Result<()> {
     let mut first_error = None;
     for step in [
         TerminalStep::ShowCursor,
+        TerminalStep::PopKeyboardEnhancement,
         TerminalStep::DisableBracketedPaste,
         TerminalStep::DisableFocusChange,
         TerminalStep::DisableMouseCapture,
@@ -902,23 +1068,24 @@ fn restore_terminal_ops<O: TerminalOps>(ops: &mut O) -> io::Result<()> {
     }
 }
 
-fn build_terminal(mode: TerminalMode) -> io::Result<RefactTerminal> {
+fn build_terminal(mode: TerminalMode, height: u16) -> io::Result<RefactTerminal> {
     let cursor_position = match mode {
         TerminalMode::Inline => probe_startup_cursor_position(),
         TerminalMode::AlternateScreen => Position { x: 0, y: 0 },
     };
-    build_terminal_with_cursor(mode, cursor_position)
+    build_terminal_with_cursor(mode, cursor_position, height)
 }
 
 fn build_terminal_with_cursor(
     mode: TerminalMode,
     cursor_position: Position,
+    height: u16,
 ) -> io::Result<RefactTerminal> {
     match mode {
         TerminalMode::Inline => Terminal::with_options(
             StdoutBackend::new(cursor_position),
             TerminalOptions {
-                viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
+                viewport: Viewport::Inline(height.max(1)),
             },
         ),
         TerminalMode::AlternateScreen => Terminal::new(StdoutBackend::new(cursor_position)),
@@ -966,6 +1133,7 @@ mod tests {
     struct FakeTerminalOps {
         calls: Arc<Mutex<Vec<TerminalStep>>>,
         fail_on: Option<TerminalStep>,
+        enhanced_keys: bool,
     }
 
     impl TerminalOps for FakeTerminalOps {
@@ -980,6 +1148,10 @@ mod tests {
 
         fn set_title(&mut self, _title: &str) -> io::Result<()> {
             Ok(())
+        }
+
+        fn detect_keyboard_enhancement(&mut self) -> bool {
+            self.enhanced_keys
         }
     }
 
@@ -1057,6 +1229,7 @@ mod tests {
             let mut ops = FakeTerminalOps {
                 calls: waiter_calls,
                 fail_on: None,
+                enhanced_keys: false,
             };
             wait_for_terminal_signal_with_ops(read_fd, &mut ops)
         })
@@ -1068,6 +1241,7 @@ mod tests {
             *calls.lock().unwrap(),
             vec![
                 TerminalStep::ShowCursor,
+                TerminalStep::PopKeyboardEnhancement,
                 TerminalStep::DisableBracketedPaste,
                 TerminalStep::DisableFocusChange,
                 TerminalStep::DisableMouseCapture,
@@ -1105,6 +1279,7 @@ mod tests {
             let ops = FakeTerminalOps {
                 calls: calls.clone(),
                 fail_on: Some(TerminalStep::EnterAlternateScreen),
+                enhanced_keys: false,
             };
             let mut guard = TerminalRestoreGuard::new(ops, TerminalMode::AlternateScreen);
             assert!(guard.initialize().is_err());
@@ -1126,6 +1301,7 @@ mod tests {
             let ops = FakeTerminalOps {
                 calls: calls.clone(),
                 fail_on: Some(TerminalStep::EnableBracketedPaste),
+                enhanced_keys: false,
             };
             let mut guard = TerminalRestoreGuard::new(ops, TerminalMode::Inline);
             assert!(guard.initialize().is_err());
@@ -1134,11 +1310,9 @@ mod tests {
             *calls.lock().unwrap(),
             vec![
                 TerminalStep::EnableRawMode,
-                TerminalStep::EnableMouseCapture,
                 TerminalStep::EnableFocusChange,
                 TerminalStep::EnableBracketedPaste,
                 TerminalStep::DisableFocusChange,
-                TerminalStep::DisableMouseCapture,
                 TerminalStep::DisableRawMode,
             ]
         );
@@ -1151,6 +1325,7 @@ mod tests {
             let ops = FakeTerminalOps {
                 calls: calls.clone(),
                 fail_on: None,
+                enhanced_keys: false,
             };
             let mut guard = TerminalRestoreGuard::new(ops, TerminalMode::AlternateScreen);
             guard.initialize().unwrap();
@@ -1171,6 +1346,7 @@ mod tests {
             let ops = FakeTerminalOps {
                 calls: calls.clone(),
                 fail_on: None,
+                enhanced_keys: false,
             };
             let mut guard = TerminalRestoreGuard::new(ops, TerminalMode::Inline);
             guard.initialize().unwrap();
@@ -1180,17 +1356,57 @@ mod tests {
             calls,
             vec![
                 TerminalStep::EnableRawMode,
-                TerminalStep::EnableMouseCapture,
                 TerminalStep::EnableFocusChange,
                 TerminalStep::EnableBracketedPaste,
                 TerminalStep::HideCursor,
                 TerminalStep::ShowCursor,
                 TerminalStep::DisableBracketedPaste,
                 TerminalStep::DisableFocusChange,
-                TerminalStep::DisableMouseCapture,
                 TerminalStep::DisableRawMode,
             ]
         );
+    }
+
+    #[test]
+    fn inline_mode_pushes_and_pops_keyboard_enhancement_when_supported() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        {
+            let ops = FakeTerminalOps {
+                calls: calls.clone(),
+                fail_on: None,
+                enhanced_keys: true,
+            };
+            let mut guard = TerminalRestoreGuard::new(ops, TerminalMode::Inline);
+            guard.initialize().unwrap();
+            assert!(guard.enhanced_keys);
+            guard.restore();
+            guard.resume().unwrap();
+        }
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|step| **step == TerminalStep::PushKeyboardEnhancement)
+                .count(),
+            2
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|step| **step == TerminalStep::PopKeyboardEnhancement)
+                .count(),
+            2
+        );
+        let first_push = calls
+            .iter()
+            .position(|step| *step == TerminalStep::PushKeyboardEnhancement)
+            .unwrap();
+        let first_pop = calls
+            .iter()
+            .position(|step| *step == TerminalStep::PopKeyboardEnhancement)
+            .unwrap();
+        assert!(first_push < first_pop);
+        assert!(!calls.contains(&TerminalStep::EnableMouseCapture));
     }
 
     #[test]
@@ -1297,7 +1513,8 @@ mod tests {
     #[test]
     fn resize_rebuild_uses_the_bounded_cursor_position() {
         let cursor_position = Position { x: 4, y: 9 };
-        let Ok(mut terminal) = build_terminal_with_cursor(TerminalMode::Inline, cursor_position)
+        let Ok(mut terminal) =
+            build_terminal_with_cursor(TerminalMode::Inline, cursor_position, 12)
         else {
             return;
         };
@@ -1314,6 +1531,7 @@ mod tests {
         let mut ops = FakeTerminalOps {
             calls: calls.clone(),
             fail_on: None,
+            enhanced_keys: false,
         };
 
         restore_terminal_ops(&mut ops).unwrap();
@@ -1322,6 +1540,7 @@ mod tests {
             *calls.lock().unwrap(),
             vec![
                 TerminalStep::ShowCursor,
+                TerminalStep::PopKeyboardEnhancement,
                 TerminalStep::DisableBracketedPaste,
                 TerminalStep::DisableFocusChange,
                 TerminalStep::DisableMouseCapture,
@@ -1337,12 +1556,13 @@ mod tests {
         let mut ops = FakeTerminalOps {
             calls: calls.clone(),
             fail_on: None,
+            enhanced_keys: false,
         };
 
         restore_terminal_ops(&mut ops).unwrap();
         restore_terminal_ops(&mut ops).unwrap();
 
-        assert_eq!(calls.lock().unwrap().len(), 12);
+        assert_eq!(calls.lock().unwrap().len(), 14);
         assert_eq!(
             calls.lock().unwrap().last(),
             Some(&TerminalStep::DisableRawMode)
@@ -1403,6 +1623,7 @@ mod tests {
             let ops = FakeTerminalOps {
                 calls: calls.clone(),
                 fail_on: None,
+                enhanced_keys: false,
             };
             let mut guard = TerminalRestoreGuard::new_with_title_config(
                 ops,

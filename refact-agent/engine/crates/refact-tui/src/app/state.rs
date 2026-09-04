@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use super::session_lifecycle::context_window_for_model;
 use super::*;
 use crate::client::{request_id, BrowserContextDecision};
@@ -354,11 +355,16 @@ pub struct App {
     pub(super) notifications: NotificationManager,
     pub(super) history: HistoryBuffer,
     pub(super) resize_reflow: ResizeReflowState,
-    pub(super) resize_reflow_row_cap: usize,
     pub(super) native_scrollback: bool,
+    pub(super) enhanced_keys_supported: bool,
+    pub(super) screen_height: u16,
     pub(super) rendered_message_count: usize,
     pub(super) rendered_state_cursor: usize,
     pub(super) rendered_state_keys: Vec<String>,
+    pub(super) rendered_state_identities: HashSet<String>,
+    pub(super) plan_stream_pushed: HashMap<String, String>,
+    pub(super) internal_event_ids: HashSet<String>,
+    pub(super) archived_tool_ids: HashSet<String>,
 }
 
 impl App {
@@ -522,11 +528,16 @@ impl App {
             notifications: NotificationManager::default(),
             history: HistoryBuffer::new(),
             resize_reflow: ResizeReflowState::default(),
-            resize_reflow_row_cap: resize_reflow_row_cap_from_env(),
             native_scrollback: false,
+            enhanced_keys_supported: false,
+            screen_height: 0,
             rendered_message_count: 0,
             rendered_state_cursor: 0,
             rendered_state_keys: Vec::new(),
+            rendered_state_identities: HashSet::new(),
+            plan_stream_pushed: HashMap::new(),
+            internal_event_ids: HashSet::new(),
+            archived_tool_ids: HashSet::new(),
         }
     }
 
@@ -637,6 +648,27 @@ impl App {
         self.native_scrollback
     }
 
+    pub fn enhanced_keys_supported(&self) -> bool {
+        self.enhanced_keys_supported
+    }
+
+    pub fn set_enhanced_keys_supported(&mut self, supported: bool) {
+        self.enhanced_keys_supported = supported;
+    }
+
+    pub fn ctrl_c_quit_armed(&self) -> Option<Duration> {
+        let last = self.last_ctrl_c?;
+        crate::app::input::main::CTRL_C_QUIT_WINDOW.checked_sub(last.elapsed())
+    }
+
+    pub fn screen_height(&self) -> u16 {
+        self.screen_height
+    }
+
+    pub fn set_screen_height(&mut self, height: u16) {
+        self.screen_height = height;
+    }
+
     pub fn rendered_message_count(&self) -> usize {
         self.rendered_message_count
     }
@@ -719,13 +751,6 @@ impl App {
 
     pub fn should_quit(&self) -> bool {
         self.should_quit
-    }
-
-    pub fn composer_height(&self, width: u16) -> u16 {
-        let text_width = width
-            .saturating_sub(crate::ui_consts::LIVE_PREFIX_COLS + 2)
-            .max(1);
-        self.composer.height(text_width, 8) + 1 + self.queue_preview_height()
     }
 
     pub fn queue_preview_height(&self) -> u16 {

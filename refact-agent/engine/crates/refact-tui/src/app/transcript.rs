@@ -359,8 +359,23 @@ impl App {
     }
 
     pub(super) fn append_plan_stream(&mut self, key: String, text: &str) {
+        let identity = state_key_identity(&key);
         if !self.record_state_history_key(key) && self.plan_stream_controller.is_some() {
-            self.sync_plan_stream_item();
+            if self.native_scrollback {
+                let growth = self
+                    .plan_stream_pushed
+                    .get(&identity)
+                    .and_then(|previous| text.strip_prefix(previous.as_str()))
+                    .filter(|growth| !growth.is_empty())
+                    .map(str::to_string);
+                if let Some(growth) = growth {
+                    if let Some(controller) = &mut self.plan_stream_controller {
+                        controller.push_sanitized_delta(&growth);
+                    }
+                    self.plan_stream_pushed.insert(identity, text.to_string());
+                }
+            }
+            self.sync_plan_stream_display();
             return;
         }
         if self.plan_stream_controller.is_none() {
@@ -371,7 +386,16 @@ impl App {
         if let Some(controller) = &mut self.plan_stream_controller {
             controller.push_sanitized_delta(text);
         }
-        self.sync_plan_stream_item();
+        self.plan_stream_pushed.insert(identity, text.to_string());
+        self.sync_plan_stream_display();
+    }
+
+    fn sync_plan_stream_display(&mut self) {
+        if self.native_scrollback {
+            self.sync_plan_stream_tail_item();
+        } else {
+            self.sync_plan_stream_item();
+        }
     }
 
     pub(super) fn sync_plan_stream_item(&mut self) {
@@ -383,11 +407,10 @@ impl App {
     }
 
     pub(super) fn sync_plan_stream_tail_item(&mut self) {
-        let Some(controller) = self.plan_stream_controller.as_mut() else {
+        if self.plan_stream_controller.is_none() {
             return;
-        };
-        let lines = controller.current_tail_display_lines();
-        self.sync_plan_stream_lines(lines);
+        }
+        self.sync_plan_stream_lines(Vec::new());
     }
 
     pub(super) fn sync_plan_stream_lines(
@@ -416,14 +439,8 @@ impl App {
     }
 
     pub(super) fn sync_assistant_stream_tail_item(&mut self) {
-        let tail = self.stream_controller.live();
-        match self.transcript.last_mut() {
-            Some(TranscriptItem::Assistant(_)) if tail.is_empty() => {
-                self.transcript.pop();
-            }
-            Some(TranscriptItem::Assistant(value)) => *value = tail,
-            _ if !tail.is_empty() => self.push_live_item(TranscriptItem::Assistant(tail)),
-            _ => {}
+        if let Some(TranscriptItem::Assistant(_)) = self.transcript.last() {
+            self.transcript.pop();
         }
     }
 
@@ -451,7 +468,34 @@ impl App {
         }
     }
 
+    pub(super) fn truncate_rendered_state_keys(&mut self, len: usize) {
+        self.rendered_state_keys.truncate(len);
+        self.rebuild_rendered_state_identities();
+    }
+
+    pub(super) fn clear_rendered_state_keys(&mut self) {
+        self.rendered_state_keys.clear();
+        self.rendered_state_identities.clear();
+    }
+
+    fn rebuild_rendered_state_identities(&mut self) {
+        self.rendered_state_identities = self
+            .rendered_state_keys
+            .iter()
+            .map(|key| state_key_identity(key))
+            .collect();
+    }
+
     pub(super) fn record_state_history_key(&mut self, key: String) -> bool {
+        if self.native_scrollback {
+            let identity = state_key_identity(&key);
+            if !self.rendered_state_identities.insert(identity) {
+                return false;
+            }
+            self.rendered_state_keys.push(key);
+            self.rendered_state_cursor = self.rendered_state_keys.len();
+            return true;
+        }
         if self
             .rendered_state_keys
             .get(self.rendered_state_cursor)
@@ -467,8 +511,7 @@ impl App {
         {
             return false;
         }
-        self.rendered_state_keys
-            .truncate(self.rendered_state_cursor);
+        self.truncate_rendered_state_keys(self.rendered_state_cursor);
         self.rendered_state_keys.push(key);
         self.rendered_state_cursor += 1;
         true
@@ -490,21 +533,20 @@ impl App {
     }
 
     pub(super) fn replace_assistant_stream_with_final(&mut self, text: String) {
-        self.stream_controller.clear();
-        self.stream_chunking_policy.reset();
         if self.native_scrollback {
+            let (cell, streamed) = self.stream_controller.finalize_into_cells();
+            self.stream_chunking_policy.reset();
             self.transcript
                 .retain(|item| !matches!(item, TranscriptItem::Assistant(_)));
-            if self
-                .history
-                .remove_non_final_cells(HistoryCellKind::Assistant)
-                > 0
-            {
-                self.resize_reflow.schedule_immediate();
+            if streamed.is_empty() {
+                self.history.enqueue(TranscriptItem::Assistant(text));
+            } else if let Some(cell) = cell {
+                self.history.enqueue_cell(cell);
             }
-            self.history.enqueue(TranscriptItem::Assistant(text));
             return;
         }
+        self.stream_controller.clear();
+        self.stream_chunking_policy.reset();
         if let Some(existing) = self
             .transcript
             .iter_mut()
@@ -566,13 +608,9 @@ impl App {
     pub(super) fn replace_live_region_from_snapshot(&mut self, next_keys: &[String]) {
         self.transcript.clear();
         self.clear_stream_controllers();
-        if self.rendered_state_keys != next_keys {
-            let inserted = self.native_scrollback && self.history.inserted_cell_count() > 0;
+        if self.rendered_state_keys != next_keys && self.history.inserted_cell_count() == 0 {
             self.history.clear_pending();
-            self.rendered_state_keys.clear();
-            if inserted {
-                self.resize_reflow.schedule_immediate();
-            }
+            self.clear_rendered_state_keys();
         }
         self.selected_tool_index = None;
         self.rendered_state_cursor = 0;
@@ -580,15 +618,16 @@ impl App {
 
     pub(super) fn mark_rendered_state_from_messages(&mut self) {
         self.rendered_state_cursor = 0;
-        self.rendered_state_keys.clear();
+        self.clear_rendered_state_keys();
         let messages = self.transcript_state.messages().to_vec();
         for message in &messages {
             for key in rendered_state_keys_for_message(message) {
                 self.record_state_history_key(key);
             }
         }
-        self.rendered_state_keys
-            .truncate(self.rendered_state_cursor);
+        if !self.native_scrollback {
+            self.truncate_rendered_state_keys(self.rendered_state_cursor);
+        }
     }
 
     pub(super) fn push_history_item(&mut self, item: TranscriptItem) {
@@ -677,6 +716,65 @@ impl App {
         }
     }
 
+    fn archive_live_reasoning_before_content(&mut self) {
+        if !self.reasoning_stream_active {
+            return;
+        }
+        let Some((text, collapsed)) = self.transcript.iter().rev().find_map(|item| match item {
+            TranscriptItem::Reasoning(text, collapsed) => Some((text.clone(), *collapsed)),
+            _ => None,
+        }) else {
+            return;
+        };
+        if let Some(active_id) = self.transcript_state.active_assistant_id() {
+            let key = self
+                .transcript_state
+                .messages()
+                .iter()
+                .rev()
+                .find(|message| {
+                    message.role == TranscriptRole::Assistant
+                        && message.message_id.as_deref() == Some(active_id)
+                })
+                .map(|message| render_message_key(message, "reasoning", 0));
+            if let Some(key) = key {
+                self.record_state_history_key(key);
+            }
+        }
+        self.reasoning_stream_active = false;
+        self.transcript
+            .retain(|item| !matches!(item, TranscriptItem::Reasoning(_, _)));
+        self.history
+            .enqueue(TranscriptItem::Reasoning(text, collapsed));
+    }
+
+    pub(super) fn record_active_assistant_render_key(&mut self) {
+        if self.stream_controller.committed().is_empty() {
+            return;
+        }
+        let Some(active_id) = self.transcript_state.active_assistant_id() else {
+            return;
+        };
+        let Some(message) = self
+            .transcript_state
+            .messages()
+            .iter()
+            .rev()
+            .find(|message| {
+                message.role == TranscriptRole::Assistant
+                    && message.message_id.as_deref() == Some(active_id)
+            })
+        else {
+            return;
+        };
+        let key = render_message_key(
+            message,
+            "assistant",
+            finalized_assistant_content_part(message),
+        );
+        self.record_state_history_key(key);
+    }
+
     pub(super) fn finalized_assistant_message(
         &self,
         message_id: Option<&str>,
@@ -714,9 +812,11 @@ impl App {
             return;
         }
         if self.native_scrollback {
+            self.archive_live_reasoning_before_content();
             for cell in output.cells {
                 self.history.enqueue_cell(cell);
             }
+            self.record_active_assistant_render_key();
             self.sync_assistant_stream_tail_item();
             self.sync_plan_stream_tail_item();
         } else {
@@ -726,29 +826,27 @@ impl App {
     }
 
     pub(super) fn finalize_assistant_stream(&mut self) -> Option<String> {
+        if self.native_scrollback {
+            let (cell, final_content) = self.stream_controller.finalize_into_cells();
+            self.transcript
+                .retain(|item| !matches!(item, TranscriptItem::Assistant(_)));
+            if final_content.is_empty() {
+                return None;
+            }
+            if let Some(cell) = cell {
+                self.history.enqueue_cell(cell);
+            }
+            return Some(final_content);
+        }
         let final_content = self.stream_controller.finalize();
         if final_content.is_empty() {
             return None;
         }
-        if self.native_scrollback {
-            self.transcript
-                .retain(|item| !matches!(item, TranscriptItem::Assistant(_)));
-            if self
-                .history
-                .remove_non_final_cells(HistoryCellKind::Assistant)
-                > 0
-            {
-                self.resize_reflow.schedule_immediate();
-            }
-            self.history
-                .enqueue(TranscriptItem::Assistant(final_content.clone()));
-        } else {
-            match self.transcript.last_mut() {
-                Some(TranscriptItem::Assistant(value)) => *value = final_content.clone(),
-                _ => self
-                    .transcript
-                    .push(TranscriptItem::Assistant(final_content.clone())),
-            }
+        match self.transcript.last_mut() {
+            Some(TranscriptItem::Assistant(value)) => *value = final_content.clone(),
+            _ => self
+                .transcript
+                .push(TranscriptItem::Assistant(final_content.clone())),
         }
         Some(final_content)
     }
@@ -760,6 +858,7 @@ impl App {
             .and_then(PlanStreamController::finalize);
         if source.is_some() {
             self.plan_stream_controller = None;
+            self.plan_stream_pushed.clear();
             self.transcript
                 .retain(|item| !matches!(item, TranscriptItem::PlanStream(_)));
             if self.native_scrollback
@@ -781,7 +880,17 @@ impl App {
     pub(super) fn add_notice(&mut self, text: impl Into<String>) {
         let text = text.into();
         self.transcript_state.push_notice(text.clone());
-        self.push_history_item(TranscriptItem::Notice(text));
+        let key = self
+            .transcript_state
+            .messages()
+            .last()
+            .map(|message| render_message_key(message, "notice", 0));
+        match key {
+            Some(key) if self.native_scrollback => {
+                self.push_state_history_item(key, TranscriptItem::Notice(text));
+            }
+            _ => self.push_history_item(TranscriptItem::Notice(text)),
+        }
     }
 
     pub(super) fn show_diff_result(&mut self, diff: String) {
@@ -800,7 +909,9 @@ impl App {
         self.history.clear_pending();
         self.selected_tool_index = None;
         self.rendered_state_cursor = 0;
-        self.rendered_state_keys.clear();
+        self.clear_rendered_state_keys();
+        self.archived_tool_ids.clear();
+        self.internal_event_ids.clear();
         self.push_history_item(TranscriptItem::Notice(text));
     }
 
@@ -811,7 +922,9 @@ impl App {
         self.history.clear_pending();
         self.selected_tool_index = None;
         self.rendered_state_cursor = 0;
-        self.rendered_state_keys.clear();
+        self.clear_rendered_state_keys();
+        self.archived_tool_ids.clear();
+        self.internal_event_ids.clear();
         self.push_state_history_item(
             session_header_key(&title, subtitle.as_deref().unwrap_or_default()),
             TranscriptItem::Session { title, subtitle },
@@ -828,8 +941,12 @@ impl App {
     pub(super) fn push_session_header(&mut self) {
         let title = self.session_header_title();
         let subtitle = self.session_header_subtitle();
+        let key = session_header_key(&title, &subtitle);
+        if self.native_scrollback && self.history.inserted_cell_count() > 0 {
+            self.sync_session_header_render_key(&key);
+        }
         self.push_state_history_item(
-            session_header_key(&title, &subtitle),
+            key,
             TranscriptItem::Session {
                 title,
                 subtitle: Some(subtitle),
@@ -846,19 +963,15 @@ impl App {
 
     pub(super) fn rebuild_render_transcript_from_state(&mut self) {
         self.transcript.clear();
-        self.history.clear_pending();
         self.selected_tool_index = None;
         self.rendered_state_cursor = 0;
-        if !self.native_scrollback {
-            self.rendered_state_keys.clear();
+        if !self.native_scrollback || self.history.inserted_cell_count() == 0 {
+            self.history.clear_pending();
+            self.clear_rendered_state_keys();
         }
         let messages = self.transcript_state.messages().to_vec();
         for message in &messages {
             self.append_render_message(message);
-        }
-        if self.native_scrollback {
-            self.rendered_state_keys
-                .truncate(self.rendered_state_cursor);
         }
         self.sync_backtrack_selection_after_rebuild();
     }
@@ -958,7 +1071,7 @@ impl App {
             TranscriptRole::Plan => {
                 if self.plan_stream_active() {
                     self.append_plan_stream(
-                        render_message_key(message, "plan", 0),
+                        render_message_key(message, "plan_stream", 0),
                         &message.content,
                     );
                 } else {
@@ -972,7 +1085,7 @@ impl App {
                 if is_plan_delta_message(message) {
                     if self.plan_stream_active() {
                         self.append_plan_stream(
-                            render_message_key(message, "plan_delta", 0),
+                            render_message_key(message, "plan_delta_stream", 0),
                             &message.content,
                         );
                     } else {
@@ -1095,6 +1208,11 @@ impl App {
         if !self.record_state_history_key(render_message_key(message, "event", 0)) {
             return;
         }
+        if let Some(message_id) = message.message_id.clone() {
+            if !self.internal_event_ids.insert(message_id) {
+                return;
+            }
+        }
         let (subkind, source, payload) = event_metadata(message);
         if subkind == "mode_switch" && Self::settings_surface_enabled() {
             self.push_history_item(TranscriptItem::Info(mode_transition_banner(
@@ -1136,13 +1254,8 @@ impl App {
         {
             *existing = next;
         } else if self.native_scrollback {
-            let changed = self.history.replace_first_item_kind(&next);
-            match changed {
-                Some(true) => self.resize_reflow.schedule_immediate(),
-                None => {
-                    self.history.enqueue(next);
-                }
-                Some(false) => {}
+            if self.history.replace_first_item_kind(&next).is_none() {
+                self.history.enqueue(next);
             }
         } else {
             self.transcript.insert(0, next);
@@ -1156,19 +1269,16 @@ impl App {
             .find(|existing| existing.starts_with("session:header:0:"))
         {
             *existing = key.to_string();
+            self.rebuild_rendered_state_identities();
         }
     }
 
     pub(super) fn rebuild_remote_transcript_from_state(&mut self) {
         let include_header = self.show_session_header || self.session_title.is_some();
-        if self.native_scrollback {
-            self.rendered_state_keys.clear();
+        if !self.native_scrollback {
+            self.plan_stream_controller = None;
         }
-        self.plan_stream_controller = None;
         self.rebuild_render_transcript_from_state();
-        if self.native_scrollback && self.history.inserted_cell_count() > 0 {
-            self.resize_reflow.schedule_immediate();
-        }
         if include_header && !self.native_scrollback {
             self.transcript.insert(0, self.session_header_item());
         }
@@ -1400,9 +1510,11 @@ pub(super) fn line_to_plain_string(line: &ratatui::text::Line<'_>) -> String {
 }
 
 pub(super) fn render_message_key(message: &TranscriptMessage, part: &str, index: usize) -> String {
-    let id = message
-        .message_id
-        .as_deref()
+    let client_id = (message.role == TranscriptRole::User)
+        .then(|| message.client_message_id())
+        .flatten();
+    let id = client_id
+        .or(message.message_id.as_deref())
         .or(message.tool_call_id.as_deref())
         .unwrap_or_default();
     let revision = render_message_revision(message, part, index);
@@ -1417,6 +1529,15 @@ pub(super) fn render_message_key(message: &TranscriptMessage, part: &str, index:
     } else {
         format!("{}:{}:{}:{:016x}", id, part, index, revision)
     }
+}
+
+pub(super) fn state_key_identity(key: &str) -> String {
+    if !state_key_has_stable_identity(key) {
+        return key.to_string();
+    }
+    key.rsplit_once(':')
+        .map(|(identity, _)| identity.to_string())
+        .unwrap_or_else(|| key.to_string())
 }
 
 pub(super) fn state_key_has_stable_identity(key: &str) -> bool {

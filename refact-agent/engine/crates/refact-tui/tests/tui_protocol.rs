@@ -1435,10 +1435,10 @@ fn render_snapshot_for_assistant_streaming_fixture() {
 
     fn main() {}
 
-
-
-│› Ask Refact…
-│  Enter send   Ctrl-J newline
+╭──────────────────────────────────────────────────────────────────────╮
+│ › Ask Refact…                                                        │
+╰──────────────────────────────────────────────────────────────────────╯
+  Enter send  ·  \+Enter newline  ·  ? shortcuts
  30 used · ● idle · daemon online · fixture · gpt-demo · agent · reason…"#;
     assert_eq!(snapshot, expected);
 }

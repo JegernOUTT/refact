@@ -1,4 +1,4 @@
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect, Size};
 use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Frame;
 
@@ -28,6 +28,7 @@ const BORDERLESS_MODAL_MAX_WIDTH: u16 = 39;
 const COMPACT_MAX_WIDTH: u16 = 30;
 const COMPACT_MAX_HEIGHT: u16 = 10;
 const COMPACT_MIN_TRANSCRIPT_HEIGHT: u16 = 2;
+const DIALOG_MIN_ROWS_ABOVE_COMPOSER: u16 = 8;
 pub const BOX_DRAWING_GLYPHS: &str = concat!(
     "─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟",
     "┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼┽┾┿",
@@ -60,6 +61,93 @@ impl SurfaceLayer {
             Self::History | Self::Board | Self::Browser | Self::Activity
         )
     }
+
+    pub(crate) fn fills_screen(self) -> bool {
+        self.is_exclusive() || matches!(self, Self::Overlay | Self::Help | Self::Settings)
+    }
+
+    fn dialog_rows(self) -> u16 {
+        match self {
+            Self::ModalPicker => 14,
+            Self::ProjectPicker => 16,
+            Self::Approval => 18,
+            Self::Goal | Self::Worktree => 20,
+            _ => 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InlineLayout {
+    transcript: u16,
+    status: u16,
+    goal: u16,
+    tabs: u16,
+    composer: u16,
+    footer: u16,
+}
+
+impl InlineLayout {
+    fn total(self) -> u16 {
+        self.transcript
+            .saturating_add(self.status)
+            .saturating_add(self.goal)
+            .saturating_add(self.tabs)
+            .saturating_add(self.composer)
+            .saturating_add(self.footer)
+    }
+}
+
+pub fn inline_viewport_height(app: &mut App, size: Size) -> u16 {
+    let layer = app.surface_layer();
+    if layer.fills_screen() {
+        return size.height.max(1);
+    }
+    inline_layout(app, size.width, size.height, layer)
+        .total()
+        .clamp(1, size.height.max(1))
+}
+
+fn inline_layout(app: &mut App, width: u16, max_height: u16, layer: SurfaceLayer) -> InlineLayout {
+    let footer = footer::desired_height(width);
+    let screen_height = app.screen_height().max(max_height);
+    let composer = match layer {
+        SurfaceLayer::AskForm => app
+            .ask_questions_form()
+            .map(|form| ask::desired_height(form, max_height))
+            .unwrap_or_else(|| composer::desired_height(app, width, screen_height)),
+        _ => composer::desired_height(app, width, screen_height),
+    };
+    let tabs = session_tabs::height(app);
+    let goal = goal_dock::height(app);
+    let status = status_indicator::height(app, width).max(1);
+    let fixed = footer
+        .saturating_add(composer)
+        .saturating_add(tabs)
+        .saturating_add(goal)
+        .saturating_add(status);
+    let room = max_height.saturating_sub(fixed);
+    let mut transcript = transcript::live_content_height(app, width).min(room);
+    let mut dialog_rows = layer.dialog_rows();
+    if layer == SurfaceLayer::Approval
+        && app
+            .approval_modal()
+            .is_some_and(|modal| modal.details_open())
+    {
+        dialog_rows = 30;
+    }
+    if dialog_rows > 0 {
+        let wanted = dialog_rows.min(max_height).saturating_sub(fixed);
+        transcript = transcript.max(wanted);
+    }
+    InlineLayout {
+        transcript,
+        status,
+        goal,
+        tabs,
+        composer,
+        footer,
+    }
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
@@ -72,6 +160,10 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_exclusive_surface(frame, app, area, layer, compact);
         return;
     }
+    if app.native_scrollback() {
+        render_inline(frame, app, area, layer, compact);
+        return;
+    }
     let session_tabs_height = session_tabs::height(app);
     let status_height = status_indicator::height(app, area.width);
     let goal_dock_height = goal_dock::height(app);
@@ -80,8 +172,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         SurfaceLayer::AskForm => app
             .ask_questions_form()
             .map(|form| ask::desired_height(form, area.height))
-            .unwrap_or_else(|| app.composer_height(area.width)),
-        _ => app.composer_height(area.width),
+            .unwrap_or_else(|| composer::desired_height(app, area.width, area.height)),
+        _ => composer::desired_height(app, area.width, area.height),
     };
     let events_open = app.events_pane().open && !compact;
     let main_constraints = if compact {
@@ -138,6 +230,49 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_composer_region(frame, app, chunks[5], layer);
         footer::render(frame, app, chunks[6]);
     }
+    render_modal_layer(frame, app, area, layer, composer_area);
+    finish_frame(frame, area, compact, chunks[2]);
+}
+
+fn render_inline(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    layer: SurfaceLayer,
+    compact: bool,
+) {
+    let layout = inline_layout(app, area.width, area.height, layer);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(layout.transcript),
+            Constraint::Length(layout.status),
+            Constraint::Length(layout.goal),
+            Constraint::Length(layout.tabs),
+            Constraint::Length(layout.composer),
+            Constraint::Length(layout.footer),
+        ])
+        .split(area);
+    transcript::render_transcript(frame, app, chunks[0]);
+    status_indicator::render(frame, app, chunks[1]);
+    goal_dock::render(frame, app, chunks[2]);
+    if layout.tabs > 0 {
+        session_tabs::render(frame, app, chunks[3]);
+    }
+    render_composer_region(frame, app, chunks[4], layer);
+    footer::render(frame, app, chunks[5]);
+    render_modal_layer(frame, app, area, layer, chunks[4]);
+    finish_frame(frame, area, compact, chunks[0]);
+}
+
+fn render_modal_layer(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    layer: SurfaceLayer,
+    composer_area: Rect,
+) {
+    let area = dialog_area(area, composer_area);
     match layer {
         SurfaceLayer::ProjectPicker => {
             picker::render_project_picker(frame, app.project_picker(), area);
@@ -171,7 +306,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         | SurfaceLayer::Activity
         | SurfaceLayer::AskForm => {}
     }
-    finish_frame(frame, area, compact, chunks[2]);
 }
 
 fn render_exclusive_surface(
@@ -275,16 +409,17 @@ fn remove_frame_borders(buffer: &mut ratatui::buffer::Buffer, area: Rect) {
     let mut borders = Vec::new();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            if buffer[(x, y)].symbol() != "┌" {
+            if !matches!(buffer[(x, y)].symbol(), "┌" | "╭") {
                 continue;
             }
-            let Some(right) =
-                ((x + 1)..area.right()).find(|right| buffer[(*right, y)].symbol() == "┐")
+            let Some(right) = ((x + 1)..area.right())
+                .find(|right| matches!(buffer[(*right, y)].symbol(), "┐" | "╮"))
             else {
                 continue;
             };
             let Some(bottom) = ((y + 1)..area.bottom()).find(|bottom| {
-                buffer[(x, *bottom)].symbol() == "└" && buffer[(right, *bottom)].symbol() == "┘"
+                matches!(buffer[(x, *bottom)].symbol(), "└" | "╰")
+                    && matches!(buffer[(right, *bottom)].symbol(), "┘" | "╯")
             }) else {
                 continue;
             };
@@ -325,6 +460,18 @@ fn render_composer_region(frame: &mut Frame<'_>, app: &App, area: Rect, layer: S
         }
     } else {
         composer::render_composer(frame, app, area);
+    }
+}
+
+fn dialog_area(area: Rect, composer_area: Rect) -> Rect {
+    let above = composer_area.y.saturating_sub(area.y);
+    if above >= DIALOG_MIN_ROWS_ABOVE_COMPOSER {
+        Rect {
+            height: above,
+            ..area
+        }
+    } else {
+        area
     }
 }
 

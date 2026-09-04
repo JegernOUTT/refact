@@ -42,6 +42,7 @@ pub struct StreamController {
     render_cache: RenderCache,
     width: Option<usize>,
     render_mode: HistoryRenderMode,
+    committed_rendered_lines: usize,
 }
 
 impl StreamController {
@@ -58,6 +59,7 @@ impl StreamController {
             render_cache: RenderCache::default(),
             width,
             render_mode: HistoryRenderMode::Rich,
+            committed_rendered_lines: 0,
         }
     }
 
@@ -71,6 +73,7 @@ impl StreamController {
         self.table_scanner.reset();
         self.policy.reset();
         self.render_cache.clear();
+        self.committed_rendered_lines = 0;
     }
 
     pub fn replace_committed(&mut self, content: &str) {
@@ -85,6 +88,7 @@ impl StreamController {
         self.enqueued_source_len = self.raw_source.len();
         self.table_scanner.replace_prefix(content);
         self.emitted_stable_source_len = self.raw_source.len();
+        self.committed_rendered_lines = self.render_full_source(content).len();
         self.assert_holdback_boundary();
     }
 
@@ -101,6 +105,7 @@ impl StreamController {
         }
         self.emitted_stable_source_len = self.emitted_stable_source_len.min(self.raw_source.len());
         self.render_cache.clear();
+        self.committed_rendered_lines = self.render_full_source(&self.committed.clone()).len();
         if had_pending_queue
             && self.emitted_stable_source_len == self.raw_source.len()
             && self.emitted_stable_source_len > 0
@@ -130,6 +135,7 @@ impl StreamController {
         }
         self.emitted_stable_source_len = self.emitted_stable_source_len.min(self.raw_source.len());
         self.render_cache.clear();
+        self.committed_rendered_lines = self.render_full_source(&self.committed.clone()).len();
         self.queue.clear();
         if self.emitted_stable_source_len > 0 && !had_pending_queue && !had_live_tail {
             self.enqueued_source_len = self.raw_source.len();
@@ -222,6 +228,34 @@ impl StreamController {
         self.drain(DrainPlan::Batch(usize::MAX))
     }
 
+    pub(crate) fn finalize_into_cells(&mut self) -> (Option<Box<dyn HistoryCell>>, String) {
+        let remainder = self.collector.finalize_and_drain_source();
+        if !remainder.is_empty() {
+            self.raw_source.push_str(&remainder);
+            self.table_scanner.push_source_chunk(&remainder);
+        }
+        let source_len = self.raw_source.len();
+        self.queue.clear();
+        if self.committed.len() < source_len {
+            self.enqueue_source_range(self.committed.len(), source_len);
+        }
+        self.enqueued_source_len = source_len;
+        let cell = self.drain(DrainPlan::Batch(usize::MAX)).map(|drained| {
+            let first = self.committed.len() == drained.len();
+            Box::new(AssistantStreamCell::new_lines(
+                self.newly_committed_lines(),
+                first,
+            )) as Box<dyn HistoryCell>
+        });
+        let out = if self.raw_source.is_empty() {
+            self.committed.clone()
+        } else {
+            self.raw_source.clone()
+        };
+        self.clear();
+        (cell, out)
+    }
+
     pub fn run_commit_tick(&mut self) -> Option<String> {
         let now = Instant::now();
         let snapshot = QueueSnapshot {
@@ -243,11 +277,31 @@ impl StreamController {
         let cell = drained.map(|drained| {
             let first = self.committed().len() == drained.len();
             Box::new(AssistantStreamCell::new_lines(
-                self.render_source(&drained),
+                self.newly_committed_lines(),
                 first,
             )) as Box<dyn HistoryCell>
         });
         (cell, self.queue.is_empty() && !self.has_live_tail())
+    }
+
+    fn newly_committed_lines(&mut self) -> Vec<HyperlinkLine> {
+        let committed = self.committed.clone();
+        let rendered = self.render_full_source(&committed);
+        let start = self.committed_rendered_lines.min(rendered.len());
+        self.committed_rendered_lines = rendered.len();
+        rendered[start..].to_vec()
+    }
+
+    fn render_full_source(&self, source: &str) -> Vec<HyperlinkLine> {
+        if source.is_empty() {
+            return Vec::new();
+        }
+        match self.render_mode {
+            HistoryRenderMode::Rich => {
+                crate::render::MarkdownRenderer::new(self.width).render_with_links(source)
+            }
+            HistoryRenderMode::Raw => plain_hyperlink_lines(raw_lines_from_source(source)),
+        }
     }
 
     fn ingest_complete_source(&mut self, source: &str) {
@@ -628,6 +682,49 @@ mod tests {
             .iter()
             .map(|line| line_to_plain(&line.line))
             .collect()
+    }
+
+    #[test]
+    fn committed_cells_keep_paragraph_lines_and_blank_separators() {
+        let mut stream = StreamController::new(Some(60), Path::new("."));
+        let source = "Testing a terminal application is easiest when the terminal\nis real. A headless harness gives us exactly that.\n\n- capture-pane gives the viewport\n- resize delivers SIGWINCH\n";
+        let mut cells = Vec::new();
+        for line in source.split_inclusive('\n') {
+            let words = line.split(' ').collect::<Vec<_>>();
+            for chunk in words.chunks(3) {
+                let mut text = chunk.join(" ");
+                if chunk.len() == 3 && chunk.last().is_some_and(|word| !word.ends_with('\n')) {
+                    text.push(' ');
+                }
+                stream.push_delta(&text);
+                let (cell, _) = stream.drain_for_commit_tick(DrainPlan::Single);
+                cells.extend(cell);
+            }
+        }
+        let (cell, _) = stream.drain_for_commit_tick(DrainPlan::Batch(usize::MAX));
+        cells.extend(cell);
+        let mut lines = Vec::new();
+        for cell in cells {
+            lines.extend(cell.display_hyperlink_lines(60).into_iter().map(|line| {
+                line.line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            }));
+        }
+        assert_eq!(
+            lines,
+            vec![
+                "• Testing a terminal application is easiest when the terminal",
+                "  is real. A headless harness gives us exactly that.",
+                "",
+                "  - capture-pane gives the viewport",
+                "  - resize delivers SIGWINCH",
+            ],
+        );
     }
 
     #[test]

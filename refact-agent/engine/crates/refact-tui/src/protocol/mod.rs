@@ -1191,6 +1191,7 @@ pub struct TranscriptState {
     active_assistant_index: Option<usize>,
     usage: Option<Value>,
     unknown_delta_ops: Vec<UnknownDeltaOp>,
+    next_local_notice_id: u64,
 }
 
 impl TranscriptState {
@@ -1200,6 +1201,10 @@ impl TranscriptState {
 
     pub fn messages(&self) -> &[TranscriptMessage] {
         &self.messages
+    }
+
+    pub fn active_assistant_id(&self) -> Option<&str> {
+        self.active_assistant_id.as_deref()
     }
 
     pub fn messages_mut(&mut self) -> &mut [TranscriptMessage] {
@@ -1260,6 +1265,8 @@ impl TranscriptState {
     pub fn push_notice(&mut self, text: impl Into<String>) {
         let mut message = TranscriptMessage::new(TranscriptRole::ClientLocalNotice);
         message.content = text.into();
+        self.next_local_notice_id = self.next_local_notice_id.wrapping_add(1);
+        message.message_id = Some(format!("local-notice-{}", self.next_local_notice_id));
         self.messages.push(message);
     }
 

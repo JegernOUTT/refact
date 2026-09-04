@@ -7,6 +7,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+use crate::vendored::line_truncation::line_width;
 
 use crate::vendored::terminal_hyperlinks::{
     hyperlinks_enabled_from_env, mark_buffer_hyperlinks, prefix_hyperlink_lines, visible_lines,
@@ -26,11 +30,6 @@ const HISTORY_CELL_GUTTER: u16 = 2;
 pub const RESIZE_REFLOW_PENDING_CELL_CAP: usize = 1_000;
 pub const TRANSCRIPT_REFLOW_DEBOUNCE: Duration = Duration::from_millis(75);
 
-const VSCODE_RESIZE_REFLOW_MAX_ROWS: usize = 1_000;
-const WEZTERM_RESIZE_REFLOW_MAX_ROWS: usize = 3_500;
-const ALACRITTY_RESIZE_REFLOW_MAX_ROWS: usize = 10_000;
-const FALLBACK_RESIZE_REFLOW_MAX_ROWS: usize = 1_000;
-
 #[derive(Debug, Clone)]
 struct HistoryEntry {
     id: u64,
@@ -46,18 +45,7 @@ struct ReflowEntryDisplay {
 
 #[derive(Debug, Default, Clone)]
 pub struct ResizeReflowState {
-    last_observed_width: Option<u16>,
-    last_reflow_width: Option<u16>,
-    pending_reflow_width: Option<u16>,
     pending_until: Option<Instant>,
-    ran_during_stream: bool,
-    resize_requested_during_stream: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResizeWidthChange {
-    pub changed: bool,
-    pub initialized: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,31 +65,11 @@ impl ResizeReflowState {
         *self = Self::default();
     }
 
-    pub fn note_width(&mut self, width: u16) -> ResizeWidthChange {
-        let previous_width = self.last_observed_width.replace(width);
-        if previous_width.is_none() {
-            self.last_reflow_width = Some(width);
-        }
-        ResizeWidthChange {
-            changed: previous_width.is_some_and(|previous| previous != width),
-            initialized: previous_width.is_none(),
-        }
-    }
-
-    pub fn reflow_needed_for_width(&self, width: u16) -> bool {
-        self.last_reflow_width != Some(width) && self.pending_reflow_width != Some(width)
-    }
-
-    pub fn schedule_debounced(&mut self, target_width: Option<u16>) {
-        let now = Instant::now();
-        if let Some(target_width) = target_width {
-            self.pending_reflow_width = Some(target_width);
-        }
-        self.pending_until = Some(now + TRANSCRIPT_REFLOW_DEBOUNCE);
+    pub fn schedule_debounced(&mut self) {
+        self.pending_until = Some(Instant::now() + TRANSCRIPT_REFLOW_DEBOUNCE);
     }
 
     pub fn schedule_immediate(&mut self) {
-        self.pending_reflow_width = None;
         self.pending_until = Some(Instant::now());
     }
 
@@ -124,78 +92,7 @@ impl ResizeReflowState {
 
     pub fn clear_pending_reflow(&mut self) {
         self.pending_until = None;
-        self.pending_reflow_width = None;
     }
-
-    pub fn mark_reflowed_width(&mut self, width: u16) -> bool {
-        self.last_reflow_width.replace(width) != Some(width)
-    }
-
-    pub fn mark_ran_during_stream(&mut self) {
-        self.ran_during_stream = true;
-    }
-
-    pub fn mark_resize_requested_during_stream(&mut self) {
-        self.resize_requested_during_stream = true;
-    }
-
-    pub fn take_stream_finish_reflow_needed(&mut self) -> bool {
-        let needed = self.ran_during_stream || self.resize_requested_during_stream;
-        self.ran_during_stream = false;
-        self.resize_requested_during_stream = false;
-        needed
-    }
-
-    pub fn clear_stream_flags(&mut self) {
-        self.ran_during_stream = false;
-        self.resize_requested_during_stream = false;
-    }
-}
-
-pub fn resize_reflow_row_cap_from_env() -> usize {
-    resize_reflow_row_cap_for_values(
-        std::env::var("TERM_PROGRAM").ok().as_deref(),
-        std::env::var("TERM").ok().as_deref(),
-        std::env::var_os("WEZTERM_EXECUTABLE").is_some(),
-        std::env::var_os("ALACRITTY_SOCKET").is_some()
-            || std::env::var_os("ALACRITTY_LOG").is_some()
-            || std::env::var_os("ALACRITTY_WINDOW_ID").is_some(),
-    )
-}
-
-fn resize_reflow_row_cap_for_values(
-    term_program: Option<&str>,
-    term: Option<&str>,
-    wezterm_env: bool,
-    alacritty_env: bool,
-) -> usize {
-    let term_lower = term.map(str::to_ascii_lowercase);
-    if term_program.is_some_and(|value| value.eq_ignore_ascii_case("vscode")) {
-        return VSCODE_RESIZE_REFLOW_MAX_ROWS;
-    }
-    if term_program.is_some_and(|value| value.eq_ignore_ascii_case("WezTerm"))
-        || wezterm_env
-        || term_lower
-            .as_deref()
-            .is_some_and(|value| value.contains("wezterm"))
-    {
-        return WEZTERM_RESIZE_REFLOW_MAX_ROWS;
-    }
-    if term_program.is_some_and(|value| value.eq_ignore_ascii_case("Alacritty"))
-        || alacritty_env
-        || term_lower
-            .as_deref()
-            .is_some_and(|value| value.contains("alacritty"))
-    {
-        return ALACRITTY_RESIZE_REFLOW_MAX_ROWS;
-    }
-    if term_lower
-        .as_deref()
-        .is_some_and(|value| value.contains("vscode"))
-    {
-        return VSCODE_RESIZE_REFLOW_MAX_ROWS;
-    }
-    FALLBACK_RESIZE_REFLOW_MAX_ROWS
 }
 
 #[derive(Debug, Default, Clone)]
@@ -221,8 +118,10 @@ impl HistoryBuffer {
         self.pending.clear();
         self.render_cache.clear();
         self.cache_keys.clear();
-        self.emitted_history_lines = false;
-        self.emitted_history_trailing_blank = false;
+        if self.inserted_cell_count == 0 {
+            self.emitted_history_lines = false;
+            self.emitted_history_trailing_blank = false;
+        }
     }
 
     pub fn set_theme(&mut self, theme: TuiTheme) {
@@ -408,40 +307,33 @@ impl HistoryBuffer {
         insertions
     }
 
-    pub fn reflow_insertions(&mut self, width: u16, max_rows: usize) -> Vec<HistoryInsertion> {
+    pub fn inserted_tail_insertions(
+        &mut self,
+        width: u16,
+        max_rows: usize,
+    ) -> Vec<HistoryInsertion> {
         if self.history.is_empty() || max_rows == 0 {
             return Vec::new();
         }
-
+        let pending_ids = self
+            .pending
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>();
         let mut displays = VecDeque::new();
         let mut rendered_rows = 0usize;
-        let mut start = self.history.len();
-
-        while start > 0 {
-            start -= 1;
-            let entry = self.history[start].clone();
+        let mut index = self.history.len();
+        while index > 0 && rendered_rows <= max_rows {
+            index -= 1;
+            let entry = self.history[index].clone();
+            if pending_ids.contains(&entry.id) {
+                continue;
+            }
             let lines = self.render_entry(&entry, width);
             rendered_rows += lines.len();
             displays.push_front(ReflowEntryDisplay {
                 id: entry.id,
                 lines,
-                is_stream_continuation: entry.cell.is_stream_continuation(),
-            });
-            if rendered_rows > max_rows {
-                break;
-            }
-        }
-
-        while start > 0
-            && displays
-                .front()
-                .is_some_and(|display| display.is_stream_continuation)
-        {
-            start -= 1;
-            let entry = self.history[start].clone();
-            displays.push_front(ReflowEntryDisplay {
-                id: entry.id,
-                lines: self.render_entry(&entry, width),
                 is_stream_continuation: entry.cell.is_stream_continuation(),
             });
         }
@@ -472,14 +364,14 @@ impl HistoryBuffer {
             .into_iter()
             .filter_map(|(id, start, end)| (start == end || end > visible_start).then_some(id))
             .collect::<Vec<_>>();
-        lines = lines.split_off(visible_start);
+        let lines = lines.split_off(visible_start);
         self.emitted_history_lines = !lines.is_empty();
         self.emitted_history_trailing_blank = lines.last().is_some_and(hyperlink_line_is_blank);
-        let insertions = split_history_insertion(cell_ids, lines);
-        let insertions = self.drain_insertions(insertions);
         self.evict_cache_entries(&[]);
-
-        insertions
+        if lines.is_empty() {
+            return Vec::new();
+        }
+        split_history_insertion(cell_ids, lines)
     }
 
     fn drain_insertions(&mut self, insertions: Vec<HistoryInsertion>) -> Vec<HistoryInsertion> {
@@ -774,20 +666,65 @@ pub fn insert_history<B: Backend>(
     terminal: &mut Terminal<B>,
     insertion: HistoryInsertion,
 ) -> io::Result<()> {
-    let height = insertion.height();
-    if height == 0 {
+    if insertion.height() == 0 {
         return Ok(());
     }
     let lines = insertion.lines;
+    let width = usize::from(terminal.size()?.width.max(1));
+    let visible = visible_lines(lines.clone());
+    if visible.iter().any(|line| line_width(line) > width) {
+        let wrapped = hard_wrap_lines(visible, width);
+        let height = wrapped.len().min(u16::MAX as usize) as u16;
+        return terminal.insert_before(height, move |buffer| {
+            Paragraph::new(wrapped).render(buffer.area, buffer);
+        });
+    }
+    let height = insertion_height(lines.len());
     let enabled = hyperlinks_enabled_from_env();
     crate::vendored::terminal_hyperlinks::clear_buffer_hyperlinks();
     terminal.insert_before(height, move |buffer| {
         let area = buffer.area;
         fill_line_backgrounds(buffer, area, &lines);
-        let visible = visible_lines(lines.clone());
         Paragraph::new(visible).render(area, buffer);
         mark_buffer_hyperlinks(&*buffer, area, &lines, enabled);
     })
+}
+
+fn insertion_height(lines: usize) -> u16 {
+    lines.min(u16::MAX as usize) as u16
+}
+
+fn hard_wrap_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    let mut wrapped = Vec::new();
+    for line in lines {
+        if line_width(&line) <= width {
+            wrapped.push(line);
+            continue;
+        }
+        let style = line.style;
+        let mut current: Vec<Span<'static>> = Vec::new();
+        let mut current_width = 0usize;
+        for span in line.spans {
+            let mut chunk = String::new();
+            for grapheme in UnicodeSegmentation::graphemes(span.content.as_ref(), true) {
+                let grapheme_width = UnicodeWidthStr::width(grapheme);
+                if current_width + grapheme_width > width && current_width > 0 {
+                    if !chunk.is_empty() {
+                        current.push(Span::styled(std::mem::take(&mut chunk), span.style));
+                    }
+                    wrapped.push(Line::from(std::mem::take(&mut current)).style(style));
+                    current_width = 0;
+                }
+                chunk.push_str(grapheme);
+                current_width += grapheme_width;
+            }
+            if !chunk.is_empty() {
+                current.push(Span::styled(chunk, span.style));
+            }
+        }
+        wrapped.push(Line::from(current).style(style));
+    }
+    wrapped
 }
 
 pub fn render_transcript_item_lines(
@@ -1201,7 +1138,7 @@ mod tests {
 
         history.drain_pending(80);
         let reflow = history
-            .reflow_insertions(80, 1_000)
+            .inserted_tail_insertions(80, 1_000)
             .into_iter()
             .flat_map(|insertion| insertion.lines)
             .map(|line| line_to_plain(&line.line))
@@ -1334,7 +1271,7 @@ mod tests {
 
         assert!(raw.contains("[image:"));
         assert!(!raw.contains('\x1b'));
-        let reflowed = history.reflow_insertions(12, 100);
+        let reflowed = history.inserted_tail_insertions(12, 100);
         let reflowed_text = reflowed
             .iter()
             .flat_map(|insertion| insertion.lines.iter())
@@ -1403,7 +1340,7 @@ mod tests {
 
         let narrow = history.drain_pending(12);
         assert_eq!(history.pending_cell_count(), 0);
-        let wide = history.reflow_insertions(40, 1_000);
+        let wide = history.inserted_tail_insertions(40, 1_000);
 
         assert_eq!(wide.len(), 1);
         assert_ne!(wide[0].lines, narrow[0].lines);
@@ -1428,7 +1365,7 @@ mod tests {
         }
         history.drain_pending(40);
 
-        let reflow = history.reflow_insertions(40, 3);
+        let reflow = history.inserted_tail_insertions(40, 3);
         let lines = reflow[0]
             .lines
             .iter()
@@ -1439,82 +1376,72 @@ mod tests {
     }
 
     #[test]
-    fn resize_reflow_drains_partially_visible_cells_and_keeps_trimmed_cells_pending() {
+    fn inserted_tail_skips_pending_cells_so_they_follow_in_order() {
         let mut history = HistoryBuffer::new();
         let first_id = history.enqueue_cell(Box::new(MultiLineCell::new(&["cell0a", "cell0b"])));
+        history.drain_pending(40);
         let second_id = history.enqueue_cell(Box::new(MultiLineCell::new(&["cell1a", "cell1b"])));
         let third_id = history.enqueue_cell(Box::new(MultiLineCell::new(&["cell2a", "cell2b"])));
 
-        let reflow = history.reflow_insertions(40, 4);
-        assert_eq!(reflow.len(), 1);
-        assert_eq!(reflow[0].cell_ids, vec![second_id, third_id]);
-        let reflow_lines = reflow[0]
+        let tail = history.inserted_tail_insertions(40, 4);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].cell_ids, vec![first_id]);
+        let tail_lines = tail[0]
             .lines
             .iter()
             .map(|line| line_to_plain(&line.line))
             .collect::<Vec<_>>();
-        assert_eq!(reflow_lines, vec!["  cell1b", "", "  cell2a", "  cell2b"]);
-        assert_eq!(
-            history
-                .pending
-                .iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>(),
-            vec![first_id]
-        );
+        assert_eq!(tail_lines, vec!["  cell0a", "  cell0b"]);
+        assert_eq!(history.pending_cell_count(), 2);
 
         let later = history.drain_pending(40);
         assert_eq!(later.len(), 1);
-        assert_eq!(later[0].cell_ids, vec![first_id]);
+        assert_eq!(later[0].cell_ids, vec![second_id, third_id]);
         let later_lines = later[0]
             .lines
             .iter()
             .map(|line| line_to_plain(&line.line))
             .collect::<Vec<_>>();
-        assert_eq!(later_lines, vec!["", "  cell0a", "  cell0b"]);
+        assert_eq!(
+            later_lines,
+            vec!["", "  cell1a", "  cell1b", "", "  cell2a", "  cell2b"]
+        );
         assert_eq!(history.pending_cell_count(), 0);
         assert_eq!(history.inserted_cell_count(), 3);
     }
 
     #[test]
-    fn resize_reflow_drains_a_partially_visible_ten_line_cell_once() {
+    fn inserted_tail_trims_a_ten_line_cell_to_the_visible_rows() {
         let mut history = HistoryBuffer::new();
         let id = history.enqueue_cell(Box::new(MultiLineCell::new(&[
             "line0", "line1", "line2", "line3", "line4", "line5", "line6", "line7", "line8",
             "line9",
         ])));
+        history.drain_pending(40);
 
-        let reflow = history.reflow_insertions(40, 4);
-        assert_eq!(reflow.len(), 1);
-        assert_eq!(reflow[0].cell_ids, vec![id]);
-        let reflow_lines = reflow[0]
+        let tail = history.inserted_tail_insertions(40, 4);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].cell_ids, vec![id]);
+        let tail_lines = tail[0]
             .lines
             .iter()
             .map(|line| line_to_plain(&line.line))
             .collect::<Vec<_>>();
-        assert_eq!(
-            reflow_lines,
-            vec!["  line6", "  line7", "  line8", "  line9"]
-        );
-        assert_eq!(history.pending_cell_count(), 0);
-
+        assert_eq!(tail_lines, vec!["  line6", "  line7", "  line8", "  line9"]);
         assert!(history.drain_pending(40).is_empty());
         assert_eq!(history.inserted_cell_count(), 1);
     }
 
     #[test]
-    fn resize_reflow_drains_zero_line_cells_once() {
+    fn inserted_tail_is_empty_when_nothing_was_inserted() {
         let mut history = HistoryBuffer::new();
-        let id = history.enqueue_cell(Box::new(EmptyCell));
+        history.enqueue_cell(Box::new(EmptyCell));
+        history.enqueue_cell(Box::new(FixedCell::new("pending", false)));
 
-        let reflow = history.reflow_insertions(40, 4);
-        assert_eq!(reflow.len(), 1);
-        assert_eq!(reflow[0].cell_ids, vec![id]);
-        assert!(reflow[0].lines.is_empty());
-        assert_eq!(history.pending_cell_count(), 0);
-
-        assert!(history.drain_pending(40).is_empty());
-        assert_eq!(history.inserted_cell_count(), 1);
+        assert!(history.inserted_tail_insertions(40, 4).is_empty());
+        assert_eq!(history.pending_cell_count(), 2);
+        assert_eq!(history.drain_pending(40).len(), 1);
+        assert_eq!(history.inserted_cell_count(), 2);
     }
 
     #[test]
@@ -1631,12 +1558,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        let reflow = history.reflow_insertions(80, 3);
-        let reflow_ids = reflow
-            .iter()
-            .flat_map(|insertion| insertion.cell_ids.iter().copied())
-            .collect::<Vec<_>>();
-        assert_eq!(reflow_ids, expected[expected.len() - 2..]);
+        assert!(history.inserted_tail_insertions(80, 3).is_empty());
 
         let later = history.drain_pending(80);
         assert_eq!(
@@ -1644,12 +1566,14 @@ mod tests {
                 .iter()
                 .flat_map(|insertion| insertion.cell_ids.iter().copied())
                 .collect::<Vec<_>>(),
-            initial_ids[251..]
-                .iter()
-                .chain(pending_ids[..pending_ids.len() - 2].iter())
-                .copied()
-                .collect::<Vec<_>>()
+            expected
         );
+        let tail = history.inserted_tail_insertions(80, 3);
+        let tail_ids = tail
+            .iter()
+            .flat_map(|insertion| insertion.cell_ids.iter().copied())
+            .collect::<Vec<_>>();
+        assert_eq!(tail_ids, expected[expected.len() - 2..]);
     }
 
     #[test]
@@ -1678,11 +1602,12 @@ mod tests {
     }
 
     #[test]
-    fn reflow_insertions_split_oversized_visible_suffixes() {
+    fn inserted_tail_splits_oversized_visible_suffixes() {
         let mut history = HistoryBuffer::new();
         let id = history.enqueue_cell(Box::new(RepeatedLineCell::new(MAX_INSERTION_LINES + 1)));
+        history.drain_pending(80);
 
-        let insertions = history.reflow_insertions(80, MAX_INSERTION_LINES + 1);
+        let insertions = history.inserted_tail_insertions(80, MAX_INSERTION_LINES + 1);
         assert_eq!(insertions.len(), 2);
         assert!(insertions
             .iter()
@@ -1710,51 +1635,48 @@ mod tests {
     }
 
     #[test]
-    fn resize_reflow_row_cap_detects_known_terminals() {
+    fn hard_wrap_splits_only_over_wide_lines_and_keeps_blank_lines() {
+        let lines = vec![
+            Line::from("short"),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    "abcdef",
+                    ratatui::style::Style::default().fg(ratatui::style::Color::Red),
+                ),
+                Span::raw("ghijkl"),
+            ]),
+            Line::from("    "),
+        ];
+        let wrapped = hard_wrap_lines(lines, 5);
+        let texts = wrapped
+            .iter()
+            .map(|line| line_to_plain(line))
+            .collect::<Vec<_>>();
+        assert_eq!(texts, vec!["short", "", "abcde", "fghij", "kl", "    "]);
         assert_eq!(
-            resize_reflow_row_cap_for_values(Some("vscode"), None, false, false),
-            VSCODE_RESIZE_REFLOW_MAX_ROWS
+            wrapped[2].spans[0].style.fg,
+            Some(ratatui::style::Color::Red)
         );
         assert_eq!(
-            resize_reflow_row_cap_for_values(None, None, true, false),
-            WEZTERM_RESIZE_REFLOW_MAX_ROWS
+            wrapped[3].spans[0].style.fg,
+            Some(ratatui::style::Color::Red)
         );
-        assert_eq!(
-            resize_reflow_row_cap_for_values(None, Some("wezterm"), false, false),
-            WEZTERM_RESIZE_REFLOW_MAX_ROWS
-        );
-        assert_eq!(
-            resize_reflow_row_cap_for_values(Some("Alacritty"), None, false, false),
-            ALACRITTY_RESIZE_REFLOW_MAX_ROWS
-        );
-        assert_eq!(
-            resize_reflow_row_cap_for_values(None, Some("alacritty"), false, false),
-            ALACRITTY_RESIZE_REFLOW_MAX_ROWS
-        );
-        assert_eq!(
-            resize_reflow_row_cap_for_values(None, Some("xterm-256color"), false, false),
-            FALLBACK_RESIZE_REFLOW_MAX_ROWS
-        );
+        assert_eq!(wrapped[3].spans[1].style.fg, None);
     }
 
     #[test]
-    fn resize_reflow_state_debounces_and_tracks_stream_finish() {
+    fn resize_reflow_state_debounces_until_due() {
         let mut state = ResizeReflowState::default();
-        let first = state.note_width(80);
-        assert!(first.initialized);
-        assert!(!state.reflow_needed_for_width(80));
-
-        let changed = state.note_width(100);
-        assert!(changed.changed);
-        assert!(state.reflow_needed_for_width(100));
-        state.schedule_debounced(Some(100));
+        assert!(!state.has_pending_reflow());
+        state.schedule_debounced();
         assert!(state.has_pending_reflow());
         assert!(!state.pending_is_due(Instant::now()));
-        assert!(!state.reflow_needed_for_width(100));
-
-        state.mark_resize_requested_during_stream();
-        assert!(state.take_stream_finish_reflow_needed());
-        assert!(!state.take_stream_finish_reflow_needed());
+        assert!(state.pending_is_due(Instant::now() + TRANSCRIPT_REFLOW_DEBOUNCE));
+        state.schedule_immediate();
+        assert!(state.pending_is_due(Instant::now()));
+        state.clear_pending_reflow();
+        assert!(!state.has_pending_reflow());
     }
 
     #[test]

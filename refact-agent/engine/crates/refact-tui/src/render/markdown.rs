@@ -206,6 +206,19 @@ impl IndentContext {
     }
 }
 
+fn source_has_blank_line_before(source: &str, offset: usize) -> bool {
+    let Some(preceding) = source.get(..offset) else {
+        return false;
+    };
+    let preceding = preceding.trim_end_matches([' ', '\t']);
+    let Some(preceding) = preceding.strip_suffix('\n') else {
+        return false;
+    };
+    preceding
+        .trim_end_matches([' ', '\t'])
+        .ends_with(['\n', '\r'])
+}
+
 #[derive(Clone, Debug)]
 struct LinkState {
     destination: String,
@@ -224,8 +237,6 @@ struct Writer<'a> {
     inline_styles: Vec<Style>,
     indent_stack: Vec<IndentContext>,
     list_indices: Vec<Option<u64>>,
-    list_needs_blank_before_next_item: Vec<bool>,
-    list_item_start_line_counts: Vec<usize>,
     link: Option<LinkState>,
     needs_newline: bool,
     pending_marker_line: bool,
@@ -252,8 +263,6 @@ impl<'a> Writer<'a> {
             inline_styles: Vec::new(),
             indent_stack: Vec::new(),
             list_indices: Vec::new(),
-            list_needs_blank_before_next_item: Vec::new(),
-            list_item_start_line_counts: Vec::new(),
             link: None,
             needs_newline: false,
             pending_marker_line: false,
@@ -342,7 +351,7 @@ impl<'a> Writer<'a> {
             Tag::BlockQuote => self.start_blockquote(),
             Tag::HtmlBlock => self.start_html_block(),
             Tag::List(start) => self.start_list(start),
-            Tag::Item => self.start_item(),
+            Tag::Item => self.start_item(range),
             Tag::FootnoteDefinition(name) => self.start_footnote_definition(name.to_string()),
             Tag::Link {
                 link_type,
@@ -523,28 +532,26 @@ impl<'a> Writer<'a> {
             self.push_blank_line();
         }
         self.list_indices.push(start);
-        self.list_needs_blank_before_next_item.push(false);
         self.needs_newline = false;
     }
 
     fn end_list(&mut self) {
         self.flush_current_line();
         self.list_indices.pop();
-        self.list_needs_blank_before_next_item.pop();
         self.needs_newline = true;
     }
 
-    fn start_item(&mut self) {
-        if self
-            .list_needs_blank_before_next_item
-            .last_mut()
-            .map(std::mem::take)
-            .unwrap_or(false)
-        {
+    fn start_item(&mut self, range: std::ops::Range<usize>) {
+        self.flush_current_line();
+        let previous_blank = self.out.last().is_none_or(|line| {
+            line.line
+                .spans
+                .iter()
+                .all(|span| span.content.trim().is_empty())
+        });
+        if !previous_blank && source_has_blank_line_before(self.source, range.start) {
             self.push_blank_line();
         }
-        self.flush_current_line();
-        self.list_item_start_line_counts.push(self.out.len());
         self.pending_marker_line = true;
         let depth = self.list_indices.len();
         let width = depth.saturating_mul(4).saturating_sub(3).max(1);
@@ -575,12 +582,6 @@ impl<'a> Writer<'a> {
 
     fn end_item(&mut self) {
         self.flush_current_line();
-        let start_line_count = self.list_item_start_line_counts.pop().unwrap_or_default();
-        if self.out.len().saturating_sub(start_line_count) > 1 {
-            if let Some(needs_blank) = self.list_needs_blank_before_next_item.last_mut() {
-                *needs_blank = true;
-            }
-        }
         self.indent_stack.pop();
         self.pending_marker_line = false;
     }
@@ -1823,5 +1824,119 @@ mod tests {
             .find(|line| line_to_plain(line) == "1 +new")
             .unwrap();
         assert_eq!(add.spans[1].style.fg, Some(Color::Green));
+    }
+
+    const TIGHT_LIST_SNIPPET: &str = "There are three failure modes we care about:\n\n\
+- rows that are printed twice because the application re-emits a cell that has\n  \
+already scrolled out of the viewport\n\
+- rows that are lost because the application assumed the emulator scrolled when\n  \
+it did not\n\
+- rows that are wrapped differently after a resize than they were when they were\n  \
+first emitted\n\n\
+## Requirements\n\n\
+1. Every logical line must be emitted exactly once into scrollback.\n\
+2. Re-wrapping after a resize must not duplicate previously emitted rows.\n\
+3. The viewport must always end with the composer, never with a partial cell.\n";
+
+    fn blank_line_indices(rendered: &[String]) -> Vec<usize> {
+        rendered
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.trim().is_empty())
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    #[test]
+    fn tight_lists_render_without_blank_lines_between_items() {
+        let lines =
+            render_markdown_with_options(TIGHT_LIST_SNIPPET, RenderOptions::plain(Some(80)));
+        let rendered = text(&lines);
+
+        let bullet_indices = rendered
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.starts_with("- rows"))
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+        assert_eq!(bullet_indices.len(), 3, "rendered: {rendered:#?}");
+        let blanks = blank_line_indices(&rendered);
+        for pair in bullet_indices.windows(2) {
+            assert!(
+                !blanks.iter().any(|idx| *idx > pair[0] && *idx < pair[1]),
+                "blank line between tight bullets: {rendered:#?}"
+            );
+        }
+
+        let numbered_indices = rendered
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                line.starts_with("1. ") || line.starts_with("2. ") || line.starts_with("3. ")
+            })
+            .map(|(idx, _)| idx)
+            .collect::<Vec<_>>();
+        assert_eq!(numbered_indices.len(), 3, "rendered: {rendered:#?}");
+        for pair in numbered_indices.windows(2) {
+            assert!(
+                !blanks.iter().any(|idx| *idx > pair[0] && *idx < pair[1]),
+                "blank line between tight numbered items: {rendered:#?}"
+            );
+        }
+
+        let paragraph_index = rendered
+            .iter()
+            .position(|line| line.starts_with("There are three failure modes"))
+            .unwrap();
+        assert_eq!(
+            blanks
+                .iter()
+                .filter(|idx| **idx > paragraph_index && **idx < bullet_indices[0])
+                .count(),
+            1,
+            "expected exactly one blank line between paragraph and list: {rendered:#?}"
+        );
+
+        assert_eq!(
+            rendered[bullet_indices[0] + 1],
+            "  already scrolled out of the viewport"
+        );
+        assert!(rendered.iter().all(|line| line.width() <= 80));
+    }
+
+    #[test]
+    fn loose_lists_keep_blank_lines_between_items() {
+        let lines = render_markdown_with_options(
+            "- first item\n\n- second item\n\n- third item\n",
+            RenderOptions::plain(Some(80)),
+        );
+        let rendered = text(&lines);
+        assert_eq!(
+            rendered,
+            vec![
+                "- first item".to_string(),
+                String::new(),
+                "- second item".to_string(),
+                String::new(),
+                "- third item".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn tight_nested_lists_render_without_blank_lines() {
+        let lines = render_markdown_with_options(
+            "- outer one\n  - inner one\n  - inner two\n- outer two\n",
+            RenderOptions::plain(Some(80)),
+        );
+        assert_eq!(
+            text(&lines),
+            vec![
+                "- outer one".to_string(),
+                "    - inner one".to_string(),
+                "    - inner two".to_string(),
+                "- outer two".to_string(),
+            ]
+        );
     }
 }

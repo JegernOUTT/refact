@@ -282,7 +282,6 @@ impl App {
                             self.record_state_history_key(key);
                         }
                     }
-                    self.schedule_final_stream_resize_reflow();
                 }
                 self.finalize_tool_cards_for_turn();
                 if let Some(usage) = usage {
@@ -694,6 +693,9 @@ impl App {
 
     pub(super) fn push_tool_call(&mut self, tool: &Value) {
         let card = ToolCard::from_tool_call(tool);
+        if !card.id.is_empty() && self.archived_tool_ids.contains(&card.id) {
+            return;
+        }
         if !card.id.is_empty() {
             if let Some((idx, existing)) =
                 self.transcript
@@ -851,6 +853,9 @@ impl App {
         result: String,
         status: ToolStatus,
     ) {
+        if !id.is_empty() && self.archived_tool_ids.contains(id) {
+            return;
+        }
         let active_ask_tool_id = self
             .ask_questions_form
             .as_ref()
@@ -915,6 +920,11 @@ impl App {
                 continue;
             }
             let item = self.transcript.remove(idx);
+            if let TranscriptItem::Tool(card) = &item {
+                if !card.id.is_empty() {
+                    self.archived_tool_ids.insert(card.id.clone());
+                }
+            }
             self.history.enqueue(item);
             self.selected_tool_index = self.selected_tool_index.and_then(|selected| {
                 if selected == idx {
@@ -1042,8 +1052,6 @@ impl App {
                     for message in &messages {
                         self.append_render_message(message);
                     }
-                    self.rendered_state_keys
-                        .truncate(self.rendered_state_cursor);
                 }
             } else {
                 self.rebuild_render_transcript_from_state();
@@ -1123,9 +1131,6 @@ impl App {
                     }
                 }
                 self.rebuild_remote_transcript_from_state();
-                if self.native_scrollback && self.history.inserted_cell_count() > 0 {
-                    self.resize_reflow.schedule_immediate();
-                }
                 if let Some(index) = out_of_range_index {
                     self.add_notice(format!(
                         "Server message index {index} exceeds transcript length {message_count}; appended"
@@ -1173,9 +1178,6 @@ impl App {
         let added = self.transcript_state.add_message_at(raw_message, index);
         if !added {
             self.rebuild_remote_transcript_from_state();
-            if self.native_scrollback && self.history.inserted_cell_count() > 0 {
-                self.resize_reflow.schedule_immediate();
-            }
             if let Some(index) = out_of_range_index {
                 self.add_notice(format!(
                     "Server message index {index} exceeds transcript length {message_count}; appended"
@@ -1266,10 +1268,16 @@ impl App {
     pub(super) fn push_state_tool_result(&mut self, message: &TranscriptMessage) {
         let key = render_message_key(message, "tool", 0);
         self.maybe_open_ask_questions_form(message);
-        if !self.record_state_history_key(key) {
-            return;
-        }
+        let first_time = self.record_state_history_key(key);
         let tool_call_id = message.tool_call_id.as_deref().unwrap_or_default();
+        if !first_time {
+            let live_card_pending = self.transcript.iter().any(|item| {
+                matches!(item, TranscriptItem::Tool(card) if card.id == tool_call_id && !card.status.is_final())
+            });
+            if !live_card_pending {
+                return;
+            }
+        }
         self.complete_tool(
             tool_call_id,
             message.role.as_str(),
@@ -1289,6 +1297,9 @@ impl App {
             })
         {
             card.apply_result_metadata(&message.extra);
+        }
+        if self.native_scrollback && self.ask_questions_form.is_none() {
+            self.move_completed_tool_cards_to_history();
         }
     }
 }

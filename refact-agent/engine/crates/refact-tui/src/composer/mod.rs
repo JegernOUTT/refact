@@ -129,7 +129,15 @@ impl ComposerState {
     }
 
     pub fn enter(&mut self, _now: Instant) -> EnterDecision {
-        EnterDecision::Submit
+        if !self.editor.cursor_follows_backslash() {
+            return EnterDecision::Submit;
+        }
+        self.history.reset_navigation();
+        self.history_search = None;
+        let before = self.snapshot();
+        self.editor.replace_preceding_backslash_with_newline();
+        self.record_edit(before, UndoKind::Other, None);
+        EnterDecision::InsertedNewline
     }
 
     pub fn insert_paste(&mut self, text: &str) {
@@ -952,6 +960,23 @@ impl TextEditor {
         self.cursor = prev;
     }
 
+    pub fn cursor_follows_backslash(&self) -> bool {
+        self.selection_anchor.is_none()
+            && grapheme::previous_boundary(&self.text, self.cursor)
+                .is_some_and(|prev| &self.text[prev..self.cursor] == "\\")
+    }
+
+    pub fn replace_preceding_backslash_with_newline(&mut self) {
+        let Some(prev) = grapheme::previous_boundary(&self.text, self.cursor) else {
+            return;
+        };
+        if &self.text[prev..self.cursor] != "\\" {
+            return;
+        }
+        self.text.replace_range(prev..self.cursor, "\n");
+        self.cursor = prev + 1;
+    }
+
     pub fn delete(&mut self) {
         if self.delete_selection() {
             return;
@@ -1316,53 +1341,51 @@ fn previous_word_start(text: &str, cursor: usize) -> Option<usize> {
 }
 
 fn wrap_rows(text: &str, cursor: usize, width: usize) -> (Vec<String>, usize, usize) {
-    let mut rows = Vec::new();
-    let mut row = String::new();
-    let mut row_width = 0;
-    let mut cursor_row = 0;
-    let mut cursor_col = 0;
-    let mut cursor_seen = false;
-
-    if cursor == 0 {
-        cursor_seen = true;
-    }
-
-    for (byte_idx, grapheme) in grapheme::indices(text) {
-        if !cursor_seen && byte_idx == cursor {
-            cursor_seen = true;
-            cursor_row = rows.len();
-            cursor_col = row_width;
+    let width = width.max(1);
+    let mut rows: Vec<(usize, usize)> = Vec::new();
+    let mut line_start = 0usize;
+    for line in text.split_inclusive('\n') {
+        let line_end = line_start + line.len();
+        let content_end = line_end - usize::from(line.ends_with('\n'));
+        let mut row_start = line_start;
+        let mut row_width = 0usize;
+        let mut last_space: Option<usize> = None;
+        for (offset, grapheme) in grapheme::indices(&text[line_start..content_end]) {
+            let idx = line_start + offset;
+            let grapheme_width = grapheme::grapheme_width(grapheme);
+            if row_width > 0 && row_width + grapheme_width > width && grapheme != " " {
+                let break_at = last_space.filter(|at| *at > row_start).unwrap_or(idx);
+                rows.push((row_start, break_at));
+                row_start = break_at;
+                row_width = grapheme::display_width(&text[break_at..idx]);
+                last_space = None;
+            }
+            row_width += grapheme_width;
+            if grapheme == " " {
+                last_space = Some(idx + grapheme.len());
+            }
         }
+        rows.push((row_start, content_end));
+        line_start = line_end;
+    }
+    if text.ends_with('\n') || text.is_empty() {
+        rows.push((text.len(), text.len()));
+    }
 
-        if grapheme == "\n" {
-            rows.push(row);
-            row = String::new();
-            row_width = 0;
-            continue;
+    let mut cursor_row = rows.len() - 1;
+    let mut cursor_col = 0usize;
+    for (index, (start, end)) in rows.iter().enumerate() {
+        let terminal = text[*end..].starts_with('\n') || *end == text.len();
+        if cursor < *end || (cursor == *end && terminal) {
+            cursor_row = index;
+            cursor_col = grapheme::display_width(&text[*start..cursor.min(*end)]);
+            break;
         }
-
-        let grapheme_width = grapheme::grapheme_width(grapheme);
-        if row_width > 0 && row_width + grapheme_width > width {
-            rows.push(row);
-            row = String::new();
-            row_width = 0;
-        }
-        row.push_str(grapheme);
-        row_width += grapheme_width;
     }
-
-    if !cursor_seen {
-        cursor_row = rows.len();
-        cursor_col = row_width;
-    }
-    rows.push(row);
-    if cursor_seen && cursor == text.len() && text.ends_with('\n') {
-        cursor_row = rows.len() - 1;
-        cursor_col = 0;
-    } else if cursor_seen && cursor == text.len() {
-        cursor_row = rows.len() - 1;
-        cursor_col = grapheme::display_width(rows.last().map(String::as_str).unwrap_or_default());
-    }
+    let rows = rows
+        .into_iter()
+        .map(|(start, end)| text[start..end].to_string())
+        .collect();
     (rows, cursor_row, cursor_col)
 }
 
@@ -1612,6 +1635,55 @@ mod tests {
         composer.insert_explicit_newline(t(100));
         composer.insert_char('b', t(200));
         assert_eq!(composer.text(), "a\nb");
+    }
+
+    #[test]
+    fn wrap_rows_breaks_at_word_boundaries_and_maps_the_cursor() {
+        let text = "The quick brown fox jumps";
+        let (rows, row, col) = wrap_rows(text, text.len(), 10);
+        assert_eq!(rows, vec!["The quick ", "brown fox ", "jumps"]);
+        assert_eq!((row, col), (2, 5));
+
+        let (_, row, col) = wrap_rows(text, 10, 10);
+        assert_eq!((row, col), (1, 0));
+        let (_, row, col) = wrap_rows(text, 4, 10);
+        assert_eq!((row, col), (0, 4));
+
+        let (rows, row, col) = wrap_rows("abcdefghijkl", 12, 5);
+        assert_eq!(rows, vec!["abcde", "fghij", "kl"]);
+        assert_eq!((row, col), (2, 2));
+
+        let (rows, row, col) = wrap_rows("one two\nthree", 8, 20);
+        assert_eq!(rows, vec!["one two", "three"]);
+        assert_eq!((row, col), (1, 0));
+
+        let (rows, row, col) = wrap_rows("done\n", 5, 20);
+        assert_eq!(rows, vec!["done", ""]);
+        assert_eq!((row, col), (1, 0));
+    }
+
+    #[test]
+    fn backslash_enter_inserts_newline_and_drops_the_backslash() {
+        let mut composer = ComposerState::new(Vec::new());
+        for (idx, ch) in "abc\\".chars().enumerate() {
+            composer.insert_char(ch, t(idx as u64));
+        }
+        assert_eq!(composer.enter(t(10)), EnterDecision::InsertedNewline);
+        assert_eq!(composer.text(), "abc\n");
+        composer.insert_char('d', t(11));
+        assert_eq!(composer.text(), "abc\nd");
+        assert_eq!(composer.enter(t(12)), EnterDecision::Submit);
+        assert_eq!(composer.submit_text().as_deref(), Some("abc\nd"));
+    }
+
+    #[test]
+    fn backslash_not_adjacent_to_cursor_still_submits() {
+        let mut composer = ComposerState::new(Vec::new());
+        for (idx, ch) in "a\\b".chars().enumerate() {
+            composer.insert_char(ch, t(idx as u64));
+        }
+        assert_eq!(composer.enter(t(10)), EnterDecision::Submit);
+        assert_eq!(composer.submit_text().as_deref(), Some("a\\b"));
     }
 
     #[test]

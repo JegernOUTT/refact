@@ -23,12 +23,7 @@ pub(crate) fn render_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect
 }
 
 pub(crate) fn render_live_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    render_transcript_view(
-        frame,
-        app,
-        area,
-        "History is in native scrollback. Start typing below.",
-    );
+    render_transcript_view(frame, app, area, None);
 }
 
 pub(crate) fn render_full_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -36,11 +31,27 @@ pub(crate) fn render_full_transcript(frame: &mut Frame<'_>, app: &mut App, area:
         frame,
         app,
         area,
-        "Start typing. Enter sends, Shift-Enter inserts a newline.",
+        Some("Start typing. Enter sends, Shift-Enter inserts a newline."),
     );
 }
 
-fn render_transcript_view(frame: &mut Frame<'_>, app: &mut App, area: Rect, empty_hint: &str) {
+pub(crate) fn live_content_height(app: &mut App, width: u16) -> u16 {
+    if width == 0 || app.visible_transcript().is_empty() {
+        return 0;
+    }
+    let total = prepare_transcript_children(app, width, None)
+        .iter()
+        .map(|child| usize::from(child.height))
+        .sum::<usize>();
+    saturating_u16(total)
+}
+
+fn render_transcript_view(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    empty_hint: Option<&str>,
+) {
     if area.is_empty() {
         return;
     }
@@ -52,10 +63,12 @@ fn render_transcript_view(frame: &mut Frame<'_>, app: &mut App, area: Rect, empt
 fn prepare_transcript_children(
     app: &mut App,
     width: u16,
-    empty_hint: &str,
+    empty_hint: Option<&str>,
 ) -> Vec<PreparedRenderable> {
     if app.visible_transcript().is_empty() {
-        return vec![prepare_hint(width, empty_hint)];
+        return empty_hint
+            .map(|hint| vec![prepare_hint(width, hint)])
+            .unwrap_or_default();
     }
     let mut children = Vec::new();
     let content_width = width.saturating_sub(TRANSCRIPT_GUTTER).max(1) as usize;
@@ -75,7 +88,9 @@ fn prepare_transcript_children(
         }
     }
     if children.is_empty() {
-        vec![prepare_hint(width, empty_hint)]
+        empty_hint
+            .map(|hint| vec![prepare_hint(width, hint)])
+            .unwrap_or_default()
     } else {
         children
     }

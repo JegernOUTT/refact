@@ -1,5 +1,7 @@
 use super::super::*;
 
+pub(crate) const CTRL_C_QUIT_WINDOW: Duration = Duration::from_millis(1500);
+
 impl App {
     pub(super) fn handle_history_search_key(&mut self, key: KeyEvent) -> Option<AppAction> {
         if !self.composer.history_search_active() {
@@ -319,14 +321,18 @@ impl App {
             self.last_ctrl_c = None;
             return AppAction::Abort;
         }
+        if !self.composer.is_empty() {
+            self.composer.clear();
+            self.last_ctrl_c = None;
+            return AppAction::None;
+        }
         let now = Instant::now();
         if self
             .last_ctrl_c
-            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(900))
+            .is_some_and(|last| now.duration_since(last) < CTRL_C_QUIT_WINDOW)
         {
             self.should_quit = true;
         } else {
-            self.add_notice("Press Ctrl-C again to exit");
             self.last_ctrl_c = Some(now);
         }
         AppAction::None

@@ -182,22 +182,25 @@ Run the matrix with `RUST_TEST_THREADS=1 cargo test -p refact-tui --test tui_ren
 
 - `REFACT_DAEMON_URL` takes precedence over the launcher-provided daemon URL. `REFACT_DAEMON_TOKEN`, when set, is supplied as the explicit daemon token.
 - `REFACT_TUI_SURFACES=1` enables the rollout surfaces and controls: settings, mode and permissions pickers, goal mutations, Activity, Browser, task board, and worktree operations. The accepted enable values are `1`, `true`, `yes`, and `on`, case-insensitively; the default is disabled. `/subagents` still shows its local activity card without the flag.
-- `REFACT_TUI_ALT_SCREEN=1` uses the alternate-screen transcript fallback instead of the default inline viewport. `REFACT_TUI_HYPERLINKS=1` or `0` forces OSC8 hyperlink probing on or off.
+- `REFACT_TUI_ALT_SCREEN=1` uses the alternate-screen transcript fallback instead of the default inline viewport. `REFACT_TUI_HYPERLINKS=1` or `0` forces OSC8 hyperlink probing on or off. `REFACT_TUI_ENHANCED_KEYS=1` or `0` forces the kitty keyboard protocol on or off instead of probing for it.
 - `REFACT_TUI_SIXEL` opts into sixel image output when color is enabled. Kitty and iTerm2 image protocols are detected from terminal environment data; unsupported terminals retain the textual image fallback.
 - `REFACT_TUI_TERMINAL_TITLE=1` or `0` overrides the terminal-title setting. `REFACT_TUI_REDUCED_MOTION` enables reduced motion, and `REFACT_TUI_NOTIFY` can disable notifications with `quiet`, `silent`, `none`, `disabled`, or a false value.
 
 ## Native scrollback
 
-C-3 uses `ratatui::Viewport::Inline` by default. Finalized transcript cells are rendered once, queued through `history::HistoryBuffer`, and inserted with `Terminal::insert_before`, so the transcript lives in the terminal's native scrollback and mouse copy works on real terminal text. The frame render path only redraws the inline live region: active stream tail, running tools, approvals, composer, and footer.
+The default terminal mode uses `ratatui::Viewport::Inline` with the `scrolling-regions` feature, so history is inserted with DECSTBM scroll regions and the terminal owns scrollback, mouse wheel scrolling, and text selection. The TUI never enables mouse reporting in this mode. Finalized transcript cells are rendered once, queued through `history::HistoryBuffer`, and inserted with `Terminal::insert_before`; the inline live region is only as tall as its content: a status row (`Working…` while busy, blank when idle), running tool cards and approvals, the composer box, its key hints, and the footer. The viewport is resized in place (top-anchored) whenever that height changes, without cursor-position probes.
 
-Set `REFACT_TUI_ALT_SCREEN=1` to use the previous alternate-screen/full-transcript fallback for terminals or CI environments where inline viewport behavior is not usable. In fallback mode, the flat transcript remains in the frame buffer and PageUp/PageDown keep the legacy local scroll behavior.
+Inserted cells are immutable. Streamed assistant lines are committed to scrollback as they complete (the uncommitted tail is not drawn), so a finished stream only inserts its remainder; the persisted `message_added` for the same message id is deduplicated by identity, as are optimistic user echoes (`client_message_id`), tool results, local notices, and replayed snapshots. Corrections to content that is already on screen are not re-rendered; genuinely new messages are appended. Completed tool cards move into scrollback as soon as their result arrives.
 
-Resize policy matches Codex: pending finalized cells re-render at the current width before insertion, while content already inserted into native scrollback keeps the width it had when inserted.
-Resize reflow is capped to 1,000 pending finalized cells per frame. Extra pending cells remain queued and render on later frames, so resize cannot force unbounded transcript rewrapping.
+Full-screen layers (help, transcript overlay, settings, History, Board, Browser, Activity) render on the alternate screen and leave the main screen untouched; pickers and approvals grow the live region above the composer and shrink it again when closed. On resize the screen is cleared and the last screenful of history is re-rendered at the new width above the composer (debounced 75ms); rows the terminal already pushed into scrollback are not rewritten. The old `Clear(Purge)` reflow that rewrote the whole scrollback after every turn is gone.
+
+Set `REFACT_TUI_ALT_SCREEN=1` to use the alternate-screen/full-transcript fallback for terminals or CI environments where inline viewport behavior is not usable. In fallback mode the flat transcript remains in the frame buffer, mouse capture is enabled, and the wheel or PageUp/PageDown scroll it locally.
 
 Markdown links carry hyperlink metadata beside visible ratatui lines. OSC8 bytes are emitted only at the terminal output boundary, so wrapping and width calculations see plain visible text. `NO_COLOR`, `TERM=dumb`, and unsupported terminals keep the same styled visible text without OSC8; `REFACT_TUI_HYPERLINKS=1` or `0` overrides probing.
 
-Recovery snapshots replace the inline live region and pending finalized cells using revision-aware transcript keys, so changed content with stable message ids is rendered while identical snapshots do not enqueue duplicate cells. Finalized cells already inserted into native terminal scrollback are intentionally left as-is; the live transcript and future pending insertions follow the latest snapshot.
+## Keyboard
+
+Enter sends. A newline is inserted with Shift-Enter when the terminal supports the kitty keyboard protocol (queried once at startup and enabled with `DISAMBIGUATE_ESCAPE_CODES | REPORT_ALTERNATE_KEYS`; `REFACT_TUI_ENHANCED_KEYS=0|1` forces it off or on), and always with `\` followed by Enter, Alt-Enter, or Ctrl-J. The composer hint shows `Shift-Enter` or `\+Enter` depending on what was detected. Vim mode is opt-in through `/vim` or a `toggle-vim` keymap binding; it is no longer bound to Ctrl-V. Ctrl-C clears a non-empty draft, interrupts an active turn, and otherwise arms a quit that a second Ctrl-C within 1.5s completes (the arming hint is shown in the composer frame, not in the transcript). The composer wraps at word boundaries and only breaks inside words that are wider than the box.
 
 ## External editor
 
@@ -211,3 +214,18 @@ REFACT_SKIP_GUI_BUILD=1 REFACT_DAEMON_WORKER_CMD="python3 tests/fake_worker.py" 
 ```
 
 This smoke command intentionally skips refreshing embedded GUI assets; use the normal engine build when those assets must be bundled. Type a prompt and press Enter to stream the fake worker response, press Esc during a turn to send abort, press F2 or `/events` to toggle daemon events/workers, use `/theme` to apply a built-in theme, and press Ctrl-Q or `/quit` to restore the terminal and exit cleanly.
+
+## Headless harness
+
+`tools/dev/tui.sh` drives the real binary inside a detached tmux pane against an isolated daemon (temporary `REFACT_DAEMON_DIR`, free port, `XDG_CACHE_HOME`) backed by `tests/tui_fake_worker.py`, a stateful worker that keeps per-chat history, streams keyword-scripted answers (`long`, `code`, `table`, `tool`, `approve` for a pause/approval round-trip, `think` for a reasoning stream, `slow`, default echo), handles `abort`, and echoes `client_message_id` like the engine does. The tmux server is spawned through `systemd-run --user` when the caller is seccomp-filtered (agent exec tools install a `RET_TRACE` filter that would otherwise turn the TUI's file writes into `ENOSYS`).
+
+```bash
+tools/dev/tui.sh start [--cols 120 --rows 40] [--alt-screen]
+tools/dev/tui.sh type "long" && tools/dev/tui.sh keys Enter
+tools/dev/tui.sh screen --history      # pane plus scrollback, numbered rows
+tools/dev/tui.sh resize 100 30         # real SIGWINCH
+tools/dev/tui.sh keys M-Enter C-q      # tmux key names
+tools/dev/tui.sh stop
+```
+
+`screen --history` is the fastest way to prove that every transcript row is emitted exactly once; `tmux display -p '#{mouse_any_flag}'` on the pane confirms that inline mode never requests mouse reporting.

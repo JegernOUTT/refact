@@ -1,17 +1,47 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, SessionState};
 use crate::key_hint;
-use crate::style::user_message_style;
+use crate::theme::ThemeRole;
 use crate::ui_consts::{FOOTER_INDENT_COLS, LIVE_PREFIX_COLS};
 use crate::vendored::line_truncation::truncate_line_with_ellipsis_if_overflow;
 
 const MAX_COMPOSER_ROWS: u16 = 8;
-const FOOTER_ROWS: u16 = 1;
+const HINT_ROWS: u16 = 1;
+const BORDER_ROWS: u16 = 2;
+const BORDER_COLS: u16 = 2;
+const FRAMED_MIN_FRAME_HEIGHT: u16 = 16;
+const HINT_MIN_FRAME_HEIGHT: u16 = 11;
+
+pub(crate) fn desired_height(app: &App, width: u16, frame_height: u16) -> u16 {
+    let framed = frame_height >= FRAMED_MIN_FRAME_HEIGHT;
+    let text_width = if framed {
+        text_width_for(width)
+    } else {
+        width.saturating_sub(LIVE_PREFIX_COLS + 1).max(1)
+    };
+    let text_rows = app.composer_state().height(text_width, MAX_COMPOSER_ROWS);
+    let chrome = if framed {
+        BORDER_ROWS + HINT_ROWS
+    } else if frame_height >= HINT_MIN_FRAME_HEIGHT {
+        HINT_ROWS
+    } else {
+        0
+    };
+    text_rows
+        .saturating_add(chrome)
+        .saturating_add(app.queue_preview_height())
+}
+
+fn text_width_for(width: u16) -> u16 {
+    width
+        .saturating_sub(BORDER_COLS + LIVE_PREFIX_COLS + 1)
+        .max(1)
+}
 
 pub(crate) fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let queue_height = app.queue_preview_height().min(area.height);
@@ -29,22 +59,50 @@ pub(crate) fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         return;
     }
 
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::LEFT)
-            .style(user_message_style()),
-        input_area,
-    );
-
-    let inner = Rect {
-        x: input_area.x.saturating_add(1),
-        y: input_area.y,
-        width: input_area.width.saturating_sub(1),
-        height: input_area.height,
+    let text_rows = app
+        .composer_state()
+        .height(text_width_for(input_area.width), MAX_COMPOSER_ROWS)
+        .max(1);
+    let framed = input_area.height >= text_rows + BORDER_ROWS
+        && input_area.width > BORDER_COLS + LIVE_PREFIX_COLS + 1;
+    let chrome_rows = if framed { BORDER_ROWS } else { 0 };
+    let hint_height = if input_area.height > text_rows + chrome_rows {
+        HINT_ROWS
+    } else {
+        0
+    };
+    let box_area = Rect {
+        height: input_area.height.saturating_sub(hint_height),
+        ..input_area
     };
     let status = composer_status(app);
-    let footer_height = FOOTER_ROWS.min(inner.height.saturating_sub(1));
-    let editor_area = editor_area(inner, footer_height);
+    let inner = if framed {
+        let mut block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(app.theme().style(ThemeRole::Border));
+        if let Some(status) = status.as_deref() {
+            block = block.title(Line::from(Span::styled(
+                format!(" {status} "),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        let inner = block.inner(box_area);
+        frame.render_widget(block, box_area);
+        Rect {
+            x: inner.x.saturating_add(1),
+            width: inner.width.saturating_sub(1),
+            ..inner
+        }
+    } else {
+        box_area
+    };
+    let editor_area = Rect {
+        x: inner.x.saturating_add(LIVE_PREFIX_COLS),
+        y: inner.y,
+        width: inner.width.saturating_sub(LIVE_PREFIX_COLS),
+        height: inner.height,
+    };
     let text_width = editor_area.width.max(1);
     let max_rows = editor_area.height.min(MAX_COMPOSER_ROWS).max(1);
     let view = app.composer_state().view(text_width, max_rows);
@@ -65,7 +123,12 @@ pub(crate) fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if editor_area.height > 0 && editor_area.width > 0 {
         frame.render_widget(
             Paragraph::new(Line::from(prompt_span(app))),
-            prompt_area(inner),
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: LIVE_PREFIX_COLS.min(inner.width),
+                height: 1,
+            },
         );
         frame.render_widget(
             Paragraph::new(lines).wrap(Wrap { trim: false }),
@@ -82,18 +145,18 @@ pub(crate) fn render_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }
     }
 
-    if footer_height > 0 {
-        let footer_area = Rect {
-            x: inner.x,
-            y: inner.y.saturating_add(inner.height.saturating_sub(1)),
-            width: inner.width,
-            height: 1,
+    if hint_height > 0 {
+        let hint_area = Rect {
+            x: input_area.x,
+            y: box_area.bottom(),
+            width: input_area.width,
+            height: hint_height,
         };
-        let footer = truncate_line_with_ellipsis_if_overflow(
-            composer_footer_line(app, status),
-            footer_area.width as usize,
+        let hints = truncate_line_with_ellipsis_if_overflow(
+            composer_hint_line(app, if framed { None } else { status }),
+            hint_area.width as usize,
         );
-        frame.render_widget(Paragraph::new(footer), footer_area);
+        frame.render_widget(Paragraph::new(hints), hint_area);
     }
 }
 
@@ -126,24 +189,6 @@ fn line_with_paste_placeholders(line: String, placeholders: &[String]) -> Line<'
     Line::from(spans)
 }
 
-fn editor_area(area: Rect, footer_height: u16) -> Rect {
-    Rect {
-        x: area.x.saturating_add(LIVE_PREFIX_COLS),
-        y: area.y,
-        width: area.width.saturating_sub(LIVE_PREFIX_COLS + 1),
-        height: area.height.saturating_sub(footer_height),
-    }
-}
-
-fn prompt_area(area: Rect) -> Rect {
-    Rect {
-        x: area.x,
-        y: area.y,
-        width: LIVE_PREFIX_COLS,
-        height: 1,
-    }
-}
-
 fn prompt_span(app: &App) -> Span<'static> {
     let prompt = if app.session_state() == SessionState::WaitingUserInput {
         "?"
@@ -156,6 +201,7 @@ fn prompt_span(app: &App) -> Span<'static> {
 fn composer_status(app: &App) -> Option<String> {
     match app.session_state() {
         _ if app.composer_history_search().is_some() => Some(history_search_title(app)),
+        _ if app.ctrl_c_quit_armed().is_some() => Some("Ctrl-C again to exit".to_string()),
         SessionState::Generating => Some("generating · Enter queues · Esc cancels".to_string()),
         SessionState::ExecutingTools => {
             Some("running tools · Enter queues · Esc cancels".to_string())
@@ -172,34 +218,45 @@ fn composer_status(app: &App) -> Option<String> {
     }
 }
 
-fn composer_footer_line(app: &App, status: Option<String>) -> Line<'static> {
+fn composer_hint_line(app: &App, status: Option<String>) -> Line<'static> {
     let mut spans = vec![Span::raw(" ".repeat(FOOTER_INDENT_COLS))];
     if let Some(status) = status {
         spans.push(Span::styled(status, Style::default().fg(Color::DarkGray)));
         spans.push(Span::raw("   "));
     }
-    spans.extend(key_hint::pair("Enter", "send").spans);
-    spans.push(Span::raw("   "));
-    let newline = app
-        .keymap()
-        .binding_label(
-            crate::keymap::KeyContext::Main,
-            crate::keymap::KeyAction::InsertNewline,
-        )
-        .and_then(|label| label.split('/').next().map(str::to_string))
-        .unwrap_or_else(|| "Ctrl-J".to_string());
-    spans.extend(key_hint::pair(newline, "newline").spans);
-    if matches!(
+    let busy = matches!(
         app.session_state(),
         SessionState::Generating
             | SessionState::ExecutingTools
             | SessionState::Paused
             | SessionState::WaitingIde
-    ) {
-        spans.push(Span::raw("   "));
-        spans.extend(key_hint::pair("Enter", "queue").spans);
+    );
+    spans.extend(key_hint::pair("Enter", if busy { "queue" } else { "send" }).spans);
+    spans.push(Span::raw("  ·  "));
+    spans.extend(key_hint::pair(newline_hint(app), "newline").spans);
+    if busy {
+        spans.push(Span::raw("  ·  "));
+        spans.extend(key_hint::pair("Esc", "interrupt").spans);
     }
+    spans.push(Span::raw("  ·  "));
+    let help = app
+        .keymap()
+        .binding_label(
+            crate::keymap::KeyContext::Main,
+            crate::keymap::KeyAction::ShowHelp,
+        )
+        .and_then(|label| label.split('/').next().map(str::to_string))
+        .unwrap_or_else(|| "?".to_string());
+    spans.extend(key_hint::pair(help, "shortcuts").spans);
     Line::from(spans).dim()
+}
+
+fn newline_hint(app: &App) -> String {
+    if app.enhanced_keys_supported() {
+        "Shift-Enter".to_string()
+    } else {
+        "\\+Enter".to_string()
+    }
 }
 
 pub(crate) fn history_search_title(app: &App) -> String {
@@ -304,7 +361,7 @@ mod tests {
     #[test]
     fn composer_renders_framed_placeholder_and_footer_hints() {
         let app = App::new(project());
-        let mut terminal = Terminal::new(TestBackend::new(64, 3)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(64, 4)).unwrap();
 
         terminal
             .draw(|frame| render_composer(frame, &app, frame.area()))
@@ -321,9 +378,14 @@ mod tests {
         assert!(text.contains("› Ask Refact…"));
         assert!(text.contains("Enter send"));
         assert!(text.contains("newline"));
+        assert!(text.contains("╭"));
+        assert!(text.contains("╰"));
         assert!(text.contains("│"));
         assert!(!text.contains("message"));
         assert!(placeholder.style().add_modifier.contains(Modifier::DIM));
+        assert_eq!(desired_height(&app, 64, 40), 4);
+        assert_eq!(desired_height(&app, 64, 15), 2);
+        assert_eq!(desired_height(&app, 64, 10), 1);
     }
 
     #[test]
@@ -352,13 +414,29 @@ mod tests {
     fn composer_cursor_accounts_for_border_and_prompt() {
         let mut app = App::new(project());
         app.test_set_composer_text("hello");
-        let mut terminal = Terminal::new(TestBackend::new(40, 2)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(40, 4)).unwrap();
 
         terminal
             .draw(|frame| render_composer(frame, &app, frame.area()))
             .unwrap();
 
-        terminal.backend_mut().assert_cursor_position((8, 0));
+        terminal.backend_mut().assert_cursor_position((9, 1));
+    }
+
+    #[test]
+    fn composer_degrades_to_borderless_layout_in_two_rows() {
+        let mut app = App::new(project());
+        app.test_set_composer_text("hello");
+        let mut terminal = Terminal::new(TestBackend::new(40, 2)).unwrap();
+
+        terminal
+            .draw(|frame| render_composer(frame, &app, frame.area()))
+            .unwrap();
+        let text = buffer_text(&terminal);
+
+        assert!(text.contains("› hello"));
+        assert!(!text.contains("╭"));
+        terminal.backend_mut().assert_cursor_position((7, 0));
     }
 
     #[test]

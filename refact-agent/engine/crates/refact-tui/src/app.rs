@@ -23,8 +23,8 @@ use crate::composer::{load_history, save_history, ComposerState, EnterDecision, 
 use crate::events_pane::{DaemonEventRecord, EventsPaneState};
 use crate::history::cells::HistoryRenderMode;
 use crate::history::{
-    insert_history, resize_reflow_row_cap_from_env, HistoryBuffer, HistoryInsertion,
-    ResizeReflowState, RESIZE_REFLOW_PENDING_CELL_CAP,
+    insert_history, HistoryBuffer, HistoryInsertion, ResizeReflowState,
+    RESIZE_REFLOW_PENDING_CELL_CAP,
 };
 use crate::keymap::{
     HelpRow, KeyAction, KeyContext, KeyDispatch, KeymapRegistry, VimEffect, VimMode, VimState,
@@ -58,7 +58,7 @@ mod browser;
 mod chat_events;
 mod command_results;
 mod goal;
-mod input;
+pub(crate) mod input;
 mod runtime;
 #[path = "app/session.rs"]
 mod session_lifecycle;
@@ -269,6 +269,7 @@ impl App {
         self.stream_controller.clear();
         self.reasoning_stream_active = false;
         self.plan_stream_controller = None;
+        self.plan_stream_pushed.clear();
         self.stream_chunking_policy.reset();
     }
 
@@ -284,26 +285,32 @@ impl App {
             .drain_pending_capped(width, RESIZE_REFLOW_PENDING_CELL_CAP)
     }
 
-    fn resize_reflow_insertions(&mut self, width: u16) -> Vec<HistoryInsertion> {
-        self.history
-            .reflow_insertions(width, self.resize_reflow_row_cap)
+    fn resize_reflow_insertions(&mut self, width: u16, max_rows: usize) -> Vec<HistoryInsertion> {
+        self.history.inserted_tail_insertions(width, max_rows)
     }
 
-    fn note_terminal_resize_width(&mut self, width: u16) -> bool {
-        self.update_stream_width_for_terminal(width);
-        if !self.native_scrollback {
-            self.resize_reflow.clear();
-            return false;
+    pub fn note_terminal_resize(&mut self) {
+        if self.native_scrollback {
+            self.resize_reflow.schedule_debounced();
         }
-        let width_change = self.resize_reflow.note_width(width);
-        if !width_change.changed || self.history.source_cell_count() == 0 {
-            return false;
-        }
-        if self.should_mark_resize_reflow_as_stream_time() {
-            self.resize_reflow.mark_resize_requested_during_stream();
-        }
-        self.resize_reflow.schedule_debounced(Some(width));
-        true
+    }
+
+    fn resize_reflow_pending(&self) -> bool {
+        self.resize_reflow.has_pending_reflow()
+    }
+
+    fn resize_reflow_is_due(&self) -> bool {
+        self.resize_reflow.pending_is_due(Instant::now())
+    }
+
+    fn resize_reflow_delay(&self) -> Option<Duration> {
+        self.resize_reflow
+            .pending_until()
+            .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+    }
+
+    fn finish_resize_reflow(&mut self) {
+        self.resize_reflow.clear_pending_reflow();
     }
 
     fn update_stream_width_for_terminal(&mut self, width: u16) {
@@ -334,52 +341,6 @@ impl App {
                 self.sync_plan_stream_tail_item();
             }
         }
-    }
-
-    fn note_terminal_height_resize(&mut self) -> bool {
-        if !self.native_scrollback || self.history.source_cell_count() == 0 {
-            return false;
-        }
-        if self.should_mark_resize_reflow_as_stream_time() {
-            self.resize_reflow.mark_resize_requested_during_stream();
-        }
-        self.resize_reflow.schedule_debounced(None);
-        true
-    }
-
-    fn resize_reflow_is_due(&self) -> bool {
-        self.resize_reflow.pending_is_due(Instant::now())
-    }
-
-    fn resize_reflow_delay(&self) -> Option<Duration> {
-        self.resize_reflow
-            .pending_until()
-            .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
-    }
-
-    fn finish_resize_reflow(&mut self, width: u16, ran_during_stream: bool) {
-        self.resize_reflow.clear_pending_reflow();
-        self.resize_reflow.mark_reflowed_width(width);
-        if ran_during_stream {
-            self.resize_reflow.mark_ran_during_stream();
-        }
-    }
-
-    fn schedule_final_stream_resize_reflow(&mut self) {
-        if self.native_scrollback
-            && self.history.source_cell_count() > 0
-            && self.resize_reflow.take_stream_finish_reflow_needed()
-        {
-            self.resize_reflow.schedule_immediate();
-        }
-    }
-
-    fn should_mark_resize_reflow_as_stream_time(&self) -> bool {
-        self.session_state.shows_working_indicator()
-            || self
-                .transcript
-                .iter()
-                .any(|item| matches!(item, TranscriptItem::Assistant(_)))
     }
 
     pub fn set_native_scrollback(&mut self, enabled: bool) {
@@ -1421,37 +1382,67 @@ fn assistant_stream_width(width: u16) -> Option<usize> {
 fn render_frame(terminal: &mut TerminalSession, app: &mut App) -> Result<(), TuiError> {
     terminal.set_title(&app.terminal_title())?;
     if app.native_scrollback() {
-        let width = terminal.terminal_mut().size()?.width;
-        app.note_terminal_resize_width(width);
-        if app.resize_reflow_is_due() {
-            let ran_during_stream = app.should_mark_resize_reflow_as_stream_time();
-            terminal.clear_for_resize_reflow()?;
-            for insertion in app.resize_reflow_insertions(width) {
-                insert_history(terminal.terminal_mut(), insertion)?;
-            }
-            app.finish_resize_reflow(width, ran_during_stream);
-        } else {
-            for insertion in app.pending_history_insertions(width) {
-                insert_history(terminal.terminal_mut(), insertion)?;
-            }
+        let size = terminal.size()?;
+        app.set_screen_height(size.height);
+        app.update_stream_width_for_terminal(size.width);
+        let fullscreen_layer = app.surface_layer().fills_screen();
+        if fullscreen_layer && !terminal.alt_screen_active() {
+            terminal.enter_alt_screen()?;
+        } else if !fullscreen_layer && terminal.alt_screen_active() {
+            terminal.leave_alt_screen()?;
         }
+        if terminal.alt_screen_active() {
+            terminal.begin_synchronized_update()?;
+            let result = terminal
+                .draw_target()
+                .draw(|frame| crate::ui::render(frame, app))
+                .map(|_| ());
+            terminal.end_synchronized_update()?;
+            result?;
+            return Ok(());
+        }
+        if app.resize_reflow_pending() && !app.resize_reflow_is_due() {
+            return Ok(());
+        }
+        terminal.begin_synchronized_update()?;
+        if app.resize_reflow_pending() {
+            let height = crate::ui::inline_viewport_height(app, size);
+            terminal.restart_screen(height)?;
+            let rows = usize::from(size.height.saturating_sub(height));
+            for insertion in app.resize_reflow_insertions(size.width, rows) {
+                insert_history(terminal.terminal_mut(), insertion)?;
+            }
+            for insertion in app.pending_history_insertions(size.width) {
+                insert_history(terminal.terminal_mut(), insertion)?;
+            }
+            app.finish_resize_reflow();
+        } else {
+            for insertion in app.pending_history_insertions(size.width) {
+                insert_history(terminal.terminal_mut(), insertion)?;
+            }
+            let height = crate::ui::inline_viewport_height(app, size);
+            terminal.set_inline_height(height)?;
+        }
+        let result = terminal
+            .terminal_mut()
+            .draw(|frame| crate::ui::render(frame, app))
+            .map(|_| ());
+        terminal.end_synchronized_update()?;
+        result?;
+        return Ok(());
     }
     let completed_frame = terminal
         .terminal_mut()
         .draw(|frame| crate::ui::render(frame, app))?;
-    if !app.native_scrollback() {
-        let positions = crate::terminal_image::image_positions(
-            completed_frame.buffer,
-            app.visible_transcript(),
-        );
-        let mut images = crate::app::transcript::inline_images_for_visible_transcript(
-            app.visible_transcript(),
-            crate::terminal_probe::image_protocol_from_env(),
-            &positions,
-        );
-        browser::append_inline_image(app, completed_frame.buffer, &mut images);
-        terminal.write_inline_images(&images)?;
-    }
+    let positions =
+        crate::terminal_image::image_positions(completed_frame.buffer, app.visible_transcript());
+    let mut images = crate::app::transcript::inline_images_for_visible_transcript(
+        app.visible_transcript(),
+        crate::terminal_probe::image_protocol_from_env(),
+        &positions,
+    );
+    browser::append_inline_image(app, completed_frame.buffer, &mut images);
+    terminal.write_inline_images(&images)?;
     Ok(())
 }
 
@@ -2308,11 +2299,11 @@ mod tests {
             "defaults": {"chat_default_model": "openai/gpt-demo"},
             "chat_models": {"openai/gpt-demo": {"name": "GPT Demo"}}
         }));
-        assert!(app.resize_reflow_is_due());
+        assert!(!app.resize_reflow_is_due());
         app.handle_chat_event(snapshot_event(&app, Vec::new()));
 
         assert_eq!(app.history_pending_count(), 0);
-        let reflow = app.resize_reflow_insertions(80);
+        let reflow = app.resize_reflow_insertions(80, 100);
         let rendered = reflow
             .iter()
             .flat_map(|insertion| insertion.lines.iter())
@@ -2355,7 +2346,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_snapshot_after_insertions_reflows_native_scrollback_region() {
+    fn changed_snapshot_after_insertions_keeps_inserted_cells_immutable() {
         let mut app = App::new(project());
         app.set_native_scrollback(true);
         app.pending_history_insertions(80);
@@ -2365,34 +2356,370 @@ mod tests {
         ];
 
         app.handle_chat_event(snapshot_event(&app, initial));
-        assert!(app.resize_reflow_is_due());
-        let first_reflow = app.resize_reflow_insertions(80);
-        app.finish_resize_reflow(80, false);
-        let first_text = first_reflow
-            .iter()
-            .flat_map(|insertion| insertion.lines.iter())
-            .map(|line| line_to_plain_string(&line.line))
-            .collect::<Vec<_>>()
-            .join("\n");
+        assert!(!app.resize_reflow_is_due());
+        let first_text = pending_plain_text(&mut app);
+        assert!(first_text.contains("hello"));
         assert!(first_text.contains("stale answer"));
+        let inserted_before = app.history_inserted_cell_count();
 
         let changed = vec![
             json!({"message_id": "u1", "role": "user", "content": "hello"}),
             json!({"message_id": "a1", "role": "assistant", "content": "fresh answer", "stream_finished": true}),
+            json!({"message_id": "a2", "role": "assistant", "content": "follow-up", "stream_finished": true}),
         ];
         app.handle_chat_event(snapshot_event(&app, changed));
 
-        assert!(app.resize_reflow_is_due());
-        let changed_reflow = app.resize_reflow_insertions(80);
-        let changed_text = changed_reflow
+        assert!(!app.resize_reflow_is_due());
+        let changed_text = pending_plain_text(&mut app);
+        assert!(changed_text.contains("follow-up"), "{changed_text}");
+        assert!(!changed_text.contains("fresh answer"), "{changed_text}");
+        assert!(!changed_text.contains("stale answer"), "{changed_text}");
+        assert!(!changed_text.contains("hello"), "{changed_text}");
+        assert_eq!(app.history_inserted_cell_count(), inserted_before + 1);
+        assert_eq!(app.history_pending_count(), 0);
+    }
+
+    #[test]
+    fn native_turn_renders_prompt_and_answer_exactly_once() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        app.composer.set_text("hello there");
+        let AppAction::SendMessage { correlation, .. } = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected send");
+        };
+        let mut rendered = pending_plain_lines(&mut app);
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"index": 0, "message": {
+                "message_id": "user-1",
+                "role": "user",
+                "content": "hello there",
+                "extra": {"client_message_id": correlation.client_message_id},
+            }}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "runtime_updated".to_string(),
+            raw: json!({"state": "generating"}),
+        });
+        rendered.extend(pending_plain_lines(&mut app));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_started".to_string(),
+            raw: json!({"message_id": "assistant-1"}),
+        });
+        let answer = "You said: hello there.\n\nThis is the default reply.\n\nSend another prompt.";
+        for chunk in [
+            "You said: ",
+            "hello there.\n\nThis is ",
+            "the default reply.\n\nSend ",
+            "another prompt.",
+        ] {
+            app.handle_chat_event(ChatEvent {
+                chat_id: Some(app.chat_id().to_string()),
+                seq: None,
+                kind: "stream_delta".to_string(),
+                raw: json!({"message_id": "assistant-1", "ops": [{"op": "append_content", "text": chunk}]}),
+            });
+            app.apply_stream_commit_tick();
+            rendered.extend(pending_plain_lines(&mut app));
+        }
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "stream_finished".to_string(),
+            raw: json!({"message_id": "assistant-1"}),
+        });
+        rendered.extend(pending_plain_lines(&mut app));
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "message_added".to_string(),
+            raw: json!({"index": 1, "message": {
+                "message_id": "assistant-1",
+                "role": "assistant",
+                "content": answer,
+                "stream_finished": true,
+            }}),
+        });
+        app.handle_chat_event(ChatEvent {
+            chat_id: Some(app.chat_id().to_string()),
+            seq: None,
+            kind: "runtime_updated".to_string(),
+            raw: json!({"state": "idle"}),
+        });
+        rendered.extend(pending_plain_lines(&mut app));
+
+        let joined = rendered.join("\n");
+        assert_eq!(joined.matches("hello there.").count(), 1, "{joined}");
+        assert_eq!(joined.matches("› hello there").count(), 1, "{joined}");
+        assert_eq!(joined.matches("another prompt.").count(), 1, "{joined}");
+        let trimmed = rendered.iter().map(|line| line.trim()).collect::<Vec<_>>();
+        let answer_start = trimmed
+            .iter()
+            .position(|line| *line == "• You said: hello there.")
+            .expect("answer start");
+        assert_eq!(
+            &trimmed[answer_start..answer_start + 5],
+            [
+                "• You said: hello there.",
+                "",
+                "This is the default reply.",
+                "",
+                "Send another prompt.",
+            ],
+            "{rendered:?}"
+        );
+        assert!(!app.resize_reflow_is_due());
+        assert!(
+            app.visible_transcript().is_empty(),
+            "{:?}",
+            app.visible_transcript()
+        );
+    }
+
+    #[test]
+    fn native_tool_turn_moves_finished_card_to_history_once() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        let mut rendered = Vec::new();
+        let event = |app: &mut App, kind: &str, raw: Value| {
+            app.handle_chat_event(ChatEvent {
+                chat_id: Some(app.chat_id().to_string()),
+                seq: None,
+                kind: kind.to_string(),
+                raw,
+            });
+        };
+        event(
+            &mut app,
+            "stream_started",
+            json!({"message_id": "assistant-1"}),
+        );
+        event(
+            &mut app,
+            "stream_delta",
+            json!({"message_id": "assistant-1", "ops": [{"op": "append_content", "text": "Let me look first.\n"}]}),
+        );
+        app.apply_stream_commit_tick();
+        rendered.extend(pending_plain_lines(&mut app));
+        let tool_calls = json!([{"id": "call-1", "type": "function", "function": {"name": "shell", "arguments": "{\"command\":\"ls -la\"}"}}]);
+        event(
+            &mut app,
+            "stream_delta",
+            json!({"message_id": "assistant-1", "ops": [{"op": "set_tool_calls", "tool_calls": tool_calls}]}),
+        );
+        event(
+            &mut app,
+            "stream_finished",
+            json!({"message_id": "assistant-1", "finish_reason": "tool_calls"}),
+        );
+        rendered.extend(pending_plain_lines(&mut app));
+        event(
+            &mut app,
+            "message_added",
+            json!({"index": 1, "message": {
+                "message_id": "assistant-1", "role": "assistant", "content": "Let me look first.\n",
+                "tool_calls": tool_calls, "stream_finished": true,
+            }}),
+        );
+        rendered.extend(pending_plain_lines(&mut app));
+        assert!(
+            app.visible_transcript()
+                .iter()
+                .any(|item| matches!(item, TranscriptItem::Tool(card) if card.status.is_active())),
+            "{:?}",
+            app.visible_transcript()
+        );
+        event(
+            &mut app,
+            "message_added",
+            json!({"index": 2, "message": {
+                "message_id": "tool-1", "role": "tool", "tool_call_id": "call-1",
+                "content": "total 8\ndrwxr-xr-x  src\n",
+            }}),
+        );
+        rendered.extend(pending_plain_lines(&mut app));
+        event(
+            &mut app,
+            "stream_started",
+            json!({"message_id": "assistant-2"}),
+        );
+        event(
+            &mut app,
+            "stream_delta",
+            json!({"message_id": "assistant-2", "ops": [{"op": "append_content", "text": "The listing shows a small project.\n"}]}),
+        );
+        event(
+            &mut app,
+            "stream_finished",
+            json!({"message_id": "assistant-2"}),
+        );
+        event(
+            &mut app,
+            "message_added",
+            json!({"index": 3, "message": {
+                "message_id": "assistant-2", "role": "assistant", "content": "The listing shows a small project.\n", "stream_finished": true,
+            }}),
+        );
+        event(&mut app, "runtime_updated", json!({"state": "idle"}));
+        rendered.extend(pending_plain_lines(&mut app));
+
+        let joined = rendered.join("\n");
+        assert!(
+            app.visible_transcript().is_empty(),
+            "{:?}\n{joined}",
+            app.visible_transcript()
+        );
+        assert_eq!(joined.matches("Let me look first.").count(), 1, "{joined}");
+        assert_eq!(joined.matches("ls -la").count(), 1, "{joined}");
+        assert_eq!(joined.matches("The listing shows").count(), 1, "{joined}");
+        assert!(joined.contains("succeeded"), "{joined}");
+    }
+
+    #[test]
+    fn aborted_stream_persisted_after_queued_dispatch_is_not_rendered_twice() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        let event = |app: &mut App, kind: &str, raw: Value| {
+            app.handle_chat_event(ChatEvent {
+                chat_id: Some(app.chat_id().to_string()),
+                seq: None,
+                kind: kind.to_string(),
+                raw,
+            });
+        };
+        app.composer.set_text("slow please");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            AppAction::SendMessage { .. }
+        ));
+        let mut rendered = pending_plain_lines(&mut app);
+        event(&mut app, "stream_started", json!({"message_id": "a1"}));
+        event(
+            &mut app,
+            "stream_delta",
+            json!({"message_id": "a1", "ops": [{"op": "append_content", "text": "Line one.\nLine two.\nLine three.\n"}]}),
+        );
+        for _ in 0..4 {
+            app.apply_stream_commit_tick();
+            rendered.extend(pending_plain_lines(&mut app));
+        }
+        assert!(
+            rendered.iter().any(|line| line.contains("Line one.")),
+            "{rendered:?}"
+        );
+
+        app.composer.set_text("queued follow-up");
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), AppAction::None);
+        assert_eq!(app.input_queue().len(), 1);
+        assert_eq!(app.handle_key(key(KeyCode::Esc)), AppAction::Abort);
+        let dispatched = app.handle_command_finished(
+            CommandContextTag::Abort {
+                origin: app.command_origin(),
+            },
+            Ok(()),
+        );
+        assert!(
+            matches!(dispatched, AppAction::SendMessage { .. }),
+            "{dispatched:?}"
+        );
+        rendered.extend(pending_plain_lines(&mut app));
+        event(
+            &mut app,
+            "stream_finished",
+            json!({"message_id": "a1", "finish_reason": "abort"}),
+        );
+        event(
+            &mut app,
+            "message_added",
+            json!({"index": 2, "message": {
+                "message_id": "a1", "role": "assistant", "content": "Line one.\nLine two.\nLine three.\n", "stream_finished": true,
+            }}),
+        );
+        rendered.extend(pending_plain_lines(&mut app));
+
+        let joined = rendered.join("\n");
+        assert_eq!(joined.matches("Line one.").count(), 1, "{joined}");
+        assert_eq!(joined.matches("Line three.").count(), 1, "{joined}");
+        assert_eq!(joined.matches("› queued follow-up").count(), 1, "{joined}");
+    }
+
+    #[test]
+    fn native_reasoning_is_archived_before_the_answer_it_precedes() {
+        let mut app = App::new(project());
+        app.set_native_scrollback(true);
+        app.pending_history_insertions(80);
+        let event = |app: &mut App, kind: &str, raw: Value| {
+            app.handle_chat_event(ChatEvent {
+                chat_id: Some(app.chat_id().to_string()),
+                seq: None,
+                kind: kind.to_string(),
+                raw,
+            });
+        };
+        event(&mut app, "stream_started", json!({"message_id": "a1"}));
+        event(
+            &mut app,
+            "stream_delta",
+            json!({"message_id": "a1", "ops": [{"op": "append_reasoning", "text": "weigh the options\n"}]}),
+        );
+        event(
+            &mut app,
+            "stream_delta",
+            json!({"message_id": "a1", "ops": [{"op": "append_content", "text": "Final answer.\n"}]}),
+        );
+        let mut rendered = Vec::new();
+        for _ in 0..3 {
+            app.apply_stream_commit_tick();
+            rendered.extend(pending_plain_lines(&mut app));
+        }
+        event(&mut app, "stream_finished", json!({"message_id": "a1"}));
+        event(
+            &mut app,
+            "message_added",
+            json!({"index": 1, "message": {
+                "message_id": "a1", "role": "assistant", "content": "Final answer.\n",
+                "reasoning": "weigh the options\n", "stream_finished": true,
+            }}),
+        );
+        rendered.extend(pending_plain_lines(&mut app));
+
+        let joined = rendered.join("\n");
+        let thinking = joined.find("Thinking").expect(&joined);
+        let answer = joined.find("Final answer.").expect(&joined);
+        assert!(thinking < answer, "{joined}");
+        assert_eq!(joined.matches("Thinking").count(), 1, "{joined}");
+        assert_eq!(joined.matches("Final answer.").count(), 1, "{joined}");
+        assert!(
+            app.visible_transcript().is_empty(),
+            "{:?}",
+            app.visible_transcript()
+        );
+    }
+
+    fn pending_plain_lines(app: &mut App) -> Vec<String> {
+        app.pending_history_insertions(80)
+            .iter()
+            .flat_map(|insertion| insertion.lines.iter())
+            .map(|line| line_to_plain_string(&line.line))
+            .collect()
+    }
+
+    fn pending_plain_text(app: &mut App) -> String {
+        app.pending_history_insertions(80)
             .iter()
             .flat_map(|insertion| insertion.lines.iter())
             .map(|line| line_to_plain_string(&line.line))
             .collect::<Vec<_>>()
-            .join("\n");
-        assert!(changed_text.contains("fresh answer"));
-        assert!(!changed_text.contains("stale answer"));
-        assert_eq!(app.history_pending_count(), 0);
+            .join("\n")
     }
 
     #[test]
@@ -2444,21 +2771,27 @@ mod tests {
         })];
 
         app.handle_chat_event(snapshot_event(&app, messages.clone()));
+        let mut committed = String::new();
+        for _ in 0..12 {
+            app.apply_stream_commit_tick();
+            committed.push_str(&pending_plain_text(&mut app));
+        }
+        assert!(committed.contains("- five"), "{committed}");
+        assert_eq!(committed.matches("- one").count(), 1, "{committed}");
         let visible_before = app.visible_transcript().len();
         let stream_text_before = plan_stream_text(&app);
-        assert!(stream_text_before.contains("- five"));
 
         app.handle_chat_event(snapshot_event(&app, messages));
 
         assert_eq!(app.history_pending_count(), 0);
         assert_eq!(app.visible_transcript().len(), visible_before);
         assert_eq!(plan_stream_text(&app), stream_text_before);
-        assert_eq!(
+        assert!(
             app.visible_transcript()
                 .iter()
                 .filter(|item| matches!(item, TranscriptItem::PlanStream(_)))
-                .count(),
-            1
+                .count()
+                <= 1
         );
     }
 
@@ -2493,7 +2826,7 @@ mod tests {
             kind: "stream_started".to_string(),
             raw: json!({"message_id": "a1"}),
         });
-        app.note_terminal_resize_width(80);
+        app.update_stream_width_for_terminal(80);
         let source = "intro\nalpha beta gamma delta epsilon zeta eta theta";
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),
@@ -2503,7 +2836,7 @@ mod tests {
         });
         let wide_tail = stream_tail_plain_lines(&app);
 
-        app.note_terminal_resize_width(16);
+        app.update_stream_width_for_terminal(16);
         let narrow_tail = stream_tail_plain_lines(&app);
 
         assert_eq!(
@@ -2571,7 +2904,7 @@ mod tests {
     }
 
     #[test]
-    fn native_snapshot_replaces_pending_changed_content_and_skips_identical_snapshot() {
+    fn native_snapshot_keeps_rendered_content_and_skips_identical_snapshot() {
         let mut app = App::new(project());
         app.set_native_scrollback(true);
         app.pending_history_insertions(80);
@@ -2601,22 +2934,8 @@ mod tests {
                 {"message_id": "a1", "role": "assistant", "content": "corrected", "stream_finished": true}
             ]}),
         });
-        let corrected = app.pending_history_insertions(80);
-        let corrected_text = corrected
-            .iter()
-            .flat_map(|insertion| insertion.lines.iter())
-            .map(|hl| line_to_plain_string(&hl.line))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(corrected_text.contains("corrected"));
-        assert!(!corrected_text.contains("stale"));
-        assert_eq!(
-            corrected
-                .iter()
-                .map(|insertion| insertion.cell_ids.len())
-                .sum::<usize>(),
-            1
-        );
+        assert!(app.pending_history_insertions(80).is_empty());
+        assert!(!app.resize_reflow_is_due());
 
         app.handle_chat_event(ChatEvent {
             chat_id: Some(app.chat_id().to_string()),
@@ -2627,6 +2946,7 @@ mod tests {
             ]}),
         });
         assert!(app.pending_history_insertions(80).is_empty());
+        assert_eq!(app.history_inserted_cell_count(), 2);
     }
 
     #[test]
@@ -2847,7 +3167,12 @@ new-chat = "ctrl-x"
     #[test]
     fn app_vim_mode_basic_motions_and_delete_line() {
         let mut app = App::new(project());
-        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            AppAction::None
+        );
+        assert!(!app.vim_enabled());
+        app.test_execute_command_name("vim");
         assert!(app.vim_enabled());
         assert_eq!(app.vim_mode(), VimMode::Normal);
         app.composer.set_text("alpha beta");
@@ -3548,16 +3873,10 @@ new-chat = "ctrl-x"
             assert_eq!(app.transcript_state().messages().len(), 3);
             if native_scrollback {
                 assert_eq!(app.history_pending_count(), pending_before_snapshot);
-                let insertions = app.resize_reflow_insertions(80);
-                let text = insertions
-                    .iter()
-                    .flat_map(|insertion| insertion.lines.iter())
-                    .map(|line| line_to_plain_string(&line.line))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                assert!(text.contains("c updated"));
-                assert!(text.contains("a final"));
-                assert_eq!(text.matches("a final").count(), 1);
+                assert!(!app.resize_reflow_is_due());
+                let text = pending_plain_text(&mut app);
+                assert!(!text.contains("c updated"), "{text}");
+                assert!(!text.contains("a final"), "{text}");
             } else {
                 assert_eq!(assistant_cell_count(&app), 3);
                 assert_eq!(assistant_text(&app), "c updatedba final");
@@ -3601,16 +3920,10 @@ new-chat = "ctrl-x"
                 [Some("later"), Some("server-user-1")],
             );
             if native_scrollback {
-                let insertions = app.resize_reflow_insertions(80);
-                let text = insertions
-                    .iter()
-                    .flat_map(|insertion| insertion.lines.iter())
-                    .map(|line| line_to_plain_string(&line.line))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                assert!(text.contains("same"));
-                assert!(text.contains("later"));
-                assert_eq!(text.matches("same").count(), 1);
+                assert!(!app.resize_reflow_is_due());
+                let text = pending_plain_text(&mut app);
+                assert!(!text.contains("same"), "{text}");
+                assert!(!text.contains("later"), "{text}");
             }
         }
     }
@@ -3653,7 +3966,7 @@ new-chat = "ctrl-x"
     }
 
     #[test]
-    fn authoritative_insertions_rebuild_native_and_alternate_history_in_server_order() {
+    fn authoritative_insertions_enqueue_native_cells_in_server_order() {
         for native_scrollback in [false, true] {
             let mut app = App::new(project());
             app.set_native_scrollback(native_scrollback);
@@ -3697,17 +4010,15 @@ new-chat = "ctrl-x"
                 [Some("a0"), Some("a1"), Some("a2"), Some("a3"), Some("a4")],
             );
             if native_scrollback {
-                assert!(app.resize_reflow_is_due());
-                let text = app
-                    .resize_reflow_insertions(80)
-                    .into_iter()
-                    .flat_map(|insertion| insertion.lines)
-                    .map(|line| line_to_plain_string(&line.line))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                for content in ["start", "one", "middle", "three", "end"] {
+                assert!(!app.resize_reflow_is_due());
+                let text = pending_plain_text(&mut app);
+                for content in ["start", "middle", "end"] {
                     assert_eq!(text.matches(content).count(), 1, "{content}: {text}");
                 }
+                for content in ["one", "three"] {
+                    assert_eq!(text.matches(content).count(), 0, "{content}: {text}");
+                }
+                assert_eq!(app.history_pending_count(), 0);
             } else {
                 assert_eq!(assistant_cell_count(&app), 5);
                 assert_eq!(assistant_text(&app), "startonemiddlethreeend");
@@ -3716,7 +4027,7 @@ new-chat = "ctrl-x"
     }
 
     #[test]
-    fn authoritative_correction_rebuilds_drained_native_and_alternate_history_once() {
+    fn authoritative_correction_leaves_inserted_native_cell_untouched() {
         for native_scrollback in [false, true] {
             let mut app = App::new(project());
             app.set_native_scrollback(native_scrollback);
@@ -3750,16 +4061,10 @@ new-chat = "ctrl-x"
             });
 
             if native_scrollback {
-                assert!(app.resize_reflow_is_due());
-                let text = app
-                    .resize_reflow_insertions(80)
-                    .into_iter()
-                    .flat_map(|insertion| insertion.lines)
-                    .map(|line| line_to_plain_string(&line.line))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                assert_eq!(text.matches("corrected").count(), 1);
-                assert!(!text.contains("stale"));
+                assert!(!app.resize_reflow_is_due());
+                let text = pending_plain_text(&mut app);
+                assert!(!text.contains("corrected"), "{text}");
+                assert!(!text.contains("stale"), "{text}");
             } else {
                 assert_eq!(assistant_cell_count(&app), 1);
                 assert_eq!(assistant_text(&app), "corrected");
@@ -6662,8 +6967,21 @@ new-chat = "ctrl-x"
             app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             AppAction::None
         );
+        assert_eq!(app.composer(), "");
+        assert!(!app.should_quit());
+        assert!(app.last_ctrl_c.is_none());
+
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::None
+        );
         assert!(!app.should_quit());
         assert!(app.last_ctrl_c.is_some());
+        assert_eq!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppAction::None
+        );
+        assert!(app.should_quit());
     }
 
     #[test]
@@ -7626,7 +7944,8 @@ new-chat = "ctrl-x"
 
         assert!(plan_stream_text(&app).is_empty());
         assert!(app.resize_reflow_is_due());
-        app.resize_reflow_insertions(80);
+        app.resize_reflow_insertions(80, 100);
+        app.pending_history_insertions(80);
         assert_eq!(app.history_pending_count(), 0);
         assert!(app.visible_transcript().iter().any(|item| {
             matches!(item, TranscriptItem::Plan(data) if data.content.contains("- eight"))
@@ -7665,9 +7984,10 @@ new-chat = "ctrl-x"
                     "extra": {"event": {"subkind": "plan_delta", "payload": {"seq": 1}}},
                 }}),
             });
+            let mut committed_all = String::new();
             if native_scrollback {
                 app.apply_stream_commit_tick();
-                app.pending_history_insertions(80);
+                committed_all.push_str(&pending_plain_text(&mut app));
             }
 
             app.handle_chat_event(ChatEvent {
@@ -7681,18 +8001,21 @@ new-chat = "ctrl-x"
                 }}),
             });
 
-            let rebuilt = plan_stream_text(&app);
-            for content in ["## Plan", "- base", "- first delta"] {
-                assert_eq!(rebuilt.matches(content).count(), 1, "{content}: {rebuilt}");
+            if native_scrollback {
+                committed_all.push_str(&pending_plain_text(&mut app));
+            } else {
+                let rebuilt = plan_stream_text(&app);
+                for content in ["## Plan", "- base", "- first delta"] {
+                    assert_eq!(rebuilt.matches(content).count(), 1, "{content}: {rebuilt}");
+                }
+                assert_eq!(
+                    app.visible_transcript()
+                        .iter()
+                        .filter(|item| matches!(item, TranscriptItem::PlanStream(_)))
+                        .count(),
+                    1
+                );
             }
-            assert_eq!(
-                app.visible_transcript()
-                    .iter()
-                    .filter(|item| matches!(item, TranscriptItem::PlanStream(_)))
-                    .count(),
-                1
-            );
-
             app.handle_chat_event(ChatEvent {
                 chat_id: Some(app.chat_id().to_string()),
                 seq: None,
@@ -7705,13 +8028,28 @@ new-chat = "ctrl-x"
                     "extra": {"event": {"subkind": "plan_delta", "payload": {"seq": 1}}},
                 }}),
             });
-            let continued = plan_stream_text(&app);
-            for content in ["- base", "- first delta", "- continued"] {
-                assert_eq!(
-                    continued.matches(content).count(),
-                    1,
-                    "{content}: {continued}"
-                );
+            if native_scrollback {
+                for _ in 0..8 {
+                    app.apply_stream_commit_tick();
+                    committed_all.push_str(&pending_plain_text(&mut app));
+                }
+                committed_all.push_str(&plan_stream_text(&app));
+                for content in ["## Plan", "- base", "- first delta", "- continued"] {
+                    assert_eq!(
+                        committed_all.matches(content).count(),
+                        1,
+                        "{content}: {committed_all}"
+                    );
+                }
+            } else {
+                let continued = plan_stream_text(&app);
+                for content in ["- base", "- first delta", "- continued"] {
+                    assert_eq!(
+                        continued.matches(content).count(),
+                        1,
+                        "{content}: {continued}"
+                    );
+                }
             }
 
             app.handle_chat_event(ChatEvent {

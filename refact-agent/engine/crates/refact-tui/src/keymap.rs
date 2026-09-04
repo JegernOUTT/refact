@@ -966,7 +966,7 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(
             KeyContext::Main,
             KeyAction::InsertNewline,
-            &["ctrl-j", "shift-enter", "alt-enter"],
+            &["shift-enter", "alt-enter", "ctrl-j"],
         ),
         entry(KeyContext::Main, KeyAction::Accept, &["enter"]),
         entry(KeyContext::Main, KeyAction::Backspace, &["backspace"]),
@@ -979,7 +979,7 @@ fn default_entries() -> Vec<KeymapEntry> {
         entry(KeyContext::Main, KeyAction::MoveDown, &["down"]),
         entry(KeyContext::Main, KeyAction::ScrollPageUp, &["pageup"]),
         entry(KeyContext::Main, KeyAction::ScrollPageDown, &["pagedown"]),
-        entry(KeyContext::Main, KeyAction::ToggleVimMode, &["ctrl-v"]),
+        entry(KeyContext::Main, KeyAction::ToggleVimMode, &[]),
         entry(KeyContext::ProjectPicker, KeyAction::Cancel, &["esc"]),
         entry(KeyContext::ProjectPicker, KeyAction::Accept, &["enter"]),
         entry(KeyContext::ProjectPicker, KeyAction::MoveUp, &["up"]),
@@ -1156,7 +1156,7 @@ fn ask_form_entries() -> Vec<KeymapEntry> {
         entry(
             KeyContext::AskForm,
             KeyAction::InsertNewline,
-            &["ctrl-j", "shift-enter", "alt-enter"],
+            &["shift-enter", "alt-enter", "ctrl-j"],
         ),
     ]
 }

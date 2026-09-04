@@ -117,6 +117,7 @@ slash commands (local, in `.refact/commands/`) orchestrate reusable scripts
 | `release.sh <ver> <build\|plugins\|engine> [--push]` | Bump all manifests, commit, tag, optionally push |
 | `perf.sh [filter]` | Run the engine performance benchmarks (see Performance tests below) |
 | `setup-cache.sh [--status]` | Enable/inspect the shared sccache build cache |
+| `tui.sh start\|type\|keys\|screen\|resize\|stop` | Drive the real `refact tui` in a detached tmux pane against an isolated daemon + `tests/tui_fake_worker.py`; `screen --history` dumps pane + scrollback |
 
 ### Slash commands (`.refact/commands/`, local/personal)
 

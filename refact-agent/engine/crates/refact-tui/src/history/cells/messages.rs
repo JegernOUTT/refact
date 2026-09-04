@@ -278,7 +278,7 @@ impl HistoryCell for ReasoningCell {
     fn render_with_links(&self, width: usize) -> Vec<HyperlinkLine> {
         let lines = if self.collapsed {
             vec![HyperlinkLine::new(reasoning_line(&format!(
-                "… {} {} hidden (expand)",
+                "Thinking · {} {} hidden",
                 self.text.lines().count().max(1),
                 if self.text.lines().count() == 1 {
                     "line"
@@ -500,7 +500,7 @@ mod tests {
         assert!(!cell.collapsed());
         cell.set_collapsed(true);
         let rendered = text(&cell.render(40));
-        assert_eq!(rendered, "• … 1 line hidden (expand)");
+        assert_eq!(rendered, "• Thinking · 1 line hidden");
         assert!(!rendered.contains("• collapsed"));
     }
 }

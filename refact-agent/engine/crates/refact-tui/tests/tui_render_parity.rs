@@ -933,10 +933,7 @@ fn keymap_help_golden_snapshot() {
     assert_snapshot(
         actual,
         r#"refact fixture | Ctrl-N new · Ctrl-P projects · Alt-M model · Ctrl-O mode · ? help
-  • Opened project fixture at /tmp/fixture
-
-
-    ┌──────────────────────────────────────────────────────────────────────────────────────────┐
+  • ┌──────────────────────────────────────────────────────────────────────────────────────────┐
     │Help                                                                                      │
     │Theme dark · vim off                                                                      │
     │                                                                                          │
@@ -959,8 +956,11 @@ fn keymap_help_golden_snapshot() {
     │transcript cell t                     expand selected tool card                           │
     └──────────────────────────────────────────────────────────────────────────────────────────┘
 
-│› Ask Refact…
-│  Enter send   Ctrl-J newline
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ › Ask Refact…                                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+  Enter send  ·  \+Enter newline  ·  ? shortcuts
  ● idle · daemon online · fixture · default · agent · reason:off · worker ready"#,
     );
 }
@@ -1016,7 +1016,7 @@ fn transcript_cells_golden_snapshot() {
 
   › Inspect @src/lib.rs and summarize the TUI parity risks.
 
-  • … 1 line hidden (expand)
+  • Thinking · 1 line hidden
 
   • ## Findings
 
@@ -1044,10 +1044,10 @@ fn transcript_cells_golden_snapshot() {
   • Daemon event captured separately.
 
 
-
-
-│› Ask Refact…
-│  Enter send   Ctrl-J newline
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ › Ask Refact…                                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+  Enter send  ·  \+Enter newline  ·  ? shortcuts
  98% context left (1.54K used) · ● idle · daemon online · fixture · gpt-demo · agent · reason:off ·…"#,
     );
 }
@@ -1145,7 +1145,6 @@ fn approval_overlay_golden_snapshot() {
         r#"refact fixture | Ctrl-N new · Ctrl-P projects · Alt-M model · Ctrl-O mode · ? help
   • Opened project fixture at /tmp/fixture
 
-
    ┌──────────────────────────────────────────────────────────────────────────────────┐
    │Approval required · approval 1 of 1                                               │
    │› apply_patch  apply patch                                                        │
@@ -1157,14 +1156,15 @@ fn approval_overlay_golden_snapshot() {
    │                                                                                  │
    │                                                                                  │
    │                                                                                  │
-   │                                                                                  │
-   │                                                                                  │
-   │                                                                                  │
    │y approve · a approve for chat · n reject · v details · Esc                       │
    └──────────────────────────────────────────────────────────────────────────────────┘
 
-│› Ask Refact…
-│  approval pending · Enter queues · Esc cancels   Enter send   Ctrl-J newline   Enter qu…
+
+
+╭ approval pending · Enter queues · Esc cancels ─────────────────────────────────────────╮
+│ › Ask Refact…                                                                          │
+╰────────────────────────────────────────────────────────────────────────────────────────╯
+  Enter queue  ·  \+Enter newline  ·  Esc interrupt  ·  ? shortcuts
  ◆ approval pending · Esc to interrupt · daemon online · fixture · default · agent · reas…"#,
     );
 }
