@@ -1264,7 +1264,7 @@ mod tests {
     fn diff_for_path_truncation_marker_reports_shown_and_total_bytes() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path();
-        run(root, &["init", "--initial-branch=main"]);
+        run(root, &["init"]);
         run(root, &["config", "user.email", "test@example.com"]);
         run(root, &["config", "user.name", "test"]);
         std::fs::write(root.join("seed.txt"), "seed\n").expect("write seed");
@@ -1290,7 +1290,7 @@ mod tests {
     fn diff_for_path_untruncated_patch_reports_equal_counts() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path();
-        run(root, &["init", "--initial-branch=main"]);
+        run(root, &["init"]);
         run(root, &["config", "user.email", "test@example.com"]);
         run(root, &["config", "user.name", "test"]);
         std::fs::write(root.join("seed.txt"), "seed\n").expect("write seed");
