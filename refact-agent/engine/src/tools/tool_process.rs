@@ -44,7 +44,7 @@ const PROCESS_TRANSCRIPT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DISK_READ_MAX_BYTES: usize = 1024 * 1024;
 const TOOL_PTY_ROWS: u16 = 32;
 const TOOL_PTY_COLS: u16 = 120;
-const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-terminal (PTY). Enables interactive stdin via process_write_stdin and merges stdout+stderr into a single combined stream. Defeats some pipe-only output buffering. Defaults to true.";
+const TTY_DESCRIPTION: &str = "If true, run the command attached to a pseudo-terminal (PTY). Enables interactive stdin via process_write_stdin and merges stdout+stderr into a single combined stream. Defeats some pipe-only output buffering. Defaults to true, except on Windows, where a pty cannot currently deliver output and pipes are used instead.";
 
 static PATH_ENRICHMENT_CACHE: LazyLock<
     Mutex<HashMap<(String, u64, u64), crate::exec::path_enrichment::CollectedPathEnrichment>>,
@@ -208,7 +208,7 @@ impl Tool for ToolProcessStart {
             }
         }
         let short_description = sanitize_short_description(&parsed.description);
-        let tty = parsed.tty.unwrap_or(true);
+        let tty = parsed.tty.unwrap_or(refact_exec::default_tty());
         let owner = ExecOwnerMeta {
             chat_id: Some(chat_id.clone()),
             tool_call_id: Some(tool_call_id.clone()),
@@ -1032,7 +1032,7 @@ fn process_start_input_schema() -> Value {
     );
     schema["properties"]["tty"] = json!({
         "type": "boolean",
-        "default": true,
+        "default": refact_exec::default_tty(),
         "description": TTY_DESCRIPTION,
     });
     schema["properties"]["needs_confirmation"] = json!({
@@ -2070,7 +2070,7 @@ mod tests {
         );
         assert_eq!(
             start_desc.input_schema["properties"]["tty"]["default"],
-            true
+            refact_exec::default_tty()
         );
         assert_eq!(
             start_desc.input_schema["properties"]["tty"]["description"],
@@ -2164,7 +2164,7 @@ mod tests {
             "Run background gremlin"
         );
         assert_eq!(exec(&message)["status"], "running");
-        assert_eq!(exec(&message)["tty"], true);
+        assert_eq!(exec(&message)["tty"], refact_exec::default_tty());
         let snapshot = gcx.exec_registry.get(&process_id).await.unwrap();
         assert!(snapshot.meta.tty);
         wait_for_output(gcx.clone(), &process_id, "ready").await;
@@ -2260,7 +2260,7 @@ mod tests {
         .unwrap();
         let background_id = process_id(&background);
         wait_for_output(gcx.clone(), &background_id, "32 120").await;
-        assert_eq!(exec(&background)["tty"], true);
+        assert_eq!(exec(&background)["tty"], refact_exec::default_tty());
         gcx.exec_registry.kill(&background_id).await.unwrap();
 
         let service = run_tool(
@@ -2277,7 +2277,7 @@ mod tests {
         .unwrap();
         let service_id = process_id(&service);
         wait_for_output(gcx.clone(), &service_id, "32 120").await;
-        assert_eq!(exec(&service)["tty"], true);
+        assert_eq!(exec(&service)["tty"], refact_exec::default_tty());
         gcx.exec_registry.kill(&service_id).await.unwrap();
     }
 
@@ -2339,7 +2339,7 @@ mod tests {
         );
         assert_eq!(exec(&message)["mode"], "service");
         assert_eq!(exec(&message)["service_name"], "api");
-        assert_eq!(exec(&message)["tty"], true);
+        assert_eq!(exec(&message)["tty"], refact_exec::default_tty());
         assert!(_gcx.exec_registry.get(&process_id).await.unwrap().meta.tty);
 
         let mut list = ToolProcessList {

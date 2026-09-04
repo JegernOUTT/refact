@@ -309,6 +309,12 @@ pub struct ExecSpawnRequest {
     pub notify_chat_on_spawn: bool,
 }
 
+// Windows ConPTY does not deliver the child's output to the reader, so a pty there yields a
+// process whose output can never be read. Pipes stay the default until that is fixed.
+pub fn default_tty() -> bool {
+    !cfg!(windows)
+}
+
 impl ExecSpawnRequest {
     pub fn new(mode: ExecMode, command: impl Into<String>) -> Self {
         Self {
