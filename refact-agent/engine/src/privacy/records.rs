@@ -1251,7 +1251,7 @@ mod tests {
             derived_zone_for_path(&gcx, &derived, &derived_zones)
                 .and_then(|zone| zone.origin)
                 .unwrap(),
-            secret.to_string_lossy()
+            refact_core::chat_types::normalize_file_name(secret.to_string_lossy().into_owned())
         );
 
         let mut read_message = tool_message("derived secret");
@@ -1274,7 +1274,7 @@ mod tests {
         assert!(withheld.starts_with("Output withheld by user privacy policy"));
         assert!(withheld.contains(&format!(
             "(zone \"secrets\", inherited from \"{}\")",
-            secret.to_string_lossy()
+            refact_core::chat_types::normalize_file_name(secret.to_string_lossy().into_owned())
         )));
         assert!(withheld.contains("session-derived label"));
 
@@ -1297,7 +1297,7 @@ mod tests {
         let plain = plain_message.content.content_text_only();
         assert!(plain.contains(&format!(
             "  - {} (zone \"secrets\")",
-            secret.to_string_lossy()
+            refact_core::chat_types::normalize_file_name(secret.to_string_lossy().into_owned())
         )));
         assert!(!plain.contains("inherited from"));
         assert!(!plain.contains("session-derived label"));

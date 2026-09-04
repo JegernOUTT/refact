@@ -2166,7 +2166,7 @@ mod tests {
         assert_eq!(exec(&message)["status"], "running");
         assert_eq!(exec(&message)["tty"], refact_exec::default_tty());
         let snapshot = gcx.exec_registry.get(&process_id).await.unwrap();
-        assert!(snapshot.meta.tty);
+        assert_eq!(snapshot.meta.tty, refact_exec::default_tty());
         wait_for_output(gcx.clone(), &process_id, "ready").await;
 
         let mut list = ToolProcessList {
@@ -2340,7 +2340,10 @@ mod tests {
         assert_eq!(exec(&message)["mode"], "service");
         assert_eq!(exec(&message)["service_name"], "api");
         assert_eq!(exec(&message)["tty"], refact_exec::default_tty());
-        assert!(_gcx.exec_registry.get(&process_id).await.unwrap().meta.tty);
+        assert_eq!(
+            _gcx.exec_registry.get(&process_id).await.unwrap().meta.tty,
+            refact_exec::default_tty()
+        );
 
         let mut list = ToolProcessList {
             config_path: String::new(),

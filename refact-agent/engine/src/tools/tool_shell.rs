@@ -1401,7 +1401,7 @@ mod tests {
         );
         assert_eq!(exec(&message)["mode"], "background");
         assert_eq!(exec(&message)["status"], "running");
-        assert_eq!(exec(&message)["tty"], true);
+        assert_eq!(exec(&message)["tty"], refact_exec::default_tty());
         assert!(exec(&message)["timeout_secs"].is_null());
 
         gcx.exec_registry.kill(&process_id).await.unwrap();
