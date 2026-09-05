@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use tokio::fs::{self, OpenOptions};
-use tokio::io::AsyncWriteExt;
+use tokio::fs;
 use tracing::warn;
 
 pub use refact_buddy_core::storage::*;
@@ -42,10 +41,67 @@ fn remember_compacted_len(project_root: &Path, len: u64) {
         .insert(project_root.to_path_buf(), len);
 }
 
+/// Proof that the caller holds the cross-process memory ops file lock.
+pub(crate) struct MemoryOpsLock(());
+
+fn memory_ops_lock_path_for(queue_path: &Path) -> PathBuf {
+    let mut raw = queue_path.as_os_str().to_owned();
+    raw.push(".lock");
+    PathBuf::from(raw)
+}
+
+fn memory_ops_lock_path(project_root: &Path) -> PathBuf {
+    memory_ops_lock_path_for(&memory_ops_path(project_root))
+}
+
+fn with_memory_ops_lock<T>(
+    lock_path: &Path,
+    body: impl FnOnce(&MemoryOpsLock) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut lock = crate::daemon::lock::open_lock(lock_path)
+        .map_err(|err| format!("Failed to open memory ops lock {:?}: {}", lock_path, err))?;
+    let guard = crate::daemon::lock::lock_blocking(&mut lock)
+        .map_err(|err| format!("Failed to lock memory ops queue {:?}: {}", lock_path, err))?;
+    let result = body(&MemoryOpsLock(()));
+    drop(guard);
+    result
+}
+
+async fn memory_ops_transaction<T, F>(project_root: &Path, body: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&Path, &MemoryOpsLock) -> Result<T, String> + Send + 'static,
+{
+    let root = project_root.to_path_buf();
+    let _order = MEMORY_OPS_IO_LOCK.lock().await;
+    tokio::task::spawn_blocking(move || {
+        let lock_path = memory_ops_lock_path(&root);
+        with_memory_ops_lock(&lock_path, |lock| body(&root, lock))
+    })
+    .await
+    .map_err(|err| format!("memory ops io task failed: {}", err))?
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct MemoryOpsFileStamp {
     len: u64,
     modified: Option<std::time::SystemTime>,
+    identity: Option<(u64, u64)>,
+}
+
+fn stamp_from_metadata(metadata: &std::fs::Metadata) -> MemoryOpsFileStamp {
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        Some((metadata.dev(), metadata.ino()))
+    };
+    #[cfg(not(unix))]
+    let identity = None;
+    MemoryOpsFileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        identity,
+    }
 }
 
 struct MemoryOpsCacheEntry {
@@ -59,10 +115,12 @@ static MEMORY_OPS_CACHE: std::sync::Mutex<Option<MemoryOpsCacheEntry>> =
 
 async fn memory_ops_file_stamp(project_root: &Path) -> Option<MemoryOpsFileStamp> {
     let metadata = fs::metadata(memory_ops_path(project_root)).await.ok()?;
-    Some(MemoryOpsFileStamp {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-    })
+    Some(stamp_from_metadata(&metadata))
+}
+
+fn memory_ops_file_stamp_sync(project_root: &Path) -> Option<MemoryOpsFileStamp> {
+    let metadata = std::fs::metadata(memory_ops_path(project_root)).ok()?;
+    Some(stamp_from_metadata(&metadata))
 }
 
 fn cached_memory_ops_state(
@@ -101,50 +159,90 @@ fn memory_ops_bad_path(project_root: &Path) -> PathBuf {
     project_root.join(".refact/buddy/memory_ops.jsonl.bad")
 }
 
-pub(crate) async fn rewrite_memory_ops_records(
-    path: &Path,
-    records: Vec<MemoryOpsRecord>,
-) -> Result<(), String> {
+fn create_parent_dir(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .await
+        std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create dir {:?}: {}", parent, e))?;
     }
+    Ok(())
+}
+
+fn fsync_parent_dir(path: &Path) {
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+}
+
+fn serialize_memory_ops_records(records: &[MemoryOpsRecord]) -> Result<String, String> {
     let mut buf = String::new();
     for record in records {
-        let line = serde_json::to_string(&record)
+        let line = serde_json::to_string(record)
             .map_err(|e| format!("Failed to serialize memory op record: {}", e))?;
         buf.push_str(&line);
         buf.push('\n');
     }
-    let tmp = path.with_extension(format!("jsonl.{}.tmp", uuid::Uuid::new_v4()));
-    let result = write_sync_rename(&tmp, path, &buf).await;
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp).await;
-    }
-    result
+    Ok(buf)
 }
 
-async fn write_sync_rename(tmp: &Path, path: &Path, buf: &str) -> Result<(), String> {
-    let mut file = fs::File::create(tmp)
-        .await
-        .map_err(|e| format!("Failed to create {:?}: {}", tmp, e))?;
+fn memory_ops_tmp_path(path: &Path) -> PathBuf {
+    path.with_extension(format!("jsonl.{}.tmp", uuid::Uuid::new_v4()))
+}
+
+fn write_tmp_file(tmp: &Path, buf: &str) -> Result<(), String> {
+    let mut file =
+        std::fs::File::create(tmp).map_err(|e| format!("Failed to create {:?}: {}", tmp, e))?;
     file.write_all(buf.as_bytes())
-        .await
         .map_err(|e| format!("Failed to write {:?}: {}", tmp, e))?;
     file.sync_all()
-        .await
-        .map_err(|e| format!("Failed to fsync {:?}: {}", tmp, e))?;
-    drop(file);
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path)
-            .await
-            .map_err(|e| format!("Failed to remove existing file: {}", e))?;
+        .map_err(|e| format!("Failed to fsync {:?}: {}", tmp, e))
+}
+
+#[cfg(test)]
+pub(crate) async fn rewrite_memory_ops_records(
+    project_root: &Path,
+    records: Vec<MemoryOpsRecord>,
+) -> Result<(), String> {
+    memory_ops_transaction(project_root, move |root, lock| {
+        rewrite_memory_ops_records_locked(lock, &memory_ops_path(root), records)
+    })
+    .await
+}
+
+fn stage_memory_ops_tmp(path: &Path, records: &[MemoryOpsRecord]) -> Result<PathBuf, String> {
+    create_parent_dir(path)?;
+    let buf = serialize_memory_ops_records(records)?;
+    let tmp = memory_ops_tmp_path(path);
+    match write_tmp_file(&tmp, &buf) {
+        Ok(()) => Ok(tmp),
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(err)
+        }
     }
-    fs::rename(tmp, path)
-        .await
-        .map_err(|e| format!("Failed to rename {:?} to {:?}: {}", tmp, path, e))
+}
+
+fn commit_memory_ops_tmp(tmp: &Path, path: &Path) -> Result<(), String> {
+    match std::fs::rename(tmp, path) {
+        Ok(()) => {
+            fsync_parent_dir(path);
+            Ok(())
+        }
+        Err(err) => {
+            let _ = std::fs::remove_file(tmp);
+            Err(format!("Failed to rename {:?} to {:?}: {}", tmp, path, err))
+        }
+    }
+}
+
+fn rewrite_memory_ops_records_locked(
+    _lock: &MemoryOpsLock,
+    path: &Path,
+    records: Vec<MemoryOpsRecord>,
+) -> Result<(), String> {
+    let tmp = stage_memory_ops_tmp(path, &records)?;
+    commit_memory_ops_tmp(&tmp, path)
 }
 
 const MEMORY_OPS_TMP_GC_MAX_AGE_SECS: u64 = 3600;
@@ -157,13 +255,38 @@ async fn gc_stale_memory_ops_tmp_files_with_max_age(
     project_root: &Path,
     max_age_secs: u64,
 ) -> usize {
+    let removed = memory_ops_transaction(project_root, move |root, lock| {
+        Ok(gc_stale_memory_ops_tmp_files_locked(
+            lock,
+            root,
+            max_age_secs,
+        ))
+    })
+    .await;
+    match removed {
+        Ok(removed) => removed,
+        Err(err) => {
+            warn!(
+                "buddy: failed to collect stale memory ops tmp files: {}",
+                err
+            );
+            0
+        }
+    }
+}
+
+fn gc_stale_memory_ops_tmp_files_locked(
+    _lock: &MemoryOpsLock,
+    project_root: &Path,
+    max_age_secs: u64,
+) -> usize {
     let dir = project_root.join(".refact/buddy");
-    let Ok(mut rd) = fs::read_dir(&dir).await else {
+    let Ok(rd) = std::fs::read_dir(&dir) else {
         return 0;
     };
     let now = std::time::SystemTime::now();
     let mut removed = 0usize;
-    while let Ok(Some(entry)) = rd.next_entry().await {
+    for entry in rd.flatten() {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
@@ -171,7 +294,7 @@ async fn gc_stale_memory_ops_tmp_files_with_max_age(
         if !(name.starts_with("memory_ops.jsonl.") && name.ends_with(".tmp")) {
             continue;
         }
-        let Ok(metadata) = entry.metadata().await else {
+        let Ok(metadata) = entry.metadata() else {
             continue;
         };
         if !metadata.is_file() {
@@ -186,7 +309,7 @@ async fn gc_stale_memory_ops_tmp_files_with_max_age(
         if !old_enough {
             continue;
         }
-        match fs::remove_file(&path).await {
+        match std::fs::remove_file(&path) {
             Ok(()) => removed += 1,
             Err(err) => warn!(
                 "buddy: failed to remove stale memory ops tmp file {:?}: {}",
@@ -303,28 +426,7 @@ struct MemoryOpsFileRead {
     malformed: Vec<(usize, String, String)>,
 }
 
-async fn read_memory_ops_file(project_root: &Path) -> MemoryOpsFileRead {
-    let path = memory_ops_path(project_root);
-    let content = match fs::read_to_string(&path).await {
-        Ok(content) => content,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            return MemoryOpsFileRead {
-                records: Vec::new(),
-                malformed: Vec::new(),
-            }
-        }
-        Err(err) => {
-            warn!(
-                "buddy: failed to read memory ops queue at {:?}: {}, starting empty",
-                path, err
-            );
-            return MemoryOpsFileRead {
-                records: Vec::new(),
-                malformed: Vec::new(),
-            };
-        }
-    };
-
+fn parse_memory_ops_content(content: &str) -> MemoryOpsFileRead {
     let mut records = Vec::new();
     let mut malformed = Vec::<(usize, String, String)>::new();
     for (idx, raw) in content.lines().enumerate() {
@@ -340,18 +442,54 @@ async fn read_memory_ops_file(project_root: &Path) -> MemoryOpsFileRead {
     MemoryOpsFileRead { records, malformed }
 }
 
-async fn read_memory_ops_records_locked(project_root: &Path) -> (Vec<MemoryOpsRecord>, u32) {
+fn read_memory_ops_file_sync(project_root: &Path) -> Result<MemoryOpsFileRead, String> {
     let path = memory_ops_path(project_root);
-    let read = read_memory_ops_file(project_root).await;
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Ok(parse_memory_ops_content(&content)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(MemoryOpsFileRead {
+            records: Vec::new(),
+            malformed: Vec::new(),
+        }),
+        Err(err) => Err(format!(
+            "Failed to read memory ops queue {:?}: {}",
+            path, err
+        )),
+    }
+}
+
+async fn read_memory_ops_file(project_root: &Path) -> Option<MemoryOpsFileRead> {
+    let path = memory_ops_path(project_root);
+    let content = match fs::read_to_string(&path).await {
+        Ok(content) => content,
+        Err(err) if err.kind() == ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            warn!(
+                "buddy: failed to read memory ops queue at {:?}: {}",
+                path, err
+            );
+            return None;
+        }
+    };
+    Some(parse_memory_ops_content(&content))
+}
+
+fn read_memory_ops_records_locked(
+    lock: &MemoryOpsLock,
+    project_root: &Path,
+) -> Result<(Vec<MemoryOpsRecord>, u32), String> {
+    let path = memory_ops_path(project_root);
+    let read = read_memory_ops_file_sync(project_root)?;
     let malformed_lines = read.malformed.len().min(u32::MAX as usize) as u32;
     if malformed_lines > 0 {
         warn!(
             "buddy: quarantining {} malformed memory ops queue line(s) from {:?}",
             malformed_lines, path
         );
-        match quarantine_memory_ops_bad_lines(project_root, &path, &read.malformed).await {
+        match quarantine_memory_ops_bad_lines(project_root, &path, &read.malformed) {
             Ok(()) => {
-                if let Err(err) = rewrite_memory_ops_records(&path, read.records.clone()).await {
+                if let Err(err) =
+                    rewrite_memory_ops_records_locked(lock, &path, read.records.clone())
+                {
                     warn!(
                         "buddy: failed to repair memory ops queue after quarantine: {}",
                         err
@@ -366,7 +504,7 @@ async fn read_memory_ops_records_locked(project_root: &Path) -> (Vec<MemoryOpsRe
             }
         }
     }
-    (read.records, malformed_lines)
+    Ok((read.records, malformed_lines))
 }
 
 fn memory_bad_line_hash(raw: &str, err: &str) -> String {
@@ -378,8 +516,8 @@ fn memory_bad_line_hash(raw: &str, err: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-async fn existing_quarantine_hashes(path: &Path) -> HashSet<String> {
-    let Ok(content) = fs::read_to_string(path).await else {
+fn existing_quarantine_hashes(path: &Path) -> HashSet<String> {
+    let Ok(content) = std::fs::read_to_string(path) else {
         return HashSet::new();
     };
     content
@@ -394,7 +532,7 @@ async fn existing_quarantine_hashes(path: &Path) -> HashSet<String> {
         .collect()
 }
 
-async fn quarantine_memory_ops_bad_lines(
+fn quarantine_memory_ops_bad_lines(
     project_root: &Path,
     path: &Path,
     malformed: &[(usize, String, String)],
@@ -403,12 +541,8 @@ async fn quarantine_memory_ops_bad_lines(
         return Ok(());
     }
     let bad_path = memory_ops_bad_path(project_root);
-    let existing_hashes = existing_quarantine_hashes(&bad_path).await;
-    if let Some(parent) = bad_path.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("Failed to create dir {:?}: {}", parent, e))?;
-    }
+    let existing_hashes = existing_quarantine_hashes(&bad_path);
+    create_parent_dir(&bad_path)?;
     let mut buf = String::new();
     for (line_number, raw, err) in malformed {
         let raw = crate::llm::safe_truncate(raw.trim(), 2000).to_string();
@@ -430,19 +564,18 @@ async fn quarantine_memory_ops_bad_lines(
     if buf.is_empty() {
         return Ok(());
     }
-    let mut file = OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&bad_path)
-        .await
         .map_err(|e| format!("Failed to open memory ops quarantine {:?}: {}", bad_path, e))?;
-    file.write_all(buf.as_bytes()).await.map_err(|e| {
+    file.write_all(buf.as_bytes()).map_err(|e| {
         format!(
             "Failed to append memory ops quarantine {:?}: {}",
             bad_path, e
         )
     })?;
-    file.flush().await.map_err(|e| {
+    file.flush().map_err(|e| {
         format!(
             "Failed to flush memory ops quarantine {:?}: {}",
             bad_path, e
@@ -463,18 +596,29 @@ async fn enqueue_memory_op_with_compact_threshold(
     op: MemoryLifecycleOp,
     compact_threshold_bytes: u64,
 ) -> Result<MemoryOpsState, String> {
-    let _guard = MEMORY_OPS_IO_LOCK.lock().await;
+    memory_ops_transaction(project_root, move |root, lock| {
+        enqueue_memory_op_locked(lock, root, op, compact_threshold_bytes)
+    })
+    .await
+}
+
+fn enqueue_memory_op_locked(
+    lock: &MemoryOpsLock,
+    project_root: &Path,
+    op: MemoryLifecycleOp,
+    compact_threshold_bytes: u64,
+) -> Result<MemoryOpsState, String> {
     let incoming_has_key = !op.idempotency_key.trim().is_empty();
-    let stamp = memory_ops_file_stamp(project_root).await;
+    let stamp = memory_ops_file_stamp_sync(project_root);
     let current = match stamp
         .as_ref()
         .and_then(|stamp| cached_memory_ops_state(project_root, stamp))
     {
         Some(state) => state,
         None => {
-            let (records, malformed_lines) = read_memory_ops_records_locked(project_root).await;
+            let (records, malformed_lines) = read_memory_ops_records_locked(lock, project_root)?;
             let state = MemoryOpsState::from_records_with_malformed(records, malformed_lines);
-            if let Some(stamp) = stamp {
+            if let Some(stamp) = memory_ops_file_stamp_sync(project_root) {
                 store_memory_ops_state(project_root, stamp, &state);
             }
             state
@@ -491,37 +635,32 @@ async fn enqueue_memory_op_with_compact_threshold(
     }
 
     let path = memory_ops_path(project_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("Failed to create dir {:?}: {}", parent, e))?;
-    }
+    create_parent_dir(&path)?;
     let record = MemoryOpsRecord::Op { op };
     let serialized = serde_json::to_string(&record)
         .map_err(|e| format!("Failed to serialize memory op record: {}", e))?;
     let replayed = serde_json::from_str::<MemoryOpsRecord>(&serialized)
         .map_err(|e| format!("Serialized memory op record did not round-trip: {}", e))?;
     let line = format!("{}\n", serialized);
-    let mut file = OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .await
         .map_err(|e| format!("Failed to open memory ops queue {:?}: {}", path, e))?;
     file.write_all(line.as_bytes())
-        .await
         .map_err(|e| format!("Failed to append memory ops queue {:?}: {}", path, e))?;
     file.flush()
-        .await
         .map_err(|e| format!("Failed to flush memory ops queue {:?}: {}", path, e))?;
     drop(file);
-    let state = match archive_memory_ops_if_oversized_locked(project_root, compact_threshold_bytes)
-        .await?
-    {
+    let state = match archive_memory_ops_if_oversized_locked(
+        lock,
+        project_root,
+        compact_threshold_bytes,
+    )? {
         Some(compacted) => compacted,
         None => current.with_appended_record(replayed),
     };
-    if let Some(stamp) = memory_ops_file_stamp(project_root).await {
+    if let Some(stamp) = memory_ops_file_stamp_sync(project_root) {
         store_memory_ops_state(project_root, stamp, &state);
     }
     Ok(state)
@@ -571,19 +710,35 @@ pub async fn load_memory_ops(project_root: &Path) -> MemoryOpsState {
     {
         return state;
     }
-    let read = read_memory_ops_file(project_root).await;
+    let Some(read) = read_memory_ops_file(project_root).await else {
+        return MemoryOpsState::default();
+    };
     let malformed_lines = read.malformed.len().min(u32::MAX as usize) as u32;
     let state = MemoryOpsState::from_records_with_malformed(read.records, malformed_lines);
     if let Some(stamp) = stamp {
-        store_memory_ops_state(project_root, stamp, &state);
+        if memory_ops_file_stamp(project_root).await.as_ref() == Some(&stamp) {
+            store_memory_ops_state(project_root, stamp, &state);
+        }
     }
     state
 }
 
 pub async fn load_memory_ops_repairing(project_root: &Path) -> MemoryOpsState {
-    let _guard = MEMORY_OPS_IO_LOCK.lock().await;
-    let (records, malformed_lines) = read_memory_ops_records_locked(project_root).await;
-    MemoryOpsState::from_records_with_malformed(records, malformed_lines)
+    let loaded = memory_ops_transaction(project_root, |root, lock| {
+        let (records, malformed_lines) = read_memory_ops_records_locked(lock, root)?;
+        Ok(MemoryOpsState::from_records_with_malformed(
+            records,
+            malformed_lines,
+        ))
+    })
+    .await;
+    match loaded {
+        Ok(state) => state,
+        Err(err) => {
+            warn!("buddy: failed to load memory ops queue: {}", err);
+            MemoryOpsState::default()
+        }
+    }
 }
 
 async fn snapshot_memory_ops(project_root: &Path) -> MemoryOpsState {
@@ -661,8 +816,18 @@ async fn merge_processed_ops_and_rewrite(
     project_root: &Path,
     processed: Vec<(MemoryLifecycleOp, MemoryLifecycleOp)>,
 ) -> Result<MemoryOpsState, String> {
-    let _guard = MEMORY_OPS_IO_LOCK.lock().await;
-    let (records, malformed_lines) = read_memory_ops_records_locked(project_root).await;
+    memory_ops_transaction(project_root, move |root, lock| {
+        merge_processed_ops_and_rewrite_locked(lock, root, processed)
+    })
+    .await
+}
+
+fn merge_processed_ops_and_rewrite_locked(
+    lock: &MemoryOpsLock,
+    project_root: &Path,
+    processed: Vec<(MemoryLifecycleOp, MemoryLifecycleOp)>,
+) -> Result<MemoryOpsState, String> {
+    let (records, malformed_lines) = read_memory_ops_records_locked(lock, project_root)?;
     let mut state = MemoryOpsState::from_records_with_malformed(records, malformed_lines);
     for (expected, updated) in processed {
         match state.ops.iter_mut().find(|op| op.op_id == expected.op_id) {
@@ -689,22 +854,35 @@ async fn merge_processed_ops_and_rewrite(
         state.ops.into_iter().map(|op| MemoryOpsRecord::Op { op }),
         malformed_lines,
     );
-    rewrite_memory_ops_records(&memory_ops_path(project_root), state.canonical_records()).await?;
+    rewrite_memory_ops_records_locked(
+        lock,
+        &memory_ops_path(project_root),
+        state.canonical_records(),
+    )?;
     Ok(state)
 }
 
 pub async fn compact_memory_ops(project_root: &Path) -> Result<MemoryOpsState, String> {
-    let _guard = MEMORY_OPS_IO_LOCK.lock().await;
-    let (records, _) = read_memory_ops_records_locked(project_root).await;
+    memory_ops_transaction(project_root, |root, lock| {
+        compact_memory_ops_locked(lock, root)
+    })
+    .await
+}
+
+fn compact_memory_ops_locked(
+    lock: &MemoryOpsLock,
+    project_root: &Path,
+) -> Result<MemoryOpsState, String> {
+    let (records, _) = read_memory_ops_records_locked(lock, project_root)?;
     let state = compact_memory_ops_records(records, Utc::now());
     let path = memory_ops_path(project_root);
-    rewrite_memory_ops_records(&path, state.canonical_records()).await?;
-    remember_compacted_file(project_root, &state).await;
+    rewrite_memory_ops_records_locked(lock, &path, state.canonical_records())?;
+    remember_compacted_file(project_root, &state);
     Ok(state)
 }
 
-async fn remember_compacted_file(project_root: &Path, state: &MemoryOpsState) {
-    if let Some(stamp) = memory_ops_file_stamp(project_root).await {
+fn remember_compacted_file(project_root: &Path, state: &MemoryOpsState) {
+    if let Some(stamp) = memory_ops_file_stamp_sync(project_root) {
         remember_compacted_len(project_root, stamp.len);
         store_memory_ops_state(project_root, stamp, state);
     }
@@ -714,20 +892,38 @@ pub async fn archive_memory_ops_if_oversized(
     project_root: &Path,
     threshold_bytes: u64,
 ) -> Result<bool, String> {
-    let _guard = MEMORY_OPS_IO_LOCK.lock().await;
-    Ok(
-        archive_memory_ops_if_oversized_locked(project_root, threshold_bytes)
-            .await?
-            .is_some(),
-    )
+    memory_ops_transaction(project_root, move |root, lock| {
+        Ok(archive_memory_ops_if_oversized_locked(lock, root, threshold_bytes)?.is_some())
+    })
+    .await
 }
 
-async fn archive_memory_ops_if_oversized_locked(
+fn link_live_queue_to_backup(path: &Path, backup: &Path) -> Result<(), String> {
+    match std::fs::remove_file(backup) {
+        Ok(()) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(format!(
+                "Failed to remove existing backup {:?}: {}",
+                backup, err
+            ))
+        }
+    }
+    match std::fs::hard_link(path, backup) {
+        Ok(()) => Ok(()),
+        Err(_) => std::fs::copy(path, backup)
+            .map(|_| ())
+            .map_err(|err| format!("Failed to back up {:?} to {:?}: {}", path, backup, err)),
+    }
+}
+
+fn archive_memory_ops_if_oversized_locked(
+    lock: &MemoryOpsLock,
     project_root: &Path,
     threshold_bytes: u64,
 ) -> Result<Option<MemoryOpsState>, String> {
     let path = memory_ops_path(project_root);
-    let metadata = match fs::metadata(&path).await {
+    let metadata = match std::fs::metadata(&path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
         Err(err) => {
@@ -745,22 +941,15 @@ async fn archive_memory_ops_if_oversized_locked(
             return Ok(None);
         }
     }
-    let (records, _) = read_memory_ops_records_locked(project_root).await;
+    let (records, _) = read_memory_ops_records_locked(lock, project_root)?;
     let compacted = compact_memory_ops_records(records, Utc::now());
-    let backup = memory_ops_backup_path(project_root);
-    if fs::try_exists(&backup)
-        .await
-        .map_err(|e| format!("Failed to check backup {:?}: {}", backup, e))?
-    {
-        fs::remove_file(&backup)
-            .await
-            .map_err(|e| format!("Failed to remove existing backup {:?}: {}", backup, e))?;
+    let tmp = stage_memory_ops_tmp(&path, &compacted.canonical_records())?;
+    if let Err(err) = link_live_queue_to_backup(&path, &memory_ops_backup_path(project_root)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
     }
-    fs::rename(&path, &backup)
-        .await
-        .map_err(|e| format!("Failed to rename {:?} to {:?}: {}", path, backup, e))?;
-    rewrite_memory_ops_records(&path, compacted.canonical_records()).await?;
-    remember_compacted_file(project_root, &compacted).await;
+    commit_memory_ops_tmp(&tmp, &path)?;
+    remember_compacted_file(project_root, &compacted);
     Ok(Some(compacted))
 }
 
@@ -1019,9 +1208,7 @@ mod tests {
             .into_iter()
             .map(|op| MemoryOpsRecord::Op { op })
             .collect::<Vec<_>>();
-        rewrite_memory_ops_records(&memory_ops_path(root), records)
-            .await
-            .unwrap();
+        rewrite_memory_ops_records(root, records).await.unwrap();
     }
 
     async fn test_gcx_with_workspace(dir: &Path) -> AppState {
@@ -1095,7 +1282,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = rewrite_memory_ops_records(&path, Vec::new()).await;
+        let result = rewrite_memory_ops_records(root, Vec::new()).await;
 
         assert!(result.is_err());
         let mut rd = tokio::fs::read_dir(&buddy_dir).await.unwrap();
@@ -2214,5 +2401,186 @@ mod tests {
         );
         let state = load_memory_ops(root).await;
         assert_eq!(state.ops.len(), 1);
+    }
+
+    const CROSS_PROCESS_ROOT_ENV: &str = "REFACT_TEST_MEMORY_OPS_ROOT";
+    const CROSS_PROCESS_COUNT_ENV: &str = "REFACT_TEST_MEMORY_OPS_COUNT";
+    const CROSS_PROCESS_PREFIX_ENV: &str = "REFACT_TEST_MEMORY_OPS_PREFIX";
+
+    fn pending_op(op_id: &str) -> MemoryLifecycleOp {
+        op_with_time(
+            op_id,
+            MemorySource::Trajectory,
+            MemoryOpStatus::Pending,
+            Utc::now(),
+        )
+    }
+
+    fn record_op_ids(root: &Path) -> Vec<String> {
+        let content = std::fs::read_to_string(memory_ops_path(root)).unwrap_or_default();
+        parse_memory_ops_content(&content)
+            .records
+            .into_iter()
+            .map(|record| record.into_op().op_id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn archive_never_leaves_the_live_queue_missing() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let ops: Vec<MemoryLifecycleOp> = (0..64).map(|i| pending_op(&format!("op-{i}"))).collect();
+        write_memory_ops_records_for_test(&root, ops).await;
+
+        let path = memory_ops_path(&root);
+        let stop = Arc::new(AtomicBool::new(false));
+        let missing = Arc::new(AtomicUsize::new(0));
+        let poll_stop = stop.clone();
+        let poll_missing = missing.clone();
+        let poll_path = path.clone();
+        let poller = std::thread::spawn(move || {
+            while !poll_stop.load(AtomicOrdering::SeqCst) {
+                if !poll_path.exists() {
+                    poll_missing.fetch_add(1, AtomicOrdering::SeqCst);
+                }
+            }
+        });
+
+        for _ in 0..16 {
+            remember_compacted_len(&root, 0);
+            assert!(archive_memory_ops_if_oversized(&root, 1).await.unwrap());
+        }
+        stop.store(true, AtomicOrdering::SeqCst);
+        poller.join().unwrap();
+
+        assert_eq!(
+            missing.load(AtomicOrdering::SeqCst),
+            0,
+            "live queue disappeared during archive"
+        );
+        assert_eq!(record_op_ids(&root).len(), 64);
+    }
+
+    #[tokio::test]
+    async fn unreadable_queue_fails_closed_instead_of_persisting_empty_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let survivor = pending_op("op-survivor");
+        write_memory_ops_records_for_test(root, vec![survivor.clone()]).await;
+        let path = memory_ops_path(root);
+        let saved = tokio::fs::read_to_string(&path).await.unwrap();
+
+        tokio::fs::remove_file(&path).await.unwrap();
+        tokio::fs::create_dir(&path).await.unwrap();
+
+        let compact_err = compact_memory_ops(root).await.unwrap_err();
+        assert!(
+            compact_err.contains("Failed to read memory ops queue"),
+            "unexpected compaction error: {compact_err}"
+        );
+        assert!(enqueue_memory_op(root, pending_op("op-new")).await.is_err());
+        assert!(path.is_dir(), "failed read must not rewrite the queue");
+        assert_eq!(load_memory_ops(root).await, MemoryOpsState::default());
+
+        tokio::fs::remove_dir(&path).await.unwrap();
+        tokio::fs::write(&path, saved).await.unwrap();
+        assert_eq!(
+            load_memory_ops_repairing(root).await.ops,
+            vec![survivor.normalized()]
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_ops_cross_process_appender_child() {
+        let Ok(root) = std::env::var(CROSS_PROCESS_ROOT_ENV) else {
+            return;
+        };
+        let count: usize = std::env::var(CROSS_PROCESS_COUNT_ENV)
+            .expect("child needs a record count")
+            .parse()
+            .expect("record count must be a number");
+        let prefix = std::env::var(CROSS_PROCESS_PREFIX_ENV).expect("child needs an id prefix");
+        let root = PathBuf::from(root);
+        for index in 0..count {
+            enqueue_memory_op(&root, pending_op(&format!("{prefix}-{index}")))
+                .await
+                .expect("child append must succeed");
+        }
+    }
+
+    #[tokio::test]
+    async fn cross_process_appends_survive_concurrent_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        write_memory_ops_records_for_test(&root, vec![pending_op("op-seed")]).await;
+
+        let child_records = 30usize;
+        let suffix = module_path!()
+            .split_once("::")
+            .map(|(_, rest)| rest)
+            .unwrap_or(module_path!());
+        let child_test = format!("{suffix}::memory_ops_cross_process_appender_child");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &child_test,
+                "--test-threads=1",
+                "--nocapture",
+                "--quiet",
+            ])
+            .env(CROSS_PROCESS_ROOT_ENV, &root)
+            .env(CROSS_PROCESS_COUNT_ENV, child_records.to_string())
+            .env(CROSS_PROCESS_PREFIX_ENV, "child")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn cross-process appender");
+
+        let mut parent_ids = Vec::new();
+        let mut round = 0usize;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if round < 200 {
+                let op_id = format!("parent-{round}");
+                enqueue_memory_op(&root, pending_op(&op_id)).await.unwrap();
+                parent_ids.push(op_id);
+                remember_compacted_len(&root, 0);
+                archive_memory_ops_if_oversized(&root, 1).await.unwrap();
+                compact_memory_ops(&root).await.unwrap();
+                round += 1;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            status.success(),
+            "child appender failed: {}
+{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let on_disk = record_op_ids(&root);
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for op_id in on_disk {
+            *counts.entry(op_id).or_default() += 1;
+        }
+        let mut expected: Vec<String> = (0..child_records).map(|i| format!("child-{i}")).collect();
+        expected.push("op-seed".to_string());
+        expected.extend(parent_ids);
+        let lost: Vec<&String> = expected
+            .iter()
+            .filter(|op_id| counts.get(*op_id).copied().unwrap_or(0) != 1)
+            .collect();
+        assert!(
+            lost.is_empty(),
+            "records lost or duplicated across processes: {lost:?} (have {} ids)",
+            counts.len()
+        );
     }
 }

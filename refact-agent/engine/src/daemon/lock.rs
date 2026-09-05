@@ -20,6 +20,10 @@ pub fn try_lock(lock: &mut RwLock<File>) -> io::Result<RwLockWriteGuard<'_, File
     lock.try_write()
 }
 
+pub fn lock_blocking(lock: &mut RwLock<File>) -> io::Result<RwLockWriteGuard<'_, File>> {
+    lock.write()
+}
+
 pub fn is_already_locked(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::WouldBlock
 }
