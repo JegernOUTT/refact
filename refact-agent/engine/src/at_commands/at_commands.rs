@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use tokio::sync::mpsc;
 
 use async_trait::async_trait;
@@ -53,6 +53,7 @@ pub struct AtCommandsContext {
     pub subchat_tx: Arc<AMutex<mpsc::UnboundedSender<serde_json::Value>>>,
     pub subchat_rx: Arc<AMutex<mpsc::UnboundedReceiver<serde_json::Value>>>,
     pub abort_flag: Arc<AtomicBool>,
+    pub activity_stamp: Option<Arc<AtomicU64>>,
 }
 
 impl AtCommandsContext {
@@ -196,6 +197,7 @@ impl AtCommandsContext {
             subchat_tx: Arc::new(AMutex::new(tx)),
             subchat_rx: Arc::new(AMutex::new(rx)),
             abort_flag: abort_flag.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+            activity_stamp: None,
         }
     }
 

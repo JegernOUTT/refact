@@ -723,6 +723,7 @@ async fn run_verifier_review(
         parent_subchat_tx: None,
         abort_flag: None,
         soft_abort: false,
+        activity_stamp: None,
         background_agent_id: None,
         subchat_depth: 1,
         final_step_force_answer: false,

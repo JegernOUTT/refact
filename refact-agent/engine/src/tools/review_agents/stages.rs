@@ -152,6 +152,8 @@ pub struct StageSpec {
     pub preferred_tools: Vec<String>,
     #[serde(default)]
     pub fallback: Option<String>,
+    #[serde(default)]
+    pub budget_minutes: Option<u64>,
     pub task: String,
 }
 
@@ -183,7 +185,14 @@ impl StageSpec {
 
 fn parse_stage(filename: &str, content: &str) -> Option<StageSpec> {
     match serde_yaml::from_str::<StageSpec>(content) {
-        Ok(spec) if !spec.id.trim().is_empty() && !spec.task.trim().is_empty() => Some(spec),
+        Ok(spec) if !spec.id.trim().is_empty() && !spec.task.trim().is_empty() => {
+            if spec.budget_minutes.is_some() {
+                tracing::warn!(
+                    "review stage '{filename}' sets budget_minutes, which no longer has any effect: stages are stopped only after idle_timeout_secs of silence"
+                );
+            }
+            Some(spec)
+        }
         Ok(_) => {
             tracing::warn!("review stage '{filename}' is missing id or task");
             None
@@ -319,6 +328,13 @@ mod tests {
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn review_stage_stale_budget_minutes_key_still_parses_and_is_carried_for_the_warning() {
+        let stale = "id: diff\ntask: look\nbudget_minutes: 20\n";
+        let spec = parse_stage("stale.yaml", stale).unwrap();
+        assert_eq!(spec.budget_minutes, Some(20));
     }
 
     #[test]

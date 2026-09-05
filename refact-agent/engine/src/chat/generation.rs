@@ -33,8 +33,7 @@ use super::goal_monitor::handle_goal_turn_end;
 use super::types::*;
 use super::trajectories::{
     check_external_reload_pending, ensure_frozen_prefix, first_system_prompt,
-    frozen_prefix_is_complete,
-    maybe_save_trajectory_background_with_intent,
+    frozen_prefix_is_complete, maybe_save_trajectory_background_with_intent,
 };
 use super::tools::{process_tool_calls_once, ToolStepOutcome};
 use super::prepare::{

@@ -202,6 +202,7 @@ pub async fn spawn_background_agent(
             parent_subchat_tx: parent_subchat_tx.clone(),
             abort_flag: None,
             soft_abort: false,
+            activity_stamp: None,
             background_agent_id: None,
             subchat_depth: subchat_depth + 1,
             final_step_force_answer: false,

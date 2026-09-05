@@ -225,6 +225,7 @@ async fn plan_jobs(
     let slots = cfg.settings.slots_for_variants(variants);
     for spec in specs {
         let overrides = cfg.settings.stage_override(&spec.id);
+        overrides.warn_if_deprecated(&spec.id);
         if overrides.enabled == Some(false) {
             rows.push(StageRun::not_run(
                 &spec.id,
@@ -535,12 +536,9 @@ pub fn render_review_markdown(report: &ReviewReport) -> String {
     }
     if !scope.dropped_files.is_empty() {
         output.push_str(&format!(
-            "\n\n### Files not reviewed ({})",
+            "\n\n{} file(s) were not reviewed (max_files cap); the full list is in the machine-readable report.",
             scope.dropped_files.len()
         ));
-        for file in &scope.dropped_files {
-            output.push_str(&format!("\n- {}", markdown_cell(file)));
-        }
     }
     if let Some(dir) = report.scratch_dir.as_deref() {
         output.push_str(&format!("\n\nRaw per-stage output: {dir}"));
@@ -711,6 +709,7 @@ async fn run_review(
             continue;
         }
         let overrides = cfg.settings.stage_override(&spec.id);
+        overrides.warn_if_deprecated(&spec.id);
         if overrides.enabled == Some(false) {
             stage_rows.push(StageRun::not_run(
                 &spec.id,
@@ -871,6 +870,7 @@ impl Tool for ToolCodeReview {
                 worktree: ccx_lock.execution_scope_worktree(),
                 chat_id: ccx_lock.chat_id.clone(),
                 root_chat_id: ccx_lock.root_chat_id.clone(),
+                activity: None,
             };
             (gcx, ctx)
         };
@@ -1214,9 +1214,9 @@ mod tests {
 
         let markdown = render_review_markdown(&with_dropped);
 
-        assert!(markdown.contains("### Files not reviewed (2)"));
-        assert!(markdown.contains("\n- src/a.rs"));
-        assert!(markdown.contains("\n- src/b.rs"));
+        assert!(markdown.contains("2 file(s) were not reviewed"));
+        assert!(!markdown.contains("\n- src/a.rs"));
+        assert!(!markdown.contains("\n- src/b.rs"));
     }
 
     #[test]

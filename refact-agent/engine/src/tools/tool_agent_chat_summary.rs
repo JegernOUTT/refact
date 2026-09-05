@@ -393,6 +393,7 @@ async fn run_summary_subchat(
         parent_subchat_tx: Some(parent_subchat_tx),
         abort_flag: Some(abort_flag),
         soft_abort: false,
+        activity_stamp: None,
         background_agent_id: None,
         subchat_depth: parent_depth + 1,
         final_step_force_answer: false,

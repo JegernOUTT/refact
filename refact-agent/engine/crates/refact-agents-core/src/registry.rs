@@ -969,10 +969,11 @@ impl BackgroundAgentRegistry {
         .map(|_| ())
     }
 
-    pub async fn drain_deliveries(
+    async fn claim_pending_deliveries(
         &self,
         agent_id: &str,
-        idle: bool,
+        seal: bool,
+        filter: impl Fn(&PendingDelivery) -> bool,
     ) -> Result<Vec<PendingDelivery>, String> {
         let runtime = self
             .runtime
@@ -989,16 +990,27 @@ impl BackgroundAgentRegistry {
         let deliveries = record
             .pending_deliveries
             .iter()
-            .filter(|delivery| {
-                (idle || delivery.push != PushMode::WhenIdle)
-                    && !state.claimed.contains(&delivery.id)
-            })
+            .filter(|delivery| filter(delivery) && !state.claimed.contains(&delivery.id))
             .cloned()
             .collect::<Vec<_>>();
         state
             .claimed
             .extend(deliveries.iter().map(|delivery| delivery.id.clone()));
+        if seal {
+            state.sealed = !deliveries.iter().any(|delivery| delivery.wake);
+        }
         Ok(deliveries)
+    }
+
+    pub async fn drain_deliveries(
+        &self,
+        agent_id: &str,
+        idle: bool,
+    ) -> Result<Vec<PendingDelivery>, String> {
+        self.claim_pending_deliveries(agent_id, false, |delivery| {
+            idle || delivery.push != PushMode::WhenIdle
+        })
+        .await
     }
 
     /// Claim the final batch and atomically stop accepting if it cannot rearm the runner.
@@ -1007,29 +1019,8 @@ impl BackgroundAgentRegistry {
         &self,
         agent_id: &str,
     ) -> Result<Vec<PendingDelivery>, String> {
-        let runtime = self
-            .runtime
-            .read()
+        self.claim_pending_deliveries(agent_id, true, |_| true)
             .await
-            .get(agent_id)
-            .cloned()
-            .ok_or_else(|| "agent is not running in this process".to_string())?;
-        let mut state = runtime.delivery_state.lock().await;
-        let records = self.records.read().await;
-        let record = records
-            .get(agent_id)
-            .ok_or_else(|| "agent not found".to_string())?;
-        let deliveries = record
-            .pending_deliveries
-            .iter()
-            .filter(|delivery| !state.claimed.contains(&delivery.id))
-            .cloned()
-            .collect::<Vec<_>>();
-        state
-            .claimed
-            .extend(deliveries.iter().map(|delivery| delivery.id.clone()));
-        state.sealed = !deliveries.iter().any(|delivery| delivery.wake);
-        Ok(deliveries)
     }
 
     pub async fn inbox_for(&self, agent_id: &str) -> Option<Arc<Mutex<VecDeque<InboxMessage>>>> {

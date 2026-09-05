@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{Mutex as AMutex, mpsc};
 use serde_json::{json, Value};
 use tracing::{info, warn};
@@ -505,6 +505,7 @@ pub struct SubchatConfig {
     pub parent_subchat_tx: Option<Arc<AMutex<mpsc::UnboundedSender<Value>>>>,
     pub abort_flag: Option<Arc<AtomicBool>>,
     pub soft_abort: bool,
+    pub activity_stamp: Option<Arc<AtomicU64>>,
     pub background_agent_id: Option<String>,
     pub subchat_depth: usize,
     pub final_step_force_answer: bool,
@@ -534,6 +535,7 @@ fn should_stream_thinking_progress(tool_name: &str) -> bool {
 struct SubchatProgressCollector {
     sender: Option<mpsc::UnboundedSender<Value>>,
     tool_call_id: Option<String>,
+    activity_stamp: Option<Arc<AtomicU64>>,
     thinking_tail: String,
     reasoning_tail: String,
     content_tail: String,
@@ -542,10 +544,15 @@ struct SubchatProgressCollector {
 }
 
 impl SubchatProgressCollector {
-    fn new(sender: Option<mpsc::UnboundedSender<Value>>, tool_call_id: Option<String>) -> Self {
+    fn new(
+        sender: Option<mpsc::UnboundedSender<Value>>,
+        tool_call_id: Option<String>,
+        activity_stamp: Option<Arc<AtomicU64>>,
+    ) -> Self {
         Self {
             sender,
             tool_call_id,
+            activity_stamp,
             thinking_tail: String::new(),
             reasoning_tail: String::new(),
             content_tail: String::new(),
@@ -643,6 +650,7 @@ impl SubchatProgressCollector {
 
 impl StreamCollector for SubchatProgressCollector {
     fn on_delta_ops(&mut self, _choice_idx: usize, ops: Vec<crate::chat::types::DeltaOp>) {
+        stamp_activity(&self.activity_stamp);
         for op in ops {
             match op {
                 crate::chat::types::DeltaOp::AppendReasoning { text } => {
@@ -1307,6 +1315,7 @@ pub async fn resolve_subchat_config_with_parent(
         parent_subchat_tx,
         abort_flag,
         soft_abort: false,
+        activity_stamp: None,
         background_agent_id: None,
         subchat_depth,
         final_step_force_answer: false,
@@ -1436,6 +1445,7 @@ pub async fn resolve_subchat_config_with_explicit_params(
         parent_subchat_tx,
         abort_flag,
         soft_abort: false,
+        activity_stamp: None,
         background_agent_id: None,
         subchat_depth,
         final_step_force_answer: false,
@@ -1815,6 +1825,7 @@ pub async fn run_subchat(
 
     ccx.lock().await.subchat_depth = config.subchat_depth;
     ccx.lock().await.background_agent_id = config.background_agent_id.clone();
+    ccx.lock().await.activity_stamp = config.activity_stamp.clone();
 
     if let Some(ref parent_tx) = config.parent_subchat_tx {
         ccx.lock().await.subchat_tx = parent_tx.clone();
@@ -2170,6 +2181,19 @@ fn is_abort_error(err: &str) -> bool {
     err.eq_ignore_ascii_case("aborted")
 }
 
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn stamp_activity(stamp: &Option<Arc<AtomicU64>>) {
+    if let Some(stamp) = stamp {
+        stamp.store(epoch_ms(), Ordering::Relaxed);
+    }
+}
+
 fn is_aborted(abort_flag: &Option<Arc<AtomicBool>>) -> bool {
     abort_flag
         .as_ref()
@@ -2302,6 +2326,7 @@ async fn run_subchat_loop(
             }
             return Err("Aborted".to_string());
         }
+        stamp_activity(&config.activity_stamp);
         emit_subchat_progress(config, SubchatProgress::Step(step + 1));
         drain_background_agent_inbox(&ccx, &mut messages).await;
         persist_subchat_progress(&ccx, config, progress, &messages).await;
@@ -2504,6 +2529,7 @@ async fn run_subchat_with_wrap_up(
             return Err("Aborted".to_string());
         }
 
+        stamp_activity(&config.activity_stamp);
         emit_subchat_progress(config, SubchatProgress::Step(step_n + 1));
         drain_background_agent_inbox(&ccx, &mut messages).await;
         persist_subchat_progress(&ccx, config, progress, &messages).await;
@@ -2959,12 +2985,22 @@ async fn subchat_stream(
     progress_tool_call_id: Option<&str>,
     allow_provider_retries: bool,
 ) -> Result<Vec<Vec<ChatMessage>>, String> {
-    let (gcx, effective_n_ctx, abort_flag, task_meta, worktree, context_chat_id, context_root_id) = {
+    let (
+        gcx,
+        effective_n_ctx,
+        abort_flag,
+        activity_stamp,
+        task_meta,
+        worktree,
+        context_chat_id,
+        context_root_id,
+    ) = {
         let cgcx = ccx.lock().await;
         (
             cgcx.global_context.clone(),
             cgcx.n_ctx,
             cgcx.abort_flag.clone(),
+            cgcx.activity_stamp.clone(),
             cgcx.task_meta.clone(),
             cgcx.execution_scope_worktree(),
             cgcx.chat_id.clone(),
@@ -3100,8 +3136,11 @@ async fn subchat_stream(
             supports_temperature: model_rec.supports_temperature,
         };
 
-        let mut collector =
-            SubchatProgressCollector::new(progress_sender.clone(), progress_tool_call_id.clone());
+        let mut collector = SubchatProgressCollector::new(
+            progress_sender.clone(),
+            progress_tool_call_id.clone(),
+            activity_stamp.clone(),
+        );
 
         let call_ts_start = chrono::Utc::now().to_rfc3339();
         let call_start = std::time::Instant::now();
@@ -3439,8 +3478,9 @@ mod subchat_tests {
         stable_subchat_chat_id, should_compact_context_limit_error,
         should_persist_subchat_trajectory, stateful_thread_from_config, subchat_retries_allowed,
         subchat_trajectory_commit_intent, trace_thread_from_config, save_failed_subchat_trajectory,
-        SubchatConfig, SubchatProgress, SubchatTrajectoryCommitPhase, ToolsPolicy, TraceParent,
-        GUARDED_REPORT_INSTRUCTION, PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
+        SubchatConfig, SubchatProgress, SubchatProgressCollector, SubchatTrajectoryCommitPhase,
+        ToolsPolicy, TraceParent, GUARDED_REPORT_INSTRUCTION,
+        PARENT_COMPACTION_DIAGNOSTIC_MAX_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_REDACTION_LOOKAHEAD_CHARS,
         PARENT_COMPACTION_DIAGNOSTIC_TRUNCATED, PARTIAL_OUTPUT_STREAM_ERROR,
     };
@@ -3464,9 +3504,11 @@ mod subchat_tests {
         Attribution, FileRecord, PolicyLoad, PrivacyPolicy, PrivacyRecord, ShellBehavior,
         SubagentPolicy, Zone,
     };
+    use crate::chat::stream_core::StreamCollector;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3876,6 +3918,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             soft_abort: false,
+            activity_stamp: None,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
@@ -3910,6 +3953,21 @@ mod subchat_tests {
         config.abort_flag = Some(Arc::new(std::sync::atomic::AtomicBool::new(true)));
         config.soft_abort = soft_abort;
         config
+    }
+
+    #[test]
+    fn streaming_deltas_stamp_watchdog_activity() {
+        let stamp = Arc::new(AtomicU64::new(0));
+        let mut collector = SubchatProgressCollector::new(None, None, Some(stamp.clone()));
+
+        collector.on_delta_ops(
+            0,
+            vec![crate::chat::types::DeltaOp::AppendContent {
+                text: "token".to_string(),
+            }],
+        );
+
+        assert!(stamp.load(Ordering::Relaxed) > 0);
     }
 
     #[test]
@@ -4732,6 +4790,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             soft_abort: false,
+            activity_stamp: None,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
@@ -4799,6 +4858,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             soft_abort: false,
+            activity_stamp: None,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
@@ -4860,6 +4920,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             soft_abort: false,
+            activity_stamp: None,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,
@@ -5105,6 +5166,7 @@ mod subchat_tests {
             parent_subchat_tx: None,
             abort_flag: None,
             soft_abort: false,
+            activity_stamp: None,
             background_agent_id: None,
             subchat_depth: 1,
             final_step_force_answer: false,

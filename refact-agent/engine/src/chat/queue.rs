@@ -32,9 +32,7 @@ use super::tools::{
     acquire_session_turn_tool_pool, execute_tools_with_session,
     resolve_tool_call_aliases_with_catalog,
 };
-use super::trajectories::{
-    maybe_save_trajectory_background_with_intent,
-};
+use super::trajectories::{maybe_save_trajectory_background_with_intent};
 use crate::ext::slash_expand::expand_slash_command;
 use crate::ext::skills_context::{expand_skill_includes, SKILLS_CONTEXT_MARKER};
 use crate::worktrees::service::WorktreeService;
