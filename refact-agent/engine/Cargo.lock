@@ -4199,6 +4199,7 @@ dependencies = [
 name = "refact-codegraph"
 version = "0.1.0"
 dependencies = [
+ "fd-lock",
  "hex",
  "petgraph",
  "refact-codegraph-parsers",

@@ -23,7 +23,9 @@ use tokio::sync::Mutex as AMutex;
 use tokio::sync::Notify;
 use tracing::debug;
 
-pub use store::{Counts, IndexedFile, ParseFailure, Store, WalCheckpointMode, WalCheckpointResult};
+pub use store::{
+    Counts, IndexedFile, ParseFailure, Store, StoreIdentity, WalCheckpointMode, WalCheckpointResult,
+};
 
 pub const PARSE_FAILURE_REPORT_LIMIT: i64 = 50;
 
@@ -98,9 +100,31 @@ pub struct IndexReadiness {
     pub parse_failure_paths: Vec<String>,
 }
 
+pub const DB_UNAVAILABLE_ERROR: &str = "codegraph database is unavailable";
+
+fn unavailable_error() -> String {
+    format!("{DB_UNAVAILABLE_ERROR}: waiting for the store to be reopened")
+}
+
+/// Minimum spacing between reopen attempts after another process replaced the database, so a
+/// permanently failing reopen degrades to the idle cadence instead of spinning.
+const REOPEN_RETRY_INTERVAL: Duration = Duration::from_secs(3);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatabaseRecovery {
+    /// The connections still point at the file on disk.
+    NotNeeded,
+    /// Both connections were reopened on the current file.
+    Recovered,
+    /// A replacement was seen but the retry interval has not elapsed yet.
+    Deferred,
+    /// The database is unavailable; the next attempt happens on the idle cadence.
+    Failed(String),
+}
+
 pub struct CodeGraphService {
-    store: AMutex<Store>,
-    read_store: Option<AMutex<Store>>,
+    store: AMutex<Option<Store>>,
+    read_store: Option<AMutex<Option<Store>>>,
     queue: StdMutex<PendingQueue>,
     throughput: StdMutex<ThroughputWindow>,
     queue_notify: Notify,
@@ -112,6 +136,11 @@ pub struct CodeGraphService {
     analytics_rebuild_count: AtomicUsize,
     scoped_analytics_rebuild_count: AtomicUsize,
     run_parse_failures: AtomicUsize,
+    store_generation: AtomicU64,
+    reopen_attempts: AtomicUsize,
+    last_reopen_attempt: StdMutex<Option<Instant>>,
+    writer_identity: StdMutex<Option<Arc<StoreIdentity>>>,
+    store_available: AtomicBool,
 }
 
 fn normalize_indexed_path(path: &str) -> String {
@@ -320,9 +349,10 @@ impl CodeGraphService {
     pub fn open(db_path: PathBuf) -> Result<Self, String> {
         let store = Store::open(&db_path)?;
         let read_store = Store::open_readonly(&db_path)?;
+        let identity = store.identity_handle();
         Ok(Self {
-            store: AMutex::new(store),
-            read_store: Some(AMutex::new(read_store)),
+            store: AMutex::new(Some(store)),
+            read_store: Some(AMutex::new(Some(read_store))),
             queue: StdMutex::new(PendingQueue::default()),
             throughput: StdMutex::new(ThroughputWindow::default()),
             queue_notify: Notify::new(),
@@ -336,13 +366,18 @@ impl CodeGraphService {
             analytics_rebuild_count: AtomicUsize::new(0),
             scoped_analytics_rebuild_count: AtomicUsize::new(0),
             run_parse_failures: AtomicUsize::new(0),
+            store_generation: AtomicU64::new(0),
+            reopen_attempts: AtomicUsize::new(0),
+            last_reopen_attempt: StdMutex::new(None),
+            writer_identity: StdMutex::new(Some(identity)),
+            store_available: AtomicBool::new(true),
         })
     }
 
     pub fn open_in_memory() -> Result<Self, String> {
         let store = Store::open_in_memory()?;
         Ok(Self {
-            store: AMutex::new(store),
+            store: AMutex::new(Some(store)),
             read_store: None,
             queue: StdMutex::new(PendingQueue::default()),
             throughput: StdMutex::new(ThroughputWindow::default()),
@@ -357,6 +392,11 @@ impl CodeGraphService {
             analytics_rebuild_count: AtomicUsize::new(0),
             scoped_analytics_rebuild_count: AtomicUsize::new(0),
             run_parse_failures: AtomicUsize::new(0),
+            store_generation: AtomicU64::new(0),
+            reopen_attempts: AtomicUsize::new(0),
+            last_reopen_attempt: StdMutex::new(None),
+            writer_identity: StdMutex::new(None),
+            store_available: AtomicBool::new(true),
         })
     }
 
@@ -453,11 +493,113 @@ impl CodeGraphService {
     ) -> Result<T, String> {
         if let Some(store) = &self.read_store {
             let store = store.lock().await;
-            f(&store)
+            f(store.as_ref().ok_or_else(unavailable_error)?)
         } else {
             let store = self.store.lock().await;
-            f(&store)
+            f(store.as_ref().ok_or_else(unavailable_error)?)
         }
+    }
+
+    async fn with_write_store<T>(
+        &self,
+        f: impl FnOnce(&Store) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let store = self.store.lock().await;
+        f(store.as_ref().ok_or_else(unavailable_error)?)
+    }
+
+    /// Generation of the underlying sqlite files. It changes whenever the connections are
+    /// reopened after another process replaced the database, so results computed against the
+    /// previous files can be discarded instead of written back.
+    pub fn store_generation(&self) -> u64 {
+        self.store_generation.load(Ordering::Acquire)
+    }
+
+    pub fn reopen_attempts(&self) -> usize {
+        self.reopen_attempts.load(Ordering::Relaxed)
+    }
+
+    /// True when the writer connection no longer points at the file living at `db_path`.
+    ///
+    /// This runs on the hot loop before every queue drain, so it deliberately reads the retained
+    /// descriptor instead of locking the writer connection the indexer holds across batches.
+    pub fn database_replaced(&self) -> bool {
+        match self.writer_identity.lock().unwrap().as_ref() {
+            Some(identity) => identity.replaced(),
+            None => !self.store_available.load(Ordering::Acquire),
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.store_available.load(Ordering::Acquire)
+    }
+
+    /// Reopen both connections on the file that now lives at `db_path`, dropping every cache
+    /// derived from the old files. The pending queue is deliberately preserved: those paths still
+    /// need indexing, and the fresh database has none of their content.
+    pub async fn recover_replaced_database(&self) -> DatabaseRecovery {
+        if self.read_store.is_none() {
+            return DatabaseRecovery::NotNeeded;
+        }
+        if !self.database_replaced() && self.is_available() {
+            return DatabaseRecovery::NotNeeded;
+        }
+        {
+            let mut last = self.last_reopen_attempt.lock().unwrap();
+            let now = Instant::now();
+            if let Some(previous) = *last {
+                if now.saturating_duration_since(previous) < REOPEN_RETRY_INTERVAL {
+                    return DatabaseRecovery::Deferred;
+                }
+            }
+            *last = Some(now);
+        }
+        self.reopen_attempts.fetch_add(1, Ordering::Relaxed);
+
+        let mut writer = self.store.lock().await;
+        let Some(read_slot) = self.read_store.as_ref() else {
+            return DatabaseRecovery::NotNeeded;
+        };
+        let mut reader = read_slot.lock().await;
+        *writer = None;
+        *reader = None;
+
+        let db_path = self.db_path.clone();
+        let reopened = Store::open(&db_path).and_then(|store| {
+            let read_store = Store::open_readonly(&db_path)?;
+            Ok((store, read_store))
+        });
+        match reopened {
+            Ok((store, read_store)) => {
+                *self.writer_identity.lock().unwrap() = Some(store.identity_handle());
+                *writer = Some(store);
+                *reader = Some(read_store);
+                drop(reader);
+                drop(writer);
+                self.store_available.store(true, Ordering::Release);
+                self.store_generation.fetch_add(1, Ordering::AcqRel);
+                self.bump_graph_generation();
+                self.reset_caches_after_reopen().await;
+                debug!("codegraph: reopened both connections after the database was replaced");
+                DatabaseRecovery::Recovered
+            }
+            Err(err) => {
+                *self.writer_identity.lock().unwrap() = None;
+                drop(reader);
+                drop(writer);
+                self.store_available.store(false, Ordering::Release);
+                self.store_generation.fetch_add(1, Ordering::AcqRel);
+                DatabaseRecovery::Failed(format!("{DB_UNAVAILABLE_ERROR}: {err}"))
+            }
+        }
+    }
+
+    async fn reset_caches_after_reopen(&self) {
+        *self.analytics_cache.lock().await = None;
+        self.scoped_analytics_cache.lock().await.entries.clear();
+        *self.throughput.lock().unwrap() = ThroughputWindow::default();
+        self.run_parse_failures.store(0, Ordering::Relaxed);
+        self.initial_index_done.store(false, Ordering::Relaxed);
     }
 
     pub fn graph_generation(&self) -> u64 {
@@ -484,9 +626,9 @@ impl CodeGraphService {
         text: &str,
         lang: &str,
     ) -> Result<IndexedFile, String> {
-        let store = self.store.lock().await;
-        let indexed = store.index_file_graph(path, text, lang)?;
-        drop(store);
+        let indexed = self
+            .with_write_store(|store| store.index_file_graph(path, text, lang))
+            .await?;
         self.record_run_parse_failures(std::slice::from_ref(&indexed));
         if indexed.changed {
             self.bump_graph_generation();
@@ -498,10 +640,10 @@ impl CodeGraphService {
         &self,
         entries: &[(String, String, String)],
     ) -> Result<Vec<IndexedFile>, String> {
-        let store = self.store.lock().await;
-        let results = store.index_files_batch(entries)?;
+        let results = self
+            .with_write_store(|store| store.index_files_batch(entries))
+            .await?;
         let changed = results.iter().any(|indexed| indexed.changed);
-        drop(store);
         self.record_run_parse_failures(&results);
         if changed {
             self.bump_graph_generation();
@@ -531,13 +673,16 @@ impl CodeGraphService {
     /// Use `Passive` after routine batches and `Truncate` only at a genuine idle boundary.
     pub async fn checkpoint_wal(&self, mode: WalCheckpointMode) {
         let store = self.store.lock().await;
-        Self::checkpoint_wal_failure_tolerant(&store, mode);
+        let Some(store) = store.as_ref() else {
+            return;
+        };
+        Self::checkpoint_wal_failure_tolerant(store, mode);
     }
 
     pub async fn remove_path(&self, path: &str) -> Result<(), String> {
-        let store = self.store.lock().await;
-        let changed = store.remove_path(path)?;
-        drop(store);
+        let changed = self
+            .with_write_store(|store| store.remove_path(path))
+            .await?;
         if changed {
             self.bump_graph_generation();
         }
@@ -549,9 +694,9 @@ impl CodeGraphService {
     }
 
     pub async fn connect_usages(&self) -> Result<(), String> {
-        let store = self.store.lock().await;
-        let changed = store.connect_usages()?;
-        drop(store);
+        let changed = self
+            .with_write_store(|store| store.connect_usages())
+            .await?;
         if changed {
             self.bump_graph_generation();
         }
@@ -624,8 +769,8 @@ impl CodeGraphService {
     }
 
     pub async fn meta_set(&self, key: &str, value: &str) -> Result<(), String> {
-        let store = self.store.lock().await;
-        store.meta_set(key, value)
+        self.with_write_store(|store| store.meta_set(key, value))
+            .await
     }
 
     pub async fn dirty_usage_path_count(&self) -> Result<usize, String> {
@@ -1876,5 +2021,94 @@ mod tests {
         writer.join().unwrap();
 
         assert!(defs.iter().any(|def| def.name() == "ready"));
+    }
+
+    #[tokio::test]
+    async fn recovery_reopens_both_stores_and_keeps_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("codegraph.sqlite");
+        let service = CodeGraphService::open(db_path.clone()).unwrap();
+        service.enqueue_files(&["src/a.rs".to_string(), "src/b.rs".to_string()]);
+
+        assert!(!service.database_replaced());
+        assert_eq!(
+            service.recover_replaced_database().await,
+            DatabaseRecovery::NotNeeded
+        );
+
+        Store::remove_sqlite_files(&db_path).unwrap();
+        drop(Store::open(&db_path).unwrap());
+        assert!(
+            service.database_replaced(),
+            "a recreated file at the same path must be detected"
+        );
+
+        let generation_before = service.store_generation();
+        assert_eq!(
+            service.recover_replaced_database().await,
+            DatabaseRecovery::Recovered
+        );
+
+        assert!(service.is_available());
+        assert!(
+            !service.database_replaced(),
+            "the reopened writer must track the fresh inode"
+        );
+        assert!(service.store_generation() > generation_before);
+        assert_eq!(
+            service.queue_len(),
+            2,
+            "recovery must preserve the pending queue, the fresh db has none of that content"
+        );
+        service
+            .index_file("src/a.rs", "fn a() {}\n", "rust")
+            .await
+            .expect("the writer connection must work after recovery");
+        assert!(
+            !service.definitions("a").await.unwrap().is_empty(),
+            "the reader connection must see the fresh database too"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_reopen_reports_unavailable_and_does_not_spin() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("codegraph.sqlite");
+        let service = CodeGraphService::open(db_path.clone()).unwrap();
+        service.enqueue_files(&["src/a.rs".to_string()]);
+
+        // A directory at the database path is a different inode than the retained handle, and no
+        // reopen attempt can ever succeed against it.
+        Store::remove_sqlite_files(&db_path).unwrap();
+        std::fs::create_dir(&db_path).unwrap();
+
+        assert!(service.database_replaced());
+        match service.recover_replaced_database().await {
+            DatabaseRecovery::Failed(err) => {
+                assert!(err.contains(DB_UNAVAILABLE_ERROR), "got {err:?}")
+            }
+            other => panic!("a broken path must fail the reopen, got {other:?}"),
+        }
+        assert!(!service.is_available());
+        assert_eq!(service.reopen_attempts(), 1);
+
+        for _ in 0..5 {
+            assert_eq!(
+                service.recover_replaced_database().await,
+                DatabaseRecovery::Deferred,
+                "retries inside the interval must be deferred, not attempted"
+            );
+        }
+        assert_eq!(
+            service.reopen_attempts(),
+            1,
+            "a failing reopen must not spin: retries wait for the idle cadence"
+        );
+        assert_eq!(
+            service.queue_len(),
+            1,
+            "an unavailable database must not drop the queue"
+        );
+        assert!(service.counts().await.is_err());
     }
 }

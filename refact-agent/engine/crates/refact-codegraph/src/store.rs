@@ -1,14 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use refact_codegraph_parsers::{RawRef, Resolver};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::extract::{edge_kind_str, extract_symbols};
 use crate::schema;
@@ -308,8 +310,166 @@ const SYMBOLS_BULK_LOAD_REF_RATIO: i64 = 4;
 
 pub const PARSERS_GENERATION_KEY: &str = "parsers_generation";
 
+pub const DB_IN_USE_ERROR: &str = "codegraph database in use by another engine";
+pub const SCHEMA_TOO_NEW_MARKER: &str = "is newer than supported";
+
+const LEASE_FILE_SUFFIX: &str = ".lease";
+
+pub fn lease_path_for(db_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}{LEASE_FILE_SUFFIX}", db_path.to_string_lossy()))
+}
+
+pub fn schema_too_new_error(path: &Path, found: i64) -> String {
+    format!(
+        "codegraph database {path:?} schema {found} {SCHEMA_TOO_NEW_MARKER} {}; \
+         refusing to recreate it, upgrade or remove the database manually",
+        schema::SCHEMA_VERSION
+    )
+}
+
+/// Advisory sidecar lock guarding the sqlite file set. Normal opens hold it shared for the
+/// lifetime of the connection; deleting or recreating the files requires it exclusively.
+#[derive(Debug)]
+pub struct DatabaseLease {
+    _file: File,
+}
+
+fn open_lease_file(db_path: &Path) -> Result<File, String> {
+    let path = lease_path_for(db_path);
+    if let Some(parent) = path.parent() {
+        match fs::create_dir_all(parent) {
+            Ok(()) => {}
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(format!("codegraph create lease dir {parent:?}: {err}")),
+        }
+    }
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|err| format!("codegraph open lease {path:?}: {err}"))
+}
+
+fn acquire_lease(db_path: &Path, exclusive: bool) -> Result<Option<DatabaseLease>, String> {
+    let file = open_lease_file(db_path)?;
+    let mut lock = fd_lock::RwLock::new(file);
+    // The guard is forgotten on purpose: the advisory lock lives on the open descriptor and is
+    // released when `DatabaseLease` drops the file it owns.
+    let outcome = if exclusive {
+        lock.try_write().map(std::mem::forget)
+    } else {
+        lock.try_read().map(std::mem::forget)
+    };
+    match outcome {
+        Ok(()) => Ok(Some(DatabaseLease {
+            _file: lock.into_inner(),
+        })),
+        Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(None),
+        Err(err) => Err(format!("codegraph lease for {db_path:?}: {err}")),
+    }
+}
+
+pub fn try_acquire_shared_lease(db_path: &Path) -> Result<Option<DatabaseLease>, String> {
+    acquire_lease(db_path, false)
+}
+
+pub fn try_acquire_exclusive_lease(db_path: &Path) -> Result<Option<DatabaseLease>, String> {
+    acquire_lease(db_path, true)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileFingerprint {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(unix)]
+fn fingerprint_of(metadata: &fs::Metadata) -> Option<FileFingerprint> {
+    use std::os::unix::fs::MetadataExt;
+    Some(FileFingerprint {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn fingerprint_of(metadata: &fs::Metadata) -> Option<FileFingerprint> {
+    use std::os::windows::fs::MetadataExt;
+    match (metadata.volume_serial_number(), metadata.file_index()) {
+        (Some(volume), Some(index)) => Some(FileFingerprint {
+            dev: volume as u64,
+            ino: index,
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn fingerprint_of(_metadata: &fs::Metadata) -> Option<FileFingerprint> {
+    None
+}
+
+/// Identity of the sqlite file this connection was opened on. A retained descriptor lets us
+/// compare the inode we are still writing to against whatever now lives at the path.
+///
+/// It is immutable after `capture` and shared behind an `Arc`, so callers can check for a
+/// replacement without taking the connection mutex the indexer holds for whole batches.
+#[derive(Debug, Default)]
+pub struct StoreIdentity {
+    path: Option<PathBuf>,
+    handle: Option<File>,
+}
+
+impl StoreIdentity {
+    fn capture(path: &Path) -> Self {
+        Self {
+            path: Some(path.to_path_buf()),
+            handle: File::open(path).ok(),
+        }
+    }
+
+    pub fn replaced(&self) -> bool {
+        let (Some(path), Some(handle)) = (self.path.as_ref(), self.handle.as_ref()) else {
+            return false;
+        };
+        let Some(expected) = handle.metadata().ok().as_ref().and_then(fingerprint_of) else {
+            return false;
+        };
+        match fs::metadata(path) {
+            Ok(metadata) => match fingerprint_of(&metadata) {
+                Some(current) => current != expected,
+                None => false,
+            },
+            Err(err) if err.kind() == ErrorKind::NotFound => true,
+            Err(err) => {
+                warn!("codegraph identity check for {path:?} failed: {err}");
+                false
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaState {
+    Compatible,
+    Stale,
+    Newer(i64),
+}
+
 pub struct Store {
     conn: Connection,
+    identity: Arc<StoreIdentity>,
+    _lease: Option<DatabaseLease>,
+}
+
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Store")
+            .field("path", &self.identity.path)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Store {
@@ -323,32 +483,86 @@ impl Store {
                 }
             }
         }
-        let conn = Connection::open(path).map_err(|e| format!("codegraph open {path:?}: {e}"))?;
-        let conn = if Self::schema_mismatch(&conn)? {
-            drop(conn);
-            Self::remove_sqlite_files(path)?;
-            Connection::open(path).map_err(|e| format!("codegraph reopen {path:?}: {e}"))?
-        } else {
-            conn
-        };
+        let probe = Connection::open(path).map_err(|e| format!("codegraph open {path:?}: {e}"))?;
+        let state = Self::schema_state(&probe)?;
+        drop(probe);
+        match state {
+            SchemaState::Newer(found) => return Err(schema_too_new_error(path, found)),
+            SchemaState::Stale => Self::recreate_under_exclusive_lease(path)?,
+            SchemaState::Compatible => {}
+        }
+        let lease = Self::require_shared_lease(path)?;
+        let conn = Connection::open(path).map_err(|e| format!("codegraph reopen {path:?}: {e}"))?;
         Self::tune_persistent_connection(&conn)?;
-        let store = Self { conn };
+        let store = Self {
+            conn,
+            identity: Arc::new(StoreIdentity::capture(path)),
+            _lease: Some(lease),
+        };
         store.apply_schema()?;
         Ok(store)
     }
 
     pub fn open_in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| format!("codegraph open mem: {e}"))?;
-        let store = Self { conn };
+        let store = Self {
+            conn,
+            identity: Arc::new(StoreIdentity::default()),
+            _lease: None,
+        };
         store.apply_schema()?;
         Ok(store)
     }
 
     pub fn open_readonly(path: &Path) -> Result<Self, String> {
+        let lease = Self::require_shared_lease(path)?;
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| format!("codegraph open readonly {path:?}: {e}"))?;
         Self::tune_readonly_connection(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            identity: Arc::new(StoreIdentity::capture(path)),
+            _lease: Some(lease),
+        })
+    }
+
+    fn require_shared_lease(path: &Path) -> Result<DatabaseLease, String> {
+        match try_acquire_shared_lease(path)? {
+            Some(lease) => Ok(lease),
+            None => Err(format!("{DB_IN_USE_ERROR}: {path:?} is being recreated")),
+        }
+    }
+
+    /// Deleting the sqlite file set out from under a live connection leaves that connection
+    /// writing into an unlinked inode forever, so recreation only happens when nobody else holds
+    /// the shared lease. The fresh schema is written while the exclusive lease is still held.
+    fn recreate_under_exclusive_lease(path: &Path) -> Result<(), String> {
+        let Some(_exclusive) = try_acquire_exclusive_lease(path)? else {
+            return Err(format!("{DB_IN_USE_ERROR}: cannot recreate {path:?}"));
+        };
+        Self::remove_sqlite_files(path)?;
+        let conn =
+            Connection::open(path).map_err(|e| format!("codegraph recreate {path:?}: {e}"))?;
+        Self::tune_persistent_connection(&conn)?;
+        let fresh = Self {
+            conn,
+            identity: Arc::new(StoreIdentity::default()),
+            _lease: None,
+        };
+        fresh.apply_schema()?;
+        Ok(())
+    }
+
+    /// True when the sqlite file this connection writes to is no longer the file at our path:
+    /// another process recreated the database and we are holding a deleted inode.
+    pub fn database_replaced(&self) -> bool {
+        self.identity.replaced()
+    }
+
+    /// Cheap handle on the retained descriptor. Cloning it lets the hot loop poll for a
+    /// replacement without contending on the connection mutex held across index batches.
+    pub fn identity_handle(&self) -> Arc<StoreIdentity> {
+        self.identity.clone()
     }
 
     pub fn read_snapshot<T>(
@@ -422,7 +636,7 @@ impl Store {
         Ok(())
     }
 
-    fn schema_mismatch(conn: &Connection) -> Result<bool, String> {
+    fn schema_state(conn: &Connection) -> Result<SchemaState, String> {
         let object_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table', 'virtual table') \
@@ -432,7 +646,7 @@ impl Store {
             )
             .map_err(|e| format!("codegraph schema inspect: {e}"))?;
         if object_count == 0 {
-            return Ok(false);
+            return Ok(SchemaState::Compatible);
         }
 
         let meta_count: i64 = conn
@@ -443,7 +657,7 @@ impl Store {
             )
             .map_err(|e| format!("codegraph meta inspect: {e}"))?;
         if meta_count == 0 {
-            return Ok(true);
+            return Ok(SchemaState::Stale);
         }
 
         let raw: Option<String> = conn
@@ -454,10 +668,14 @@ impl Store {
             )
             .optional()
             .map_err(|e| format!("codegraph schema_version inspect: {e}"))?;
-        Ok(raw.and_then(|v| v.parse::<i64>().ok()) != Some(schema::SCHEMA_VERSION))
+        Ok(match raw.and_then(|v| v.parse::<i64>().ok()) {
+            Some(found) if found == schema::SCHEMA_VERSION => SchemaState::Compatible,
+            Some(found) if found > schema::SCHEMA_VERSION => SchemaState::Newer(found),
+            _ => SchemaState::Stale,
+        })
     }
 
-    fn remove_sqlite_files(path: &Path) -> Result<(), String> {
+    pub(crate) fn remove_sqlite_files(path: &Path) -> Result<(), String> {
         for suffix in ["", "-wal", "-shm", "-journal"] {
             let candidate = if suffix.is_empty() {
                 path.to_path_buf()
@@ -2550,6 +2768,140 @@ mod tests {
         let store = Store::open(&db_path).unwrap();
         assert_eq!(store.schema_version().unwrap(), schema::SCHEMA_VERSION);
         assert_eq!(store.counts().unwrap(), Counts::default());
+        assert!(
+            lease_path_for(&db_path).is_file(),
+            "the sidecar lease must exist next to the recreated database"
+        );
+        assert!(
+            try_acquire_exclusive_lease(&db_path).unwrap().is_none(),
+            "an open store must keep holding the shared lease so nobody recreates under it"
+        );
+        drop(store);
+        assert!(
+            try_acquire_exclusive_lease(&db_path).unwrap().is_some(),
+            "closing the store must release the shared lease"
+        );
+    }
+
+    fn write_db_with_schema_version(db_path: &Path, version: i64) {
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute_batch(schema::SCHEMA_SQL).unwrap();
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES('schema_version', ?1) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![version.to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO nodes(kind, path, name, lang, line1, line2) \
+             VALUES('file', 'keep.rs', 'keep.rs', 'rust', 1, 1)",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn node_count_on_disk(db_path: &Path) -> i64 {
+        let conn = Connection::open(db_path).unwrap();
+        conn.query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn open_refuses_a_future_schema_without_deleting_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("codegraph.sqlite");
+        write_db_with_schema_version(&db_path, schema::SCHEMA_VERSION + 1);
+
+        let err = Store::open(&db_path).unwrap_err();
+
+        assert!(
+            err.contains(SCHEMA_TOO_NEW_MARKER),
+            "a newer schema must be reported as such, got {err:?}"
+        );
+        assert!(
+            db_path.is_file(),
+            "refusing to open a newer schema must never delete the database"
+        );
+        assert_eq!(
+            node_count_on_disk(&db_path),
+            1,
+            "the newer engine's rows must survive untouched"
+        );
+    }
+
+    #[test]
+    fn recreate_is_refused_while_another_handle_holds_the_shared_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("codegraph.sqlite");
+        write_db_with_schema_version(&db_path, schema::SCHEMA_VERSION - 1);
+
+        let held = try_acquire_shared_lease(&db_path).unwrap();
+        assert!(held.is_some(), "the first shared lease must be grantable");
+
+        let err = Store::open(&db_path).unwrap_err();
+
+        assert!(
+            err.contains(DB_IN_USE_ERROR),
+            "a live shared lease must block recreation, got {err:?}"
+        );
+        assert_eq!(
+            node_count_on_disk(&db_path),
+            1,
+            "a blocked recreate must not delete the in-use database"
+        );
+
+        drop(held);
+        let store = Store::open(&db_path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), schema::SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn database_replaced_stays_false_across_normal_writes_and_checkpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("codegraph.sqlite");
+        let store = Store::open(&db_path).unwrap();
+
+        assert!(!store.database_replaced());
+        store.index_file("src/a.rs", "fn a() {}\n", "rust").unwrap();
+        assert!(!store.database_replaced());
+        store.checkpoint_wal(WalCheckpointMode::Passive).unwrap();
+        assert!(!store.database_replaced());
+        store.checkpoint_wal(WalCheckpointMode::Truncate).unwrap();
+        assert!(
+            !store.database_replaced(),
+            "WAL activity must never look like a replacement"
+        );
+    }
+
+    #[test]
+    fn database_replaced_detects_delete_rename_and_replace() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let deleted_path = dir.path().join("deleted.sqlite");
+        let deleted = Store::open(&deleted_path).unwrap();
+        fs::remove_file(&deleted_path).unwrap();
+        assert!(
+            deleted.database_replaced(),
+            "an unlinked database must be reported as replaced"
+        );
+
+        let renamed_path = dir.path().join("renamed.sqlite");
+        let renamed = Store::open(&renamed_path).unwrap();
+        fs::rename(&renamed_path, dir.path().join("moved-away.sqlite")).unwrap();
+        assert!(
+            renamed.database_replaced(),
+            "a database renamed away must be reported as replaced"
+        );
+
+        let replaced_path = dir.path().join("replaced.sqlite");
+        let replaced = Store::open(&replaced_path).unwrap();
+        assert!(!replaced.database_replaced());
+        Store::remove_sqlite_files(&replaced_path).unwrap();
+        drop(Store::open(&replaced_path).unwrap());
+        assert!(
+            replaced.database_replaced(),
+            "a freshly recreated file at the same path is a different inode"
+        );
     }
 
     #[test]
