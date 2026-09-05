@@ -2433,7 +2433,7 @@ pub async fn process_tool_calls_once(
             }
             session.drain_post_tool_side_effects();
         } else {
-            session.clear_post_tool_side_effects();
+            session.drain_post_tool_side_effects();
         }
         if tool_initiated_stop {
             if final_state == SessionState::Completed

@@ -78,7 +78,7 @@ fn record_terminal_timestamp(record: &BackgroundAgent) -> Option<DateTime<Utc>> 
 fn prune_records(records: &mut Vec<BackgroundAgent>, now: DateTime<Utc>) {
     let cutoff = now - Duration::days(TERMINAL_RETENTION_DAYS);
     records.retain(|record| {
-        if !record.status.is_terminal() {
+        if !record.status.is_terminal() || !record.pending_deliveries.is_empty() {
             return true;
         }
         record_terminal_timestamp(record)
@@ -96,7 +96,7 @@ fn prune_records(records: &mut Vec<BackgroundAgent>, now: DateTime<Utc>) {
     let mut excess = records.len().saturating_sub(MAX_RECORDS);
     let mut retained = Vec::with_capacity(records.len().saturating_sub(excess));
     for record in records.drain(..) {
-        if excess > 0 && record.status.is_terminal() {
+        if excess > 0 && record.status.is_terminal() && record.pending_deliveries.is_empty() {
             excess -= 1;
             continue;
         }
@@ -190,6 +190,9 @@ mod tests {
             completion_message_id: None,
             completion_pushed_at: None,
             deferred_at: None,
+            completion_push: Default::default(),
+            pending_deliveries: Vec::new(),
+            delivery_ids: Vec::new(),
             model: "model".to_string(),
             model_type: None,
             current_tool: None,
@@ -207,6 +210,29 @@ mod tests {
             last_update_at: finished_at.unwrap_or(created_at),
             change_seq: 1,
         }
+    }
+
+    #[test]
+    fn prune_records_preserves_unacknowledged_delivery_payloads() {
+        let now = Utc::now();
+        let mut record = make_record(
+            "pending",
+            BgAgentStatus::Interrupted,
+            now - Duration::days(30),
+            Some(now - Duration::days(20)),
+        );
+        record
+            .pending_deliveries
+            .push(refact_chat_api::PendingDelivery::new(
+                Vec::new(),
+                refact_chat_api::PushMode::Append,
+                "test",
+                false,
+            ));
+        let mut records = vec![record];
+        prune_records(&mut records, now);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].pending_deliveries.len(), 1);
     }
 
     #[test]

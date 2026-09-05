@@ -1,7 +1,8 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { Provider, useSelector } from "react-redux";
-import { Flex } from "@radix-ui/themes";
+import { Button as UiButton } from "../../src/components/ui";
+import { Button, Flex, Text } from "@radix-ui/themes";
 
 import { setUpStore, type RootState } from "../../src/app/store";
 import { Theme } from "../../src/components/Theme";
@@ -31,6 +32,10 @@ import {
   type MarketplaceTabId,
 } from "../../src/features/MarketplaceHub";
 import { setBackendStatus } from "../../src/features/Connection";
+import { applyChatEvent } from "../../src/features/Chat/Thread/actions";
+import { selectMessagesById } from "../../src/features/Chat/Thread/selectors";
+import type { EventEnvelope } from "../../src/services/refact/chatSubscription";
+import { isPushMode } from "../../src/services/refact/chatSubscription";
 import { sidebarSectionSnapshotReceived } from "../../src/features/Sidebar/sidebarSlice";
 import { tasksApi, type TaskMeta } from "../../src/services/refact/tasks";
 import type { ChatHistoryItem } from "../../src/features/History/historySlice";
@@ -73,8 +78,12 @@ const terminalDisabledRoute = route === "workspace-chrome-disabled";
 const workspaceChromeRoute =
   route === "workspace-chrome" || terminalDisabledRoute;
 const chatRoute =
-  route === "chat" || route === "chat-split" || workspaceChromeRoute;
+  route === "chat" ||
+  route === "chat-split" ||
+  route === "queue" ||
+  workspaceChromeRoute;
 const chatDndRoute = route === "chat-dnd";
+const queueRoute = route === "queue";
 const multiChatRoute = route === "chat-split" || chatDndRoute;
 
 const buddySettings: BuddySettings = {
@@ -389,6 +398,167 @@ const showcaseMessages: ChatMessages = [
   },
 ];
 
+const queueEventMessages: ChatMessages = [
+  ...showcaseMessages,
+  ...(
+    [
+      ["mode_switch", "chat.mode", "Switched to Agent mode", {}],
+      ["tool_decision", "chat.tools", "Tool call approved", { accepted: true }],
+      ["ide_callback", "ide.vscode", "IDE returned the open file", {}],
+      [
+        "process_completed",
+        "exec.process",
+        "npm run build finished",
+        { process_id: "exec_route_showcase", status: "exited", exit_code: 0 },
+      ],
+      [
+        "process_completed",
+        "exec.process",
+        "npm run lint failed",
+        { process_id: "exec_route_lint", status: "failed", exit_code: 1 },
+      ],
+      [
+        "cron_fire",
+        "scheduler.cron",
+        "Scheduled job fired",
+        {
+          task_id: "responsive-cron-task",
+          status: "fired",
+        },
+      ],
+      ["tick", "chat.ticker", "Tick 42", {}],
+      [
+        "summarization_marker",
+        "chat.summarizer",
+        "Older context compacted",
+        { status: "applied" },
+      ],
+      [
+        "cancellation_note",
+        "chat.session",
+        "Generation cancelled by the user",
+        { status: "cancelled" },
+      ],
+      [
+        "verifier_report",
+        "goal.verifier",
+        "Verifier reported remaining gaps",
+        { verdict: "needs_work" },
+      ],
+      ["plan_delta", "chat.plan", "Plan updated with a queue section", {}],
+      ["goal_delta", "chat.goal", "Goal narrowed to the queue redesign", {}],
+      [
+        "goal_pursuit",
+        "chat.goal",
+        "Pursuit step 3 of 8",
+        { status: "active" },
+      ],
+      [
+        "system_notice",
+        "agents.spawn",
+        "Background agent spawned",
+        { status: "ok" },
+      ],
+      [
+        "unknown_future_subkind",
+        "engine.future",
+        "An event kind this GUI build does not know yet",
+        {},
+      ],
+    ] as const
+  ).map(([subkind, source, content, payload], index) => ({
+    role: "event" as const,
+    message_id: `showcase-event-${index}`,
+    content,
+    subkind,
+    source,
+    payload: { ...payload, created_at_ms: Date.parse(now) + index * 1000 },
+  })),
+] as ChatMessages;
+
+const queueItems: ChatThreadRuntime["queued_items"] = [
+  {
+    client_request_id: "queued-user-1",
+    priority: false,
+    command_type: "user_message",
+    preview: "Also check the dark theme once you are done",
+    content: "Also check the dark theme once you are done",
+    enqueued_at_ms: Date.parse(now),
+  },
+  {
+    client_request_id: "delivery-agent-1",
+    priority: false,
+    command_type: "delivery",
+    preview: "Child agent finished the engine subset",
+    push: "append" as const,
+    source: "agents.push",
+    event: {
+      subkind: "system_notice",
+      source: "agents.push",
+      payload: { status: "ok", agent_id: "bgagent-showcase" },
+    },
+    enqueued_at_ms: Date.parse(now) + 1000,
+  },
+  {
+    client_request_id: "delivery-process-1",
+    priority: true,
+    command_type: "delivery",
+    preview: "npm run lint failed with exit code 1",
+    push: "preempt" as const,
+    source: "exec.process",
+    event: {
+      subkind: "process_completed",
+      source: "exec.process",
+      payload: {
+        process_id: "exec_route_lint",
+        status: "failed",
+        exit_code: 1,
+      },
+    },
+    enqueued_at_ms: Date.parse(now) + 2000,
+  },
+  {
+    client_request_id: "delivery-cron-1",
+    priority: false,
+    command_type: "delivery",
+    preview: "Nightly maintenance sweep is due",
+    push: "when_idle" as const,
+    source: "scheduler.cron",
+    event: {
+      subkind: "cron_fire",
+      source: "scheduler.cron",
+      payload: { task_id: "responsive-cron-task", status: "fired" },
+    },
+    enqueued_at_ms: Date.parse(now) + 3000,
+  },
+  {
+    client_request_id: "delivery-unlabeled-1",
+    priority: false,
+    command_type: "delivery",
+    preview: "",
+    enqueued_at_ms: Date.parse(now) + 4000,
+  },
+] satisfies ChatThreadRuntime["queued_items"];
+
+// Opt-in stress data stays in this browser fixture, never production props.
+const queueParams = new URLSearchParams(window.location.search);
+const queueCount = Math.min(100, Number(queueParams.get("queue_count")) || 5);
+for (let index = queueItems.length; index < queueCount; index++) {
+  queueItems.push({
+    client_request_id: `delivery-stress-${index + 1}`,
+    priority: false,
+    command_type: "delivery",
+    push: "append",
+    source: `agents.${"long_source_identifier_".repeat(12)}`,
+    preview: `Stress delivery ${
+      index + 1
+    }: ${"Long queued content with meaningful details. ".repeat(
+      80,
+    )}${"unbroken".repeat(80)}`,
+    enqueued_at_ms: Date.parse(now) + index * 1000,
+  });
+}
+
 const chatRuntime: ChatThreadRuntime = {
   thread: {
     id: chatId,
@@ -419,6 +589,25 @@ const chatRuntime: ChatThreadRuntime = {
   memory_enrichment_user_touched: false,
   manual_preview_items: [],
   manual_preview_ran: false,
+};
+
+const queueChatRuntime: ChatThreadRuntime = {
+  ...chatRuntime,
+  thread: {
+    ...chatRuntime.thread,
+    title: "Delivery queue and event history",
+    messages: [
+      ...queueEventMessages,
+      {
+        role: "assistant",
+        message_id: "queue-partial",
+        content: "Partial response from the active step…",
+      },
+    ],
+  },
+  streaming: true,
+  session_state: "generating",
+  queued_items: queueItems,
 };
 
 const splitChatRuntime: ChatThreadRuntime = {
@@ -1029,6 +1218,17 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         showcaseCommandLog.push(init.body);
       }
     }
+    if (queueRoute && path.endsWith("/commands")) {
+      if (queueParams.get("queue_pending") === "1") {
+        await new Promise<void>((resolve) => {
+          Object.assign(window, { __releaseQueueRequest: resolve });
+        });
+      }
+      if (queueParams.get("queue_error") === "1") {
+        return new Response("Queue update failed", { status: 500 });
+      }
+    }
+    applyShowcaseQueueMutation(path, method, body);
     return Promise.resolve(jsonResponse({ ok: true }));
   }
   if (path === "/v1/files/tree") {
@@ -1284,7 +1484,12 @@ const preloadedState: Partial<RootState> = {
     engineServed: false,
     apiKey: null,
     features: { statistics: true, vecdb: true, ast: true, images: true },
-    themeProps: { appearance: "dark" },
+    themeProps: {
+      appearance:
+        new URLSearchParams(window.location.search).get("theme") === "light"
+          ? "light"
+          : "dark",
+    },
     shiftEnterToSubmit: false,
   },
   chat: {
@@ -1292,7 +1497,7 @@ const preloadedState: Partial<RootState> = {
     open_thread_ids: multiChatRoute ? [chatId, splitChatId] : [chatId],
     threads: multiChatRoute
       ? { [chatId]: chatRuntime, [splitChatId]: splitChatRuntime }
-      : { [chatId]: chatRuntime },
+      : { [chatId]: queueRoute ? queueChatRuntime : chatRuntime },
     max_new_tokens: 4096,
     tool_use: "agent",
     system_prompt: {},
@@ -1338,6 +1543,15 @@ const preloadedState: Partial<RootState> = {
                   : [chatSurface(chatId)],
                 activeTabId: chatSurface(chatId),
                 groups: {},
+                ...(queueRoute
+                  ? {
+                      dock: {
+                        open: false,
+                        width: 280,
+                        section: "files" as const,
+                      },
+                    }
+                  : {}),
                 ...(workspaceChromeRoute
                   ? {
                       dock: {
@@ -1377,6 +1591,291 @@ const preloadedState: Partial<RootState> = {
 };
 
 const store = setUpStore(preloadedState);
+
+/**
+ * Test-only queue server: the stubbed command endpoint mutates this list and
+ * pushes a real `queue_updated` SSE envelope through the real reducer, so the
+ * showcase exercises the production round trip instead of a static mock.
+ */
+let showcaseQueue: ChatThreadRuntime["queued_items"] = queueItems;
+let showcaseQueueSeq = 100;
+
+function pushRank(item: ChatThreadRuntime["queued_items"][number]): number {
+  const mode = item.push ?? (item.priority ? "preempt" : "append");
+  if (mode === "preempt") return 0;
+  return mode === "when_idle" ? 2 : 1;
+}
+
+function publishShowcaseQueue(): void {
+  showcaseQueue = [...showcaseQueue].sort((a, b) => pushRank(a) - pushRank(b));
+  showcaseQueueSeq += 1;
+  store.dispatch(
+    applyChatEvent({
+      chat_id: chatId,
+      seq: String(showcaseQueueSeq),
+      type: "queue_updated",
+      queue_size: showcaseQueue.length,
+      queued_items: showcaseQueue,
+    }),
+  );
+}
+
+let queueDemoPhase: "assistant" | "tools" | "idle" | "interrupted" =
+  "assistant";
+function publishQueueDemo(event: EventEnvelope): void {
+  store.dispatch(
+    applyChatEvent({
+      ...event,
+      chat_id: chatId,
+      seq: String(++showcaseQueueSeq),
+    }),
+  );
+}
+function addQueueDemoMessage(message: ChatMessages[number]): void {
+  publishQueueDemo({
+    type: "message_added",
+    chat_id: chatId,
+    seq: "0",
+    index: selectMessagesById(store.getState(), chatId).length,
+    message,
+  });
+}
+function deliverQueueDemo(mode: "preempt" | "append" | "when_idle"): void {
+  const delivering = showcaseQueue.filter(
+    (item) => (item.push ?? (item.priority ? "preempt" : "append")) === mode,
+  );
+  showcaseQueue = showcaseQueue.filter((item) => !delivering.includes(item));
+  for (const item of delivering) {
+    addQueueDemoMessage(
+      item.command_type === "user_message"
+        ? {
+            role: "user",
+            message_id: item.client_request_id,
+            content: item.content ?? item.preview,
+          }
+        : {
+            role: "event",
+            message_id: item.client_request_id,
+            content: item.preview || "Agent continuation delivered",
+            subkind: item.event?.subkind ?? "system_notice",
+            source: item.source ?? "queue.demo",
+            payload: item.event?.payload ?? {},
+          },
+    );
+  }
+  publishShowcaseQueue();
+}
+function interruptQueueDemo(): void {
+  if (queueDemoPhase === "assistant" || queueDemoPhase === "tools") {
+    publishQueueDemo({
+      type: "messages_truncated",
+      chat_id: chatId,
+      seq: "0",
+      from_index: queueEventMessages.length,
+    });
+    addQueueDemoMessage({
+      role: "event",
+      message_id: "queue-cancellation",
+      subkind: "cancellation_note",
+      source: "chat.delivery",
+      payload: { status: "cancelled", discarded: true },
+      content:
+        "Active step cancelled; partial assistant output and pending tool results discarded.",
+    });
+  }
+  queueDemoPhase = "interrupted";
+  publishQueueDemo({
+    type: "runtime_updated",
+    chat_id: chatId,
+    seq: "0",
+    state: "idle",
+  });
+  deliverQueueDemo("preempt");
+}
+function advanceQueueDemo(): void {
+  if (queueDemoPhase === "assistant") {
+    publishQueueDemo({
+      type: "message_updated",
+      chat_id: chatId,
+      seq: "0",
+      message_id: "queue-partial",
+      message: {
+        role: "assistant",
+        message_id: "queue-partial",
+        content: "Assistant response complete; waiting for the tool result.",
+        tool_calls: [
+          {
+            id: "queue-demo-tool",
+            index: 0,
+            type: "function",
+            function: { name: "cat", arguments: '{"paths":"README.md"}' },
+          },
+        ],
+      },
+    });
+    queueDemoPhase = "tools";
+  } else if (queueDemoPhase === "tools") {
+    addQueueDemoMessage({
+      role: "tool",
+      tool_call_id: "queue-demo-tool",
+      message_id: "queue-demo-result",
+      content: "Tool result complete.",
+      tool_failed: false,
+    });
+    deliverQueueDemo("append");
+    queueDemoPhase = "idle";
+  } else {
+    publishQueueDemo({
+      type: "runtime_updated",
+      chat_id: chatId,
+      seq: "0",
+      state: "idle",
+    });
+    deliverQueueDemo("when_idle");
+  }
+}
+Object.defineProperty(window, "__routeShowcaseDeliveryState", {
+  get: () => ({
+    phase: queueDemoPhase,
+    messages: selectMessagesById(store.getState(), chatId),
+    queue: showcaseQueue,
+  }),
+});
+
+function applyShowcaseQueueMutation(
+  path: string,
+  method: string,
+  body: unknown,
+): void {
+  if (!queueRoute) return;
+
+  const queueMatch = /\/queue\/([^/]+)$/.exec(path);
+  if (queueMatch) {
+    const id = decodeURIComponent(queueMatch[1]);
+    if (method === "DELETE") {
+      showcaseQueue = showcaseQueue.filter(
+        (item) => item.client_request_id !== id,
+      );
+      publishShowcaseQueue();
+      return;
+    }
+    if (
+      method === "PATCH" &&
+      typeof body === "object" &&
+      body !== null &&
+      "priority" in body
+    ) {
+      const priority = Boolean((body as { priority: unknown }).priority);
+      showcaseQueue = showcaseQueue.map((item) =>
+        item.client_request_id === id ? { ...item, priority } : item,
+      );
+      publishShowcaseQueue();
+    }
+    return;
+  }
+
+  if (!path.endsWith("/commands")) return;
+  if (typeof body !== "object" || body === null) return;
+  const command = body as {
+    type?: unknown;
+    delivery_id?: unknown;
+    push?: unknown;
+    cancel?: unknown;
+  };
+  if (
+    command.type !== "update_pending_delivery" ||
+    typeof command.delivery_id !== "string"
+  ) {
+    return;
+  }
+
+  if (command.cancel === true) {
+    showcaseQueue = showcaseQueue.filter(
+      (item) => item.client_request_id !== command.delivery_id,
+    );
+    publishShowcaseQueue();
+    return;
+  }
+
+  if (isPushMode(command.push)) {
+    const push = command.push;
+    showcaseQueue = showcaseQueue.map((item) =>
+      item.client_request_id === command.delivery_id
+        ? { ...item, push, priority: push === "preempt" }
+        : item,
+    );
+    publishShowcaseQueue();
+  }
+}
+
+// Explicit mock boundary controls; these model server events, not engine execution.
+function advanceQueueBoundary(
+  boundary: "assistant" | "tools" | "idle" | "interrupt",
+) {
+  const addMessage = (message: ChatMessages[number]) =>
+    store.dispatch(
+      applyChatEvent({
+        chat_id: chatId,
+        seq: String(++showcaseQueueSeq),
+        type: "message_added",
+        message,
+        index:
+          store.getState().chat.threads[chatId]?.thread.messages.length ?? 0,
+      }),
+    );
+  if (boundary === "assistant") {
+    addMessage({
+      role: "assistant",
+      message_id: "boundary-assistant",
+      content: "Mock assistant response complete; tool results still pending.",
+    });
+    return;
+  }
+  if (boundary === "interrupt") {
+    addMessage({
+      role: "event",
+      message_id: `boundary-cancel-${showcaseQueueSeq}`,
+      content:
+        "Active step cancelled; partial assistant and tool output discarded.",
+      subkind: "cancellation_note",
+      source: "chat.delivery",
+      payload: { status: "cancelled" },
+    });
+  }
+  const deliver = showcaseQueue.filter(
+    (item) =>
+      boundary === "idle" ||
+      (boundary === "interrupt" ? pushRank(item) === 0 : pushRank(item) === 1),
+  );
+  if (boundary === "tools")
+    addMessage({
+      role: "assistant",
+      message_id: "boundary-tools",
+      content:
+        "Mock assistant and all tool results complete: safe boundary reached.",
+    });
+  for (const item of deliver) {
+    addMessage({
+      role: "event",
+      message_id: `delivered-${item.client_request_id}`,
+      content: item.preview || "Agent continuation delivered",
+      subkind: item.event?.subkind ?? "system_notice",
+      source: item.source ?? "mock.delivery",
+      payload: item.event?.payload ?? {},
+    } as ChatMessages[number]);
+  }
+  showcaseQueue = showcaseQueue.filter((item) => !deliver.includes(item));
+  publishShowcaseQueue();
+  if (boundary === "idle")
+    store.dispatch(
+      applyChatEvent({
+        chat_id: chatId,
+        seq: String(++showcaseQueueSeq),
+        type: "runtime_updated",
+        state: "idle",
+      }),
+    );
+}
 
 store.dispatch(setBackendStatus({ status: "online" }));
 for (const section of ["workspace", "chats", "tasks", "buddy"] as const) {
@@ -1435,6 +1934,36 @@ const PrivacyBlockSurface = () => (
   />
 );
 
+const QueueDemoControls = () => {
+  const [phase, setPhase] = React.useState(queueDemoPhase);
+  const [finished, setFinished] = React.useState(false);
+  return (
+    <Flex gap="2" p="2" wrap="wrap" align="center">
+      <Text size="1">Mock backend · delivery boundary demo</Text>
+      <Button
+        size="1"
+        disabled={finished}
+        onClick={() => {
+          const final =
+            queueDemoPhase === "idle" || queueDemoPhase === "interrupted";
+          advanceQueueDemo();
+          setPhase(queueDemoPhase);
+          setFinished(final);
+        }}
+      >
+        {phase === "assistant"
+          ? "Finish assistant response"
+          : phase === "tools"
+            ? "Finish tool results"
+            : "Reach final idle"}
+      </Button>
+      <Button size="1" variant="soft" onClick={() => window.location.reload()}>
+        Reset demo
+      </Button>
+    </Flex>
+  );
+};
+
 const ShowcaseSurface = () => {
   const currentPage = useSelector((state: RootState) => {
     const page = state.pages[state.pages.length - 1];
@@ -1475,8 +2004,37 @@ const ShowcaseSurface = () => {
     );
   }
 
+  if (queueRoute) {
+    return (
+      <Flex direction="column" style={{ height: "100%", minHeight: 0 }}>
+        <Flex wrap="wrap" gap="1" aria-label="Mock backend boundary controls">
+          <UiButton size="sm" onClick={() => advanceQueueBoundary("assistant")}>
+            Mock: assistant finished
+          </UiButton>
+          <UiButton size="sm" onClick={() => advanceQueueBoundary("tools")}>
+            Mock: tools finished
+          </UiButton>
+          <UiButton size="sm" onClick={() => advanceQueueBoundary("idle")}>
+            Mock: final idle
+          </UiButton>
+          <UiButton size="sm" onClick={() => advanceQueueBoundary("interrupt")}>
+            Mock: interrupt and discard
+          </UiButton>
+        </Flex>
+        <Flex style={{ flex: "1 1 auto", minHeight: 0 }}>
+          <WorkspaceView />
+        </Flex>
+      </Flex>
+    );
+  }
+
   if (chatRoute) {
-    return <WorkspaceView />;
+    return (
+      <>
+        {queueRoute && <QueueDemoControls />}
+        <WorkspaceView />
+      </>
+    );
   }
 
   if (route === "settings") {

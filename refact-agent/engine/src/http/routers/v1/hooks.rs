@@ -11,9 +11,10 @@ use crate::chat::internal_roles::{event, EventSubkind};
 use crate::custom_error::ScratchError;
 use crate::daemon::auth::token_matches;
 use crate::scheduler::{
-    active_durable_cron_store, delivery_from_value, session_cron_store, Action, AgentTarget,
-    CronRunner, CronStore, Delivery, Job, Trigger,
+    active_durable_cron_store, delivery_from_value, push_from_value, session_cron_store, Action,
+    AgentTarget, CronRunner, CronStore, Delivery, Job, Trigger,
 };
+use refact_core::chat_types::{PendingDelivery, PushMode};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -37,6 +38,8 @@ pub struct HookFireRequest {
     pub hook_id: Option<String>,
     #[serde(default)]
     pub deliver: Option<Value>,
+    #[serde(default)]
+    pub push: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,7 +128,12 @@ async fn fire_inline(
             let Some(text) = request_text(request) else {
                 return Ok(None);
             };
-            let chat_id = inject_wake(app, &text).await;
+            let push = push_from_value(request.push.as_ref())
+                .map_err(|error| ScratchError::new(StatusCode::BAD_REQUEST, error))?
+                .unwrap_or_default();
+            let chat_id = inject_wake(app, &text, push)
+                .await
+                .map_err(|error| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, error))?;
             Ok(Some(InlineFireResponse::Wake { chat_id }))
         }
         HookFireKind::Agent => {
@@ -145,7 +153,10 @@ async fn fire_inline(
                     "agent hook delivery must be chat".to_string(),
                 ));
             }
-            let job = inline_agent_job(
+            let push = push_from_value(request.push.as_ref())
+                .map_err(|error| ScratchError::new(StatusCode::BAD_REQUEST, error))?
+                .unwrap_or_default();
+            let mut job = inline_agent_job(
                 message,
                 request
                     .mode
@@ -157,6 +168,7 @@ async fn fire_inline(
                     .and_then(|model| normalized(Some(&model))),
                 now_ms,
             );
+            job.push = push;
             let job_id = job.id.clone();
             let fired = CronRunner::fire_manual_job(app.gcx.clone(), job, now_ms)
                 .await
@@ -166,20 +178,26 @@ async fn fire_inline(
     }
 }
 
-async fn inject_wake(app: &AppState, text: &str) -> String {
+/// A wake hook is a pure notice: route it through the shared delivery layer so a
+/// busy chat queues it at the next safe boundary instead of racing the history.
+async fn inject_wake(app: &AppState, text: &str, push: PushMode) -> Result<String, String> {
     let chat_id = wake_chat_id(app).await;
-    let session_arc =
-        get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, &chat_id).await;
-    let mut session = session_arc.lock().await;
-    session.add_message(event(
+    let _ = get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, &chat_id).await;
+    let notice = event(
         EventSubkind::SystemNotice,
         "daemon.hooks",
         json!({
             "kind": "wake",
         }),
         text.to_string(),
-    ));
-    chat_id
+    );
+    crate::chat::delivery::deliver_to_chat(
+        app.clone(),
+        &chat_id,
+        PendingDelivery::new(vec![notice], push, "daemon.hooks".to_string(), false),
+    )
+    .await?;
+    Ok(chat_id)
 }
 
 async fn wake_chat_id(app: &AppState) -> String {
@@ -329,12 +347,15 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::chat::types::{ChatCommand, ChatSession};
+    use crate::chat::types::ChatSession;
     use crate::scheduler::InMemoryCronStore;
 
-    async fn test_app() -> AppState {
+    async fn test_app() -> (tempfile::TempDir, AppState) {
+        let workspace = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        AppState::from_gcx(gcx).await
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        (workspace, AppState::from_gcx(gcx).await)
     }
 
     fn router(app: AppState) -> axum::Router {
@@ -393,7 +414,10 @@ mod tests {
 
     #[tokio::test]
     async fn hooks_fire_auth_requires_daemon_bearer_when_configured() {
+        let workspace = tempfile::tempdir().unwrap();
         let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
         Arc::get_mut(&mut gcx).unwrap().cmdline.daemon_auth_token = Some("secret".to_string());
         let app = AppState::from_gcx(gcx).await;
         let router = router(app);
@@ -422,7 +446,7 @@ mod tests {
 
     #[tokio::test]
     async fn hooks_fire_wake_injects_system_notice() {
-        let app = test_app().await;
+        let (_workspace, app) = test_app().await;
         add_session(&app, "chat-existing").await;
         let router = router(app.clone());
 
@@ -447,8 +471,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn busy_wake_hook_defaults_to_append_without_generation_wake() {
+        let (_workspace, app) = test_app().await;
+        add_session(&app, "chat-existing").await;
+        let arc = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get("chat-existing")
+            .cloned()
+            .unwrap();
+        arc.lock().await.start_stream().unwrap();
+        let (status, _) = request_json(
+            router(app.clone()),
+            json!({"kind":"wake","text":"queued notice"}),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let mut session = arc.lock().await;
+        assert_eq!(session.pending_deliveries.len(), 1);
+        assert_eq!(session.pending_deliveries[0].push, PushMode::Append);
+        assert!(!session.pending_deliveries[0].wake);
+        session.finish_stream(Some("stop".into()));
+        session.drain_pending_deliveries();
+        assert_eq!(
+            session.messages.last().unwrap().content.content_text_only(),
+            "queued notice"
+        );
+    }
+
+    #[tokio::test]
     async fn hooks_fire_agent_creates_isolated_turn() {
-        let app = test_app().await;
+        let (_workspace, app) = test_app().await;
         let router = router(app.clone());
 
         let (status, value) = request_json(
@@ -471,8 +527,10 @@ mod tests {
         let session_arc = sessions.get(&chat_id).cloned().unwrap();
         drop(sessions);
         let session = session_arc.lock().await;
-        let queued = session.command_queue.iter().any(|request| {
-            matches!(&request.command, ChatCommand::UserMessage { content, .. } if content.as_str() == Some("ship it"))
+        let queued = session.pending_deliveries.iter().any(|delivery| {
+            delivery.messages.iter().any(|message| {
+                message.role == "user" && message.content.content_text_only() == "ship it"
+            })
         });
         let added = session.messages.iter().any(|message| {
             message.role == "user" && message.content.content_text_only() == "ship it"
@@ -482,7 +540,7 @@ mod tests {
 
     #[tokio::test]
     async fn hooks_fire_agent_accepts_type_delivery_alias() {
-        let app = test_app().await;
+        let (_workspace, app) = test_app().await;
         let router = router(app.clone());
 
         let (status, value) = request_json(
@@ -502,7 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn hooks_fire_hook_id_runs_matching_webhook_jobs_only() {
-        let app = test_app().await;
+        let (_workspace, app) = test_app().await;
         let store = session_cron_store();
         let hook_id = format!("deploy-{}", Uuid::now_v7());
         let mut matching = Job::new_cron_agent_chat(
@@ -571,7 +629,7 @@ mod tests {
 
     #[tokio::test]
     async fn hooks_fire_one_shot_failed_job_reports_not_fired() {
-        let app = test_app().await;
+        let (_workspace, app) = test_app().await;
         let store = session_cron_store();
         let hook_id = format!("deploy-fail-{}", Uuid::now_v7());
         let mut matching = Job::new_cron_agent_chat(
@@ -609,7 +667,7 @@ mod tests {
 
     #[tokio::test]
     async fn hooks_fire_unknown_hook_id_returns_not_found() {
-        let app = test_app().await;
+        let (_workspace, app) = test_app().await;
         let hook_id = format!("missing-{}", Uuid::now_v7());
         let router = router(app);
 
@@ -622,7 +680,7 @@ mod tests {
 
     #[tokio::test]
     async fn hooks_fire_agent_and_hook_id_do_both() {
-        let app = test_app().await;
+        let (_workspace, app) = test_app().await;
         let store = session_cron_store();
         let hook_id = format!("deploy-{}", Uuid::now_v7());
         let mut matching = Job::new_cron_agent_chat(

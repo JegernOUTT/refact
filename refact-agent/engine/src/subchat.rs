@@ -69,17 +69,118 @@ fn subchat_retries_allowed(config: &SubchatConfig) -> bool {
     config.tool_name != "segment_summarize"
 }
 
+fn append_runner_deliveries(
+    messages: &mut Vec<ChatMessage>,
+    deliveries: Vec<refact_chat_api::PendingDelivery>,
+) -> bool {
+    let mut wake = false;
+    for delivery in deliveries {
+        if messages.iter().any(|message| {
+            refact_core::chat_types::delivery_id_of_message(message) == Some(delivery.id.as_str())
+        }) {
+            continue;
+        }
+        wake |= delivery.wake;
+        if delivery.push == refact_chat_api::PushMode::Preempt {
+            messages.push(event(
+                EventSubkind::CancellationNote,
+                "runner",
+                json!({"source": delivery.source, "delivery_id": delivery.id}),
+                format!("The current response was interrupted by {}. Follow the delivered instructions below.", delivery.source),
+            ));
+        }
+        messages.extend(delivery.stamp_messages());
+    }
+    wake
+}
+
+fn runner_tool_window_closed(messages: &[ChatMessage]) -> bool {
+    let Some(index) = messages
+        .iter()
+        .rposition(|message| message.role == "assistant")
+    else {
+        return true;
+    };
+    messages[index].tool_calls.as_ref().map_or(true, |calls| {
+        calls.iter().all(|call| {
+            messages[index + 1..]
+                .iter()
+                .any(|message| message.role == "tool" && message.tool_call_id == call.id)
+        })
+    })
+}
+
+async fn import_runner_local_deliveries(
+    app: &AppState,
+    agent_id: &str,
+    chat_id: &str,
+    messages: &[ChatMessage],
+) {
+    if !runner_tool_window_closed(messages) {
+        return;
+    }
+    let session = app.chat.sessions.read().await.get(chat_id).cloned();
+    let Some(session) = session else {
+        return;
+    };
+    let deliveries = session.lock().await.pending_deliveries.clone();
+    for mut delivery in deliveries {
+        if let Some(tool_id) = delivery.after_tool_call_id.as_deref() {
+            let ready = messages.iter().enumerate().any(|(index, message)| {
+                message.role == "assistant"
+                    && message.tool_calls.as_ref().is_some_and(|calls| {
+                        calls.iter().any(|call| {
+                            (tool_id.is_empty() || call.id == tool_id)
+                                && messages[index + 1..].iter().any(|result| {
+                                    result.role == "tool" && result.tool_call_id == call.id
+                                })
+                        })
+                    })
+            });
+            if !ready {
+                continue;
+            }
+        }
+        delivery.after_tool_call_id = None;
+        let id = delivery.id.clone();
+        match app.agents.enqueue_delivery(agent_id, delivery).await {
+            Ok(_) => {
+                let _ = session
+                    .lock()
+                    .await
+                    .update_pending_delivery(&id, None, true);
+            }
+            Err(error) => warn!(%agent_id, %id, %error, "Failed to import runner local delivery"),
+        }
+    }
+}
+
 pub(crate) async fn drain_background_agent_inbox(
     ccx: &Arc<AMutex<AtCommandsContext>>,
     messages: &mut Vec<ChatMessage>,
 ) {
-    let (app, agent_id) = {
+    if !runner_tool_window_closed(messages) {
+        return;
+    }
+    let (app, agent_id, chat_id) = {
         let ccx = ccx.lock().await;
-        (ccx.app.clone(), ccx.background_agent_id.clone())
+        (
+            ccx.app.clone(),
+            ccx.background_agent_id.clone(),
+            ccx.chat_id.clone(),
+        )
     };
     let Some(agent_id) = agent_id else {
         return;
     };
+    import_runner_local_deliveries(&app, &agent_id, &chat_id, messages).await;
+    match app.agents.drain_deliveries(&agent_id, false).await {
+        Ok(deliveries) => {
+            append_runner_deliveries(messages, deliveries);
+        }
+        Err(error) => warn!(%agent_id, %error, "Failed to drain runner deliveries"),
+    }
+    crate::agents::delivery::publish_runner_queue(&app, &agent_id).await;
     for message in app.agents.drain_inbox(&agent_id).await {
         let sender = match message.from.as_str() {
             "user" => "[message from user]".to_string(),
@@ -1386,9 +1487,8 @@ pub async fn run_subchat_once_with_explicit_params(
 
 fn has_final_answer(messages: &[ChatMessage]) -> bool {
     messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "assistant")
+        .last()
+        .filter(|m| m.role == "assistant")
         .map(|m| m.tool_calls.as_ref().map_or(true, |tc| tc.is_empty()))
         .unwrap_or(false)
 }
@@ -1512,13 +1612,50 @@ async fn persist_subchat_progress(
     };
 
     let thread = trace_thread_from_config(&chat_id, config);
-    save_trajectory_as_with_intent(
+    let app = AppState::from_gcx(gcx.clone()).await;
+    let acknowledgements = if let Some(agent_id) = config.background_agent_id.as_deref() {
+        app.agents
+            .pending_deliveries(agent_id)
+            .await
+            .into_iter()
+            .filter(|delivery| {
+                messages.iter().any(|message| {
+                    refact_core::chat_types::delivery_id_of_message(message)
+                        == Some(delivery.id.as_str())
+                })
+            })
+            .map(|delivery| delivery.id)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    // A checkpoint may merely schedule a write. A delivery may only be removed
+    // from the durable registry after a required trajectory commit has completed.
+    let intent = if acknowledgements.is_empty() {
+        subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Progress)
+    } else {
+        TrajectoryCommitIntent::Required
+    };
+    match crate::chat::trajectories::save_trajectory_as_with_intent_checked(
         gcx.clone(),
         &thread,
         messages,
-        subchat_trajectory_commit_intent(SubchatTrajectoryCommitPhase::Progress),
+        intent,
     )
-    .await;
+    .await
+    {
+        Ok(()) => {
+            if let Some(agent_id) = config.background_agent_id.as_deref() {
+                for id in acknowledgements {
+                    if let Err(error) = app.agents.acknowledge_delivery(agent_id, &id).await {
+                        warn!(%agent_id, %id, %error, "Failed to acknowledge durable runner delivery");
+                    }
+                }
+                crate::agents::delivery::publish_runner_queue(&app, agent_id).await;
+            }
+        }
+        Err(error) => warn!(%error, "Failed to save runner progress; retaining delivery payloads"),
+    }
     if config.stateful {
         let app = AppState::from_gcx(gcx).await;
         mirror_subchat_messages_into_session(&app, &chat_id, messages).await;
@@ -1687,28 +1824,54 @@ pub async fn run_subchat(
 
     let progress_messages: SubchatProgressMessages = Arc::new(StdMutex::new(messages.clone()));
 
-    let current_messages_result = if let Some(ref wrap_up) = config.wrap_up {
-        Box::pin(run_subchat_with_wrap_up(
-            ccx.clone(),
-            &config,
-            messages,
-            &config.tools,
-            wrap_up,
-            &mut _usage,
-            &progress_messages,
-        ))
-        .await
-    } else {
-        Box::pin(run_subchat_loop(
-            ccx.clone(),
-            &config,
-            messages,
-            &config.tools,
-            &mut _usage,
-            &progress_messages,
-        ))
-        .await
-    };
+    let current_messages_result: Result<(Vec<ChatMessage>, bool), String> = async {
+        let mut messages = messages;
+        loop {
+            let (mut completed, aborted) = if let Some(ref wrap_up) = config.wrap_up {
+                Box::pin(run_subchat_with_wrap_up(
+                    ccx.clone(),
+                    &config,
+                    messages,
+                    &config.tools,
+                    wrap_up,
+                    &mut _usage,
+                    &progress_messages,
+                ))
+                .await?
+            } else {
+                Box::pin(run_subchat_loop(
+                    ccx.clone(),
+                    &config,
+                    messages,
+                    &config.tools,
+                    &mut _usage,
+                    &progress_messages,
+                ))
+                .await?
+            };
+            if aborted {
+                break Ok((completed, true));
+            }
+            // C is eligible only after the entire run, including forced finals
+            // and wrap-up, has finished. The registry closes acceptance atomically
+            // with this drain so a successful enqueue cannot be stranded on exit.
+            let wake = if let Some(agent_id) = config.background_agent_id.as_deref() {
+                import_runner_local_deliveries(&app, agent_id, &chat_id, &completed).await;
+                let deliveries = app.agents.finish_delivery_turn(agent_id).await?;
+                let wake = append_runner_deliveries(&mut completed, deliveries);
+                crate::agents::delivery::publish_runner_queue(&app, agent_id).await;
+                wake
+            } else {
+                false
+            };
+            persist_subchat_progress(&ccx, &config, &progress_messages, &completed).await;
+            if !wake {
+                break Ok((completed, false));
+            }
+            messages = completed;
+        }
+    }
+    .await;
     let (mut current_messages, aborted) = match current_messages_result {
         Ok((messages, aborted)) => (messages, aborted),
         Err(e) => {
@@ -2031,6 +2194,97 @@ fn needs_forced_final_answer(
     final_step_force_answer && !aborted && !has_answer
 }
 
+/// Race only the uncommitted model draft, never tool execution. Dropping this
+/// future discards partial output without setting the runner's permanent abort flag.
+async fn wait_for_runner_preempt(app: &AppState, agent_id: &str) {
+    let Some(notify) = app.agents.interrupt_notify(agent_id).await else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    loop {
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if app.agents.has_preempt(agent_id).await {
+            return;
+        }
+        notified.await;
+    }
+}
+
+async fn runner_model_turn(
+    ccx: Arc<AMutex<AtCommandsContext>>,
+    config: &SubchatConfig,
+    messages: &mut Vec<ChatMessage>,
+    tools_subset: Option<Vec<String>>,
+    prepend_system_prompt: bool,
+) -> Result<Vec<Vec<ChatMessage>>, String> {
+    if !runner_tool_window_closed(messages) {
+        return Err(
+            "Cannot generate a runner draft before all tool calls have results".to_string(),
+        );
+    }
+    let (app, agent_id, chat_id) = {
+        let context = ccx.lock().await;
+        (
+            context.app.clone(),
+            context.background_agent_id.clone(),
+            context.chat_id.clone(),
+        )
+    };
+    loop {
+        let result = {
+            let generation = subchat_single_internal(
+                ccx.clone(),
+                &config.model,
+                &config.mode,
+                messages.clone(),
+                tools_subset.clone(),
+                false,
+                config.temperature,
+                config.max_new_tokens,
+                config.reasoning_effort.clone(),
+                config.cache_control,
+                prepend_system_prompt,
+                if should_stream_thinking_progress(&config.tool_name) {
+                    config.parent_tool_call_id.as_deref()
+                } else {
+                    None
+                },
+                subchat_retries_allowed(config),
+            );
+            tokio::pin!(generation);
+            if let Some(agent_id) = agent_id.as_deref() {
+                tokio::select! {
+                    biased;
+                    _ = wait_for_runner_preempt(&app, agent_id) => None,
+                    result = &mut generation => Some(result),
+                }
+            } else {
+                Some(generation.await)
+            }
+        };
+        if let Some(result) = result {
+            return result;
+        }
+        // The cancelled generation has been dropped before touching its context.
+        clear_unbound_openai_codex_websocket_session(&chat_id).await;
+        drain_background_agent_inbox(&ccx, messages).await;
+        if let Some(agent_id) = agent_id.as_deref() {
+            if app.agents.has_preempt(agent_id).await {
+                // A concurrent new preemption can retry, but never busy-spin on
+                // a failed durable drain: let the registry error reach the caller.
+                let deliveries = app.agents.drain_deliveries(agent_id, false).await?;
+                append_runner_deliveries(messages, deliveries);
+                crate::agents::delivery::publish_runner_queue(&app, agent_id).await;
+            }
+        }
+        if is_aborted(&config.abort_flag) {
+            return Err("Aborted".to_string());
+        }
+    }
+}
+
 async fn run_subchat_loop(
     ccx: Arc<AMutex<AtCommandsContext>>,
     config: &SubchatConfig,
@@ -2053,24 +2307,12 @@ async fn run_subchat_loop(
         persist_subchat_progress(&ccx, config, progress, &messages).await;
 
         let results = loop {
-            match subchat_single_internal(
+            match runner_model_turn(
                 ccx.clone(),
-                &config.model,
-                &config.mode,
-                messages.clone(),
+                config,
+                &mut messages,
                 tools_policy.to_subset_for_llm(),
-                false,
-                config.temperature,
-                config.max_new_tokens,
-                config.reasoning_effort.clone(),
-                config.cache_control,
                 config.prepend_system_prompt && step == 0,
-                if should_stream_thinking_progress(&config.tool_name) {
-                    config.parent_tool_call_id.as_deref()
-                } else {
-                    None
-                },
-                subchat_retries_allowed(config),
             )
             .await
             {
@@ -2187,27 +2429,7 @@ async fn run_forced_final_answer_turn(
     let mut empty_choice_retry_count = 0usize;
 
     let results = loop {
-        match subchat_single_internal(
-            ccx.clone(),
-            &config.model,
-            &config.mode,
-            messages.clone(),
-            Some(vec![]),
-            false,
-            config.temperature,
-            config.max_new_tokens,
-            config.reasoning_effort.clone(),
-            config.cache_control,
-            false,
-            if should_stream_thinking_progress(&config.tool_name) {
-                config.parent_tool_call_id.as_deref()
-            } else {
-                None
-            },
-            subchat_retries_allowed(config),
-        )
-        .await
-        {
+        match runner_model_turn(ccx.clone(), config, &mut messages, Some(vec![]), false).await {
             Ok(r) => break r,
             Err(ref err)
                 if subchat_retries_allowed(config)
@@ -2312,24 +2534,12 @@ async fn run_subchat_with_wrap_up(
         }
 
         let results = loop {
-            match subchat_single_internal(
+            match runner_model_turn(
                 ccx.clone(),
-                &config.model,
-                &config.mode,
-                messages.clone(),
+                config,
+                &mut messages,
                 tools_policy.to_subset_for_llm(),
-                false,
-                config.temperature,
-                config.max_new_tokens,
-                config.reasoning_effort.clone(),
-                config.cache_control,
                 config.prepend_system_prompt && step_n == 0,
-                if should_stream_thinking_progress(&config.tool_name) {
-                    config.parent_tool_call_id.as_deref()
-                } else {
-                    None
-                },
-                subchat_retries_allowed(config),
             )
             .await
             {
@@ -2444,27 +2654,7 @@ async fn run_subchat_with_wrap_up(
     record_subchat_progress(progress, &messages);
 
     let final_results = loop {
-        match subchat_single_internal(
-            ccx.clone(),
-            &config.model,
-            &config.mode,
-            messages.clone(),
-            Some(vec![]),
-            false,
-            config.temperature,
-            config.max_new_tokens,
-            config.reasoning_effort.clone(),
-            config.cache_control,
-            false,
-            if should_stream_thinking_progress(&config.tool_name) {
-                config.parent_tool_call_id.as_deref()
-            } else {
-                None
-            },
-            subchat_retries_allowed(config),
-        )
-        .await
-        {
+        match runner_model_turn(ccx.clone(), config, &mut messages, Some(vec![]), false).await {
             Ok(r) => break r,
             Err(ref err)
                 if subchat_retries_allowed(config)
@@ -2724,6 +2914,7 @@ async fn execute_pending_tool_calls(
 
     messages.extend(denied_msgs);
     messages.extend(tool_results);
+    drain_background_agent_inbox(&ccx, &mut messages).await;
 
     if let Some(tx_toolid) = &tx_toolid_mb {
         let subchat_tx = ccx.lock().await.subchat_tx.clone();
@@ -3316,6 +3507,326 @@ mod subchat_tests {
         fs::write(root.join("file.txt"), "hello\n").unwrap();
         run_git(root, &["add", "."]);
         run_git(root, &["commit", "-m", "initial"]);
+    }
+
+    #[tokio::test]
+    async fn runner_preempt_wait_observes_queued_a_without_aborting_runner() {
+        let ccx = abort_test_ccx().await;
+        let app = ccx.lock().await.app.clone();
+        let request = crate::agents::types::CreateAgentRequest {
+            parent_chat_id: "parent".into(),
+            parent_root_chat_id: None,
+            parent_tool_call_id: None,
+            kind: crate::agents::types::BgAgentKind::Subagent,
+            config_name: "subagent".into(),
+            title: "delivery test".into(),
+            prompt: "test".into(),
+            target_files: vec![],
+            model: "test".into(),
+            model_type: None,
+            goal_summary: None,
+            plan_present: false,
+            worktree_id: None,
+            worktree_branch: None,
+        };
+        let (agent, _, _) = app.agents.create(request).await.unwrap();
+        ccx.lock().await.background_agent_id = Some(agent.agent_id.clone());
+        for push in [
+            refact_chat_api::PushMode::WhenIdle,
+            refact_chat_api::PushMode::Append,
+            refact_chat_api::PushMode::Preempt,
+        ] {
+            app.agents
+                .enqueue_delivery(
+                    &agent.agent_id,
+                    refact_chat_api::PendingDelivery::new(
+                        vec![ChatMessage::new("user".into(), push.as_str().into())],
+                        push,
+                        "test",
+                        true,
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            super::wait_for_runner_preempt(&app, &agent.agent_id),
+        )
+        .await
+        .unwrap();
+        assert!(!ccx
+            .lock()
+            .await
+            .abort_flag
+            .load(std::sync::atomic::Ordering::SeqCst));
+        let mut messages = vec![];
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        let pending = app.agents.pending_deliveries(&agent.agent_id).await;
+        assert_eq!(pending.len(), 3); // Claimed A/B remain durable until trajectory ack.
+        assert_eq!(pending[0].push, refact_chat_api::PushMode::WhenIdle);
+        assert!(!app.agents.has_preempt(&agent.agent_id).await);
+        assert_eq!(messages.len(), 3);
+        let mut config = test_subchat_config();
+        config.stateful = true;
+        config.background_agent_id = Some(agent.agent_id.clone());
+        let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let gcx = ccx.lock().await.global_context.clone();
+        assert_eq!(
+            crate::chat::trajectories::get_trajectories_dir(gcx.clone())
+                .await
+                .unwrap_err(),
+            "No workspace folder found"
+        );
+        super::persist_subchat_progress(&ccx, &config, &progress, &messages).await;
+        assert_eq!(
+            app.agents.pending_deliveries(&agent.agent_id).await.len(),
+            3
+        );
+        let workspace = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        super::persist_subchat_progress(&ccx, &config, &progress, &messages).await;
+        let pending = app.agents.pending_deliveries(&agent.agent_id).await;
+        assert_eq!(
+            pending.len(),
+            1,
+            "required trajectory commit acknowledges A/B only"
+        );
+        assert_eq!(pending[0].push, refact_chat_api::PushMode::WhenIdle);
+        let (gcx, chat_id) = {
+            let context = ccx.lock().await;
+            (context.global_context.clone(), context.chat_id.clone())
+        };
+        let saved = crate::chat::trajectories::load_trajectory_for_chat(gcx, &chat_id)
+            .await
+            .unwrap();
+        assert_eq!(saved.messages.len(), messages.len());
+    }
+
+    #[tokio::test]
+    async fn runner_local_sleep_deliveries_follow_result_and_survive_ack() {
+        use refact_chat_api::{PendingDelivery, PushMode};
+        let ccx = abort_test_ccx().await;
+        let app = ccx.lock().await.app.clone();
+        let request = crate::agents::types::CreateAgentRequest {
+            parent_chat_id: "parent".into(),
+            parent_root_chat_id: None,
+            parent_tool_call_id: None,
+            kind: crate::agents::types::BgAgentKind::Subagent,
+            config_name: "subagent".into(),
+            title: "delivery test".into(),
+            prompt: "test".into(),
+            target_files: vec![],
+            model: "test".into(),
+            model_type: None,
+            goal_summary: None,
+            plan_present: false,
+            worktree_id: None,
+            worktree_branch: None,
+        };
+        let (agent, _, _) = app.agents.create(request).await.unwrap();
+        ccx.lock().await.background_agent_id = Some(agent.agent_id.clone());
+        let chat_id = ccx.lock().await.chat_id.clone();
+        let assistant: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "assistant", "content": "", "tool_calls": [
+                {"id":"sleep", "type":"function", "function":{"name":"sleep", "arguments":"{}"}}
+            ]
+        }))
+        .unwrap();
+        let mut messages = vec![assistant.clone()];
+        let mut session = crate::chat::types::ChatSession::new(chat_id.clone());
+        session.messages = messages.clone();
+        session.turn_depth = 1;
+        let mut originals = Vec::new();
+        for push in [PushMode::Preempt, PushMode::Append, PushMode::WhenIdle] {
+            let delivery = PendingDelivery::with_id(
+                push.as_str(),
+                vec![ChatMessage::new("event".into(), "sleep tick".into())],
+                push,
+                "sleep",
+                false,
+            );
+            assert_eq!(
+                session.queue_post_tool_delivery(delivery).unwrap(),
+                refact_chat_api::DeliveryOutcome::Queued
+            );
+            if push == PushMode::Append {
+                session
+                    .pending_deliveries
+                    .back_mut()
+                    .unwrap()
+                    .after_tool_call_id = Some(String::new());
+            }
+            originals.push(session.pending_deliveries.back().unwrap().clone());
+        }
+        let serialized = serde_json::to_value(session.pending_deliveries_for_snapshot()).unwrap();
+        session.pending_deliveries.clear();
+        session.restore_pending_deliveries(serde_json::from_value(serialized).unwrap());
+        session.set_runner_pending_deliveries(vec![PendingDelivery::with_id(
+            "mirror-only",
+            vec![ChatMessage::new("event".into(), "not input".into())],
+            PushMode::Append,
+            "display",
+            false,
+        )]);
+        let session = Arc::new(tokio::sync::Mutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.clone(), session.clone());
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        assert_eq!(messages.len(), 1);
+        assert!(!app.agents.has_preempt(&agent.agent_id).await);
+        assert_eq!(session.lock().await.pending_deliveries.len(), 3);
+        messages.push(ChatMessage {
+            role: "tool".into(),
+            tool_call_id: "sleep".into(),
+            content: ChatContent::SimpleText("slept".into()),
+            ..Default::default()
+        });
+        super::import_runner_local_deliveries(&app, "missing-agent", &chat_id, &messages).await;
+        assert_eq!(session.lock().await.pending_deliveries.len(), 3);
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        assert!(session.lock().await.pending_deliveries.is_empty());
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[1].role, "tool");
+        assert_eq!(messages.len(), 5);
+        assert_eq!(
+            messages[3].extra["delivery"]["id"],
+            PushMode::Preempt.as_str()
+        );
+        assert_eq!(
+            messages[4].extra["delivery"]["id"],
+            PushMode::Append.as_str()
+        );
+        assert_eq!(
+            app.agents.pending_deliveries(&agent.agent_id).await.len(),
+            3
+        );
+        session
+            .lock()
+            .await
+            .pending_deliveries
+            .extend(originals.clone());
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        assert_eq!(messages.len(), 5);
+        let mut config = test_subchat_config();
+        config.stateful = true;
+        config.background_agent_id = Some(agent.agent_id.clone());
+        let workspace = tempfile::tempdir().unwrap();
+        let gcx = ccx.lock().await.global_context.clone();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let progress = Arc::new(StdMutex::new(Vec::new()));
+        super::persist_subchat_progress(&ccx, &config, &progress, &messages).await;
+        assert_eq!(
+            app.agents.pending_deliveries(&agent.agent_id).await.len(),
+            1
+        );
+        session.lock().await.pending_deliveries.extend(originals);
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        assert_eq!(messages.len(), 5);
+        messages.push(ChatMessage::new("assistant".into(), "final".into()));
+        let deliveries = app
+            .agents
+            .finish_delivery_turn(&agent.agent_id)
+            .await
+            .unwrap();
+        assert!(!super::append_runner_deliveries(&mut messages, deliveries));
+        assert_eq!(messages[5].content.content_text_only(), "final");
+        assert_eq!(
+            messages[6].extra["delivery"]["id"],
+            PushMode::WhenIdle.as_str()
+        );
+        for (index, message) in messages.iter_mut().enumerate() {
+            if message.message_id.is_empty() {
+                message.message_id = format!("runner-sleep-message-{index}");
+            }
+            if let Some(calls) = message.tool_calls.as_mut() {
+                for (call_index, call) in calls.iter_mut().enumerate() {
+                    call.index = Some(call_index);
+                }
+            }
+        }
+        super::persist_subchat_progress(&ccx, &config, &progress, &messages).await;
+        assert!(app
+            .agents
+            .pending_deliveries(&agent.agent_id)
+            .await
+            .is_empty());
+        let gcx = ccx.lock().await.global_context.clone();
+        let saved = crate::chat::trajectories::load_trajectory_for_chat(gcx, &chat_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(saved.messages).unwrap(),
+            serde_json::to_value(messages).unwrap()
+        );
+    }
+
+    #[test]
+    fn runner_delivery_preserves_prefix_and_puts_cancellation_before_preempt() {
+        let original = ChatMessage::new("assistant".into(), "completed answer".into());
+        let mut messages = vec![original.clone()];
+        let delivery = refact_chat_api::PendingDelivery::with_id(
+            "urgent",
+            vec![ChatMessage::new("user".into(), "new instruction".into())],
+            refact_chat_api::PushMode::Preempt,
+            "user",
+            true,
+        );
+        assert!(super::append_runner_deliveries(
+            &mut messages,
+            vec![delivery]
+        ));
+        assert_eq!(
+            serde_json::to_value(&messages[0]).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        assert_eq!(messages[1].extra["event"]["source"], "runner");
+        assert_eq!(messages[1].extra["event"]["subkind"], "cancellation_note");
+        assert_eq!(messages[1].extra["event"]["payload"]["source"], "user");
+        assert_eq!(messages[2].extra["delivery"]["id"], "urgent");
+        assert!(!super::has_final_answer(&messages));
+    }
+
+    #[test]
+    fn runner_idle_delivery_wakes_only_when_requested() {
+        for wake in [false, true] {
+            let mut messages = vec![ChatMessage::new("assistant".into(), "done".into())];
+            let delivery = refact_chat_api::PendingDelivery::with_id(
+                "idle",
+                vec![ChatMessage::new("event".into(), "notice".into())],
+                refact_chat_api::PushMode::WhenIdle,
+                "test",
+                wake,
+            );
+            assert_eq!(
+                super::append_runner_deliveries(&mut messages, vec![delivery]),
+                wake
+            );
+            assert_eq!(messages.len(), 2);
+            assert!(!super::has_final_answer(&messages));
+        }
+    }
+
+    #[test]
+    fn runner_boundary_requires_every_parallel_tool_result() {
+        let mut assistant = ChatMessage::new("assistant".into(), String::new());
+        assistant.tool_calls = Some(vec![
+            serde_json::from_value(serde_json::json!({"id":"one", "type":"function", "function":{"name":"cat", "arguments":"{}"}})).unwrap(),
+            serde_json::from_value(serde_json::json!({"id":"two", "type":"function", "function":{"name":"cat", "arguments":"{}"}})).unwrap(),
+        ]);
+        let mut messages = vec![assistant];
+        assert!(!super::runner_tool_window_closed(&messages));
+        for id in ["one", "two"] {
+            let mut result = ChatMessage::new("tool".into(), "result".into());
+            result.tool_call_id = id.into();
+            messages.push(result);
+            assert_eq!(super::runner_tool_window_closed(&messages), id == "two");
+        }
     }
 
     #[test]

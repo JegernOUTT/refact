@@ -38,13 +38,13 @@ export type TodoItem = {
   status: TodoStatus;
 };
 
-export type QueuedItem = {
-  client_request_id: string;
-  priority: boolean;
-  command_type: string;
-  preview: string;
-  content?: string;
-};
+import type {
+  PushMode,
+  QueuedEvent,
+  QueuedItem,
+} from "../../../services/refact/chatSubscription";
+
+export type { PushMode, QueuedEvent, QueuedItem };
 
 /** A single item returned by the wand-preview endpoint, shown as an editable chip. */
 export type ManualPreviewItem = {

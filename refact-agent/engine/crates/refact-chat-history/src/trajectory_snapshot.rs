@@ -2,7 +2,7 @@ use refact_chat_api::{
     BuddyThreadMeta, ClaudeCodeIdentity, FrozenRequestPrefix, GoalLedgerEntry, GoalSnapshot,
     TaskMeta, ThreadParams, WorktreeMeta,
 };
-use refact_core::chat_types::ChatMessage;
+use refact_core::chat_types::{ChatMessage, PendingDelivery};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -48,6 +48,8 @@ pub struct TrajectorySnapshot {
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waiting_for_card_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_deliveries: Vec<PendingDelivery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalSnapshot>,
     #[serde(
@@ -120,6 +122,7 @@ impl TrajectorySnapshot {
             reactive_compact_attempts: thread.reactive_compact_attempts,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
+            pending_deliveries: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
@@ -166,6 +169,31 @@ mod tests {
             "2026-06-18T00:00:00Z".to_string(),
             1,
         )
+    }
+
+    #[test]
+    fn pending_deliveries_roundtrip_and_legacy_absence() {
+        use refact_core::chat_types::PushMode;
+        let mut snapshot = snapshot();
+        let mut delivery = PendingDelivery::with_id(
+            "stable-id",
+            vec![ChatMessage::new("user".into(), "queued".into())],
+            PushMode::WhenIdle,
+            "test",
+            true,
+        );
+        delivery.enqueued_at_ms = 42;
+        snapshot.pending_deliveries.push(delivery.clone());
+        let mut value = serde_json::to_value(&snapshot).unwrap();
+        let decoded: TrajectorySnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(decoded.pending_deliveries, vec![delivery]);
+        value.as_object_mut().unwrap().remove("pending_deliveries");
+        let legacy: TrajectorySnapshot = serde_json::from_value(value).unwrap();
+        assert!(legacy.pending_deliveries.is_empty());
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("pending_deliveries")
+            .is_none());
     }
 
     #[test]

@@ -10,7 +10,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::goal_role::{self, GoalInstallReport};
 use crate::chat::internal_roles::{self, EventSubkind};
-use crate::chat::types::ChatSession;
+use crate::chat::types::{ChatSession, PendingDelivery, PushMode};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::yaml_configs::customization_registry::map_legacy_mode_to_id;
 
@@ -34,6 +34,7 @@ impl Tool for ToolSetGoal {
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "push": PushMode::schema(),
                     "content": {"type": "string", "description": "Full goal body. Required."},
                     "criteria": {
                         "type": "array",
@@ -62,6 +63,7 @@ impl Tool for ToolSetGoal {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let push = PushMode::from_args(args)?;
         let content = string_arg(args, "content")?;
         if content.trim().is_empty() {
             return Err("argument `content` must be non-empty".to_string());
@@ -88,13 +90,14 @@ impl Tool for ToolSetGoal {
                 return Err("goal already exists; use update_goal".to_string());
             }
             let current_mode = map_legacy_mode_to_id(&session.thread.mode).to_string();
-            let report = queue_goal_side_effect(&mut session, &current_mode, &content, &criteria);
-            session.queue_post_tool_side_effect(internal_roles::event(
-                EventSubkind::SystemNotice,
-                "tool.set_goal",
-                json!({"version": report.version}),
-                format!("Goal updated to v{}", report.version),
-            ));
+            let report = queue_goal_side_effect(
+                &mut session,
+                &current_mode,
+                &content,
+                &criteria,
+                push,
+                tool_call_id,
+            )?;
             report
         };
 
@@ -120,7 +123,9 @@ fn queue_goal_side_effect(
     mode: &str,
     body: &str,
     criteria: &[refact_chat_api::GoalCriterion],
-) -> GoalInstallReport {
+    push: PushMode,
+    tool_call_id: &str,
+) -> Result<GoalInstallReport, String> {
     let mut message = internal_roles::goal(mode, 1, body, None, true, GoalBudget::default());
     if !criteria.is_empty() {
         if let Some(meta) = message
@@ -131,25 +136,30 @@ fn queue_goal_side_effect(
             meta.insert("criteria".to_string(), json!(criteria));
         }
     }
-    session.queue_post_tool_side_effect(message);
-    GoalInstallReport {
+    let mut delivery = PendingDelivery::new(
+        vec![
+            message,
+            internal_roles::event(
+                EventSubkind::SystemNotice,
+                "tool.set_goal",
+                json!({"version": 1}),
+                "Goal updated to v1",
+            ),
+        ],
+        push,
+        "tool.set_goal",
+        false,
+    );
+    delivery.after_tool_call_id = Some(tool_call_id.to_string());
+    session.enqueue_delivery(delivery)?;
+    Ok(GoalInstallReport {
         version: 1,
         supersedes: None,
-    }
+    })
 }
 
 fn current_goal_including_queued(session: &ChatSession) -> Option<&ChatMessage> {
-    goal_role::current_base_goal(session).or_else(|| {
-        session
-            .post_tool_side_effects
-            .iter()
-            .enumerate()
-            .filter_map(|(index, message)| {
-                goal_role::goal_version(message).map(|version| (index, version, message))
-            })
-            .max_by_key(|(index, version, _)| (*version, *index))
-            .map(|(_, _, message)| message)
-    })
+    goal_role::current_base_goal(session)
 }
 
 fn string_arg(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {
@@ -163,6 +173,22 @@ fn string_arg(args: &HashMap<String, Value>, name: &str) -> Result<String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn delivery_messages(session: &ChatSession) -> Vec<ChatMessage> {
+        session
+            .messages
+            .iter()
+            .filter(|message| message.extra.contains_key("delivery"))
+            .chain(
+                session
+                    .pending_deliveries
+                    .iter()
+                    .flat_map(|delivery| delivery.messages.iter()),
+            )
+            .cloned()
+            .collect()
+    }
+
     use crate::app_state::AppState;
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
     use crate::chat::internal_roles::{EVENT_ROLE, GOAL_ROLE};
@@ -313,20 +339,23 @@ mod tests {
             .cloned()
             .unwrap();
         let session = session_arc.lock().await;
-        assert!(session.messages.is_empty());
-        assert_eq!(session.post_tool_side_effects.len(), 2);
-        assert_eq!(session.post_tool_side_effects[0].role, GOAL_ROLE);
+        assert!(session
+            .messages
+            .iter()
+            .all(|message| message.extra.contains_key("delivery")));
+        assert_eq!(delivery_messages(&session).len(), 2);
+        assert_eq!(delivery_messages(&session)[0].role, GOAL_ROLE);
         assert_eq!(
-            content_text(&session.post_tool_side_effects[0]),
+            content_text(&delivery_messages(&session)[0]),
             "Ship the pond"
         );
         assert_eq!(
-            session.post_tool_side_effects[0].extra["goal"]["active"],
+            delivery_messages(&session)[0].extra["goal"]["active"],
             json!(true)
         );
-        assert_eq!(session.post_tool_side_effects[1].role, EVENT_ROLE);
+        assert_eq!(delivery_messages(&session)[1].role, EVENT_ROLE);
         assert_eq!(
-            session.post_tool_side_effects[1].extra["event"],
+            delivery_messages(&session)[1].extra["event"],
             json!({
                 "subkind": "system_notice",
                 "source": "tool.set_goal",
@@ -367,7 +396,7 @@ mod tests {
 
         assert_eq!(err, "goal already exists; use update_goal");
         let session = session_arc.lock().await;
-        assert!(session.post_tool_side_effects.is_empty());
+        assert!(delivery_messages(&session).is_empty());
     }
 
     #[tokio::test]
@@ -419,6 +448,7 @@ mod tests {
             session.add_message(message);
         }
         session.drain_post_tool_side_effects();
+        session.drain_pending_deliveries();
 
         let roles: Vec<_> = session
             .messages

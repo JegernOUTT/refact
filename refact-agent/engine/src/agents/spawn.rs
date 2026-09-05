@@ -7,10 +7,10 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use serde_json::Value;
+use refact_core::chat_types::{PendingDelivery, PushMode};
 use tokio::sync::{Mutex as AMutex, mpsc::UnboundedSender, oneshot};
 use uuid::Uuid;
 
-use crate::agents::registry::InboxMessage;
 use crate::agents::types::{
     AgentCompletion, BackgroundAgent, BgAgentKind, CreateAgentRequest, NO_TEXT_RESULT_SUMMARY,
 };
@@ -89,6 +89,7 @@ pub struct SpawnRequest {
     pub parent_task_meta: Option<TaskMeta>,
     pub subchat_depth: usize,
     pub notify_parent: NotifyParent,
+    pub completion_push: PushMode,
 }
 
 #[derive(Clone)]
@@ -314,6 +315,10 @@ pub async fn spawn_background_agent(
             return Err(error);
         }
     };
+    app.agents
+        .set_completion_push(&record.agent_id, req.completion_push)
+        .await?;
+    let record = app.agents.get_any(&record.agent_id).await?;
     emit_background_agent_update(app.clone(), &record).await;
 
     let agent_id = record.agent_id.clone();
@@ -915,17 +920,22 @@ async fn push_sibling_notice(app: &AppState, agent_id: &str, req: &SpawnRequest,
             && (record.parent_root_chat_id.as_deref() == Some(root_chat_id)
                 || record.parent_chat_id == root_chat_id)
     }) {
-        if let Err(error) = app
-            .agents
-            .push_inbox(
-                &sibling.agent_id,
-                InboxMessage {
-                    from: agent_id.to_string(),
-                    text: text.clone(),
-                    queued_at: chrono::Utc::now(),
-                },
-            )
-            .await
+        if let Err(error) = crate::agents::delivery::deliver_to_agent(
+            app.clone(),
+            &sibling.agent_id,
+            PendingDelivery::new(
+                vec![event(
+                    EventSubkind::SystemNotice,
+                    "agents.sibling",
+                    serde_json::json!({"from": agent_id}),
+                    text.clone(),
+                )],
+                PushMode::Append,
+                "agents.sibling".to_string(),
+                true,
+            ),
+        )
+        .await
         {
             tracing::debug!(
                 "Failed to send sibling notice to '{}': {}",
@@ -1115,6 +1125,9 @@ fn fallback_failed_record(agent_id: String, req: SpawnRequest, error: String) ->
         edited_files: Vec::new(),
         diff_summary: None,
         conflict_summary: None,
+        pending_deliveries: Vec::new(),
+        delivery_ids: Vec::new(),
+        completion_push: req.completion_push,
         completion_message_id: None,
         completion_pushed_at: None,
         deferred_at: None,

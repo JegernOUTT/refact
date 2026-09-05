@@ -1391,6 +1391,7 @@ async fn create_investigation_chat(
     )
     .await;
     let snapshot = TrajectorySnapshot {
+        pending_deliveries: Vec::new(),
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,

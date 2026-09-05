@@ -9,7 +9,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::internal_roles::{self, EventSubkind};
 use crate::chat::plan_role;
-use crate::chat::types::ChatSession;
+use crate::chat::types::{ChatSession, PendingDelivery, PushMode};
 use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
@@ -31,7 +31,7 @@ impl Tool for ToolUpdatePlan {
             experimental: false,
             allow_parallel: false,
             description: "Append an incremental update to the current plan (cache-safe delta merged into the current plan). Use when the plan evolves; it does not rewrite the original plan.".to_string(),
-            input_schema: json_schema_from_params(
+            input_schema: { let mut schema = json_schema_from_params(
                 &[
                     ("note", "string", "Plan update note. Required."),
                     (
@@ -41,7 +41,7 @@ impl Tool for ToolUpdatePlan {
                     ),
                 ],
                 &["note"],
-            ),
+            ); schema["properties"]["push"] = PushMode::schema(); schema },
             output_schema: None,
             annotations: None,
         }
@@ -53,6 +53,7 @@ impl Tool for ToolUpdatePlan {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let push = PushMode::from_args(args)?;
         let note = string_arg(args, "note")?;
         if note.trim().is_empty() {
             return Err("argument `note` must be non-empty".to_string());
@@ -86,13 +87,16 @@ impl Tool for ToolUpdatePlan {
                 json!({"seq": seq, "summary": summary}),
                 note,
             );
-            session.queue_post_tool_side_effect(delta);
-            session.queue_post_tool_side_effect(internal_roles::event(
+            let mut messages = vec![delta];
+            messages.push(internal_roles::event(
                 EventSubkind::SystemNotice,
                 "tool.update_plan",
                 json!({"seq": seq, "summary": summary}),
                 format!("Plan updated (delta {seq})"),
             ));
+            let mut delivery = PendingDelivery::new(messages, push, "tool.update_plan", false);
+            delivery.after_tool_call_id = Some(tool_call_id.clone());
+            session.enqueue_delivery(delivery)?;
             (seq, result_truncation)
         };
 
@@ -127,29 +131,10 @@ fn update_plan_tool_result(
 
 fn has_base_plan_including_queued(session: &ChatSession) -> bool {
     plan_role::current_base_plan(session).is_some()
-        || session
-            .post_tool_side_effects
-            .iter()
-            .any(|message| message.role == internal_roles::PLAN_ROLE)
 }
 
 fn plan_delta_count_including_queued(session: &ChatSession) -> usize {
-    plan_role::plan_delta_events(session).len()
-        + session
-            .post_tool_side_effects
-            .iter()
-            .filter(|message| is_plan_delta(message))
-            .count()
-}
-
-fn is_plan_delta(message: &ChatMessage) -> bool {
-    message.role == internal_roles::EVENT_ROLE
-        && message
-            .extra
-            .get("event")
-            .and_then(|event| event.get("subkind"))
-            .and_then(|subkind| subkind.as_str())
-            == Some("plan_delta")
+    plan_role::plan_delta_events(&session.accepted_control_projection()).len()
 }
 
 fn string_arg(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {
@@ -174,6 +159,22 @@ fn optional_string_arg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn delivery_messages(session: &ChatSession) -> Vec<ChatMessage> {
+        session
+            .messages
+            .iter()
+            .filter(|message| message.extra.contains_key("delivery"))
+            .chain(
+                session
+                    .pending_deliveries
+                    .iter()
+                    .flat_map(|delivery| delivery.messages.iter()),
+            )
+            .cloned()
+            .collect()
+    }
+
     use crate::app_state::AppState;
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
     use crate::chat::internal_roles::{EVENT_ROLE, PLAN_ROLE};
@@ -336,27 +337,24 @@ mod tests {
             .cloned()
             .unwrap();
         let session = session_arc.lock().await;
-        assert_eq!(session.post_tool_side_effects.len(), 2);
-        assert_eq!(session.post_tool_side_effects[0].role, EVENT_ROLE);
+        assert_eq!(delivery_messages(&session).len(), 2);
+        assert_eq!(delivery_messages(&session)[0].role, EVENT_ROLE);
+        assert_eq!(content_text(&delivery_messages(&session)[0]), "second note");
         assert_eq!(
-            content_text(&session.post_tool_side_effects[0]),
-            "second note"
-        );
-        assert_eq!(
-            session.post_tool_side_effects[0].extra["event"],
+            delivery_messages(&session)[0].extra["event"],
             json!({
                 "subkind": "plan_delta",
                 "source": "tool.update_plan",
                 "payload": {"seq": 2, "summary": "second"}
             })
         );
-        assert_eq!(session.post_tool_side_effects[1].role, EVENT_ROLE);
+        assert_eq!(delivery_messages(&session)[1].role, EVENT_ROLE);
         assert_eq!(
-            content_text(&session.post_tool_side_effects[1]),
+            content_text(&delivery_messages(&session)[1]),
             "Plan updated (delta 2)"
         );
         assert_eq!(
-            session.post_tool_side_effects[1].extra["event"],
+            delivery_messages(&session)[1].extra["event"],
             json!({
                 "subkind": "system_notice",
                 "source": "tool.update_plan",
@@ -386,13 +384,13 @@ mod tests {
             .cloned()
             .unwrap();
         let session = session_arc.lock().await;
-        assert_eq!(session.post_tool_side_effects.len(), 4);
+        assert_eq!(delivery_messages(&session).len(), 4);
         assert_eq!(
-            plan_delta_payload(&session.post_tool_side_effects[2])["seq"],
+            plan_delta_payload(&delivery_messages(&session)[2])["seq"],
             json!(3)
         );
         assert_eq!(
-            plan_delta_payload(&session.post_tool_side_effects[2])["summary"],
+            plan_delta_payload(&delivery_messages(&session)[2])["summary"],
             Value::Null
         );
     }
@@ -426,7 +424,8 @@ mod tests {
             .cloned()
             .unwrap();
         let session = session_arc.lock().await;
-        let delta = &session.post_tool_side_effects[0];
+        let deliveries = delivery_messages(&session);
+        let delta = &deliveries[0];
         let content = content_text(delta);
         assert!(content.chars().count() <= internal_roles::MAX_PLAN_DELTA_CHARS);
         assert!(content.chars().count() < original_chars);
@@ -465,7 +464,8 @@ mod tests {
             .cloned()
             .unwrap();
         let session = session_arc.lock().await;
-        let delta = &session.post_tool_side_effects[0];
+        let deliveries = delivery_messages(&session);
+        let delta = &deliveries[0];
         let content = content_text(delta);
         assert!(std::str::from_utf8(content.as_bytes()).is_ok());
         assert!(content.chars().count() <= internal_roles::MAX_PLAN_DELTA_CHARS);
@@ -517,7 +517,7 @@ mod tests {
             .cloned()
             .unwrap();
         let session = session_arc.lock().await;
-        assert!(session.post_tool_side_effects.is_empty());
+        assert!(delivery_messages(&session).is_empty());
     }
 
     #[tokio::test]
@@ -648,6 +648,7 @@ mod tests {
             session.add_message(message);
         }
         session.drain_post_tool_side_effects();
+        session.drain_pending_deliveries();
 
         let roles: Vec<_> = session
             .messages

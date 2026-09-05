@@ -194,6 +194,16 @@ pub fn handle_verifier_failure(
     trigger: &str,
     error: &str,
 ) -> GoalCompletionGateOutcome {
+    handle_verifier_failure_with_delivery(session, trigger, error, PushMode::Append, None)
+}
+
+pub fn handle_verifier_failure_with_delivery(
+    session: &mut ChatSession,
+    trigger: &str,
+    error: &str,
+    push: PushMode,
+    tool_call_id: Option<&str>,
+) -> GoalCompletionGateOutcome {
     let at_ms = epoch_ms_now();
     if session.goal_status == Some(GoalStatus::Verifying) {
         session.goal_set_status(GoalStatus::Active);
@@ -201,12 +211,13 @@ pub fn handle_verifier_failure(
     session.goal_verification_blocked_until_ms =
         Some(at_ms.saturating_add(GOAL_VERIFIER_BLOCKED_BACKOFF_MS));
     let reason = crate::llm::safe_truncate(error, 200);
-    session.add_message(internal_roles::event(
+    let event = internal_roles::event(
         EventSubkind::GoalPursuit,
         GOAL_VERIFIER_SOURCE,
         json!({"kind": "verification_blocked", "trigger": trigger, "at_ms": at_ms}),
         format!("Goal verification unavailable: {reason}"),
-    ));
+    );
+    deliver_verifier_event(session, event, push, tool_call_id, false);
     GoalCompletionGateOutcome::VerificationUnavailable
 }
 
@@ -239,7 +250,7 @@ fn apply_goal_budget_exhausted_terminal(
             kind: "goal_pursuit".to_string(),
             text: message.content.content_text_only(),
         });
-        session.add_message(message);
+        deliver_verifier_event(session, message, PushMode::Append, None, false);
     }
     session.set_runtime_state(SessionState::Completed, None);
     Some(status)
@@ -462,6 +473,24 @@ fn goal_verifier_prepare_inputs_from_parts(
     }
 }
 
+fn deliver_verifier_event(
+    session: &mut ChatSession,
+    event: ChatMessage,
+    push: PushMode,
+    tool_call_id: Option<&str>,
+    wake: bool,
+) {
+    let mut delivery = PendingDelivery::new(vec![event], push, GOAL_VERIFIER_SOURCE, wake);
+    delivery.after_tool_call_id = tool_call_id.map(str::to_string);
+    match session.enqueue_delivery(delivery) {
+        Ok(DeliveryOutcome::Delivered) if wake => {
+            session.queue_notify.notify_one();
+        }
+        Err(error) => tracing::warn!(%error, "Goal verifier delivery rejected"),
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 fn goal_verifier_prepare_inputs(
     session: &ChatSession,
@@ -646,13 +675,33 @@ pub fn apply_goal_verdict_guarded(
     epoch: Option<u64>,
     fork_trajectory_version: u64,
 ) -> GoalVerificationApplyOutcome {
+    apply_goal_verdict_guarded_with_delivery(
+        session,
+        trigger,
+        reply,
+        epoch,
+        fork_trajectory_version,
+        PushMode::Append,
+        None,
+    )
+}
+
+pub fn apply_goal_verdict_guarded_with_delivery(
+    session: &mut ChatSession,
+    trigger: &str,
+    reply: GoalVerifierReply,
+    epoch: Option<u64>,
+    fork_trajectory_version: u64,
+    push: PushMode,
+    tool_call_id: Option<&str>,
+) -> GoalVerificationApplyOutcome {
     if session.goal.is_some() && session.trajectory_version != fork_trajectory_version {
         if session.goal_status == Some(GoalStatus::Verifying) {
             session.goal_set_status(GoalStatus::Active);
         }
         return GoalVerificationApplyOutcome::Superseded;
     }
-    apply_goal_verdict(session, trigger, reply, epoch)
+    apply_goal_verdict_with_delivery(session, trigger, reply, epoch, push, tool_call_id)
 }
 
 pub fn apply_goal_verdict(
@@ -660,6 +709,17 @@ pub fn apply_goal_verdict(
     trigger: &str,
     reply: GoalVerifierReply,
     epoch: Option<u64>,
+) -> GoalVerificationApplyOutcome {
+    apply_goal_verdict_with_delivery(session, trigger, reply, epoch, PushMode::Append, None)
+}
+
+fn apply_goal_verdict_with_delivery(
+    session: &mut ChatSession,
+    trigger: &str,
+    reply: GoalVerifierReply,
+    epoch: Option<u64>,
+    push: PushMode,
+    tool_call_id: Option<&str>,
 ) -> GoalVerificationApplyOutcome {
     if session.goal.is_none() {
         return GoalVerificationApplyOutcome::NoGoal;
@@ -710,18 +770,7 @@ pub fn apply_goal_verdict(
         payload,
         event_text,
     );
-    if trigger == "validate_goal" {
-        let text = event.content.content_text_only();
-        session.goal_push_event(GoalEvent {
-            at_ms,
-            kind: "goal_pursuit".to_string(),
-            text,
-        });
-        session.queue_post_tool_side_effect(event);
-    } else {
-        session.add_message(event);
-    }
-    match reply.verdict {
+    let outcome = match reply.verdict {
         GoalVerdict::Met => {
             session.goal_set_status(GoalStatus::Completed);
             if trigger != "validate_goal" {
@@ -748,16 +797,19 @@ pub fn apply_goal_verdict(
                     GoalVerificationApplyOutcome::Stalled
                 } else {
                     session.set_runtime_state(SessionState::Idle, None);
-                    let _ = session.enqueue_priority_command(CommandRequest {
-                        client_request_id: format!("goal-verifier-regenerate-{}", Uuid::new_v4()),
-                        priority: true,
-                        command: ChatCommand::Regenerate {},
-                    });
                     GoalVerificationApplyOutcome::Rearmed
                 }
             }
         }
-    }
+    };
+    deliver_verifier_event(
+        session,
+        event,
+        push,
+        tool_call_id,
+        outcome == GoalVerificationApplyOutcome::Rearmed,
+    );
+    outcome
 }
 
 #[cfg(test)]
@@ -866,6 +918,66 @@ mod tests {
             vec![],
             None,
         )
+    }
+
+    #[test]
+    fn selected_verdict_delivery_waits_for_tool_result_and_whole_turn() {
+        for push in [PushMode::Preempt, PushMode::Append, PushMode::WhenIdle] {
+            let mut session = session_with_goal();
+            session.turn_depth = 1;
+            session.add_message(ChatMessage {
+                role: "assistant".into(),
+                tool_calls: Some(vec![crate::call_validation::ChatToolCall {
+                    id: "validate".into(),
+                    index: Some(0),
+                    function: crate::call_validation::ChatToolFunction {
+                        name: "validate_goal".into(),
+                        arguments: "{}".into(),
+                    },
+                    tool_type: "function".into(),
+                    extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
+                }]),
+                ..Default::default()
+            });
+            session.goal_set_status(GoalStatus::Verifying);
+            let version = session.trajectory_version;
+            let outcome = apply_goal_verdict_guarded_with_delivery(
+                &mut session,
+                "validate_goal",
+                GoalVerifierReply {
+                    verdict: GoalVerdict::Met,
+                    verifier_reply: "GOAL: MET".into(),
+                    tokens: 1,
+                },
+                None,
+                version,
+                push,
+                Some("validate"),
+            );
+            assert_eq!(outcome, GoalVerificationApplyOutcome::Finalized);
+            assert_eq!(session.pending_deliveries[0].push, push);
+            assert!(!session.abort_flag.load(Ordering::SeqCst));
+            session.add_message(ChatMessage {
+                role: "tool".into(),
+                tool_call_id: "validate".into(),
+                ..Default::default()
+            });
+            session.set_runtime_state(SessionState::Idle, None);
+            session.drain_pending_deliveries();
+            assert_eq!(
+                session.pending_deliveries.is_empty(),
+                push != PushMode::WhenIdle
+            );
+            session.turn_depth = 0;
+            session.drain_pending_deliveries();
+            assert!(session.pending_deliveries.is_empty());
+            assert_eq!(
+                session.messages.last().unwrap().extra["event"]["payload"]["kind"],
+                json!("verified")
+            );
+        }
     }
 
     #[test]
@@ -1133,6 +1245,67 @@ mod tests {
     }
 
     #[test]
+    fn validate_delivery_uses_selected_push_after_own_result() {
+        for push in [PushMode::Preempt, PushMode::Append, PushMode::WhenIdle] {
+            let mut session = session_with_goal();
+            session.turn_depth = 1;
+            session.goal_set_status(GoalStatus::Verifying);
+            session.add_message(ChatMessage {
+                role: "assistant".into(),
+                tool_calls: Some(vec![crate::call_validation::ChatToolCall {
+                    id: "validate".into(),
+                    index: Some(0),
+                    function: crate::call_validation::ChatToolFunction {
+                        name: "validate_goal".into(),
+                        arguments: "{}".into(),
+                    },
+                    tool_type: "function".into(),
+                    extra_content: None,
+                    started_at_ms: None,
+                    completed_at_ms: None,
+                }]),
+                ..Default::default()
+            });
+            let version = session.trajectory_version;
+            let outcome = apply_goal_verdict_guarded_with_delivery(
+                &mut session,
+                "validate_goal",
+                GoalVerifierReply {
+                    verdict: GoalVerdict::Unmet(vec!["tests".into()]),
+                    verifier_reply: "GOAL: UNMET".into(),
+                    tokens: 1,
+                },
+                None,
+                version,
+                push,
+                Some("validate"),
+            );
+            assert_eq!(outcome, GoalVerificationApplyOutcome::Continued);
+            assert_eq!(session.pending_deliveries.len(), 1);
+            assert_eq!(session.pending_deliveries[0].push, push);
+            assert!(!session.abort_flag.load(Ordering::SeqCst));
+            session.add_message(ChatMessage {
+                role: "tool".into(),
+                tool_call_id: "validate".into(),
+                ..Default::default()
+            });
+            session.set_runtime_state(SessionState::Idle, None);
+            session.drain_pending_deliveries();
+            assert_eq!(
+                session.pending_deliveries.is_empty(),
+                push != PushMode::WhenIdle
+            );
+            session.turn_depth = 0;
+            session.drain_pending_deliveries();
+            assert!(session.pending_deliveries.is_empty());
+            assert_eq!(
+                session.messages.last().unwrap().extra["event"]["payload"]["kind"],
+                "verification_gaps"
+            );
+        }
+    }
+
+    #[test]
     fn apply_goal_verdict_met_finalizes_completed_and_records_attempt() {
         let mut session = session_with_goal();
         session.goal_set_status(GoalStatus::Verifying);
@@ -1188,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_goal_verdict_unmet_rearms_and_enqueues_regenerate() {
+    fn apply_goal_verdict_unmet_rearms_and_requests_delivery_wake() {
         let mut session = session_with_goal();
         session.goal_set_status(GoalStatus::Verifying);
 
@@ -1214,10 +1387,8 @@ mod tests {
             session.goal.as_ref().unwrap().attempts[0].verifier_reply,
             "GOAL: UNMET\n- missing test"
         );
-        assert!(session
-            .command_queue
-            .iter()
-            .any(|request| matches!(request.command, ChatCommand::Regenerate {})));
+        assert!(!session.delivery_wake_sources.is_empty());
+        assert!(session.command_queue.is_empty());
     }
 
     #[test]
@@ -1477,9 +1648,9 @@ mod tests {
         assert_eq!(goal.progress.tokens_used, 13);
         assert_eq!(goal.progress.no_progress_turns, 1);
         assert!(session.command_queue.is_empty());
-        assert_eq!(session.post_tool_side_effects.len(), 1);
+        assert!(session.post_tool_side_effects.is_empty());
         assert_eq!(
-            session.post_tool_side_effects[0].extra["event"]["payload"]["kind"],
+            session.messages.last().unwrap().extra["event"]["payload"]["kind"],
             json!("verification_gaps")
         );
     }

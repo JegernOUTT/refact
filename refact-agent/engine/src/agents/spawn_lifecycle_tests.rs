@@ -123,6 +123,7 @@ fn spawn_request(parent_chat_id: &str, kind: BgAgentKind) -> SpawnRequest {
         parent_task_meta: None,
         subchat_depth: 0,
         notify_parent: NotifyParent::Silent,
+        completion_push: Default::default(),
     }
 }
 
@@ -446,7 +447,7 @@ async fn inherit_mode_keeps_parent_worktree_and_has_no_merge_status() {
 
 #[serial(test_runner)]
 #[tokio::test]
-async fn sibling_lifecycle_notices_arrive_in_running_sibling_inbox() {
+async fn sibling_lifecycle_notices_arrive_in_running_sibling_deliveries() {
     let first_started = Arc::new(Notify::new());
     let release_first = Arc::new(Notify::new());
     let _runner = {
@@ -481,17 +482,15 @@ async fn sibling_lifecycle_notices_arrive_in_running_sibling_inbox() {
         .await
         .expect("spawn second sibling");
     let second_completed = await_completion(second).await;
-    let inbox = fixture
-        .app
-        .agents
-        .inbox_for(&first.agent_id)
-        .await
-        .expect("first sibling inbox");
-    let texts = inbox
-        .lock()
-        .await
+    let deliveries = fixture.app.agents.pending_deliveries(&first.agent_id).await;
+    assert_eq!(deliveries.len(), 2);
+    assert!(deliveries
         .iter()
-        .map(|message| message.text.clone())
+        .all(|delivery| delivery.push == refact_core::chat_types::PushMode::Append));
+    let texts = deliveries
+        .iter()
+        .flat_map(|delivery| delivery.messages.iter())
+        .map(|message| message.content.content_text_only())
         .collect::<Vec<_>>();
 
     assert!(texts

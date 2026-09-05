@@ -5,7 +5,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::json;
 use tokio::sync::Mutex as AMutex;
 use tokio::time::sleep;
-use uuid::Uuid;
 
 use crate::app_state::AppState;
 use crate::chat::internal_roles::{self, EventSubkind};
@@ -211,6 +210,7 @@ pub async fn dispatch_goal_nudge(
             GoalNudgeConfig::default(),
         );
         let processor_flag = if outcome.nudged() {
+            session.queue_notify.notify_one();
             Some(session.queue_processor_running.clone())
         } else {
             None
@@ -285,7 +285,13 @@ pub fn try_apply_goal_nudge(
     if queued_user_message(session) {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::UserMessageQueued);
     }
-    if !session.command_queue.is_empty() {
+    if !session.command_queue.is_empty()
+        || !session.delivery_wake_sources.is_empty()
+        || session
+            .pending_deliveries
+            .iter()
+            .any(|delivery| delivery.wake)
+    {
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::PendingCommand);
     }
 
@@ -298,18 +304,24 @@ pub fn try_apply_goal_nudge(
         return GoalNudgeOutcome::Skipped(GoalNudgeSkip::Quiescent);
     }
 
-    let request = CommandRequest {
-        client_request_id: format!("goal-nudge-{}", Uuid::new_v4()),
-        priority: true,
-        command: ChatCommand::Regenerate {},
+    let context = session.goal.as_ref().map(nudge_context).unwrap_or_default();
+    let push = if reason == GoalNudgeReason::GeneratingNoTokens {
+        PushMode::Preempt
+    } else {
+        PushMode::Append
     };
-    if enqueue_regenerate_for_nudge(session, reason, request) != EnqueueCommandOutcome::Accepted {
-        return GoalNudgeOutcome::Skipped(GoalNudgeSkip::QueueRejected);
-    }
-
-    if !session.coalesce_tail_goal_nudge_event(now_ms) {
-        let context = session.goal.as_ref().map(nudge_context).unwrap_or_default();
-        session.add_message(goal_nudge_event(trigger, reason, now_ms, &context));
+    let delivery = PendingDelivery::new(
+        vec![goal_nudge_event(trigger, reason, now_ms, &context)],
+        push,
+        GOAL_MONITOR_SOURCE,
+        true,
+    );
+    match session.enqueue_delivery(delivery) {
+        Ok(DeliveryOutcome::Delivered) => {
+            session.queue_notify.notify_one();
+        }
+        Ok(_) => {}
+        Err(_) => return GoalNudgeOutcome::Skipped(GoalNudgeSkip::QueueRejected),
     }
     if matches!(
         reason,
@@ -322,23 +334,6 @@ pub fn try_apply_goal_nudge(
     }
     session.goal_record_nudge(now_ms);
     GoalNudgeOutcome::Nudged(reason)
-}
-
-fn enqueue_regenerate_for_nudge(
-    session: &mut ChatSession,
-    reason: GoalNudgeReason,
-    request: CommandRequest,
-) -> EnqueueCommandOutcome {
-    if reason == GoalNudgeReason::GeneratingNoTokens
-        && session.runtime.state == SessionState::Generating
-    {
-        if session.command_queue.len() >= max_queue_size() {
-            return EnqueueCommandOutcome::Full;
-        }
-        session.abort_stream();
-        session.clear_pending_tool_calls_for_interruption();
-    }
-    session.enqueue_priority_command(request)
 }
 
 fn waiting_for_user_or_ide(session: &ChatSession) -> bool {
@@ -529,6 +524,12 @@ fn quiescent_event_already_recorded(session: &ChatSession) -> bool {
     session
         .messages
         .iter()
+        .chain(
+            session
+                .pending_deliveries
+                .iter()
+                .flat_map(|delivery| delivery.messages.iter()),
+        )
         .rev()
         .find_map(goal_pursuit_kind)
         .is_some_and(|kind| kind == "pursuit_quiescent")
@@ -542,8 +543,14 @@ fn record_quiescent_event_if_needed(
     if quiescent_event_already_recorded(session) {
         return false;
     }
-    session.add_message(goal_quiescent_event(trigger, at_ms));
-    true
+    session
+        .enqueue_delivery(PendingDelivery::new(
+            vec![goal_quiescent_event(trigger, at_ms)],
+            PushMode::Append,
+            GOAL_MONITOR_SOURCE,
+            false,
+        ))
+        .is_ok()
 }
 
 fn goal_quiescent_event(
@@ -578,11 +585,25 @@ fn record_terminal_goal_event_if_needed(
             .iter()
             .any(|event| event.kind == "goal_pursuit" && event.text.contains(kind))
     });
-    if already_recorded {
+    if already_recorded
+        || session
+            .pending_deliveries
+            .iter()
+            .flat_map(|delivery| delivery.messages.iter())
+            .any(|message| goal_pursuit_kind(message) == Some(kind))
+    {
         return Some(false);
     }
-    session.add_message(goal_terminal_event(status, trigger, at_ms));
-    Some(true)
+    Some(
+        session
+            .enqueue_delivery(PendingDelivery::new(
+                vec![goal_terminal_event(status, trigger, at_ms)],
+                PushMode::Append,
+                GOAL_MONITOR_SOURCE,
+                false,
+            ))
+            .is_ok(),
+    )
 }
 
 fn terminal_kind(status: GoalStatus) -> &'static str {
@@ -599,7 +620,12 @@ fn apply_goal_terminal_status(
     at_ms: u64,
 ) {
     session.goal_set_status(status);
-    session.add_message(goal_terminal_event(status, trigger, at_ms));
+    let _ = session.enqueue_delivery(PendingDelivery::new(
+        vec![goal_terminal_event(status, trigger, at_ms)],
+        PushMode::Append,
+        GOAL_MONITOR_SOURCE,
+        false,
+    ));
 }
 
 fn goal_terminal_event(
@@ -692,15 +718,17 @@ mod tests {
     }
 
     #[test]
-    fn goal_monitor_idle_stall_enqueues_regenerate_and_records_event() {
+    fn goal_monitor_idle_stall_delivers_append_and_requests_wake() {
         let (mut session, now) = old_idle_session();
         let outcome = apply_monitor(&mut session, 10_000, now);
 
         assert_eq!(outcome, GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle));
-        assert_eq!(session.command_queue.len(), 1);
-        let request = session.command_queue.front().unwrap();
-        assert!(request.priority);
-        assert!(matches!(request.command, ChatCommand::Regenerate {}));
+        assert!(session.command_queue.is_empty());
+        assert!(!session.delivery_wake_sources.is_empty());
+        assert_eq!(
+            session.messages.last().unwrap().extra["delivery"]["push"],
+            json!("append")
+        );
         assert_eq!(
             session.goal.as_ref().unwrap().progress.last_nudge_at_ms,
             10_000
@@ -760,6 +788,7 @@ mod tests {
                 GoalNudgeOutcome::Nudged(GoalNudgeReason::Error) => {
                     nudges += 1;
                     session.command_queue.clear();
+                    session.delivery_wake_sources.clear();
                     session
                         .set_runtime_state(SessionState::Error, Some("permanent 400".to_string()));
                     session.last_activity = now - Duration::from_secs(10);
@@ -1004,7 +1033,7 @@ mod tests {
             apply_monitor(&mut session, 7_000, now),
             GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
         );
-        assert_eq!(session.command_queue.len(), 1);
+        assert!(!session.delivery_wake_sources.is_empty());
     }
 
     #[test]
@@ -1047,7 +1076,7 @@ mod tests {
             apply_monitor(&mut session, 20_000, now + Duration::from_secs(20)),
             GoalNudgeOutcome::Nudged(GoalNudgeReason::Idle)
         );
-        assert_eq!(session.command_queue.len(), 1);
+        assert!(!session.delivery_wake_sources.is_empty());
     }
 
     #[test]
@@ -1088,7 +1117,8 @@ mod tests {
             apply_monitor(&mut session, 11_500, now + Duration::from_secs(10)),
             GoalNudgeOutcome::Skipped(GoalNudgeSkip::PendingCommand)
         );
-        assert_eq!(session.command_queue.len(), 1);
+        assert!(session.command_queue.is_empty());
+        assert_eq!(session.delivery_wake_sources.len(), 1);
         let nudge_events = session
             .messages
             .iter()
@@ -1101,7 +1131,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_monitor_consecutive_nudges_coalesce_into_single_event() {
+    fn goal_monitor_consecutive_nudges_preserve_delivered_prefix() {
         let (mut session, now) = old_idle_session();
         assert_eq!(
             apply_monitor(&mut session, 10_000, now),
@@ -1109,6 +1139,7 @@ mod tests {
         );
 
         session.command_queue.clear();
+        session.delivery_wake_sources.clear();
         session.last_activity = now - Duration::from_secs(10);
         assert_eq!(
             apply_monitor(&mut session, 20_000, now),
@@ -1123,10 +1154,10 @@ mod tests {
                     && event_payload(message).get("kind") == Some(&json!("nudge"))
             })
             .collect::<Vec<_>>();
-        assert_eq!(nudge_events.len(), 1);
+        assert_eq!(nudge_events.len(), 2);
         let payload = event_payload(nudge_events[0]);
-        assert_eq!(payload["count"], json!(2));
-        assert_eq!(payload["last_at_ms"], json!(20_000));
+        assert!(payload.get("count").is_none());
+        assert_eq!(event_payload(nudge_events[1])["at_ms"], json!(20_000));
         assert_eq!(payload["at_ms"], json!(10_000));
         assert_eq!(
             session.goal.as_ref().unwrap().progress.last_nudge_at_ms,
@@ -1148,6 +1179,7 @@ mod tests {
         });
 
         session.command_queue.clear();
+        session.delivery_wake_sources.clear();
         session.last_activity = now - Duration::from_secs(10);
         assert_eq!(
             apply_monitor(&mut session, 20_000, now),
@@ -1226,7 +1258,7 @@ mod tests {
             apply_monitor(&mut session, 10_100, now + Duration::from_secs(10)),
             GoalNudgeOutcome::Skipped(GoalNudgeSkip::Cooldown)
         );
-        assert_eq!(session.command_queue.len(), 1);
+        assert!(!session.delivery_wake_sources.is_empty());
     }
 
     #[test]
@@ -1245,7 +1277,7 @@ mod tests {
     }
 
     #[test]
-    fn goal_monitor_no_token_stall_enqueues_regenerate() {
+    fn goal_monitor_no_token_stall_delivers_preempt_and_requests_wake() {
         let mut session = active_goal_session();
         let now = Instant::now();
         session.set_runtime_state(SessionState::Generating, None);
@@ -1255,7 +1287,7 @@ mod tests {
             apply_monitor(&mut session, 10_000, now),
             GoalNudgeOutcome::Nudged(GoalNudgeReason::GeneratingNoTokens)
         );
-        assert_eq!(session.command_queue.len(), 1);
+        assert!(!session.delivery_wake_sources.is_empty());
         assert_eq!(
             session.goal.as_ref().unwrap().progress.no_progress_turns,
             1,
@@ -1358,6 +1390,7 @@ mod tests {
                 expected
             );
             session.command_queue.clear();
+            session.delivery_wake_sources.clear();
             now_ms += 600_000;
         }
 
@@ -1389,11 +1422,11 @@ mod tests {
         assert!(session.user_interrupt_flag.load(Ordering::SeqCst));
         assert_eq!(session.runtime.state, SessionState::Idle);
         assert!(session.draft_message.is_none());
-        assert_eq!(session.command_queue.len(), 1);
-        assert!(matches!(
-            session.command_queue.front().unwrap().command,
-            ChatCommand::Regenerate {}
-        ));
+        assert!(!session.delivery_wake_sources.is_empty());
+        assert!(session.messages.iter().any(|message| message
+            .extra
+            .get("event")
+            .is_some_and(|event| event["subkind"] == "cancellation_note")));
     }
 
     #[test]

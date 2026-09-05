@@ -9,7 +9,11 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::scheduler::schedule::parse_schedule;
-use crate::scheduler::{active_durable_cron_store, session_cron_store, CronStore, Job, Trigger};
+use crate::scheduler::{
+    active_durable_cron_store, push_from_value, push_schema, session_cron_store, CronStore, Job,
+    Trigger,
+};
+use refact_core::chat_types::PushMode;
 use crate::tools::tool_cron_create::human_schedule_for_trigger;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
@@ -104,7 +108,8 @@ impl Tool for ToolCronUpdate {
                     "prompt": {"type":"string"},
                     "description": {"type":"string"},
                     "enabled": {"type":"boolean"},
-                    "run_now": {"type":"boolean"}
+                    "run_now": {"type":"boolean"},
+                    "push": push_schema()
                 },
                 "required": ["id"]
             }),
@@ -141,6 +146,7 @@ impl Tool for ToolCronUpdate {
                         "id": job.id,
                         "updated": true,
                         "human_schedule": human_schedule,
+                        "push": job.push,
                     })
                     .to_string(),
                 ),
@@ -172,6 +178,8 @@ struct CronUpdateInput {
     description: Option<String>,
     enabled: Option<bool>,
     run_now: bool,
+    /// `None` keeps the saved policy; omission must never reset it to append.
+    push: Option<PushMode>,
 }
 
 impl CronUpdateInput {
@@ -193,6 +201,7 @@ impl CronUpdateInput {
             description,
             enabled: optional_bool_arg(args, "enabled")?,
             run_now: optional_bool_arg(args, "run_now")?.unwrap_or(false),
+            push: push_from_value(args.get("push"))?,
         })
     }
 
@@ -234,6 +243,9 @@ fn apply_update(job: &mut Job, input: CronUpdateInput, now_ms: u64) -> Result<()
     if let Some(enabled) = input.enabled {
         job.enabled = enabled;
         job.paused_at_ms = if enabled { None } else { Some(now_ms) };
+    }
+    if let Some(push) = input.push {
+        job.push = push;
     }
     if input.run_now {
         job.trigger_at_ms = Some(now_ms);
@@ -362,6 +374,30 @@ mod tests {
             panic!("expected simple text")
         };
         serde_json::from_str(&text).unwrap()
+    }
+
+    #[test]
+    fn update_preserves_push_when_omitted_and_accepts_explicit_modes() {
+        let mut job = test_task("push", false);
+        job.push = PushMode::WhenIdle;
+        let input = CronUpdateInput::from_args(&args(&[
+            ("id", json!("push")),
+            ("description", json!("changed")),
+        ]))
+        .unwrap();
+        apply_update(&mut job, input, 1000).unwrap();
+        assert_eq!(job.push, PushMode::WhenIdle);
+        for (wire, mode) in [
+            ("preempt", PushMode::Preempt),
+            ("append", PushMode::Append),
+            ("when_idle", PushMode::WhenIdle),
+        ] {
+            let input =
+                CronUpdateInput::from_args(&args(&[("id", json!("push")), ("push", json!(wire))]))
+                    .unwrap();
+            apply_update(&mut job, input, 1000).unwrap();
+            assert_eq!(job.push, mode);
+        }
     }
 
     #[tokio::test]

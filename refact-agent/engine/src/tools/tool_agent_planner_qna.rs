@@ -13,6 +13,8 @@ use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate};
 use crate::tools::task_tool_helpers::require_bound_planner_task;
+use crate::tools::planner_delivery::{self, CardTarget, CardGuard};
+use refact_core::chat_types::DeliveryOutcome;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 const ASK_PREFIX: &str = "[ASK:";
@@ -334,10 +336,11 @@ impl Tool for ToolAgentAskPlanner {
             source: make_source(),
             experimental: false,
             allow_parallel: false,
-            description: "Task-agent-only tool for recording a question for the task planner on the current card. urgency=block additionally wakes the planner immediately; urgency=info waits for the planner's next task_list poll.".to_string(),
+            description: "Task-agent-only tool for recording a question for the task planner on the current card. urgency=block additionally requests a planner wake (append by default, without preemption); urgency=info waits for the planner's next task_list poll.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "push": planner_delivery::push_mode_schema(),
                     "question": {
                         "type": "string",
                         "description": "Question for the planner"
@@ -345,7 +348,7 @@ impl Tool for ToolAgentAskPlanner {
                     "urgency": {
                         "type": "string",
                         "enum": ["info", "block"],
-                        "description": "Question urgency. block wakes the planner immediately to answer; info waits for the planner's next task_list poll. Neither pauses the agent. Default: info"
+                        "description": "Question urgency. block requests a planner wake to answer without preemption by default; info waits for the planner's next task_list poll. Neither pauses the agent. Default: info"
                     }
                 },
                 "required": ["question", "urgency"]
@@ -370,6 +373,7 @@ impl Tool for ToolAgentAskPlanner {
             "planner_qna_question_limit",
         );
         let urgency = QuestionUrgency::parse(args.get("urgency"))?;
+        let push = planner_delivery::parse_push_mode(args)?;
         let question_id = make_question_id();
         let message = format!(
             "[ASK:{}] {} (urgency={})",
@@ -408,7 +412,7 @@ impl Tool for ToolAgentAskPlanner {
         let wake_note = if urgency == QuestionUrgency::Block {
             match planner_chat_id {
                 Some(planner_chat_id) => {
-                    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+                    let app = ccx.lock().await.app.clone();
                     match crate::chat::task_agent_monitor::notify_planner_blocking_question(
                         app,
                         &task_id,
@@ -416,13 +420,13 @@ impl Tool for ToolAgentAskPlanner {
                         &planner_chat_id,
                         &question_id,
                         &question,
+                        push,
                     )
                     .await
                     {
-                        Ok(true) => "\n\nPlanner has been woken up for this blocking question.",
-                        Ok(false) => {
-                            "\n\nPlanner wake-up was skipped (planner busy); it will see the question on its next task_list call."
-                        }
+                        Ok(DeliveryOutcome::Delivered) => "\n\nBlocking question delivered to planner; wake requested.",
+                        Ok(DeliveryOutcome::Queued) => "\n\nBlocking question queued for planner; wake requested without overriding push mode.",
+                        Ok(DeliveryOutcome::Duplicate) => "\n\nBlocking question already accepted; duplicate not delivered.",
                         Err(error) => {
                             tracing::warn!(
                                 "agent_ask_planner: failed to wake planner for blocking question {} on card {}: {}",
@@ -475,6 +479,7 @@ impl Tool for ToolPlannerReply {
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "push": planner_delivery::push_mode_schema(),
                     "card_id": {
                         "type": "string",
                         "description": "Card ID containing the question"
@@ -516,31 +521,82 @@ impl Tool for ToolPlannerReply {
             "planner_qna_answer_limit",
         );
         let gcx = ccx.lock().await.app.gcx.clone();
+        let facade = ccx.lock().await.app.chat.facade.clone();
+        let push = planner_delivery::parse_push_mode(args)?;
 
         let card_id_for_update = card_id.clone();
         let question_id_for_update = question_id.clone();
         let answer_for_update = answer.clone();
-        storage::update_board_atomic(gcx, &task_id, move |board| {
-            let card = board
-                .get_card_mut(&card_id_for_update)
-                .ok_or_else(|| format!("Card {} not found", card_id_for_update))?;
-            if !card_has_ask(card, &question_id_for_update) {
-                return Err(format!(
-                    "Question {} not found on card {}",
-                    question_id_for_update, card_id_for_update
-                ));
-            }
-            card.status_updates.push(StatusUpdate {
-                timestamp: Utc::now().to_rfc3339(),
-                message: format!("[REPLY:{}] {}", question_id_for_update, answer_for_update),
-            });
-            Ok(())
-        })
-        .await?;
+        let (_, (recorded, target)) =
+            storage::update_board_atomic(gcx.clone(), &task_id, move |board| {
+                let card = board
+                    .get_card_mut(&card_id_for_update)
+                    .ok_or_else(|| format!("Card {} not found", card_id_for_update))?;
+                if !card_has_ask(card, &question_id_for_update) {
+                    return Err(format!(
+                        "Question {} not found on card {}",
+                        question_id_for_update, card_id_for_update
+                    ));
+                }
+                let target = card
+                    .agent_chat_id
+                    .clone()
+                    .map(|chat_id| CardTarget::from_card(card, chat_id));
+                if card.status_updates.iter().any(|update| {
+                    parse_reply(&update.message)
+                        .map(|(id, _)| id == question_id_for_update)
+                        .unwrap_or(false)
+                }) {
+                    return Ok((false, target));
+                }
+                card.status_updates.push(StatusUpdate {
+                    timestamp: Utc::now().to_rfc3339(),
+                    message: format!("[REPLY:{}] {}", question_id_for_update, answer_for_update),
+                });
+                Ok((true, target))
+            })
+            .await?;
 
+        let delivery_note = if !recorded {
+            "Reply already recorded; duplicate answer not delivered.".to_string()
+        } else if let Some(target) = target {
+            let pending = planner_delivery::with_dedupe_id(
+                planner_delivery::single_message_delivery(
+                    format!("[Planner REPLY to {}] {}", question_id, answer),
+                    push,
+                    "planner_reply",
+                    true,
+                ),
+                format!("planner-reply:{}:{}:{}", task_id, card_id, question_id),
+            );
+            planner_delivery::deliver_to_card(
+                gcx,
+                facade,
+                &task_id,
+                &target,
+                CardGuard::doing_with_live_session(),
+                pending,
+            )
+            .await
+            .describe("Reply")
+        } else {
+            "Reply not delivered (card has no agent chat).".to_string()
+        };
         let mut output = format!(
-            "Reply delivered to card `{}` for question `{}`.\n\nAnswer: {}",
-            card_id, question_id, answer
+            "Reply {} on card `{}` for question `{}`.\n\n{}{}",
+            if recorded {
+                "recorded"
+            } else {
+                "already recorded"
+            },
+            card_id,
+            question_id,
+            delivery_note,
+            if recorded {
+                format!("\n\nAnswer: {}", answer)
+            } else {
+                String::new()
+            }
         );
         if let Some(notice) = answer_notice {
             output = format!("{}\n\n{}", notice, output);
@@ -1015,5 +1071,336 @@ mod tests {
             "{}",
             notice
         );
+    }
+    #[tokio::test]
+    async fn planner_reply_records_once_and_delivers_live_with_each_push_mode() {
+        use crate::chat::types::{ChatSession, SessionState, PushMode};
+        for (raw, expected) in [
+            (None, PushMode::Append),
+            (Some("append"), PushMode::Append),
+            (Some("preempt"), PushMode::Preempt),
+            (Some("when_idle"), PushMode::WhenIdle),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let gcx = write_task(
+                temp.path(),
+                vec![test_card(
+                    "T-1",
+                    "QnA",
+                    vec![StatusUpdate {
+                        timestamp: Utc::now().to_rfc3339(),
+                        message: "[ASK:1234abcd] Help (urgency=block)".into(),
+                    }],
+                )],
+            )
+            .await;
+            let ccx = task_ccx(gcx.clone(), "planner", None).await;
+            let mut session = ChatSession::new("agent-chat-T-1".into());
+            session.runtime.state = SessionState::Generating;
+            session.draft_message = Some(ChatMessage {
+                role: "assistant".into(),
+                content: ChatContent::SimpleText("partial answer".into()),
+                ..Default::default()
+            });
+            session
+                .queue_processor_running
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let session = Arc::new(AMutex::new(session));
+            ccx.lock()
+                .await
+                .app
+                .chat
+                .sessions
+                .write()
+                .await
+                .insert("agent-chat-T-1".into(), session.clone());
+            let mut arguments = args(&[
+                ("card_id", json!("T-1")),
+                ("question_id", json!("1234abcd")),
+                ("answer", json!("Proceed")),
+            ]);
+            if let Some(raw) = raw {
+                arguments.insert("push".into(), json!(raw));
+            }
+            let output = output_text(
+                ToolPlannerReply::new()
+                    .tool_execute(ccx.clone(), &"call".into(), &arguments)
+                    .await
+                    .unwrap(),
+            );
+            assert!(output.contains("Reply recorded"));
+            {
+                let session = session.lock().await;
+                if expected == PushMode::Preempt {
+                    assert!(output.contains("message delivered"));
+                    assert!(session
+                        .messages
+                        .iter()
+                        .any(|m| m.content.content_text_only()
+                            == "[Planner REPLY to 1234abcd] Proceed"));
+                } else {
+                    assert!(output.contains("message queued"));
+                    assert_eq!(session.pending_deliveries.len(), 1);
+                    let pending = session.pending_deliveries.front().unwrap();
+                    assert_eq!(pending.push, expected);
+                    assert_eq!(pending.id, "planner-reply:task-1:T-1:1234abcd");
+                }
+            }
+            let duplicate = output_text(
+                ToolPlannerReply::new()
+                    .tool_execute(ccx, &"retry".into(), &arguments)
+                    .await
+                    .unwrap(),
+            );
+            assert!(duplicate.contains("duplicate answer not delivered"));
+            let board = storage::load_board(gcx, "task-1").await.unwrap();
+            assert_eq!(
+                board
+                    .get_card("T-1")
+                    .unwrap()
+                    .status_updates
+                    .iter()
+                    .filter(|u| u.message.starts_with("[REPLY:"))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn planner_reply_records_but_does_not_claim_delivery_without_active_card_chat() {
+        for (column, chat) in [
+            ("doing", None),
+            ("done", Some("agent-chat-T-1")),
+            ("doing", Some("missing-session")),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut card = test_card(
+                "T-1",
+                "QnA",
+                vec![StatusUpdate {
+                    timestamp: Utc::now().to_rfc3339(),
+                    message: "[ASK:1234abcd] Help".into(),
+                }],
+            );
+            card.column = column.into();
+            card.agent_chat_id = chat.map(str::to_string);
+            let gcx = write_task(temp.path(), vec![card]).await;
+            let ccx = task_ccx(gcx, "planner", None).await;
+            let output = output_text(
+                ToolPlannerReply::new()
+                    .tool_execute(
+                        ccx,
+                        &"call".into(),
+                        &args(&[
+                            ("card_id", json!("T-1")),
+                            ("question_id", json!("1234abcd")),
+                            ("answer", json!("Proceed")),
+                        ]),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            assert!(output.contains("Reply recorded"));
+            assert!(output.to_lowercase().contains("not delivered"));
+        }
+    }
+
+    #[tokio::test]
+    async fn info_question_is_board_only_even_with_explicit_preempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(temp.path(), vec![test_card("T-1", "QnA", vec![])]).await;
+        let ccx = task_ccx(gcx.clone(), "agents", Some("T-1")).await;
+        ToolAgentAskPlanner::new()
+            .tool_execute(
+                ccx.clone(),
+                &"call".into(),
+                &args(&[
+                    ("question", json!("Help")),
+                    ("urgency", json!("info")),
+                    ("push", json!("preempt")),
+                ]),
+            )
+            .await
+            .unwrap();
+        assert!(ccx.lock().await.app.chat.sessions.read().await.is_empty());
+        assert_eq!(
+            storage::load_board(gcx, "task-1")
+                .await
+                .unwrap()
+                .get_card("T-1")
+                .unwrap()
+                .status_updates
+                .len(),
+            1
+        );
+    }
+    #[tokio::test]
+    async fn blocking_question_defaults_to_append_and_propagates_explicit_modes() {
+        use crate::chat::types::{ChatSession, SessionState, PushMode};
+        for (raw, expected) in [
+            (None, PushMode::Append),
+            (Some("preempt"), PushMode::Preempt),
+            (Some("when_idle"), PushMode::WhenIdle),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let gcx = write_task(temp.path(), vec![test_card("T-1", "QnA", vec![])]).await;
+            let ccx = task_ccx(gcx, "agents", Some("T-1")).await;
+            let mut planner = ChatSession::new("planner-chat".into());
+            planner.runtime.state = SessionState::Generating;
+            planner.draft_message = Some(ChatMessage {
+                role: "assistant".into(),
+                content: ChatContent::SimpleText("partial answer".into()),
+                ..Default::default()
+            });
+            planner.thread.task_meta = Some(ThreadTaskMeta {
+                task_id: "task-1".into(),
+                role: "planner".into(),
+                agent_id: None,
+                card_id: None,
+                planner_chat_id: None,
+            });
+            planner
+                .queue_processor_running
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let planner = Arc::new(AMutex::new(planner));
+            ccx.lock()
+                .await
+                .app
+                .chat
+                .sessions
+                .write()
+                .await
+                .insert("planner-chat".into(), planner.clone());
+            let mut arguments = args(&[("question", json!("Help")), ("urgency", json!("block"))]);
+            if let Some(raw) = raw {
+                arguments.insert("push".into(), json!(raw));
+            }
+            let output = output_text(
+                ToolAgentAskPlanner::new()
+                    .tool_execute(ccx, &"call".into(), &arguments)
+                    .await
+                    .unwrap(),
+            );
+            let planner = planner.lock().await;
+            assert!(planner.command_queue.is_empty());
+            if expected == PushMode::Preempt {
+                assert!(output.contains("question delivered"));
+            } else {
+                assert!(output.contains("question queued"));
+                assert_eq!(planner.pending_deliveries.front().unwrap().push, expected);
+                assert!(!planner.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+            }
+        }
+    }
+    #[tokio::test]
+    async fn planner_reply_default_append_lands_on_idle_live_session() {
+        use crate::chat::types::ChatSession;
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(
+            temp.path(),
+            vec![test_card(
+                "T-1",
+                "QnA",
+                vec![StatusUpdate {
+                    timestamp: Utc::now().to_rfc3339(),
+                    message: "[ASK:1234abcd] Help".into(),
+                }],
+            )],
+        )
+        .await;
+        let ccx = task_ccx(gcx, "planner", None).await;
+        let session = ChatSession::new("agent-chat-T-1".into());
+        session
+            .queue_processor_running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let session = Arc::new(AMutex::new(session));
+        ccx.lock()
+            .await
+            .app
+            .chat
+            .sessions
+            .write()
+            .await
+            .insert("agent-chat-T-1".into(), session.clone());
+        let output = output_text(
+            ToolPlannerReply::new()
+                .tool_execute(
+                    ccx,
+                    &"call".into(),
+                    &args(&[
+                        ("card_id", json!("T-1")),
+                        ("question_id", json!("1234abcd")),
+                        ("answer", json!("Proceed")),
+                    ]),
+                )
+                .await
+                .unwrap(),
+        );
+        assert!(output.contains("Reply message delivered"));
+        let session = session.lock().await;
+        assert!(session.command_queue.is_empty());
+        assert!(session.pending_deliveries.is_empty());
+        assert_eq!(
+            session.messages.last().unwrap().content.content_text_only(),
+            "[Planner REPLY to 1234abcd] Proceed"
+        );
+    }
+    #[tokio::test]
+    async fn planner_reply_to_idle_agent_is_delivered_and_missing_card_is_rejected() {
+        use crate::chat::types::ChatSession;
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(
+            temp.path(),
+            vec![test_card(
+                "T-1",
+                "QnA",
+                vec![StatusUpdate {
+                    timestamp: Utc::now().to_rfc3339(),
+                    message: "[ASK:1234abcd] Help".into(),
+                }],
+            )],
+        )
+        .await;
+        let ccx = task_ccx(gcx.clone(), "planner", None).await;
+        let agent = ChatSession::new("agent-chat-T-1".into());
+        agent
+            .queue_processor_running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let agent = Arc::new(AMutex::new(agent));
+        ccx.lock()
+            .await
+            .app
+            .chat
+            .sessions
+            .write()
+            .await
+            .insert("agent-chat-T-1".into(), agent.clone());
+        let mut arguments = args(&[
+            ("card_id", json!("T-1")),
+            ("question_id", json!("1234abcd")),
+            ("answer", json!("Proceed")),
+        ]);
+        let output = output_text(
+            ToolPlannerReply::new()
+                .tool_execute(ccx.clone(), &"call".into(), &arguments)
+                .await
+                .unwrap(),
+        );
+        assert!(output.contains("Reply message delivered"));
+        {
+            let agent = agent.lock().await;
+            assert!(agent.pending_deliveries.is_empty());
+            assert_eq!(
+                agent.messages.last().unwrap().content.content_text_only(),
+                "[Planner REPLY to 1234abcd] Proceed"
+            );
+        }
+        arguments.insert("card_id".into(), json!("missing"));
+        let error = ToolPlannerReply::new()
+            .tool_execute(ccx, &"call".into(), &arguments)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Card missing not found");
     }
 }

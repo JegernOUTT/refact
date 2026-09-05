@@ -30,7 +30,10 @@ pub use tool_enrichment::{
     ToolEnrichmentReferenceDetails, TOOL_ENRICHMENT_EXTRA_KEY, TOOL_ENRICHMENT_SCHEMA_VERSION,
 };
 pub use refact_core::buddy_meta::BuddyThreadMeta;
-pub use refact_core::chat_types::{ChatMessage, ContextFile};
+pub use refact_core::chat_types::{
+    delivery_id_of_message, ChatMessage, ContextFile, DeliveryOutcome, PendingDelivery, PushMode,
+    DELIVERY_EXTRA_KEY,
+};
 pub use refact_core::worktree_meta::WorktreeMeta;
 
 pub const CLIENT_MESSAGE_ID_EXTRA_KEY: &str = "client_message_id";
@@ -505,6 +508,44 @@ pub struct QueuedItem {
     pub preview: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content: String,
+    /// Delivery rows only: requested landing boundary, editable while pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<PushMode>,
+    /// Delivery rows only: producer that enqueued this batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Delivery rows only: the pending event payload, for richer UI rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enqueued_at_ms: Option<u64>,
+}
+
+pub const DELIVERY_COMMAND_TYPE: &str = "delivery";
+
+impl QueuedItem {
+    pub fn from_pending_delivery(delivery: &PendingDelivery) -> Self {
+        let preview = serde_json::Value::String(delivery.preview_text());
+        Self {
+            client_request_id: delivery.id.clone(),
+            priority: delivery.push == PushMode::Preempt,
+            command_type: DELIVERY_COMMAND_TYPE.to_string(),
+            preview: extract_preview(&preview),
+            content: extract_full_text_capped(&preview),
+            push: Some(delivery.push),
+            source: Some(delivery.source.clone()),
+            event: Some(serde_json::json!({
+                "kind": "delivery",
+                "id": delivery.id,
+                "source": delivery.source,
+                "push": delivery.push,
+                "wake": delivery.wake,
+                "message_count": delivery.messages.len(),
+                "enqueued_at_ms": delivery.enqueued_at_ms,
+            })),
+            enqueued_at_ms: Some(delivery.enqueued_at_ms),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -947,6 +988,20 @@ pub enum ChatCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         last_n_network: Option<usize>,
     },
+    /// Unified delivery of externally produced messages into this chat.
+    /// Routed into the pending-delivery queue immediately rather than waiting
+    /// for the whole command loop, so pending edits work during generation.
+    DeliverMessages {
+        delivery: PendingDelivery,
+    },
+    /// Reprioritize or cancel a still-pending delivery.
+    UpdatePendingDelivery {
+        delivery_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        push: Option<PushMode>,
+        #[serde(default)]
+        cancel: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1056,6 +1111,22 @@ impl CommandRequest {
                 pending_message_id.clone(),
                 String::new(),
             ),
+            ChatCommand::DeliverMessages { delivery } => {
+                return QueuedItem::from_pending_delivery(delivery);
+            }
+            ChatCommand::UpdatePendingDelivery {
+                delivery_id,
+                push,
+                cancel,
+            } => (
+                "update_pending_delivery".to_string(),
+                if *cancel {
+                    format!("cancel {delivery_id}")
+                } else {
+                    format!("{delivery_id} -> {}", push.unwrap_or_default().as_str())
+                },
+                String::new(),
+            ),
         };
         QueuedItem {
             client_request_id: self.client_request_id.clone(),
@@ -1063,6 +1134,10 @@ impl CommandRequest {
             command_type,
             preview,
             content,
+            push: None,
+            source: None,
+            event: None,
+            enqueued_at_ms: None,
         }
     }
 }

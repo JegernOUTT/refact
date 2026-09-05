@@ -88,12 +88,30 @@ export type PauseReason = {
   integr_config_path: string | null;
 };
 
+/** Delivery placement for a queued item: A (preempt), B (append), C (when idle). */
+export type PushMode = "preempt" | "append" | "when_idle";
+
+export type QueuedEvent = {
+  subkind: string;
+  source: string;
+  payload?: unknown;
+};
+
 export type QueuedItem = {
   client_request_id: string;
   priority: boolean;
   command_type: string;
   preview: string;
+  content?: string;
+  push?: PushMode;
+  source?: string;
+  event?: QueuedEvent;
+  enqueued_at_ms?: number;
 };
+
+export function isPushMode(value: unknown): value is PushMode {
+  return value === "preempt" || value === "append" || value === "when_idle";
+}
 
 export type RuntimeState = {
   state: SessionState;

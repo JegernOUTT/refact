@@ -8,7 +8,7 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::internal_roles::{self, EventSubkind};
-use crate::chat::types::{ChatSession, GoalStatus};
+use crate::chat::types::{ChatSession, GoalStatus, PendingDelivery, PushMode};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 const GOAL_CONTROL_SOURCE: &str = "tool.goal_pursuit";
@@ -32,26 +32,6 @@ fn tool_message(tool_call_id: &str, content: String) -> Result<(bool, Vec<Contex
             ..Default::default()
         })],
     ))
-}
-
-fn purge_goal_generated_regenerates(session: &mut ChatSession) {
-    let mut purged_ids = Vec::new();
-    session.command_queue.retain(|request| {
-        let remove = matches!(
-            request.command,
-            crate::chat::types::ChatCommand::Regenerate {}
-        ) && (request.client_request_id.starts_with("goal-nudge-")
-            || request
-                .client_request_id
-                .starts_with("goal-verifier-regenerate-"));
-        if remove {
-            purged_ids.push(request.client_request_id.clone());
-        }
-        !remove
-    });
-    for request_id in purged_ids {
-        session.clear_queue_timestamp(&request_id);
-    }
 }
 
 fn require_pursuable_goal(session: &ChatSession) -> Result<(), String> {
@@ -107,6 +87,7 @@ impl Tool for ToolPauseGoal {
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "push": PushMode::schema(),
                     "reason": {
                         "type": "string",
                         "description": "Short reason why pursuit is paused."
@@ -125,6 +106,7 @@ impl Tool for ToolPauseGoal {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let push = PushMode::from_args(args)?;
         let reason = args
             .get("reason")
             .and_then(|value| value.as_str())
@@ -134,14 +116,12 @@ impl Tool for ToolPauseGoal {
         let session_arc = session_for_chat(ccx).await?;
         let mut session = session_arc.lock().await;
         require_pursuable_goal(&session)?;
-        purge_goal_generated_regenerates(&mut session);
         let ledger_reason = if reason.is_empty() {
             "pause_goal".to_string()
         } else {
             format!("pause_goal: {reason}")
         };
-        session.goal_set_status_reason(GoalStatus::Paused, &ledger_reason);
-        session.add_message(internal_roles::event(
+        let message = internal_roles::event(
             EventSubkind::GoalPursuit,
             GOAL_CONTROL_SOURCE,
             json!({"kind": "paused", "trigger": "pause_goal", "at_ms": epoch_ms_now()}),
@@ -150,7 +130,12 @@ impl Tool for ToolPauseGoal {
             } else {
                 format!("Goal pursuit paused by the agent: {reason}")
             },
-        ));
+        );
+        let mut delivery = PendingDelivery::new(vec![message], push, GOAL_CONTROL_SOURCE, false);
+        delivery.after_tool_call_id = Some(tool_call_id.clone());
+        session.enqueue_delivery(delivery)?;
+        session.purge_goal_generated_wakes();
+        session.goal_set_status_reason(GoalStatus::Paused, &ledger_reason);
         tool_message(
             tool_call_id,
             "Goal pursuit paused. The user can resume it with goal_control(resume).".to_string(),
@@ -182,6 +167,7 @@ impl Tool for ToolSnoozeGoal {
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "push": PushMode::schema(),
                     "minutes": {
                         "type": "integer",
                         "description": "How long to snooze pursuit, in minutes (1-1440)."
@@ -204,6 +190,7 @@ impl Tool for ToolSnoozeGoal {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let push = PushMode::from_args(args)?;
         let minutes = args
             .get("minutes")
             .and_then(|value| value.as_u64())
@@ -219,9 +206,7 @@ impl Tool for ToolSnoozeGoal {
         let mut session = session_arc.lock().await;
         require_pursuable_goal(&session)?;
         let until_ms = epoch_ms_now().saturating_add(minutes.saturating_mul(60_000));
-        purge_goal_generated_regenerates(&mut session);
-        session.goal_set_snooze(Some(until_ms));
-        session.add_message(internal_roles::event(
+        let message = internal_roles::event(
             EventSubkind::GoalPursuit,
             GOAL_CONTROL_SOURCE,
             json!({
@@ -235,7 +220,12 @@ impl Tool for ToolSnoozeGoal {
             } else {
                 format!("Goal pursuit snoozed for {minutes} minutes: {reason}")
             },
-        ));
+        );
+        let mut delivery = PendingDelivery::new(vec![message], push, GOAL_CONTROL_SOURCE, false);
+        delivery.after_tool_call_id = Some(tool_call_id.clone());
+        session.enqueue_delivery(delivery)?;
+        session.purge_goal_generated_wakes();
+        session.goal_set_snooze(Some(until_ms));
         tool_message(
             tool_call_id,
             format!(
@@ -258,6 +248,43 @@ mod tests {
         let mut session = ChatSession::new("goal-controls-test".to_string());
         session.install_goal("agent", "ship it", true, GoalBudget::default());
         session
+    }
+
+    #[test]
+    fn purge_cancels_only_goal_wake_deliveries() {
+        let mut session = session_with_goal();
+        session.turn_depth = 1;
+        for (id, source) in [
+            ("goal", "chat.goal_monitor"),
+            ("other", "process.subscribe"),
+        ] {
+            session
+                .enqueue_delivery(PendingDelivery::with_id(
+                    id,
+                    vec![internal_roles::event(
+                        EventSubkind::GoalPursuit,
+                        source,
+                        json!({}),
+                        "pending",
+                    )],
+                    PushMode::WhenIdle,
+                    source,
+                    true,
+                ))
+                .unwrap();
+        }
+        session.purge_goal_generated_wakes();
+        assert_eq!(session.pending_deliveries.len(), 2);
+        assert_eq!(session.pending_deliveries[0].id, "goal");
+        assert!(!session.pending_deliveries[0].wake);
+        assert_eq!(session.pending_deliveries[1].id, "other");
+        assert!(session.pending_deliveries[1].wake);
+        session.turn_depth = 0;
+        let (delivered, wake) = session.drain_pending_deliveries();
+        assert_eq!(delivered, vec!["goal", "other"]);
+        assert!(wake);
+        assert!(!session.delivery_wake_sources.contains("goal"));
+        assert!(session.delivery_wake_sources.contains("external"));
     }
 
     #[test]
@@ -293,6 +320,40 @@ mod tests {
     }
 
     #[test]
+    fn purge_removes_only_goal_wake_deliveries() {
+        let mut session = session_with_goal();
+        session.turn_depth = 1;
+        for (id, source) in [("goal", "chat.goal_monitor"), ("other", "scheduler")] {
+            session
+                .enqueue_delivery(PendingDelivery::with_id(
+                    id,
+                    vec![internal_roles::event(
+                        EventSubkind::SystemNotice,
+                        source,
+                        json!({}),
+                        "wake",
+                    )],
+                    PushMode::WhenIdle,
+                    source,
+                    true,
+                ))
+                .unwrap();
+        }
+        session.purge_goal_generated_wakes();
+        assert_eq!(session.pending_deliveries.len(), 2);
+        assert_eq!(session.pending_deliveries[0].id, "goal");
+        assert!(!session.pending_deliveries[0].wake);
+        assert_eq!(session.pending_deliveries[1].id, "other");
+        assert!(session.pending_deliveries[1].wake);
+        session.turn_depth = 0;
+        let (delivered, wake) = session.drain_pending_deliveries();
+        assert_eq!(delivered, vec!["goal", "other"]);
+        assert!(wake);
+        assert!(!session.delivery_wake_sources.contains("goal"));
+        assert!(session.delivery_wake_sources.contains("external"));
+    }
+
+    #[test]
     fn purge_removes_goal_generated_regenerates_only() {
         let mut session = session_with_goal();
         session
@@ -318,8 +379,7 @@ mod tests {
             .command_enqueued_at
             .insert("user-x".to_string(), now);
 
-        purge_goal_generated_regenerates(&mut session);
-
+        session.purge_goal_generated_wakes();
         assert_eq!(session.command_queue.len(), 1);
         assert!(!session.command_enqueued_at.contains_key("goal-nudge-x"));
         assert!(session.command_enqueued_at.contains_key("user-x"));

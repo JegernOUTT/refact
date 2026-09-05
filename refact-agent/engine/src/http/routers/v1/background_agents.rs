@@ -4,7 +4,7 @@ use hyper::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::agents::registry::InboxMessage;
+use refact_core::chat_types::{PendingDelivery, PushMode};
 use crate::agents::types::{BackgroundAgent, BackgroundAgentSummary};
 use crate::app_state::AppState;
 
@@ -30,6 +30,8 @@ pub struct MessageRequest {
     #[serde(default)]
     pub chat_id: Option<String>,
     pub text: String,
+    #[serde(default)]
+    pub push: PushMode,
 }
 
 fn default_subtree() -> bool {
@@ -160,19 +162,27 @@ pub async fn handle_v1_background_agents_message(
             "Background agent is not running",
         ));
     }
-    app.agents
-        .push_inbox(
-            &agent_id,
-            InboxMessage {
-                from: "user".to_string(),
-                text: text.to_string(),
-                queued_at: chrono::Utc::now(),
-            },
-        )
-        .await
-        .map_err(|error| api_error(StatusCode::CONFLICT, error))?;
+    let outcome = crate::agents::delivery::deliver_to_agent(
+        app.clone(),
+        &agent_id,
+        PendingDelivery::new(
+            vec![crate::chat::internal_roles::event(
+                crate::chat::internal_roles::EventSubkind::SystemNotice,
+                "agents.message",
+                json!({"from": "user"}),
+                format!("[message from user]\n{text}"),
+            )],
+            request.push,
+            "agents.message".to_string(),
+            true,
+        ),
+    )
+    .await
+    .map_err(|error| api_error(StatusCode::CONFLICT, error))?;
     crate::agents::spawn::emit_background_agent_update(app, &record).await;
-    Ok(Json(json!({ "agent": summary(&record), "queued": true })))
+    Ok(Json(
+        json!({ "agent": summary(&record), "queued": true, "outcome": outcome }),
+    ))
 }
 
 #[cfg(test)]
@@ -225,6 +235,42 @@ mod tests {
         let body = to_bytes(response.into_body()).await.unwrap();
         let json = serde_json::from_slice(&body).unwrap_or(Value::Null);
         (status, json)
+    }
+
+    #[test]
+    fn message_push_defaults_and_validates_modes() {
+        let request: MessageRequest = serde_json::from_value(json!({"text": "hello"})).unwrap();
+        assert_eq!(request.push, PushMode::Append);
+        for mode in [PushMode::Append, PushMode::Preempt, PushMode::WhenIdle] {
+            let request: MessageRequest =
+                serde_json::from_value(json!({"text": "hello", "push": mode})).unwrap();
+            assert_eq!(request.push, mode);
+        }
+        assert!(
+            serde_json::from_value::<MessageRequest>(json!({"text": "hello", "push": true}))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn message_preserves_explicit_push_for_queued_agent() {
+        let app = app().await;
+        let (agent, _, _) = app
+            .agents
+            .create(create_request("root", "child"))
+            .await
+            .unwrap();
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            format!("/v1/background-agents/{}/message", agent.agent_id),
+            json!({"chat_id": "root", "text": "hello", "push": "when_idle"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let record = app.agents.get_any(&agent.agent_id).await.unwrap();
+        assert_eq!(record.pending_deliveries.len(), 1);
+        assert_eq!(record.pending_deliveries[0].push, PushMode::WhenIdle);
     }
 
     #[tokio::test]

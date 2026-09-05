@@ -605,6 +605,7 @@ impl Tool for ToolHandoffToMode {
             reactive_compact_attempts: None,
             wake_up_at: None,
             waiting_for_card_ids: Vec::new(),
+            pending_deliveries: Vec::new(),
         };
 
         if live_target_session {
@@ -1239,6 +1240,7 @@ mod tests {
                 reactive_compact_attempts: None,
                 wake_up_at: None,
                 waiting_for_card_ids: Vec::new(),
+                pending_deliveries: Vec::new(),
             },
         )
         .await

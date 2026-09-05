@@ -26,6 +26,8 @@ pub(crate) struct HookBody {
     model: Option<String>,
     #[serde(default)]
     deliver: Option<Value>,
+    #[serde(default)]
+    push: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +45,8 @@ struct WorkerHookFire {
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deliver: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    push: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -153,6 +157,7 @@ async fn build_fire_payload(
             mode: None,
             model: None,
             deliver: None,
+            push: body.push,
         },
         HookKind::Agent => WorkerHookFire {
             kind,
@@ -168,6 +173,7 @@ async fn build_fire_payload(
             deliver: mapping
                 .and_then(|mapping| mapping.deliver.clone())
                 .or(body.deliver),
+            push: body.push,
         },
     };
     Ok((entry, payload))
@@ -634,7 +640,7 @@ mod tests {
             "/hooks/deploy",
             Some("hook-secret"),
             "x-refact-token",
-            json!({"message": "ship it", "mode": "ignored"}),
+            json!({"message": "ship it", "mode": "ignored", "push": "when_idle"}),
         )
         .await;
 
@@ -646,6 +652,7 @@ mod tests {
         assert_eq!(forwarded["message"], "ship it");
         assert_eq!(forwarded["mode"], "agent");
         assert_eq!(forwarded["model"], "test-model");
+        assert_eq!(forwarded["push"], "when_idle");
         assert_eq!(forwarded["deliver"], json!({"type":"chat"}));
         state.supervisor.stop_all().await;
     }

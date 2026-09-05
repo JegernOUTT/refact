@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, TimeDelta, Utc};
 use tokio::sync::{Mutex, Notify, RwLock};
 use uuid::Uuid;
+use refact_chat_api::{DeliveryOutcome, PendingDelivery, PushMode};
 
 use crate::storage;
 use crate::types::{
@@ -28,8 +29,16 @@ pub struct InboxMessage {
 #[derive(Clone)]
 pub struct AgentRuntime {
     pub abort_flag: Arc<AtomicBool>,
+    pub interrupt_notify: Arc<Notify>,
     pub notify: Arc<Notify>,
     pub inbox: Arc<Mutex<VecDeque<InboxMessage>>>,
+    delivery_state: Arc<Mutex<RunnerDeliveryState>>,
+}
+
+#[derive(Default)]
+struct RunnerDeliveryState {
+    claimed: HashSet<String>,
+    sealed: bool,
 }
 
 pub struct BackgroundAgentRegistry {
@@ -37,6 +46,7 @@ pub struct BackgroundAgentRegistry {
     runtime: RwLock<HashMap<String, AgentRuntime>>,
     storage_root: PathBuf,
     write_state: Mutex<RegistryWriteState>,
+    storage_write: Mutex<()>,
 }
 
 struct RegistryWriteState {
@@ -69,6 +79,7 @@ impl BackgroundAgentRegistry {
             runtime: RwLock::new(HashMap::new()),
             storage_root,
             write_state: Mutex::new(RegistryWriteState::default()),
+            storage_write: Mutex::new(()),
         }))
     }
 
@@ -102,6 +113,9 @@ impl BackgroundAgentRegistry {
             conflict_summary: None,
             completion_message_id: None,
             completion_pushed_at: None,
+            completion_push: PushMode::Append,
+            pending_deliveries: Vec::new(),
+            delivery_ids: Vec::new(),
             deferred_at: None,
             model: req.model,
             model_type: req.model_type,
@@ -136,8 +150,10 @@ impl BackgroundAgentRegistry {
                 agent_id,
                 AgentRuntime {
                     abort_flag: abort_flag.clone(),
+                    interrupt_notify: Arc::new(Notify::new()),
                     notify: notify.clone(),
                     inbox,
+                    delivery_state: Arc::new(Mutex::new(RunnerDeliveryState::default())),
                 },
             );
         }
@@ -812,6 +828,210 @@ impl BackgroundAgentRegistry {
             .map(|runtime| runtime.abort_flag.clone())
     }
 
+    pub async fn set_completion_push(&self, agent_id: &str, push: PushMode) -> Result<(), String> {
+        self.update_record(agent_id, |record, _| {
+            record.completion_push = push;
+            Ok(())
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn interrupt_notify(&self, agent_id: &str) -> Option<Arc<Notify>> {
+        self.runtime
+            .read()
+            .await
+            .get(agent_id)
+            .map(|runtime| runtime.interrupt_notify.clone())
+    }
+
+    pub async fn pending_deliveries(&self, agent_id: &str) -> Vec<PendingDelivery> {
+        self.records
+            .read()
+            .await
+            .get(agent_id)
+            .map(|record| record.pending_deliveries.clone())
+            .unwrap_or_default()
+    }
+
+    pub async fn has_preempt(&self, agent_id: &str) -> bool {
+        let runtime = self.runtime.read().await.get(agent_id).cloned();
+        let Some(runtime) = runtime else { return false };
+        let state = runtime.delivery_state.lock().await;
+        self.records
+            .read()
+            .await
+            .get(agent_id)
+            .map(|record| {
+                record.pending_deliveries.iter().any(|delivery| {
+                    delivery.push == PushMode::Preempt && !state.claimed.contains(&delivery.id)
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    pub async fn enqueue_delivery(
+        &self,
+        agent_id: &str,
+        delivery: PendingDelivery,
+    ) -> Result<DeliveryOutcome, String> {
+        let runtime = self
+            .runtime
+            .read()
+            .await
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| "agent is not running in this process".to_string())?;
+        let state = runtime.delivery_state.lock().await;
+        if state.sealed {
+            return Err("agent delivery turn already finished".to_string());
+        }
+        let mut outcome = DeliveryOutcome::Queued;
+        let preempt = delivery.push == PushMode::Preempt;
+        self.update_record(agent_id, |record, _| {
+            if record.delivery_ids.contains(&delivery.id)
+                || record
+                    .pending_deliveries
+                    .iter()
+                    .any(|pending| pending.id == delivery.id)
+            {
+                outcome = DeliveryOutcome::Duplicate;
+                return Ok(());
+            }
+            if record.status.is_terminal() {
+                return Err("agent already finished".to_string());
+            }
+            if record.pending_deliveries.len() >= MAX_INBOX_MESSAGES {
+                return Err("agent delivery queue is full".to_string());
+            }
+            record.pending_deliveries.push(delivery);
+            Ok(())
+        })
+        .await?;
+        if preempt && outcome == DeliveryOutcome::Queued {
+            runtime.interrupt_notify.notify_one();
+        }
+        Ok(outcome)
+    }
+
+    pub async fn update_pending_delivery(
+        &self,
+        agent_id: &str,
+        id: &str,
+        push: Option<PushMode>,
+        cancel: bool,
+    ) -> Result<(), String> {
+        let runtime = self.runtime.read().await.get(agent_id).cloned();
+        let state = match runtime.as_ref() {
+            Some(runtime) => Some(runtime.delivery_state.lock().await),
+            None => None,
+        };
+        if state
+            .as_ref()
+            .is_some_and(|state| state.claimed.contains(id))
+        {
+            return Err("delivery is already being applied".to_string());
+        }
+        self.update_record(agent_id, |record, _| {
+            let index = record
+                .pending_deliveries
+                .iter()
+                .position(|delivery| delivery.id == id)
+                .ok_or_else(|| "pending delivery not found".to_string())?;
+            if cancel {
+                let cancelled = record.pending_deliveries.remove(index);
+                record.delivery_ids.push(cancelled.id);
+            } else if let Some(push) = push {
+                record.pending_deliveries[index].push = push;
+            }
+            Ok(())
+        })
+        .await?;
+        if !cancel && push == Some(PushMode::Preempt) {
+            if let Some(notify) = self.interrupt_notify(agent_id).await {
+                notify.notify_one();
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn acknowledge_delivery(&self, agent_id: &str, id: &str) -> Result<(), String> {
+        self.update_record(agent_id, |record, _| {
+            record
+                .pending_deliveries
+                .retain(|delivery| delivery.id != id);
+            if !record.delivery_ids.iter().any(|delivered| delivered == id) {
+                record.delivery_ids.push(id.to_string());
+            }
+            Ok(())
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn drain_deliveries(
+        &self,
+        agent_id: &str,
+        idle: bool,
+    ) -> Result<Vec<PendingDelivery>, String> {
+        let runtime = self
+            .runtime
+            .read()
+            .await
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| "agent is not running in this process".to_string())?;
+        let mut state = runtime.delivery_state.lock().await;
+        let records = self.records.read().await;
+        let record = records
+            .get(agent_id)
+            .ok_or_else(|| "agent not found".to_string())?;
+        let deliveries = record
+            .pending_deliveries
+            .iter()
+            .filter(|delivery| {
+                (idle || delivery.push != PushMode::WhenIdle)
+                    && !state.claimed.contains(&delivery.id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        state
+            .claimed
+            .extend(deliveries.iter().map(|delivery| delivery.id.clone()));
+        Ok(deliveries)
+    }
+
+    /// Claim the final batch and atomically stop accepting if it cannot rearm the runner.
+    /// Claims are transient: pending payloads remain durable until trajectory acknowledgement.
+    pub async fn finish_delivery_turn(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<PendingDelivery>, String> {
+        let runtime = self
+            .runtime
+            .read()
+            .await
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| "agent is not running in this process".to_string())?;
+        let mut state = runtime.delivery_state.lock().await;
+        let records = self.records.read().await;
+        let record = records
+            .get(agent_id)
+            .ok_or_else(|| "agent not found".to_string())?;
+        let deliveries = record
+            .pending_deliveries
+            .iter()
+            .filter(|delivery| !state.claimed.contains(&delivery.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        state
+            .claimed
+            .extend(deliveries.iter().map(|delivery| delivery.id.clone()));
+        state.sealed = !deliveries.iter().any(|delivery| delivery.wake);
+        Ok(deliveries)
+    }
+
     pub async fn inbox_for(&self, agent_id: &str) -> Option<Arc<Mutex<VecDeque<InboxMessage>>>> {
         self.runtime
             .read()
@@ -837,7 +1057,7 @@ impl BackgroundAgentRegistry {
             .ok_or_else(|| "agent is not running in this process".to_string())?;
         let mut inbox = inbox.lock().await;
         if inbox.len() >= MAX_INBOX_MESSAGES {
-            inbox.pop_front();
+            return Err("agent inbox is full".to_string());
         }
         inbox.push_back(msg);
         Ok(())
@@ -973,7 +1193,11 @@ impl BackgroundAgentRegistry {
         self.flush_records(snapshot).await
     }
 
-    async fn flush_records(&self, records: Vec<BackgroundAgent>) -> Result<(), String> {
+    async fn flush_records(&self, _records: Vec<BackgroundAgent>) -> Result<(), String> {
+        // Re-snapshot after serializing disk writes: older scheduled flushes must
+        // never overwrite a newly accepted durable delivery.
+        let _write = self.storage_write.lock().await;
+        let records = self.records.read().await.values().cloned().collect();
         storage::save_all(&self.storage_root, records).await?;
         let mut write_state = self.write_state.lock().await;
         write_state.pending = false;
@@ -1300,19 +1524,213 @@ mod tests {
     async fn inbox_drops_oldest_message_after_capacity() {
         let (_temp, registry) = registry().await;
         let (record, _, _) = registry.create(request("parent")).await.unwrap();
-
-        for index in 0..=MAX_INBOX_MESSAGES {
+        for index in 0..MAX_INBOX_MESSAGES {
             registry
                 .push_inbox(&record.agent_id, inbox_message(index.to_string()))
                 .await
                 .unwrap();
         }
-
-        let inbox = registry.inbox_for(&record.agent_id).await.unwrap();
-        let inbox = inbox.lock().await;
+        assert!(registry
+            .push_inbox(&record.agent_id, inbox_message("overflow"))
+            .await
+            .is_err());
+        let inbox = registry.drain_inbox(&record.agent_id).await;
         assert_eq!(inbox.len(), MAX_INBOX_MESSAGES);
-        assert_eq!(inbox.front().unwrap().text, "1");
-        assert_eq!(inbox.back().unwrap().text, MAX_INBOX_MESSAGES.to_string());
+        assert_eq!(inbox[0].text, "0");
+    }
+
+    fn delivery(push: PushMode) -> PendingDelivery {
+        PendingDelivery::new(Vec::new(), push, "registry-test".to_string(), true)
+    }
+
+    #[tokio::test]
+    async fn delivery_boundaries_dedupe_and_reprioritize() {
+        let (_temp, registry) = registry().await;
+        let (record, cancel, _) = registry.create(request("parent")).await.unwrap();
+        let idle = delivery(PushMode::WhenIdle);
+        let append = delivery(PushMode::Append);
+        registry
+            .enqueue_delivery(&record.agent_id, idle.clone())
+            .await
+            .unwrap();
+        registry
+            .enqueue_delivery(&record.agent_id, append.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .enqueue_delivery(&record.agent_id, append.clone())
+                .await
+                .unwrap(),
+            DeliveryOutcome::Duplicate
+        );
+        let safe = registry
+            .drain_deliveries(&record.agent_id, false)
+            .await
+            .unwrap();
+        assert_eq!(safe.len(), 1);
+        assert_eq!(safe[0].id, append.id);
+        assert_eq!(registry.pending_deliveries(&record.agent_id).await.len(), 2);
+        registry
+            .acknowledge_delivery(&record.agent_id, &append.id)
+            .await
+            .unwrap();
+        registry
+            .update_pending_delivery(&record.agent_id, &idle.id, Some(PushMode::Preempt), false)
+            .await
+            .unwrap();
+        assert!(registry.has_preempt(&record.agent_id).await);
+        assert!(
+            !cancel.load(Ordering::SeqCst),
+            "preempt must not cancel the runner"
+        );
+        registry
+            .update_pending_delivery(&record.agent_id, &idle.id, None, true)
+            .await
+            .unwrap();
+        assert!(registry
+            .pending_deliveries(&record.agent_id)
+            .await
+            .is_empty());
+        assert_eq!(
+            registry
+                .enqueue_delivery(&record.agent_id, idle)
+                .await
+                .unwrap(),
+            DeliveryOutcome::Duplicate
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_idle_and_completion_mode_persist() {
+        let (temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+        assert_eq!(record.completion_push, PushMode::Append);
+        registry
+            .set_completion_push(&record.agent_id, PushMode::Preempt)
+            .await
+            .unwrap();
+        let idle = delivery(PushMode::WhenIdle);
+        registry
+            .enqueue_delivery(&record.agent_id, idle.clone())
+            .await
+            .unwrap();
+        let restored = storage::load_all(&temp.path().join("agents"))
+            .await
+            .unwrap();
+        let restored = &restored[&record.agent_id];
+        assert_eq!(restored.completion_push, PushMode::Preempt);
+        assert_eq!(restored.pending_deliveries[0].id, idle.id);
+        assert!(!restored.delivery_ids.contains(&idle.id));
+        assert!(registry
+            .drain_deliveries(&record.agent_id, false)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            registry
+                .drain_deliveries(&record.agent_id, true)
+                .await
+                .unwrap()[0]
+                .id,
+            idle.id
+        );
+    }
+
+    #[tokio::test]
+    async fn claimed_delivery_survives_restart_until_acknowledged() {
+        let (temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+        let message = delivery(PushMode::Append);
+        registry
+            .enqueue_delivery(&record.agent_id, message.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .drain_deliveries(&record.agent_id, false)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(registry
+            .drain_deliveries(&record.agent_id, false)
+            .await
+            .unwrap()
+            .is_empty());
+        let restored = BackgroundAgentRegistry::new(temp.path().join("agents"))
+            .await
+            .unwrap();
+        assert_eq!(
+            restored.pending_deliveries(&record.agent_id).await[0].id,
+            message.id
+        );
+        registry
+            .acknowledge_delivery(&record.agent_id, &message.id)
+            .await
+            .unwrap();
+        let saved = storage::load_all(&temp.path().join("agents"))
+            .await
+            .unwrap();
+        assert!(saved[&record.agent_id].pending_deliveries.is_empty());
+        assert!(saved[&record.agent_id].delivery_ids.contains(&message.id));
+    }
+
+    #[tokio::test]
+    async fn final_boundary_rearms_wake_and_seals_non_wake() {
+        let (_temp, registry) = registry().await;
+        let (record, _, _) = registry.create(request("parent")).await.unwrap();
+        let wake = delivery(PushMode::WhenIdle);
+        registry
+            .enqueue_delivery(&record.agent_id, wake)
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .finish_delivery_turn(&record.agent_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let mut quiet = delivery(PushMode::WhenIdle);
+        quiet.wake = false;
+        registry
+            .enqueue_delivery(&record.agent_id, quiet)
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .finish_delivery_turn(&record.agent_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(registry
+            .enqueue_delivery(&record.agent_id, delivery(PushMode::Append))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn racing_final_boundary_never_strands_accepted_delivery() {
+        let (_temp, registry) = registry().await;
+        for _ in 0..20 {
+            let (record, _, _) = registry.create(request("parent")).await.unwrap();
+            let message = delivery(PushMode::WhenIdle);
+            let (accepted, drained) = tokio::join!(
+                registry.enqueue_delivery(&record.agent_id, message.clone()),
+                registry.finish_delivery_turn(&record.agent_id),
+            );
+            let drained = drained.unwrap();
+            if accepted.is_ok() {
+                assert!(drained.iter().any(|delivery| delivery.id == message.id));
+            } else {
+                assert!(drained.is_empty());
+            }
+        }
     }
 
     #[tokio::test]

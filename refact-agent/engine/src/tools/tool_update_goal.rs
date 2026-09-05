@@ -9,7 +9,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::goal_role;
 use crate::chat::internal_roles;
-use crate::chat::types::ChatSession;
+use crate::chat::types::{ChatSession, PendingDelivery, PushMode};
 use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
@@ -31,10 +31,10 @@ impl Tool for ToolUpdateGoal {
             experimental: false,
             allow_parallel: false,
             description: "Append an incremental update to the current goal. Use when the goal evolves; it does not rewrite the original goal.".to_string(),
-            input_schema: json_schema_from_params(
+            input_schema: { let mut schema = json_schema_from_params(
                 &[("note", "string", "Goal update note. Required.")],
                 &["note"],
-            ),
+            ); schema["properties"]["push"] = PushMode::schema(); schema },
             output_schema: None,
             annotations: None,
         }
@@ -46,6 +46,7 @@ impl Tool for ToolUpdateGoal {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let push = PushMode::from_args(args)?;
         let note = string_arg(args, "note")?;
         if note.trim().is_empty() {
             return Err("argument `note` must be non-empty".to_string());
@@ -72,7 +73,10 @@ impl Tool for ToolUpdateGoal {
                 json!({"seq": seq}),
                 note,
             );
-            session.queue_post_tool_side_effect(delta);
+            let messages = vec![delta];
+            let mut delivery = PendingDelivery::new(messages, push, "tool.update_goal", false);
+            delivery.after_tool_call_id = Some(tool_call_id.clone());
+            session.enqueue_delivery(delivery)?;
             (seq, result_truncation)
         };
 
@@ -107,29 +111,10 @@ fn update_goal_tool_result(
 
 fn has_base_goal_including_queued(session: &ChatSession) -> bool {
     goal_role::current_base_goal(session).is_some()
-        || session
-            .post_tool_side_effects
-            .iter()
-            .any(|message| message.role == internal_roles::GOAL_ROLE)
 }
 
 fn goal_delta_count_including_queued(session: &ChatSession) -> usize {
-    goal_role::goal_delta_events(session).len()
-        + session
-            .post_tool_side_effects
-            .iter()
-            .filter(|message| is_goal_delta(message))
-            .count()
-}
-
-fn is_goal_delta(message: &ChatMessage) -> bool {
-    message.role == internal_roles::EVENT_ROLE
-        && message
-            .extra
-            .get("event")
-            .and_then(|event| event.get("subkind"))
-            .and_then(|subkind| subkind.as_str())
-            == Some("goal_delta")
+    goal_role::goal_delta_events(&session.accepted_control_projection()).len()
 }
 
 fn string_arg(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {
@@ -143,6 +128,22 @@ fn string_arg(args: &HashMap<String, Value>, name: &str) -> Result<String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn delivery_messages(session: &ChatSession) -> Vec<ChatMessage> {
+        session
+            .messages
+            .iter()
+            .filter(|message| message.extra.contains_key("delivery"))
+            .chain(
+                session
+                    .pending_deliveries
+                    .iter()
+                    .flat_map(|delivery| delivery.messages.iter()),
+            )
+            .cloned()
+            .collect()
+    }
+
     use refact_chat_api::GoalBudget;
     use crate::app_state::AppState;
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
@@ -309,14 +310,11 @@ mod tests {
             .cloned()
             .unwrap();
         let session = session_arc.lock().await;
-        assert_eq!(session.post_tool_side_effects.len(), 1);
-        assert_eq!(session.post_tool_side_effects[0].role, EVENT_ROLE);
+        assert_eq!(delivery_messages(&session).len(), 1);
+        assert_eq!(delivery_messages(&session)[0].role, EVENT_ROLE);
+        assert_eq!(content_text(&delivery_messages(&session)[0]), "second note");
         assert_eq!(
-            content_text(&session.post_tool_side_effects[0]),
-            "second note"
-        );
-        assert_eq!(
-            session.post_tool_side_effects[0].extra["event"],
+            delivery_messages(&session)[0].extra["event"],
             json!({
                 "subkind": "goal_delta",
                 "source": "tool.update_goal",
@@ -360,7 +358,8 @@ mod tests {
             .cloned()
             .unwrap();
         let session = session_arc.lock().await;
-        let delta = &session.post_tool_side_effects[0];
+        let deliveries = delivery_messages(&session);
+        let delta = &deliveries[0];
         let content = content_text(delta);
         assert!(content.chars().count() <= internal_roles::MAX_GOAL_DELTA_CHARS);
         assert!(content.contains("[truncated:"));
@@ -460,6 +459,7 @@ mod tests {
             session.add_message(message);
         }
         session.drain_post_tool_side_effects();
+        session.drain_pending_deliveries();
 
         let roles: Vec<_> = session
             .messages

@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use refact_core::chat_types::{PendingDelivery, PushMode};
 use serde_json::{json, Value};
 use tokio::sync::{Mutex as AMutex, Notify};
 use tokio::time::{sleep, sleep_until, Instant as TokioInstant};
@@ -27,6 +28,7 @@ struct SleepRequest {
     duration_ms: u64,
     tick_interval_ms: Option<u64>,
     description: String,
+    push: PushMode,
 }
 
 struct SleepOutcome {
@@ -51,6 +53,7 @@ impl Tool for ToolSleep {
             input_schema: json!({
                 "type": "object",
                 "properties": {
+                    "push": PushMode::schema(),
                     "duration_ms": {
                         "type": "integer",
                         "minimum": 100,
@@ -98,7 +101,14 @@ impl Tool for ToolSleep {
             interrupted,
             ticks,
         } = outcome;
-        queue_ticks(app.clone(), chat_id.clone(), ticks).await;
+        queue_ticks(
+            app.clone(),
+            chat_id.clone(),
+            ticks,
+            request.push,
+            tool_call_id,
+        )
+        .await?;
 
         let body = json!({
             "slept_ms": slept_ms,
@@ -159,6 +169,7 @@ fn parse_sleep_request(args: &HashMap<String, Value>) -> Result<SleepRequest, St
         duration_ms,
         tick_interval_ms,
         description,
+        push: PushMode::from_args(args)?,
     })
 }
 
@@ -188,8 +199,9 @@ async fn sleep_with_ticks(
     abort_flag: Arc<AtomicBool>,
     abort_notify: Option<Arc<Notify>>,
 ) -> SleepOutcome {
-    let started = Instant::now();
-    let end = TokioInstant::now() + Duration::from_millis(duration_ms);
+    let started = TokioInstant::now();
+    let end = started + Duration::from_millis(duration_ms);
+    let mut next_tick = tick_interval_ms.map(|ms| started + Duration::from_millis(ms));
     let mut ticks = Vec::new();
 
     loop {
@@ -210,10 +222,7 @@ async fn sleep_with_ticks(
             };
         }
 
-        let tick_sleep = tick_interval_ms
-            .map(Duration::from_millis)
-            .filter(|interval| *interval < end.saturating_duration_since(now))
-            .map(sleep);
+        let tick_sleep = next_tick.filter(|at| *at < end).map(sleep_until);
         tokio::pin!(tick_sleep);
 
         tokio::select! {
@@ -241,6 +250,8 @@ async fn sleep_with_ticks(
                 let elapsed_ms = elapsed_ms(started).min(duration_ms);
                 let remaining_ms = duration_ms.saturating_sub(elapsed_ms);
                 ticks.push(tick_event(elapsed_ms, remaining_ms));
+                next_tick = next_tick.zip(tick_interval_ms)
+                    .map(|(at, ms)| at + Duration::from_millis(ms));
             }
         }
     }
@@ -263,7 +274,7 @@ async fn wait_for_abort(abort_flag: Arc<AtomicBool>, abort_notify: Option<Arc<No
     }
 }
 
-fn elapsed_ms(started: Instant) -> u64 {
+fn elapsed_ms(started: TokioInstant) -> u64 {
     started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
@@ -294,9 +305,15 @@ async fn find_abort_notify(
     Some(abort_notify)
 }
 
-async fn queue_ticks(app: crate::app_state::AppState, chat_id: String, ticks: Vec<ChatMessage>) {
+async fn queue_ticks(
+    app: crate::app_state::AppState,
+    chat_id: String,
+    ticks: Vec<ChatMessage>,
+    push: PushMode,
+    tool_call_id: &str,
+) -> Result<(), String> {
     if ticks.is_empty() {
-        return;
+        return Ok(());
     }
     let session = {
         let sessions = app.chat.sessions.read().await;
@@ -304,9 +321,16 @@ async fn queue_ticks(app: crate::app_state::AppState, chat_id: String, ticks: Ve
     };
     if let Some(session) = session {
         let mut session = session.lock().await;
-        for tick in ticks {
-            session.queue_post_tool_side_effect(tick);
-        }
+        session.queue_post_tool_delivery(PendingDelivery::with_id(
+            format!("sleep-ticks-{tool_call_id}"),
+            ticks,
+            push,
+            "tool.sleep",
+            false,
+        ))?;
+        Ok(())
+    } else {
+        Err(format!("sleep tick target chat '{chat_id}' is unavailable"))
     }
 }
 
@@ -334,6 +358,64 @@ mod tests {
         match parse_sleep_request(&args) {
             Ok(_) => panic!("expected parse_sleep_request to fail"),
             Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn sleep_push_defaults_to_append() {
+        let mut args = sleep_args(None, "wait");
+        assert_eq!(parse_sleep_request(&args).unwrap().push, PushMode::Append);
+        args.insert("push".into(), json!("when_idle"));
+        assert_eq!(parse_sleep_request(&args).unwrap().push, PushMode::WhenIdle);
+        args.insert("push".into(), json!(true));
+        assert!(parse_sleep_request(&args).is_err());
+    }
+
+    #[tokio::test]
+    async fn ticks_all_modes_wait_for_own_result_and_c_waits_for_turn() {
+        for push in [PushMode::Append, PushMode::Preempt, PushMode::WhenIdle] {
+            let gcx = crate::global_context::tests::make_test_gcx().await;
+            let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+            let session = Arc::new(AMutex::new(ChatSession::new(CHAT_ID.into())));
+            gcx.chat_sessions
+                .write()
+                .await
+                .insert(CHAT_ID.into(), session.clone());
+            {
+                let mut session = session.lock().await;
+                session.turn_depth = 1;
+                session.add_message(assistant_tool_call("own-sleep"));
+            }
+            queue_ticks(
+                app,
+                CHAT_ID.into(),
+                vec![tick_event(5000, 100)],
+                push,
+                "own-sleep",
+            )
+            .await
+            .unwrap();
+            let mut session = session.lock().await;
+            assert!(!session.abort_flag.load(Ordering::Relaxed));
+            session.drain_pending_deliveries();
+            assert_eq!(session.messages.len(), 1);
+            session.add_message(ChatMessage {
+                role: "tool".into(),
+                tool_call_id: "own-sleep".into(),
+                content: ChatContent::SimpleText("done".into()),
+                ..Default::default()
+            });
+            session.drain_pending_deliveries();
+            if push == PushMode::WhenIdle {
+                assert_eq!(session.messages.len(), 2);
+                session.turn_depth = 0;
+                session.drain_pending_deliveries();
+            }
+            assert!(session.messages.iter().any(|m| m
+                .extra
+                .get("event")
+                .is_some_and(|event| event["subkind"] == "tick")));
+            assert_eq!(session.messages[1].role, "tool");
         }
     }
 
@@ -521,6 +603,22 @@ mod tests {
         assert!(outcome.slept_ms < 500, "slept_ms was {}", outcome.slept_ms);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn ticks_follow_exact_deadlines_and_exclude_end() {
+        let outcome =
+            sleep_with_ticks(15_000, Some(5_000), Arc::new(AtomicBool::new(false)), None).await;
+        assert_eq!(outcome.slept_ms, 15_000);
+        assert_eq!(outcome.ticks.len(), 2);
+        assert_eq!(
+            outcome.ticks[0].extra["event"]["payload"]["elapsed_ms"],
+            5_000
+        );
+        assert_eq!(
+            outcome.ticks[1].extra["event"]["payload"]["elapsed_ms"],
+            10_000
+        );
+    }
+
     #[tokio::test]
     async fn tick_interval_injects_n_events() {
         let outcome =
@@ -593,6 +691,7 @@ mod tests {
             session.add_message(message);
         }
         session.drain_post_tool_side_effects();
+        session.drain_pending_deliveries();
 
         let roles: Vec<_> = session
             .messages

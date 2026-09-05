@@ -1627,7 +1627,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
           prevent_send: false,
           error: event.runtime.error ?? null,
           queued_items: Array.isArray(event.runtime.queued_items)
-            ? (event.runtime.queued_items as ChatThreadRuntime["queued_items"])
+            ? event.runtime.queued_items
             : [],
           send_immediately: existingRuntime?.send_immediately ?? false,
           attached_images: existingRuntime?.attached_images ?? [],
@@ -2149,8 +2149,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
         if (eventSeq != null && lastSeq != null && eventSeq <= lastSeq) {
           break;
         }
-        rt.queued_items =
-          event.queued_items as ChatThreadRuntime["queued_items"];
+        rt.queued_items = event.queued_items;
         rt.last_applied_seq = event.seq;
         break;
       }

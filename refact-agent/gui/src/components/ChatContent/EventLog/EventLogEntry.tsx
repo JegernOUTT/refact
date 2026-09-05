@@ -2,7 +2,13 @@ import React, { useMemo, useState } from "react";
 import { Box, Flex, Text } from "@radix-ui/themes";
 import type { EventMessage } from "../../../services/refact/types";
 import { normalizeEventMessageMetadata } from "../../../services/refact/types";
-import { eventSubkindIconElement } from "./eventSubkind";
+import { Badge } from "../../ui";
+import {
+  eventMessageTone,
+  eventSourceLabel,
+  eventSubkindIconElement,
+  eventSubkindLabel,
+} from "./eventSubkind";
 import styles from "./EventLog.module.css";
 
 type EventLogEntryProps = {
@@ -86,6 +92,10 @@ export const EventLogEntry: React.FC<EventLogEntryProps> = ({
     () => eventTimestamp(normalizedEvent),
     [normalizedEvent],
   );
+  const tone = useMemo(
+    () => eventMessageTone(normalizedEvent),
+    [normalizedEvent],
+  );
   const formattedPayload = useMemo(
     () => payloadJson(normalizedEvent.payload),
     [normalizedEvent],
@@ -99,27 +109,30 @@ export const EventLogEntry: React.FC<EventLogEntryProps> = ({
     <Box
       className={styles.entry}
       data-expanded={expanded}
+      data-tone={tone}
+      data-subkind={normalizedEvent.subkind}
       data-testid="event-log-entry"
     >
       <button
         type="button"
         className={`${styles.entryButton} rf-pressable`}
+        title={timestamp}
         aria-expanded={expanded}
         aria-controls={jsonId}
         onClick={handleClick}
       >
         <Flex align="center" gap="2" className={styles.entryRow}>
           <Text as="span" className={styles.icon} aria-hidden="true">
-            {eventSubkindIconElement(normalizedEvent.subkind)}
+            {eventSubkindIconElement(normalizedEvent.subkind, tone)}
           </Text>
           <Text as="span" size="1" className={styles.timestamp}>
             {timestamp}
           </Text>
-          <Text as="span" size="1" className={styles.subkindChip}>
-            {normalizedEvent.subkind}
-          </Text>
+          <Badge tone={tone} size="xs" className={styles.subkindChip}>
+            {eventSubkindLabel(normalizedEvent.subkind)}
+          </Badge>
           <Text as="span" size="1" className={styles.source}>
-            {normalizedEvent.source}
+            {eventSourceLabel(normalizedEvent.source)}
           </Text>
           <Text as="span" size="1" className={styles.summaryText}>
             {summaryText(normalizedEvent.content)}

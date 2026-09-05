@@ -15,7 +15,7 @@ use crate::ObservationReader;
 use crate::types::{
     current_timestamp_ms, ExecMode, ExecOutputChunk, ExecOutputStream, ExecProcessFilter,
     ExecProcessId, ExecProcessMeta, ExecProcessSnapshot, ExecReadResult, ExecServiceLookup,
-    ExecStatus, ExecWriteStdinResult,
+    ExecStatus, ExecWriteStdinResult, PushMode,
 };
 
 #[cfg(not(test))]
@@ -51,6 +51,9 @@ pub struct ProcessCompletionEvent {
     pub duration_ms: Option<u64>,
     pub short_description: String,
     pub mode: ExecMode,
+    /// Delivery policy chosen when the process was started, carried through so
+    /// the chat side does not have to re-derive it from the registry.
+    pub push: PushMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +209,7 @@ fn process_completion_event(snapshot: &ExecProcessSnapshot) -> Option<ProcessCom
         duration_ms,
         short_description: snapshot.meta.short_description.clone(),
         mode: snapshot.meta.mode.clone(),
+        push: snapshot.meta.push,
     })
 }
 

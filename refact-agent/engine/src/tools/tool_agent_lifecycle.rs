@@ -14,6 +14,7 @@ use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::global_context::GlobalContext;
 use crate::tasks::storage;
 use crate::tasks::types::{BoardCard, StatusUpdate};
+use crate::tools::planner_delivery::{self, CardGuard, CardTarget};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use crate::worktrees::service::WorktreeService;
 use refact_chat_api::ChatCommand;
@@ -146,16 +147,6 @@ fn optional_bool(args: &HashMap<String, Value>, key: &str, default: bool) -> boo
     args.get(key)
         .and_then(refact_tool_api::coerce_bool)
         .unwrap_or(default)
-}
-
-fn user_message_command(content: String) -> ChatCommand {
-    ChatCommand::UserMessage {
-        content: Value::String(content),
-        attachments: vec![],
-        context_files: vec![],
-        suppress_auto_enrichment: false,
-        client_message_id: None,
-    }
 }
 
 fn tool_message(tool_call_id: &str, content: String) -> ContextEnum {
@@ -638,6 +629,7 @@ fn pause_description() -> ToolDesc {
                     "type": "string",
                     "description": "Why the agent should pause"
                 },
+                "push": planner_delivery::push_mode_schema(),
                 "task_id": {
                     "type": "string",
                     "description": "Task ID (optional if chat is bound to a task)"
@@ -669,6 +661,7 @@ fn resume_description() -> ToolDesc {
                     "type": "string",
                     "description": "Optional resume note. Defaults to continuing from where the agent paused."
                 },
+                "push": planner_delivery::push_mode_schema(),
                 "task_id": {
                     "type": "string",
                     "description": "Task ID (optional if chat is bound to a task)"
@@ -849,6 +842,7 @@ impl Tool for ToolPauseAgent {
         let planner = planner_context(&ccx, args, "pause_agent").await?;
         let card_id = required_string(args, "card_id")?;
         let reason = required_string(args, "reason")?;
+        let push = planner_delivery::parse_push_mode(args)?;
         let snapshot =
             load_doing_card_snapshot(planner.gcx.clone(), &planner.task_id, &card_id, "pause")
                 .await?;
@@ -878,21 +872,39 @@ impl Tool for ToolPauseAgent {
         .await?;
 
         let pause_message = format!("[Planner PAUSE] {}\n\nWait for resume signal.", reason);
-        let push_report = push_if_card_current_and_live(
+        let target = CardTarget {
+            card_id: card_id.clone(),
+            title: snapshot.title.clone(),
+            chat_id: agent_chat_id.clone(),
+        };
+        let report = planner_delivery::deliver_to_card(
             planner.gcx.clone(),
-            &planner.task_id,
-            &card_id,
-            &agent_chat_id,
-            true,
             planner.chat_facade.clone(),
-            user_message_command(pause_message),
+            &planner.task_id,
+            &target,
+            CardGuard::doing_with_live_session(),
+            planner_delivery::single_message_delivery(
+                pause_message,
+                push,
+                "tools.pause_agent",
+                true,
+            ),
         )
-        .await?;
+        .await;
 
+        let headline = if report.reached_agent() {
+            format!("⏸️ Paused {}; use resume_agent to continue.", card_id)
+        } else {
+            format!(
+                "⚠️ Recorded the pause on card {}, but the agent was not told to pause.",
+                card_id
+            )
+        };
         let output = format!(
-            "⏸️ Paused {}; use resume_agent to continue.\n\n{}",
-            card_id,
-            push_report_text(&push_report, "Pause")
+            "{}\n\n{} (push={})",
+            headline,
+            report.describe("Pause"),
+            planner_delivery::push_mode_label(push)
         );
 
         Ok((false, vec![tool_message(tool_call_id, output)]))
@@ -919,6 +931,7 @@ impl Tool for ToolResumeAgent {
         let card_id = required_string(args, "card_id")?;
         let note = optional_string(args, "note")
             .unwrap_or_else(|| "Continue from where you paused.".to_string());
+        let push = planner_delivery::parse_push_mode(args)?;
         let snapshot =
             load_doing_card_snapshot(planner.gcx.clone(), &planner.task_id, &card_id, "resume")
                 .await?;
@@ -947,22 +960,40 @@ impl Tool for ToolResumeAgent {
         .await?;
 
         let resume_message = format!("[Planner RESUME]\n\n{}", note);
-        let push_report = push_if_card_current_and_live(
+        let target = CardTarget {
+            card_id: card_id.clone(),
+            title: snapshot.title.clone(),
+            chat_id: agent_chat_id.clone(),
+        };
+        let report = planner_delivery::deliver_to_card(
             planner.gcx.clone(),
-            &planner.task_id,
-            &card_id,
-            &agent_chat_id,
-            true,
             planner.chat_facade.clone(),
-            user_message_command(resume_message),
+            &planner.task_id,
+            &target,
+            CardGuard::doing_with_live_session(),
+            planner_delivery::single_message_delivery(
+                resume_message,
+                push,
+                "tools.resume_agent",
+                true,
+            ),
         )
-        .await?;
+        .await;
 
         let agent_state = state_after(planner.chat_facade.clone(), Some(&agent_chat_id)).await;
+        let headline = if report.reached_agent() {
+            format!("▶️ Resumed {}.", card_id)
+        } else {
+            format!(
+                "⚠️ Recorded the resume on card {}, but the agent was not told to resume.",
+                card_id
+            )
+        };
         let output = format!(
-            "▶️ Resumed {}.\n\n{}\nAgent state: {}",
-            card_id,
-            push_report_text(&push_report, "Resume"),
+            "{}\n\n{} (push={})\nAgent state: {}",
+            headline,
+            report.describe("Resume"),
+            planner_delivery::push_mode_label(push),
             agent_state
         );
 
@@ -977,6 +1008,7 @@ impl Tool for ToolResumeAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use refact_core::chat_types::{DeliveryOutcome, PendingDelivery, PushMode};
     use crate::app_state::AppState;
     use crate::chat::types::TaskMeta as ThreadTaskMeta;
     use crate::tasks::types::{TaskBoard, TaskMeta, TaskStatus};
@@ -989,6 +1021,8 @@ mod tests {
     struct MockChatFacade {
         state: StdMutex<Option<SessionState>>,
         pushed: StdMutex<Vec<(String, ChatCommand)>>,
+        delivered: StdMutex<Vec<(String, PendingDelivery)>>,
+        mutate_on_probe: StdMutex<Option<(Arc<GlobalContext>, bool)>>,
     }
 
     impl MockChatFacade {
@@ -996,7 +1030,13 @@ mod tests {
             Self {
                 state: StdMutex::new(state),
                 pushed: StdMutex::new(vec![]),
+                delivered: StdMutex::new(vec![]),
+                mutate_on_probe: StdMutex::new(None),
             }
+        }
+
+        fn deliveries(&self) -> Vec<(String, PendingDelivery)> {
+            self.delivered.lock().unwrap().clone()
         }
 
         fn pushed_commands(&self) -> Vec<(String, ChatCommand)> {
@@ -1036,7 +1076,32 @@ mod tests {
             Ok(())
         }
 
+        async fn deliver_messages(
+            &self,
+            chat_id: &str,
+            delivery: PendingDelivery,
+        ) -> Result<DeliveryOutcome, String> {
+            self.delivered
+                .lock()
+                .unwrap()
+                .push((chat_id.to_string(), delivery));
+            Ok(DeliveryOutcome::Queued)
+        }
+
         async fn session_state(&self, _chat_id: &str) -> Result<Option<SessionState>, String> {
+            let mutation = self.mutate_on_probe.lock().unwrap().take();
+            if let Some((gcx, rebind)) = mutation {
+                storage::update_board_atomic(gcx, "task-1", move |board| {
+                    let card = board.get_card_mut("T-39").unwrap();
+                    if rebind {
+                        card.agent_chat_id = Some("replacement-chat".to_string());
+                    } else {
+                        card.column = "done".to_string();
+                    }
+                    Ok(())
+                })
+                .await?;
+            }
             Ok(*self.state.lock().unwrap())
         }
 
@@ -1347,6 +1412,10 @@ mod tests {
         assert_eq!(pushed.len(), 1);
         assert_eq!(pushed[0].0, "agent-chat-1");
         assert!(matches!(pushed[0].1, ChatCommand::Abort {}));
+        assert!(
+            mock.deliveries().is_empty(),
+            "cancel must remain an abort control command"
+        );
         assert!(output.contains("Worktree retained"));
 
         let board = storage::load_board(gcx, "task-1").await.unwrap();
@@ -1567,7 +1636,7 @@ mod tests {
             "agent-chat-1",
             true,
             mock.clone(),
-            user_message_command("hello".to_string()),
+            ChatCommand::Abort {},
         )
         .await
         .unwrap();
@@ -1579,6 +1648,89 @@ mod tests {
             .unwrap()
             .contains("agent_chat_id changed"));
         assert!(mock.pushed_commands().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delivery_revalidates_card_after_live_session_probe() {
+        for rebind in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let gcx = write_task(
+                temp.path(),
+                test_card("doing", Some("agent-chat-1".to_string()), None),
+            )
+            .await;
+            let mock = Arc::new(MockChatFacade::new(Some(SessionState::Idle)));
+            *mock.mutate_on_probe.lock().unwrap() = Some((gcx.clone(), rebind));
+            let target = CardTarget {
+                card_id: "T-39".to_string(),
+                title: "card".to_string(),
+                chat_id: "agent-chat-1".to_string(),
+            };
+            let report = planner_delivery::deliver_to_card(
+                gcx,
+                mock.clone(),
+                "task-1",
+                &target,
+                CardGuard::doing_with_live_session(),
+                planner_delivery::single_message_delivery(
+                    "hello".to_string(),
+                    PushMode::Append,
+                    "test",
+                    true,
+                ),
+            )
+            .await;
+            assert!(!report.reached_agent());
+            assert!(report.short_status().contains(if rebind {
+                "agent_chat_id changed"
+            } else {
+                "now in column 'done'"
+            }));
+            assert!(mock.deliveries().is_empty());
+            assert!(mock.pushed_commands().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_pause_resume_propagate_all_push_modes() {
+        for (raw, expected) in [
+            ("preempt", PushMode::Preempt),
+            ("append", PushMode::Append),
+            ("when_idle", PushMode::WhenIdle),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let gcx = write_task(
+                temp.path(),
+                test_card("doing", Some("agent-chat-1".to_string()), None),
+            )
+            .await;
+            let mock = Arc::new(MockChatFacade::new(Some(SessionState::ExecutingTools)));
+            let ccx = planner_ccx(gcx, mock.clone(), "planner").await;
+            let call_args = args(&[
+                ("card_id", json!("T-39")),
+                ("reason", json!("review")),
+                ("push", json!(raw)),
+            ]);
+            ToolPauseAgent::new()
+                .tool_execute(ccx.clone(), &"pause".to_string(), &call_args)
+                .await
+                .unwrap();
+            ToolResumeAgent::new()
+                .tool_execute(ccx, &"resume".to_string(), &call_args)
+                .await
+                .unwrap();
+            let deliveries = mock.deliveries();
+            assert_eq!(deliveries.len(), 2);
+            for (_, delivery) in &deliveries {
+                assert_eq!(delivery.push, expected);
+                assert!(delivery.wake);
+                assert_eq!(delivery.messages.len(), 1);
+                assert_eq!(delivery.messages[0].role, "user");
+            }
+            assert_eq!(deliveries[0].1.source, "tools.pause_agent");
+            assert_eq!(deliveries[1].1.source, "tools.resume_agent");
+            assert!(mock.pushed_commands().is_empty());
+        }
     }
 
     #[tokio::test]
@@ -1603,17 +1755,16 @@ mod tests {
                 .unwrap(),
         );
 
-        let pushed = mock.pushed_commands();
-        assert_eq!(pushed.len(), 1);
-        match &pushed[0].1 {
-            ChatCommand::UserMessage { content, .. } => {
-                assert_eq!(
-                    content.as_str(),
-                    Some("[Planner PAUSE] need review\n\nWait for resume signal.")
-                );
-            }
-            _ => panic!("expected user message"),
-        }
+        let deliveries = mock.deliveries();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].0, "agent-chat-1");
+        assert_eq!(deliveries[0].1.push, PushMode::Append);
+        assert!(deliveries[0].1.wake);
+        assert_eq!(
+            deliveries[0].1.messages[0].content.content_text_only(),
+            "[Planner PAUSE] need review\n\nWait for resume signal."
+        );
+        assert!(mock.pushed_commands().is_empty());
         assert!(output.contains("use resume_agent to continue"));
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         let card = board.get_card("T-39").unwrap();
@@ -1648,17 +1799,16 @@ mod tests {
                 .unwrap(),
         );
 
-        let pushed = mock.pushed_commands();
-        assert_eq!(pushed.len(), 1);
-        match &pushed[0].1 {
-            ChatCommand::UserMessage { content, .. } => {
-                assert_eq!(
-                    content.as_str(),
-                    Some("[Planner RESUME]\n\nContinue with tests")
-                );
-            }
-            _ => panic!("expected user message"),
-        }
+        let deliveries = mock.deliveries();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].0, "agent-chat-1");
+        assert_eq!(deliveries[0].1.push, PushMode::Append);
+        assert!(deliveries[0].1.wake);
+        assert_eq!(
+            deliveries[0].1.messages[0].content.content_text_only(),
+            "[Planner RESUME]\n\nContinue with tests"
+        );
+        assert!(mock.pushed_commands().is_empty());
         assert!(output.contains("Agent state: idle"));
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         let card = board.get_card("T-39").unwrap();

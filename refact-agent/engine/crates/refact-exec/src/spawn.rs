@@ -281,7 +281,8 @@ fn build_process_meta(
     let owner = request.owner.clone().with_normalized_workspace();
     let mut meta = ExecProcessMeta::new(request.mode.clone(), request.command.clone())
         .with_owner(owner.clone())
-        .with_tty(request.tty);
+        .with_tty(request.tty)
+        .with_push(request.push);
     if matches!(request.mode, ExecMode::Service) {
         let service_name = request
             .owner

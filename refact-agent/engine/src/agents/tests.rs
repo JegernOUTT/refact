@@ -76,8 +76,11 @@ async fn app_with_parent_session(
     std::sync::Arc<crate::global_context::GlobalContext>,
     AppState,
     Arc<tokio::sync::Mutex<ChatSession>>,
+    tempfile::TempDir,
 ) {
     let gcx = crate::global_context::tests::make_test_gcx().await;
+    let workspace = tempdir().expect("workspace");
+    *gcx.documents_state.workspace_folders.lock().unwrap() = vec![workspace.path().to_path_buf()];
     let app = AppState::from_gcx(gcx.clone()).await;
     let session = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
         parent_chat_id.to_string(),
@@ -87,7 +90,7 @@ async fn app_with_parent_session(
         .write()
         .await
         .insert(parent_chat_id.to_string(), session.clone());
-    (gcx, app, session)
+    (gcx, app, session, workspace)
 }
 
 async fn tool_context(app: AppState, chat_id: &str) -> Arc<tokio::sync::Mutex<AtCommandsContext>> {
@@ -506,6 +509,9 @@ fn summary_maps_introspection_and_question_state() {
         conflict_summary: None,
         completion_message_id: None,
         completion_pushed_at: None,
+        completion_push: Default::default(),
+        pending_deliveries: Vec::new(),
+        delivery_ids: Vec::new(),
         deferred_at: None,
         model: "model".to_string(),
         model_type: Some("thinking".to_string()),
@@ -662,7 +668,8 @@ async fn mark_cancelled_writes_result_payload() {
 
 #[tokio::test]
 async fn agent_result_falls_back_to_payload_when_summary_missing() {
-    let (_gcx, app, _session_arc) = app_with_parent_session("parent-result-fallback").await;
+    let (_gcx, app, _session_arc, _workspace) =
+        app_with_parent_session("parent-result-fallback").await;
     let record = create_agent(&app.agents, "parent-result-fallback", BgAgentKind::Delegate).await;
     let completed = app
         .agents
@@ -1253,7 +1260,7 @@ async fn set_completion_message_id_allows_pending_and_deferred_retry_markers_to_
 
 #[tokio::test]
 async fn push_completion_to_parent_is_idempotent() {
-    let (_gcx, app, session_arc) = app_with_parent_session("parent-push").await;
+    let (_gcx, app, session_arc, _workspace) = app_with_parent_session("parent-push").await;
     let record = create_agent(&app.agents, "parent-push", BgAgentKind::Delegate).await;
     let completed = app
         .agents
@@ -1289,51 +1296,54 @@ async fn push_completion_to_parent_is_idempotent() {
 
 #[tokio::test]
 async fn push_completion_to_parent_marks_pending_when_session_not_loaded_and_flush_retries() {
-    let (_gcx, app, _session_arc) = app_with_parent_session("parent-flush").await;
+    let (_gcx, app, _session_arc, _workspace) = app_with_parent_session("parent-flush").await;
+    _session_arc.lock().await.add_message(ChatMessage::new(
+        "user".to_string(),
+        "Persist this parent before unloading it".to_string(),
+    ));
+    crate::chat::trajectories::try_save_trajectory_with_intent(
+        app.clone(),
+        _session_arc.clone(),
+        crate::chat::types::TrajectoryCommitIntent::Required,
+    )
+    .await
+    .expect("persist parent before unloading");
     app.chat.sessions.write().await.remove("parent-flush");
     let record = create_agent(&app.agents, "parent-flush", BgAgentKind::Subagent).await;
     let completed = app
         .agents
         .mark_completed(&record.agent_id, completion("child-flush"))
         .await
-        .expect("completed");
-
+        .unwrap();
     crate::agents::push::push_completion_to_parent(app.clone(), &completed)
         .await
-        .expect("pending push");
-    let pending = app
-        .agents
-        .get("parent-flush", &record.agent_id)
-        .await
         .unwrap();
-    assert_eq!(pending.completion_message_id.as_deref(), Some("pending"));
-
-    let session = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
-        "parent-flush".to_string(),
-    )));
-    app.chat
-        .sessions
-        .write()
-        .await
-        .insert("parent-flush".to_string(), session.clone());
-    let count = crate::agents::push::flush_pending_pushes_for_parent(app.clone(), "parent-flush")
-        .await
-        .expect("flush");
-
-    assert_eq!(count, 1);
-    let session_guard = session.lock().await;
-    assert_eq!(agents_spawn_system_notice_count(&session_guard), 1);
     let updated = app
         .agents
         .get("parent-flush", &record.agent_id)
         .await
         .unwrap();
-    assert_ne!(updated.completion_message_id.as_deref(), Some("pending"));
+    assert!(updated.completion_pushed_at.is_some());
+    assert_eq!(
+        crate::agents::push::flush_pending_pushes_for_parent(app.clone(), "parent-flush")
+            .await
+            .unwrap(),
+        0
+    );
+    let session = app
+        .chat
+        .sessions
+        .read()
+        .await
+        .get("parent-flush")
+        .cloned()
+        .unwrap();
+    assert_eq!(agents_spawn_system_notice_count(&*session.lock().await), 1);
 }
 
 #[tokio::test]
 async fn background_completion_burst_pushes_every_notice_without_queue_growth() {
-    let (_gcx, app, session_arc) = app_with_parent_session("parent-burst").await;
+    let (_gcx, app, session_arc, _workspace) = app_with_parent_session("parent-burst").await;
     session_arc
         .lock()
         .await
@@ -1359,15 +1369,16 @@ async fn background_completion_burst_pushes_every_notice_without_queue_growth() 
             .expect("push");
     }
 
-    let (notice_count, queue_size) = {
+    let (notice_count, wake_count) = {
         let session = session_arc.lock().await;
         (
             agents_spawn_system_notice_count(&session),
-            session.command_queue.len(),
+            session.delivery_wake_sources.len(),
         )
     };
     assert_eq!(notice_count, 6);
-    assert_eq!(queue_size, 1);
+    assert_eq!(wake_count, 1);
+    assert!(session_arc.lock().await.command_queue.is_empty());
     for record in completed {
         let updated = app
             .agents
@@ -1408,7 +1419,8 @@ async fn spawn_background_agent_returns_immediately_with_child_chat_id_and_emits
             })
         }))
     };
-    let (_gcx, app, session_arc) = app_with_parent_session("parent-spawn-immediate").await;
+    let (_gcx, app, session_arc, _workspace) =
+        app_with_parent_session("parent-spawn-immediate").await;
     let mut rx = session_arc.lock().await.subscribe();
     let mut req = subagent_spawn_request("parent-spawn-immediate", "src/frog.rs");
     req.notify_parent = crate::agents::spawn::NotifyParent::Silent;
@@ -1478,7 +1490,7 @@ async fn spawn_background_agent_returns_immediately_with_child_chat_id_and_emits
 
 #[tokio::test]
 async fn background_agent_updates_reach_parent_and_root_sessions() {
-    let (_gcx, app, parent_session) = app_with_parent_session("child-parent").await;
+    let (_gcx, app, parent_session, _workspace) = app_with_parent_session("child-parent").await;
     let root_session = Arc::new(tokio::sync::Mutex::new(ChatSession::new(
         "root-parent".to_string(),
     )));
@@ -1529,7 +1541,8 @@ async fn more_than_eight_background_agents_can_run_for_one_parent() {
             })
         }))
     };
-    let (_gcx, app, _session_arc) = app_with_parent_session("parent-unbounded-spawn").await;
+    let (_gcx, app, _session_arc, _workspace) =
+        app_with_parent_session("parent-unbounded-spawn").await;
     let mut handles = Vec::new();
 
     for index in 0..AGENT_COUNT {
@@ -1560,7 +1573,8 @@ async fn more_than_eight_background_agents_can_run_for_one_parent() {
 #[tokio::test]
 async fn spawn_and_wait_returns_terminal_record_within_timeout() {
     let _runner = install_spawn_runner(Arc::new(AtomicBool::new(false)));
-    let (_gcx, app, _session_arc) = app_with_parent_session("parent-wait-terminal").await;
+    let (_gcx, app, _session_arc, _workspace) =
+        app_with_parent_session("parent-wait-terminal").await;
     let mut req = subagent_spawn_request("parent-wait-terminal", "src/frog.rs");
     req.notify_parent = crate::agents::spawn::NotifyParent::Silent;
 
@@ -1602,7 +1616,8 @@ async fn spawn_and_wait_times_out_when_runner_hangs() {
             })
         }))
     };
-    let (_gcx, app, _session_arc) = app_with_parent_session("parent-wait-timeout").await;
+    let (_gcx, app, _session_arc, _workspace) =
+        app_with_parent_session("parent-wait-timeout").await;
     let mut req = subagent_spawn_request("parent-wait-timeout", "src/frog.rs");
     req.notify_parent = crate::agents::spawn::NotifyParent::Silent;
     let wait_task = tokio::spawn(crate::agents::spawn::spawn_and_wait(
@@ -1630,7 +1645,7 @@ async fn spawn_and_wait_times_out_when_runner_hangs() {
 
 #[tokio::test]
 async fn spawn_and_wait_timeout_returns_error() {
-    let (_gcx, app, _session_arc) = app_with_parent_session("parent-timeout").await;
+    let (_gcx, app, _session_arc, _workspace) = app_with_parent_session("parent-timeout").await;
     let req = crate::agents::spawn::SpawnRequest {
         kind: BgAgentKind::Subagent,
         parent_chat_id: "parent-timeout".to_string(),
@@ -1652,6 +1667,7 @@ async fn spawn_and_wait_timeout_returns_error() {
         parent_task_meta: None,
         subchat_depth: 0,
         notify_parent: crate::agents::spawn::NotifyParent::Silent,
+        completion_push: Default::default(),
     };
 
     let err = crate::agents::spawn::spawn_and_wait(app, req, Some(Duration::from_millis(1)))
@@ -1675,7 +1691,8 @@ async fn spawn_with_empty_assistant_response_uses_no_text_summary() {
                 })
             })
         }));
-    let (_gcx, app, _session_arc) = app_with_parent_session("parent-empty-summary").await;
+    let (_gcx, app, _session_arc, _workspace) =
+        app_with_parent_session("parent-empty-summary").await;
     let mut req = subagent_spawn_request("parent-empty-summary", "src/frog.rs");
     req.notify_parent = crate::agents::spawn::NotifyParent::Silent;
 
@@ -1715,6 +1732,7 @@ fn subagent_spawn_request(
         parent_task_meta: None,
         subchat_depth: 0,
         notify_parent: crate::agents::spawn::NotifyParent::Auto,
+        completion_push: Default::default(),
     }
 }
 
@@ -1742,7 +1760,7 @@ async fn spawn_seed_installs_hidden_plan_goal_and_caps_steps() {
             })
         }))
     };
-    let (_gcx, app, _session) = app_with_parent_session("parent-hidden-goal").await;
+    let (_gcx, app, _session, _workspace) = app_with_parent_session("parent-hidden-goal").await;
     let mut req = subagent_spawn_request("parent-hidden-goal", "src/frog.rs");
     req.max_steps = 10;
     req.plan = Some("Plan body".to_string());
@@ -1860,7 +1878,7 @@ async fn stub_spawn_runner(
 async fn background_agent_final_integration_spawn_push_list_cancel_and_restart() {
     let abort_seen = Arc::new(AtomicBool::new(false));
     let _runner = install_spawn_runner(abort_seen.clone());
-    let (_gcx, app, session_arc) = app_with_parent_session("parent-final").await;
+    let (_gcx, app, session_arc, _workspace) = app_with_parent_session("parent-final").await;
     session_arc
         .lock()
         .await
@@ -1985,4 +2003,54 @@ async fn storage_save_record_preserves_existing_records() {
 
     assert_eq!(records.get(&changed.agent_id), Some(&changed));
     assert_eq!(records.get(&second.agent_id), Some(&second));
+}
+
+#[tokio::test]
+async fn runner_pending_recovery_preserves_id_and_never_wakes() {
+    let (_gcx, app, session, _workspace) = app_with_parent_session("runner-recovery").await;
+    let record = create_agent(&app.agents, "parent", BgAgentKind::Subagent).await;
+    app.agents
+        .mark_running(&record.agent_id, "runner-recovery".to_string())
+        .await
+        .unwrap();
+    let delivery = refact_core::chat_types::PendingDelivery::with_id(
+        "recover-id",
+        vec![ChatMessage::new("user".into(), "recover me".into())],
+        refact_core::chat_types::PushMode::WhenIdle,
+        "test",
+        true,
+    );
+    app.agents
+        .enqueue_delivery(&record.agent_id, delivery)
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::agents::delivery::recover_runner_deliveries(&app, "runner-recovery")
+            .await
+            .unwrap(),
+        0
+    );
+    app.agents
+        .mark_interrupted(&record.agent_id, "restart".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::agents::delivery::recover_runner_deliveries(&app, "runner-recovery")
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(app
+        .agents
+        .pending_deliveries(&record.agent_id)
+        .await
+        .is_empty());
+    let session = session.lock().await;
+    assert!(session.messages.iter().any(
+        |message| refact_core::chat_types::delivery_id_of_message(message) == Some("recover-id")
+    ));
+    assert!(session
+        .pending_deliveries
+        .iter()
+        .all(|delivery| !delivery.wake));
 }

@@ -33,7 +33,7 @@ use super::goal_monitor::handle_goal_turn_end;
 use super::types::*;
 use super::trajectories::{
     check_external_reload_pending, ensure_frozen_prefix, first_system_prompt,
-    frozen_prefix_is_complete, maybe_save_trajectory_with_intent,
+    frozen_prefix_is_complete,
     maybe_save_trajectory_background_with_intent,
 };
 use super::tools::{process_tool_calls_once, ToolStepOutcome};
@@ -546,7 +546,29 @@ fn enrichment_insertion_index(
     .then_some(user_index)
 }
 
-pub async fn prepare_session_preamble_and_knowledge(
+// Construct checkpoint futures inside their own poll frame. In debug builds,
+// each inline await otherwise reserves large construction temporaries in the
+// caller, even while a different branch (such as generation) is being polled.
+pub(super) fn maybe_save_trajectory_with_intent(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+    intent: TrajectoryCommitIntent,
+) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        super::trajectories::maybe_save_trajectory_with_intent(app, session_arc, intent).await;
+    })
+}
+
+pub fn prepare_session_preamble_and_knowledge(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        prepare_session_preamble_and_knowledge_inner(app, session_arc).await;
+    })
+}
+
+async fn prepare_session_preamble_and_knowledge_inner(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
 ) {
@@ -1533,10 +1555,17 @@ pub fn start_generation(
     Box::pin(async move {
         let gcx = app.gcx.clone();
         let mut network_retry_attempt = 0usize;
+        // Marks the whole turn (assistant plus the multi-step tool loop) as
+        // in-flight, so `when_idle` deliveries do not land on a transient Idle.
+        let mut turn_guard = TurnDepthGuard::enter(app.clone(), session_arc.clone()).await;
         loop {
             if inject_priority_messages_before_llm_if_safe(app.clone(), session_arc.clone()).await {
                 continue;
             }
+            // `append` deliveries land here: before the next LLM request, with
+            // the previous assistant/tool window closed.
+            crate::chat::delivery::drain_deliveries_at_boundary(app.clone(), session_arc.clone())
+                .await;
 
             let (mut thread, chat_id) = {
                 let session = session_arc.lock().await;
@@ -1644,6 +1673,7 @@ pub fn start_generation(
                 let mut session = session_arc.lock().await;
                 match session.start_stream() {
                     Some((_message_id, abort_flag)) => {
+                        session.delivery_wake_sources.clear();
                         let notify = session.abort_notify.clone();
                         (abort_flag, notify)
                     }
@@ -2120,7 +2150,72 @@ pub fn start_generation(
             session.user_interrupt_flag.store(false, Ordering::SeqCst);
             session.queue_notify.notify_one();
         }
+
+        // Whole turn is over: release the depth guard, then land `when_idle`
+        // deliveries (and any `append` ones still waiting).
+        turn_guard.release().await;
+        crate::chat::delivery::drain_deliveries_at_boundary(app.clone(), session_arc.clone()).await;
     })
+}
+
+/// Tracks how many generation turns are in flight for a session, so
+/// `when_idle` deliveries wait for the real end of the turn instead of an
+/// intermediate `Idle` between tool steps.
+struct TurnDepthGuard {
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+    released: bool,
+}
+
+impl TurnDepthGuard {
+    async fn enter(app: AppState, session_arc: Arc<AMutex<ChatSession>>) -> Self {
+        {
+            let mut session = session_arc.lock().await;
+            session.turn_depth = session.turn_depth.saturating_add(1);
+        }
+        Self {
+            app,
+            session_arc,
+            released: false,
+        }
+    }
+
+    /// Release synchronously so a following drain observes the finished turn.
+    async fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        let mut session = self.session_arc.lock().await;
+        session.turn_depth = session.turn_depth.saturating_sub(1);
+        session.queue_notify.notify_one();
+        self.released = true;
+    }
+}
+
+impl Drop for TurnDepthGuard {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        // Fallback for early returns/cancellation: never leave the turn pinned.
+        let session_arc = self.session_arc.clone();
+        let app = self.app.clone();
+        tokio::spawn(async move {
+            let mut session = session_arc.lock().await;
+            session.turn_depth = session.turn_depth.saturating_sub(1);
+            if matches!(
+                session.runtime.state,
+                SessionState::Generating | SessionState::ExecutingTools
+            ) {
+                session.abort_stream();
+                session.clear_pending_tool_calls_for_interruption();
+            }
+            session.drain_post_tool_side_effects();
+            session.queue_notify.notify_one();
+            drop(session);
+            crate::chat::delivery::drain_deliveries_at_boundary(app, session_arc).await;
+        });
+    }
 }
 
 pub async fn run_llm_generation(

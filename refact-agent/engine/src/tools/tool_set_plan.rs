@@ -11,7 +11,7 @@ use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::internal_roles::{self, EventSubkind};
 use crate::chat::plan_role::{self, PlanInstallReport};
-use crate::chat::types::ChatSession;
+use crate::chat::types::{ChatSession, PendingDelivery, PushMode};
 use crate::tools::tools_description::{
     json_schema_from_params, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
@@ -36,7 +36,7 @@ impl Tool for ToolSetPlan {
             experimental: false,
             allow_parallel: false,
             description: "Install the chat's single detailed implementation plan (Markdown). Provide exactly one of `content` (full plan body) or `path` (absolute path to a `.md` report). Fails if a plan already exists — use `update_plan` to evolve it.".to_string(),
-            input_schema: json_schema_from_params(
+            input_schema: { let mut schema = json_schema_from_params(
                 &[
                     ("content", "string", "Full Markdown plan body. Optional; provide exactly one of content or path."),
                     (
@@ -51,7 +51,7 @@ impl Tool for ToolSetPlan {
                     ),
                 ],
                 &[],
-            ),
+            ); schema["properties"]["push"] = PushMode::schema(); schema },
             output_schema: None,
             annotations: None,
         }
@@ -63,6 +63,7 @@ impl Tool for ToolSetPlan {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let push = PushMode::from_args(args)?;
         let content_arg = optional_string_arg(args, "content")?;
         let path_arg = optional_string_arg(args, "path")?;
         if content_arg.is_some() == path_arg.is_some() {
@@ -107,13 +108,14 @@ impl Tool for ToolSetPlan {
                 return Err("a plan already exists; use update_plan to change it".to_string());
             }
             let current_mode = map_legacy_mode_to_id(&session.thread.mode).to_string();
-            let report = queue_plan_side_effect(&mut session, &current_mode, &content);
-            session.queue_post_tool_side_effect(internal_roles::event(
-                EventSubkind::SystemNotice,
-                "tool.set_plan",
-                json!({"version": report.version, "summary": summary}),
-                format!("Plan updated to v{}", report.version),
-            ));
+            let report = queue_plan_side_effect(
+                &mut session,
+                &current_mode,
+                &content,
+                push,
+                tool_call_id,
+                summary,
+            )?;
             report
         };
 
@@ -134,12 +136,34 @@ impl Tool for ToolSetPlan {
     }
 }
 
-fn queue_plan_side_effect(session: &mut ChatSession, mode: &str, body: &str) -> PlanInstallReport {
-    session.queue_post_tool_side_effect(internal_roles::plan(mode, 1, body, None));
-    PlanInstallReport {
+fn queue_plan_side_effect(
+    session: &mut ChatSession,
+    mode: &str,
+    body: &str,
+    push: PushMode,
+    tool_call_id: &str,
+    summary: Option<String>,
+) -> Result<PlanInstallReport, String> {
+    let mut delivery = PendingDelivery::new(
+        vec![
+            internal_roles::plan(mode, 1, body, None),
+            internal_roles::event(
+                EventSubkind::SystemNotice,
+                "tool.set_plan",
+                json!({"version": 1, "summary": summary}),
+                "Plan updated to v1",
+            ),
+        ],
+        push,
+        "tool.set_plan",
+        false,
+    );
+    delivery.after_tool_call_id = Some(tool_call_id.to_string());
+    session.enqueue_delivery(delivery)?;
+    Ok(PlanInstallReport {
         version: 1,
         supersedes: None,
-    }
+    })
 }
 
 async fn read_plan_from_path(
@@ -208,29 +232,7 @@ async fn read_bounded_plan_file(path: &Path) -> Result<String, String> {
 }
 
 fn current_plan_including_queued(session: &ChatSession) -> Option<&ChatMessage> {
-    plan_role::current_base_plan(session).or_else(|| {
-        session
-            .post_tool_side_effects
-            .iter()
-            .enumerate()
-            .filter_map(|(index, message)| {
-                plan_version(message).map(|version| (index, version, message))
-            })
-            .max_by_key(|(index, version, _)| (*version, *index))
-            .map(|(_, _, message)| message)
-    })
-}
-
-fn plan_version(message: &ChatMessage) -> Option<u32> {
-    if message.role != internal_roles::PLAN_ROLE {
-        return None;
-    }
-    message
-        .extra
-        .get("plan")?
-        .get("version")?
-        .as_u64()
-        .and_then(|version| u32::try_from(version).ok())
+    plan_role::current_base_plan(session)
 }
 
 fn optional_string_arg(
@@ -247,6 +249,22 @@ fn optional_string_arg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn delivery_messages(session: &ChatSession) -> Vec<ChatMessage> {
+        session
+            .messages
+            .iter()
+            .filter(|message| message.extra.contains_key("delivery"))
+            .chain(
+                session
+                    .pending_deliveries
+                    .iter()
+                    .flat_map(|delivery| delivery.messages.iter()),
+            )
+            .cloned()
+            .collect()
+    }
+
     use crate::app_state::AppState;
     use crate::call_validation::{ChatToolCall, ChatToolFunction};
     use crate::chat::internal_roles::{EVENT_ROLE, PLAN_ROLE};
@@ -320,8 +338,15 @@ mod tests {
         }
     }
 
-    fn event_from_json(json: Arc<String>) -> ChatEvent {
-        serde_json::from_str::<EventEnvelope>(&json).unwrap().event
+    fn next_message_event(rx: &mut tokio::sync::broadcast::Receiver<Arc<String>>) -> ChatEvent {
+        loop {
+            let event = serde_json::from_str::<EventEnvelope>(&rx.try_recv().unwrap())
+                .unwrap()
+                .event;
+            if matches!(event, ChatEvent::MessageAdded { .. }) {
+                return event;
+            }
+        }
     }
 
     fn assistant_tool_call(tool_call_id: &str, name: &str, arguments: &str) -> ChatMessage {
@@ -396,6 +421,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn push_schema_and_invalid_push_are_consistent() {
+        let (gcx, ccx, _) = ccx_for_session("agent").await;
+        let mut tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(ToolSetPlan {
+                config_path: String::new(),
+            }),
+            Box::new(crate::tools::tool_set_goal::ToolSetGoal {
+                config_path: String::new(),
+            }),
+            Box::new(crate::tools::tool_update_plan::ToolUpdatePlan {
+                config_path: String::new(),
+            }),
+            Box::new(crate::tools::tool_update_goal::ToolUpdateGoal {
+                config_path: String::new(),
+            }),
+            Box::new(crate::tools::tool_validate_goal::ToolValidateGoal {
+                config_path: String::new(),
+            }),
+            Box::new(crate::tools::tool_goal_pursuit_controls::ToolPauseGoal {
+                config_path: String::new(),
+            }),
+            Box::new(crate::tools::tool_goal_pursuit_controls::ToolSnoozeGoal {
+                config_path: String::new(),
+            }),
+        ];
+        for tool in &mut tools {
+            assert_eq!(
+                tool.tool_description().input_schema["properties"]["push"],
+                PushMode::schema()
+            );
+            let error = tool
+                .tool_execute(
+                    ccx.clone(),
+                    &"call".to_string(),
+                    &HashMap::from([("push".to_string(), json!("bad"))]),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.contains("push"));
+        }
+        let session = gcx
+            .chat_sessions
+            .read()
+            .await
+            .get(CHAT_ID)
+            .cloned()
+            .unwrap();
+        let session = session.lock().await;
+        assert!(session.messages.is_empty());
+        assert!(session.pending_deliveries.is_empty());
+        assert!(session.goal.is_none());
+    }
+
+    #[tokio::test]
+    async fn selected_push_waits_for_own_result_and_preserves_queued_base() {
+        for push in [PushMode::Preempt, PushMode::Append, PushMode::WhenIdle] {
+            let (gcx, ccx, _) = ccx_for_session("agent").await;
+            let session = gcx
+                .chat_sessions
+                .read()
+                .await
+                .get(CHAT_ID)
+                .cloned()
+                .unwrap();
+            {
+                let mut session = session.lock().await;
+                session.turn_depth = 1;
+                session.add_message(assistant_tool_call("call", "set_plan", "{}"));
+            }
+            let mut tool = ToolSetPlan {
+                config_path: String::new(),
+            };
+            let args = HashMap::from([
+                ("content".to_string(), json!("base")),
+                ("push".to_string(), json!(push.as_str())),
+            ]);
+            let (_, results) = tool
+                .tool_execute(ccx.clone(), &"call".to_string(), &args)
+                .await
+                .unwrap();
+            assert!(tool
+                .tool_execute(ccx, &"second".to_string(), &args)
+                .await
+                .is_err());
+            let mut session = session.lock().await;
+            assert_eq!(session.pending_deliveries.len(), 1);
+            assert_eq!(session.pending_deliveries[0].push, push);
+            assert!(!session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+            for result in results {
+                if let ContextEnum::ChatMessage(message) = result {
+                    session.add_message(message);
+                }
+            }
+            session.drain_pending_deliveries();
+            assert_eq!(
+                session.pending_deliveries.is_empty(),
+                push != PushMode::WhenIdle
+            );
+            session.turn_depth = 0;
+            session.drain_pending_deliveries();
+            assert!(session.pending_deliveries.is_empty());
+            assert_eq!(session.messages[1].role, "tool");
+            assert_eq!(session.messages[2].role, "plan");
+        }
+    }
+
+    #[tokio::test]
     async fn happy_path() {
         let (gcx, ccx, mut rx) = ccx_for_session("agent").await;
         let mut tool = ToolSetPlan {
@@ -424,28 +556,31 @@ mod tests {
             .cloned()
             .unwrap();
         let mut session = session_arc.lock().await;
-        assert!(session.messages.is_empty());
-        assert_eq!(session.post_tool_side_effects.len(), 2);
-        assert_eq!(session.post_tool_side_effects[0].role, PLAN_ROLE);
+        assert!(session
+            .messages
+            .iter()
+            .all(|message| message.extra.contains_key("delivery")));
+        assert_eq!(delivery_messages(&session).len(), 2);
+        assert_eq!(delivery_messages(&session)[0].role, PLAN_ROLE);
         assert_eq!(
-            content_text(&session.post_tool_side_effects[0]),
+            content_text(&delivery_messages(&session)[0]),
             "## Plan\n- do it"
         );
         assert_eq!(
-            session.post_tool_side_effects[0].extra["plan"]["version"],
+            delivery_messages(&session)[0].extra["plan"]["version"],
             json!(1)
         );
         assert_eq!(
-            session.post_tool_side_effects[0].extra["plan"]["mode"],
+            delivery_messages(&session)[0].extra["plan"]["mode"],
             json!("agent")
         );
-        assert_eq!(session.post_tool_side_effects[1].role, EVENT_ROLE);
+        assert_eq!(delivery_messages(&session)[1].role, EVENT_ROLE);
         assert_eq!(
-            content_text(&session.post_tool_side_effects[1]),
+            content_text(&delivery_messages(&session)[1]),
             "Plan updated to v1"
         );
         assert_eq!(
-            session.post_tool_side_effects[1].extra["event"],
+            delivery_messages(&session)[1].extra["event"],
             json!({
                 "subkind": "system_notice",
                 "source": "tool.set_plan",
@@ -453,15 +588,16 @@ mod tests {
             })
         );
         session.drain_post_tool_side_effects();
+        session.drain_pending_deliveries();
 
-        match event_from_json(rx.try_recv().unwrap()) {
+        match next_message_event(&mut rx) {
             ChatEvent::MessageAdded { message, index } => {
                 assert_eq!(index, 0);
                 assert_eq!(message.role, PLAN_ROLE);
             }
             other => panic!("expected plan MessageAdded, got {other:?}"),
         }
-        match event_from_json(rx.try_recv().unwrap()) {
+        match next_message_event(&mut rx) {
             ChatEvent::MessageAdded { message, index } => {
                 assert_eq!(index, 1);
                 assert_eq!(message.role, EVENT_ROLE);
@@ -482,7 +618,7 @@ mod tests {
         assert_eq!(err, "a plan already exists; use update_plan to change it");
         session = session_arc.lock().await;
         assert_eq!(session.messages.len(), 2);
-        assert!(session.post_tool_side_effects.is_empty());
+        assert!(session.pending_deliveries.is_empty());
         assert_eq!(session.messages[0].message_id, first_plan_id);
         assert_eq!(content_text(&session.messages[0]), "## Plan\n- do it");
     }
@@ -520,6 +656,7 @@ mod tests {
             session.add_message(message);
         }
         session.drain_post_tool_side_effects();
+        session.drain_pending_deliveries();
 
         let roles: Vec<_> = session
             .messages
@@ -583,9 +720,9 @@ mod tests {
             .cloned()
             .unwrap();
         let session = session_arc.lock().await;
-        assert_eq!(session.post_tool_side_effects[0].role, PLAN_ROLE);
+        assert_eq!(delivery_messages(&session)[0].role, PLAN_ROLE);
         assert_eq!(
-            content_text(&session.post_tool_side_effects[0]),
+            content_text(&delivery_messages(&session)[0]),
             "## File plan\n- loaded"
         );
     }
@@ -626,8 +763,11 @@ mod tests {
             .cloned()
             .unwrap();
         let session = session_arc.lock().await;
-        assert!(session.messages.is_empty());
-        assert!(session.post_tool_side_effects.is_empty());
+        assert!(session
+            .messages
+            .iter()
+            .all(|message| message.extra.contains_key("delivery")));
+        assert!(delivery_messages(&session).is_empty());
     }
 
     #[tokio::test]
@@ -667,7 +807,7 @@ mod tests {
             .cloned()
             .unwrap();
         let session = session_arc.lock().await;
-        assert!(session.post_tool_side_effects.is_empty());
+        assert!(delivery_messages(&session).is_empty());
     }
 
     #[cfg(unix)]
@@ -705,7 +845,7 @@ mod tests {
             .cloned()
             .unwrap();
         let session = session_arc.lock().await;
-        assert!(session.post_tool_side_effects.is_empty());
+        assert!(delivery_messages(&session).is_empty());
     }
 
     #[tokio::test]

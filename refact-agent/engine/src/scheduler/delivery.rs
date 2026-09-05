@@ -1,5 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use refact_core::chat_types::{DeliveryOutcome, PendingDelivery, PushMode};
 use serde::Serialize;
 use serde_json::json;
 
@@ -35,36 +36,112 @@ pub async fn deliver(app: &AppState, job: &Job, output: &str) -> Result<(), Stri
     }
 }
 
+/// Command results are notices: they go through the shared delivery layer so a
+/// busy chat queues the whole batch at its boundary instead of dropping it.
 async fn deliver_chat(app: &AppState, job: &Job, output: &str) -> Result<(), String> {
     if output.is_empty() {
         return Ok(());
     }
-    let session_arc = match job_target(job)? {
+    let chat_id = match job_target(job)? {
         AgentTarget::ExistingChat { chat_id } => {
-            let sessions = app.gcx.chat_sessions.read().await;
-            sessions
-                .get(chat_id)
-                .cloned()
-                .ok_or_else(|| format!("Chat session {chat_id} not found"))?
+            if !app.gcx.chat_sessions.read().await.contains_key(chat_id) {
+                return Err(format!("Chat session {chat_id} not found"));
+            }
+            chat_id.clone()
         }
         AgentTarget::Isolated => {
             let chat_id = isolated_chat_id(job);
-            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, &chat_id).await
+            let _ =
+                get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, &chat_id)
+                    .await;
+            chat_id
         }
     };
-    let mut session = session_arc.lock().await;
-    if session.closed {
-        return Err("Chat session is closed".to_string());
+    let messages = if job.last_status.as_deref() == Some("error") {
+        vec![error_notice_message(job, output)]
+    } else if matches!(job.action, Action::Command { .. }) {
+        vec![cron_fire_message(job), output_message(job, output)]
+    } else {
+        vec![output_message(job, output)]
+    };
+    let outcome = deliver_job_messages(app, &chat_id, job, messages, false).await?;
+    if outcome == DeliveryOutcome::Duplicate {
+        tracing::debug!(
+            "scheduled task {} chat delivery deduped for chat {}",
+            job.id,
+            chat_id
+        );
     }
-    if job.last_status.as_deref() == Some("error") {
-        session.add_message(error_notice_message(job, output));
-        return Ok(());
-    }
-    if matches!(job.action, Action::Command { .. }) {
-        session.add_message(cron_fire_message(job));
-    }
-    session.add_message(output_message(job, output));
     Ok(())
+}
+
+/// Stable per-fire id so a scheduler retry of the same run cannot double-post.
+pub(crate) fn delivery_id_for_fire(job_id: &str, fired_at_ms: u64, suffix: &str) -> String {
+    format!("cron-{job_id}-{fired_at_ms}-{suffix}")
+}
+
+pub(crate) fn job_delivery_id(job: &Job, suffix: &str) -> String {
+    delivery_id_for_fire(
+        &job.id,
+        job.last_fired_at_ms.unwrap_or(job.created_at_ms),
+        suffix,
+    )
+}
+
+pub(crate) async fn deliver_job_messages(
+    app: &AppState,
+    chat_id: &str,
+    job: &Job,
+    messages: Vec<ChatMessage>,
+    wake: bool,
+) -> Result<DeliveryOutcome, String> {
+    let delivery = PendingDelivery::with_id(
+        job_delivery_id(job, if wake { "turn" } else { "output" }),
+        messages,
+        job.push,
+        "scheduler.cron".to_string(),
+        wake,
+    );
+    crate::chat::delivery::deliver_to_chat(app.clone(), chat_id, delivery).await
+}
+
+/// Deliver a scheduled agent turn: the fire notice plus the prompt land as one
+/// batch, at `job.push`, waking the chat once the batch is in the history.
+pub(crate) async fn deliver_scheduled_turn(
+    app: &AppState,
+    chat_id: &str,
+    job: &Job,
+    fired_at_ms: u64,
+    messages: Vec<ChatMessage>,
+) -> Result<DeliveryOutcome, String> {
+    // Fire count advances only after acceptance; retries (including restart
+    // recovery) therefore reuse the same id independently of wall clock time.
+    let mut delivery = PendingDelivery::with_id(
+        format!("cron-{}-{}-turn", job.id, job.fire_count),
+        messages,
+        job.push,
+        "scheduler.cron".to_string(),
+        true,
+    );
+    delivery.thread_patch = super::runner::scheduled_thread_patch(job);
+    let _ = fired_at_ms;
+    crate::chat::delivery::deliver_to_chat(app.clone(), chat_id, delivery).await
+}
+
+/// Pure notices (catch-up, auto-expiry) never wake a chat.
+pub(crate) async fn deliver_notice(
+    app: &AppState,
+    chat_id: &str,
+    id: String,
+    message: ChatMessage,
+    push: PushMode,
+) -> Result<DeliveryOutcome, String> {
+    crate::chat::delivery::deliver_to_chat(
+        app.clone(),
+        chat_id,
+        PendingDelivery::with_id(id, vec![message], push, "scheduler.cron".to_string(), false),
+    )
+    .await
 }
 
 async fn deliver_webhook(
@@ -238,6 +315,7 @@ mod tests {
                 timeout_secs: None,
             },
             delivery,
+            push: Default::default(),
             last_fired_at_ms: Some(2_000),
             fire_count: 2,
             last_status: Some("fired".to_string()),
@@ -255,19 +333,84 @@ mod tests {
         }
     }
 
-    async fn app_with_session() -> AppState {
+    async fn app_with_session() -> (tempfile::TempDir, AppState) {
+        let workspace = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
         let session = Arc::new(AMutex::new(ChatSession::new("chat-1".to_string())));
         gcx.chat_sessions
             .write()
             .await
             .insert("chat-1".to_string(), session);
-        AppState::from_gcx(gcx).await
+        (workspace, AppState::from_gcx(gcx).await)
+    }
+
+    #[test]
+    fn old_job_defaults_to_append_and_explicit_push_roundtrips() {
+        let job = command_job(Delivery::Chat);
+        let mut raw = serde_json::to_value(&job).unwrap();
+        raw.as_object_mut().unwrap().remove("push");
+        assert_eq!(
+            serde_json::from_value::<Job>(raw.clone()).unwrap().push,
+            PushMode::Append
+        );
+        for (wire, mode) in [
+            ("preempt", PushMode::Preempt),
+            ("append", PushMode::Append),
+            ("when_idle", PushMode::WhenIdle),
+        ] {
+            raw["push"] = json!(wire);
+            let job: Job = serde_json::from_value(raw.clone()).unwrap();
+            assert_eq!(job.push, mode);
+            assert_eq!(
+                serde_json::from_value::<Job>(serde_json::to_value(&job).unwrap()).unwrap(),
+                job
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_command_output_and_error_are_ordered_deduplicated_notices() {
+        for failed in [false, true] {
+            let (_workspace, app) = app_with_session().await;
+            let arc = app
+                .chat
+                .sessions
+                .read()
+                .await
+                .get("chat-1")
+                .cloned()
+                .unwrap();
+            arc.lock().await.start_stream().unwrap();
+            let mut job = command_job(Delivery::Chat);
+            if failed {
+                job.last_status = Some("error".into());
+            }
+            deliver(&app, &job, "result").await.unwrap();
+            deliver(&app, &job, "result").await.unwrap();
+            let mut session = arc.lock().await;
+            assert_eq!(session.pending_deliveries.len(), 1);
+            assert!(!session.pending_deliveries[0].wake);
+            session.finish_stream(Some("stop".into()));
+            session.drain_pending_deliveries();
+            if failed {
+                assert_eq!(session.messages.len(), 1);
+                assert_eq!(
+                    session.messages[0].extra["event"]["subkind"],
+                    "system_notice"
+                );
+            } else {
+                assert_eq!(session.messages.len(), 2);
+                assert_eq!(session.messages[0].extra["event"]["subkind"], "cron_fire");
+                assert_eq!(session.messages[1].content.content_text_only(), "result");
+            }
+        }
     }
 
     #[tokio::test]
     async fn chat_delivery_injects_command_output() {
-        let app = app_with_session().await;
+        let (_workspace, app) = app_with_session().await;
         let job = command_job(Delivery::Chat);
 
         deliver(&app, &job, "hello frogs").await.unwrap();
@@ -296,7 +439,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_delivery_empty_output_is_silent() {
-        let app = app_with_session().await;
+        let (_workspace, app) = app_with_session().await;
         let job = command_job(Delivery::Chat);
 
         deliver(&app, &job, "").await.unwrap();
@@ -315,7 +458,7 @@ mod tests {
 
     #[tokio::test]
     async fn none_delivery_is_noop() {
-        let app = app_with_session().await;
+        let (_workspace, app) = app_with_session().await;
         let job = command_job(Delivery::None);
 
         deliver(&app, &job, "hello frogs").await.unwrap();

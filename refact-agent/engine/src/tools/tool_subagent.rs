@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use refact_core::chat_types::PushMode;
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex as AMutex;
 
@@ -51,6 +52,7 @@ struct SubagentArgs {
     goal: Option<SpawnGoal>,
     plan: Option<String>,
     worktree_mode: SpawnWorktreeMode,
+    completion_push: PushMode,
 }
 
 #[async_trait]
@@ -78,6 +80,7 @@ impl Tool for ToolSubagent {
                     "goal": {"description": "Optional string or object {content, criteria?, budget?}; use goal.budget.max_turns for a step limit."},
                     "plan": {"type": "string", "description": "Optional installed plan; it is ground truth for the child."},
                     "worktree": {"type": "string", "enum": ["inherit", "isolated"], "default": "inherit", "description": "Use the parent worktree or create an isolated worktree."},
+                    "push": PushMode::schema(),
                     "auto_merge": {"type": "boolean", "default": true, "description": "Only for worktree=isolated. Squash-merge completion automatically."}
                 },
                 "required": ["task", "expected_result"]
@@ -170,6 +173,7 @@ impl Tool for ToolSubagent {
             parent_task_meta,
             subchat_depth,
             notify_parent: NotifyParent::Auto,
+            completion_push: args.completion_push,
         };
         let handle = spawn_background_agent(app, req).await?;
         Ok((
@@ -236,6 +240,7 @@ fn parse_subagent_args(args: &HashMap<String, Value>) -> Result<SubagentArgs, St
         goal,
         plan,
         worktree_mode,
+        completion_push: PushMode::from_args(args)?,
     })
 }
 
@@ -778,12 +783,29 @@ mod tests {
             "plan",
             "worktree",
             "auto_merge",
+            "push",
         ] {
             assert!(
                 properties.contains_key(present),
                 "{present} must be exposed"
             );
         }
+    }
+
+    #[test]
+    fn completion_push_defaults_to_append_and_validates_modes() {
+        assert_eq!(
+            parse_subagent_args(&args()).unwrap().completion_push,
+            PushMode::Append
+        );
+        let mut values = args();
+        values.insert("push".to_string(), json!("preempt"));
+        assert_eq!(
+            parse_subagent_args(&values).unwrap().completion_push,
+            PushMode::Preempt
+        );
+        values.insert("push".to_string(), json!({}));
+        assert!(parse_subagent_args(&values).is_err());
     }
 
     #[test]
@@ -959,6 +981,7 @@ mod tests {
         ));
         let mut args = args();
         args.insert("target_files".to_string(), json!(["src/frog.rs"]));
+        args.insert("push".to_string(), json!("preempt"));
         let mut tool = ToolSubagent {
             config_path: String::new(),
         };
@@ -977,6 +1000,7 @@ mod tests {
             .wait("parent", &result.agent_id, Duration::from_secs(2))
             .await
             .unwrap();
+        assert_eq!(result.completion_push, PushMode::Preempt);
         let (tools, prompt) = captured.lock().unwrap().clone().unwrap();
         assert!(matches!(tools, ToolsPolicy::All));
         assert!(prompt.contains("# Active peers"));

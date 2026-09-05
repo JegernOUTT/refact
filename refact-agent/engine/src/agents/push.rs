@@ -1,11 +1,10 @@
 use chrono::{TimeDelta, Utc};
-use uuid::Uuid;
+use refact_core::chat_types::{DeliveryOutcome, PendingDelivery, PushMode};
 
 use crate::agents::types::{BackgroundAgent, BgAgentStatus};
 use crate::app_state::AppState;
 use crate::chat::internal_roles::{event, EventSubkind};
-use crate::chat::process_command_queue;
-use crate::chat::types::{ChatCommand, CommandRequest, EnqueueCommandOutcome};
+
 use crate::postprocessing::pp_command_output::OutputFilter;
 
 const DEFERRED_RETRY_AFTER: TimeDelta = TimeDelta::seconds(10);
@@ -39,93 +38,63 @@ pub async fn push_completion_to_parent(
         return Ok(());
     }
 
-    match enqueue_notice(
-        app.clone(),
-        &record.parent_chat_id,
-        build_completion_event(record),
-    )
-    .await?
+    let delivery = build_completion_delivery(record);
+    let id = delivery.id.clone();
+    match crate::chat::delivery::deliver_to_chat(app.clone(), &record.parent_chat_id, delivery)
+        .await
     {
-        NoticeEnqueue::Added(message_id) => {
+        Ok(DeliveryOutcome::Queued | DeliveryOutcome::Delivered | DeliveryOutcome::Duplicate) => {
             app.agents
-                .set_completion_message_id(&record.agent_id, message_id)
+                .set_completion_message_id(&record.agent_id, id)
                 .await?;
         }
-        NoticeEnqueue::Missing | NoticeEnqueue::Closed => {
-            app.agents
-                .set_completion_message_id(&record.agent_id, "pending".to_string())
-                .await?;
-        }
-        NoticeEnqueue::Full => {
+        Err(error) => {
             app.agents
                 .set_completion_message_id(&record.agent_id, "deferred".to_string())
                 .await?;
+            return Err(error);
         }
-        NoticeEnqueue::Duplicate => {}
     }
     Ok(())
 }
 
+fn build_completion_delivery(record: &BackgroundAgent) -> PendingDelivery {
+    PendingDelivery::with_id(
+        format!("background-agent-finished-{}", record.agent_id),
+        vec![build_completion_event(record)],
+        record.completion_push,
+        "agents.completion",
+        true,
+    )
+}
+
 pub async fn push_notice_to_chat(app: AppState, chat_id: &str, text: String) -> Result<(), String> {
-    let _ = enqueue_notice(
+    push_notice_to_chat_with_mode(app, chat_id, text, PushMode::Append).await
+}
+
+pub async fn push_notice_to_chat_with_mode(
+    app: AppState,
+    chat_id: &str,
+    text: String,
+    push: PushMode,
+) -> Result<(), String> {
+    crate::chat::delivery::deliver_to_chat(
         app,
         chat_id,
-        event(
-            EventSubkind::SystemNotice,
-            "agents.notice",
-            serde_json::json!({}),
-            text,
+        PendingDelivery::new(
+            vec![event(
+                EventSubkind::SystemNotice,
+                "agents.notice",
+                serde_json::json!({}),
+                text,
+            )],
+            push,
+            "agents.notice".to_string(),
+            true,
         ),
     )
     .await?;
     Ok(())
-}
-
-enum NoticeEnqueue {
-    Added(String),
-    Missing,
-    Closed,
-    Full,
-    Duplicate,
-}
-
-async fn enqueue_notice(
-    app: AppState,
-    chat_id: &str,
-    mut notice: refact_core::chat_types::ChatMessage,
-) -> Result<NoticeEnqueue, String> {
-    let session_arc = {
-        let sessions = app.chat.sessions.read().await;
-        sessions.get(chat_id).cloned()
-    };
-    let Some(session_arc) = session_arc else {
-        return Ok(NoticeEnqueue::Missing);
-    };
-
-    let message_id = Uuid::new_v4().to_string();
-    notice.message_id = message_id.clone();
-    let processor_flag = {
-        let mut session = session_arc.lock().await;
-        if session.closed {
-            return Ok(NoticeEnqueue::Closed);
-        }
-        match session.enqueue_priority_command(CommandRequest {
-            client_request_id: format!("background-agent-finished-{message_id}"),
-            priority: true,
-            command: ChatCommand::Regenerate {},
-        }) {
-            EnqueueCommandOutcome::Accepted => session.add_message(notice),
-            EnqueueCommandOutcome::Duplicate => return Ok(NoticeEnqueue::Duplicate),
-            EnqueueCommandOutcome::Full => return Ok(NoticeEnqueue::Full),
-        }
-        session.queue_processor_running.clone()
-    };
-
-    if !processor_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        tokio::spawn(process_command_queue(app, session_arc, processor_flag));
-    }
-
-    Ok(NoticeEnqueue::Added(message_id))
 }
 
 pub async fn flush_pending_pushes_for_parent(
@@ -351,6 +320,20 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn completion_delivery_defaults_to_append_and_keeps_stable_identity() {
+        let mut record = completed_record(BgAgentKind::Subagent).await;
+        let first = build_completion_delivery(&record);
+        assert_eq!(first.push, PushMode::Append);
+        assert!(first.wake);
+        record.completion_push = PushMode::WhenIdle;
+        let retry = build_completion_delivery(&record);
+        assert_eq!(retry.id, first.id);
+        assert_eq!(retry.push, PushMode::WhenIdle);
+        record.completion_push = PushMode::Preempt;
+        assert_eq!(build_completion_delivery(&record).push, PushMode::Preempt);
     }
 
     #[tokio::test]

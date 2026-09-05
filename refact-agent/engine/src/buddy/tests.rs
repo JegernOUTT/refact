@@ -6512,6 +6512,7 @@ async fn tool_buddy_launch_investigation_creates_chat() {
         reactive_compact_attempts: None,
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
+        pending_deliveries: Vec::new(),
     };
 
     let result = save_trajectory_snapshot(gcx, snapshot).await;

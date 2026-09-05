@@ -22,5 +22,5 @@ pub use types::{
     ExecEnvPolicy, ExecMode, ExecOutputChunk, ExecOutputLimits, ExecOutputStream, ExecOwnerMeta,
     ExecProcessFilter, ExecProcessId, ExecProcessMeta, ExecProcessSnapshot, ExecReadResult,
     ExecReadinessProbe, ExecSandboxMode, ExecSandboxSpec, ExecServiceLookup, ExecSpawnRequest,
-    ExecStatus, ExecStatusKind, ExecWriteStdinResult,
+    ExecStatus, ExecStatusKind, ExecWriteStdinResult, PushMode,
 };

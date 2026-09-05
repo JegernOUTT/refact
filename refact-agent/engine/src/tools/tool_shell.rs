@@ -40,6 +40,7 @@ use crate::tools::tools_description::{
     json_schema_from_params, MatchConfirmDeny, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
 use crate::worktrees::scope::ExecutionScope;
+use refact_core::chat_types::PushMode;
 
 #[derive(Deserialize, Serialize, Clone, Default)]
 pub struct SettingsShell {
@@ -72,6 +73,7 @@ struct ParsedShellArgs {
     run_in_background: bool,
     scope_warnings: Vec<String>,
     escalation: Option<ExecEscalation>,
+    push: PushMode,
 }
 
 #[async_trait]
@@ -196,6 +198,7 @@ impl Tool for ToolShell {
             .with_short_description(short_description)
             .with_tty(tty)
             .with_observe(observe)
+            .with_push(parsed.push)
             .with_chat_spawn_notification();
         if tty {
             request = request.with_pty_size(TOOL_PTY_ROWS, TOOL_PTY_COLS);
@@ -481,6 +484,15 @@ fn shell_input_schema() -> Value {
         "additionalProperties": false,
         "description": "Request a per-call sandbox escalation. Only has an effect when a sandbox is actually enforced; must explain why the wider access is needed."
     });
+    // Foreground output comes back as this call's tool result, which is not an
+    // injection; `push` only picks when the asynchronous completion notice of a
+    // run_in_background=true command lands in the chat.
+    let mut push = PushMode::schema();
+    push["description"] = json!(format!(
+        "Only used with run_in_background=true, for the asynchronous process-completed notice. {} Foreground output is returned as this call's tool result and is never injected.",
+        PushMode::schema()["description"].as_str().unwrap_or_default()
+    ));
+    schema["properties"]["push"] = push;
     schema
 }
 
@@ -871,6 +883,7 @@ async fn parse_args_with_filter(
         None => false,
     };
     let escalation = escalation_from_args(args)?;
+    let push = PushMode::from_args(args)?;
 
     if run_in_background && timeout.is_some() {
         return Err(
@@ -889,6 +902,7 @@ async fn parse_args_with_filter(
         run_in_background,
         scope_warnings,
         escalation,
+        push,
     })
 }
 
@@ -1020,6 +1034,41 @@ mod tests {
     use crate::tools::tools_description::Tool;
 
     use super::*;
+
+    #[tokio::test]
+    async fn process_notice_push_defaults_and_explicit_modes() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut input = HashMap::from([
+            ("command".to_string(), json!("echo test")),
+            ("description".to_string(), json!("test process")),
+        ]);
+        assert_eq!(
+            parse_args_with_filter(gcx.clone(), &input, &OutputFilter::default(), None)
+                .await
+                .unwrap()
+                .push,
+            PushMode::Append
+        );
+        for (value, mode) in [
+            ("preempt", PushMode::Preempt),
+            ("when_idle", PushMode::WhenIdle),
+        ] {
+            input.insert("push".into(), json!(value));
+            assert_eq!(
+                parse_args_with_filter(gcx.clone(), &input, &OutputFilter::default(), None)
+                    .await
+                    .unwrap()
+                    .push,
+                mode
+            );
+        }
+        input.insert("push".into(), json!(123));
+        assert!(
+            parse_args_with_filter(gcx.clone(), &input, &OutputFilter::default(), None)
+                .await
+                .is_err()
+        );
+    }
 
     fn args(entries: Vec<(&str, Value)>) -> HashMap<String, Value> {
         entries

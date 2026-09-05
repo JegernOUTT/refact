@@ -592,6 +592,7 @@ pub async fn handle_handoff_apply(
     let now = chrono::Utc::now().to_rfc3339();
 
     let mut snapshot = TrajectorySnapshot {
+        pending_deliveries: Vec::new(),
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,
@@ -786,6 +787,7 @@ pub async fn handle_mode_transition_apply(
         .or_else(|| Some(chat_id.clone()));
 
     let mut snapshot = TrajectorySnapshot {
+        pending_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
         compression_retry_after_ms: Default::default(),
         goal: transferred_goal.target_goal.clone(),
@@ -964,6 +966,7 @@ pub async fn handle_planner_from_transition(
     let root_chat_id = Some(new_chat_id.clone());
 
     let mut snapshot = TrajectorySnapshot {
+        pending_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
         compression_retry_after_ms: Default::default(),
         goal: transferred_goal.target_goal.clone(),
@@ -1106,6 +1109,7 @@ mod tests {
 
     fn transition_identity_snapshot(link_type: &str) -> TrajectorySnapshot {
         let mut snapshot = TrajectorySnapshot {
+            pending_deliveries: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
@@ -1506,6 +1510,7 @@ mod tests {
             *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
         }
         let snapshot = TrajectorySnapshot {
+            pending_deliveries: Vec::new(),
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,

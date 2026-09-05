@@ -39,6 +39,7 @@ use crate::tools::tools_description::{
     json_schema_from_params, MatchConfirmDeny, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
 use crate::worktrees::scope::ExecutionScope;
+use refact_core::chat_types::PushMode;
 
 const PROCESS_TRANSCRIPT_MAX_BYTES: usize = 2 * 1024 * 1024;
 const DISK_READ_MAX_BYTES: usize = 1024 * 1024;
@@ -132,6 +133,7 @@ struct ProcessStartArgs {
     tty: Option<bool>,
     scope_warnings: Vec<String>,
     escalation: Option<ExecEscalation>,
+    push: PushMode,
 }
 
 struct ShellServiceAliasArgs {
@@ -250,6 +252,7 @@ impl Tool for ToolProcessStart {
             .with_short_description(short_description)
             .with_tty(tty)
             .with_observe(observe)
+            .with_push(parsed.push)
             .with_chat_spawn_notification();
         if tty {
             request = request.with_pty_size(TOOL_PTY_ROWS, TOOL_PTY_COLS);
@@ -1050,6 +1053,10 @@ fn process_start_input_schema() -> Value {
         "additionalProperties": false,
         "description": "Request a per-call sandbox escalation. Only has an effect when a sandbox is actually enforced; must explain why the wider access is needed."
     });
+    // The process runs asynchronously, so its completion notice is a delivery
+    // into the chat rather than this call's tool result; `push` picks when that
+    // notice lands.
+    schema["properties"]["push"] = PushMode::schema();
     schema
 }
 
@@ -1265,6 +1272,7 @@ async fn parse_start_args(
     let tty = parse_optional_bool(args, "tty")?;
     parse_optional_bool(args, "needs_confirmation")?;
     let escalation = escalation_from_args(args)?;
+    let push = PushMode::from_args(args)?;
     let readiness = if wait_port.is_some() || wait_keyword.is_some() {
         Some(ExecReadinessProbe {
             wait_keyword,
@@ -1284,6 +1292,7 @@ async fn parse_start_args(
         tty,
         scope_warnings,
         escalation,
+        push,
     })
 }
 
@@ -1865,6 +1874,38 @@ fn collect_combined(chunks: &[ExecOutputChunk]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn process_notice_push_defaults_and_explicit_modes() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let mut input = HashMap::from([
+            ("command".to_string(), json!("echo test")),
+            ("description".to_string(), json!("test process")),
+        ]);
+        assert_eq!(
+            parse_start_args(gcx.clone(), &input, None)
+                .await
+                .unwrap()
+                .push,
+            PushMode::Append
+        );
+        for (value, mode) in [
+            ("preempt", PushMode::Preempt),
+            ("when_idle", PushMode::WhenIdle),
+        ] {
+            input.insert("push".into(), json!(value));
+            assert_eq!(
+                parse_start_args(gcx.clone(), &input, None)
+                    .await
+                    .unwrap()
+                    .push,
+                mode
+            );
+        }
+        input.insert("push".into(), json!(123));
+        assert!(parse_start_args(gcx.clone(), &input, None).await.is_err());
+    }
+
     use crate::app_state::AppState;
     use crate::exec::spill::SpillTarget;
     use crate::exec::{ExecProcessMeta, ExecStatusKind};

@@ -89,13 +89,18 @@ impl Tool for ToolGetGoal {
         tool_call_id: &String,
         _args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let (chat_facade, chat_id) = {
+        let (sessions, chat_id) = {
             let ccx = ccx.lock().await;
-            (ccx.app.chat.facade.clone(), ccx.chat_id.clone())
+            (ccx.app.chat.sessions.clone(), ccx.chat_id.clone())
         };
 
-        let snapshot = chat_facade.session_snapshot(&chat_id).await?;
-        let session = session_from_snapshot(chat_id, snapshot.thread, snapshot.messages);
+        let session_arc = sessions
+            .read()
+            .await
+            .get(&chat_id)
+            .cloned()
+            .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
+        let session = session_arc.lock().await.accepted_control_projection();
         let goal = match goal_role::current_base_goal(&session) {
             Some(message) => goal_value(&session, message)?,
             None => Value::Null,
@@ -105,17 +110,6 @@ impl Tool for ToolGetGoal {
             vec![output_message(tool_call_id, json!({ "goal": goal }))?],
         ))
     }
-}
-
-fn session_from_snapshot(
-    chat_id: String,
-    thread: crate::chat::types::ThreadParams,
-    messages: Vec<ChatMessage>,
-) -> ChatSession {
-    let mut session = ChatSession::new(chat_id);
-    session.thread = thread;
-    session.messages = messages;
-    session
 }
 
 #[cfg(test)]
@@ -338,5 +332,57 @@ mod tests {
                 .any(|tool| tool.tool_description().name == "get_goal");
             assert!(!has_tool, "{mode} should not expose get_goal");
         }
+    }
+    #[tokio::test]
+    async fn accepted_control_pending_goal_is_read_without_delivery() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let app = AppState::from_gcx(gcx).await;
+        let chat_id = "get-goal-pending";
+        let mut session = ChatSession::new(chat_id.to_string());
+        session.turn_depth = 1;
+        let base = internal_roles::goal(
+            "agent",
+            1,
+            "pending base",
+            None,
+            true,
+            refact_chat_api::GoalBudget::default(),
+        );
+        let delta = internal_roles::goal_delta("test", json!({"seq": 1}), "pending delta");
+        session
+            .enqueue_delivery(refact_core::chat_types::PendingDelivery::new(
+                vec![base, delta],
+                refact_core::chat_types::PushMode::WhenIdle,
+                "test",
+                false,
+            ))
+            .unwrap();
+        insert_session(&app, session).await;
+        let mut tool = ToolGetGoal::new(String::new());
+        let output = result_json(
+            tool.tool_execute(
+                ccx(app.clone(), chat_id).await,
+                &"read".to_string(),
+                &HashMap::new(),
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(output["goal"]["delta_count"], json!(1));
+        assert!(output["goal"]["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("pending delta"));
+        let session = app
+            .chat
+            .sessions
+            .read()
+            .await
+            .get(chat_id)
+            .cloned()
+            .unwrap();
+        let session = session.lock().await;
+        assert!(session.messages.is_empty());
+        assert_eq!(session.pending_deliveries.len(), 1);
     }
 }

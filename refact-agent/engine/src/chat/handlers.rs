@@ -89,6 +89,9 @@ pub async fn handle_v1_chat_subscribe(
     let sessions = app.chat.sessions.clone();
 
     let session_arc = get_or_create_session_with_trajectory(app.clone(), &sessions, &chat_id).await;
+    if let Err(error) = crate::agents::delivery::recover_runner_deliveries(&app, &chat_id).await {
+        tracing::warn!(%chat_id, %error, "runner delivery recovery failed");
+    }
     spawn_pending_background_agent_flush(app.clone(), chat_id.clone());
     let session = session_arc.lock().await;
     let mut rx = session.subscribe();
@@ -283,6 +286,9 @@ pub async fn handle_v1_chat_command(
     let sessions = app.chat.sessions.clone();
 
     let session_arc = get_or_create_session_with_trajectory(app.clone(), &sessions, &chat_id).await;
+    if let Err(error) = crate::agents::delivery::recover_runner_deliveries(&app, &chat_id).await {
+        tracing::warn!(%chat_id, %error, "runner delivery recovery failed");
+    }
     spawn_pending_background_agent_flush(app.clone(), chat_id.clone());
     let mut session = session_arc.lock().await;
 
@@ -299,7 +305,58 @@ pub async fn handle_v1_chat_command(
             .unwrap());
     }
 
+    // Delivery edits must bypass the command processor: it awaits the running
+    // turn, precisely when a user needs to reprioritize or cancel a delivery.
+    if matches!(
+        &request.command,
+        ChatCommand::DeliverMessages { .. } | ChatCommand::UpdatePendingDelivery { .. }
+    ) {
+        drop(session);
+        let result = match request.command {
+            ChatCommand::DeliverMessages { delivery } => {
+                super::delivery::deliver_to_chat(app.clone(), &chat_id, delivery)
+                    .await
+                    .map(|outcome| serde_json::json!({"delivery_outcome": outcome}))
+            }
+            ChatCommand::UpdatePendingDelivery {
+                delivery_id,
+                push,
+                cancel,
+            } => super::delivery::update_pending_delivery_in_chat(
+                app.clone(),
+                &chat_id,
+                &delivery_id,
+                push,
+                cancel,
+            )
+            .await
+            .map(|()| serde_json::json!({"updated": true})),
+            _ => unreachable!(),
+        };
+        let mut session = session_arc.lock().await;
+        if result.is_ok() {
+            session.remember_accepted_request(&request.client_request_id);
+        }
+        let accepted = result.is_ok();
+        let payload = result.unwrap_or_else(|error| serde_json::json!({"error": error}));
+        session.emit(ChatEvent::Ack {
+            client_request_id: request.client_request_id,
+            accepted,
+            result: Some(payload.clone()),
+        });
+        return Ok(Response::builder()
+            .status(if accepted {
+                StatusCode::OK
+            } else {
+                StatusCode::BAD_REQUEST
+            })
+            .header("Content-Type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap());
+    }
+
     if matches!(request.command, ChatCommand::Abort {}) {
+        session.suppress_delivery_wakes();
         session.abort_stream();
         session.clear_pending_tool_calls_for_interruption();
         session.stop_goal_on_manual_abort();
@@ -767,6 +824,53 @@ mod tests {
             .lock()
             .unwrap() = vec![root.to_path_buf()];
         app
+    }
+
+    #[tokio::test]
+    async fn delivery_command_edits_bypass_busy_processor() {
+        let workspace = tempfile::tempdir().unwrap();
+        let app = test_app_with_workspace(workspace.path()).await;
+        let chat_id = "live-delivery-edit";
+        let session = Arc::new(tokio::sync::Mutex::new(ChatSession::new(chat_id.into())));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.into(), session.clone());
+        session.lock().await.start_stream().unwrap();
+        let delivery = PendingDelivery::with_id(
+            "live",
+            vec![ChatMessage::new("user".into(), "notice".into())],
+            PushMode::Append,
+            "test",
+            false,
+        );
+        for command in [
+            ChatCommand::DeliverMessages { delivery },
+            ChatCommand::UpdatePendingDelivery {
+                delivery_id: "live".into(),
+                push: Some(PushMode::Preempt),
+                cancel: false,
+            },
+        ] {
+            let request = CommandRequest {
+                client_request_id: uuid::Uuid::new_v4().to_string(),
+                priority: false,
+                command,
+            };
+            let response = handle_v1_chat_command(
+                State(app.clone()),
+                Path(chat_id.into()),
+                serde_json::to_vec(&request).unwrap().into(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let session = session.lock().await;
+        assert!(session.command_queue.is_empty());
+        assert!(session.pending_deliveries.is_empty());
+        assert!(session.draft_message.is_none());
     }
 
     #[tokio::test]

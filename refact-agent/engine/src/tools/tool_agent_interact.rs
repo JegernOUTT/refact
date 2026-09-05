@@ -6,7 +6,9 @@ use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
+#[cfg(test)]
 use crate::agents::registry::InboxMessage;
+use refact_core::chat_types::{PendingDelivery, PushMode};
 use crate::agents::types::{BackgroundAgent, BgAgentStatus};
 use crate::app_state::AppState;
 use crate::at_commands::at_commands::AtCommandsContext;
@@ -302,6 +304,7 @@ impl Tool for ToolAgentMessage {
                     "to": {"type": "string", "description": "A child/descendant agent id, or parent."},
                     "text": {"type": "string", "description": "Message text."},
                     "expects_reply": {"type": "boolean", "description": "When messaging parent, create a tracked question."},
+                    "push": PushMode::schema(),
                     "reply_to": {"type": "string", "description": "Question id being answered when messaging a child."}
                 },
                 "required": ["to", "text"]
@@ -318,6 +321,7 @@ impl Tool for ToolAgentMessage {
         let to = required_string(args, "to")?;
         let text = required_string(args, "text")?;
         let expects_reply = optional_bool(args, "expects_reply")?;
+        let push = PushMode::from_args(args)?;
         let reply_to = optional_string(args, "reply_to");
         let (app, chat_id, root_chat_id, caller_agent_id) = context(&ccx).await;
 
@@ -328,18 +332,19 @@ impl Tool for ToolAgentMessage {
                 );
             };
             let caller = app.agents.get_any(&agent_id).await?;
-            let parent_notice_chat_id = parent_notice_chat_id(&app, &caller).await;
+            let parent_notice_chat_id = caller.parent_chat_id.clone();
             if expects_reply {
                 let (updated, question_id) =
                     app.agents.add_question(&agent_id, text.clone()).await?;
                 crate::agents::spawn::emit_background_agent_update(app.clone(), &updated).await;
-                if let Some(parent_notice_chat_id) = parent_notice_chat_id {
-                    crate::agents::push::push_notice_to_chat(
+                {
+                    crate::agents::push::push_notice_to_chat_with_mode(
                         app,
                         &parent_notice_chat_id,
                         format!(
                             "[subagent question] agent {agent_id} asks: {text} — answer with agent_message(to=\"{agent_id}\", reply_to=\"{question_id}\", text=...)"
                         ),
+                        push,
                     )
                     .await?;
                 }
@@ -348,25 +353,13 @@ impl Tool for ToolAgentMessage {
                     format!("Question {question_id} sent to parent."),
                 ));
             }
-            if let Some(parent_notice_chat_id) = parent_notice_chat_id {
-                crate::agents::push::push_notice_to_chat(
-                    app.clone(),
-                    &parent_notice_chat_id,
-                    format!("[subagent note] agent {agent_id}: {text}"),
-                )
-                .await?;
-            } else {
-                let updated = app
-                    .agents
-                    .update_activity(
-                        &agent_id,
-                        Some(format!("note to parent: {text}")),
-                        None,
-                        None,
-                    )
-                    .await?;
-                crate::agents::spawn::emit_background_agent_update(app.clone(), &updated).await;
-            }
+            crate::agents::push::push_notice_to_chat_with_mode(
+                app.clone(),
+                &parent_notice_chat_id,
+                format!("[subagent note] agent {agent_id}: {text}"),
+                push,
+            )
+            .await?;
             return Ok(output(tool_call_id, "Note sent to parent.".to_string()));
         }
 
@@ -391,37 +384,32 @@ impl Tool for ToolAgentMessage {
                 ));
             }
         }
-        app.agents
-            .push_inbox(
-                &to,
-                InboxMessage {
-                    from: "parent".to_string(),
-                    text: reply_to
-                        .as_deref()
-                        .map(|question_id| format!("Answer to {question_id}: {text}"))
-                        .unwrap_or(text),
-                    queued_at: Utc::now(),
-                },
-            )
-            .await?;
+        let message_text = reply_to
+            .as_deref()
+            .map(|question_id| format!("Answer to {question_id}: {text}"))
+            .unwrap_or(text);
+        crate::agents::delivery::deliver_to_agent(
+            app,
+            &to,
+            PendingDelivery::new(
+                vec![crate::chat::internal_roles::event(
+                    crate::chat::internal_roles::EventSubkind::SystemNotice,
+                    "agents.message",
+                    json!({"from": "parent"}),
+                    format!("[message from parent]\n{message_text}"),
+                )],
+                push,
+                "agents.message".to_string(),
+                true,
+            ),
+        )
+        .await?;
         Ok(output(tool_call_id, format!("Message queued for {to}.")))
     }
 
     fn tool_depends_on(&self) -> Vec<String> {
         vec![]
     }
-}
-
-async fn parent_notice_chat_id(app: &AppState, caller: &BackgroundAgent) -> Option<String> {
-    let sessions = app.chat.sessions.read().await;
-    if sessions.contains_key(&caller.parent_chat_id) {
-        return Some(caller.parent_chat_id.clone());
-    }
-    caller
-        .parent_root_chat_id
-        .as_ref()
-        .filter(|chat_id| sessions.contains_key(chat_id.as_str()))
-        .cloned()
 }
 
 #[async_trait]
@@ -533,6 +521,37 @@ mod tests {
             .0
     }
 
+    async fn parent_delivery_fixture(
+        app: &AppState,
+        chat_id: &str,
+    ) -> (tempfile::TempDir, Arc<AMutex<ChatSession>>) {
+        let workspace = tempfile::tempdir().unwrap();
+        *app.gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let session = Arc::new(AMutex::new(ChatSession::new(chat_id.to_string())));
+        session
+            .lock()
+            .await
+            .queue_processor_running
+            .store(true, Ordering::SeqCst);
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.to_string(), session.clone());
+        (workspace, session)
+    }
+
+    async fn assert_parent_notice_persisted(app: &AppState, chat_id: &str, text: &str) {
+        let saved = crate::chat::trajectories::load_trajectory_for_chat(app.gcx.clone(), chat_id)
+            .await
+            .expect("parent notice trajectory persisted");
+        assert!(saved
+            .messages
+            .iter()
+            .any(|message| message.content.content_text_only().contains(text)));
+    }
+
     fn args(items: &[(&str, Value)]) -> HashMap<String, Value> {
         items
             .iter()
@@ -606,6 +625,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn child_messages_preserve_all_push_modes() {
+        let (app, ccx) = test_context("root", "root", None).await;
+        let child = create(&app, "root", "child").await;
+        let mut tool = ToolAgentMessage {
+            config_path: String::new(),
+        };
+        for mode in [PushMode::Append, PushMode::Preempt, PushMode::WhenIdle] {
+            tool.tool_execute(
+                ccx.clone(),
+                &"call".to_string(),
+                &args(&[
+                    ("to", json!(child.agent_id)),
+                    ("text", json!("hello")),
+                    ("push", json!(mode)),
+                ]),
+            )
+            .await
+            .unwrap();
+        }
+        let record = app.agents.get_any(&child.agent_id).await.unwrap();
+        assert_eq!(
+            record
+                .pending_deliveries
+                .iter()
+                .map(|d| d.push)
+                .collect::<Vec<_>>(),
+            vec![PushMode::Append, PushMode::Preempt, PushMode::WhenIdle]
+        );
+    }
+
+    #[tokio::test]
     async fn parent_message_rejects_agent_outside_its_tree() {
         let (app, ccx) = test_context("root", "root", None).await;
         let outsider = create(&app, "other", "outsider").await;
@@ -628,17 +678,7 @@ mod tests {
         let (app, ccx) = test_context("child-chat", "root", None).await;
         let child = create(&app, "root", "child").await;
         ccx.lock().await.background_agent_id = Some(child.agent_id.clone());
-        let session = Arc::new(AMutex::new(ChatSession::new("root".to_string())));
-        session
-            .lock()
-            .await
-            .queue_processor_running
-            .store(true, Ordering::SeqCst);
-        app.chat
-            .sessions
-            .write()
-            .await
-            .insert("root".to_string(), session.clone());
+        let (_workspace, session) = parent_delivery_fixture(&app, "root").await;
 
         let mut tool = ToolAgentMessage {
             config_path: String::new(),
@@ -659,10 +699,13 @@ mod tests {
         let after = app.agents.get_any(&child.agent_id).await.unwrap();
         assert_eq!(after.questions.len(), 1);
         assert!(output.contains(&after.questions[0].id));
-        assert!(session.lock().await.messages.iter().any(|message| message
-            .content
-            .content_text_only()
-            .contains("subagent question")));
+        assert!(session.lock().await.messages.iter().any(|message| {
+            message
+                .content
+                .content_text_only()
+                .contains("subagent question")
+        }));
+        assert_parent_notice_persisted(&app, "root", "May I edit frogs?").await;
     }
 
     #[tokio::test]
@@ -690,13 +733,23 @@ mod tests {
         .unwrap();
         let after = app.agents.get_any(&child.agent_id).await.unwrap();
         assert_eq!(after.questions[0].answer.as_deref(), Some("Yes"));
-        let inbox = app.agents.drain_inbox(&child.agent_id).await;
-        assert_eq!(inbox[0].text, format!("Answer to {question_id}: Yes"));
+        let inbox = app
+            .agents
+            .get_any(&child.agent_id)
+            .await
+            .unwrap()
+            .pending_deliveries;
+        assert_eq!(inbox[0].push, PushMode::Append);
+        assert!(inbox[0].messages[0]
+            .content
+            .content_text_only()
+            .contains(&format!("Answer to {question_id}: Yes")));
     }
 
     #[tokio::test]
-    async fn child_note_tolerates_missing_parent_session() {
+    async fn child_note_delivers_to_parent_without_changing_progress() {
         let (app, ccx) = test_context("child-chat", "root", None).await;
+        let (_workspace, _session) = parent_delivery_fixture(&app, "root").await;
         let child = create(&app, "root", "child").await;
         ccx.lock().await.background_agent_id = Some(child.agent_id.clone());
         let mut tool = ToolAgentMessage {
@@ -710,7 +763,8 @@ mod tests {
         .await
         .unwrap();
         let after = app.agents.get_any(&child.agent_id).await.unwrap();
-        assert!(after.progress.unwrap().contains("I found a clue"));
+        assert_eq!(after.progress, None);
+        assert_parent_notice_persisted(&app, "root", "I found a clue").await;
     }
 
     #[tokio::test]
@@ -820,11 +874,9 @@ mod tests {
 
     #[tokio::test]
     async fn stateful_child_session_restores_identity_for_parent_tools() {
-        let workspace = tempfile::tempdir().unwrap();
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() =
-            vec![workspace.path().to_path_buf()];
         let app = AppState::from_gcx(gcx.clone()).await;
+        let (_workspace, _parent_session) = parent_delivery_fixture(&app, "parent").await;
         let child = create(&app, "parent", "child").await;
         app.agents
             .mark_running(&child.agent_id, "subchat-child-chat".to_string())
@@ -966,8 +1018,9 @@ mod tests {
         let record = app.agents.get_any(&child.agent_id).await.unwrap();
         assert_eq!(
             record.progress.as_deref(),
-            Some("note to parent: hello parent"),
-            "agent_message records the latest activity line (last write wins)"
+            Some("stateful child running"),
+            "agent_message delivery is independent of progress activity"
         );
+        assert_parent_notice_persisted(&app, "parent", "hello parent").await;
     }
 }

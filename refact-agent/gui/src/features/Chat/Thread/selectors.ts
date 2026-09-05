@@ -505,14 +505,7 @@ function getEventLogSelector(threadId: string) {
         const eventMessages = messages.flatMap((message) => {
           if (!isEventMessage(message)) return EMPTY_EVENT_MESSAGES;
           const metadata = getEventMetadata(message);
-          if (
-            !metadata ||
-            metadata.subkind === "plan_delta" ||
-            metadata.subkind === "goal_delta" ||
-            metadata.subkind === "goal_pursuit"
-          ) {
-            return EMPTY_EVENT_MESSAGES;
-          }
+          if (!metadata) return EMPTY_EVENT_MESSAGES;
           return [normalizeEventMessageMetadata(message)];
         });
         return eventMessages.length > 0 ? eventMessages : EMPTY_EVENT_MESSAGES;
@@ -523,6 +516,12 @@ function getEventLogSelector(threadId: string) {
   return selector;
 }
 
+/**
+ * Normalized event history for EventLog surfaces. Every subkind is included,
+ * including plan/goal deltas and pursuit, because the event history is the one
+ * place users can audit what the agent did; PlanBanner and the goal widget keep
+ * owning their own dedicated presentation.
+ */
 export const selectEventLog = (
   state: RootState,
   threadId: string,

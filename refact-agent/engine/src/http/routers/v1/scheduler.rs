@@ -13,7 +13,9 @@ use crate::scheduler::{
     active_durable_cron_store, cron_task_response, delivery_kind, human_schedule_for_trigger,
     next_run_ms, scheduler_timezone, session_cron_store, Action, AgentTarget, CronStore,
     CronTaskResponse, Delivery, DeliveryResponse, Job, Trigger, delivery_from_value,
+    push_from_value,
 };
+use refact_core::chat_types::PushMode;
 use crate::tools::tool_cron_create::MAX_CRON_JOBS;
 
 const ONE_YEAR_MS: u64 = 365 * 24 * 60 * 60 * 1000;
@@ -32,6 +34,8 @@ pub struct CronCreateRequest {
     pub cwd: Option<String>,
     pub timeout_secs: Option<u64>,
     pub delivery: Option<serde_json::Value>,
+    #[serde(default)]
+    pub push: Option<serde_json::Value>,
     #[serde(default)]
     pub recurring: Option<bool>,
     #[serde(default)]
@@ -53,6 +57,7 @@ pub struct CronCreateResponse {
     pub action_kind: String,
     pub delivery_kind: String,
     pub delivery: DeliveryResponse,
+    pub push: PushMode,
 }
 
 #[derive(Debug, Serialize)]
@@ -70,6 +75,8 @@ pub struct CronUpdateRequest {
     pub description: Option<String>,
     pub enabled: Option<bool>,
     pub run_now: Option<bool>,
+    #[serde(default)]
+    pub push: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +84,7 @@ pub struct CronUpdateResponse {
     pub id: String,
     pub updated: bool,
     pub human_schedule: String,
+    pub push: PushMode,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,6 +151,7 @@ pub async fn handle_v1_scheduler_cron_post(
         action_kind,
         delivery_kind,
         delivery,
+        push: task.push,
     }))
 }
 
@@ -171,6 +180,7 @@ pub async fn handle_v1_scheduler_cron_patch(
         id: task.id,
         updated: true,
         human_schedule,
+        push: task.push,
     }))
 }
 
@@ -255,6 +265,7 @@ async fn create_http_cron_job(
     );
     task.set_trigger(trigger);
     task.delivery = request_delivery(&request)?;
+    task.push = push_from_value(request.push.as_ref())?.unwrap_or_default();
     apply_http_action(&mut task, &request)?;
     validate_next_fire(&task, now_ms)?;
 
@@ -433,6 +444,9 @@ fn apply_update(task: &mut Job, request: CronUpdateRequest, now_ms: u64) -> Resu
     if let Some(enabled) = request.enabled {
         task.enabled = enabled;
         task.paused_at_ms = if enabled { None } else { Some(now_ms) };
+    }
+    if let Some(push) = push_from_value(request.push.as_ref())? {
+        task.push = push;
     }
     if request.run_now.unwrap_or(false) {
         task.trigger_at_ms = Some(now_ms);

@@ -27,6 +27,7 @@ async fn create_warning_chat(gcx: Arc<GlobalContext>, reason: &str) -> Result<St
     let model =
         crate::buddy::actor::resolve_buddy_chat_model(AppState::from_gcx(gcx.clone()).await).await;
     let snapshot = TrajectorySnapshot {
+        pending_deliveries: Vec::new(),
         goal: None,
         goal_ledger: Vec::new(),
         goal_verification_blocked_until_ms: None,

@@ -3526,7 +3526,10 @@ mod tests {
             .into_iter()
             .map(|entry| entry.id)
             .collect();
-        assert!(ids.contains(&"chat-2".to_string()), "listing lost the externally created trajectory: {ids:?}");
+        assert!(
+            ids.contains(&"chat-2".to_string()),
+            "listing lost the externally created trajectory: {ids:?}"
+        );
     }
 
     #[tokio::test]

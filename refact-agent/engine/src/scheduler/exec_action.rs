@@ -333,6 +333,7 @@ mod tests {
                 timeout_secs: None,
             },
             delivery: Delivery::Chat,
+            push: Default::default(),
             last_fired_at_ms: None,
             fire_count: 0,
             last_status: None,

@@ -1267,3 +1267,267 @@ pub struct CodeCompletionPost {
     #[serde(default)]
     pub rag_tokens_n: usize,
 }
+
+/// How a delivered batch of messages should land in a chat that may be busy.
+///
+/// * `Preempt` (A) — urgent: abort the in-flight draft and land immediately.
+/// * `Append` (B, default) — land at the next safe message boundary (no draft,
+///   closed assistant + tool-result window), before the next generation.
+/// * `WhenIdle` (C) — hold until the whole turn (including the assistant/tool
+///   multi-step loop) has ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PushMode {
+    Preempt,
+    #[default]
+    Append,
+    WhenIdle,
+}
+
+impl PushMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Preempt => "preempt",
+            Self::Append => "append",
+            Self::WhenIdle => "when_idle",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "preempt" => Ok(Self::Preempt),
+            "append" => Ok(Self::Append),
+            "when_idle" => Ok(Self::WhenIdle),
+            other => Err(format!(
+                "invalid push mode '{other}', expected one of: preempt, append, when_idle"
+            )),
+        }
+    }
+
+    /// Shared tool-argument parsing so every producer validates `push` identically.
+    /// A missing or null `push` yields the default (`Append`); anything else must be
+    /// one of the three known strings.
+    pub fn from_args(args: &HashMap<String, Value>) -> Result<Self, String> {
+        match args.get("push") {
+            None | Some(Value::Null) => Ok(Self::default()),
+            Some(Value::String(value)) => Self::parse(value),
+            Some(other) => Err(format!("argument `push` must be a string, got {other}")),
+        }
+    }
+
+    /// Shared JSON schema fragment for the `push` tool argument.
+    pub fn schema() -> Value {
+        serde_json::json!({
+            "type": "string",
+            "enum": ["preempt", "append", "when_idle"],
+            "default": "append",
+            "description": "When the delivered messages should land: preempt (interrupt the current answer), append (default, at the next safe message boundary), when_idle (after the whole turn finishes).",
+        })
+    }
+}
+
+/// Terminal outcome of a delivery attempt, as reported back to producers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryOutcome {
+    /// Accepted and waiting for its boundary.
+    Queued,
+    /// Already appended to the chat history.
+    Delivered,
+    /// A delivery with the same id was already accepted or delivered.
+    Duplicate,
+}
+
+/// A batch of messages waiting to be appended to a chat at a boundary chosen by
+/// `push`. `id` is stable across the pending queue, SSE, and the delivered
+/// messages (stamped into `extra.delivery`), so dedupe works after a restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingDelivery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_tool_call_id: Option<String>,
+    /// Parameter changes committed atomically with this delivery at its boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_patch: Option<serde_json::Value>,
+    pub id: String,
+    #[serde(default)]
+    pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub push: PushMode,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub wake: bool,
+    #[serde(default)]
+    pub enqueued_at_ms: u64,
+}
+
+/// Narrow equality: compares metadata directly and messages by their JSON
+/// form, since `ChatMessage` intentionally does not implement `PartialEq`.
+impl PartialEq for PendingDelivery {
+    fn eq(&self, other: &Self) -> bool {
+        self.after_tool_call_id == other.after_tool_call_id
+            && self.thread_patch == other.thread_patch
+            && self.id == other.id
+            && self.push == other.push
+            && self.source == other.source
+            && self.wake == other.wake
+            && self.enqueued_at_ms == other.enqueued_at_ms
+            && self.messages.len() == other.messages.len()
+            && serde_json::to_value(&self.messages).ok()
+                == serde_json::to_value(&other.messages).ok()
+    }
+}
+
+pub const DELIVERY_EXTRA_KEY: &str = "delivery";
+
+fn delivery_epoch_ms_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+impl PendingDelivery {
+    pub fn new(
+        messages: Vec<ChatMessage>,
+        push: PushMode,
+        source: impl Into<String>,
+        wake: bool,
+    ) -> Self {
+        Self::with_id(
+            uuid::Uuid::new_v4().to_string(),
+            messages,
+            push,
+            source,
+            wake,
+        )
+    }
+
+    /// Same as `new` but with a producer-chosen id, for producers that need a
+    /// deterministic dedupe key (e.g. one delivery per cron fire).
+    pub fn with_id(
+        id: impl Into<String>,
+        messages: Vec<ChatMessage>,
+        push: PushMode,
+        source: impl Into<String>,
+        wake: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            messages,
+            push,
+            source: source.into(),
+            wake,
+            enqueued_at_ms: delivery_epoch_ms_now(),
+            thread_patch: None,
+            after_tool_call_id: None,
+        }
+    }
+
+    /// Short human-readable text used for queue previews and UI rows.
+    pub fn preview_text(&self) -> String {
+        self.messages
+            .iter()
+            .map(|message| message.content.content_text_only())
+            .find(|text| !text.trim().is_empty())
+            .unwrap_or_default()
+    }
+
+    /// Stamp delivery provenance onto each message right before it is appended,
+    /// so dedupe and the UI survive restarts without the pending queue.
+    pub fn stamp_messages(&self) -> Vec<ChatMessage> {
+        let stamp = serde_json::json!({
+            "id": self.id,
+            "source": self.source,
+            "push": self.push,
+            "at_ms": self.enqueued_at_ms,
+        });
+        self.messages
+            .iter()
+            .cloned()
+            .map(|mut message| {
+                message
+                    .extra
+                    .insert(DELIVERY_EXTRA_KEY.to_string(), stamp.clone());
+                message
+            })
+            .collect()
+    }
+}
+
+/// Read back the delivery id stamped by `PendingDelivery::stamp_messages`.
+pub fn delivery_id_of_message(message: &ChatMessage) -> Option<&str> {
+    message
+        .extra
+        .get(DELIVERY_EXTRA_KEY)
+        .and_then(|value| value.get("id"))
+        .and_then(|value| value.as_str())
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+
+    #[test]
+    fn push_mode_defaults_to_append_and_roundtrips() {
+        assert_eq!(PushMode::default(), PushMode::Append);
+        assert_eq!(
+            serde_json::to_value(PushMode::WhenIdle).unwrap(),
+            serde_json::json!("when_idle")
+        );
+        assert_eq!(
+            serde_json::from_value::<PushMode>(serde_json::json!("preempt")).unwrap(),
+            PushMode::Preempt
+        );
+    }
+
+    #[test]
+    fn push_mode_from_args_rejects_unknown_and_non_string() {
+        let mut args = HashMap::new();
+        assert_eq!(PushMode::from_args(&args).unwrap(), PushMode::Append);
+        args.insert("push".to_string(), Value::Null);
+        assert_eq!(PushMode::from_args(&args).unwrap(), PushMode::Append);
+        args.insert("push".to_string(), serde_json::json!("when_idle"));
+        assert_eq!(PushMode::from_args(&args).unwrap(), PushMode::WhenIdle);
+        args.insert("push".to_string(), serde_json::json!("service"));
+        assert!(PushMode::from_args(&args).is_err());
+        args.insert("push".to_string(), serde_json::json!(3));
+        assert!(PushMode::from_args(&args).is_err());
+    }
+
+    #[test]
+    fn pending_delivery_stamps_messages_with_stable_id() {
+        let delivery = PendingDelivery::new(
+            vec![ChatMessage {
+                role: "user".to_string(),
+                content: ChatContent::SimpleText("hello".to_string()),
+                ..Default::default()
+            }],
+            PushMode::Append,
+            "test",
+            false,
+        );
+        let stamped = delivery.stamp_messages();
+        assert_eq!(
+            delivery_id_of_message(&stamped[0]),
+            Some(delivery.id.as_str())
+        );
+        assert_eq!(delivery.preview_text(), "hello");
+        assert!(!delivery.id.is_empty());
+    }
+
+    #[test]
+    fn pending_delivery_roundtrips_and_tolerates_minimal_json() {
+        let delivery =
+            PendingDelivery::with_id("fixed-id", Vec::new(), PushMode::WhenIdle, "cron", true);
+        let encoded = serde_json::to_string(&delivery).unwrap();
+        let decoded: PendingDelivery = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, delivery);
+
+        let minimal: PendingDelivery =
+            serde_json::from_value(serde_json::json!({"id": "x"})).unwrap();
+        assert_eq!(minimal.push, PushMode::Append);
+        assert!(!minimal.wake);
+        assert!(minimal.messages.is_empty());
+    }
+}

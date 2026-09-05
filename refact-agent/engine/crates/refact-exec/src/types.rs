@@ -8,6 +8,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub use refact_core::chat_types::PushMode;
+
 const SHORT_DESC_MAX_LEN: usize = 80;
 pub const DEFAULT_EXEC_OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 pub const EXEC_ENV_DEFAULTS: &[(&str, &str)] = &[
@@ -307,6 +309,10 @@ pub struct ExecSpawnRequest {
     pub abort_flag: Option<Arc<AtomicBool>>,
     pub output_progress_tx: Option<tokio::sync::mpsc::UnboundedSender<ExecOutputChunk>>,
     pub notify_chat_on_spawn: bool,
+    /// How the asynchronous completion notification for this process should land
+    /// in the owning chat. Only meaningful for modes that emit a completion
+    /// event (background/service); foreground results come back as a tool result.
+    pub push: PushMode,
 }
 
 // Windows ConPTY does not deliver the child's output to the reader, so a pty there yields a
@@ -342,6 +348,7 @@ impl ExecSpawnRequest {
             abort_flag: None,
             output_progress_tx: None,
             notify_chat_on_spawn: false,
+            push: PushMode::default(),
         }
     }
 
@@ -473,6 +480,11 @@ impl ExecSpawnRequest {
         self.notify_chat_on_spawn = true;
         self
     }
+
+    pub fn with_push(mut self, push: PushMode) -> Self {
+        self.push = push;
+        self
+    }
 }
 
 pub fn sanitize_short_description(s: &str) -> String {
@@ -590,6 +602,11 @@ pub struct ExecProcessMeta {
     pub short_description: String,
     #[serde(default)]
     pub tty: bool,
+    /// Delivery policy for this process's asynchronous completion notice.
+    /// `#[serde(default)]` keeps records written before this field readable,
+    /// and legacy records deserialize to the default (`append`).
+    #[serde(default)]
+    pub push: PushMode,
     pub created_at_ms: u64,
     pub started_at_ms: Option<u64>,
     pub ended_at_ms: Option<u64>,
@@ -606,6 +623,7 @@ impl ExecProcessMeta {
             command,
             short_description,
             tty: false,
+            push: PushMode::default(),
             created_at_ms: current_timestamp_ms(),
             started_at_ms: None,
             ended_at_ms: None,
@@ -649,6 +667,11 @@ impl ExecProcessMeta {
 
     pub fn with_tty(mut self, tty: bool) -> Self {
         self.tty = tty;
+        self
+    }
+
+    pub fn with_push(mut self, push: PushMode) -> Self {
+        self.push = push;
         self
     }
 
@@ -782,6 +805,7 @@ pub struct ExecWriteStdinResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_spawn_request_confinement_metadata_defaults() {
@@ -1137,6 +1161,7 @@ mod tests {
             command: "sleep 10".to_string(),
             short_description: "sleep 10".to_string(),
             tty: false,
+            push: PushMode::WhenIdle,
             created_at_ms: 1_000_000,
             started_at_ms: Some(1_000_010),
             ended_at_ms: None,
@@ -1158,6 +1183,62 @@ mod tests {
         let json = serde_json::to_string(&status).unwrap();
         let back: ExecStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(status, back);
+    }
+
+    #[test]
+    fn test_spawn_request_push_defaults_to_append_and_is_overridable() {
+        assert_eq!(
+            ExecSpawnRequest::background("sleep 1").push,
+            PushMode::Append
+        );
+        assert_eq!(
+            ExecSpawnRequest::background("sleep 1")
+                .with_push(PushMode::WhenIdle)
+                .push,
+            PushMode::WhenIdle
+        );
+        assert_eq!(
+            ExecProcessMeta::new(ExecMode::Background, "sleep 1".to_string()).push,
+            PushMode::Append
+        );
+    }
+
+    #[test]
+    fn test_process_meta_without_push_field_deserializes_to_append() {
+        // A record written before `push` existed must stay readable and keep
+        // the legacy behaviour, which is `append`.
+        let legacy = json!({
+            "process_id": "exec_legacy",
+            "owner": {
+                "chat_id": "chat-a",
+                "tool_call_id": null,
+                "service_name": null,
+                "workspace": null
+            },
+            "mode": "Background",
+            "cwd": null,
+            "command": "sleep 1",
+            "short_description": "sleep 1",
+            "created_at_ms": 1_000_000u64,
+            "started_at_ms": null,
+            "ended_at_ms": null
+        });
+
+        let meta: ExecProcessMeta = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(meta.push, PushMode::Append);
+        assert!(!meta.tty);
+    }
+
+    #[test]
+    fn test_process_meta_push_round_trips_for_every_mode() {
+        for push in [PushMode::Preempt, PushMode::Append, PushMode::WhenIdle] {
+            let meta =
+                ExecProcessMeta::new(ExecMode::Background, "sleep 1".to_string()).with_push(push);
+            let json = serde_json::to_string(&meta).unwrap();
+            let back: ExecProcessMeta = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.push, push);
+        }
     }
 
     #[test]

@@ -278,7 +278,8 @@
 }
 
 .bottomActionControls {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
   max-width: max-content;
   margin-left: auto;
 }

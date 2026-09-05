@@ -4,16 +4,15 @@ use std::sync::Arc;
 use refact_chat_history::history_limit::remove_invalid_tool_calls_and_tool_calls_results;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::tasks::storage;
-use crate::tasks::types::StatusUpdate;
+use crate::tools::planner_delivery::{self, CardGuard, CardTarget, DeliveryReport};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
-use refact_chat_api::ChatCommand;
+use refact_core::chat_types::PushMode;
 use refact_runtime_api::{ChatSessionUpdate, SessionState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,37 +90,43 @@ async fn planner_task_id(
     Ok(meta.task_id.clone())
 }
 
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
-}
-
 fn state_label(state: SessionState) -> String {
     match state {
-        SessionState::Idle => "💤 Idle (steer will start a new turn)".to_string(),
-        SessionState::Generating => {
-            "🔄 Generating response (steer will be processed after current generation)".to_string()
-        }
-        SessionState::ExecutingTools => {
-            "⚙️ Executing tools (steer will be processed after current tool)".to_string()
-        }
-        SessionState::Paused => "⏸️ Paused (steer is queued)".to_string(),
-        SessionState::WaitingIde => "⏳ Waiting for IDE (steer is queued)".to_string(),
-        SessionState::WaitingUserInput => "⏳ Waiting for user input (steer is queued)".to_string(),
-        SessionState::Completed => "✅ Completed (steer will start a new turn)".to_string(),
-        SessionState::Error => "❌ Error (steer is queued)".to_string(),
+        SessionState::Idle => "💤 Idle".to_string(),
+        SessionState::Generating => "🔄 Generating response".to_string(),
+        SessionState::ExecutingTools => "⚙️ Executing tools".to_string(),
+        SessionState::Paused => "⏸️ Paused".to_string(),
+        SessionState::WaitingIde => "⏳ Waiting for IDE".to_string(),
+        SessionState::WaitingUserInput => "⏳ Waiting for user input".to_string(),
+        SessionState::Completed => "✅ Completed".to_string(),
+        SessionState::Error => "❌ Error".to_string(),
     }
 }
 
-fn tool_output(card_id: &str, message: &str, state: SessionState, compacted: bool) -> String {
+fn tool_output(
+    card_id: &str,
+    message: &str,
+    state: SessionState,
+    compacted: bool,
+    push: PushMode,
+    report: &DeliveryReport,
+) -> String {
     let compaction_note = if compacted {
         "\nAuto-compaction: applied before steering."
     } else {
         ""
     };
+    let headline = if report.reached_agent() {
+        format!("✅ Steered {}", card_id)
+    } else {
+        format!("⚠️ Did not steer {}", card_id)
+    };
     format!(
-        "✅ Steered {}\n\nMessage: \"{}\"\nAgent state: {}{}",
-        card_id,
+        "{}\n\nMessage: \"{}\"\nDelivery: {} (push={})\nAgent state: {}{}",
+        headline,
         message,
+        report.describe("Steer"),
+        planner_delivery::push_mode_label(push),
         state_label(state),
         compaction_note
     )
@@ -180,6 +185,7 @@ fn validate_agent_snapshot(
 #[async_trait]
 impl Tool for ToolAgentSteer {
     fn tool_description(&self) -> ToolDesc {
+        let push_mode_schema = planner_delivery::push_mode_schema();
         ToolDesc {
             name: "agent_steer".to_string(),
             display_name: "Agent Steer".to_string(),
@@ -204,8 +210,9 @@ impl Tool for ToolAgentSteer {
                     "priority": {
                         "type": "string",
                         "enum": ["info", "steer", "urgent"],
-                        "description": "Message priority. Default: steer"
+                        "description": "Wording of the message only (FYI/STEER/URGENT framing). It does NOT change delivery timing; use `push` for that. Default: steer"
                     },
+                    "push": push_mode_schema,
                     "task_id": {
                         "type": "string",
                         "description": "Task ID (optional if chat is bound to a task)"
@@ -228,6 +235,9 @@ impl Tool for ToolAgentSteer {
         let card_id = required_string(args, "card_id")?;
         let message = required_string(args, "message")?;
         let priority = AgentSteerPriority::parse(args.get("priority"))?;
+        // priority only shapes the wording; delivery timing comes from `push`,
+        // which defaults to append even for priority=urgent.
+        let push = planner_delivery::parse_push_mode(args)?;
         let steer_message = priority.format_message(&message);
 
         let (gcx, chat_facade) = {
@@ -274,47 +284,55 @@ impl Tool for ToolAgentSteer {
             false
         };
 
-        let card_id_for_update = card_id.clone();
-        let agent_chat_id_for_update = agent_chat_id.clone();
-        let status_message = format!("Planner steered: {}", truncate_chars(&message, 80));
-        let heartbeat = Utc::now().to_rfc3339();
-        storage::update_board_atomic(gcx, &task_id, move |board| {
-            let card = board
-                .get_card_mut(&card_id_for_update)
-                .ok_or_else(|| format!("Card {} not found", card_id_for_update))?;
-            if card.column != "doing" {
-                return Err(format!(
-                    "Card {} must be in 'doing' column to steer its agent; current column is '{}'.",
-                    card_id_for_update, card.column
-                ));
-            }
-            if card.agent_chat_id.as_deref() != Some(agent_chat_id_for_update.as_str()) {
-                return Err(format!(
-                    "Card {} agent_chat_id changed before steering could be recorded.",
-                    card_id_for_update
-                ));
-            }
-            card.last_heartbeat_at = Some(heartbeat.clone());
-            card.status_updates.push(StatusUpdate {
-                timestamp: heartbeat.clone(),
-                message: status_message.clone(),
-            });
-            Ok(())
-        })
-        .await?;
+        let target = CardTarget {
+            card_id: card_id.clone(),
+            title: card.title.clone(),
+            chat_id: agent_chat_id.clone(),
+        };
+        let status_message = format!(
+            "Planner steered: {}",
+            planner_delivery::truncate_chars(&message, 80)
+        );
+        if let Some(reason) = planner_delivery::reserve_card_status(
+            gcx.clone(),
+            &task_id,
+            &target,
+            status_message,
+            true,
+            true,
+        )
+        .await?
+        {
+            return Err(format!(
+                "Card {} changed before steering could be recorded: {}.",
+                card_id, reason
+            ));
+        }
 
-        chat_facade
-            .push_priority_command(
-                &agent_chat_id,
-                ChatCommand::UserMessage {
-                    content: Value::String(steer_message.clone()),
-                    attachments: vec![],
-                    context_files: vec![],
-                    suppress_auto_enrichment: false,
-                    client_message_id: None,
-                },
+        let report = planner_delivery::deliver_to_card(
+            gcx.clone(),
+            chat_facade.clone(),
+            &task_id,
+            &target,
+            CardGuard::doing(),
+            planner_delivery::single_message_delivery(
+                steer_message.clone(),
+                push,
+                "tools.agent_steer",
+                true,
+            ),
+        )
+        .await;
+
+        if !report.reached_agent() {
+            planner_delivery::record_card_status(
+                gcx,
+                &task_id,
+                &target,
+                format!("Planner steer {}", report.short_status()),
             )
             .await?;
+        }
 
         Ok((
             false,
@@ -325,6 +343,8 @@ impl Tool for ToolAgentSteer {
                     &message,
                     session_state,
                     compacted,
+                    push,
+                    &report,
                 )),
                 tool_calls: None,
                 tool_call_id: tool_call_id.clone(),
@@ -341,19 +361,23 @@ impl Tool for ToolAgentSteer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use refact_chat_api::ChatCommand;
     use crate::app_state::AppState;
     use crate::chat::types::TaskMeta as ThreadTaskMeta;
     use crate::tasks::types::{BoardCard, TaskBoard, TaskMeta, TaskStatus};
     use crate::tools::tools_description::Tool;
+    use refact_core::chat_types::{DeliveryOutcome, PendingDelivery};
     use refact_runtime_api::{
         ChatSessionFacade, ChatSessionSnapshot, ChatSessionUpdate, CreateSessionRequest,
         RuntimeTrajectorySnapshot,
     };
+    use chrono::Utc;
     use std::sync::Mutex as StdMutex;
 
     struct MockChatFacade {
         state: StdMutex<SessionState>,
         pushed: StdMutex<Vec<(String, ChatCommand)>>,
+        delivered: StdMutex<Vec<(String, PendingDelivery)>>,
         messages: StdMutex<Vec<ChatMessage>>,
         thread: StdMutex<refact_chat_api::ThreadParams>,
         updates: StdMutex<Vec<ChatSessionUpdate>>,
@@ -374,22 +398,14 @@ mod tests {
 
     impl MockChatFacade {
         fn new(state: SessionState) -> Self {
-            Self {
-                state: StdMutex::new(state),
-                pushed: StdMutex::new(vec![]),
-                messages: StdMutex::new(vec![]),
-                thread: StdMutex::new(refact_chat_api::ThreadParams {
-                    auto_compact_enabled: Some(true),
-                    ..test_agent_thread()
-                }),
-                updates: StdMutex::new(vec![]),
-            }
+            Self::with_messages(state, vec![])
         }
 
         fn with_messages(state: SessionState, messages: Vec<ChatMessage>) -> Self {
             Self {
                 state: StdMutex::new(state),
                 pushed: StdMutex::new(vec![]),
+                delivered: StdMutex::new(vec![]),
                 messages: StdMutex::new(messages),
                 thread: StdMutex::new(refact_chat_api::ThreadParams {
                     auto_compact_enabled: Some(true),
@@ -401,6 +417,10 @@ mod tests {
 
         fn pushed_commands(&self) -> Vec<(String, ChatCommand)> {
             self.pushed.lock().unwrap().clone()
+        }
+
+        fn deliveries(&self) -> Vec<(String, PendingDelivery)> {
+            self.delivered.lock().unwrap().clone()
         }
 
         fn updates(&self) -> Vec<ChatSessionUpdate> {
@@ -440,6 +460,18 @@ mod tests {
                 .unwrap()
                 .push((chat_id.to_string(), command));
             Ok(())
+        }
+
+        async fn deliver_messages(
+            &self,
+            chat_id: &str,
+            delivery: PendingDelivery,
+        ) -> Result<DeliveryOutcome, String> {
+            self.delivered
+                .lock()
+                .unwrap()
+                .push((chat_id.to_string(), delivery));
+            Ok(DeliveryOutcome::Queued)
         }
 
         async fn session_state(&self, _chat_id: &str) -> Result<Option<SessionState>, String> {
@@ -694,29 +726,23 @@ mod tests {
             .unwrap(),
         );
 
-        let pushed = mock.pushed_commands();
-        assert_eq!(pushed.len(), 1);
-        assert_eq!(pushed[0].0, "agent-chat-1");
-        match &pushed[0].1 {
-            ChatCommand::UserMessage {
-                content,
-                attachments,
-                context_files,
-                suppress_auto_enrichment,
-                ..
-            } => {
-                assert_eq!(
-                    content.as_str(),
-                    Some(
-                        "[Planner STEER] Please add a test for empty filter list\n\nPlease adapt based on this and continue."
-                    )
-                );
-                assert!(attachments.is_empty());
-                assert!(context_files.is_empty());
-                assert!(!suppress_auto_enrichment);
-            }
-            _ => panic!("expected user message"),
-        }
+        let deliveries = mock.deliveries();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].0, "agent-chat-1");
+        let delivery = &deliveries[0].1;
+        assert_eq!(delivery.messages.len(), 1);
+        assert_eq!(delivery.messages[0].role, "user");
+        assert_eq!(
+            delivery.messages[0].content.content_text_only(),
+            "[Planner STEER] Please add a test for empty filter list\n\nPlease adapt based on this and continue."
+        );
+        assert_eq!(
+            delivery.push,
+            PushMode::Append,
+            "omitted push must default to append"
+        );
+        assert_eq!(delivery.source, "tools.agent_steer");
+        assert!(mock.pushed_commands().is_empty());
 
         let board = storage::load_board(gcx, "task-1").await.unwrap();
         let card = board.get_card("T-29").unwrap();
@@ -807,7 +833,7 @@ mod tests {
             .iter()
             .any(crate::chat::summarization::is_segment_summary));
         assert!(output.contains("Auto-compaction: applied before steering."));
-        assert_eq!(mock.pushed_commands().len(), 1);
+        assert_eq!(mock.deliveries().len(), 1);
     }
 
     #[tokio::test]
@@ -889,7 +915,7 @@ mod tests {
             .iter()
             .any(crate::chat::summarization::is_segment_summary));
         assert!(output.contains("Auto-compaction: applied before steering."));
-        assert_eq!(mock.pushed_commands().len(), 1);
+        assert_eq!(mock.deliveries().len(), 1);
     }
 
     #[tokio::test]
@@ -966,6 +992,132 @@ mod tests {
 
         assert!(mock.updates().is_empty());
         assert!(!output.contains("Auto-compaction: applied before steering."));
-        assert_eq!(mock.pushed_commands().len(), 1);
+        assert_eq!(mock.deliveries().len(), 1);
+    }
+
+    async fn steer_with(extra: &[(&str, Value)]) -> (Arc<MockChatFacade>, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(
+            temp.path(),
+            test_card("doing", Some("agent-chat-1".to_string())),
+        )
+        .await;
+        let mock = Arc::new(MockChatFacade::new(SessionState::ExecutingTools));
+        let ccx = planner_ccx(gcx, mock.clone(), "planner").await;
+        let mut call_args = vec![("card_id", json!("T-29")), ("message", json!("keep going"))];
+        call_args.extend(extra.iter().cloned());
+
+        let output = tool_output_text(
+            ToolAgentSteer::new()
+                .tool_execute(ccx, &"call".to_string(), &args(&call_args))
+                .await
+                .unwrap(),
+        );
+        (mock, output)
+    }
+
+    #[tokio::test]
+    async fn steer_priority_urgent_still_defaults_to_append() {
+        let (mock, output) = steer_with(&[("priority", json!("urgent"))]).await;
+
+        let deliveries = mock.deliveries();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(
+            deliveries[0].1.push,
+            PushMode::Append,
+            "priority=urgent must NOT imply preempt"
+        );
+        assert!(deliveries[0].1.messages[0]
+            .content
+            .content_text_only()
+            .starts_with("[Planner URGENT]"));
+        assert!(output.contains("push=append"));
+    }
+
+    #[tokio::test]
+    async fn steer_propagates_explicit_push_modes() {
+        for (raw, expected) in [
+            ("preempt", PushMode::Preempt),
+            ("append", PushMode::Append),
+            ("when_idle", PushMode::WhenIdle),
+        ] {
+            let (mock, output) = steer_with(&[("push", json!(raw))]).await;
+            let deliveries = mock.deliveries();
+            assert_eq!(deliveries.len(), 1);
+            assert_eq!(deliveries[0].1.push, expected, "push={raw}");
+            assert!(output.contains(&format!("push={raw}")));
+        }
+    }
+
+    #[tokio::test]
+    async fn steer_rejects_invalid_push_before_touching_the_board() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(
+            temp.path(),
+            test_card("doing", Some("agent-chat-1".to_string())),
+        )
+        .await;
+        let mock = Arc::new(MockChatFacade::new(SessionState::Idle));
+        let ccx = planner_ccx(gcx.clone(), mock.clone(), "planner").await;
+
+        let err = ToolAgentSteer::new()
+            .tool_execute(
+                ccx,
+                &"call".to_string(),
+                &args(&[
+                    ("card_id", json!("T-29")),
+                    ("message", json!("hi")),
+                    ("push", json!("immediately")),
+                ]),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_ascii_lowercase().contains("push"), "{err}");
+        assert!(mock.deliveries().is_empty());
+        let board = storage::load_board(gcx, "task-1").await.unwrap();
+        assert!(board.get_card("T-29").unwrap().status_updates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn steer_reports_not_delivered_when_card_is_rebound_after_reservation() {
+        let temp = tempfile::tempdir().unwrap();
+        let gcx = write_task(
+            temp.path(),
+            test_card("doing", Some("agent-chat-1".to_string())),
+        )
+        .await;
+        let target = CardTarget {
+            card_id: "T-29".to_string(),
+            title: "Steerable card".to_string(),
+            chat_id: "agent-chat-1".to_string(),
+        };
+        storage::update_board_atomic(gcx.clone(), "task-1", |board| {
+            board.get_card_mut("T-29").unwrap().agent_chat_id =
+                Some("replacement-chat".to_string());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let mock = Arc::new(MockChatFacade::new(SessionState::Idle));
+
+        let report = planner_delivery::deliver_to_card(
+            gcx,
+            mock.clone(),
+            "task-1",
+            &target,
+            CardGuard::doing(),
+            planner_delivery::single_message_delivery(
+                "hello".to_string(),
+                PushMode::Append,
+                "tools.agent_steer",
+                true,
+            ),
+        )
+        .await;
+
+        assert!(!report.reached_agent());
+        assert!(report.short_status().contains("agent_chat_id changed"));
+        assert!(mock.deliveries().is_empty());
     }
 }

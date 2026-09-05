@@ -32,10 +32,13 @@ import {
   updateMessage as updateMessageApi,
   removeMessage as removeMessageApi,
   cancelQueuedItem,
+  updateQueuedItemPriority,
+  updatePendingDelivery as updatePendingDeliveryApi,
   type GoalControlAction,
   type GoalBudgetCommand,
   type MessageContent,
 } from "../services/refact/chatCommands";
+import type { PushMode } from "../services/refact/chatSubscription";
 import type { UserMessage } from "../services/refact/types";
 
 type ContentItem =
@@ -349,6 +352,37 @@ export function useChatActions(explicitChatId?: string) {
     [chatId, config, apiKey],
   );
 
+  const setQueuedPriority = useCallback(
+    async (clientRequestId: string, priority: boolean) => {
+      if (!chatId) return false;
+      return updateQueuedItemPriority(
+        chatId,
+        clientRequestId,
+        priority,
+        config,
+        apiKey ?? undefined,
+      );
+    },
+    [chatId, config, apiKey],
+  );
+
+  const updatePendingDelivery = useCallback(
+    async (
+      deliveryId: string,
+      update: { push?: PushMode; cancel?: boolean },
+    ) => {
+      if (!chatId) return;
+      await updatePendingDeliveryApi(
+        chatId,
+        deliveryId,
+        update,
+        config,
+        apiKey ?? undefined,
+      );
+    },
+    [chatId, config, apiKey],
+  );
+
   return {
     submit,
     abort,
@@ -364,6 +398,8 @@ export function useChatActions(explicitChatId?: string) {
     removeMessage,
     regenerate,
     cancelQueued,
+    setQueuedPriority,
+    updatePendingDelivery,
   };
 }
 

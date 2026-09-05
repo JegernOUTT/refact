@@ -8,10 +8,10 @@ use tokio::sync::Mutex as AMutex;
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::goal_verifier::{
-    apply_goal_verdict_guarded, begin_goal_verification_if_needed, run_goal_verifier,
+    apply_goal_verdict_guarded_with_delivery, begin_goal_verification_if_needed, run_goal_verifier,
     GoalVerificationApplyOutcome, GoalVerificationBegin, GoalVerdict,
 };
-use crate::chat::types::ChatSession;
+use crate::chat::types::{ChatSession, PushMode};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 pub struct ToolValidateGoal {
@@ -33,7 +33,7 @@ impl Tool for ToolValidateGoal {
             description: "Validate the chat's active goal against its success criteria. If met, the goal is marked complete and pursuit stops; otherwise returns the remaining gaps.".to_string(),
             input_schema: json!({
                 "type": "object",
-                "properties": {},
+                "properties": {"push": PushMode::schema()},
                 "required": [],
             }),
             output_schema: None,
@@ -45,8 +45,9 @@ impl Tool for ToolValidateGoal {
         &mut self,
         ccx: Arc<AMutex<AtCommandsContext>>,
         tool_call_id: &String,
-        _args: &HashMap<String, Value>,
+        args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
+        let push = PushMode::from_args(args)?;
         let (app, chat_id) = {
             let ccx = ccx.lock().await;
             (ccx.app.clone(), ccx.chat_id.clone())
@@ -96,7 +97,13 @@ impl Tool for ToolValidateGoal {
         let reply = match run_goal_verifier(app, session_arc.clone()).await {
             Ok(reply) => reply,
             Err(error) => {
-                reset_after_verifier_error(session_arc.clone(), &error).await;
+                reset_after_verifier_error_with_delivery(
+                    session_arc.clone(),
+                    &error,
+                    push,
+                    Some(tool_call_id),
+                )
+                .await;
                 return tool_message(
                     tool_call_id,
                     format!("Goal validation could not run: {error}"),
@@ -108,12 +115,14 @@ impl Tool for ToolValidateGoal {
         let verifier_reply = reply.verifier_reply.clone();
         let outcome = {
             let mut session = session_arc.lock().await;
-            apply_goal_verdict_guarded(
+            apply_goal_verdict_guarded_with_delivery(
                 &mut session,
                 "validate_goal",
                 reply,
                 Some(epoch),
                 fork_trajectory_version,
+                push,
+                Some(tool_call_id),
             )
         };
         let content = validation_content(outcome, &verdict, &verifier_reply);
@@ -130,10 +139,25 @@ fn budget_exhausted_message() -> String {
     "Goal budget exhausted — cannot validate; the goal has hit its configured budget. Adjust the budget (set_goal_budget) or stop the goal.".to_string()
 }
 
+#[cfg(test)]
 async fn reset_after_verifier_error(session_arc: Arc<AMutex<ChatSession>>, error: &str) {
+    reset_after_verifier_error_with_delivery(session_arc, error, PushMode::Append, None).await;
+}
+
+async fn reset_after_verifier_error_with_delivery(
+    session_arc: Arc<AMutex<ChatSession>>,
+    error: &str,
+    push: PushMode,
+    tool_call_id: Option<&str>,
+) {
     let mut session = session_arc.lock().await;
-    let _ =
-        crate::chat::goal_verifier::handle_verifier_failure(&mut session, "validate_goal", error);
+    let _ = crate::chat::goal_verifier::handle_verifier_failure_with_delivery(
+        &mut session,
+        "validate_goal",
+        error,
+        push,
+        tool_call_id,
+    );
 }
 
 fn validation_content(
@@ -560,10 +584,10 @@ mod tests {
         assert_eq!(outcome, GoalVerificationApplyOutcome::Finalized);
         assert_eq!(session.runtime.state, SessionState::Idle);
         assert_eq!(session.goal_status, Some(GoalStatus::Completed));
-        assert_eq!(session.messages.len(), 1);
-        assert_eq!(session.post_tool_side_effects.len(), 1);
+        assert_eq!(session.messages.len(), 2);
+        assert!(session.post_tool_side_effects.is_empty());
         assert_eq!(
-            session.post_tool_side_effects[0].extra["event"]["payload"]["kind"],
+            session.messages.last().unwrap().extra["event"]["payload"]["kind"],
             json!("verified")
         );
         assert_eq!(
@@ -600,10 +624,10 @@ mod tests {
             session.goal.as_ref().unwrap().attempts[0].gaps,
             vec!["missing tests", "docs"]
         );
-        assert_eq!(session.messages.len(), 1);
-        assert_eq!(session.post_tool_side_effects.len(), 1);
+        assert_eq!(session.messages.len(), 2);
+        assert!(session.post_tool_side_effects.is_empty());
         assert_eq!(
-            session.post_tool_side_effects[0].extra["event"]["payload"]["kind"],
+            session.messages.last().unwrap().extra["event"]["payload"]["kind"],
             json!("verification_gaps")
         );
         assert!(session.command_queue.is_empty());

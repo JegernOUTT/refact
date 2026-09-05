@@ -4,6 +4,7 @@ import {
   getEngineEndpointIdentity,
   type EngineApiConfig,
 } from "./apiUrl";
+import type { PushMode } from "./chatSubscription";
 
 export type EngineApiConnection = EngineApiConfig;
 export type PortOrConnection = number | EngineApiConnection;
@@ -101,6 +102,12 @@ export type ChatCommandBase =
       type: "branch_from_chat";
       source_chat_id: string;
       up_to_message_id: string;
+    }
+  | {
+      type: "update_pending_delivery";
+      delivery_id: string;
+      push?: PushMode;
+      cancel?: boolean;
     }
   | {
       type: "browser_context_decision";
@@ -545,6 +552,25 @@ export async function sendBrowserContextDecision(
   await sendChatCommand(chatId, connection, apiKey, {
     type: "browser_context_decision",
     ...decision,
+  });
+}
+
+/**
+ * Change or cancel a pending delivery (queued item) that is not a legacy user
+ * message. Delivered items are immutable, so the engine rejects unknown ids.
+ */
+export async function updatePendingDelivery(
+  chatId: string,
+  deliveryId: string,
+  update: { push?: PushMode; cancel?: boolean },
+  connection: PortOrConnection,
+  apiKey?: string,
+): Promise<void> {
+  await sendChatCommand(chatId, connection, apiKey, {
+    type: "update_pending_delivery",
+    delivery_id: deliveryId,
+    ...(update.push === undefined ? {} : { push: update.push }),
+    ...(update.cancel === undefined ? {} : { cancel: update.cancel }),
   });
 }
 

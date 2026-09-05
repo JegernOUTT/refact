@@ -13,12 +13,14 @@ pub use refact_chat_api::chat_local_types::{
     PendingSkillDeactivation, TrajectorySourceIdentity,
 };
 pub use refact_chat_api::{
-    ActiveCommandContext, BackgroundAgentSummary, BrowserMeta, BrowserSnapshot, BrowserTabInfo,
-    BuddyThreadMeta, ChatCommand, ChatEvent, CommandRequest, CompressionPhase, CompressionReason,
-    CriterionVerdict, DeltaOp, DiffBox, EventEnvelope, GoalAttempt, GoalBudget, GoalCriterion,
-    GoalEvent, GoalLedgerEntry, GoalLedgerOp, GoalProgress, GoalSnapshot, GoalStatus, PauseReason,
+    delivery_id_of_message, ActiveCommandContext, BackgroundAgentSummary, BrowserMeta,
+    BrowserSnapshot, BrowserTabInfo, BuddyThreadMeta, ChatCommand, ChatEvent, CommandRequest,
+    CompressionPhase, CompressionReason, CriterionVerdict, DeliveryOutcome, DeltaOp, DiffBox,
+    EventEnvelope, GoalAttempt, GoalBudget, GoalCriterion, GoalEvent, GoalLedgerEntry,
+    GoalLedgerOp, GoalProgress, GoalSnapshot, GoalStatus, PauseReason, PendingDelivery, PushMode,
     QueuedItem, RuntimeState, SessionState, TaskMeta, ThreadParams, TimelineEntry,
     ToolDecisionItem, WindowBounds, WorktreeMeta, CLIENT_MESSAGE_ID_EXTRA_KEY,
+    DELIVERY_COMMAND_TYPE, DELIVERY_EXTRA_KEY,
 };
 
 fn epoch_ms_now() -> u64 {
@@ -349,6 +351,20 @@ pub struct ChatSession {
     pub task_agent_error: Option<String>,
     pub pending_browser_message: Option<PendingBrowserMessage>,
     pub post_tool_side_effects: VecDeque<ChatMessage>,
+    /// Deliveries accepted by this session and waiting for their `push` boundary.
+    pub pending_deliveries: VecDeque<PendingDelivery>,
+    /// Read-only mirror of deliveries owned by the background-agent runner for
+    /// this chat. Included in queue snapshots for the UI, never drained here —
+    /// the runner registry stays authoritative for them.
+    pub runner_pending_deliveries: Vec<PendingDelivery>,
+    /// Delivery ids already appended to this chat, for restart-safe dedupe.
+    pub delivered_delivery_ids: HashSet<String>,
+    /// Nesting depth of the generation turn loop. Zero means the whole turn
+    /// (assistant + multi-step tool loop) has ended, which is the `when_idle`
+    /// boundary; the `Idle` runtime state alone can be transient between steps.
+    pub turn_depth: usize,
+    /// Coalesced non-interrupting generation request from landed deliveries.
+    pub delivery_wake_sources: HashSet<&'static str>,
     pub active_command: ActiveCommandContext,
     pub skills_available_count: usize,
     pub skills_included: Vec<String>,

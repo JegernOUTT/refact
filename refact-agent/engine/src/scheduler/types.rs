@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use refact_core::chat_types::PushMode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -63,6 +64,10 @@ pub struct Job {
     pub trigger: Trigger,
     pub action: Action,
     pub delivery: Delivery,
+    /// When a fire is allowed to land in a chat that may be busy. Orthogonal to
+    /// `delivery`, which picks *where* the output goes.
+    #[serde(default)]
+    pub push: PushMode,
     pub last_fired_at_ms: Option<u64>,
     pub fire_count: u32,
     pub last_status: Option<String>,
@@ -107,6 +112,7 @@ impl Job {
                 tools: None,
             },
             delivery: Delivery::Chat,
+            push: PushMode::default(),
             last_fired_at_ms: None,
             fire_count: 0,
             last_status: None,
@@ -317,6 +323,7 @@ pub struct CronTaskResponse {
     pub action_kind: String,
     pub delivery_kind: String,
     pub delivery: DeliveryResponse,
+    pub push: PushMode,
     pub chat_id: Option<String>,
     pub target: String,
     pub isolated: bool,
@@ -385,6 +392,7 @@ pub fn cron_task_response(task: &Job, next_fire_at_ms: u64) -> CronTaskResponse 
         action_kind: task.action_kind().to_string(),
         delivery_kind: delivery_kind(&task.delivery).to_string(),
         delivery: DeliveryResponse::from_delivery(&task.delivery),
+        push: task.push,
         chat_id: task.chat_id().map(str::to_string),
         target: if isolated {
             "isolated"
@@ -459,6 +467,20 @@ fn duration_label(ms: u64) -> String {
 
 fn first_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
+}
+
+/// Parse the optional `push` argument shared by cron_create / cron_update / HTTP.
+/// `None` means "not supplied": create defaults to `Append`, update preserves.
+pub fn push_from_value(value: Option<&Value>) -> Result<Option<PushMode>, String> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => PushMode::parse(value).map(Some),
+        Some(other) => Err(format!("argument `push` must be a string, got {other}")),
+    }
+}
+
+pub fn push_schema() -> Value {
+    PushMode::schema()
 }
 
 pub fn delivery_from_value(value: &Value) -> Result<Delivery, String> {
@@ -542,6 +564,7 @@ struct RawJob {
     trigger: Option<Trigger>,
     action: Option<Action>,
     delivery: Option<Delivery>,
+    push: Option<PushMode>,
     last_fired_at_ms: Option<u64>,
     fire_count: Option<u32>,
     last_status: Option<String>,
@@ -583,6 +606,7 @@ impl From<RawJob> for Job {
                 .action
                 .unwrap_or_else(|| legacy_action(raw.prompt, raw.chat_id, raw.mode)),
             delivery: raw.delivery.unwrap_or(Delivery::Chat),
+            push: raw.push.unwrap_or_default(),
             last_fired_at_ms: raw.last_fired_at_ms,
             fire_count: raw.fire_count.unwrap_or_default(),
             last_status: raw.last_status,
@@ -683,6 +707,7 @@ mod tests {
                 tools: Some(vec!["cat".to_string()]),
             },
             delivery: Delivery::Chat,
+            push: PushMode::default(),
             last_fired_at_ms: Some(2_000),
             fire_count: 3,
             last_status: Some("ok".to_string()),

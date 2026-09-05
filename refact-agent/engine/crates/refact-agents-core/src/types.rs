@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 pub use refact_chat_api::{AgentQuestionSummary, BackgroundAgentSummary};
 use serde::{Deserialize, Serialize};
+use refact_chat_api::{PendingDelivery, PushMode};
 
 pub const NO_TEXT_RESULT_SUMMARY: &str =
     "<no text response — see child trajectory for full details>";
@@ -91,6 +92,12 @@ pub struct BackgroundAgent {
     pub conflict_summary: Option<String>,
     pub completion_message_id: Option<String>,
     pub completion_pushed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub completion_push: PushMode,
+    #[serde(default)]
+    pub pending_deliveries: Vec<PendingDelivery>,
+    #[serde(default)]
+    pub delivery_ids: Vec<String>,
     #[serde(default)]
     pub deferred_at: Option<DateTime<Utc>>,
     pub model: String,

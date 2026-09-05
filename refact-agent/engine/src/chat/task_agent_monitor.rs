@@ -26,8 +26,9 @@ use crate::chat::retry_policy::{
     user_error_info,
 };
 use crate::chat::types::{ChatSession, SessionState, TaskMeta};
-use crate::chat::{get_or_create_session_with_trajectory, process_command_queue};
-use crate::chat::types::{CommandRequest, ChatCommand, EnqueueCommandOutcome};
+use crate::chat::get_or_create_session_with_trajectory;
+use crate::chat::delivery::deliver_to_chat;
+use refact_core::chat_types::{DeliveryOutcome, PendingDelivery, PushMode};
 use crate::worktrees::service::WorktreeService;
 use crate::worktrees::git;
 use refact_buddy_core::types::BuddyRuntimeEvent;
@@ -57,14 +58,6 @@ fn task_agent_monitor_notice(payload: serde_json::Value, content: String) -> Cha
         payload,
         content,
     )
-}
-
-fn regenerate_request(client_request_prefix: &str) -> CommandRequest {
-    CommandRequest {
-        client_request_id: format!("{}-{}", client_request_prefix, uuid::Uuid::new_v4()),
-        priority: true,
-        command: ChatCommand::Regenerate {},
-    }
 }
 
 /// A legitimate planner session can come back without `task_meta` when its first
@@ -147,8 +140,8 @@ async fn ensure_planner_task_meta(
 
 /// Wake the planner for a blocking question raised via `agent_ask_planner`.
 /// The question itself is already durably recorded on the card as an `[ASK:...]`
-/// status update; this push makes `urgency=block` interrupt the planner's idle
-/// wait instead of relying on its next `task_list` poll.
+/// status update; the chosen push mode controls when the notice lands, while
+/// wake=true resumes an idle planner instead of relying on its next poll.
 pub(crate) async fn notify_planner_blocking_question(
     app: AppState,
     task_id: &str,
@@ -156,7 +149,8 @@ pub(crate) async fn notify_planner_blocking_question(
     planner_chat_id: &str,
     question_id: &str,
     question: &str,
-) -> Result<bool, String> {
+    push: PushMode,
+) -> Result<DeliveryOutcome, String> {
     let notice = task_agent_monitor_notice(
         json!({
             "kind": "blocking_question",
@@ -184,25 +178,18 @@ pub(crate) async fn notify_planner_blocking_question(
     )
     .await?;
 
-    let processor_flag = {
-        let mut session = planner_session.lock().await;
-        let request = regenerate_request("task-agent-blocking-question");
-        if session.enqueue_priority_command(request) != EnqueueCommandOutcome::Accepted {
-            return Ok(false);
-        }
-        session.add_message(notice);
-        session.queue_processor_running.clone()
-    };
-
-    if !processor_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        tokio::spawn(process_command_queue(
-            app.clone(),
-            planner_session.clone(),
-            processor_flag,
-        ));
-    }
-
-    Ok(true)
+    deliver_to_chat(
+        app,
+        planner_chat_id,
+        PendingDelivery::with_id(
+            format!("task-agent-blocking-question:{task_id}:{card_id}:{question_id}"),
+            vec![notice],
+            push,
+            TASK_AGENT_MONITOR_SOURCE,
+            true,
+        ),
+    )
+    .await
 }
 
 fn make_runtime_event(
@@ -314,6 +301,7 @@ fn agent_session_idle_stall_ready(session: &ChatSession, task_id: &str, card: &B
         || session.draft_message.is_some()
         || session.pending_browser_message.is_some()
         || !session.command_queue.is_empty()
+        || !session.pending_deliveries.is_empty()
         || !session.runtime.pause_reasons.is_empty()
     {
         return false;
@@ -420,23 +408,17 @@ async fn notify_planner_about_reasoning_token_limit(
         return Ok(false);
     }
 
-    let processor_flag = {
-        let mut session = planner_session.lock().await;
-        let request = regenerate_request("task-agent-reasoning-token-limit");
-        if session.enqueue_priority_command(request) != EnqueueCommandOutcome::Accepted {
-            return Ok(false);
-        }
-        session.add_message(notice);
-        session.queue_processor_running.clone()
-    };
-
-    if !processor_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        tokio::spawn(process_command_queue(
-            app.clone(),
-            planner_session.clone(),
-            processor_flag,
-        ));
-    }
+    deliver_to_chat(
+        app.clone(),
+        planner_chat_id,
+        PendingDelivery::new(
+            vec![notice],
+            PushMode::Append,
+            TASK_AGENT_MONITOR_SOURCE,
+            true,
+        ),
+    )
+    .await?;
 
     Ok(true)
 }
@@ -701,23 +683,17 @@ async fn notify_planner_about_stalled_agent(
         return Ok(false);
     }
 
-    let processor_flag = {
-        let mut session = planner_session.lock().await;
-        let request = regenerate_request("task-agent-stall");
-        if session.enqueue_priority_command(request) != EnqueueCommandOutcome::Accepted {
-            return Ok(false);
-        }
-        session.add_message(notice);
-        session.queue_processor_running.clone()
-    };
-
-    if !processor_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        tokio::spawn(process_command_queue(
-            app.clone(),
-            planner_session.clone(),
-            processor_flag,
-        ));
-    }
+    deliver_to_chat(
+        app.clone(),
+        planner_chat_id,
+        PendingDelivery::new(
+            vec![notice],
+            PushMode::Append,
+            TASK_AGENT_MONITOR_SOURCE,
+            true,
+        ),
+    )
+    .await?;
 
     tracing::info!(
         "Notified planner {} about stalled agent for card {} ({}): {}",
@@ -1255,23 +1231,17 @@ pub(crate) async fn notify_planner_agents_finished(
     )
     .await?;
 
-    let processor_flag = {
-        let mut session = planner_session.lock().await;
-        let request = regenerate_request("task-agent-finished");
-        if session.enqueue_priority_command(request) != EnqueueCommandOutcome::Accepted {
-            return Ok(());
-        }
-        session.add_message(notice);
-        session.queue_processor_running.clone()
-    };
-
-    if !processor_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        tokio::spawn(process_command_queue(
-            app.clone(),
-            planner_session.clone(),
-            processor_flag,
-        ));
-    }
+    deliver_to_chat(
+        app.clone(),
+        &planner_chat_id,
+        PendingDelivery::new(
+            vec![notice],
+            PushMode::Append,
+            TASK_AGENT_MONITOR_SOURCE,
+            true,
+        ),
+    )
+    .await?;
 
     // Best-effort: mark summary as emitted.
     if let Ok(mut meta) = storage::load_task_meta(app.gcx.clone(), task_id).await {
@@ -1748,23 +1718,17 @@ async fn sweep_planner_wake_ups(app: AppState) -> Result<(), String> {
                 message,
             );
 
-            let processor_flag = {
-                let mut session = session_arc.lock().await;
-                let request = regenerate_request("planner-wake-up");
-                if session.enqueue_priority_command(request) != EnqueueCommandOutcome::Accepted {
-                    continue;
-                }
-                session.add_message(notice);
-                session.queue_processor_running.clone()
-            };
-
-            if !processor_flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                tokio::spawn(process_command_queue(
-                    app.clone(),
-                    session_arc.clone(),
-                    processor_flag,
-                ));
-            }
+            deliver_to_chat(
+                app.clone(),
+                &chat_id,
+                PendingDelivery::new(
+                    vec![notice],
+                    PushMode::Append,
+                    TASK_AGENT_MONITOR_SOURCE,
+                    true,
+                ),
+            )
+            .await?;
 
             tracing::info!(
                 "Auto-woke planner {} for task {} (wake_up_at deadline passed)",
@@ -2024,6 +1988,7 @@ async fn check_for_stuck_agents(app: AppState) -> Result<(), String> {
             // If agent is idle and hasn't done anything in a long time, might be stuck
             if session.runtime.state == SessionState::Idle
                 && session.command_queue.is_empty()
+                && session.pending_deliveries.is_empty()
                 && elapsed > AGENT_STUCK_TIMEOUT
             {
                 drop(session);
@@ -2218,7 +2183,14 @@ mod tests {
             card_id: None,
             planner_chat_id: None,
         });
-        planner_session.runtime.state = SessionState::WaitingUserInput;
+        planner_session.runtime.state = SessionState::Generating;
+        planner_session.draft_message = Some(ChatMessage {
+            role: "assistant".to_string(),
+            content: crate::call_validation::ChatContent::SimpleText(
+                "Unfinished planner draft".to_string(),
+            ),
+            ..Default::default()
+        });
         planner_session
             .queue_processor_running
             .store(true, Ordering::SeqCst);
@@ -2256,11 +2228,12 @@ mod tests {
         );
 
         let planner = planner_arc.lock().await;
-        assert_eq!(planner.command_queue.len(), 1);
-        let queued = planner.command_queue.front().unwrap();
-        assert!(queued.priority);
-        assert!(matches!(&queued.command, ChatCommand::Regenerate {}));
-        let notice = planner.messages.last().unwrap();
+        assert_eq!(planner.pending_deliveries.len(), 1);
+        assert!(planner.command_queue.is_empty());
+        let queued = planner.pending_deliveries.front().unwrap();
+        assert_eq!(queued.push, PushMode::Append);
+        assert!(queued.wake);
+        let notice = queued.messages.last().unwrap();
         assert_eq!(notice.role, "event");
         assert_eq!(
             notice.extra["event"]["source"],
@@ -2275,6 +2248,61 @@ mod tests {
         assert!(text.contains("T-1"));
         assert!(text.contains("restart_agent"));
         assert!(text.contains(&agent_chat_id));
+    }
+
+    #[tokio::test]
+    async fn blocking_question_append_preserves_busy_draft_and_deduplicates() {
+        let (_temp, app, task_id, _agent_chat_id, _agent_arc, planner_arc) =
+            setup_monitor_case("doing", SessionState::Idle, Duration::from_secs(90), vec![]).await;
+        let (draft, messages) = {
+            let planner = planner_arc.lock().await;
+            (
+                serde_json::to_value(&planner.draft_message).unwrap(),
+                serde_json::to_value(&planner.messages).unwrap(),
+            )
+        };
+        for expected in [DeliveryOutcome::Queued, DeliveryOutcome::Duplicate] {
+            assert_eq!(
+                notify_planner_blocking_question(
+                    app.clone(),
+                    &task_id,
+                    "T-1",
+                    "planner-test",
+                    "q-1",
+                    "Which approach?",
+                    PushMode::Append,
+                )
+                .await
+                .unwrap(),
+                expected
+            );
+        }
+        let mut planner = planner_arc.lock().await;
+        assert_eq!(serde_json::to_value(&planner.draft_message).unwrap(), draft);
+        assert_eq!(serde_json::to_value(&planner.messages).unwrap(), messages);
+        assert_eq!(planner.runtime.state, SessionState::Generating);
+        assert!(!planner.user_interrupt_flag.load(Ordering::SeqCst));
+        assert!(planner.command_queue.is_empty());
+        assert_eq!(planner.pending_deliveries.len(), 1);
+        let delivery = planner.pending_deliveries.front().unwrap();
+        assert_eq!(delivery.push, PushMode::Append);
+        assert!(delivery.wake);
+        assert_eq!(
+            delivery.id,
+            format!("task-agent-blocking-question:{task_id}:T-1:q-1")
+        );
+        let draft = planner.draft_message.take().unwrap();
+        planner.add_message(draft);
+        let (delivered, wake) = planner.drain_pending_deliveries();
+        assert_eq!(delivered.len(), 1);
+        assert!(wake);
+        assert!(planner.pending_deliveries.is_empty());
+        assert_eq!(planner.messages.len(), 2);
+        assert_eq!(planner.messages[0].role, "assistant");
+        assert_eq!(
+            planner.messages[1].extra["event"]["payload"]["kind"],
+            json!("blocking_question")
+        );
     }
 
     #[tokio::test]
@@ -2294,7 +2322,7 @@ mod tests {
                     .message
                     .starts_with(STALL_PLANNER_NOTIFY_STATUS_PREFIX)
             }));
-            assert!(planner_arc.lock().await.command_queue.is_empty());
+            assert!(planner_arc.lock().await.pending_deliveries.is_empty());
         }
     }
 
@@ -2316,7 +2344,7 @@ mod tests {
                     .message
                     .starts_with(STALL_PLANNER_NOTIFY_STATUS_PREFIX)
             }));
-            assert!(planner_arc.lock().await.command_queue.is_empty());
+            assert!(planner_arc.lock().await.pending_deliveries.is_empty());
         }
     }
 
@@ -2341,7 +2369,7 @@ mod tests {
             .unwrap();
         let card = board.get_card("T-1").unwrap();
         assert_eq!(stall_planner_notifications(card).0, 1);
-        assert!(planner_arc.lock().await.command_queue.is_empty());
+        assert!(planner_arc.lock().await.pending_deliveries.is_empty());
     }
 
     #[tokio::test]
@@ -2363,12 +2391,21 @@ mod tests {
             1
         );
         let planner = planner_arc.lock().await;
-        assert_eq!(planner.command_queue.len(), 1);
-        assert!(matches!(
-            &planner.command_queue.front().unwrap().command,
-            ChatCommand::Regenerate {}
-        ));
-        let text = planner.messages.last().unwrap().content.content_text_only();
+        assert_eq!(planner.pending_deliveries.len(), 1);
+        assert!(planner.command_queue.is_empty());
+        assert_eq!(
+            planner.pending_deliveries.front().unwrap().push,
+            PushMode::Append
+        );
+        let text = planner
+            .pending_deliveries
+            .front()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .content_text_only();
         assert!(text.contains("Completed state but the card is still in `doing`"));
     }
 
@@ -2625,12 +2662,25 @@ mod tests {
         );
 
         let planner = planner_arc.lock().await;
-        assert_eq!(planner.command_queue.len(), 1, "planner should be notified");
-        assert!(matches!(
-            &planner.command_queue.front().unwrap().command,
-            ChatCommand::Regenerate {}
-        ));
-        let text = planner.messages.last().unwrap().content.content_text_only();
+        assert_eq!(
+            planner.pending_deliveries.len(),
+            1,
+            "planner should be notified"
+        );
+        assert!(planner.command_queue.is_empty());
+        assert_eq!(
+            planner.pending_deliveries.front().unwrap().push,
+            PushMode::Append
+        );
+        let text = planner
+            .pending_deliveries
+            .front()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .content_text_only();
         assert!(text.contains("stream stalled"));
         assert!(text.contains("Generating"));
     }
@@ -2662,12 +2712,21 @@ mod tests {
 
         assert!(agent_arc.lock().await.command_queue.is_empty());
         let planner = planner_arc.lock().await;
-        assert_eq!(planner.command_queue.len(), 1);
-        assert!(matches!(
-            &planner.command_queue.front().unwrap().command,
-            ChatCommand::Regenerate {}
-        ));
-        let text = planner.messages.last().unwrap().content.content_text_only();
+        assert_eq!(planner.pending_deliveries.len(), 1);
+        assert!(planner.command_queue.is_empty());
+        assert_eq!(
+            planner.pending_deliveries.front().unwrap().push,
+            PushMode::Append
+        );
+        let text = planner
+            .pending_deliveries
+            .front()
+            .unwrap()
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .content_text_only();
         assert!(text.contains("tool execution stalled"));
     }
 
@@ -2695,7 +2754,7 @@ mod tests {
             .status_updates
             .iter()
             .all(|u| { !u.message.starts_with(STALL_PLANNER_NOTIFY_STATUS_PREFIX) }));
-        assert!(planner_arc.lock().await.command_queue.is_empty());
+        assert!(planner_arc.lock().await.pending_deliveries.is_empty());
     }
 
     #[tokio::test]
@@ -2738,7 +2797,7 @@ mod tests {
         // the standard "agent finished" planner summary message.
         let planner = planner_arc.lock().await;
         assert!(
-            !planner.command_queue.is_empty(),
+            !planner.pending_deliveries.is_empty(),
             "planner should receive a failure summary, not a stall notification"
         );
     }
@@ -2841,7 +2900,7 @@ mod tests {
 
         let session = planner_arc.lock().await;
         assert_eq!(
-            session.command_queue.len(),
+            session.messages.len(),
             1,
             "wake-up message should be queued"
         );
@@ -2849,9 +2908,12 @@ mod tests {
             session.wake_up_at.is_none(),
             "wake_up_at cleared after fire"
         );
-        let cmd = session.command_queue.front().unwrap();
-        assert!(cmd.priority);
-        assert!(matches!(&cmd.command, ChatCommand::Regenerate {}));
+        assert!(session.command_queue.is_empty());
+        assert!(session.pending_deliveries.is_empty());
+        assert_eq!(
+            session.messages.last().unwrap().extra["delivery"]["push"],
+            json!("append")
+        );
         assert!(
             session
                 .messages
@@ -2875,7 +2937,7 @@ mod tests {
 
         let session = planner_arc.lock().await;
         assert_eq!(
-            session.command_queue.len(),
+            session.messages.len(),
             1,
             "only one wake-up message after two sweeps"
         );
@@ -2905,11 +2967,8 @@ mod tests {
         check_for_stuck_agents(app.clone()).await.unwrap();
 
         let session = planner_arc.lock().await;
-        assert_eq!(session.command_queue.len(), 1);
-        assert!(matches!(
-            &session.command_queue.front().unwrap().command,
-            ChatCommand::Regenerate {}
-        ));
+        assert_eq!(session.messages.len(), 1);
+        assert!(session.command_queue.is_empty());
         let text = session.messages.last().unwrap().content.content_text_only();
         assert!(text.contains("T-1"), "message should contain card T-1");
     }

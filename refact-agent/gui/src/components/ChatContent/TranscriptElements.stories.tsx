@@ -94,7 +94,7 @@ export const HiddenEvents: Story = {
     docs: {
       description: {
         story:
-          "Process completion, cron, and system-notice messages are intentionally absent from ordinary transcript turns; only the surrounding user and assistant messages are rendered by ChatContent.",
+          "Process completion, cron, and system-notice messages are intentionally absent from ordinary transcript turns; they are collected in Event history while surrounding user and assistant messages remain ordinary turns.",
       },
     },
   },
@@ -104,8 +104,15 @@ export const HiddenEvents: Story = {
       "Scheduled transcript maintenance fired.",
       "Internal transcript synchronization notice.",
     ];
-    const transcriptText = canvasElement.textContent ?? "";
+    const transcript = canvasElement.cloneNode(true) as HTMLElement;
+    transcript.querySelector('[data-testid="event-log"]')?.remove();
+    const transcriptText = transcript.textContent ?? "";
+    const historyText =
+      canvasElement.querySelector('[data-testid="event-log"]')?.textContent ??
+      "";
     for (const eventText of hiddenEventText) {
+      if (!historyText.includes(eventText))
+        throw new Error(`Missing history event: ${eventText}`);
       if (transcriptText.includes(eventText)) {
         throw new Error(
           `Hidden event rendered as a transcript turn: ${eventText}`,

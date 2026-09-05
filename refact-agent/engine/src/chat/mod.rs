@@ -6,6 +6,7 @@ mod cache_stability_tests;
 pub mod cloud_token_count;
 pub mod config;
 mod content;
+pub mod delivery;
 pub mod diagnostics;
 mod generation;
 pub mod goal_monitor;
@@ -54,6 +55,7 @@ pub use session::{
     try_restore_session_if_trajectory_exists, snapshot_with_agents,
 };
 pub use queue::process_command_queue;
+pub use delivery::{deliver_to_chat, drain_deliveries_at_boundary, update_pending_delivery_in_chat};
 pub use trajectories::{
     start_trajectory_watcher, TrajectoryEvent, TrajectoryMeta, handle_v1_trajectories_list,
     handle_v1_trajectories_all, handle_v1_trajectories_get, handle_v1_trajectory_path,

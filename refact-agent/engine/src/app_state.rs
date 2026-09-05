@@ -132,6 +132,28 @@ impl EngineChatSessionFacade {
         priority: bool,
     ) -> Result<(), String> {
         let app = AppState::from_gcx(self.gcx.clone()).await;
+        match command {
+            refact_chat_api::ChatCommand::DeliverMessages { delivery } => {
+                return chat::deliver_to_chat(app, chat_id, delivery)
+                    .await
+                    .map(|_| ());
+            }
+            refact_chat_api::ChatCommand::UpdatePendingDelivery {
+                delivery_id,
+                push,
+                cancel,
+            } => {
+                return chat::update_pending_delivery_in_chat(
+                    app,
+                    chat_id,
+                    &delivery_id,
+                    push,
+                    cancel,
+                )
+                .await;
+            }
+            _ => {}
+        }
         let session_arc = chat::get_or_create_session_with_trajectory(
             app.clone(),
             &self.gcx.chat_sessions,
@@ -162,6 +184,36 @@ impl EngineChatSessionFacade {
 
 #[async_trait]
 impl ChatSessionFacade for EngineChatSessionFacade {
+    async fn deliver_messages(
+        &self,
+        chat_id: &str,
+        delivery: refact_core::chat_types::PendingDelivery,
+    ) -> Result<refact_core::chat_types::DeliveryOutcome, String> {
+        chat::deliver_to_chat(
+            AppState::from_gcx(self.gcx.clone()).await,
+            chat_id,
+            delivery,
+        )
+        .await
+    }
+
+    async fn update_pending_delivery(
+        &self,
+        chat_id: &str,
+        delivery_id: &str,
+        push: Option<refact_core::chat_types::PushMode>,
+        cancel: bool,
+    ) -> Result<(), String> {
+        chat::update_pending_delivery_in_chat(
+            AppState::from_gcx(self.gcx.clone()).await,
+            chat_id,
+            delivery_id,
+            push,
+            cancel,
+        )
+        .await
+    }
+
     async fn session_snapshot(&self, chat_id: &str) -> Result<ChatSessionSnapshot, String> {
         let app = AppState::from_gcx(self.gcx.clone()).await;
         let session_arc =

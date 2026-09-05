@@ -47,7 +47,10 @@ describe("chat bottom dock clearance styles", () => {
       "--rf-composer-clearance",
     );
     expect(rule(contentCss, ".queuedMessagesContainer")).toContain(
-      "bottom: var(--rf-space-2)",
+      "flex: 0 0 auto",
+    );
+    expect(rule(contentCss, ".queuedMessagesContainer")).not.toContain(
+      "position: absolute",
     );
     expect(rule(followButtonCss, ".root")).not.toContain(
       "--rf-composer-clearance",

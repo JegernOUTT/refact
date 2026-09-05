@@ -125,6 +125,7 @@ mod tests {
                 duration_ms: Some(123),
                 short_description: "test process".to_string(),
                 mode: ExecMode::Background,
+                push: Default::default(),
             },
         );
 
@@ -938,6 +939,10 @@ mod tests {
                 command_type: "user_message".to_string(),
                 preview: "Hello".to_string(),
                 content: "Hello".to_string(),
+                push: None,
+                source: None,
+                event: None,
+                enqueued_at_ms: None,
             }],
         };
 

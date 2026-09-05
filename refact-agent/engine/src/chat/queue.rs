@@ -22,7 +22,9 @@ use crate::yaml_configs::customization_types::ModeConfig;
 use super::types::*;
 use super::browser_context;
 use super::content::parse_content_with_attachments;
-use super::generation::{start_generation, prepare_session_preamble_and_knowledge};
+use super::generation::{
+    start_generation, prepare_session_preamble_and_knowledge, maybe_save_trajectory_with_intent,
+};
 use super::goal_verifier::{
     should_verify_goal_on_done, verify_goal_before_completion, GoalCompletionGateOutcome,
 };
@@ -31,7 +33,7 @@ use super::tools::{
     resolve_tool_call_aliases_with_catalog,
 };
 use super::trajectories::{
-    maybe_save_trajectory_with_intent, maybe_save_trajectory_background_with_intent,
+    maybe_save_trajectory_background_with_intent,
 };
 use crate::ext::slash_expand::expand_slash_command;
 use crate::ext::skills_context::{expand_skill_includes, SKILLS_CONTEXT_MARKER};
@@ -813,12 +815,7 @@ fn goal_base_exists_including_pending(session: &ChatSession) -> bool {
 }
 
 fn goal_delta_count_including_pending(session: &ChatSession) -> usize {
-    crate::chat::goal_role::goal_delta_events(session).len()
-        + session
-            .post_tool_side_effects
-            .iter()
-            .filter(|message| is_goal_delta_event(message))
-            .count()
+    crate::chat::goal_role::goal_delta_events(&session.accepted_control_projection()).len()
 }
 
 fn update_goal_result(
@@ -958,25 +955,6 @@ fn handle_update_goal_command(
     Ok(update_goal_result(seq, truncation))
 }
 
-fn purge_goal_generated_commands(session: &mut ChatSession) -> usize {
-    let mut purged_ids = Vec::new();
-    session.command_queue.retain(|request| {
-        let remove = matches!(request.command, ChatCommand::Regenerate {})
-            && (request.client_request_id.starts_with("goal-nudge-")
-                || request
-                    .client_request_id
-                    .starts_with("goal-verifier-regenerate-"));
-        if remove {
-            purged_ids.push(request.client_request_id.clone());
-        }
-        !remove
-    });
-    for request_id in &purged_ids {
-        session.clear_queue_timestamp(request_id);
-    }
-    purged_ids.len()
-}
-
 fn handle_goal_control_command(
     session: &mut ChatSession,
     action: String,
@@ -1001,7 +979,7 @@ fn handle_goal_control_command(
     }
     session.clear_goal_stopped_by_abort_marker();
     if matches!(status, GoalStatus::Paused | GoalStatus::Stopped) {
-        purge_goal_generated_commands(session);
+        session.purge_goal_generated_wakes();
     }
     session.goal_set_status_reason(status, "goal_control");
     if status == GoalStatus::Stopped {
@@ -1203,7 +1181,19 @@ pub async fn resolve_worktree_setparams_update(
     Ok(None)
 }
 
-pub async fn process_command_queue(
+pub fn process_command_queue(
+    app: AppState,
+    session_arc: Arc<AMutex<ChatSession>>,
+    processor_running: Arc<AtomicBool>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(process_command_queue_inner(
+        app,
+        session_arc,
+        processor_running,
+    ))
+}
+
+async fn process_command_queue_inner(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
     processor_running: Arc<AtomicBool>,
@@ -1263,8 +1253,9 @@ pub async fn process_command_queue(
             let _ = Pin::as_mut(&mut waiter).enable();
 
             let state = session.runtime.state;
-            let is_busy =
-                state == SessionState::Generating || state == SessionState::ExecutingTools;
+            let is_busy = state == SessionState::Generating
+                || state == SessionState::ExecutingTools
+                || session.turn_depth > 0;
 
             if is_busy {
                 session
@@ -1302,6 +1293,19 @@ pub async fn process_command_queue(
                         .fetch_add(1, Ordering::Relaxed);
                     (None, Some(waiter))
                 }
+            } else if !session.delivery_wake_sources.is_empty() {
+                session.delivery_wake_sources.clear();
+                session.abort_flag.store(false, Ordering::SeqCst);
+                session.user_interrupt_flag.store(false, Ordering::SeqCst);
+                session.set_runtime_state(SessionState::Generating, None);
+                (
+                    Some(CommandRequest {
+                        client_request_id: format!("delivery-wake-{}", uuid::Uuid::new_v4()),
+                        priority: false,
+                        command: ChatCommand::Regenerate {},
+                    }),
+                    None,
+                )
             } else if session.command_queue.is_empty() {
                 session
                     .queue_processor_counters
@@ -1438,361 +1442,370 @@ pub async fn process_command_queue(
                 suppress_auto_enrichment,
                 client_message_id,
             } => {
-                let mut skill_activation_info = None;
-                if let Some(text) = content.as_str() {
-                    match expand_slash_command(app.clone(), text).await {
-                        Ok(Some(expanded)) => {
-                            skill_activation_info = expanded.skill_to_activate;
-                            content = serde_json::Value::String(expanded.expanded_text);
-                            let mut session = session_arc.lock().await;
-                            session.active_command = ActiveCommandContext {
-                                name: expanded.source_command,
-                                allowed_tools: expanded.allowed_tools,
-                                model_override: expanded.model_override,
-                                context_fork: expanded.context_fork,
-                                started_at_index: None,
-                                activation_tool_call_id: None,
-                            };
-                        }
-                        Ok(None) => {
-                            // No slash command — only reset active_command when no skill is
-                            // active. While a skill is active, active_command carries the
-                            // compaction anchor (started_at_index) and must not be wiped on
-                            // every normal user message.
-                            let mut session = session_arc.lock().await;
-                            if session.thread.active_skill.is_none() {
-                                session.active_command = ActiveCommandContext::default();
+                // Keep preparation's stack temporaries out of the generation poll frame.
+                let prepared = Box::pin(async {
+                    let mut skill_activation_info = None;
+                    if let Some(text) = content.as_str() {
+                        match expand_slash_command(app.clone(), text).await {
+                            Ok(Some(expanded)) => {
+                                skill_activation_info = expanded.skill_to_activate;
+                                content = serde_json::Value::String(expanded.expanded_text);
+                                let mut session = session_arc.lock().await;
+                                session.active_command = ActiveCommandContext {
+                                    name: expanded.source_command,
+                                    allowed_tools: expanded.allowed_tools,
+                                    model_override: expanded.model_override,
+                                    context_fork: expanded.context_fork,
+                                    started_at_index: None,
+                                    activation_tool_call_id: None,
+                                };
                             }
-                        }
-                        Err(e) => {
-                            warn!("slash command expansion error: {}", e);
-                            let mut session = session_arc.lock().await;
-                            if session.thread.active_skill.is_none() {
-                                session.active_command = ActiveCommandContext::default();
+                            Ok(None) => {
+                                // No slash command — only reset active_command when no skill is
+                                // active. While a skill is active, active_command carries the
+                                // compaction anchor (started_at_index) and must not be wiped on
+                                // every normal user message.
+                                let mut session = session_arc.lock().await;
+                                if session.thread.active_skill.is_none() {
+                                    session.active_command = ActiveCommandContext::default();
+                                }
+                            }
+                            Err(e) => {
+                                warn!("slash command expansion error: {}", e);
+                                let mut session = session_arc.lock().await;
+                                if session.thread.active_skill.is_none() {
+                                    session.active_command = ActiveCommandContext::default();
+                                }
                             }
                         }
                     }
-                }
 
-                let skill_activation_name: Option<String> =
-                    skill_activation_info.as_ref().map(|i| i.name.clone());
-                let skill_context_msg = if let Some(info) = skill_activation_info {
-                    let body = expand_skill_includes(&info.body, &info.skill_dir).await;
-                    let line_count = body.lines().count().max(1);
-                    Some(ChatMessage {
-                        message_id: Uuid::new_v4().to_string(),
-                        role: "context_file".to_string(),
-                        content: ChatContent::ContextFiles(vec![ContextFile {
-                            file_name: format!("skill://{}", info.name),
-                            file_content: body,
-                            line1: 1,
-                            line2: line_count,
-                            file_rev: None,
-                            symbols: vec![],
-                            gradient_type: 0,
-                            usefulness: 95.0,
-                            skip_pp: true,
-                        }]),
-                        tool_call_id: SKILLS_CONTEXT_MARKER.to_string(),
-                        ..Default::default()
-                    })
-                } else {
-                    None
-                };
+                    let skill_activation_name: Option<String> =
+                        skill_activation_info.as_ref().map(|i| i.name.clone());
+                    let skill_context_msg = if let Some(info) = skill_activation_info {
+                        let body = expand_skill_includes(&info.body, &info.skill_dir).await;
+                        let line_count = body.lines().count().max(1);
+                        Some(ChatMessage {
+                            message_id: Uuid::new_v4().to_string(),
+                            role: "context_file".to_string(),
+                            content: ChatContent::ContextFiles(vec![ContextFile {
+                                file_name: format!("skill://{}", info.name),
+                                file_content: body,
+                                line1: 1,
+                                line2: line_count,
+                                file_rev: None,
+                                symbols: vec![],
+                                gradient_type: 0,
+                                usefulness: 95.0,
+                                skip_pp: true,
+                            }]),
+                            tool_call_id: SKILLS_CONTEXT_MARKER.to_string(),
+                            ..Default::default()
+                        })
+                    } else {
+                        None
+                    };
 
-                let additional_messages = if !request.priority {
-                    let mut session = session_arc.lock().await;
-                    let msgs = drain_non_priority_user_messages(&mut session.command_queue);
-                    if !msgs.is_empty() {
-                        for message in &msgs {
-                            session.record_command_queue_wait(&message.client_request_id);
-                        }
-                        session.emit_queue_update();
-                    }
-                    msgs
-                } else {
-                    Vec::new()
-                };
-
-                let (checkpoints_enabled, chat_id, latest_checkpoint, worktree) = {
-                    let session = session_arc.lock().await;
-                    (
-                        session.thread.checkpoints_enabled,
-                        session.chat_id.clone(),
-                        find_latest_checkpoint(&session),
-                        session.thread.worktree.clone(),
-                    )
-                };
-
-                let checkpoints = if checkpoints_enabled {
-                    create_checkpoint_async(
-                        app.clone(),
-                        latest_checkpoint.as_ref(),
-                        &chat_id,
-                        worktree.as_ref(),
-                    )
-                    .await
-                } else {
-                    Vec::new()
-                };
-
-                let (has_browser_meta, attach_screenshot_on_send, browser_chat_id) = {
-                    let session = session_arc.lock().await;
-                    let bm = session.thread.browser_meta.as_ref();
-                    (
-                        bm.is_some(),
-                        bm.map_or(false, |m| m.attach_screenshot_on_send),
-                        session.chat_id.clone(),
-                    )
-                };
-
-                let browser_ctx_result = browser_context::maybe_insert_browser_context(
-                    app.gcx.clone(),
-                    &browser_chat_id,
-                    has_browser_meta,
-                    attach_screenshot_on_send,
-                )
-                .await;
-
-                let (session_id_for_hook, project_dir_for_hook) = {
-                    let session = session_arc.lock().await;
-                    let sid = session.chat_id.clone();
-                    drop(session);
-                    let pd = get_project_dir_string(app.clone()).await;
-                    (sid, pd)
-                };
-                let prompt_text = match &content {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => serde_json::to_string(other).unwrap_or_default(),
-                };
-                let prompt_payload = HookPayload {
-                    hook_event_name: "UserPromptSubmit".to_string(),
-                    session_id: session_id_for_hook.clone(),
-                    project_dir: project_dir_for_hook.clone(),
-                    tool_name: None,
-                    tool_input: None,
-                    tool_output: None,
-                    user_prompt: Some(prompt_text),
-                    extra: std::collections::HashMap::new(),
-                };
-                let prompt_results =
-                    run_hooks(app.clone(), HookEvent::UserPromptSubmit, prompt_payload).await;
-                if let Some(reason) = first_block_reason(&prompt_results) {
-                    let mut session = session_arc.lock().await;
-                    let compression_phase = session.compression_phase;
-                    let compression_reason = session.compression_reason;
-                    let event = session.runtime_update_event(
-                        super::types::SessionState::Error,
-                        Some(format!("Message blocked by hook: {}", reason)),
-                        false,
-                        compression_phase,
-                        compression_reason,
-                    );
-                    session.emit(event);
-                    session.set_runtime_state(super::types::SessionState::Idle, None);
-                    continue;
-                }
-
-                let additional_messages = {
-                    let mut approved = Vec::new();
-                    for additional in additional_messages {
-                        let text = if let ChatCommand::UserMessage { ref content, .. } =
-                            additional.command
-                        {
-                            match content {
-                                serde_json::Value::String(s) => s.clone(),
-                                other => serde_json::to_string(other).unwrap_or_default(),
+                    let additional_messages = if !request.priority {
+                        let mut session = session_arc.lock().await;
+                        let msgs = drain_non_priority_user_messages(&mut session.command_queue);
+                        if !msgs.is_empty() {
+                            for message in &msgs {
+                                session.record_command_queue_wait(&message.client_request_id);
                             }
-                        } else {
-                            approved.push(additional);
-                            continue;
-                        };
-                        let add_results = run_hooks(
+                            session.emit_queue_update();
+                        }
+                        msgs
+                    } else {
+                        Vec::new()
+                    };
+
+                    let (checkpoints_enabled, chat_id, latest_checkpoint, worktree) = {
+                        let session = session_arc.lock().await;
+                        (
+                            session.thread.checkpoints_enabled,
+                            session.chat_id.clone(),
+                            find_latest_checkpoint(&session),
+                            session.thread.worktree.clone(),
+                        )
+                    };
+
+                    let checkpoints = if checkpoints_enabled {
+                        create_checkpoint_async(
                             app.clone(),
-                            HookEvent::UserPromptSubmit,
-                            HookPayload {
-                                hook_event_name: "UserPromptSubmit".to_string(),
-                                session_id: session_id_for_hook.clone(),
-                                project_dir: project_dir_for_hook.clone(),
-                                tool_name: None,
-                                tool_input: None,
-                                tool_output: None,
-                                user_prompt: Some(text),
-                                extra: std::collections::HashMap::new(),
-                            },
+                            latest_checkpoint.as_ref(),
+                            &chat_id,
+                            worktree.as_ref(),
                         )
-                        .await;
-                        if first_block_reason(&add_results).is_none() {
-                            approved.push(additional);
-                        }
-                    }
-                    approved
-                };
+                        .await
+                    } else {
+                        Vec::new()
+                    };
 
-                let is_oversize = browser_ctx_result
-                    .as_ref()
-                    .map_or(false, |(_, oversize)| *oversize);
-
-                if is_oversize {
-                    if let Some((_, true)) = browser_ctx_result {
-                        let snapshot = browser_context::get_browser_context_for_chat(
-                            app.gcx.clone(),
-                            &browser_chat_id,
+                    let (has_browser_meta, attach_screenshot_on_send, browser_chat_id) = {
+                        let session = session_arc.lock().await;
+                        let bm = session.thread.browser_meta.as_ref();
+                        (
+                            bm.is_some(),
+                            bm.map_or(false, |m| m.attach_screenshot_on_send),
+                            session.chat_id.clone(),
                         )
-                        .await;
-                        if let Some(ref snap) = snapshot {
-                            let action_bytes = serde_json::to_string(&snap.actions)
-                                .unwrap_or_default()
-                                .len();
-                            let console_bytes = serde_json::to_string(&snap.console)
-                                .unwrap_or_default()
-                                .len();
-                            let network_bytes = serde_json::to_string(&snap.network)
-                                .unwrap_or_default()
-                                .len();
-                            let mutation_bytes = serde_json::to_string(&snap.mutations)
-                                .unwrap_or_default()
-                                .len();
-                            let pending_message_id = Uuid::new_v4().to_string();
-                            let mut session = session_arc.lock().await;
-                            session.pending_browser_message = Some(PendingBrowserMessage {
-                                pending_message_id: pending_message_id.clone(),
-                                content: content.clone(),
-                                attachments: attachments.clone(),
-                                client_message_id: client_message_id.clone(),
-                                checkpoints: checkpoints.clone(),
-                                context_files: context_files.clone(),
-                                suppress_auto_enrichment,
-                                skill_activation_name: skill_activation_name.clone(),
-                                skill_context_msg: skill_context_msg.clone(),
-                            });
-                            session.emit(ChatEvent::BrowserContextOversize {
-                                total_bytes: action_bytes
-                                    + console_bytes
-                                    + network_bytes
-                                    + mutation_bytes,
-                                action_count: snap.actions.len(),
-                                action_bytes,
-                                console_count: snap.console.len(),
-                                console_bytes,
-                                network_count: snap.network.len(),
-                                network_bytes,
-                                mutation_bytes,
-                                pending_message_id: pending_message_id.clone(),
-                            });
-                            session.set_runtime_state(SessionState::WaitingUserInput, None);
-                        }
-                    }
-                    continue;
-                }
+                    };
 
-                let mut accepted_user_messages = Vec::new();
-                {
-                    let mut session = session_arc.lock().await;
+                    let browser_ctx_result = browser_context::maybe_insert_browser_context(
+                        app.gcx.clone(),
+                        &browser_chat_id,
+                        has_browser_meta,
+                        attach_screenshot_on_send,
+                    )
+                    .await;
 
-                    if let Some((ctx_messages, _)) = browser_ctx_result {
-                        session.add_message(ctx_messages.event);
-                        if let Some(screenshot) = ctx_messages.screenshot {
-                            session.add_message(screenshot);
-                        }
-                    }
-
-                    // Set compaction anchor for slash-command skill activation before any skill
-                    // messages are added, so deactivate_skill can truncate back to this point.
-                    if skill_activation_name.is_some()
-                        && session.active_command.started_at_index.is_none()
-                    {
-                        session.active_command.started_at_index = Some(session.messages.len());
-                    }
-
-                    if let Some(skill_msg) = skill_context_msg {
-                        session.add_message(skill_msg);
-                    }
-
-                    if !context_files.is_empty() {
-                        apply_manual_context_files(&mut session, &context_files);
-                    }
-
-                    let parsed_content = parse_content_with_attachments(&content, &attachments);
-                    accepted_user_messages.push(AcceptedUserMessage {
-                        chat_id: session.chat_id.clone(),
-                        thread: session.thread.clone(),
-                        content: parsed_content.clone(),
-                    });
-                    let user_message = user_message_with_client_message_id(
-                        parsed_content.clone(),
-                        checkpoints,
-                        client_message_id,
-                    );
-                    session.add_message(user_message);
-                    note_user_turn_resets_goal_pursuit(&mut session);
-                    if session.messages.iter().filter(|m| m.role == "user").count() == 1 {
-                        let chat_id = session.chat_id.clone();
-                        let first_user_text_preview = parsed_content
-                            .content_text_only()
-                            .chars()
-                            .take(80)
-                            .collect();
+                    let (session_id_for_hook, project_dir_for_hook) = {
+                        let session = session_arc.lock().await;
+                        let sid = session.chat_id.clone();
                         drop(session);
-                        push_user_activity(
-                            app.clone(),
-                            UserAction::ChatStarted {
-                                chat_id,
-                                first_user_text_preview,
-                                ts: Utc::now(),
-                            },
-                        )
-                        .await;
-                        session = session_arc.lock().await;
+                        let pd = get_project_dir_string(app.clone()).await;
+                        (sid, pd)
+                    };
+                    let prompt_text = match &content {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => serde_json::to_string(other).unwrap_or_default(),
+                    };
+                    let prompt_payload = HookPayload {
+                        hook_event_name: "UserPromptSubmit".to_string(),
+                        session_id: session_id_for_hook.clone(),
+                        project_dir: project_dir_for_hook.clone(),
+                        tool_name: None,
+                        tool_input: None,
+                        tool_output: None,
+                        user_prompt: Some(prompt_text),
+                        extra: std::collections::HashMap::new(),
+                    };
+                    let prompt_results =
+                        run_hooks(app.clone(), HookEvent::UserPromptSubmit, prompt_payload).await;
+                    if let Some(reason) = first_block_reason(&prompt_results) {
+                        let mut session = session_arc.lock().await;
+                        let compression_phase = session.compression_phase;
+                        let compression_reason = session.compression_reason;
+                        let event = session.runtime_update_event(
+                            super::types::SessionState::Error,
+                            Some(format!("Message blocked by hook: {}", reason)),
+                            false,
+                            compression_phase,
+                            compression_reason,
+                        );
+                        session.emit(event);
+                        session.set_runtime_state(super::types::SessionState::Idle, None);
+                        return false;
                     }
 
-                    if suppress_auto_enrichment && context_files.is_empty() {
-                        session.suppress_auto_enrichment_for_next_turn = true;
-                    }
-
-                    if let Some(ref skill_name) = skill_activation_name {
-                        session.set_active_skill(skill_name.clone());
-                    }
-
-                    for additional in additional_messages {
-                        if let ChatCommand::UserMessage {
-                            content: add_content,
-                            attachments: add_attachments,
-                            context_files: add_ctx_files,
-                            suppress_auto_enrichment: _,
-                            client_message_id: add_client_message_id,
-                        } = additional.command
-                        {
-                            if !add_ctx_files.is_empty() {
-                                apply_manual_context_files(&mut session, &add_ctx_files);
+                    let additional_messages = {
+                        let mut approved = Vec::new();
+                        for additional in additional_messages {
+                            let text = if let ChatCommand::UserMessage { ref content, .. } =
+                                additional.command
+                            {
+                                match content {
+                                    serde_json::Value::String(s) => s.clone(),
+                                    other => serde_json::to_string(other).unwrap_or_default(),
+                                }
+                            } else {
+                                approved.push(additional);
+                                continue;
+                            };
+                            let add_results = run_hooks(
+                                app.clone(),
+                                HookEvent::UserPromptSubmit,
+                                HookPayload {
+                                    hook_event_name: "UserPromptSubmit".to_string(),
+                                    session_id: session_id_for_hook.clone(),
+                                    project_dir: project_dir_for_hook.clone(),
+                                    tool_name: None,
+                                    tool_input: None,
+                                    tool_output: None,
+                                    user_prompt: Some(text),
+                                    extra: std::collections::HashMap::new(),
+                                },
+                            )
+                            .await;
+                            if first_block_reason(&add_results).is_none() {
+                                approved.push(additional);
                             }
-                            let add_parsed =
-                                parse_content_with_attachments(&add_content, &add_attachments);
-                            accepted_user_messages.push(AcceptedUserMessage {
-                                chat_id: session.chat_id.clone(),
-                                thread: session.thread.clone(),
-                                content: add_parsed.clone(),
-                            });
-                            let add_message = user_message_with_client_message_id(
-                                add_parsed,
-                                Vec::new(),
-                                add_client_message_id,
-                            );
-                            session.add_message(add_message);
-                            note_user_turn_resets_goal_pursuit(&mut session);
+                        }
+                        approved
+                    };
+
+                    let is_oversize = browser_ctx_result
+                        .as_ref()
+                        .map_or(false, |(_, oversize)| *oversize);
+
+                    if is_oversize {
+                        if let Some((_, true)) = browser_ctx_result {
+                            let snapshot = browser_context::get_browser_context_for_chat(
+                                app.gcx.clone(),
+                                &browser_chat_id,
+                            )
+                            .await;
+                            if let Some(ref snap) = snapshot {
+                                let action_bytes = serde_json::to_string(&snap.actions)
+                                    .unwrap_or_default()
+                                    .len();
+                                let console_bytes = serde_json::to_string(&snap.console)
+                                    .unwrap_or_default()
+                                    .len();
+                                let network_bytes = serde_json::to_string(&snap.network)
+                                    .unwrap_or_default()
+                                    .len();
+                                let mutation_bytes = serde_json::to_string(&snap.mutations)
+                                    .unwrap_or_default()
+                                    .len();
+                                let pending_message_id = Uuid::new_v4().to_string();
+                                let mut session = session_arc.lock().await;
+                                session.pending_browser_message = Some(PendingBrowserMessage {
+                                    pending_message_id: pending_message_id.clone(),
+                                    content: content.clone(),
+                                    attachments: attachments.clone(),
+                                    client_message_id: client_message_id.clone(),
+                                    checkpoints: checkpoints.clone(),
+                                    context_files: context_files.clone(),
+                                    suppress_auto_enrichment,
+                                    skill_activation_name: skill_activation_name.clone(),
+                                    skill_context_msg: skill_context_msg.clone(),
+                                });
+                                session.emit(ChatEvent::BrowserContextOversize {
+                                    total_bytes: action_bytes
+                                        + console_bytes
+                                        + network_bytes
+                                        + mutation_bytes,
+                                    action_count: snap.actions.len(),
+                                    action_bytes,
+                                    console_count: snap.console.len(),
+                                    console_bytes,
+                                    network_count: snap.network.len(),
+                                    network_bytes,
+                                    mutation_bytes,
+                                    pending_message_id: pending_message_id.clone(),
+                                });
+                                session.set_runtime_state(SessionState::WaitingUserInput, None);
+                            }
+                        }
+                        return false;
+                    }
+
+                    let mut accepted_user_messages = Vec::new();
+                    {
+                        let mut session = session_arc.lock().await;
+
+                        if let Some((ctx_messages, _)) = browser_ctx_result {
+                            session.add_message(ctx_messages.event);
+                            if let Some(screenshot) = ctx_messages.screenshot {
+                                session.add_message(screenshot);
+                            }
+                        }
+
+                        // Set compaction anchor for slash-command skill activation before any skill
+                        // messages are added, so deactivate_skill can truncate back to this point.
+                        if skill_activation_name.is_some()
+                            && session.active_command.started_at_index.is_none()
+                        {
+                            session.active_command.started_at_index = Some(session.messages.len());
+                        }
+
+                        if let Some(skill_msg) = skill_context_msg {
+                            session.add_message(skill_msg);
+                        }
+
+                        if !context_files.is_empty() {
+                            apply_manual_context_files(&mut session, &context_files);
+                        }
+
+                        let parsed_content = parse_content_with_attachments(&content, &attachments);
+                        accepted_user_messages.push(AcceptedUserMessage {
+                            chat_id: session.chat_id.clone(),
+                            thread: session.thread.clone(),
+                            content: parsed_content.clone(),
+                        });
+                        let user_message = user_message_with_client_message_id(
+                            parsed_content.clone(),
+                            checkpoints,
+                            client_message_id,
+                        );
+                        session.add_message(user_message);
+                        note_user_turn_resets_goal_pursuit(&mut session);
+                        if session.messages.iter().filter(|m| m.role == "user").count() == 1 {
+                            let chat_id = session.chat_id.clone();
+                            let first_user_text_preview = parsed_content
+                                .content_text_only()
+                                .chars()
+                                .take(80)
+                                .collect();
+                            drop(session);
+                            push_user_activity(
+                                app.clone(),
+                                UserAction::ChatStarted {
+                                    chat_id,
+                                    first_user_text_preview,
+                                    ts: Utc::now(),
+                                },
+                            )
+                            .await;
+                            session = session_arc.lock().await;
+                        }
+
+                        if suppress_auto_enrichment && context_files.is_empty() {
+                            session.suppress_auto_enrichment_for_next_turn = true;
+                        }
+
+                        if let Some(ref skill_name) = skill_activation_name {
+                            session.set_active_skill(skill_name.clone());
+                        }
+
+                        for additional in additional_messages {
+                            if let ChatCommand::UserMessage {
+                                content: add_content,
+                                attachments: add_attachments,
+                                context_files: add_ctx_files,
+                                suppress_auto_enrichment: _,
+                                client_message_id: add_client_message_id,
+                            } = additional.command
+                            {
+                                if !add_ctx_files.is_empty() {
+                                    apply_manual_context_files(&mut session, &add_ctx_files);
+                                }
+                                let add_parsed =
+                                    parse_content_with_attachments(&add_content, &add_attachments);
+                                accepted_user_messages.push(AcceptedUserMessage {
+                                    chat_id: session.chat_id.clone(),
+                                    thread: session.thread.clone(),
+                                    content: add_parsed.clone(),
+                                });
+                                let add_message = user_message_with_client_message_id(
+                                    add_parsed,
+                                    Vec::new(),
+                                    add_client_message_id,
+                                );
+                                session.add_message(add_message);
+                                note_user_turn_resets_goal_pursuit(&mut session);
+                            }
                         }
                     }
-                }
 
-                for accepted_user_message in accepted_user_messages {
-                    let _ = maybe_enqueue_chat_reaction(app.clone(), accepted_user_message).await;
-                }
+                    for accepted_user_message in accepted_user_messages {
+                        let _ =
+                            maybe_enqueue_chat_reaction(app.clone(), accepted_user_message).await;
+                    }
 
-                maybe_save_trajectory_background_with_intent(
-                    app.clone(),
-                    session_arc.clone(),
-                    TrajectoryCommitIntent::Checkpoint,
-                );
+                    maybe_save_trajectory_background_with_intent(
+                        app.clone(),
+                        session_arc.clone(),
+                        TrajectoryCommitIntent::Checkpoint,
+                    );
+                    true
+                })
+                .await;
+                if !prepared {
+                    continue;
+                }
                 prepare_session_preamble_and_knowledge(app.clone(), session_arc.clone()).await;
                 if aborted_before_start_generation(&session_arc).await {
                     continue;
@@ -1941,10 +1954,11 @@ pub async fn process_command_queue(
             }
             ChatCommand::Abort {} => {
                 let mut session = session_arc.lock().await;
+                session.suppress_delivery_wakes();
                 session.abort_stream();
                 let goal_stopped = session.stop_goal_on_manual_abort();
                 drop(session);
-                if goal_stopped {
+                if goal_stopped || session_arc.lock().await.trajectory_dirty {
                     maybe_save_trajectory_with_intent(
                         app.clone(),
                         session_arc.clone(),
@@ -2320,8 +2334,76 @@ pub async fn process_command_queue(
                 }
                 start_generation(app.clone(), session_arc.clone()).await;
             }
+            ChatCommand::DeliverMessages { delivery } => {
+                // Normally routed straight into the pending queue by
+                // `chat::delivery`; reaching the command loop means a producer
+                // pushed it as a plain command, so honour it here too.
+                let wake = delivery.wake;
+                let outcome = {
+                    let mut session = session_arc.lock().await;
+                    session.enqueue_delivery(delivery)
+                };
+                match outcome {
+                    Ok(DeliveryOutcome::Delivered) => {
+                        note_delivered_messages_reset_goal_pursuit(&session_arc).await;
+                        maybe_save_trajectory_with_intent(
+                            app.clone(),
+                            session_arc.clone(),
+                            TrajectoryCommitIntent::Required,
+                        )
+                        .await;
+                        if wake && !aborted_before_start_generation(&session_arc).await {
+                            start_generation(app.clone(), session_arc.clone()).await;
+                        }
+                    }
+                    Ok(_) => {
+                        maybe_save_trajectory_with_intent(
+                            app.clone(),
+                            session_arc.clone(),
+                            TrajectoryCommitIntent::Required,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        warn!("DeliverMessages rejected: {}", error);
+                        let mut session = session_arc.lock().await;
+                        emit_goal_command_error(&mut session, error);
+                    }
+                }
+            }
+            ChatCommand::UpdatePendingDelivery {
+                delivery_id,
+                push,
+                cancel,
+            } => {
+                let chat_id = {
+                    let session = session_arc.lock().await;
+                    session.chat_id.clone()
+                };
+                if let Err(error) = super::delivery::update_pending_delivery_in_chat(
+                    app.clone(),
+                    &chat_id,
+                    &delivery_id,
+                    push,
+                    cancel,
+                )
+                .await
+                {
+                    warn!("UpdatePendingDelivery rejected: {}", error);
+                }
+            }
         }
+
+        // A command finished: land any delivery whose boundary just opened.
+        super::delivery::drain_deliveries_at_boundary(app.clone(), session_arc.clone()).await;
     }
+}
+
+/// Delivered user-visible messages start a fresh pursuit turn, exactly like a
+/// genuine user message, without going through the `UserMessage` command path.
+async fn note_delivered_messages_reset_goal_pursuit(session_arc: &Arc<AMutex<ChatSession>>) {
+    let mut session = session_arc.lock().await;
+    note_user_turn_resets_goal_pursuit(&mut session);
 }
 
 fn is_plan_delta_event(msg: &ChatMessage) -> bool {

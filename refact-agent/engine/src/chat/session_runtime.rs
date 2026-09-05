@@ -183,6 +183,16 @@ pub async fn get_or_create_session_with_trajectory(
             loaded.waiting_for_card_ids,
             loaded.goal,
         );
+        if let Some(agent_id) = app.agents.find_agent_id_by_child_chat_id(chat_id).await {
+            if app.agents.has_runtime(&agent_id).await {
+                session.restore_pending_deliveries(Vec::new());
+                session.runner_pending_deliveries = app.agents.pending_deliveries(&agent_id).await;
+            } else {
+                session.restore_pending_deliveries(loaded.pending_deliveries);
+            }
+        } else {
+            session.restore_pending_deliveries(loaded.pending_deliveries);
+        }
         session.goal_ledger = loaded.goal_ledger;
         session.goal_verification_blocked_until_ms = loaded.goal_verification_blocked_until_ms;
         session.compression_retry_after_ms = loaded.compression_retry_after_ms;
@@ -449,6 +459,7 @@ struct CleanupRemovalSnapshot {
     pause_reasons_len: usize,
     messages_len: usize,
     command_queue_len: usize,
+    pending_deliveries: Vec<PendingDelivery>,
     event_seq: u64,
     trajectory_version: u64,
     last_activity: Instant,
@@ -466,6 +477,7 @@ impl CleanupRemovalSnapshot {
             pause_reasons_len: session.runtime.pause_reasons.len(),
             messages_len: session.messages.len(),
             command_queue_len: session.command_queue.len(),
+            pending_deliveries: session.pending_deliveries_for_snapshot(),
             event_seq: session.event_seq,
             trajectory_version: session.trajectory_version,
             last_activity: session.last_activity,
@@ -485,6 +497,7 @@ impl CleanupRemovalSnapshot {
             && session.runtime.pause_reasons.len() == self.pause_reasons_len
             && session.messages.len() == self.messages_len
             && session.command_queue.len() == self.command_queue_len
+            && session.pending_deliveries_for_snapshot() == self.pending_deliveries
             && session.event_seq == self.event_seq
             && session.trajectory_version == self.trajectory_version
             && session.last_activity == self.last_activity
@@ -777,10 +790,8 @@ mod tests {
 
         let session = session_arc.lock().await;
         assert!(!session.closed);
-        assert!(session
-            .command_queue
-            .iter()
-            .any(|request| matches!(request.command, ChatCommand::Regenerate {})));
+        assert!(session.command_queue.is_empty());
+        assert_eq!(session.delivery_wake_sources.len(), 1);
         assert!(session.last_activity.elapsed() <= session_idle_timeout());
         session
             .queue_processor_running
@@ -788,6 +799,64 @@ mod tests {
         drop(session);
         assert!(app.chat.sessions.read().await.get(chat_id).is_some());
         app.runtime.shutdown_flag.store(true, Ordering::Relaxed);
+    }
+
+    #[tokio::test]
+    async fn cleanup_persists_pending_deliveries_before_removal() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (app, _config_dir) = test_app_with_workspace(workspace.path()).await;
+        let chat_id = "cleanup-pending-deliveries";
+        let session_arc = Arc::new(AMutex::new(ChatSession::new(chat_id.into())));
+        let delivery = PendingDelivery::with_id(
+            "cleanup-id",
+            vec![ChatMessage::new("user".into(), "queued".into())],
+            PushMode::WhenIdle,
+            "test",
+            false,
+        );
+        {
+            let mut session = session_arc.lock().await;
+            session.last_activity =
+                Instant::now() - session_idle_timeout() - std::time::Duration::from_secs(1);
+            session.pending_deliveries.push_back(delivery.clone());
+            session.increment_version();
+        }
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id.into(), session_arc.clone());
+        assert!(cleanup_idle_session(app.clone(), &app.chat.sessions, chat_id, session_arc).await);
+        let loaded = super::super::trajectories::load_trajectory_for_chat(app.gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        assert_eq!(loaded.pending_deliveries, vec![delivery.clone()]);
+        let restored =
+            get_or_create_session_with_trajectory(app.clone(), &app.chat.sessions, chat_id).await;
+        assert_eq!(
+            restored.lock().await.pending_deliveries_for_snapshot(),
+            vec![delivery]
+        );
+    }
+
+    #[test]
+    fn cleanup_rechecks_pending_deliveries() {
+        let mut session = make_session();
+        session.last_activity =
+            Instant::now() - session_idle_timeout() - std::time::Duration::from_secs(1);
+        assert!(close_idle_session_for_cleanup(&mut session));
+        let snapshot = CleanupRemovalSnapshot::capture(&session);
+        let delivery = PendingDelivery::new(
+            vec![ChatMessage::new("user".into(), "queued".into())],
+            PushMode::WhenIdle,
+            "test",
+            false,
+        );
+        session.pending_deliveries.push_back(delivery.clone());
+        assert!(!snapshot.still_matches(&session));
+        session.pending_deliveries.clear();
+        session.runner_pending_deliveries.push(delivery);
+        assert!(!snapshot.still_matches(&session));
     }
 
     #[test]

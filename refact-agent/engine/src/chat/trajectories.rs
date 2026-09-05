@@ -723,6 +723,7 @@ pub struct LoadedTrajectory {
     pub updated_at: String,
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
     pub waiting_for_card_ids: Vec<String>,
+    pub pending_deliveries: Vec<refact_core::chat_types::PendingDelivery>,
     pub auto_approve_editing_tools_present: bool,
     pub auto_approve_dangerous_commands_present: bool,
     pub transition_identity_repaired: bool,
@@ -779,6 +780,7 @@ pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> Traject
     snapshot.goal_ledger = session.goal_ledger.clone();
     snapshot.goal_verification_blocked_until_ms = session.goal_verification_blocked_until_ms;
     snapshot.compression_retry_after_ms = session.compression_retry_after_ms.clone();
+    snapshot.pending_deliveries = session.pending_deliveries_for_snapshot();
     span.finish(
         PerfOutcome::Success,
         None,
@@ -2285,6 +2287,7 @@ fn is_known_trajectory_top_level_key(key: &str) -> bool {
             | "reactive_compact_attempts"
             | "wake_up_at"
             | "waiting_for_card_ids"
+            | "pending_deliveries"
             | "worktree"
             | "parent_id"
             | "link_type"
@@ -2836,6 +2839,11 @@ async fn load_trajectory_candidate(
     let goal_ledger_value = t
         .as_object_mut()
         .and_then(|object| object.remove("goal_ledger"));
+    let pending_deliveries = t
+        .as_object_mut()
+        .and_then(|object| object.remove("pending_deliveries"))
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
     let compression_retry_after_ms = t
         .as_object_mut()
         .and_then(|object| object.remove("compression_retry_after_ms"))
@@ -3127,7 +3135,19 @@ async fn load_trajectory_candidate(
         .unwrap_or(&created_at)
         .to_string();
 
+    let pending_deliveries =
+        if let Some(agent_id) = app.agents.find_agent_id_by_child_chat_id(chat_id).await {
+            if app.agents.has_runtime(&agent_id).await {
+                Vec::new()
+            } else {
+                pending_deliveries
+            }
+        } else {
+            pending_deliveries
+        };
+
     Some(LoadedTrajectory {
+        pending_deliveries,
         goal_ledger,
         goal_verification_blocked_until_ms,
         compression_retry_after_ms,
@@ -3411,6 +3431,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
     let snapshot = TrajectorySnapshot {
         goal: None,
         goal_ledger: Vec::new(),
+        pending_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
         compression_retry_after_ms: Default::default(),
         chat_id: chat_id.to_string(),
@@ -3474,12 +3495,24 @@ pub async fn save_trajectory_as_with_intent(
     messages: &[ChatMessage],
     intent: TrajectoryCommitIntent,
 ) {
+    if let Err(e) = save_trajectory_as_with_intent_checked(gcx, thread, messages, intent).await {
+        warn!("Failed to save trajectory: {}", e);
+    }
+}
+
+pub async fn save_trajectory_as_with_intent_checked(
+    gcx: Arc<GlobalContext>,
+    thread: &ThreadParams,
+    messages: &[ChatMessage],
+    intent: TrajectoryCommitIntent,
+) -> Result<(), String> {
     if !intent.persists() {
-        return;
+        return Ok(());
     }
     let snapshot = TrajectorySnapshot {
         goal: None,
         goal_ledger: Vec::new(),
+        pending_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
         compression_retry_after_ms: Default::default(),
         chat_id: thread.id.clone(),
@@ -3521,9 +3554,7 @@ pub async fn save_trajectory_as_with_intent(
         wake_up_at: None,
         waiting_for_card_ids: Vec::new(),
     };
-    if let Err(e) = persist_trajectory_snapshot_with_intent(gcx, snapshot, intent).await {
-        warn!("Failed to save trajectory: {}", e);
-    }
+    persist_trajectory_snapshot_with_intent(gcx, snapshot, intent).await
 }
 
 pub async fn save_trajectory_snapshot(
@@ -4072,6 +4103,7 @@ async fn save_trajectory_snapshot_inner(
         None
     };
     if snapshot.messages.is_empty()
+        && snapshot.pending_deliveries.is_empty()
         && snapshot.task_meta.is_none()
         && snapshot.buddy_meta.is_none()
         && snapshot.frozen_request_prefix.is_none()
@@ -4262,6 +4294,9 @@ async fn save_trajectory_snapshot_inner(
     }
     if !snapshot.waiting_for_card_ids.is_empty() {
         trajectory["waiting_for_card_ids"] = json!(snapshot.waiting_for_card_ids);
+    }
+    if !snapshot.pending_deliveries.is_empty() {
+        trajectory["pending_deliveries"] = json!(snapshot.pending_deliveries);
     }
     if let Some(ref goal) = snapshot.goal {
         trajectory["goal"] = serde_json::to_value(goal).unwrap_or_default();
@@ -5109,7 +5144,10 @@ fn external_delete_matches_session(
 }
 
 fn can_apply_external_reload(session: &ChatSession) -> bool {
-    session.runtime.state == SessionState::Idle && !session.trajectory_dirty
+    session.runtime.state == SessionState::Idle
+        && !session.trajectory_dirty
+        && session.pending_deliveries.is_empty()
+        && session.runner_pending_deliveries.is_empty()
 }
 
 fn pending_reload_source_matches_session(
@@ -5153,6 +5191,7 @@ fn apply_loaded_external_update_to_session(
 ) -> Option<u64> {
     session.release_turn_only_state();
     session.messages = loaded.messages;
+    session.restore_pending_deliveries(loaded.pending_deliveries);
     session.thread = loaded.thread;
     session.compression_retry_after_ms = loaded.compression_retry_after_ms;
     session.reset_compaction_runtime_state();
@@ -10874,6 +10913,7 @@ mod tests {
         TrajectorySnapshot {
             goal: None,
             goal_ledger: Vec::new(),
+            pending_deliveries: Vec::new(),
             goal_verification_blocked_until_ms: None,
             compression_retry_after_ms: Default::default(),
             chat_id: chat_id.to_string(),
@@ -18235,6 +18275,11 @@ mod tests {
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
+            pending_deliveries: VecDeque::new(),
+            runner_pending_deliveries: Vec::new(),
+            delivered_delivery_ids: Default::default(),
+            turn_depth: 0,
+            delivery_wake_sources: Default::default(),
             event_seq: 0,
             event_tx: tx,
             recent_request_ids: VecDeque::new(),
@@ -18352,6 +18397,11 @@ mod tests {
             draft_message: None,
             draft_usage: None,
             command_queue: VecDeque::new(),
+            pending_deliveries: VecDeque::new(),
+            runner_pending_deliveries: Vec::new(),
+            delivered_delivery_ids: Default::default(),
+            turn_depth: 0,
+            delivery_wake_sources: Default::default(),
             event_seq: 0,
             event_tx: tx,
             recent_request_ids: VecDeque::new(),
@@ -19196,6 +19246,7 @@ mod tests {
         let snapshot = TrajectorySnapshot {
             goal: None,
             goal_ledger: Vec::new(),
+            pending_deliveries: Vec::new(),
             goal_verification_blocked_until_ms: None,
             compression_retry_after_ms: Default::default(),
             chat_id: chat_id.clone(),
@@ -21485,6 +21536,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(loaded.thread.reactive_compact_attempts, None);
+    }
+
+    #[tokio::test]
+    async fn pending_deliveries_save_load_preserves_identity_and_clears_delivered() {
+        use refact_core::chat_types::{PendingDelivery, PushMode};
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let mut session = ChatSession::new("pending-roundtrip".into());
+        session.created_at = "2024-01-01T00:00:00Z".into();
+        let mut delivery = PendingDelivery::with_id(
+            "stable-id",
+            vec![ChatMessage::new("user".into(), "queued".into())],
+            PushMode::WhenIdle,
+            "test",
+            true,
+        );
+        delivery.enqueued_at_ms = 42;
+        session.pending_deliveries.push_back(delivery.clone());
+        assert!(!session_is_stale_refresh_candidate(&session, true));
+        save_trajectory_snapshot(gcx.clone(), trajectory_snapshot_from_session(&session))
+            .await
+            .unwrap();
+        let loaded = load_trajectory_for_chat(gcx.clone(), "pending-roundtrip")
+            .await
+            .unwrap();
+        assert_eq!(loaded.pending_deliveries, vec![delivery.clone()]);
+        let mut restored = ChatSession::new("pending-roundtrip".into());
+        restored.restore_pending_deliveries(loaded.pending_deliveries);
+        assert_eq!(
+            restored.pending_deliveries_for_snapshot(),
+            vec![delivery.clone()]
+        );
+        restored.pending_deliveries.clear();
+        restored.messages = delivery.stamp_messages();
+        restored.restore_pending_deliveries(vec![delivery]);
+        assert!(restored.pending_deliveries.is_empty());
+        save_trajectory_snapshot(gcx.clone(), trajectory_snapshot_from_session(&restored))
+            .await
+            .unwrap();
+        assert!(load_trajectory_for_chat(gcx, "pending-roundtrip")
+            .await
+            .unwrap()
+            .pending_deliveries
+            .is_empty());
     }
 
     #[tokio::test]

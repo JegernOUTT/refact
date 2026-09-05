@@ -287,12 +287,17 @@ describe("hidden chat roles", () => {
     ]);
   });
 
-  it("selectEventLog returns only non-plan and non-goal event messages", () => {
+  it("selectEventLog returns all event messages in transcript order", () => {
     const events = selectEventLog(makeRootState(mixedMessages), threadId);
 
     expect(events.map((event) => event.message_id)).toEqual([
       "event-1",
+      "goal-delta-1",
+      "goal-pursuit-1",
+      "plan-delta-1",
       "event-2",
+      "backend-plan-delta",
+      "plan-delta-2",
       "backend-mode-event",
     ]);
     expect(events.at(-1)).toMatchObject({

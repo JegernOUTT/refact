@@ -2,16 +2,17 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Box, Card, Flex, Text } from "@radix-ui/themes";
 import { useAppDispatch } from "../../../hooks/useAppDispatch";
 import { openScheduler } from "../../../features/Pages/pagesSlice";
-import type {
-  EventMessage,
-  EventSubkind,
-} from "../../../services/refact/types";
+import type { EventMessage } from "../../../services/refact/types";
 import {
   getEventMetadata,
   normalizeEventMessageMetadata,
 } from "../../../services/refact/types";
 import { EventLogEntry } from "./EventLogEntry";
-import { eventSubkindIconElement } from "./eventSubkind";
+import {
+  eventSubkindIconElement,
+  eventSubkindLabel,
+  eventMessageTone,
+} from "./eventSubkind";
 import styles from "./EventLog.module.css";
 
 export type EventLogProps = {
@@ -21,52 +22,22 @@ export type EventLogProps = {
   onProcessCompletedClick?: (processId: string) => void;
 };
 
-type EventLogSubkind = Exclude<EventSubkind, "plan_delta">;
-type EventLogMessage = EventMessage & { subkind: EventLogSubkind };
-
-const EVENT_SUBKINDS: EventLogSubkind[] = [
-  "mode_switch",
-  "tool_decision",
-  "ide_callback",
-  "process_completed",
-  "cron_fire",
-  "tick",
-  "summarization_marker",
-  "cancellation_note",
-  "verifier_report",
-  "system_notice",
-];
-
 function collapsedStorageKey(threadId: string): string {
   return `event-log-collapsed-${threadId}`;
 }
 
 function filterStorageKey(threadId: string): string {
-  return `event-log-filter-${threadId}`;
+  return `event-log-hidden-${threadId}`;
 }
 
-function isEventSubkind(value: unknown): value is EventLogSubkind {
-  return (
-    typeof value === "string" &&
-    EVENT_SUBKINDS.includes(value as EventLogSubkind)
-  );
-}
-
-function isEventLogMessage(event: EventMessage): event is EventLogMessage {
-  const metadata = getEventMetadata(event);
-  return Boolean(metadata && metadata.subkind !== "plan_delta");
-}
-
-function normalizeEventLogMessage(event: EventMessage): EventLogMessage {
-  return normalizeEventMessageMetadata(event) as EventLogMessage;
+function isEventLogMessage(event: EventMessage): boolean {
+  return getEventMetadata(event) !== null;
 }
 
 function readCollapsed(threadId: string): boolean {
   try {
     if (typeof localStorage === "undefined") return true;
-    const stored = localStorage.getItem(collapsedStorageKey(threadId));
-    if (stored === "false") return false;
-    return true;
+    return localStorage.getItem(collapsedStorageKey(threadId)) !== "false";
   } catch {
     return true;
   }
@@ -81,30 +52,27 @@ function writeCollapsed(threadId: string, collapsed: boolean): void {
   }
 }
 
-function readSelectedSubkinds(threadId: string): EventLogSubkind[] {
+/**
+ * Hidden subkinds are persisted instead of visible ones so subkinds the engine
+ * adds later stay visible by default rather than silently disappearing.
+ */
+function readHiddenSubkinds(threadId: string): string[] {
   try {
-    if (typeof localStorage === "undefined") return EVENT_SUBKINDS;
+    if (typeof localStorage === "undefined") return [];
     const stored = localStorage.getItem(filterStorageKey(threadId));
-    if (!stored) return EVENT_SUBKINDS;
+    if (!stored) return [];
     const parsed = JSON.parse(stored) as unknown;
-    if (!Array.isArray(parsed)) return EVENT_SUBKINDS;
-    const selected = parsed.filter(isEventSubkind);
-    return selected;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((value): value is string => typeof value === "string");
   } catch {
-    return EVENT_SUBKINDS;
+    return [];
   }
 }
 
-function writeSelectedSubkinds(
-  threadId: string,
-  selectedSubkinds: EventLogSubkind[],
-): void {
+function writeHiddenSubkinds(threadId: string, hidden: string[]): void {
   try {
     if (typeof localStorage === "undefined") return;
-    localStorage.setItem(
-      filterStorageKey(threadId),
-      JSON.stringify(selectedSubkinds),
-    );
+    localStorage.setItem(filterStorageKey(threadId), JSON.stringify(hidden));
   } catch {
     return;
   }
@@ -136,40 +104,44 @@ export const EventLog: React.FC<EventLogProps> = ({
 }) => {
   const dispatch = useAppDispatch();
   const [collapsed, setCollapsed] = useState(() => readCollapsed(threadId));
-  const [selectedSubkinds, setSelectedSubkinds] = useState(() =>
-    readSelectedSubkinds(threadId),
+  const [hiddenSubkinds, setHiddenSubkinds] = useState(() =>
+    readHiddenSubkinds(threadId),
   );
 
   useEffect(() => {
     setCollapsed(readCollapsed(threadId));
-    setSelectedSubkinds(readSelectedSubkinds(threadId));
+    setHiddenSubkinds(readHiddenSubkinds(threadId));
   }, [threadId]);
 
   const visibleEvents = useMemo(
-    () => events.filter(isEventLogMessage).map(normalizeEventLogMessage),
+    () => events.filter(isEventLogMessage).map(normalizeEventMessageMetadata),
     [events],
   );
 
   const filterEvents = useMemo(
     () =>
-      rawFilterEvents.filter(isEventLogMessage).map(normalizeEventLogMessage),
+      rawFilterEvents
+        .filter(isEventLogMessage)
+        .map(normalizeEventMessageMetadata),
     [rawFilterEvents],
   );
 
   const presentSubkinds = useMemo(() => {
-    return EVENT_SUBKINDS.filter((subkind) =>
-      filterEvents.some((event) => event.subkind === subkind),
-    );
+    const seen: string[] = [];
+    for (const event of filterEvents) {
+      if (!seen.includes(event.subkind)) seen.push(event.subkind);
+    }
+    return seen;
   }, [filterEvents]);
 
-  const selectedSet = useMemo(
-    () => new Set<EventLogSubkind>(selectedSubkinds),
-    [selectedSubkinds],
+  const hiddenSet = useMemo(
+    () => new Set<string>(hiddenSubkinds),
+    [hiddenSubkinds],
   );
 
   const filteredEvents = useMemo(
-    () => visibleEvents.filter((event) => selectedSet.has(event.subkind)),
-    [visibleEvents, selectedSet],
+    () => visibleEvents.filter((event) => !hiddenSet.has(event.subkind)),
+    [visibleEvents, hiddenSet],
   );
 
   if (visibleEvents.length === 0) return null;
@@ -183,18 +155,12 @@ export const EventLog: React.FC<EventLogProps> = ({
     });
   };
 
-  const toggleSubkind = (subkind: EventLogSubkind) => {
-    setSelectedSubkinds((current) => {
-      const currentSet = new Set(current);
-      if (currentSet.has(subkind)) {
-        currentSet.delete(subkind);
-      } else {
-        currentSet.add(subkind);
-      }
-      const next = EVENT_SUBKINDS.filter((candidate) =>
-        currentSet.has(candidate),
-      );
-      writeSelectedSubkinds(threadId, next);
+  const toggleSubkind = (subkind: string) => {
+    setHiddenSubkinds((current) => {
+      const next = current.includes(subkind)
+        ? current.filter((candidate) => candidate !== subkind)
+        : [...current, subkind];
+      writeHiddenSubkinds(threadId, next);
       return next;
     });
   };
@@ -232,7 +198,7 @@ export const EventLog: React.FC<EventLogProps> = ({
             className={styles.summaryRow}
           >
             <Text as="span" size="1" weight="medium" className={styles.title}>
-              Event log
+              Event history
             </Text>
             <Text as="span" size="1" className={styles.count}>
               {visibleEvents.length}{" "}
@@ -242,25 +208,34 @@ export const EventLog: React.FC<EventLogProps> = ({
         </summary>
         <Box className={`${styles.body} rf-enter-rise`}>
           <Flex gap="1" wrap="wrap" className={styles.filters}>
-            {presentSubkinds.map((subkind) => (
-              <label
-                key={subkind}
-                className={styles.filterChip}
-                data-selected={selectedSet.has(subkind)}
-              >
-                <input
-                  type="checkbox"
-                  checked={selectedSet.has(subkind)}
-                  onChange={() => toggleSubkind(subkind)}
-                />
-                <Text as="span" size="1" aria-hidden="true">
-                  {eventSubkindIconElement(subkind)}
-                </Text>
-                <Text as="span" size="1">
-                  {subkind}
-                </Text>
-              </label>
-            ))}
+            {presentSubkinds.map((subkind) => {
+              const selected = !hiddenSet.has(subkind);
+              const label = eventSubkindLabel(subkind);
+              const tone = eventMessageTone(
+                filterEvents.find((event) => event.subkind === subkind) ??
+                  ({ subkind } as EventMessage),
+              );
+              return (
+                <label
+                  key={subkind}
+                  className={styles.filterChip}
+                  data-selected={selected}
+                  data-subkind={subkind}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    onChange={() => toggleSubkind(subkind)}
+                  />
+                  <Text as="span" size="1" aria-hidden="true">
+                    {eventSubkindIconElement(subkind, tone)}
+                  </Text>
+                  <Text as="span" size="1">
+                    {label}
+                  </Text>
+                </label>
+              );
+            })}
           </Flex>
           <Flex direction="column" gap="1">
             {filteredEvents.length > 0 ? (
@@ -277,7 +252,7 @@ export const EventLog: React.FC<EventLogProps> = ({
               })
             ) : (
               <Text size="1" color="gray">
-                All event subkinds are hidden by filters.
+                All event types are hidden by filters.
               </Text>
             )}
           </Flex>

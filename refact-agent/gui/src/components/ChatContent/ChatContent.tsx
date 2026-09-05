@@ -33,6 +33,7 @@ import {
   selectCompressionPhaseById,
   selectCompressionReasonById,
   selectCompressionPulseSeqById,
+  selectEventLog,
 } from "../../features/Chat/Thread/selectors";
 import {
   createChatWithId,
@@ -49,7 +50,8 @@ import {
   DisplayItem,
   tryIncrementalDisplayItemsUpdate,
 } from "./ChatContentDisplayItems";
-import { QueuedMessage } from "./QueuedMessage";
+import { QueuePanel } from "./QueuePanel";
+import { EventLog } from "./EventLog";
 import { selectSseStatusForChat } from "../../features/Connection";
 import { LogoAnimation } from "../LogoAnimation/LogoAnimation.tsx";
 import { ChatLoading } from "./ChatLoading";
@@ -124,6 +126,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const queuedItems = useAppSelector((s) =>
     selectQueuedItemsById(s, renderChatId),
   );
+  const eventLog = useAppSelector((s) => selectEventLog(s, renderChatId));
   const isStreaming = useAppSelector((s) =>
     selectIsStreamingById(s, renderChatId),
   );
@@ -341,10 +344,22 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     return displayItems.length > 0 ? displayItems.length - 1 : undefined;
   }, [displayItems]);
 
+  const handleProcessCompletedClick = useCallback((processId: string) => {
+    const card = Array.from(
+      document.querySelectorAll("[data-exec-process-id]"),
+    ).find((item) => item.getAttribute("data-exec-process-id") === processId);
+    card?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, []);
+
   const virtuosoFooter = useMemo(
     () => (
       <>
         <Container>
+          <EventLog
+            events={eventLog}
+            threadId={renderChatId}
+            onProcessCompletedClick={handleProcessCompletedClick}
+          />
           <UncommittedChangesWarning />
         </Container>
         <Flex
@@ -380,9 +395,12 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     ),
     [
       compressionStatusText,
+      eventLog,
+      handleProcessCompletedClick,
       isStreaming,
       isWaiting,
       isWaitingForConfirmation,
+      renderChatId,
       visibleCompression,
     ],
   );
@@ -542,56 +560,54 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     <ChatThreadProvider chatId={renderChatId}>
       <CollapsibleStoreProvider value={collapsibleStore}>
         <SelectionToolbar />
-        <Box className={styles.chatRoot} data-element="ChatContent">
-          <VirtualizedChatList
-            key={renderChatId}
-            items={displayItems}
-            renderItem={renderDisplayItem}
-            initialScrollIndex={initialScrollIndex}
-            footer={virtuosoFooter}
-            header={
-              <Flex direction="column" gap="2">
-                <ChatShield threadId={renderChatId} />
-                <PlanBanner threadId={renderChatId} />
-              </Flex>
-            }
-            isStreaming={isStreaming}
-          />
+        <Flex
+          direction="column"
+          className={styles.chatRoot}
+          data-element="ChatContent"
+        >
+          <Box className={styles.transcriptScrollRegion}>
+            <VirtualizedChatList
+              key={renderChatId}
+              items={displayItems}
+              renderItem={renderDisplayItem}
+              initialScrollIndex={initialScrollIndex}
+              footer={virtuosoFooter}
+              header={
+                <Flex direction="column" gap="2">
+                  <ChatShield threadId={renderChatId} />
+                  <PlanBanner threadId={renderChatId} />
+                </Flex>
+              }
+              isStreaming={isStreaming}
+            />
 
-          <Box className={styles.floatingLinks}>
-            <ScrollArea scrollbars="horizontal">
-              <Flex align="start" gap="3" pb="2">
-                {shouldConfigButtonBeVisible && (
-                  <Button
-                    title="Return to configuration page"
-                    onClick={handleReturnToConfigurationClick}
-                    size="sm"
-                    variant="soft"
-                  >
-                    Return
-                  </Button>
-                )}
-                <ChatLinks />
-              </Flex>
-            </ScrollArea>
+            <Box className={styles.floatingLinks}>
+              <ScrollArea scrollbars="horizontal">
+                <Flex align="start" gap="3" pb="2">
+                  {shouldConfigButtonBeVisible && (
+                    <Button
+                      title="Return to configuration page"
+                      onClick={handleReturnToConfigurationClick}
+                      size="sm"
+                      variant="soft"
+                    >
+                      Return
+                    </Button>
+                  )}
+                  <ChatLinks />
+                </Flex>
+              </ScrollArea>
+            </Box>
           </Box>
-
           {queuedItems.length > 0 && (
             <Box className={styles.queuedMessagesContainer}>
-              <Container className={styles.queuedMessagesContent}>
-                <Flex direction="column" gap="2" align="end">
-                  {queuedItems.map((item, index) => (
-                    <QueuedMessage
-                      key={item.client_request_id}
-                      queuedItem={item}
-                      position={index + 1}
-                    />
-                  ))}
-                </Flex>
-              </Container>
+              <QueuePanel
+                queuedItems={queuedItems}
+                isBusy={isStreaming || isWaiting}
+              />
             </Box>
           )}
-        </Box>
+        </Flex>
       </CollapsibleStoreProvider>
     </ChatThreadProvider>
   );

@@ -410,10 +410,16 @@ pub async fn queue_sandbox_audit(
         sessions.get(chat_id).cloned()
     };
     if let Some(session) = session {
-        session
-            .lock()
-            .await
-            .queue_post_tool_side_effect(audit.message());
+        if let Err(error) = session.lock().await.queue_post_tool_delivery(
+            refact_core::chat_types::PendingDelivery::new(
+                vec![audit.message()],
+                refact_core::chat_types::PushMode::Append,
+                "exec.audit",
+                false,
+            ),
+        ) {
+            tracing::warn!(%chat_id, "could not queue sandbox audit: {error}");
+        }
     }
 }
 

@@ -83,6 +83,7 @@ fn interval_job(id: &str, every_ms: u64) -> Job {
             tools: None,
         },
         delivery: Delivery::Chat,
+        push: Default::default(),
         last_fired_at_ms: Some(2_000),
         fire_count: 2,
         last_status: Some("fired".to_string()),
@@ -939,7 +940,7 @@ async fn scheduler_cron_http_patch_pauses_resumes_and_changes_schedule() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         paused,
-        json!({ "id": id.clone(), "updated": true, "human_schedule": "every 15 minutes" })
+        json!({ "id": id.clone(), "updated": true, "human_schedule": "every 15 minutes", "push": "append" })
     );
     let stored = crate::scheduler::session_cron_store()
         .get(&id)
@@ -1018,4 +1019,45 @@ async fn scheduler_cron_http_bad_patch_unknown_id_returns_4xx() {
     .await;
 
     assert_ne!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn scheduler_http_push_defaults_and_patch_preserves_policy() {
+    let (_temp, _state, app) = test_app().await;
+    for policy in [None, Some("preempt"), Some("when_idle")] {
+        let mut body = json!({"every":"1h", "prompt":"push regression", "description":"Push policy", "durable":false, "isolated":true});
+        if let Some(policy) = policy {
+            body["push"] = json!(policy);
+        }
+        let (status, created) = json_request(
+            app.clone(),
+            Request::builder()
+                .method("POST")
+                .uri("/scheduler/cron")
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let id = created["id"].as_str().unwrap();
+        let expected = match policy {
+            Some("preempt") => "preempt",
+            Some("when_idle") => "when_idle",
+            _ => "append",
+        };
+        assert_eq!(created["push"], expected);
+        let (status, updated) = json_request(
+            app.clone(),
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/scheduler/cron/{id}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({"description":"Renamed"}).to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(updated["push"], expected);
+    }
 }

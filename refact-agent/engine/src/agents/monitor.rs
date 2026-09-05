@@ -144,6 +144,9 @@ mod tests {
     #[tokio::test]
     async fn monitor_retries_cooled_deferred_completion() {
         let gcx = crate::global_context::tests::make_test_gcx().await;
+        let workspace = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
         let app = AppState::from_gcx(gcx).await;
         let session = Arc::new(tokio::sync::Mutex::new(
             crate::chat::types::ChatSession::new("parent-monitor-deferred".to_string()),
@@ -203,7 +206,7 @@ mod tests {
 
         monitor_once(app.clone()).await.unwrap();
 
-        assert_eq!(session.lock().await.command_queue.len(), 1);
+        assert_eq!(session.lock().await.delivery_wake_sources.len(), 1);
         let updated = app
             .agents
             .get("parent-monitor-deferred", &record.agent_id)

@@ -1048,7 +1048,7 @@ export type EventSubkind =
   | "system_notice";
 
 export type EventMetadata = {
-  subkind: EventSubkind;
+  subkind: string;
   source: string;
   payload?: unknown;
 };
@@ -1056,7 +1056,7 @@ export type EventMetadata = {
 export type EventMessage = MessageEnvelope & {
   role: "event";
   content: string;
-  subkind: EventSubkind;
+  subkind: string;
   source: string;
   payload?: unknown;
 };
@@ -1083,11 +1083,12 @@ export function getEventMetadata(message: EventMessage): EventMetadata | null {
   const backendEvent = isRecord(message.extra?.event)
     ? message.extra.event
     : null;
-  const subkind = isEventSubkind(backendEvent?.subkind)
-    ? backendEvent.subkind
-    : isEventSubkind(message.subkind)
-      ? message.subkind
-      : null;
+  const subkind =
+    typeof backendEvent?.subkind === "string"
+      ? backendEvent.subkind
+      : typeof message.subkind === "string"
+        ? message.subkind
+        : null;
   if (!subkind) return null;
 
   const source =

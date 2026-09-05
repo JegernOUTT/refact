@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 use tokio::task::JoinHandle;
 
+use refact_core::chat_types::{PendingDelivery, PushMode};
+
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::call_validation::{ChatContent, ChatMessage, ContextEnum};
 use crate::chat::internal_roles::{event, EventSubkind};
@@ -34,6 +36,10 @@ const TRUNCATION_MARKER: &str = "[truncated]";
 const MIN_MAX_LINE_BYTES: usize = TRUNCATION_MARKER.len();
 const RATE_LIMIT_PER_SECOND: usize = 10;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
+/// How many events a single delivery may carry. Batching keeps the number of
+/// deliveries bounded without dropping any event: leftovers stay in the queue
+/// and are delivered by the next flush.
+const MAX_EVENTS_PER_DELIVERY: usize = 20;
 
 pub struct ToolProcessSubscribe {
     pub config_path: String,
@@ -45,6 +51,7 @@ struct SubscribeArgs {
     max_duration_ms: u64,
     max_events: usize,
     max_line_bytes: usize,
+    push: PushMode,
 }
 
 struct SubscriptionConfig {
@@ -52,6 +59,7 @@ struct SubscriptionConfig {
     max_duration: Duration,
     max_events: usize,
     max_line_bytes: usize,
+    push: PushMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +109,7 @@ impl Tool for ToolProcessSubscribe {
                 max_duration: Duration::from_millis(parsed.max_duration_ms),
                 max_events: parsed.max_events,
                 max_line_bytes: parsed.max_line_bytes,
+                push: parsed.push,
             },
             abort_flag,
         );
@@ -113,6 +122,7 @@ impl Tool for ToolProcessSubscribe {
                 "max_events": parsed.max_events,
                 "max_line_bytes": parsed.max_line_bytes,
                 "process_id": parsed.process_id.as_str(),
+                "push": parsed.push.as_str(),
             })
             .to_string(),
         ))
@@ -171,6 +181,8 @@ async fn run_process_subscription(
         config.max_events,
         config.max_line_bytes,
     );
+    let push = config.push;
+    let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
     let timeout = tokio::time::sleep(config.max_duration);
     tokio::pin!(timeout);
     let wait_process_id = process_id.clone();
@@ -184,11 +196,13 @@ async fn run_process_subscription(
         if input_finished {
             if state.needs_timer() {
                 state.finalize_ready_summary(Instant::now());
-                if !try_flush_events_when_idle(
-                    gcx.clone(),
+                if !flush_events(
+                    &app,
                     &chat_id,
                     &process_id,
+                    push,
                     &mut state.events,
+                    &mut state.pending_delivery,
                     abort_flag.clone(),
                 )
                 .await
@@ -198,6 +212,8 @@ async fn run_process_subscription(
             } else {
                 break;
             }
+            tokio::time::sleep(IDLE_FLUSH_INTERVAL).await;
+            continue;
         }
         tokio::select! {
             biased;
@@ -205,11 +221,13 @@ async fn run_process_subscription(
                 let now = Instant::now();
                 state.flush_pending_line(now);
                 state.finalize_summaries();
-                if !try_flush_events_when_idle(
-                    gcx.clone(),
+                if !flush_events(
+                    &app,
                     &chat_id,
                     &process_id,
+                    push,
                     &mut state.events,
+                    &mut state.pending_delivery,
                     abort_flag.clone(),
                 ).await {
                     break;
@@ -224,11 +242,13 @@ async fn run_process_subscription(
                             state.finalize_summaries();
                             input_finished = true;
                         }
-                        if !try_flush_events_when_idle(
-                            gcx.clone(),
+                        if !flush_events(
+                            &app,
                             &chat_id,
                             &process_id,
+                            push,
                             &mut state.events,
+                    &mut state.pending_delivery,
                             abort_flag.clone(),
                         ).await {
                             break;
@@ -251,11 +271,13 @@ async fn run_process_subscription(
             },
             _ = tokio::time::sleep(IDLE_FLUSH_INTERVAL), if state.needs_timer() => {
                 state.finalize_ready_summary(Instant::now());
-                if !try_flush_events_when_idle(
-                    gcx.clone(),
+                if !flush_events(
+                    &app,
                     &chat_id,
                     &process_id,
+                    push,
                     &mut state.events,
+                    &mut state.pending_delivery,
                     abort_flag.clone(),
                 ).await {
                     break;
@@ -286,6 +308,7 @@ struct SubscriptionState {
     pending: String,
     pending_truncated: bool,
     events: VecDeque<SubscribeEvent>,
+    pending_delivery: Option<PendingDelivery>,
     event_count: usize,
     recent_event_times: VecDeque<Instant>,
     active_summary: Option<SummaryBuilder>,
@@ -301,6 +324,7 @@ impl SubscriptionState {
             pending: String::new(),
             pending_truncated: false,
             events: VecDeque::new(),
+            pending_delivery: None,
             event_count: 0,
             recent_event_times: VecDeque::new(),
             active_summary: None,
@@ -426,7 +450,7 @@ impl SubscriptionState {
     }
 
     fn needs_timer(&self) -> bool {
-        self.has_events() || self.active_summary.is_some()
+        self.has_events() || self.active_summary.is_some() || self.pending_delivery.is_some()
     }
 
     fn reached_cap(&self) -> bool {
@@ -514,38 +538,42 @@ fn line_matches(regex_filter: Option<&Regex>, line: &str) -> bool {
         .unwrap_or(true)
 }
 
-async fn try_flush_events_when_idle(
-    gcx: SharedGlobalContext,
+async fn flush_events(
+    app: &crate::app_state::AppState,
     chat_id: &str,
     process_id: &ExecProcessId,
+    push: PushMode,
     events: &mut VecDeque<SubscribeEvent>,
+    pending: &mut Option<PendingDelivery>,
     abort_flag: Arc<AtomicBool>,
 ) -> bool {
-    if events.is_empty() {
-        return true;
-    }
-    if abort_flag.load(Ordering::Relaxed) {
+    if app.gcx.shutdown_flag.load(Ordering::Relaxed) || abort_flag.load(Ordering::Relaxed) {
         return false;
     }
-    let session_arc = {
-        let sessions = gcx.chat_sessions.read().await;
-        sessions.get(chat_id).cloned()
-    };
-    let Some(session_arc) = session_arc else {
-        return false;
-    };
-    if gcx.shutdown_flag.load(Ordering::Relaxed) || abort_flag.load(Ordering::Relaxed) {
-        return false;
+    if pending.is_none() && !events.is_empty() {
+        let messages = events
+            .drain(..events.len().min(MAX_EVENTS_PER_DELIVERY))
+            .map(|item| subscription_message(process_id.clone(), item))
+            .collect();
+        *pending = Some(PendingDelivery::new(
+            messages,
+            push,
+            "exec.subscribe",
+            false,
+        ));
     }
-    let mut session = session_arc.lock().await;
-    if session.closed {
-        return false;
-    }
-    if !session.is_idle() {
-        return true;
-    }
-    while let Some(event) = events.pop_front() {
-        session.add_message(subscription_message(process_id.clone(), event));
+    if let Some(delivery) = pending.as_ref() {
+        match crate::chat::delivery::deliver_to_chat(app.clone(), chat_id, delivery.clone()).await {
+            Ok(_) => {
+                *pending = None;
+            }
+            Err(error) => {
+                // Retain the same envelope/id on backpressure or transient failure.
+                // The caller retries on its bounded timer, and stops on shutdown/abort.
+                tracing::warn!(%chat_id, %process_id, "subscription delivery retained: {error}");
+                tokio::time::sleep(IDLE_FLUSH_INTERVAL).await;
+            }
+        }
     }
     true
 }
@@ -600,6 +628,7 @@ fn process_subscribe_input_schema() -> Value {
         "type": "object",
         "properties": {
             "process_id": { "type": "string" },
+            "push": PushMode::schema(),
             "regex_filter": { "type": "string", "description": "Optional regex. Only matching lines fire notifications. Empty = all lines." },
             "max_duration_ms": { "type": "integer", "default": DEFAULT_MAX_DURATION_MS, "minimum": MIN_MAX_DURATION_MS, "maximum": MAX_MAX_DURATION_MS },
             "max_events": { "type": "integer", "default": DEFAULT_MAX_EVENTS, "minimum": 1, "maximum": MAX_MAX_EVENTS },
@@ -636,7 +665,9 @@ fn parse_subscribe_args(args: &HashMap<String, Value>) -> Result<SubscribeArgs, 
         MIN_MAX_LINE_BYTES,
         MAX_MAX_LINE_BYTES,
     )?;
+    let push = PushMode::from_args(args)?;
     Ok(SubscribeArgs {
+        push,
         process_id,
         regex_filter,
         max_duration_ms,
@@ -944,7 +975,8 @@ mod tests {
                 "max_duration_ms": subscribe_duration_ms(),
                 "max_events": DEFAULT_MAX_EVENTS,
                 "max_line_bytes": DEFAULT_MAX_LINE_BYTES,
-                "process_id": process_id.as_str()
+                "process_id": process_id.as_str(),
+                "push": "append"
             })
         );
         let _ = gcx.exec_registry.wait(&process_id).await.unwrap();
@@ -963,6 +995,125 @@ mod tests {
         assert!(events
             .iter()
             .all(|message| message.extra["event"]["payload"]["process_id"] == json!(process_id)));
+    }
+
+    #[test]
+    fn push_defaults_to_append_and_validates_modes() {
+        let mut input = args(vec![("process_id", json!("exec_test"))]);
+        assert_eq!(parse_subscribe_args(&input).unwrap().push, PushMode::Append);
+        for (value, expected) in [
+            ("preempt", PushMode::Preempt),
+            ("when_idle", PushMode::WhenIdle),
+        ] {
+            input.insert("push".into(), json!(value));
+            assert_eq!(parse_subscribe_args(&input).unwrap().push, expected);
+        }
+        input.insert("push".into(), json!(true));
+        assert!(parse_subscribe_args(&input).is_err());
+        assert_eq!(
+            process_subscribe_input_schema()["properties"]["push"]["default"],
+            "append"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_batch_retains_id_and_bounded_order_then_retries() {
+        let (gcx, _, session) = test_context("retry-subscribe").await;
+        let workspace = tempfile::tempdir().unwrap();
+        *gcx.documents_state.workspace_folders.lock().unwrap() =
+            vec![workspace.path().to_path_buf()];
+        let app = AppState::from_gcx(gcx.clone()).await;
+        session.lock().await.closed = true;
+        let mut events = (0..25)
+            .map(|n| SubscribeEvent::Line(n.to_string()))
+            .collect();
+        let mut pending = None;
+        let abort = Arc::new(AtomicBool::new(false));
+        let process = ExecProcessId("exec_retry".into());
+        assert!(
+            flush_events(
+                &app,
+                "retry-subscribe",
+                &process,
+                PushMode::Append,
+                &mut events,
+                &mut pending,
+                abort.clone()
+            )
+            .await
+        );
+        let id = pending.as_ref().unwrap().id.clone();
+        assert_eq!(pending.as_ref().unwrap().messages.len(), 20);
+        assert_eq!(events.len(), 5);
+        assert!(
+            flush_events(
+                &app,
+                "retry-subscribe",
+                &process,
+                PushMode::Append,
+                &mut events,
+                &mut pending,
+                abort.clone()
+            )
+            .await
+        );
+        assert_eq!(pending.as_ref().unwrap().id, id);
+        session.lock().await.closed = false;
+        assert!(
+            flush_events(
+                &app,
+                "retry-subscribe",
+                &process,
+                PushMode::Append,
+                &mut events,
+                &mut pending,
+                abort.clone()
+            )
+            .await
+        );
+        assert!(pending.is_none());
+        assert_eq!(subscribe_events(&session).await.len(), 20);
+        assert!(
+            flush_events(
+                &app,
+                "retry-subscribe",
+                &process,
+                PushMode::Append,
+                &mut events,
+                &mut pending,
+                abort.clone()
+            )
+            .await
+        );
+        assert_eq!(subscribe_events(&session).await.len(), 25);
+        assert!(pending.is_none());
+        assert!(events.is_empty());
+        let saved =
+            crate::chat::trajectories::load_trajectory_for_chat(gcx.clone(), "retry-subscribe")
+                .await
+                .expect("retried batches persisted");
+        assert_eq!(
+            saved
+                .messages
+                .iter()
+                .filter(|message| is_subscribe_event(message))
+                .map(|message| message.content.content_text_only())
+                .collect::<Vec<_>>(),
+            (0..25).map(|n| n.to_string()).collect::<Vec<_>>()
+        );
+        gcx.shutdown_flag.store(true, Ordering::Relaxed);
+        assert!(
+            !flush_events(
+                &app,
+                "retry-subscribe",
+                &process,
+                PushMode::Append,
+                &mut events,
+                &mut pending,
+                abort
+            )
+            .await
+        );
     }
 
     #[test]
@@ -1017,12 +1168,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paused_session_gets_no_injections_until_idle() {
+    async fn streaming_session_queues_until_boundary() {
         let chat_id = "paused-session-gets-no-injections-until-idle";
         let (gcx, ccx, session) = test_context(chat_id).await;
         {
             let mut session = session.lock().await;
-            session.set_runtime_state(SessionState::Paused, None);
+            session.start_stream().unwrap();
         }
         let process_id = spawn_background(&gcx, chat_id, ready_command()).await;
         let mut tool = ToolProcessSubscribe {
@@ -1048,7 +1199,9 @@ mod tests {
 
         {
             let mut session = session.lock().await;
+            session.draft_message = None;
             session.set_runtime_state(SessionState::Idle, None);
+            session.drain_pending_deliveries();
         }
 
         wait_for_subscribe_event_count(&session, 2).await;
@@ -1097,6 +1250,7 @@ mod tests {
                 max_duration: Duration::from_secs(10),
                 max_events: DEFAULT_MAX_EVENTS,
                 max_line_bytes: DEFAULT_MAX_LINE_BYTES,
+                push: PushMode::Append,
             },
             Arc::new(AtomicBool::new(false)),
         );
@@ -1123,6 +1277,7 @@ mod tests {
                 max_duration: Duration::from_millis(50),
                 max_events: DEFAULT_MAX_EVENTS,
                 max_line_bytes: DEFAULT_MAX_LINE_BYTES,
+                push: PushMode::Append,
             },
             Arc::new(AtomicBool::new(false)),
         );

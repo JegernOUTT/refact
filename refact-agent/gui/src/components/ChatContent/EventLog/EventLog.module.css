@@ -1,4 +1,5 @@
 .card {
+  container-type: inline-size;
   margin: var(--rf-space-1) 0 var(--rf-space-2);
   color: var(--rf-color-fg);
   background: transparent;
@@ -89,7 +90,7 @@
 }
 
 .filterChip[data-selected="true"] {
-  color: var(--rf-color-accent);
+  color: var(--rf-color-fg);
   background: var(--rf-color-accent-soft);
   border-color: transparent;
 }
@@ -144,17 +145,14 @@
 
 .timestamp {
   flex: 0 0 auto;
-  color: var(--rf-color-faint);
+  color: var(--rf-color-muted);
   font-variant-numeric: tabular-nums;
 }
 
-.subkindChip {
-  flex: 0 0 auto;
-  padding: 0 var(--rf-space-1);
-  color: var(--rf-color-accent);
-  font-family: var(--rf-font-mono);
-  background: var(--rf-color-accent-soft);
-  border-radius: var(--rf-radius-chip);
+.entry .subkindChip {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--rf-color-fg);
 }
 
 .source {
@@ -210,4 +208,24 @@
 :global(.radix-themes[data-host="jetbrains"]) .entry[data-expanded="true"] {
   background: var(--rf-surface-glass);
   backdrop-filter: none;
+}
+
+@container (max-width: 480px) {
+  .body {
+    padding-left: 0;
+  }
+  .entryRow {
+    flex-wrap: wrap;
+  }
+  .summaryText {
+    flex-basis: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .source {
+    flex: 1 1 auto;
+  }
+  .timestamp {
+    display: none;
+  }
 }

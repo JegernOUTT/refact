@@ -16,9 +16,10 @@ use crate::files_correction::get_active_project_path;
 use crate::scheduler::schedule::parse_schedule;
 use crate::scheduler::{
     delivery_kind, human_schedule_for_trigger as scheduler_human_schedule_for_trigger, next_run_ms,
-    scheduler_timezone, session_cron_store, Action, AgentTarget, CronStore, Delivery, Job,
-    JsonFileCronStore, Trigger, delivery_from_value,
+    push_from_value, push_schema, scheduler_timezone, session_cron_store, Action, AgentTarget,
+    CronStore, Delivery, Job, JsonFileCronStore, Trigger, delivery_from_value,
 };
+use refact_core::chat_types::PushMode;
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 
 pub const MAX_CRON_JOBS: usize = 50;
@@ -47,6 +48,7 @@ pub(crate) struct CronCreateInput {
     pub(crate) cwd: Option<String>,
     pub(crate) timeout_secs: Option<u64>,
     pub(crate) delivery: Delivery,
+    pub(crate) push: PushMode,
     pub(crate) recurring: Option<bool>,
     pub(crate) durable: Option<bool>,
     pub(crate) isolated: bool,
@@ -131,6 +133,7 @@ impl Tool for ToolCronCreate {
                         ],
                         "description": "Delivery target: chat (default), none, webhook {url, token?}, or notifier {integration_id, target?}."
                     },
+                    "push": push_schema(),
                     "recurring": { "type": "boolean", "default": true },
                     "durable": { "type": "boolean", "description": "Persist in the current project when true; stay session-only when false. Omitted defaults to durable when a project store exists." },
                     "isolated": { "type": "boolean", "default": false, "description": "Create a fresh isolated chat session for each fire instead of enqueueing into the current chat." },
@@ -171,6 +174,7 @@ impl Tool for ToolCronCreate {
             "action_kind": outcome.task.action_kind(),
             "delivery_kind": delivery_kind(&outcome.task.delivery),
             "delivery": delivery_output(&outcome.task.delivery),
+            "push": outcome.task.push,
             "isolated": outcome.task.is_isolated(),
         });
 
@@ -240,6 +244,7 @@ fn input_from_args(args: &HashMap<String, Value>) -> Result<CronCreateInput, Str
         cwd: optional_string_arg(args, "cwd")?,
         timeout_secs: optional_u64_arg(args, "timeout_secs")?,
         delivery: delivery_arg(args)?,
+        push: push_from_value(args.get("push"))?.unwrap_or_default(),
         recurring: optional_bool_arg(args, "recurring")?,
         durable: optional_bool_arg(args, "durable")?,
         isolated: optional_bool_arg(args, "isolated")?.unwrap_or(false),
@@ -489,6 +494,7 @@ pub(crate) async fn create_cron_job(
     );
     task.set_trigger(trigger);
     task.delivery = input.delivery.clone();
+    task.push = input.push;
     apply_cron_create_action(&mut task, &input, runtime.chat_id, runtime.model)?;
     task.set_mode(runtime.mode);
     validate_next_run(&task, runtime.now_ms, runtime.timezone)?;

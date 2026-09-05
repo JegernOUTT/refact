@@ -5,6 +5,7 @@ import type {
   EventSubkind,
 } from "../../../services/refact/types";
 import { EventLog } from "./EventLog";
+import { EVENT_SUBKINDS, eventSubkindLabel } from "./eventSubkind";
 
 type RenderStore = ReturnType<typeof render>["store"];
 
@@ -49,7 +50,7 @@ const planDeltaEvent = makeEvent("event-5", "plan_delta", "Plan updated");
 const events = [modeSwitchEvent, toolDecisionEvent, processEvent];
 
 function openLog(): void {
-  fireEvent.click(screen.getByText("Event log"));
+  fireEvent.click(screen.getByText("Event history"));
 }
 
 function pagesFromStore(store: RenderStore) {
@@ -58,13 +59,29 @@ function pagesFromStore(store: RenderStore) {
 
 function storedFilters(threadId: string): EventSubkind[] {
   return JSON.parse(
-    localStorage.getItem(`event-log-filter-${threadId}`) ?? "[]",
+    localStorage.getItem(`event-log-hidden-${threadId}`) ?? "[]",
   ) as EventSubkind[];
 }
 
 describe("EventLog", () => {
   beforeEach(() => {
     localStorage.clear();
+  });
+
+  it("renders every known kind and newly introduced kinds by default", () => {
+    const all = EVENT_SUBKINDS.map((kind, index) =>
+      makeEvent(`all-${index}`, kind, `content-${kind}`),
+    );
+    all.push({
+      ...makeEvent("future", "system_notice", "Future event payload"),
+      subkind: "future_kind",
+    });
+    render(<EventLog events={all} threadId="all-kinds" />);
+    openLog();
+    expect(screen.getAllByTestId("event-log-entry")).toHaveLength(14);
+    for (const kind of EVENT_SUBKINDS)
+      expect(screen.getByLabelText(eventSubkindLabel(kind))).toBeChecked();
+    expect(screen.getByLabelText("Future kind")).toBeChecked();
   });
 
   it("renders nothing when events array is empty", () => {
@@ -79,7 +96,7 @@ describe("EventLog", () => {
     );
 
     expect(screen.getByTestId("event-log")).toBeInTheDocument();
-    expect(screen.getByText("Event log")).toBeInTheDocument();
+    expect(screen.getByText("Event history")).toBeInTheDocument();
     expect(screen.getByText("3 events")).toBeInTheDocument();
     expect(container.querySelector("details")).not.toHaveAttribute("open");
   });
@@ -93,14 +110,14 @@ describe("EventLog", () => {
     const summary = container.querySelector("summary");
 
     expect(details).toBeInTheDocument();
-    expect(summary).toHaveTextContent("Event log");
+    expect(summary).toHaveTextContent("Event history");
 
     openLog();
 
     expect(details).toHaveAttribute("open");
   });
 
-  it("excludes plan_delta events from the visible log", () => {
+  it("includes plan updates in the visible log", () => {
     render(
       <EventLog
         events={[modeSwitchEvent, planDeltaEvent]}
@@ -110,10 +127,10 @@ describe("EventLog", () => {
 
     openLog();
 
-    expect(screen.getByText("1 event")).toBeInTheDocument();
+    expect(screen.getByText("2 events")).toBeInTheDocument();
     expect(screen.getByText("Mode switched")).toBeInTheDocument();
-    expect(screen.queryByText("Plan updated")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText(/plan_delta/)).not.toBeInTheDocument();
+    expect(screen.getByText("Plan updated")).toBeInTheDocument();
+    expect(screen.getByLabelText("Plan update")).toBeChecked();
   });
 
   it("click to expand reveals all entries", () => {
@@ -145,34 +162,24 @@ describe("EventLog", () => {
     render(<EventLog events={events} threadId="thread-filter" />);
 
     openLog();
-    fireEvent.click(screen.getByLabelText(/mode_switch/));
+    fireEvent.click(screen.getByLabelText(/Mode switch/));
 
     expect(screen.queryByText("Mode switched")).not.toBeInTheDocument();
     expect(screen.getByText("Tool accepted")).toBeInTheDocument();
     expect(screen.getByText("Process completed")).toBeInTheDocument();
-    expect(storedFilters("thread-filter")).toEqual([
-      "tool_decision",
-      "ide_callback",
-      "process_completed",
-      "cron_fire",
-      "tick",
-      "summarization_marker",
-      "cancellation_note",
-      "verifier_report",
-      "system_notice",
-    ]);
+    expect(storedFilters("thread-filter")).toEqual(["mode_switch"]);
   });
 
   it("keeps the disclosure visible when no events match active filters", () => {
     render(<EventLog events={[modeSwitchEvent]} threadId="thread-no-match" />);
 
     openLog();
-    fireEvent.click(screen.getByLabelText(/mode_switch/));
+    fireEvent.click(screen.getByLabelText(/Mode switch/));
 
     expect(screen.getByTestId("event-log")).toBeInTheDocument();
     expect(screen.getByText("1 event")).toBeInTheDocument();
     expect(
-      screen.getByText("All event subkinds are hidden by filters."),
+      screen.getByText("All event types are hidden by filters."),
     ).toBeInTheDocument();
   });
 
@@ -182,7 +189,7 @@ describe("EventLog", () => {
     );
 
     openLog();
-    fireEvent.click(screen.getByLabelText(/tool_decision/));
+    fireEvent.click(screen.getByLabelText(/Tool decision/));
     expect(screen.queryByText("Tool accepted")).not.toBeInTheDocument();
     unmount();
 
@@ -193,7 +200,7 @@ describe("EventLog", () => {
     expect(container.querySelector("details")).toHaveAttribute("open");
     expect(screen.getByText("Mode switched")).toBeInTheDocument();
     expect(screen.queryByText("Tool accepted")).not.toBeInTheDocument();
-    expect(screen.getByLabelText(/tool_decision/)).not.toBeChecked();
+    expect(screen.getByLabelText(/Tool decision/)).not.toBeChecked();
   });
 
   it("default state per thread is independent", () => {
@@ -217,14 +224,14 @@ describe("EventLog", () => {
     );
 
     openLog();
-    fireEvent.click(screen.getByLabelText(/process_completed/));
+    fireEvent.click(screen.getByLabelText(/Process finished/));
     unmount();
 
     render(<EventLog events={events} threadId="thread-filter-b" />);
     openLog();
 
     expect(screen.getByText("Process completed")).toBeInTheDocument();
-    const processFilter = screen.getByLabelText(/process_completed/);
+    const processFilter = screen.getByLabelText(/Process finished/);
     expect(processFilter).toBeChecked();
   });
 
@@ -234,9 +241,9 @@ describe("EventLog", () => {
     openLog();
     const eventLog = screen.getByTestId("event-log");
 
-    expect(within(eventLog).getByLabelText(/mode_switch/)).toBeInTheDocument();
+    expect(within(eventLog).getByLabelText(/Mode switch/)).toBeInTheDocument();
     expect(
-      within(eventLog).queryByLabelText(/tool_decision/),
+      within(eventLog).queryByLabelText(/Tool decision/),
     ).not.toBeInTheDocument();
   });
 

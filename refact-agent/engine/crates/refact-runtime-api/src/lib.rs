@@ -7,11 +7,15 @@ use async_trait::async_trait;
 use refact_buddy_core::snapshot::BuddySnapshot;
 use refact_buddy_core::types::{BuddyRuntimeEvent, BuddySuggestion};
 use refact_buddy_core::user_action::UserAction;
-use refact_chat_api::{ChatCommand, ChatMessage, ContextFile, GoalSnapshot, PauseReason, ThreadParams};
+use refact_chat_api::{
+    ChatCommand, ChatMessage, ContextFile, DeliveryOutcome, GoalSnapshot, PauseReason,
+    PendingDelivery, PushMode, ThreadParams,
+};
 use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 use refact_tool_api::{build_registry_from_names, ToolAliasRegistry, ToolDesc};
 
-pub use refact_chat_api::{SessionState, TaskMeta};
+pub use refact_chat_api::{DeliveryOutcome as RuntimeDeliveryOutcome, SessionState, TaskMeta};
+pub use refact_chat_api::{PendingDelivery as RuntimePendingDelivery, PushMode as RuntimePushMode};
 pub use refact_tool_api::ToolDesc as RuntimeToolDesc;
 pub use refact_buddy_core::types::BuddyRuntimeEvent as RuntimeBuddyEvent;
 pub use refact_buddy_core::user_action::UserAction as RuntimeUserAction;
@@ -307,6 +311,37 @@ pub trait ChatSessionFacade: Send + Sync {
         command: ChatCommand,
     ) -> Result<(), String> {
         self.push_command(chat_id, command).await
+    }
+    /// Unified delivery entry point for producers. The default implementation
+    /// only enqueues the command (so existing mocks keep compiling); the engine
+    /// implementation reports the real outcome.
+    async fn deliver_messages(
+        &self,
+        chat_id: &str,
+        delivery: PendingDelivery,
+    ) -> Result<DeliveryOutcome, String> {
+        self.push_command(chat_id, ChatCommand::DeliverMessages { delivery })
+            .await?;
+        Ok(DeliveryOutcome::Queued)
+    }
+    /// Reprioritize or cancel a pending delivery. Default implementation routes
+    /// through the command queue.
+    async fn update_pending_delivery(
+        &self,
+        chat_id: &str,
+        delivery_id: &str,
+        push: Option<PushMode>,
+        cancel: bool,
+    ) -> Result<(), String> {
+        self.push_command(
+            chat_id,
+            ChatCommand::UpdatePendingDelivery {
+                delivery_id: delivery_id.to_string(),
+                push,
+                cancel,
+            },
+        )
+        .await
     }
     async fn session_state(&self, chat_id: &str) -> Result<Option<SessionState>, String>;
     async fn maybe_save_session(&self, chat_id: &str) -> Result<(), String>;
