@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-non-null-assertion */
-import { expect, test, describe, beforeEach } from "vitest";
+import { expect, test, describe, beforeEach, vi } from "vitest";
+import type { RootState } from "../../../app/store";
+import { selectWaitingInterruptibleById } from "./selectors";
 import { chatReducer } from "./reducer";
 import type { Chat } from "./types";
 import type { ChatHistoryItem } from "../../History/historySlice";
@@ -9,6 +11,7 @@ import {
   markThreadSseError,
   restoreChat,
 } from "./actions";
+import { subscribeToChatEvents } from "../../../services/refact/chatSubscription";
 import type { ChatEventEnvelope } from "../../../services/refact/chatSubscription";
 import type { ChatMessage } from "../../../services/refact/types";
 
@@ -50,6 +53,95 @@ describe("Chat Thread Reducer - Edge Cases", () => {
     },
     background_agents: [],
     messages,
+  });
+
+  test("parses interruptible waiting snapshots and runtime updates with false legacy default", () => {
+    const snapshot = createSnapshot();
+    snapshot.runtime.waiting_interruptible = true;
+    let state = chatReducer(initialState, applyChatEvent(snapshot));
+    const waiting = () =>
+      selectWaitingInterruptibleById({ chat: state } as RootState, chatId);
+    expect(waiting()).toBe(true);
+    expect(
+      selectWaitingInterruptibleById({ chat: state } as RootState, "missing"),
+    ).toBe(false);
+    state = chatReducer(
+      state,
+      applyChatEvent({
+        chat_id: chatId,
+        seq: "2",
+        type: "runtime_updated",
+        state: "executing_tools",
+        waiting_interruptible: false,
+      }),
+    );
+    expect(waiting()).toBe(false);
+    state = chatReducer(
+      state,
+      applyChatEvent({
+        chat_id: chatId,
+        seq: "3",
+        type: "runtime_updated",
+        state: "executing_tools",
+        waiting_interruptible: true,
+      }),
+    );
+    expect(waiting()).toBe(true);
+    state = chatReducer(
+      state,
+      applyChatEvent({
+        chat_id: chatId,
+        seq: "4",
+        type: "runtime_updated",
+        state: "idle",
+      }),
+    );
+    expect(waiting()).toBe(false);
+  });
+
+  test("SSE parsing preserves waiting_interruptible on snapshots and updates", async () => {
+    const snapshot = createSnapshot();
+    snapshot.runtime.waiting_interruptible = true;
+    const update = {
+      chat_id: chatId,
+      seq: "2",
+      type: "runtime_updated",
+      state: "executing_tools",
+      waiting_interruptible: false,
+    };
+    const bytes = new TextEncoder().encode(
+      [snapshot, update]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join(""),
+    );
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(bytes);
+            controller.close();
+          },
+        }),
+      ),
+    );
+    const onEvent = vi.fn<(event: ChatEventEnvelope) => void>();
+    const stop = subscribeToChatEvents(
+      chatId,
+      { lspPort: 8001 },
+      { onEvent, onError: vi.fn() },
+    );
+    try {
+      await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2));
+      expect(onEvent.mock.calls[0][0]).toMatchObject({
+        runtime: { waiting_interruptible: true },
+      });
+      expect(onEvent.mock.calls[1][0]).toMatchObject({
+        waiting_interruptible: false,
+      });
+    } finally {
+      stop();
+      fetchMock.mockRestore();
+    }
   });
 
   const selectCompression = (state: Chat): boolean =>

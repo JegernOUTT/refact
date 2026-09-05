@@ -438,6 +438,9 @@ impl ChatSession {
             recent_request_ids_set: HashSet::new(),
             abort_flag: Arc::new(AtomicBool::new(false)),
             abort_notify: Arc::new(Notify::new()),
+            interruptible_waits: 0,
+            wait_delivery_boundary: false,
+            wait_interrupt_flag: Arc::new(AtomicBool::new(false)),
             user_interrupt_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
             queue_notify: Arc::new(Notify::new()),
@@ -563,6 +566,9 @@ impl ChatSession {
             recent_request_ids_set: HashSet::new(),
             abort_flag: Arc::new(AtomicBool::new(false)),
             abort_notify: Arc::new(Notify::new()),
+            interruptible_waits: 0,
+            wait_delivery_boundary: false,
+            wait_interrupt_flag: Arc::new(AtomicBool::new(false)),
             user_interrupt_flag: Arc::new(AtomicBool::new(false)),
             queue_processor_running: Arc::new(AtomicBool::new(false)),
             queue_notify: Arc::new(Notify::new()),
@@ -1059,6 +1065,7 @@ impl ChatSession {
         compression_reason: Option<CompressionReason>,
     ) -> ChatEvent {
         ChatEvent::RuntimeUpdated {
+            waiting_interruptible: self.runtime.waiting_interruptible,
             goal_active: self.goal_active,
             goal_status: self.goal_status,
             goal_turns_used: self.goal_turns_used,
@@ -1740,6 +1747,40 @@ impl ChatSession {
             )
     }
 
+    /// Wait cancellation is separate from turn cancellation: real work in the same
+    /// tool window must finish, and its assistant message must remain intact.
+    pub fn begin_interruptible_wait(&mut self) {
+        if self.interruptible_waits == 0 {
+            self.wait_interrupt_flag.store(false, Ordering::SeqCst);
+        }
+        self.interruptible_waits += 1;
+        self.runtime.waiting_interruptible = true;
+        self.emit_goal_status();
+        self.interrupt_wait_for_delivery();
+    }
+
+    pub fn end_interruptible_wait(&mut self) {
+        self.interruptible_waits = self.interruptible_waits.saturating_sub(1);
+        self.runtime.waiting_interruptible = self.interruptible_waits > 0;
+        self.emit_goal_status();
+    }
+
+    pub fn interrupt_wait_for_delivery(&mut self) {
+        if self.interruptible_waits > 0
+            && self
+                .pending_deliveries
+                .iter()
+                .chain(self.runner_pending_deliveries.iter())
+                .any(|delivery| {
+                    delivery.push != PushMode::Preempt && delivery.after_tool_call_id.is_none()
+                })
+        {
+            self.wait_delivery_boundary = true;
+            self.wait_interrupt_flag.store(true, Ordering::SeqCst);
+            self.abort_notify.notify_waiters();
+        }
+    }
+
     /// Whether a delivery with this `push` may land right now.
     ///
     /// * `Preempt` always may — the caller aborts the draft first.
@@ -1755,7 +1796,7 @@ impl ChatSession {
             PushMode::WhenIdle => {
                 self.draft_message.is_none()
                     && !self.has_pending_tool_result_window()
-                    && self.turn_finished()
+                    && (self.turn_finished() || self.wait_delivery_boundary)
             }
         }
     }
@@ -1951,7 +1992,9 @@ impl ChatSession {
             return Ok(DeliveryOutcome::Delivered);
         }
 
-        if self.delivery_envelope_boundary_open(&delivery) {
+        if self.delivery_envelope_boundary_open(&delivery)
+            && !(self.wait_delivery_boundary && !self.pending_deliveries.is_empty())
+        {
             self.append_delivery(&delivery);
             self.emit_queue_update();
             self.mark_persisted_runtime_changed();
@@ -1959,6 +2002,7 @@ impl ChatSession {
         }
 
         self.pending_deliveries.push_back(delivery);
+        self.interrupt_wait_for_delivery();
         self.emit_queue_update();
         self.mark_persisted_runtime_changed();
         Ok(DeliveryOutcome::Queued)
@@ -1999,6 +2043,13 @@ impl ChatSession {
         if !delivered_ids.is_empty() {
             self.emit_queue_update();
             self.mark_persisted_runtime_changed();
+        }
+        // Runner mirrors are consumed by the runner after importing tool results.
+        if self.runner_pending_deliveries.is_empty()
+            && !self.has_pending_tool_result_window()
+            && self.interruptible_waits == 0
+        {
+            self.wait_delivery_boundary = false;
         }
         (delivered_ids, wake)
     }
@@ -2056,6 +2107,7 @@ impl ChatSession {
         if let Some(pending) = self.pending_deliveries.get_mut(index) {
             pending.push = push;
         }
+        self.interrupt_wait_for_delivery();
         self.emit_queue_update();
         self.mark_persisted_runtime_changed();
         Ok(self.delivery_envelope_boundary_open(&self.pending_deliveries[index]))
@@ -2069,6 +2121,7 @@ impl ChatSession {
             return;
         }
         self.runner_pending_deliveries = deliveries;
+        self.interrupt_wait_for_delivery();
         self.emit_queue_update();
     }
 
@@ -2794,6 +2847,7 @@ impl ChatSession {
             warn!("Attempted to start stream while already executing tools or draft exists");
             return None;
         }
+        self.wait_delivery_boundary = false;
         self.abort_flag.store(false, Ordering::SeqCst);
         self.user_interrupt_flag.store(false, Ordering::SeqCst);
         let message_id = Uuid::new_v4().to_string();
@@ -3580,6 +3634,91 @@ mod tests {
             assert_eq!(session.messages[1].content.content_text_only(), "slept");
             assert!(session.pending_deliveries.is_empty());
         }
+    }
+
+    #[test]
+    fn interruptible_wait_delivery_closes_window_before_fifo_release() {
+        for push in [PushMode::Append, PushMode::WhenIdle] {
+            for already_queued in [false, true] {
+                let mut session = make_session();
+                session.turn_depth = 1;
+                session.start_stream().unwrap();
+                session.emit_stream_delta(vec![DeltaOp::SetToolCalls {
+                    tool_calls: vec![
+                        json!({"id":"wait","type":"function","function":{"name":"sleep","arguments":"{}"}}),
+                        json!({"id":"work","type":"function","function":{"name":"shell","arguments":"{}"}}),
+                    ],
+                }]);
+                session.finish_stream_with_next_state(
+                    Some("tool_calls".into()),
+                    SessionState::ExecutingTools,
+                );
+                if already_queued {
+                    session
+                        .enqueue_delivery(delivery_fixture("first", push))
+                        .unwrap();
+                }
+                session.begin_interruptible_wait();
+                assert!(session.runtime.waiting_interruptible);
+                assert_eq!(
+                    serde_json::to_value(&session.runtime).unwrap()["waiting_interruptible"],
+                    true
+                );
+                if !already_queued {
+                    session
+                        .enqueue_delivery(delivery_fixture("first", push))
+                        .unwrap();
+                }
+                session
+                    .enqueue_delivery(delivery_fixture("second", PushMode::Append))
+                    .unwrap();
+                assert!(session.wait_interrupt_flag.load(Ordering::SeqCst));
+                assert!(!session.abort_flag.load(Ordering::SeqCst));
+                assert!(!session.user_interrupt_flag.load(Ordering::SeqCst));
+                session.end_interruptible_wait();
+                assert!(!session.runtime.waiting_interruptible);
+                for id in ["wait", "work"] {
+                    session.add_message(ChatMessage {
+                        role: "tool".into(),
+                        tool_call_id: id.into(),
+                        content: ChatContent::SimpleText("result".into()),
+                        ..Default::default()
+                    });
+                    if id == "wait" {
+                        assert!(session.drain_pending_deliveries().0.is_empty());
+                    }
+                }
+                assert_eq!(
+                    session.drain_pending_deliveries(),
+                    (vec!["first".into(), "second".into()], true)
+                );
+                assert_eq!(session.drain_pending_deliveries(), (vec![], false));
+                assert!(!session.wait_delivery_boundary);
+                assert_eq!(
+                    session
+                        .messages
+                        .iter()
+                        .map(|m| m.role.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["assistant", "tool", "tool", "event", "event"]
+                );
+                session
+                    .enqueue_delivery(delivery_fixture("later", PushMode::WhenIdle))
+                    .unwrap();
+                assert!(session.drain_pending_deliveries().0.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_wait_runtime_remains_true_until_last_wait_finishes() {
+        let mut session = make_session();
+        session.begin_interruptible_wait();
+        session.begin_interruptible_wait();
+        session.end_interruptible_wait();
+        assert!(session.runtime.waiting_interruptible);
+        session.end_interruptible_wait();
+        assert!(!session.runtime.waiting_interruptible);
     }
 
     #[test]

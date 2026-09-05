@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { QueuedMessage } from "../components/ChatContent/QueuedMessage";
+import { QueueRow } from "../components/ChatContent/QueueRow";
 import { ChatThreadProvider } from "../features/Chat/Thread";
 import {
   createDefaultChatState,
@@ -248,7 +248,7 @@ describe("chatCommands", () => {
         React.createElement(
           ThreadProvider,
           { chatId },
-          React.createElement(QueuedMessage, {
+          React.createElement(QueueRow, {
             position: 1,
             queuedItem: {
               client_request_id: "image/request",
@@ -272,9 +272,9 @@ describe("chatCommands", () => {
         },
       );
 
-      await user.click(
-        screen.getByRole("button", { name: "Change to send next" }),
-      );
+      await user.click(screen.getByRole("button", { name: /1 Your message/ }));
+
+      await user.click(screen.getByRole("radio", { name: "Send next" }));
 
       await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
       expect(mockFetch).toHaveBeenCalledWith(

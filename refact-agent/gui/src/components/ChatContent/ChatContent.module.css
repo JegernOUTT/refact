@@ -422,40 +422,7 @@
   background: var(--rf-surface-1);
 }
 
-.queueList {
-  display: flex;
-  flex-direction: column;
-  gap: var(--rf-space-2);
-  max-height: min(30dvh, 18rem);
-  overflow-y: auto;
-  scrollbar-gutter: stable;
-}
-
-.queuedMessagesContent {
-  container-type: inline-size;
-  width: 100%;
-  min-width: 0;
-}
-
-.queuedMessage {
-  box-sizing: border-box;
-  width: 100%;
-  max-width: 100%;
-  margin-left: auto;
-  padding: var(--rf-space-2) var(--rf-space-3);
-  color: var(--rf-color-fg);
-  background: var(--rf-surface-glass);
-  border: var(--rf-hairline) solid var(--rf-border);
-  border-radius: var(--rf-radius-card);
-  box-shadow: var(--rf-elev-panel);
-  backdrop-filter: blur(var(--rf-blur-overlay));
-}
-
 @media (prefers-reduced-transparency: reduce) {
-  .queuedMessage {
-    backdrop-filter: none;
-  }
-
   .userInput,
   .diff_file_body,
   .tool_result_markdown {
@@ -471,55 +438,6 @@
 :global(.radix-themes[data-host="jetbrains"]) .diff_file_body,
 :global(.radix-themes[data-host="jetbrains"]) .tool_result_markdown {
   background: var(--rf-surface-glass);
-}
-
-.queuedMessagePriority {
-  border-left: var(--rf-focus-ring-w) solid var(--rf-color-danger);
-}
-
-.queuedMessageDeferred {
-  border-left: var(--rf-focus-ring-w) solid var(--rf-border-strong);
-}
-
-.queueHeader {
-  flex-wrap: wrap;
-  min-width: 0;
-  color: var(--rf-color-muted);
-}
-
-.queuedMessageSource {
-  overflow: hidden;
-  color: var(--rf-color-muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.queuedMessagePushControl {
-  min-width: 0;
-}
-
-.queuedMessageMain {
-  flex: 1;
-  min-width: 0;
-}
-
-.queuedMessageText {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--rf-color-muted);
-}
-
-.queuedMessageEditable {
-  cursor: pointer;
-}
-
-.queuedMessageEditable:hover {
-  color: var(--rf-color-fg);
 }
 
 .plainTextCollapsible {
@@ -630,56 +548,4 @@
 
 .virtuosoItem {
   min-height: 1px;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .queuedMessage {
-    transition:
-      border-color var(--rf-dur-fast) var(--rf-ease-standard),
-      background-color var(--rf-dur-fast) var(--rf-ease-standard);
-  }
-}
-
-@container (max-width: 300px) {
-  .queuedMessagePushControl {
-    width: 100%;
-  }
-  .queuedMessage {
-    padding-inline: var(--rf-space-2);
-  }
-}
-
-.queuedMessagePushSelect {
-  display: none;
-}
-@container (max-width: 380px) {
-  .queuedMessagePushControl {
-    display: none;
-  }
-  .queuedMessagePushSelect {
-    display: block;
-    flex: 1;
-    min-width: 0;
-  }
-}
-
-.queueError {
-  color: var(--rf-color-danger);
-  overflow-wrap: anywhere;
-}
-
-.queueCardHeader {
-  min-width: 0;
-}
-.queuedMessagePushSelect button {
-  width: 100%;
-  white-space: nowrap;
-}
-@container (max-width: 300px) {
-  .queueCardHeader {
-    flex-wrap: wrap;
-  }
-  .queueCardActions {
-    margin-left: auto;
-  }
 }

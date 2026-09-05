@@ -189,3 +189,74 @@ pub async fn set_tool_config(
 
     Ok(())
 }
+
+/// A wait-only cancellation signal; observing it never aborts the chat turn.
+#[derive(Clone)]
+pub(crate) struct WaitInterrupt {
+    pub(crate) abort_flag: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) wait_flag: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) notify: Option<Arc<tokio::sync::Notify>>,
+}
+
+impl WaitInterrupt {
+    pub(crate) async fn from_context(ccx: &Arc<AMutex<AtCommandsContext>>) -> Self {
+        let (app, chat_id, abort_flag) = {
+            let context = ccx.lock().await;
+            (
+                context.app.clone(),
+                context.chat_id.clone(),
+                context.abort_flag.clone(),
+            )
+        };
+        let session = app.chat.sessions.read().await.get(&chat_id).cloned();
+        let (wait_flag, notify) = if let Some(session) = session {
+            let session = session.lock().await;
+            (
+                session.wait_interrupt_flag.clone(),
+                Some(session.abort_notify.clone()),
+            )
+        } else {
+            (Arc::new(std::sync::atomic::AtomicBool::new(false)), None)
+        };
+        Self {
+            abort_flag,
+            wait_flag,
+            notify,
+        }
+    }
+
+    pub(crate) fn interrupted(&self) -> bool {
+        self.abort_flag.load(std::sync::atomic::Ordering::SeqCst)
+            || self.wait_flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn reason(&self, elapsed_seconds: f64) -> String {
+        let cause = if self.wait_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            "message arrived"
+        } else {
+            "user aborted"
+        };
+        format!("interrupted after {elapsed_seconds:.1}s: {cause}")
+    }
+
+    pub(crate) async fn wait(&self) {
+        loop {
+            // Polling also covers notification races and contexts without a session.
+            let notified = async {
+                if let Some(notify) = &self.notify {
+                    notify.notified().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            };
+            tokio::pin!(notified);
+            if self.interrupted() {
+                return;
+            }
+            tokio::select! {
+                _ = &mut notified => {},
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
+            }
+        }
+    }
+}

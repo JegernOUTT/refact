@@ -467,14 +467,27 @@ const queueEventMessages: ChatMessages = [
         {},
       ],
     ] as const
-  ).map(([subkind, source, content, payload], index) => ({
-    role: "event" as const,
-    message_id: `showcase-event-${index}`,
-    content,
-    subkind,
-    source,
-    payload: { ...payload, created_at_ms: Date.parse(now) + index * 1000 },
-  })),
+  )
+    .map(([subkind, source, content, payload], index) => ({
+      role: "event" as const,
+      message_id: `showcase-event-${index}`,
+      content,
+      subkind,
+      source,
+      payload: { ...payload, created_at_ms: Date.parse(now) + index * 1000 },
+    }))
+    .flatMap((event) =>
+      event.subkind === "unknown_future_subkind"
+        ? [
+            {
+              role: "assistant" as const,
+              message_id: "queue-event-separator",
+              content: "Continuing the active step.",
+            },
+            event,
+          ]
+        : [event],
+    ),
 ] as ChatMessages;
 
 const queueItems: ChatThreadRuntime["queued_items"] = [
@@ -511,7 +524,7 @@ const queueItems: ChatThreadRuntime["queued_items"] = [
       subkind: "process_completed",
       source: "exec.process",
       payload: {
-        process_id: "exec_route_lint",
+        process_id: "exec_route_showcase",
         status: "failed",
         exit_code: 1,
       },
@@ -536,7 +549,7 @@ const queueItems: ChatThreadRuntime["queued_items"] = [
     client_request_id: "delivery-unlabeled-1",
     priority: false,
     command_type: "delivery",
-    preview: "",
+    preview: "A long single-line continuation: " + "unbroken".repeat(80),
     enqueued_at_ms: Date.parse(now) + 4000,
   },
 ] satisfies ChatThreadRuntime["queued_items"];
@@ -604,11 +617,19 @@ const queueChatRuntime: ChatThreadRuntime = {
         message_id: "queue-partial",
         content: "Partial response from the active step…",
       },
+      {
+        role: "event",
+        message_id: "queue-single-event",
+        subkind: "system_notice",
+        source: "chat.runtime",
+        content: "Waiting for the next tool result",
+      },
     ],
   },
   streaming: true,
   session_state: "generating",
   queued_items: queueItems,
+  waiting_interruptible: queueParams.get("waiting") === "1",
 };
 
 const rebuildRoute = new URLSearchParams(window.location.search).has("rebuild");

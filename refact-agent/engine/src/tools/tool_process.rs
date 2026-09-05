@@ -791,7 +791,7 @@ impl Tool for ToolProcessWait {
             source: source(&self.config_path),
             experimental: false,
             allow_parallel: true,
-            description: "Wait for a runtime-owned process to complete, or return the current snapshot when timeout_ms expires.".to_string(),
+            description: "Wait for a runtime-owned process to complete, or return the current snapshot when timeout_ms expires. Incoming messages interrupt only the wait, not the underlying work.".to_string(),
             input_schema: json_schema_from_params(
                 &[
                     ("process_id", "string", "Runtime-owned process ID returned by process_start."),

@@ -67,7 +67,7 @@ mod tool_set_goal;
 mod tool_set_plan;
 mod tool_set_trajectory_label;
 mod tool_shell;
-mod tool_sleep;
+pub(crate) mod tool_sleep;
 mod tool_spawn_ab;
 mod tool_subagent;
 mod tool_trajectory_context;

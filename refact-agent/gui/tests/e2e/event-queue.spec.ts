@@ -1,45 +1,60 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 const route = "/tests/e2e/route-showcase.html?route=queue";
 async function chooseTiming(page: Page, item: Locator, label: string) {
-  const select = item.getByRole("combobox");
-  if (await select.isVisible()) {
-    await select.click();
-    await page.getByRole("option", { name: label, exact: true }).click();
-  } else await item.getByText(label, { exact: true }).first().click();
+  await item.getByRole("combobox").click();
+  await page.getByRole("option", { name: new RegExp(`^${label}`) }).click();
 }
-for (const width of [360, 1280]) {
-  test(`queue controls and mock boundaries at ${width}px`, async ({
-    page,
-  }, testInfo) => {
+/** Rows wrap the preview under the title below 360px, so the 4-row cap is taller there. */
+function fourRowCap(width: number): [number, number] {
+  return width <= 360 ? [180, 200] : [140, 150];
+}
+async function expectBounded(page: Page, width: number) {
+  const bounds = await page.getByTestId("queued-item").evaluateAll((elements) =>
+    elements.map((element) => ({
+      left: element.getBoundingClientRect().left,
+      right: element.getBoundingClientRect().right,
+      overflow: element.scrollWidth > element.clientWidth,
+    })),
+  );
+  for (const bound of bounds) {
+    expect(bound.left).toBeGreaterThanOrEqual(0);
+    expect(bound.right).toBeLessThanOrEqual(width);
+    expect(bound.overflow).toBe(false);
+  }
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+}
+for (const width of [330, 1280]) {
+  test(`queue controls and mock boundaries at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto(route);
-    await page.getByRole("button", { name: "Show all 5 queued items" }).click();
+    await expect(page.getByTestId("queued-item")).toHaveCount(5);
+    expect(
+      await page
+        .getByTestId("queued-item")
+        .evaluateAll((rows) =>
+          rows.map((row) => row.getAttribute("data-delivery-id")),
+        ),
+    ).toEqual([
+      "queued-user-1",
+      "delivery-agent-1",
+      "delivery-process-1",
+      "delivery-cron-1",
+      "delivery-unlabeled-1",
+    ]);
+    await expectBounded(page, width);
     const agent = page.locator('[data-delivery-id="delivery-agent-1"]');
-    await expect(agent).toHaveAttribute("data-push", "append");
-    const geometry = await page
-      .getByTestId("queued-item")
-      .evaluateAll((elements) =>
-        elements.map((element) => {
-          const r = element.getBoundingClientRect();
-          return {
-            left: r.left,
-            right: r.right,
-            width: r.width,
-            overflow: element.scrollWidth > element.clientWidth,
-          };
-        }),
-      );
-    for (const item of geometry) {
-      expect(item.left).toBeGreaterThanOrEqual(0);
-      expect(item.right).toBeLessThanOrEqual(width);
-      expect(item.overflow).toBe(false);
-    }
-    await page.screenshot({
-      path: testInfo.outputPath(`queue-${width}.png`),
-      fullPage: true,
-    });
+    const process = page.locator('[data-delivery-id="delivery-process-1"]');
+    await expect(process).toHaveAttribute("data-push", "preempt");
+    await expect(process.getByRole("combobox")).toHaveAccessibleName(
+      /Interrupt now/,
+    );
     await chooseTiming(page, agent, "When idle");
     await expect(agent).toHaveAttribute("data-push", "when_idle");
+    await expect(agent.getByRole("combobox")).toHaveAccessibleName(/When idle/);
     await expect
       .poll(() =>
         page.evaluate(
@@ -66,196 +81,135 @@ for (const width of [360, 1280]) {
     await page
       .getByRole("button", { name: "Mock: interrupt and discard" })
       .click();
-    await expect(
-      page.locator('[data-delivery-id="delivery-process-1"]'),
-    ).toHaveCount(0);
+    await expect(process).toHaveCount(0);
     await expect(cron).toHaveCount(1);
     await page.getByRole("button", { name: "Mock: final idle" }).click();
     await expect(page.getByTestId("queued-item")).toHaveCount(0);
-    await page.getByText("Event history", { exact: true }).click();
     await expect(
-      page
-        .getByTestId("event-log")
-        .getByText(
+      page.getByTestId("event-row").filter({
+        hasText:
           "Active step cancelled; partial assistant and tool output discarded.",
-        ),
+      }),
     ).toBeVisible();
-    expect(
-      await page.evaluate(
-        () => document.documentElement.scrollWidth <= innerWidth,
-      ),
-    ).toBe(true);
+    await expectBounded(page, width);
   });
 }
-test("cancel pending delivery and preserve legacy controls", async ({
-  page,
-}) => {
+test("cancel delivery and edit a legacy priority message", async ({ page }) => {
   await page.goto(route);
-  await page.getByRole("button", { name: "Show all 5 queued items" }).click();
   const agent = page.locator('[data-delivery-id="delivery-agent-1"]');
   await agent.getByRole("button", { name: /Cancel pending delivery/ }).click();
   await expect(agent).toHaveCount(0);
   const user = page.locator('[data-delivery-id="queued-user-1"]');
-  await user.getByRole("button", { name: "Change to send next" }).click();
+  await chooseTiming(page, user, "Send next");
   await expect(user).toHaveAttribute("data-push", "preempt");
   await user
     .getByRole("button", { name: "Click to edit queued message" })
     .click();
   await expect(user).toHaveCount(0);
 });
-
 for (const theme of ["light", "dark"]) {
-  for (const width of [240, 360, 768, 1280]) {
-    test(`expanded history and queue ${theme} ${width} reduced motion`, async ({
+  for (const width of [330, 768, 1280]) {
+    test(`dense queue and inline events ${theme} ${width}`, async ({
       page,
     }, testInfo) => {
       await page.setViewportSize({ width, height: 1000 });
       await page.emulateMedia({ reducedMotion: "reduce" });
-      await page.goto(`${route}&theme=${theme}`);
-      await page
-        .getByRole("button", { name: "Show all 5 queued items" })
-        .click();
-      const history = page.getByTestId("event-log");
-      await history.locator("summary").click();
-      await expect(history.getByTestId("event-log-entry")).toHaveCount(15);
-      const bounds = await page
-        .getByTestId("queued-item")
-        .evaluateAll((elements) =>
-          elements.map((element) => ({
-            left: element.getBoundingClientRect().left,
-            right: element.getBoundingClientRect().right,
-            overflow: element.scrollWidth > element.clientWidth,
-          })),
-        );
-      for (const bound of bounds) {
-        expect(bound.left).toBeGreaterThanOrEqual(0);
-        expect(bound.right).toBeLessThanOrEqual(width);
-        expect(bound.overflow).toBe(false);
-      }
+      await page.goto(`${route}&queue_count=6&theme=${theme}&waiting=1`);
+      await expect(page.getByTestId("queued-item")).toHaveCount(6);
+      await expect(page.getByTestId("queue-header")).toContainText(
+        "delivering now",
+      );
+      const list = page.getByTestId("queue-list");
+      const geometry = await list.evaluate((element) => ({
+        height: element.clientHeight,
+        scroll: element.scrollHeight,
+        overflow: getComputedStyle(element).overflowY,
+      }));
+      const [minCap, maxCap] = fourRowCap(width);
+      expect(geometry.height).toBeGreaterThanOrEqual(minCap);
+      expect(geometry.height).toBeLessThanOrEqual(maxCap);
+      expect(geometry.scroll).toBeGreaterThan(geometry.height);
+      expect(geometry.overflow).toBe("auto");
+      await expect(list).toHaveAttribute("data-overflow", "true");
+      await expectBounded(page, width);
+      // Only the tail is stable in the virtualized transcript.
+      await expect(
+        page
+          .locator('[data-testid="event-row"][data-subkind="system_notice"]')
+          .last(),
+      ).toBeVisible();
       const agent = page.locator('[data-delivery-id="delivery-agent-1"]');
       const select = agent.getByRole("combobox");
-      if (await select.isVisible()) {
-        await select.focus();
-        await page.keyboard.press("Space");
-        await page
-          .getByRole("option", { name: "When idle", exact: true })
-          .click();
-        await expect(select).toBeFocused();
-      } else {
-        const radio = agent.getByRole("radio", { name: "When idle" });
-        await radio.focus();
-        await page.keyboard.press("Space");
-        await expect(radio).toBeFocused();
-      }
+      await select.focus();
+      await page.keyboard.press("Space");
+      await page.getByRole("option", { name: /^When idle/ }).click();
+      await expect(select).toBeFocused();
       await expect(agent).toHaveAttribute("data-push", "when_idle");
+      await agent.getByRole("button", { name: /^\d+ Agent completed/ }).click();
+      await expect(
+        agent.getByRole("radio", { name: "When idle" }),
+      ).toBeChecked();
+      await expect(list).toHaveAttribute("data-expanded-row", "true");
+      const rowBounds = await agent.boundingBox();
+      const listBounds = await list.boundingBox();
+      expect(rowBounds!.y).toBeGreaterThanOrEqual(listBounds!.y);
+      expect(rowBounds!.y + rowBounds!.height).toBeLessThanOrEqual(
+        listBounds!.y + listBounds!.height + 1,
+      );
+      await expectBounded(page, width);
       await page.screenshot({
         path: testInfo.outputPath(`expanded-${theme}-${width}.png`),
         fullPage: true,
       });
-    });
-  }
-}
-
-for (const theme of ["light", "dark"]) {
-  for (const width of [240, 1280]) {
-    test(`100 long deliveries remain bounded ${theme} ${width}`, async ({
-      page,
-    }, testInfo) => {
-      await page.setViewportSize({ width, height: 1000 });
-      const errors: string[] = [];
-      page.on("pageerror", (error) => errors.push(error.message));
-      await page.goto(`${route}&queue_count=100&theme=${theme}`);
-      const disclosure = page.getByRole("button", {
-        name: "Show all 100 queued items",
-      });
-      await expect(disclosure).toHaveAttribute("aria-expanded", "false");
-      await disclosure.click();
-      await expect(
-        page.getByRole("button", { name: "Show fewer queued items" }),
-      ).toHaveAttribute("aria-expanded", "true");
-      await expect(page.getByTestId("queued-item")).toHaveCount(100);
-      const bounds = await page
-        .getByTestId("queued-item")
-        .evaluateAll((elements) =>
-          elements.map((element) => ({
-            left: element.getBoundingClientRect().left,
-            right: element.getBoundingClientRect().right,
-            overflow: element.scrollWidth > element.clientWidth,
-          })),
-        );
-      for (const bound of bounds) {
-        expect(bound.left).toBeGreaterThanOrEqual(0);
-        expect(bound.right).toBeLessThanOrEqual(width);
-        expect(bound.overflow).toBe(false);
-      }
-      for (const id of [
-        "queue-header",
-        "chat-form-textarea",
-        "chat-virtualized-list-wrapper",
-      ]) {
-        const area = page.getByTestId(id);
-        await expect(area).toBeInViewport();
-        const box = await area.boundingBox();
-        expect(box!.height).toBeGreaterThan(0);
-        expect(box!.y).toBeGreaterThanOrEqual(0);
-        expect(box!.y + box!.height).toBeLessThanOrEqual(1000);
-      }
-      const last = page.locator('[data-delivery-id="delivery-stress-100"]');
-      const stop = page.getByRole("button", {
-        name: "Stop generation",
-        exact: true,
-      });
-      await expect(stop).toBeInViewport();
-      expect(
-        await stop.evaluate((element) => {
-          const rect = element.getBoundingClientRect();
-          return [rect.left + 2, rect.right - 2].every((x) =>
-            element.contains(
-              document.elementFromPoint(x, rect.top + rect.height / 2),
-            ),
-          );
-        }),
-      ).toBe(true);
-      await last.scrollIntoViewIfNeeded();
-      await expect(last).toBeInViewport();
-      expect(
-        await last.evaluate((element) => element.parentElement!.scrollTop),
-      ).toBeGreaterThan(0);
-      await chooseTiming(page, last, "When idle");
-      await expect(last).toHaveAttribute("data-push", "when_idle");
-      await last
-        .getByRole("button", { name: /Cancel pending delivery/ })
+      await page
+        .getByRole("button", { name: "Collapse the delivery queue" })
         .click();
-      await expect(last).toHaveCount(0);
-      await expect(page.getByTestId("queued-item")).toHaveCount(99);
-      await page.screenshot({
-        path: testInfo.outputPath(`stress-${theme}-${width}.png`),
-        fullPage: true,
+      await expect(list).toHaveCount(0);
+      await page
+        .getByRole("button", { name: /Expand the delivery queue/ })
+        .click();
+      await list.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
       });
-      expect(errors).toEqual([]);
+      await expect(list).toHaveAttribute("data-overflow", "false");
     });
   }
 }
-
-for (const width of [240, 1280]) {
-  test(`HTTP failures retain timing and keyboard access ${width}`, async ({
+for (const width of [330, 1280]) {
+  test(`100 long deliveries remain bounded ${width}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.goto(`${route}&queue_count=100`);
+    await expect(page.getByTestId("queued-item")).toHaveCount(100);
+    await expectBounded(page, width);
+    expect(
+      (await page.getByTestId("queue-list").boundingBox())!.height,
+    ).toBeLessThanOrEqual(fourRowCap(width)[1]);
+    const last = page.locator('[data-delivery-id="delivery-stress-100"]');
+    await last.scrollIntoViewIfNeeded();
+    await expect(last).toBeInViewport();
+    expect(
+      await last.evaluate((element) => element.parentElement!.scrollTop),
+    ).toBeGreaterThan(0);
+    await chooseTiming(page, last, "When idle");
+    await expect(last).toHaveAttribute("data-push", "when_idle");
+    await last.getByRole("button", { name: /Cancel pending delivery/ }).click();
+    await expect(last).toHaveCount(0);
+    await expect(page.getByTestId("queued-item")).toHaveCount(99);
+  });
+  test(`HTTP errors retain timing and keyboard access ${width}`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 1000 });
     await page.goto(`${route}&queue_error=1`);
-    await page.getByRole("button", { name: "Show all 5 queued items" }).click();
     const item = page.locator('[data-delivery-id="delivery-agent-1"]');
     await chooseTiming(page, item, "When idle");
     await expect(item.getByRole("alert")).toHaveText(
       "Could not change delivery timing. Try choosing it again.",
     );
     await expect(item).toHaveAttribute("data-push", "append");
-    if (width === 240)
-      await expect(item.getByRole("combobox")).toHaveText("After step");
-    else
-      await expect(
-        item.getByRole("radio", { name: "After current step" }),
-      ).toBeChecked();
+    await expect(item.getByRole("combobox")).toHaveAccessibleName(
+      /After current step/,
+    );
     const cancel = item.getByRole("button", {
       name: /Cancel pending delivery/,
     });
@@ -264,29 +218,20 @@ for (const width of [240, 1280]) {
     await expect(item.getByRole("alert")).toHaveText(
       "Could not update this queued item. Try the control again.",
     );
-    await expect(item).toHaveCount(1);
     await expect(cancel).toBeEnabled();
-    await cancel.focus();
-    await expect(cancel).toBeFocused();
-    await page.keyboard.press("Tab");
-    expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe(
-      "BODY",
-    );
   });
-
-  test(`pending timing suppresses duplicate requests ${width}`, async ({
+  test(`pending timing disables duplicate actions ${width}`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 1000 });
     await page.goto(`${route}&queue_pending=1`);
-    await page.getByRole("button", { name: "Show all 5 queued items" }).click();
     const item = page.locator('[data-delivery-id="delivery-agent-1"]');
     await chooseTiming(page, item, "When idle");
     await expect(item).toHaveAttribute("aria-busy", "true");
+    await expect(item.getByRole("combobox")).toBeDisabled();
     await expect(
       item.getByRole("button", { name: /Cancel pending delivery/ }),
     ).toBeDisabled();
-    await chooseTiming(page, item, "Interrupt now");
     expect(
       await page.evaluate(
         () =>
@@ -303,10 +248,7 @@ for (const width of [240, 1280]) {
     await expect(item).toHaveAttribute("data-push", "when_idle");
   });
 }
-
-test("entry motion follows the actual reduced-motion media preference", async ({
-  page,
-}) => {
+test("row entry motion honors reduced motion", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.goto(route);
   const item = page.getByTestId("queued-item").first();

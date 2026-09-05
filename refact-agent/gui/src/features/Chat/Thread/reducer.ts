@@ -1622,6 +1622,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
         const newRt: ChatThreadRuntime = {
           thread,
           session_state: snapshotState,
+          waiting_interruptible: event.runtime.waiting_interruptible === true,
           streaming: snapshotStreaming,
           waiting_for_response: snapshotWaiting,
           prevent_send: false,
@@ -2166,6 +2167,7 @@ export const chatReducer = createReducer(initialState, (builder) => {
         }
         const newState = event.state;
         rt.session_state = newState;
+        rt.waiting_interruptible = event.waiting_interruptible === true;
 
         // Update streaming/waiting flags based on state
         switch (newState) {

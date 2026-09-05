@@ -617,6 +617,8 @@ fn delivery_event_descriptor(delivery: &PendingDelivery) -> Option<serde_json::V
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeState {
+    #[serde(default)]
+    pub waiting_interruptible: bool,
     pub state: SessionState,
     pub paused: bool,
     pub error: Option<String>,
@@ -656,6 +658,7 @@ impl Default for RuntimeState {
             paused: false,
             error: None,
             queue_size: 0,
+            waiting_interruptible: false,
             goal_active: false,
             goal_status: None,
             goal_turns_used: 0,
@@ -818,6 +821,8 @@ pub enum ChatEvent {
         attached_files: Vec<String>,
     },
     RuntimeUpdated {
+        #[serde(default)]
+        waiting_interruptible: bool,
         state: SessionState,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
@@ -2417,6 +2422,7 @@ mod tests {
     #[test]
     fn test_runtime_updated_serde() {
         let event = ChatEvent::RuntimeUpdated {
+            waiting_interruptible: false,
             state: SessionState::Completed,
             error: None,
             goal_active: false,
@@ -2435,6 +2441,7 @@ mod tests {
         assert_eq!(json["is_compressing"], false);
 
         let event_with_error = ChatEvent::RuntimeUpdated {
+            waiting_interruptible: false,
             state: SessionState::Error,
             error: Some("test error".into()),
             goal_active: true,
@@ -2481,7 +2488,9 @@ mod tests {
                 is_compressing,
                 compression_phase,
                 compression_reason,
+                waiting_interruptible,
             } => {
+                assert!(!waiting_interruptible);
                 assert_eq!(state, SessionState::Completed);
                 assert_eq!(error, None);
                 assert!(!goal_active);

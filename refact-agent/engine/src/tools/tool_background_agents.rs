@@ -800,7 +800,7 @@ impl Tool for ToolAgentWait {
             self.config_path.clone(),
             "agent_wait",
             "Agent Wait",
-            "Wait for one background agent spawned by this chat to reach a terminal state, or return its current status after a timeout.",
+            "Wait for one background agent spawned by this chat to reach a terminal state, or return its current status after a timeout. Incoming messages interrupt only the wait, not the underlying work.",
             agent_wait_schema(),
         )
     }

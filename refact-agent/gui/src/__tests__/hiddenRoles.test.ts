@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { applyChatEvent } from "../features/Chat/Thread/actions";
 import { chatReducer } from "../features/Chat/Thread/reducer";
+import { buildDisplayItems } from "../components/ChatContent/ChatContentDisplayItems";
 import {
   selectCurrentPlan,
-  selectEventLog,
   selectGoalAttemptsById,
   selectGoalById,
   selectGoalContentById,
@@ -287,10 +287,12 @@ describe("hidden chat roles", () => {
     ]);
   });
 
-  it("selectEventLog returns all event messages in transcript order", () => {
-    const events = selectEventLog(makeRootState(mixedMessages), threadId);
+  it("buildDisplayItems renders every event inline in transcript order", () => {
+    const eventItems = buildDisplayItems(mixedMessages, false).flatMap(
+      (item) => (item.type === "event" ? [item] : []),
+    );
 
-    expect(events.map((event) => event.message_id)).toEqual([
+    expect(eventItems.map((item) => item.event.message_id)).toEqual([
       "event-1",
       "goal-delta-1",
       "goal-pursuit-1",
@@ -300,7 +302,7 @@ describe("hidden chat roles", () => {
       "plan-delta-2",
       "backend-mode-event",
     ]);
-    expect(events.at(-1)).toMatchObject({
+    expect(eventItems.at(-1)?.event).toMatchObject({
       subkind: "mode_switch",
       source: "tool.update_plan",
       payload: { mode: "agent" },

@@ -88,36 +88,13 @@ export const ThinkingBlocks: Story = {
   args: { messages: THINKING_BLOCKS_ASSISTANT },
 };
 
-export const HiddenEvents: Story = {
+export const InlineEvents: Story = {
   args: { messages: EVENT_MESSAGES },
-  parameters: {
-    docs: {
-      description: {
-        story:
-          "Process completion, cron, and system-notice messages are intentionally absent from ordinary transcript turns; they are collected in Event history while surrounding user and assistant messages remain ordinary turns.",
-      },
-    },
-  },
   play: ({ canvasElement }) => {
-    const hiddenEventText = [
-      "Background index refresh completed successfully.",
-      "Scheduled transcript maintenance fired.",
-      "Internal transcript synchronization notice.",
-    ];
-    const transcript = canvasElement.cloneNode(true) as HTMLElement;
-    transcript.querySelector('[data-testid="event-log"]')?.remove();
-    const transcriptText = transcript.textContent ?? "";
-    const historyText =
-      canvasElement.querySelector('[data-testid="event-log"]')?.textContent ??
-      "";
-    for (const eventText of hiddenEventText) {
-      if (!historyText.includes(eventText))
-        throw new Error(`Missing history event: ${eventText}`);
-      if (transcriptText.includes(eventText)) {
-        throw new Error(
-          `Hidden event rendered as a transcript turn: ${eventText}`,
-        );
-      }
+    const rows = canvasElement.querySelectorAll('[data-testid="event-row"]');
+    if (rows.length !== 3) throw new Error("Expected three inline event rows");
+    if (canvasElement.querySelector('[data-testid="event-log"]')) {
+      throw new Error("Legacy event history rendered");
     }
   },
 };

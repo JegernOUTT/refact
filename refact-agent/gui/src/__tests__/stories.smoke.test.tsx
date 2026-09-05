@@ -16,6 +16,7 @@ import * as previewAnnotations from "../../.storybook/preview";
 import * as toolCardsFileOpsStories from "../components/ChatContent/ToolCardsFileOps.stories";
 import * as toolCardsAgenticStories from "../components/ChatContent/ToolCardsAgentic.stories";
 import * as transcriptElementsStories from "../components/ChatContent/TranscriptElements.stories";
+import * as eventRowStories from "../components/ChatContent/EventRow/EventRow.stories";
 import * as chatContentStories from "../components/ChatContent/ChatContent.stories";
 import * as chatFormStories from "../components/ChatForm/ChatForm.stories";
 import * as retryFormStories from "../components/ChatForm/RetryForm.stories";
@@ -45,6 +46,7 @@ const COVERED_STORY_FILES = [
   "../components/Buttons/ThreadInfoButton.stories.tsx",
   "../components/Callout/ErrorCallout.stories.tsx",
   "../components/ChatContent/ChatContent.stories.tsx",
+  "../components/ChatContent/EventRow/EventRow.stories.tsx",
   "../components/ChatContent/PlanBanner/PlanBanner.stories.tsx",
   "../components/ChatContent/ToolCardsAgentic.stories.tsx",
   "../components/ChatContent/ToolCardsFileOps.stories.tsx",
@@ -205,6 +207,7 @@ const smokeCases: SmokeCase[] = [
   ...casesFrom("ToolCardsFileOps", composeStories(toolCardsFileOpsStories)),
   ...casesFrom("ToolCardsAgentic", composeStories(toolCardsAgenticStories)),
   ...casesFrom("TranscriptElements", composeStories(transcriptElementsStories)),
+  ...casesFrom("EventRow", composeStories(eventRowStories)),
   // Portals and virtualized content may not populate the RTL container in
   // happy-dom. The no-crash tier still verifies composition, decorators,
   // effects, MSW setup, play calls, and that rendering leaves a body tree.

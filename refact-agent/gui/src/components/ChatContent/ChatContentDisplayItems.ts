@@ -5,6 +5,7 @@ import {
   DiffChunk,
   DiffMessage,
   ErrorMessage,
+  EventMessage,
   getAssistantCompressionMetadata,
   getCompressionReportMetadata,
   isChatContextFileMessage,
@@ -14,10 +15,11 @@ import {
   isCompressionReportMessage,
   isEventMessage,
   isErrorMessage,
-  isToolMessage,
   isSystemMessage,
+  isToolMessage,
   isSummarizationMessage,
   isVisibleCompressionFailureEvent,
+  normalizeEventMessageMetadata,
   SummarizationMessage,
   syntheticCompressionReportMessage,
   syntheticSummarizationMessage,
@@ -162,6 +164,17 @@ type DisplayItemSummarization = {
   key: string;
   messageIndex: number;
   message: SummarizationMessage;
+};
+
+// Rails connect adjacent rendered events, including across hidden messages.
+export type EventRunPosition = "single" | "start" | "middle" | "end";
+
+type DisplayItemEvent = {
+  type: "event";
+  key: string;
+  messageIndex: number;
+  event: EventMessage;
+  run: EventRunPosition;
 };
 
 function syntheticCompressionFailureError(
@@ -334,7 +347,7 @@ function assistantDisplayClass(
 }
 
 function isHiddenDisplayMessage(message: ChatMessages[number]): boolean {
-  return isEventMessage(message) || message.role === "plan";
+  return message.role === "plan";
 }
 
 export type DisplayItem =
@@ -347,7 +360,36 @@ export type DisplayItem =
   | DisplayItemError
   | DisplayItemSkillActivated
   | DisplayItemSkillReport
-  | DisplayItemSummarization;
+  | DisplayItemSummarization
+  | DisplayItemEvent;
+
+function runPositionFor(
+  hasPrevious: boolean,
+  hasNext: boolean,
+): EventRunPosition {
+  if (hasPrevious && hasNext) return "middle";
+  if (hasPrevious) return "end";
+  if (hasNext) return "start";
+  return "single";
+}
+
+function withEventRunPositions(items: DisplayItem[]): DisplayItem[] {
+  let patched: DisplayItem[] | null = null;
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.type !== "event") continue;
+    const run = runPositionFor(
+      items[i - 1]?.type === "event",
+      items[i + 1]?.type === "event",
+    );
+    if (run === item.run) continue;
+    patched ??= [...items];
+    patched[i] = { ...item, run };
+  }
+
+  return patched ?? items;
+}
 
 function updateAssistantStreamingFlags(
   items: DisplayItem[],
@@ -393,7 +435,7 @@ function findRebuildStartIndex(messages: ChatMessages, index: number): number {
   for (let i = index - 1; i >= 0; i--) {
     const msg = messages[i];
 
-    if (isEventMessage(msg) || msg.role === "plan") {
+    if (msg.role === "plan") {
       rebuildStart = i;
       continue;
     }
@@ -435,10 +477,12 @@ function rebuildDisplayItemsFromStart(
     (item) => item.messageIndex < rebuildStart,
   );
 
-  return updateAssistantStreamingFlags(
-    [...prefixItems, ...tailItems],
-    isStreaming,
-    findLastAssistantMessageIndex(nextMessages),
+  return withEventRunPositions(
+    updateAssistantStreamingFlags(
+      [...prefixItems, ...tailItems],
+      isStreaming,
+      findLastAssistantMessageIndex(nextMessages),
+    ),
   );
 }
 
@@ -492,6 +536,17 @@ function buildDisplayItemsFromIndex(
     }
 
     if (isHiddenDisplayMessage(head)) continue;
+
+    if (isEventMessage(head)) {
+      items.push({
+        type: "event",
+        key: getMessageKey(head, i),
+        messageIndex: i,
+        event: normalizeEventMessageMetadata(head),
+        run: "single",
+      });
+      continue;
+    }
 
     if (isErrorMessage(head)) {
       const errors = [head];
@@ -870,11 +925,13 @@ export function buildDisplayItems(
   isStreaming: boolean,
 ): DisplayItem[] {
   if (messages.length === 0) return [];
-  return buildDisplayItemsFromIndex(
-    messages,
-    isStreaming,
-    computeHiddenQaMessageIndices(messages),
-    0,
+  return withEventRunPositions(
+    buildDisplayItemsFromIndex(
+      messages,
+      isStreaming,
+      computeHiddenQaMessageIndices(messages),
+      0,
+    ),
   );
 }
 

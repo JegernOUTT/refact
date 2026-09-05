@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { MessageSquare, Send } from "lucide-react";
-import { describeQueuedItem } from "./queuePresentation";
+import {
+  describeQueuedItem,
+  queueModeOptions,
+  queueStatusText,
+} from "./queuePresentation";
 import type {
   QueuedEvent,
   QueuedItem,
@@ -87,5 +91,67 @@ describe("describeQueuedItem", () => {
     expect(presentation.icon).toBe(MessageSquare);
     expect(presentation.isUserMessage).toBe(true);
     expect(presentation.isDelivery).toBe(false);
+  });
+});
+
+const statusItem: QueuedItem = {
+  client_request_id: "id",
+  command_type: "delivery",
+  priority: false,
+  preview: "",
+  enqueued_at_ms: 1,
+};
+describe("queue presentation", () => {
+  it("summarizes busy and idle delivery timing", () => {
+    const items = ["preempt", "append", "when_idle"].map(
+      (push) => ({ ...statusItem, push }) as QueuedItem,
+    );
+    expect(queueStatusText(items, true)).toBe(
+      "1 interrupting · 1 after step · 1 when idle",
+    );
+    expect(queueStatusText(items, false)).toBe(
+      "1 interrupting · 1 ready to deliver · 1 when idle",
+    );
+  });
+  it("keeps legacy priority options distinct", () => {
+    expect(queueModeOptions(true).map((o) => o.label)).toEqual([
+      "Send next",
+      "In order",
+    ]);
+    expect(queueModeOptions(false).map((o) => o.shortLabel)).toEqual([
+      "Interrupt now",
+      "After step",
+      "When idle",
+    ]);
+  });
+  it("extracts process navigation and agent labels", () => {
+    expect(
+      describeQueuedItem({
+        ...statusItem,
+        event: {
+          subkind: "process_completed",
+          source: "exec.process",
+          payload: { process_id: "proc" },
+        },
+      }).processId,
+    ).toBe("proc");
+    expect(
+      describeQueuedItem({
+        ...statusItem,
+        source: "agents.push",
+        event: {
+          subkind: "system_notice",
+          source: "agents.push",
+          payload: { status: "ok" },
+        },
+      }).title,
+    ).toBe("Agent completed");
+    expect(
+      describeQueuedItem({
+        ...statusItem,
+        command_type: "user_message",
+        priority: true,
+      }).push,
+    ).toBe("preempt");
   });
 });

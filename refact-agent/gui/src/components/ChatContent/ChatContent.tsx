@@ -34,7 +34,6 @@ import {
   selectCompressionPhaseById,
   selectCompressionReasonById,
   selectCompressionPulseSeqById,
-  selectEventLog,
 } from "../../features/Chat/Thread/selectors";
 import {
   createChatWithId,
@@ -52,7 +51,8 @@ import {
   tryIncrementalDisplayItemsUpdate,
 } from "./ChatContentDisplayItems";
 import { QueuePanel } from "./QueuePanel";
-import { EventLog } from "./EventLog";
+import { EventRow } from "./EventRow";
+import { revealProcessOutput } from "./revealProcessOutput";
 import { selectSseStatusForChat } from "../../features/Connection";
 import { LogoAnimation } from "../LogoAnimation/LogoAnimation.tsx";
 import { ChatLoading } from "./ChatLoading";
@@ -127,7 +127,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const queuedItems = useAppSelector((s) =>
     selectQueuedItemsById(s, renderChatId),
   );
-  const eventLog = useAppSelector((s) => selectEventLog(s, renderChatId));
   const isStreaming = useAppSelector((s) =>
     selectIsStreamingById(s, renderChatId),
   );
@@ -346,21 +345,13 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   }, [displayItems]);
 
   const handleProcessCompletedClick = useCallback((processId: string) => {
-    const card = Array.from(
-      document.querySelectorAll("[data-exec-process-id]"),
-    ).find((item) => item.getAttribute("data-exec-process-id") === processId);
-    card?.scrollIntoView({ block: "center", behavior: "smooth" });
+    revealProcessOutput(processId);
   }, []);
 
   const virtuosoFooter = useMemo(
     () => (
       <>
         <Container>
-          <EventLog
-            events={eventLog}
-            threadId={renderChatId}
-            onProcessCompletedClick={handleProcessCompletedClick}
-          />
           <UncommittedChangesWarning />
         </Container>
         <Flex
@@ -396,12 +387,9 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     ),
     [
       compressionStatusText,
-      eventLog,
-      handleProcessCompletedClick,
       isStreaming,
       isWaiting,
       isWaitingForConfirmation,
-      renderChatId,
       visibleCompression,
     ],
   );
@@ -513,6 +501,16 @@ export const ChatContent: React.FC<ChatContentProps> = ({
             <SummarizationMessageCard key={item.key} message={item.message} />
           );
 
+        case "event":
+          return (
+            <EventRow
+              key={item.key}
+              event={item.event}
+              run={item.run}
+              onOpenProcessOutput={handleProcessCompletedClick}
+            />
+          );
+
         default:
           return null;
       }
@@ -520,6 +518,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
     [
       handleBranch,
       handleDelete,
+      handleProcessCompletedClick,
       onRetryWrapper,
       collapsibleState,
       renderChatId,

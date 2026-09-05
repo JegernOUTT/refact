@@ -561,42 +561,6 @@ export const selectVisibleMessages = (
   threadId: string,
 ): ChatMessages => getVisibleMessagesSelector(threadId)(state, threadId);
 
-const eventLogSelectors = new Map<
-  string,
-  ReturnType<typeof createSelector<[typeof selectMessagesById], EventMessage[]>>
->();
-
-function getEventLogSelector(threadId: string) {
-  let selector = eventLogSelectors.get(threadId);
-  if (!selector) {
-    selector = createSelector(
-      [selectMessagesById],
-      (messages): EventMessage[] => {
-        const eventMessages = messages.flatMap((message) => {
-          if (!isEventMessage(message)) return EMPTY_EVENT_MESSAGES;
-          const metadata = getEventMetadata(message);
-          if (!metadata) return EMPTY_EVENT_MESSAGES;
-          return [normalizeEventMessageMetadata(message)];
-        });
-        return eventMessages.length > 0 ? eventMessages : EMPTY_EVENT_MESSAGES;
-      },
-    );
-    eventLogSelectors.set(threadId, selector);
-  }
-  return selector;
-}
-
-/**
- * Normalized event history for EventLog surfaces. Every subkind is included,
- * including plan/goal deltas and pursuit, because the event history is the one
- * place users can audit what the agent did; PlanBanner and the goal widget keep
- * owning their own dedicated presentation.
- */
-export const selectEventLog = (
-  state: RootState,
-  threadId: string,
-): EventMessage[] => getEventLogSelector(threadId)(state, threadId);
-
 export const selectMessagesCountById = createSelector(
   [selectMessagesById],
   (messages) => messages.length,
@@ -1715,3 +1679,8 @@ export const selectThreadWorktreeById = (
 
 export const selectIsBuddyChat = (state: RootState, chatId: string): boolean =>
   !!state.chat.threads[chatId]?.thread.buddy_meta?.is_buddy_chat;
+
+export const selectWaitingInterruptibleById = (
+  state: RootState,
+  chatId: string,
+): boolean => state.chat.threads[chatId]?.waiting_interruptible ?? false;

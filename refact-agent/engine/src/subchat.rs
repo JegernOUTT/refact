@@ -182,11 +182,30 @@ pub(crate) async fn drain_background_agent_inbox(
         return;
     };
     import_runner_local_deliveries(&app, &agent_id, &chat_id, messages).await;
-    match app.agents.drain_deliveries(&agent_id, false).await {
-        Ok(deliveries) => {
-            append_runner_deliveries(messages, deliveries);
+    {
+        let session = app.chat.sessions.read().await.get(&chat_id).cloned();
+        let mut session = match session.as_ref() {
+            Some(session) => Some(session.lock().await),
+            None => None,
+        };
+        // A yielded wait opens C only after every tool result has landed. Keep
+        // the boundary through local tick import, and retain it on drain errors.
+        let include_when_idle = session
+            .as_ref()
+            .is_some_and(|session| session.wait_delivery_boundary);
+        match app
+            .agents
+            .drain_deliveries(&agent_id, include_when_idle)
+            .await
+        {
+            Ok(deliveries) => {
+                append_runner_deliveries(messages, deliveries);
+                if let Some(session) = session.as_mut() {
+                    session.wait_delivery_boundary = false;
+                }
+            }
+            Err(error) => warn!(%agent_id, %error, "Failed to drain runner deliveries"),
         }
-        Err(error) => warn!(%agent_id, %error, "Failed to drain runner deliveries"),
     }
     crate::agents::delivery::publish_runner_queue(&app, &agent_id).await;
     for message in app.agents.drain_inbox(&agent_id).await {
@@ -1897,8 +1916,8 @@ pub async fn run_subchat(
             if aborted {
                 break Ok((completed, true));
             }
-            // C is eligible only after the entire run, including forced finals
-            // and wrap-up, has finished. The registry closes acceptance atomically
+            // Outside interruptible-wait boundaries, C becomes eligible after
+            // forced finals and wrap-up. The registry closes acceptance atomically
             // with this drain so a successful enqueue cannot be stranded on exit.
             let wake = if let Some(agent_id) = config.background_agent_id.as_deref() {
                 import_runner_local_deliveries(&app, agent_id, &chat_id, &completed).await;
@@ -3691,6 +3710,133 @@ mod subchat_tests {
             .await
             .unwrap();
         assert_eq!(saved.messages.len(), messages.len());
+    }
+
+    #[tokio::test]
+    async fn runner_wait_boundary_releases_idle_after_all_results_and_local_ticks() {
+        use refact_chat_api::{PendingDelivery, PushMode};
+        let ccx = abort_test_ccx().await;
+        let (app, chat_id) = {
+            let ccx = ccx.lock().await;
+            (ccx.app.clone(), ccx.chat_id.clone())
+        };
+        let (agent, _, _) = app
+            .agents
+            .create(crate::agents::types::CreateAgentRequest {
+                parent_chat_id: "parent".into(),
+                parent_root_chat_id: None,
+                parent_tool_call_id: None,
+                kind: crate::agents::types::BgAgentKind::Subagent,
+                config_name: "subagent".into(),
+                title: "wait boundary test".into(),
+                prompt: "test".into(),
+                target_files: vec![],
+                model: "test".into(),
+                model_type: None,
+                goal_summary: None,
+                plan_present: false,
+                worktree_id: None,
+                worktree_branch: None,
+            })
+            .await
+            .unwrap();
+        ccx.lock().await.background_agent_id = Some(agent.agent_id.clone());
+        let delivery = PendingDelivery::with_id(
+            "runner-idle",
+            vec![ChatMessage::new("user".into(), "continue".into())],
+            PushMode::WhenIdle,
+            "parent",
+            true,
+        );
+        app.agents
+            .enqueue_delivery(&agent.agent_id, delivery.clone())
+            .await
+            .unwrap();
+        let mut session = crate::chat::types::ChatSession::new(chat_id.clone());
+        session.set_runner_pending_deliveries(vec![delivery]);
+        let session = Arc::new(tokio::sync::Mutex::new(session));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(chat_id, session.clone());
+        let mut messages = vec![];
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        assert!(messages.is_empty(), "ordinary runner boundaries retain C");
+
+        let assistant: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "assistant", "content": "", "tool_calls": [
+                {"id":"sleep", "type":"function", "function":{"name":"sleep", "arguments":"{}"}},
+                {"id":"other", "type":"function", "function":{"name":"sleep", "arguments":"{}"}}
+            ]
+        }))
+        .unwrap();
+        messages.push(assistant);
+        {
+            let mut session = session.lock().await;
+            session.messages = messages.clone();
+            session.turn_depth = 1;
+            session.interruptible_waits = 1;
+            session.interrupt_wait_for_delivery();
+            assert!(session.wait_delivery_boundary);
+            assert!(!session.abort_flag.load(std::sync::atomic::Ordering::SeqCst));
+            session.interruptible_waits = 0;
+            session
+                .queue_post_tool_delivery(PendingDelivery::with_id(
+                    "local-tick",
+                    vec![ChatMessage::new("event".into(), "tick".into())],
+                    PushMode::WhenIdle,
+                    "sleep",
+                    false,
+                ))
+                .unwrap();
+        }
+        for id in ["sleep", "other"] {
+            super::drain_background_agent_inbox(&ccx, &mut messages).await;
+            assert!(session.lock().await.wait_delivery_boundary);
+            assert!(!messages.iter().any(|message| message.role == "user"));
+            messages.push(ChatMessage {
+                role: "tool".into(),
+                tool_call_id: id.into(),
+                content: ChatContent::SimpleText("yielded".into()),
+                ..Default::default()
+            });
+        }
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        assert!(!session.lock().await.wait_delivery_boundary);
+        assert!(session.lock().await.pending_deliveries.is_empty());
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[3].extra["delivery"]["id"], "runner-idle");
+        assert_eq!(messages[4].extra["delivery"]["id"], "local-tick");
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        assert_eq!(
+            messages.len(),
+            5,
+            "claimed deliveries must not be duplicated"
+        );
+        app.agents
+            .enqueue_delivery(
+                &agent.agent_id,
+                PendingDelivery::with_id(
+                    "later-idle",
+                    vec![ChatMessage::new("user".into(), "later".into())],
+                    PushMode::WhenIdle,
+                    "parent",
+                    true,
+                ),
+            )
+            .await
+            .unwrap();
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        assert_eq!(messages.len(), 5, "wait boundary is consumed once");
+
+        session.lock().await.wait_delivery_boundary = true;
+        ccx.lock().await.background_agent_id = Some("missing-agent".into());
+        super::drain_background_agent_inbox(&ccx, &mut messages).await;
+        assert!(
+            session.lock().await.wait_delivery_boundary,
+            "failed drains retain the boundary"
+        );
     }
 
     #[tokio::test]

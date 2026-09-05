@@ -323,18 +323,13 @@ describe("ChatContent compression progress", () => {
       }),
     );
 
-    const queuedText = screen.getByText(preview);
-    const queuedCard = queuedText.closest("[class*='queuedMessage']");
-    const queuedContent = queuedText.closest(
-      "[class*='queuedMessagesContent']",
-    );
-    const queuedContainer = queuedText.closest(
-      "[class*='queuedMessagesContainer']",
-    );
-
-    expect(queuedCard?.className).toContain("queuedMessage");
-    expect(queuedContent?.className).toContain("queuedMessagesContent");
-    expect(queuedContainer?.className).toContain("queuedMessagesContainer");
+    const queuedRow = screen.getByTestId("queued-item");
+    expect(queuedRow).toHaveAttribute("data-delivery-id", "queued-1");
+    expect(queuedRow.closest("[data-testid='queue-list']")).not.toBeNull();
+    expect(
+      queuedRow.closest("[class*='queuedMessagesContainer']")?.className,
+    ).toContain("queuedMessagesContainer");
+    expect(queuedRow.closest("[data-testid='chat-virtuoso-item']")).toBeNull();
   });
 
   it("shows preloaded compression pulse on first mount", () => {

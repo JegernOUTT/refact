@@ -114,6 +114,7 @@ export function isPushMode(value: unknown): value is PushMode {
 }
 
 export type RuntimeState = {
+  waiting_interruptible?: boolean;
   state: SessionState;
   paused: boolean;
   error: string | null;
@@ -363,6 +364,7 @@ export type EventEnvelope =
       chat_id: string;
       seq: string;
       type: "runtime_updated";
+      waiting_interruptible?: boolean;
       state: string;
       error?: string;
       goal_active?: boolean;

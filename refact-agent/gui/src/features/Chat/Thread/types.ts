@@ -228,6 +228,7 @@ export type ChatThreadRuntime = {
   task_goal_expanded?: boolean;
   /** Actual session state from backend (for waiting_user_input, completed, etc.) */
   session_state?: string;
+  waiting_interruptible?: boolean;
   /** Last applied chat SSE event seq for duplicate/out-of-order protection */
   last_applied_seq?: string;
   /** Fast lookup index from message_id to message index (rebuilt on snapshots/mutations) */

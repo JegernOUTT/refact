@@ -2973,6 +2973,37 @@ async fn wait_for_tool_abort(session_arc: Arc<AMutex<ChatSession>>, abort_flag: 
     }
 }
 
+/// Owns the runtime wait marker even if execution errors, panics or is cancelled.
+struct InterruptibleWaitGuard(Option<Arc<AMutex<ChatSession>>>);
+
+impl InterruptibleWaitGuard {
+    async fn begin(session: Arc<AMutex<ChatSession>>) -> Self {
+        session.lock().await.begin_interruptible_wait();
+        Self(Some(session))
+    }
+
+    async fn finish(&mut self) {
+        if let Some(session) = &self.0 {
+            session.lock().await.end_interruptible_wait();
+        }
+        self.0 = None;
+    }
+}
+
+impl Drop for InterruptibleWaitGuard {
+    fn drop(&mut self) {
+        if let Some(session) = self.0.take() {
+            if let Ok(mut locked) = session.try_lock() {
+                locked.end_interruptible_wait();
+                return;
+            }
+            tokio::spawn(async move {
+                session.lock().await.end_interruptible_wait();
+            });
+        }
+    }
+}
+
 type SerialToolRegistry = std::collections::HashSet<String>;
 
 async fn execute_single_tool(
@@ -3058,19 +3089,57 @@ async fn execute_single_tool(
         session.stamp_tool_call_timing(&tool_call.id, tool_timestamp_ms(), None);
     }
 
-    let execution = app
-        .tool_registry
-        .execute_tool_with_catalog_and_pool(
-            &ccx,
-            &catalog,
-            turn_tool_pool.as_ref(),
-            mode_id,
-            model_id,
-            &tool_call.id,
-            &tool_call.function.name,
-            serde_json::Map::from_iter(args.into_iter()),
-        )
-        .await;
+    let interruptible = catalog
+        .index
+        .tools
+        .iter()
+        .any(|desc| desc.name == tool_call.function.name && desc.is_interruptible_wait());
+    let mut wait_guard = if interruptible {
+        let session = app.chat.sessions.read().await.get(&session_id).cloned();
+        match session {
+            Some(session) => Some(InterruptibleWaitGuard::begin(session).await),
+            None => None,
+        }
+    } else {
+        None
+    };
+    let started = std::time::Instant::now();
+    let execution_future = app.tool_registry.execute_tool_with_catalog_and_pool(
+        &ccx,
+        &catalog,
+        turn_tool_pool.as_ref(),
+        mode_id,
+        model_id,
+        &tool_call.id,
+        &tool_call.function.name,
+        serde_json::Map::from_iter(args.into_iter()),
+    );
+    // Sleep must finish cooperatively so its accumulated ticks are not discarded.
+    let execution = if interruptible && tool_call.function.name != "sleep" {
+        let interrupt = crate::tools::tools_description::WaitInterrupt::from_context(&ccx).await;
+        tokio::select! {
+            result = execution_future => result,
+            _ = interrupt.wait() => Ok(Some(refact_runtime_api::ToolExecutionResult {
+                had_corrections: false,
+                messages: vec![ChatMessage {
+                    role: "tool".into(),
+                    tool_call_id: tool_call.id.clone(),
+                    tool_failed: Some(false),
+                    content: ChatContent::SimpleText(serde_json::json!({
+                        "interrupted": true,
+                        "reason": interrupt.reason(started.elapsed().as_secs_f64()),
+                    }).to_string()),
+                    ..Default::default()
+                }],
+                context_files: vec![],
+            })),
+        }
+    } else {
+        execution_future.await
+    };
+    if let Some(guard) = &mut wait_guard {
+        guard.finish().await;
+    }
 
     if let Some(session_arc) = {
         let sessions_read = app.chat.sessions.read().await;
@@ -3691,4 +3760,187 @@ pub async fn execute_tools(
     }
 
     (result_msgs, had_corrections)
+}
+
+#[cfg(test)]
+mod interruptible_wait_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn live_sleep_execution_yields_to_append_and_when_idle() {
+        use crate::tools::tools_description::Tool;
+        use refact_core::chat_types::{PendingDelivery, PushMode};
+        for push in [PushMode::Append, PushMode::WhenIdle] {
+            let gcx = crate::global_context::tests::make_test_gcx().await;
+            let base_app = AppState::from_gcx(gcx).await;
+            let app = AppState {
+                tool_registry: Arc::new(
+                    crate::app_state::AppToolRegistry::with_fixture_tool_factory(
+                        base_app.gcx.clone(),
+                        Arc::new(|| {
+                            vec![Box::new(crate::tools::tool_sleep::ToolSleep {
+                                config_path: String::new(),
+                            })
+                                as Box<dyn crate::tools::tools_description::Tool + Send>]
+                        }),
+                    ),
+                ),
+                ..base_app
+            };
+            let session = Arc::new(AMutex::new(ChatSession::new("live-wait".into())));
+            app.chat
+                .sessions
+                .write()
+                .await
+                .insert("live-wait".into(), session.clone());
+            let ccx = Arc::new(AMutex::new(
+                AtCommandsContext::new_from_app(
+                    app.clone(),
+                    4096,
+                    20,
+                    false,
+                    vec![],
+                    "live-wait".into(),
+                    None,
+                    "model".into(),
+                    None,
+                    None,
+                )
+                .await,
+            ));
+            let desc = crate::tools::tool_sleep::ToolSleep {
+                config_path: String::new(),
+            }
+            .tool_description();
+            let catalog = Arc::new(ToolCatalogSnapshot {
+                index: refact_runtime_api::ToolRegistryIndex {
+                    tools: vec![desc],
+                    mcp_lazy_mode: false,
+                    mcp_total_count: 0,
+                    mcp_tool_index: vec![],
+                },
+                policy: vec![],
+                aliases: refact_tool_api::ToolAliasRegistry::new(),
+            });
+            let tool_call = ChatToolCall {
+                id: "live-sleep".into(),
+                index: Some(0),
+                tool_type: "function".into(),
+                function: crate::call_validation::ChatToolFunction {
+                    name: "sleep".into(),
+                    arguments: serde_json::json!({"duration_ms":30000,"description":"wait"})
+                        .to_string(),
+                },
+                extra_content: None,
+                started_at_ms: None,
+                completed_at_ms: None,
+            };
+            {
+                let mut locked = session.lock().await;
+                locked.turn_depth = 1;
+                locked.add_message(ChatMessage {
+                    role: "assistant".into(),
+                    tool_calls: Some(vec![tool_call.clone()]),
+                    ..Default::default()
+                });
+            }
+            let run = tokio::spawn(async move {
+                execute_single_tool(
+                    app,
+                    ccx,
+                    0,
+                    tool_call,
+                    catalog,
+                    None,
+                    Arc::new(Default::default()),
+                    true,
+                    1,
+                    "agent",
+                    None,
+                )
+                .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if session.lock().await.runtime.waiting_interruptible {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("sleep did not enter wait wrapper");
+            {
+                let mut locked = session.lock().await;
+                locked
+                    .enqueue_delivery(PendingDelivery::with_id(
+                        "incoming",
+                        vec![ChatMessage {
+                            role: "user".into(),
+                            content: ChatContent::SimpleText("wake up".into()),
+                            ..Default::default()
+                        }],
+                        push,
+                        "test",
+                        true,
+                    ))
+                    .unwrap();
+            }
+            let (_, corrected, messages, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(10), run)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(!corrected);
+            assert_eq!(messages[0].extra["sleep"]["interrupted"], true);
+            assert!(messages[0].extra["sleep"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("message arrived"));
+            let mut locked = session.lock().await;
+            assert!(!locked.abort_flag.load(Ordering::SeqCst));
+            assert!(!locked.runtime.waiting_interruptible);
+            for message in messages {
+                locked.add_message(message);
+            }
+            assert_eq!(
+                locked.drain_pending_deliveries(),
+                (vec!["incoming".into()], true)
+            );
+            assert_eq!(locked.drain_pending_deliveries(), (vec![], false));
+            assert_eq!(locked.messages[0].role, "assistant");
+            assert_eq!(locked.messages[1].role, "tool");
+            assert!(locked
+                .messages
+                .iter()
+                .skip(2)
+                .any(|message| message.content.content_text_only().contains("wake up")));
+        }
+    }
+
+    #[tokio::test]
+    async fn guard_clears_runtime_on_finish_and_drop() {
+        let session = Arc::new(AMutex::new(ChatSession::new("wait-guard".into())));
+        let mut first = InterruptibleWaitGuard::begin(session.clone()).await;
+        let second = InterruptibleWaitGuard::begin(session.clone()).await;
+        assert!(session.lock().await.runtime.waiting_interruptible);
+        first.finish().await;
+        assert!(session.lock().await.runtime.waiting_interruptible);
+        drop(second);
+        assert!(!session.lock().await.runtime.waiting_interruptible);
+        assert_eq!(session.lock().await.interruptible_waits, 0);
+    }
+
+    #[tokio::test]
+    async fn guard_cleans_up_on_panic() {
+        let session = Arc::new(AMutex::new(ChatSession::new("wait-panic".into())));
+        let copy = session.clone();
+        assert!(tokio::spawn(async move {
+            let _guard = InterruptibleWaitGuard::begin(copy).await;
+            panic!("test panic");
+        })
+        .await
+        .is_err());
+        assert!(!session.lock().await.runtime.waiting_interruptible);
+    }
 }

@@ -258,7 +258,17 @@ pub fn make_openai_tool_value(
     })
 }
 
+// The descriptor gate is used because the registry facade hides the Tool trait.
+const INTERRUPTIBLE_WAIT_TOOLS: &[&str] = &["sleep", "process_wait", "agent_wait"];
+
 impl ToolDesc {
+    /// Only builtin wait tools can open an interruptible delivery boundary.
+    /// An MCP tool with the same name remains ordinary work.
+    pub fn is_interruptible_wait(&self) -> bool {
+        matches!(self.source.source_type, ToolSourceType::Builtin)
+            && INTERRUPTIBLE_WAIT_TOOLS.contains(&self.name.as_str())
+    }
+
     pub fn into_openai_style(self, strict: bool) -> Value {
         make_openai_tool_value(self.name, self.description, self.input_schema, strict)
     }
@@ -268,6 +278,32 @@ impl ToolDesc {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn interruptible_wait_capability_is_builtin_only_and_excludes_real_work() {
+        let mut desc: ToolDesc = serde_json::from_value(json!({
+            "name": "sleep", "description": "wait", "input_schema": {},
+            "display_name": "Wait", "source": {"source_type": "builtin", "config_path": ""}
+        }))
+        .unwrap();
+        for name in ["sleep", "process_wait", "agent_wait"] {
+            desc.name = name.into();
+            assert!(desc.is_interruptible_wait(), "{name}");
+        }
+        for name in [
+            "shell",
+            "process_start",
+            "process_subscribe",
+            "task_wait_for_agents",
+            "wait_agents",
+        ] {
+            desc.name = name.into();
+            assert!(!desc.is_interruptible_wait(), "{name}");
+        }
+        desc.name = "sleep".into();
+        desc.source.source_type = ToolSourceType::Integration;
+        assert!(!desc.is_interruptible_wait());
+    }
 
     #[test]
     fn test_json_schema_from_params_basic() {

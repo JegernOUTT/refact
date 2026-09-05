@@ -865,7 +865,7 @@ describe("ChatContent display items", () => {
     expectIncrementalAppendMatchesFull(eventMessage());
   });
 
-  it("keeps unrelated events and plan deltas hidden", () => {
+  it("renders ordinary events inline while plan messages stay hidden", () => {
     const messages: ChatMessages = [
       eventMessage({
         message_id: "unrelated-system-notice",
@@ -881,11 +881,122 @@ describe("ChatContent display items", () => {
         source: "tool.update_plan",
         content: "Context compression failed: not a summarizer notice",
       }),
+      { role: "plan", content: "hidden plan body", message_id: "plan-1" },
     ];
 
     const items = buildDisplayItems(messages, false);
 
-    expect(items).toHaveLength(0);
+    expect(items.map((item) => item.type)).toEqual(["event", "event", "event"]);
+    expect(
+      items.map((item) => (item.type === "event" ? item.run : null)),
+    ).toEqual(["start", "middle", "end"]);
+  });
+
+  it("computes run positions from rendered adjacency, not message indices", () => {
+    const messages: ChatMessages = [
+      eventMessage({ message_id: "lonely-event", content: "Agent woke up" }),
+      assistantMessage({ message_id: "assistant-between" }),
+      eventMessage({ message_id: "run-first", content: "Agent woke up" }),
+      { role: "plan", content: "hidden plan", message_id: "plan-between" },
+      eventMessage({ message_id: "run-second", content: "Agent woke up" }),
+      userMessage({ message_id: "user-after" }),
+    ];
+
+    const items = buildDisplayItems(messages, false);
+
+    expect(
+      items.map((item) => (item.type === "event" ? item.run : item.type)),
+    ).toEqual(["single", "assistant", "start", "end", "user"]);
+  });
+
+  it("promotes the previous event from single to start when an event is appended", () => {
+    const previousMessages: ChatMessages = [
+      assistantMessage({ message_id: "assistant-before" }),
+      eventMessage({ message_id: "event-first", content: "Agent woke up" }),
+    ];
+    const nextMessages: ChatMessages = [
+      ...previousMessages,
+      eventMessage({ message_id: "event-second", subkind: "tick" }),
+    ];
+    const previousItems = buildDisplayItems(previousMessages, false);
+
+    expect(previousItems.at(-1)).toMatchObject({
+      type: "event",
+      run: "single",
+    });
+
+    const incrementalItems = tryIncrementalDisplayItemsUpdate(
+      previousMessages,
+      nextMessages,
+      previousItems,
+      false,
+    );
+
+    expect(incrementalItems).toEqual(buildDisplayItems(nextMessages, false));
+    expect(
+      (incrementalItems ?? []).map((item) =>
+        item.type === "event" ? item.run : item.type,
+      ),
+    ).toEqual(["assistant", "start", "end"]);
+  });
+
+  it("promotes the previous event from end to middle when a third event is appended", () => {
+    const previousMessages: ChatMessages = [
+      eventMessage({ message_id: "event-first", content: "Agent woke up" }),
+      eventMessage({ message_id: "event-second", subkind: "tick" }),
+    ];
+    const nextMessages: ChatMessages = [
+      ...previousMessages,
+      eventMessage({ message_id: "event-third", subkind: "cron_fire" }),
+    ];
+    const previousItems = buildDisplayItems(previousMessages, false);
+
+    const incrementalItems = tryIncrementalDisplayItemsUpdate(
+      previousMessages,
+      nextMessages,
+      previousItems,
+      false,
+    );
+
+    expect(incrementalItems).toEqual(buildDisplayItems(nextMessages, false));
+    expect(
+      (incrementalItems ?? []).map((item) =>
+        item.type === "event" ? item.run : item.type,
+      ),
+    ).toEqual(["start", "middle", "end"]);
+  });
+
+  it("matches full rebuild when appending an event after an assistant message", () => {
+    expectIncrementalAppendMatchesFull(
+      eventMessage({ message_id: "appended-event", subkind: "tick" }),
+    );
+  });
+
+  it("normalizes backend event metadata onto the display item", () => {
+    const messages: ChatMessages = [
+      {
+        role: "event",
+        content: "Mode switched",
+        message_id: "backend-event",
+        extra: {
+          event: {
+            subkind: "mode_switch",
+            source: "chat.session",
+            payload: { from: "agent", to: "task_planner" },
+          },
+        },
+      } as unknown as EventMessage,
+    ];
+
+    const items = buildDisplayItems(messages, false);
+
+    expect(items[0]?.type).toBe("event");
+    if (items[0]?.type !== "event") throw new Error("Expected event item");
+    expect(items[0].event).toMatchObject({
+      subkind: "mode_switch",
+      source: "chat.session",
+      payload: { from: "agent", to: "task_planner" },
+    });
   });
 
   it("renders compression failure content once when appended incrementally", () => {

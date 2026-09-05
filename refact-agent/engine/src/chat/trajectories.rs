@@ -18395,6 +18395,9 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let session = ChatSession {
             chat_id: "test-123".to_string(),
+            interruptible_waits: 0,
+            wait_delivery_boundary: false,
+            wait_interrupt_flag: Arc::new(AtomicBool::new(false)),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {
                 id: "test-123".to_string(),
@@ -18548,6 +18551,9 @@ mod tests {
         let (tx, _rx) = broadcast::channel(16);
         let mut session = ChatSession {
             chat_id: "skill-test".to_string(),
+            interruptible_waits: 0,
+            wait_delivery_boundary: false,
+            wait_interrupt_flag: Arc::new(AtomicBool::new(false)),
             derived_privacy_zones: crate::privacy::records::new_derived_privacy_zones(),
             thread: ThreadParams {
                 id: "skill-test".to_string(),
