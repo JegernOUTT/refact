@@ -64,10 +64,10 @@ impl Tool for ToolUpdateGoal {
 
         let (seq, result_truncation) = {
             let mut session = session_arc.lock().await;
-            if !has_base_goal_including_queued(&session) {
+            if !has_base_goal_including_queued(&session)? {
                 return Err("no goal to update; call set_goal first".to_string());
             }
-            let seq = goal_delta_count_including_queued(&session) + 1;
+            let seq = goal_delta_count_including_queued(&session)? + 1;
             let (delta, result_truncation) = internal_roles::goal_delta_with_truncation(
                 "tool.update_goal",
                 json!({"seq": seq}),
@@ -109,12 +109,12 @@ fn update_goal_tool_result(
     })
 }
 
-fn has_base_goal_including_queued(session: &ChatSession) -> bool {
-    goal_role::current_base_goal(session).is_some()
+fn has_base_goal_including_queued(session: &ChatSession) -> Result<bool, String> {
+    Ok(goal_role::current_base_goal(&session.try_accepted_control_projection()?).is_some())
 }
 
-fn goal_delta_count_including_queued(session: &ChatSession) -> usize {
-    goal_role::goal_delta_events(&session.accepted_control_projection()).len()
+fn goal_delta_count_including_queued(session: &ChatSession) -> Result<usize, String> {
+    Ok(goal_role::goal_delta_events(&session.try_accepted_control_projection()?).len())
 }
 
 fn string_arg(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {
@@ -486,7 +486,7 @@ mod tests {
             GoalBudget::default(),
         ));
 
-        assert!(has_base_goal_including_queued(&session));
+        assert!(has_base_goal_including_queued(&session).unwrap());
         assert_eq!(session.post_tool_side_effects[0].role, GOAL_ROLE);
     }
 

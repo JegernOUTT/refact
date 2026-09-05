@@ -1,10 +1,8 @@
-use crate::call_validation::{ChatContent, ChatMessage};
+use crate::call_validation::ChatMessage;
+#[cfg(test)]
+use crate::call_validation::ChatContent;
 use crate::global_context::GlobalContext;
-use crate::subchat::{run_subchat_once, TraceParent};
-use crate::yaml_configs::customization_registry::get_subagent_config;
 use std::sync::Arc;
-
-const SUBAGENT_ID: &str = "compress_trajectory";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompressedTrajectory {
@@ -16,157 +14,56 @@ fn source_records(messages: &[ChatMessage]) -> Result<Vec<refact_privacy::FileRe
     crate::privacy::records::records_to_carry(messages).map_err(|error| error.to_string())
 }
 
-fn assistant_text_after_prompt(messages: &[ChatMessage], prompt_idx: usize) -> Option<String> {
-    messages
-        .iter()
-        .skip(prompt_idx.saturating_add(1))
-        .rev()
-        .find_map(|message| {
-            if message.role != "assistant" {
-                return None;
-            }
-
-            let content = message.content.content_text_only().trim().to_string();
-            if content.is_empty() {
-                None
-            } else {
-                Some(content)
-            }
-        })
-}
-
 pub async fn compress_trajectory(
     gcx: Arc<GlobalContext>,
     messages: &Vec<ChatMessage>,
     parent_chat_id: Option<&str>,
 ) -> Result<CompressedTrajectory, String> {
-    if messages.is_empty() {
-        return Err("The provided chat is empty".to_string());
+    use refact_core::active_context::{active_context, legacy_rebuild_input, requires_explicit_rebuild};
+    let input = if requires_explicit_rebuild(messages) {
+        legacy_rebuild_input(messages)
+    } else {
+        active_context(messages).map(|view| view.messages)
     }
-    let messages = messages.clone();
-    let gcx2 = gcx.clone();
-    let parent_chat_id = parent_chat_id.map(|id| id.to_string());
-    crate::buddy::workflows::buddy_wrap_workflow(
-        crate::app_state::AppState::from_gcx(gcx).await,
-        "compress_trajectory",
-        "🗜",
-        10,
-        |_: &CompressedTrajectory| "Trajectory compressed".to_string(),
-        move || async move {
-            let subagent_config = get_subagent_config(gcx2.clone(), SUBAGENT_ID, None)
-                .await
-                .ok_or_else(|| format!("subagent config '{}' not found", SUBAGENT_ID))?;
-
-            let compression_prompt =
-                subagent_config
-                    .messages
-                    .user_template
-                    .as_ref()
-                    .ok_or_else(|| {
-                        format!(
-                            "messages.user_template not defined for subagent '{}'",
-                            SUBAGENT_ID
-                        )
-                    })?;
-
-            let mut messages_compress = messages.clone();
-            messages_compress.push(ChatMessage {
-                role: "user".to_string(),
-                content: ChatContent::SimpleText(compression_prompt.clone()),
-                ..Default::default()
-            });
-            let compression_prompt_idx = messages_compress.len() - 1;
-
-            let result = run_subchat_once(
-                gcx2,
-                SUBAGENT_ID,
-                messages_compress,
-                TraceParent::from_parts(parent_chat_id.as_deref(), None),
-            )
-            .await
-            .map_err(|e| format!("compress_trajectory subchat failed: {}", e))?;
-
-            let content = assistant_text_after_prompt(&result.messages, compression_prompt_idx)
-                .ok_or_else(|| "Trajectory compression produced empty result".to_string())?;
-
-            Ok(CompressedTrajectory {
-                text: content,
-                records: source_records(&messages)?,
-            })
+    .map_err(|e| e.to_string())?;
+    let outcome = crate::agentic::mode_transition::reconstruct_context(
+        gcx,
+        crate::agentic::mode_transition::ReconstructionRequest {
+            messages: &input,
+            target_mode: "agent",
+            target_mode_description: "Continue the current conversation",
+            parent_chat_id,
+            model_override: None,
+            abort_flag: None,
+            hints: None,
+            target_budget_symbols: None,
+            preserve_goal_messages: true,
         },
     )
-    .await
+    .await?;
+    let text = outcome
+        .messages
+        .iter()
+        .map(|m| format!("[{}]\n{}", m.role, m.content.content_text_only()))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Ok(CompressedTrajectory {
+        text,
+        records: source_records(&input)?,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use refact_privacy::{Attribution, PrivacyRecord};
-
-    const DEFAULT_COMPRESS_TRAJECTORY_YAML: &str = include_str!(
-        "../../crates/refact-yaml-configs/src/defaults/subagents/compress_trajectory.yaml"
-    );
-
     fn message(role: &str, text: &str) -> ChatMessage {
         ChatMessage {
-            role: role.to_string(),
-            content: ChatContent::SimpleText(text.to_string()),
+            role: role.into(),
+            content: ChatContent::SimpleText(text.into()),
             ..Default::default()
         }
     }
-
-    #[test]
-    fn compress_trajectory_prompt_is_compact_continuation_handoff() {
-        assert!(!DEFAULT_COMPRESS_TRAJECTORY_YAML.contains("<analysis>"));
-        assert!(DEFAULT_COMPRESS_TRAJECTORY_YAML.contains("150-350 words"));
-        assert!(DEFAULT_COMPRESS_TRAJECTORY_YAML.contains("up to 600 words"));
-        assert!(DEFAULT_COMPRESS_TRAJECTORY_YAML
-            .contains("tool, subagent, planner, and code-review outputs"));
-        assert!(DEFAULT_COMPRESS_TRAJECTORY_YAML
-            .contains("Do not use first person unless quoting the user"));
-        assert!(DEFAULT_COMPRESS_TRAJECTORY_YAML.contains("Drop routine reads, searches"));
-        assert!(!DEFAULT_COMPRESS_TRAJECTORY_YAML.contains("Chronologically analyze"));
-        assert!(!DEFAULT_COMPRESS_TRAJECTORY_YAML.contains("Here's an example"));
-    }
-
-    #[test]
-    fn assistant_text_after_prompt_ignores_source_assistant() {
-        let messages = vec![
-            message("user", "source user"),
-            message("assistant", "old assistant"),
-            message("user", "compression prompt"),
-        ];
-
-        assert_eq!(assistant_text_after_prompt(&messages, 2), None);
-    }
-
-    #[test]
-    fn assistant_text_after_prompt_selects_new_assistant() {
-        let messages = vec![
-            message("user", "source user"),
-            message("assistant", "old assistant"),
-            message("user", "compression prompt"),
-            message("assistant", " compressed trajectory\n"),
-        ];
-
-        assert_eq!(
-            assistant_text_after_prompt(&messages, 2),
-            Some("compressed trajectory".to_string())
-        );
-    }
-
-    #[test]
-    fn assistant_text_after_prompt_ignores_blank_new_assistant() {
-        let messages = vec![
-            message("user", "source user"),
-            message("assistant", "old assistant"),
-            message("user", "compression prompt"),
-            message("assistant", "   \n"),
-        ];
-
-        assert_eq!(assistant_text_after_prompt(&messages, 2), None);
-    }
-
     #[test]
     fn source_records_unions_and_deduplicates_privacy_metadata() {
         let secret = refact_privacy::FileRecord {

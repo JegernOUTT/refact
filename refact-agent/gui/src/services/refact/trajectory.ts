@@ -3,8 +3,6 @@ import { RootState } from "../../app/store";
 import {
   TRAJECTORY_TRANSFORM_PREVIEW_URL,
   TRAJECTORY_TRANSFORM_APPLY_URL,
-  TRAJECTORY_HANDOFF_PREVIEW_URL,
-  TRAJECTORY_HANDOFF_APPLY_URL,
   TRAJECTORY_LLM_COMPRESS_PREVIEW_URL,
   TRAJECTORY_LLM_COMPRESS_APPLY_URL,
   TRAJECTORY_MODE_TRANSITION_APPLY_URL,
@@ -25,15 +23,6 @@ export type LlmCompressOptions = {
   expected_trajectory_version?: number;
 };
 
-export type HandoffOptions = {
-  include_last_user_plus?: boolean;
-  include_all_opened_context?: boolean;
-  include_all_edited_context?: boolean;
-  include_agentic_tools?: boolean;
-  llm_summary_for_excluded?: boolean;
-  include_all_user_assistant_only?: boolean;
-};
-
 export type TransformStats = {
   before_message_count: number;
   after_message_count: number;
@@ -50,18 +39,6 @@ export type TransformPreviewResponse = {
 
 export type TransformApplyResponse = {
   stats: TransformStats;
-};
-
-export type HandoffPreviewResponse = {
-  stats: TransformStats;
-  actions: string[];
-  llm_summary?: string | null;
-};
-
-export type HandoffApplyResponse = {
-  new_chat_id: string;
-  stats: TransformStats;
-  browser_runtime_id?: string | null;
 };
 
 export type LlmCompressPreviewResponse = {
@@ -148,46 +125,6 @@ export const trajectoryApi = createApi({
       },
     }),
 
-    previewHandoff: builder.mutation<
-      HandoffPreviewResponse,
-      { chatId: string; options: HandoffOptions }
-    >({
-      async queryFn({ chatId, options }, api, _opts, baseQuery) {
-        const state = api.getState() as RootState;
-        const url = buildApiUrlFromState(
-          state,
-          buildPath(TRAJECTORY_HANDOFF_PREVIEW_URL, chatId),
-        );
-        const result = await baseQuery({
-          url,
-          method: "POST",
-          body: { options },
-        });
-        if (result.error) return { error: result.error };
-        return { data: result.data as HandoffPreviewResponse };
-      },
-    }),
-
-    applyHandoff: builder.mutation<
-      HandoffApplyResponse,
-      { chatId: string; options: HandoffOptions }
-    >({
-      async queryFn({ chatId, options }, api, _opts, baseQuery) {
-        const state = api.getState() as RootState;
-        const url = buildApiUrlFromState(
-          state,
-          buildPath(TRAJECTORY_HANDOFF_APPLY_URL, chatId),
-        );
-        const result = await baseQuery({
-          url,
-          method: "POST",
-          body: { options },
-        });
-        if (result.error) return { error: result.error };
-        return { data: result.data as HandoffApplyResponse };
-      },
-    }),
-
     previewLlmCompress: builder.mutation<
       LlmCompressPreviewResponse,
       { chatId: string; options: LlmCompressOptions }
@@ -265,8 +202,6 @@ export const trajectoryApi = createApi({
 export const {
   usePreviewTransformMutation,
   useApplyTransformMutation,
-  usePreviewHandoffMutation,
-  useApplyHandoffMutation,
   usePreviewLlmCompressMutation,
   useApplyLlmCompressMutation,
   useApplyModeTransitionMutation,

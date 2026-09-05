@@ -303,6 +303,8 @@ pub async fn prepare_chat_passthrough(
     sampling_parameters: &mut SamplingParameters,
     options: &ChatPrepareOptions,
 ) -> Result<PreparedChat, String> {
+    // Boundary projection must precede UI filtering, enrichment, and provider conversion.
+    let messages = apply_summarization_linearize(messages)?;
     let mut has_rag_results = HasRagResults::new();
     let messages = filter_ui_only_messages(messages);
     let messages = remove_visualization_only_messages(messages);
@@ -439,7 +441,7 @@ pub async fn prepare_chat_passthrough(
     // operate on exactly what reaches the model. Running the limiter first
     // mutates/reorders messages, which previously made suppression unreliable
     // and silently re-sent every summarized source under context pressure.
-    let linearized_msgs = apply_summarization_linearize(messages);
+    let linearized_msgs = apply_summarization_linearize(messages)?;
 
     // 7.5. History validation and fixing
     let limited_msgs = fix_and_limit_messages_history(&linearized_msgs, sampling_parameters)?;
@@ -955,28 +957,6 @@ mod tests {
         }
     }
 
-    fn segment_summary_message(content: &str) -> ChatMessage {
-        let mut extra = serde_json::Map::new();
-        extra.insert(
-            "compression".to_string(),
-            json!({
-                "schema_version": 2,
-                "kind": "llm_segment_summary",
-                "source_hash": "hash",
-                "source_message_ids": ["source-id"],
-                "created_at": "now",
-                "summary_model": "test/frozen-model",
-            }),
-        );
-        ChatMessage {
-            role: "assistant".to_string(),
-            content: ChatContent::SimpleText(content.to_string()),
-            summarization_tier: Some("llm_segment_summary".to_string()),
-            extra,
-            ..Default::default()
-        }
-    }
-
     fn compression_report_message(content: &str) -> ChatMessage {
         let mut extra = serde_json::Map::new();
         extra.insert(
@@ -1054,12 +1034,38 @@ mod tests {
         gcx
     }
 
+    fn segment_summary_message(content: &str) -> ChatMessage {
+        let mut message = ChatMessage::new("assistant".into(), content.into());
+        message
+            .extra
+            .insert("compression".into(), json!({"kind": "llm_segment_summary"}));
+        message
+    }
+
+    fn reconstructed_report(content: &str) -> ChatMessage {
+        let mut message = ChatMessage::new("user".into(), content.into());
+        message.message_id = uuid::Uuid::new_v4().to_string();
+        refact_core::active_context::make_reconstruction_report(vec![message], Default::default())
+            .unwrap()
+    }
+
     async fn prepare_with_prefix(
         gcx: Arc<GlobalContext>,
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDesc>,
         frozen_request_prefix: Option<FrozenRequestPrefix>,
     ) -> PreparedChat {
+        try_prepare_with_prefix(gcx, messages, tools, frozen_request_prefix)
+            .await
+            .unwrap()
+    }
+
+    async fn try_prepare_with_prefix(
+        gcx: Arc<GlobalContext>,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDesc>,
+        frozen_request_prefix: Option<FrozenRequestPrefix>,
+    ) -> Result<PreparedChat, String> {
         let app = AppState::from_gcx(gcx.clone()).await;
         let model_id = "test/frozen-model";
         let ccx = AtCommandsContext::new_from_app(
@@ -1131,7 +1137,6 @@ mod tests {
             &options,
         )
         .await
-        .unwrap()
     }
 
     #[tokio::test]
@@ -1271,87 +1276,96 @@ mod tests {
         )
         .await;
         let messages = vec![
-            user_message("before compression"),
-            compression_report_message("visible report should stay out of model context"),
-            segment_summary_message("internal summary kept for the model"),
+            user_message("archived before compression"),
+            reconstructed_report("obsolete reconstructed payload"),
+            compression_report_message("archived static diagnostic"),
+            reconstructed_report("authoritative reconstructed payload"),
+            compression_report_message("visible static diagnostic"),
             user_message("after compression"),
         ];
 
         let prepared = prepare_with_prefix(gcx, messages, Vec::new(), None).await;
-        let roles: Vec<&str> = prepared
-            .llm_request
-            .messages
-            .iter()
-            .map(|message| message.role.as_str())
-            .collect();
-        let text = prepared
-            .llm_request
-            .messages
-            .iter()
-            .map(|message| message.content.content_text_only())
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert_eq!(roles, vec!["user", "assistant", "user"]);
-        assert!(text.contains("internal summary kept for the model"));
-        assert!(!text.contains("visible report should stay out of model context"));
-        assert!(prepared
-            .limited_messages
-            .iter()
-            .all(|message| message.role != COMPRESSION_REPORT_ROLE));
+        for projected in [&prepared.llm_request.messages, &prepared.limited_messages] {
+            let roles: Vec<_> = projected
+                .iter()
+                .map(|message| message.role.as_str())
+                .collect();
+            let texts: Vec<_> = projected
+                .iter()
+                .map(|message| message.content.content_text_only())
+                .collect();
+            assert_eq!(roles, vec!["user", "user"]);
+            assert_eq!(
+                texts,
+                vec!["authoritative reconstructed payload", "after compression"]
+            );
+        }
     }
 
     #[tokio::test]
-    async fn prepare_suppresses_summarized_sources_even_after_source_mutation() {
+    async fn prepare_excludes_archive_even_after_source_mutation() {
         let gcx = gcx_with_model_and_modes(
             "test/frozen-model",
             vec![mode_config("agent", "Agent", "Do agent work")],
         )
         .await;
-
-        let mut source = ChatMessage {
-            role: "assistant".to_string(),
-            content: ChatContent::SimpleText("huge old assistant output ".repeat(50)),
-            ..Default::default()
-        };
-        source.message_id = "source-id".to_string();
-
-        let mut summary = segment_summary_message("compact summary of the work");
-        summary.message_id = "summary-id".to_string();
-        summary.extra.insert(
-            "compression".to_string(),
-            json!({
-                "schema_version": 3,
-                "kind": "llm_segment_summary",
-                "insert_mode": "source_preserving",
-                // Stale on purpose: in-place compaction mutates sources after
-                // summarization, and suppression must survive that.
-                "source_hash": "stale-after-in-place-mutation",
-                "source_message_ids": ["source-id"],
-                "summarized_source_message_ids": ["source-id"],
-                "preserved_source_message_ids": [],
-                "created_at": "now",
-                "summary_model": "test/frozen-model",
-            }),
-        );
-
-        let messages = vec![
-            user_message("before"),
-            source,
-            summary,
+        let mut messages = vec![
+            user_message("archived before"),
+            ChatMessage::new("assistant".into(), "huge old assistant output".into()),
+            segment_summary_message("archived legacy summary"),
+            reconstructed_report("compact reconstructed history"),
             user_message("after"),
         ];
+        let before = prepare_with_prefix(gcx.clone(), messages.clone(), Vec::new(), None).await;
+        // Archive edits cannot resurrect source text or trigger legacy migration.
+        messages[1].content = ChatContent::SimpleText("mutated archive output ".repeat(50));
+        messages[1].message_id = "mutated-source-id".into();
+        messages[2].extra.insert(
+            "summarized_source_message_ids".into(),
+            json!(["mutated-source-id"]),
+        );
+        let after = prepare_with_prefix(gcx, messages, Vec::new(), None).await;
+        for projected in [
+            &before.llm_request.messages,
+            &before.limited_messages,
+            &after.llm_request.messages,
+            &after.limited_messages,
+        ] {
+            let texts: Vec<_> = projected
+                .iter()
+                .map(|message| message.content.content_text_only())
+                .collect();
+            assert_eq!(texts, vec!["compact reconstructed history", "after"]);
+        }
+    }
 
-        let prepared = prepare_with_prefix(gcx, messages, Vec::new(), None).await;
-        let text = prepared
-            .llm_request
-            .messages
-            .iter()
-            .map(|message| message.content.content_text_only())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("compact summary of the work"));
-        assert!(!text.contains("huge old assistant output"));
+    #[tokio::test]
+    async fn prepare_refuses_legacy_summary_without_explicit_rebuild() {
+        let gcx = gcx_with_model_and_modes(
+            "test/frozen-model",
+            vec![mode_config("agent", "Agent", "Do agent work")],
+        )
+        .await;
+        for prefix in [
+            user_message("original source"),
+            reconstructed_report("older valid payload"),
+        ] {
+            let result = try_prepare_with_prefix(
+                gcx.clone(),
+                vec![
+                    prefix,
+                    segment_summary_message("legacy summary"),
+                    user_message("after"),
+                ],
+                Vec::new(),
+                None,
+            )
+            .await;
+            assert_eq!(
+                result.err().as_deref(),
+                Some("Legacy compressed history needs an explicit rebuild")
+            );
+        }
     }
 
     fn default_settings() -> AdapterSettings {

@@ -49,7 +49,7 @@ mod tool_get_goal;
 mod tool_get_plan;
 mod tool_glob;
 pub mod tool_goal_pursuit_controls;
-mod tool_handoff_to_mode;
+pub(crate) mod tool_handoff_to_mode;
 mod tool_image_region;
 mod tool_knowledge;
 mod tool_mark_elements;

@@ -4,7 +4,6 @@ use refact_chat_api::{
 };
 use refact_core::chat_types::{ChatMessage, PendingDelivery};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TrajectorySnapshot {
@@ -20,6 +19,8 @@ pub struct TrajectorySnapshot {
     pub context_tokens_cap: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compression_cap: Option<usize>,
+    #[serde(default)]
+    pub auto_compression_cap_pending: bool,
     pub include_project_info: bool,
     pub is_title_generated: bool,
     pub auto_approve_editing_tools: bool,
@@ -60,8 +61,6 @@ pub struct TrajectorySnapshot {
     pub goal_ledger: Vec<GoalLedgerEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal_verification_blocked_until_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub compression_retry_after_ms: BTreeMap<String, u64>,
 }
 
 fn tolerant_goal_ledger<'de, D>(deserializer: D) -> Result<Vec<GoalLedgerEntry>, D::Error>
@@ -95,6 +94,7 @@ impl TrajectorySnapshot {
             checkpoints_enabled: thread.checkpoints_enabled,
             context_tokens_cap: thread.context_tokens_cap,
             auto_compression_cap: thread.auto_compression_cap,
+            auto_compression_cap_pending: thread.auto_compression_cap_pending,
             include_project_info: thread.include_project_info,
             is_title_generated: thread.is_title_generated,
             auto_approve_editing_tools: thread.auto_approve_editing_tools,
@@ -126,7 +126,6 @@ impl TrajectorySnapshot {
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
-            compression_retry_after_ms: BTreeMap::new(),
         }
     }
 }
@@ -188,6 +187,10 @@ mod tests {
         let decoded: TrajectorySnapshot = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(decoded.pending_deliveries, vec![delivery]);
         value.as_object_mut().unwrap().remove("pending_deliveries");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap_pending");
         let legacy: TrajectorySnapshot = serde_json::from_value(value).unwrap();
         assert!(legacy.pending_deliveries.is_empty());
         assert!(serde_json::to_value(legacy)
@@ -229,6 +232,11 @@ mod tests {
         let mut value = serde_json::to_value(&snapshot).unwrap();
         let decoded: TrajectorySnapshot = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(decoded.auto_compression_cap, Some(4096));
+        assert!(decoded.auto_compression_cap_pending);
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap_pending");
 
         value
             .as_object_mut()
@@ -236,24 +244,18 @@ mod tests {
             .remove("auto_compression_cap");
         let legacy: TrajectorySnapshot = serde_json::from_value(value).unwrap();
         assert_eq!(legacy.auto_compression_cap, None);
+        assert!(!legacy.auto_compression_cap_pending);
     }
 
     #[test]
-    fn compression_retry_cooldown_roundtrips_and_legacy_absence_defaults_empty() {
-        let mut snapshot = snapshot();
-        snapshot
-            .compression_retry_after_ms
-            .insert("source-hash".to_string(), 123_456);
-        let mut value = serde_json::to_value(&snapshot).unwrap();
-        let decoded: TrajectorySnapshot = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(decoded.compression_retry_after_ms["source-hash"], 123_456);
-
-        value
-            .as_object_mut()
+    fn obsolete_compression_cooldown_is_ignored_on_load() {
+        let mut value = serde_json::to_value(snapshot()).unwrap();
+        value["compression_retry_after_ms"] = serde_json::json!({"old-hash": 123_456});
+        let decoded: TrajectorySnapshot = serde_json::from_value(value).unwrap();
+        assert!(serde_json::to_value(decoded)
             .unwrap()
-            .remove("compression_retry_after_ms");
-        let legacy: TrajectorySnapshot = serde_json::from_value(value).unwrap();
-        assert!(legacy.compression_retry_after_ms.is_empty());
+            .get("compression_retry_after_ms")
+            .is_none());
     }
 
     #[test]

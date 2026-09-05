@@ -7,8 +7,7 @@ use tokio::sync::Mutex as AMutex;
 use uuid::Uuid;
 
 use crate::agentic::mode_transition::{
-    AgenticPathContext, ParsedDecisions, assemble_new_chat, insert_goal_messages_before_plan,
-    transfer_goal_ownership,
+    ParsedDecisions, insert_goal_messages_before_plan, transfer_goal_ownership,
 };
 use crate::at_commands::at_commands::AtCommandsContext;
 use crate::chat::trajectories::{
@@ -23,7 +22,7 @@ use crate::tools::tool_task_documents::{
 };
 use refact_chat_history::trajectory_ops::sanitize_messages_for_new_thread;
 use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
-use refact_runtime_api::{ChatSessionUpdate, SessionState};
+use refact_runtime_api::SessionState;
 use crate::tools::tools_description::{
     MatchConfirmDeny, MatchConfirmDenyResult, Tool, ToolDesc, ToolSource, ToolSourceType,
 };
@@ -204,60 +203,179 @@ async fn create_initial_plan_document(
     Ok(slug)
 }
 
-struct ExistingHandoffMessages {
-    messages: Vec<ChatMessage>,
-    live_session: bool,
-}
-
-async fn existing_messages_for_handoff_target(
-    gcx: Arc<crate::global_context::GlobalContext>,
-    chat_id: &str,
-) -> Option<ExistingHandoffMessages> {
-    let session_arc = {
-        let sessions = gcx.chat_sessions.read().await;
-        sessions.get(chat_id).cloned()
-    };
-    if let Some(session_arc) = session_arc {
-        return Some(ExistingHandoffMessages {
-            messages: session_arc.lock().await.messages.clone(),
-            live_session: true,
-        });
-    }
-
-    crate::chat::trajectories::load_trajectory_for_chat(gcx, chat_id)
-        .await
-        .map(|loaded| ExistingHandoffMessages {
-            messages: loaded.messages,
-            live_session: false,
-        })
-}
-
-async fn replace_live_source_messages_if_present(
-    gcx: Arc<crate::global_context::GlobalContext>,
-    chat_id: &str,
-    messages: Vec<ChatMessage>,
-    source_goal: Option<refact_chat_api::GoalSnapshot>,
-) {
-    let session_arc = {
-        let sessions = gcx.chat_sessions.read().await;
-        sessions.get(chat_id).cloned()
-    };
-    if let Some(session_arc) = session_arc {
-        let mut session = session_arc.lock().await;
-        session.replace_messages(messages);
-        if source_goal.is_some() {
-            if let Some(target_chat_id) = source_goal
-                .as_ref()
-                .and_then(|goal| goal.transferred_to.clone())
-            {
-                session.goal_ledger_append(refact_chat_api::GoalLedgerOp::TransferredOut {
-                    target_chat_id,
-                });
-            }
-            session.set_goal_projection(source_goal);
+/// The destination always starts with the same authoritative report artifact.
+pub(crate) fn transition_report(
+    messages: &[ChatMessage],
+    source_version: u64,
+    model: String,
+    from_mode: String,
+    to_mode: String,
+) -> Result<Vec<ChatMessage>, String> {
+    let mut payload = sanitize_messages_for_new_thread(messages);
+    for message in &mut payload {
+        if message.message_id.is_empty() {
+            message.message_id = Uuid::new_v4().to_string();
         }
-        session.emit_goal_status();
     }
+    Ok(vec![
+        refact_core::active_context::make_reconstruction_report(
+            payload,
+            refact_core::active_context::ReconstructionMetadata {
+                source_version: Some(source_version),
+                model: Some(model),
+                trigger: Some("mode_transition".into()),
+                from_mode: Some(from_mode),
+                to_mode: Some(to_mode),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| e.to_string())?,
+    ])
+}
+
+pub(crate) fn transition_fingerprint(session: &crate::chat::types::ChatSession) -> Value {
+    json!({"thread": session.thread, "goal": session.goal, "ledger": session.goal_ledger,
+        "deliveries": session.pending_deliveries_for_snapshot()})
+}
+
+fn handoff_completion_messages(
+    raw: &[ChatMessage],
+    tool_call_id: &str,
+    result: &Value,
+) -> Result<(Vec<ChatMessage>, ChatMessage), String> {
+    let mut updated = raw.to_vec();
+    let start = refact_core::active_context::active_context(raw)
+        .ok()
+        .and_then(|active| active.report_index)
+        .map_or(0, |i| i + 1);
+    let message = updated[start..]
+        .iter_mut()
+        .rev()
+        .find(|m| m.role == "tool" && m.tool_call_id == tool_call_id)
+        .ok_or("Handoff acknowledgement disappeared")?;
+    message.content = ChatContent::SimpleText(result.to_string());
+    message.preserve = Some(true);
+    let message = message.clone();
+    Ok((updated, message))
+}
+
+fn publish_handoff_completion(
+    source: &mut crate::chat::types::ChatSession,
+    updated: Vec<ChatMessage>,
+    message: ChatMessage,
+) {
+    source.replace_messages(updated);
+    source.emit(crate::chat::types::ChatEvent::MessageUpdated {
+        message_id: message.message_id.clone(),
+        message,
+    });
+}
+
+pub(crate) fn transition_source_goal(
+    session: &crate::chat::types::ChatSession,
+) -> Option<refact_chat_api::GoalSnapshot> {
+    let mut goal = session.goal.clone();
+    if let Some(state) = refact_chat_api::reduce_goal_ledger(&session.goal_ledger) {
+        let goal = goal.get_or_insert_with(Default::default);
+        state.apply_to_snapshot(goal);
+    }
+    goal
+}
+
+/// Transfer only the active view, writing it back without touching archive bytes.
+/// Legacy input is explicitly rebuilt but its source history is never migrated.
+pub(crate) fn transition_goal(
+    raw: &[ChatMessage],
+    goal: Option<&refact_chat_api::GoalSnapshot>,
+    source_id: &str,
+    target_id: &str,
+    mode: &str,
+) -> Result<crate::agentic::mode_transition::GoalTransferResult, String> {
+    let input =
+        refact_core::active_context::legacy_rebuild_input(raw).map_err(|e| e.to_string())?;
+    let mut transfer = transfer_goal_ownership(
+        &input,
+        goal,
+        &[],
+        source_id,
+        target_id,
+        mode,
+        epoch_ms_now(),
+    );
+    if transfer.transferred() {
+        // Control messages inside the report are immutable reconstruction input.
+        // Ledger/snapshot ownership wins over their historical active metadata.
+        if refact_core::active_context::active_context(raw)
+            .map(|active| active.report_index.is_some())
+            .unwrap_or(true)
+        {
+            transfer.source_messages = raw.to_vec();
+        }
+    }
+    Ok(transfer)
+}
+
+/// Stage a goal-free destination, durably relinquish source ownership, then
+/// activate the target. Failures can leave a recoverable inactive target, never
+/// two durable owners. The caller holds the source lock throughout this commit.
+pub(crate) async fn persist_transition(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    source: &mut crate::chat::types::ChatSession,
+    snapshot: &TrajectorySnapshot,
+    transfer: &crate::agentic::mode_transition::GoalTransferResult,
+) -> Result<(), String> {
+    use crate::chat::trajectories::{save_trajectory_snapshot, trajectory_snapshot_from_session};
+    if !transfer.transferred() {
+        return save_trajectory_snapshot(gcx, snapshot.clone()).await;
+    }
+    let mut staged = snapshot.clone();
+    staged.goal = None;
+    staged.goal_ledger.clear();
+    let mut active = refact_core::active_context::active_context(&staged.messages)
+        .map_err(|e| e.to_string())?
+        .messages;
+    active.retain(|m| m.role != "goal" && m.role != "goal_delta");
+    staged.messages = transition_report(
+        &active,
+        source.trajectory_version,
+        snapshot.model.clone(),
+        source.thread.mode.clone(),
+        snapshot.mode.clone(),
+    )?;
+    save_trajectory_snapshot(gcx.clone(), staged).await?;
+    let mut source_snapshot = trajectory_snapshot_from_session(source);
+    source_snapshot.messages = transfer.source_messages.clone();
+    source_snapshot.goal = transfer.source_goal.clone();
+    source_snapshot
+        .goal_ledger
+        .push(refact_chat_api::GoalLedgerEntry {
+            seq: source.goal_ledger_last_seq() + 1,
+            at_ms: epoch_ms_now(),
+            op: refact_chat_api::GoalLedgerOp::TransferredOut {
+                target_chat_id: snapshot.chat_id.clone(),
+            },
+        });
+    source_snapshot.version += 1;
+    save_trajectory_snapshot(gcx.clone(), source_snapshot.clone())
+        .await
+        .map_err(|e| {
+            format!(
+                "Source transfer save failed; inactive destination {} retained: {e}",
+                snapshot.chat_id
+            )
+        })?;
+    source.replace_messages(source_snapshot.messages);
+    source.goal_ledger = source_snapshot.goal_ledger;
+    source.set_goal_projection(transfer.source_goal.clone());
+    source.emit_goal_status();
+    let mut committed = snapshot.clone();
+    committed.version += 1;
+    save_trajectory_snapshot(gcx, committed).await.map_err(|e| {
+        format!(
+            "Source transferred; destination {} activation requires retry: {e}",
+            snapshot.chat_id
+        )
+    })
 }
 
 pub struct ToolHandoffToMode {
@@ -352,321 +470,42 @@ impl Tool for ToolHandoffToMode {
         tool_call_id: &String,
         args: &HashMap<String, Value>,
     ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let target_mode = match args.get("target_mode") {
-            Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
-            _ => return Err("Missing required argument `target_mode`".to_string()),
+        let target = parse_optional_string(args, "target_mode")
+            .ok_or("Missing required argument `target_mode`")?;
+        let (gcx, chat_id) = {
+            let c = ccx.lock().await;
+            (c.app.gcx.clone(), c.chat_id.clone())
         };
-        let reason = parse_optional_string(args, "reason").unwrap_or_default();
-
-        let (gcx, chat_facade, chat_id) = {
-            let ccx_lock = ccx.lock().await;
-            (
-                ccx_lock.app.gcx.clone(),
-                ccx_lock.app.chat.facade.clone(),
-                ccx_lock.chat_id.clone(),
-            )
-        };
-
-        let session_snapshot = chat_facade.session_snapshot(&chat_id).await?;
-        let messages = session_snapshot.messages;
-        let source_goal = session_snapshot.goal;
-        let thread = session_snapshot.thread;
-        let existing_task_meta = thread.task_meta.clone();
-        let session_state = session_snapshot.session_state;
-        let pause_reasons = session_snapshot.pause_reasons;
-
-        match session_state {
-            SessionState::Generating => {
-                return Err("Cannot handoff while model is generating. Wait for the current response to complete.".to_string());
-            }
-            SessionState::Paused => {
-                return Err(
-                    "Cannot handoff while session is paused. Resume or abort first.".to_string(),
-                );
-            }
-            SessionState::WaitingIde => {
-                return Err("Cannot handoff while waiting for IDE response. Cancel the IDE wait or wait for it to complete.".to_string());
-            }
-            SessionState::Error => {
-                return Err(
-                    "Cannot handoff from an error state. Acknowledge the error first.".to_string(),
-                );
-            }
-            SessionState::WaitingUserInput => {
-                if !pause_reasons.is_empty() {
-                    return Err(
-                        "Cannot handoff while pending tool approvals exist. Resolve them first."
-                            .to_string(),
-                    );
-                }
-            }
-            SessionState::ExecutingTools | SessionState::Idle | SessionState::Completed => {}
-        }
-        if messages.is_empty() {
-            return Err("Cannot handoff an empty chat".to_string());
-        }
-        let last_asst_idx = messages
-            .iter()
-            .rposition(|m| m.role == "assistant" && m.tool_calls.is_some());
-        if let Some(asst_idx) = last_asst_idx {
-            let asst = &messages[asst_idx];
-            let call_ids: std::collections::HashSet<&str> = asst
-                .tool_calls
-                .as_ref()
-                .unwrap()
-                .iter()
-                .map(|c| c.id.as_str())
-                .collect();
-            let result_ids: std::collections::HashSet<&str> = messages[asst_idx + 1..]
-                .iter()
-                .filter(|m| {
-                    (m.role == "tool" || m.role == "diff" || m.role == "context_file")
-                        && !m.tool_call_id.is_empty()
-                })
-                .map(|m| m.tool_call_id.as_str())
-                .collect();
-            let mut missing_ids: Vec<&str> = call_ids
-                .difference(&result_ids)
-                .copied()
-                .filter(|id| *id != tool_call_id.as_str())
-                .collect();
-            if !missing_ids.is_empty() {
-                missing_ids.sort();
-                return Err(format!(
-                    "Cannot handoff: the latest assistant message has {} tool calls without results: {:?}",
-                    missing_ids.len(),
-                    missing_ids
-                ));
-            }
-        }
-
-        let canonical_mode = map_legacy_mode_to_id(&target_mode).to_string();
-        let mode_config = get_mode_config(gcx.clone(), &canonical_mode, None)
+        let canonical = map_legacy_mode_to_id(&target);
+        get_mode_config(gcx.clone(), canonical, None)
             .await
-            .ok_or_else(|| format!("Mode '{}' not found", canonical_mode))?;
-        if thread.mode == canonical_mode {
-            return Err("Target mode matches current mode".to_string());
-        }
-
-        let mode_title = if mode_config.title.is_empty() {
-            mode_config.id.clone()
-        } else {
-            mode_config.title.clone()
-        };
-        let mode_description = if mode_config.description.is_empty() {
-            mode_title.clone()
-        } else {
-            format!("{} — {}", mode_title, mode_config.description)
-        };
-
-        let mut decisions = ParsedDecisions {
-            summary: if reason.is_empty() {
-                format!("Continue the conversation in {}.", mode_description)
-            } else {
-                reason.clone()
-            },
-            handoff_message: if reason.is_empty() {
-                format!("Continue in {}.", mode_description)
-            } else {
-                reason.clone()
-            },
-            ..Default::default()
-        };
-
-        apply_overrides(&mut decisions, args);
-        let plan_body = parse_optional_string(args, "initial_plan")
-            .or_else(|| parse_optional_string(args, "summary"))
-            .or_else(|| parse_optional_string(args, "context_summary"))
-            .or_else(|| parse_optional_string(args, "handoff_message"))
-            .unwrap_or_else(|| {
-                "# Initial Plan\n\nNo plan content provided at handoff. Edit this document or use doc_create.".to_string()
-            });
-
-        let path_context = { AgenticPathContext::from_context(&*gcx) };
-        let mut new_messages = assemble_new_chat(&path_context, &messages, &decisions)
+            .ok_or("Target mode not found")?;
+        let session = gcx
+            .chat_sessions
+            .read()
             .await
-            .map_err(|e| format!("handoff assembly failed: {}", e))?;
-        let task_meta = ensure_task_for_planner_handoff(
-            gcx.clone(),
-            &canonical_mode,
-            existing_task_meta,
-            &chat_id,
-            thread.root_chat_id.as_deref(),
-        )
-        .await?;
-        let new_chat_id = if canonical_mode == "task_planner" {
-            task_meta
-                .as_ref()
-                .and_then(|meta| meta.planner_chat_id.clone())
-                .unwrap_or_else(|| Uuid::new_v4().to_string())
-        } else {
-            Uuid::new_v4().to_string()
-        };
-        let root_chat_id = if canonical_mode == "task_planner" {
-            Some(new_chat_id.clone())
-        } else {
-            thread
-                .root_chat_id
-                .clone()
-                .or_else(|| Some(chat_id.clone()))
-        };
-        let existing_target = if canonical_mode == "task_planner" {
-            existing_messages_for_handoff_target(gcx.clone(), &new_chat_id).await
-        } else {
-            None
-        };
-        let existing_target_messages = existing_target
-            .as_ref()
-            .map(|existing| existing.messages.as_slice())
-            .unwrap_or(&[]);
-        let transferred_goal = transfer_goal_ownership(
-            &messages,
-            source_goal.as_ref(),
-            existing_target_messages,
-            &chat_id,
-            &new_chat_id,
-            &canonical_mode,
-            epoch_ms_now(),
-        );
-        if transferred_goal.transferred() {
-            insert_goal_messages_before_plan(
-                &mut new_messages,
-                transferred_goal.target_messages.clone(),
-            );
-            replace_live_source_messages_if_present(
-                gcx.clone(),
-                &chat_id,
-                transferred_goal.source_messages.clone(),
-                transferred_goal.source_goal.clone(),
-            )
-            .await;
-            chat_facade.maybe_save_session(&chat_id).await?;
+            .get(&chat_id)
+            .cloned()
+            .ok_or("Chat session not found")?;
+        let mut session = session.lock().await;
+        if session.closed
+            || crate::chat::context_rebuild::compression_attempt_active(&session)
+            || session.pending_mode_handoff.is_some()
+            || session.pending_context_rebuild.is_some()
+        {
+            return Err("A context operation is already pending".into());
         }
-
-        let new_messages = sanitize_messages_for_new_thread(&new_messages);
-        let now = chrono::Utc::now().to_rfc3339();
-        let live_target_session = existing_target
-            .as_ref()
-            .is_some_and(|existing| existing.live_session);
-        let snapshot_messages = existing_target
-            .map(|mut existing| {
-                existing.messages.extend(new_messages.clone());
-                existing.messages
-            })
-            .unwrap_or_else(|| new_messages.clone());
-
-        let snapshot_task_meta = task_meta.clone();
-        let snapshot = TrajectorySnapshot {
-            goal_verification_blocked_until_ms: None,
-            compression_retry_after_ms: Default::default(),
-            goal: transferred_goal.target_goal.clone(),
-            goal_ledger: transferred_goal
-                .target_goal
-                .as_ref()
-                .map(|target| {
-                    refact_chat_api::seed_transferred_goal_ledger(target, &chat_id, epoch_ms_now())
-                })
-                .unwrap_or_default(),
-            chat_id: new_chat_id.clone(),
-            title: String::new(),
-            model: thread.model.clone(),
-            mode: canonical_mode.clone(),
-            tool_use: thread.tool_use.clone(),
-            messages: snapshot_messages.clone(),
-            created_at: now,
-            boost_reasoning: thread.boost_reasoning.unwrap_or(false),
-            checkpoints_enabled: thread.checkpoints_enabled,
-            context_tokens_cap: thread.context_tokens_cap,
-            auto_compression_cap: thread.auto_compression_cap,
-            include_project_info: thread.include_project_info,
-            is_title_generated: false,
-            auto_approve_editing_tools: thread.auto_approve_editing_tools,
-            auto_approve_dangerous_commands: thread.auto_approve_dangerous_commands,
-            autonomous_no_confirm: thread.autonomous_no_confirm,
-            version: 1,
-            task_meta: snapshot_task_meta,
-            worktree: thread.worktree.clone(),
-            parent_id: Some(chat_id.clone()),
-            link_type: Some("handoff".to_string()),
-            root_chat_id: root_chat_id.clone(),
-            reasoning_effort: thread.reasoning_effort.clone(),
-            thinking_budget: thread.thinking_budget,
-            temperature: thread.temperature,
-            frequency_penalty: thread.frequency_penalty,
-            max_tokens: thread.max_tokens,
-            parallel_tool_calls: thread.parallel_tool_calls,
-            previous_response_id: None,
-            active_skill: None,
-            auto_enrichment_enabled: thread.auto_enrichment_enabled,
-            buddy_meta: None,
-            auto_compact_enabled: thread.auto_compact_enabled,
-            frozen_request_prefix: None,
-            claude_code_identity: None,
-            reactive_compact_attempts: None,
-            wake_up_at: None,
-            waiting_for_card_ids: Vec::new(),
-            pending_deliveries: Vec::new(),
-        };
-
-        if live_target_session {
-            chat_facade
-                .update_session(
-                    &new_chat_id,
-                    ChatSessionUpdate {
-                        messages: snapshot_messages.clone(),
-                        previous_response_id: None,
-                    },
-                )
-                .await
-                .map_err(|e| format!("Failed to update planner handoff session: {}", e))?;
-        }
-
-        chat_facade
-            .save_trajectory_snapshot(snapshot)
-            .await
-            .map_err(|e| format!("Failed to save handoff trajectory: {}", e))?;
-
-        let (initial_plan_doc_slug, initial_plan_doc_error) = if canonical_mode == "task_planner" {
-            if let Some(task_id_str) = task_meta.as_ref().map(|meta| meta.task_id.as_str()) {
-                match create_initial_plan_document(gcx.clone(), task_id_str, &plan_body).await {
-                    Ok(slug) => (Some(slug), None::<String>),
-                    Err(err) => {
-                        tracing::warn!(
-                            "failed to create initial-plan document for task {}: {}",
-                            task_id_str,
-                            err
-                        );
-                        (None, Some(err))
-                    }
-                }
-            } else {
-                (None, None)
-            }
-        } else {
-            (None, None)
-        };
-
-        let result = json!({
-            "type": "handoff_to_mode",
-            "new_chat_id": new_chat_id,
-            "target_mode": canonical_mode,
-            "reason": reason,
-            "messages_count": new_messages.len(),
-            "task_meta": task_meta,
-            "root_chat_id": root_chat_id,
-            "parent_id": chat_id,
-            "link_type": "handoff",
-            "initial_plan_document": initial_plan_doc_slug,
-            "initial_plan_error": initial_plan_doc_error,
-        });
-
+        session.pending_mode_handoff = Some(json!({"args":args,"tool_call_id":tool_call_id}));
         Ok((
             false,
             vec![ContextEnum::ChatMessage(ChatMessage {
-                role: "tool".to_string(),
-                content: ChatContent::SimpleText(result.to_string()),
+                role: "tool".into(),
                 tool_call_id: tool_call_id.clone(),
                 preserve: Some(true),
+                content: ChatContent::SimpleText(
+                    json!({"type":"handoff_to_mode", "queued":true, "target_mode":canonical})
+                        .to_string(),
+                ),
                 output_filter: Some(OutputFilter::no_limits()),
                 ..Default::default()
             })],
@@ -702,1160 +541,586 @@ impl Tool for ToolHandoffToMode {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use refact_runtime_api::{ChatSessionFacade, ChatSessionSnapshot, ChatSessionUpdate};
-    use std::sync::Mutex as StdMutex;
-    use std::time::Duration;
+async fn finalize_handoff_inner(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    session_arc: &Arc<AMutex<crate::chat::types::ChatSession>>,
+    payload: Value,
+) -> Result<(), String> {
+    let args: HashMap<String, Value> =
+        serde_json::from_value(payload.get("args").cloned().ok_or("Missing handoff args")?)
+            .map_err(|e| e.to_string())?;
+    let args = &args;
+    let tool_call_id = payload
+        .get("tool_call_id")
+        .and_then(Value::as_str)
+        .ok_or("Missing handoff tool call")?
+        .to_string();
+    let tool_call_id = &tool_call_id;
+    let target_mode = match args.get("target_mode") {
+        Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => return Err("Missing required argument `target_mode`".to_string()),
+    };
+    let reason = parse_optional_string(args, "reason").unwrap_or_default();
 
-    #[derive(Default)]
-    struct MockChatFacade {
-        snapshot: StdMutex<Option<ChatSessionSnapshot>>,
-        saved: StdMutex<Vec<TrajectorySnapshot>>,
-        fail_update_session: StdMutex<bool>,
-    }
-
-    #[async_trait]
-    impl ChatSessionFacade for MockChatFacade {
-        async fn session_snapshot(&self, _chat_id: &str) -> Result<ChatSessionSnapshot, String> {
-            self.snapshot
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or_else(|| "missing snapshot".to_string())
+    let chat_facade = crate::app_state::AppState::from_gcx(gcx.clone())
+        .await
+        .chat
+        .facade;
+    let (chat_id, source_version, source_thread, source_fingerprint, abort) = {
+        let session = session_arc.lock().await;
+        if session.runtime.state != SessionState::Idle
+            || session.closed
+            || crate::chat::context_rebuild::compression_attempt_active(&session)
+        {
+            return Err("Handoff requires an idle source session".into());
         }
+        (
+            session.thread.id.clone(),
+            session.trajectory_version,
+            session.thread.clone(),
+            transition_fingerprint(&session),
+            session.abort_flag.clone(),
+        )
+    };
 
-        async fn update_session(
-            &self,
-            _chat_id: &str,
-            _update: ChatSessionUpdate,
-        ) -> Result<(), String> {
-            if *self.fail_update_session.lock().unwrap() {
-                return Err("update_session should not be called".to_string());
+    let session_snapshot = chat_facade.session_snapshot(&chat_id).await?;
+    let raw_messages = session_snapshot.messages;
+    let messages = refact_core::active_context::legacy_rebuild_input(&raw_messages)
+        .map_err(|e| e.to_string())?;
+    let source_goal = transition_source_goal(&*session_arc.lock().await);
+    let thread = session_snapshot.thread;
+    let existing_task_meta = thread.task_meta.clone();
+    let session_state = session_snapshot.session_state;
+    let pause_reasons = session_snapshot.pause_reasons;
+
+    match session_state {
+        SessionState::Generating => {
+            return Err("Cannot handoff while model is generating. Wait for the current response to complete.".to_string());
+        }
+        SessionState::Paused => {
+            return Err(
+                "Cannot handoff while session is paused. Resume or abort first.".to_string(),
+            );
+        }
+        SessionState::WaitingIde => {
+            return Err("Cannot handoff while waiting for IDE response. Cancel the IDE wait or wait for it to complete.".to_string());
+        }
+        SessionState::Error => {
+            return Err(
+                "Cannot handoff from an error state. Acknowledge the error first.".to_string(),
+            );
+        }
+        SessionState::WaitingUserInput => {
+            if !pause_reasons.is_empty() {
+                return Err(
+                    "Cannot handoff while pending tool approvals exist. Resolve them first."
+                        .to_string(),
+                );
             }
-            Ok(())
         }
-
-        async fn create_session(
-            &self,
-            _request: refact_runtime_api::CreateSessionRequest,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-
-        async fn push_command(
-            &self,
-            _chat_id: &str,
-            _command: refact_chat_api::ChatCommand,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-
-        async fn session_state(&self, _chat_id: &str) -> Result<Option<SessionState>, String> {
-            Ok(Some(SessionState::Idle))
-        }
-
-        async fn maybe_save_session(&self, _chat_id: &str) -> Result<(), String> {
-            Ok(())
-        }
-
-        async fn save_trajectory_snapshot(
-            &self,
-            snapshot: TrajectorySnapshot,
-        ) -> Result<(), String> {
-            self.saved.lock().unwrap().push(snapshot);
-            Ok(())
+        SessionState::ExecutingTools | SessionState::Idle | SessionState::Completed => {}
+    }
+    if messages.is_empty() {
+        return Err("Cannot handoff an empty chat".to_string());
+    }
+    let last_asst_idx = messages
+        .iter()
+        .rposition(|m| m.role == "assistant" && m.tool_calls.is_some());
+    if let Some(asst_idx) = last_asst_idx {
+        let asst = &messages[asst_idx];
+        let call_ids: std::collections::HashSet<&str> = asst
+            .tool_calls
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        let result_ids: std::collections::HashSet<&str> = messages[asst_idx + 1..]
+            .iter()
+            .filter(|m| {
+                (m.role == "tool" || m.role == "diff" || m.role == "context_file")
+                    && !m.tool_call_id.is_empty()
+            })
+            .map(|m| m.tool_call_id.as_str())
+            .collect();
+        let mut missing_ids: Vec<&str> = call_ids
+            .difference(&result_ids)
+            .copied()
+            .filter(|id| *id != tool_call_id.as_str())
+            .collect();
+        if !missing_ids.is_empty() {
+            missing_ids.sort();
+            return Err(format!(
+                "Cannot handoff: the latest assistant message has {} tool calls without results: {:?}",
+                missing_ids.len(),
+                missing_ids
+            ));
         }
     }
 
-    async fn test_app_with_workspace(
-        root: &std::path::Path,
-        facade: Arc<MockChatFacade>,
-    ) -> crate::app_state::AppState {
+    let canonical_mode = map_legacy_mode_to_id(&target_mode).to_string();
+    let mode_config = get_mode_config(gcx.clone(), &canonical_mode, None)
+        .await
+        .ok_or_else(|| format!("Mode '{}' not found", canonical_mode))?;
+
+    let mode_title = if mode_config.title.is_empty() {
+        mode_config.id.clone()
+    } else {
+        mode_config.title.clone()
+    };
+    let mode_description = if mode_config.description.is_empty() {
+        mode_title.clone()
+    } else {
+        format!("{} — {}", mode_title, mode_config.description)
+    };
+
+    let mut decisions = ParsedDecisions {
+        summary: if reason.is_empty() {
+            format!("Continue the conversation in {}.", mode_description)
+        } else {
+            reason.clone()
+        },
+        handoff_message: if reason.is_empty() {
+            format!("Continue in {}.", mode_description)
+        } else {
+            reason.clone()
+        },
+        ..Default::default()
+    };
+
+    apply_overrides(&mut decisions, args);
+    let plan_body = parse_optional_string(args, "initial_plan")
+            .or_else(|| parse_optional_string(args, "summary"))
+            .or_else(|| parse_optional_string(args, "context_summary"))
+            .or_else(|| parse_optional_string(args, "handoff_message"))
+            .unwrap_or_else(|| {
+                "# Initial Plan\n\nNo plan content provided at handoff. Edit this document or use doc_create.".to_string()
+            });
+
+    let outcome = Box::pin(crate::agentic::mode_transition::reconstruct_context(
+        gcx.clone(),
+        crate::agentic::mode_transition::ReconstructionRequest {
+            messages: &raw_messages,
+            target_mode: &canonical_mode,
+            target_mode_description: &mode_description,
+            parent_chat_id: Some(&chat_id),
+            model_override: None,
+            abort_flag: Some(abort.clone()),
+            hints: Some(decisions),
+            target_budget_symbols: None,
+            preserve_goal_messages: false,
+        },
+    ))
+    .await?;
+    let mut new_messages = outcome.messages;
+    let mut source = session_arc.lock().await;
+    if source.pending_mode_handoff.as_ref() != Some(&payload)
+        || source.trajectory_version != source_version
+        || source.runtime.state != SessionState::Idle
+        || source.closed
+        || source.pending_context_rebuild.is_some()
+        || abort.load(std::sync::atomic::Ordering::SeqCst)
+        || serde_json::to_value(&source.thread).ok() != serde_json::to_value(&source_thread).ok()
+        || transition_fingerprint(&source) != source_fingerprint
+        || crate::chat::context_rebuild::compression_attempt_active(&source)
+    {
+        return Err("Source changed during handoff reconstruction".into());
+    }
+    if !source
+        .messages
+        .iter()
+        .any(|m| m.role == "tool" && m.tool_call_id == *tool_call_id)
+    {
+        return Err("Handoff acknowledgement disappeared".into());
+    }
+    let new_chat_id = Uuid::new_v4().to_string();
+    let mut task_meta = existing_task_meta;
+    if canonical_mode == "task_planner" {
+        if let Some(meta) = task_meta.as_mut() {
+            meta.role = "planner".into();
+            meta.agent_id = None;
+            meta.card_id = None;
+            meta.planner_chat_id = Some(new_chat_id.clone());
+        }
+    }
+    let root_chat_id = if canonical_mode == "task_planner" {
+        Some(new_chat_id.clone())
+    } else {
+        thread
+            .root_chat_id
+            .clone()
+            .or_else(|| Some(chat_id.clone()))
+    };
+    let transferred_goal = transition_goal(
+        &raw_messages,
+        source_goal.as_ref(),
+        &chat_id,
+        &new_chat_id,
+        &canonical_mode,
+    )?;
+    if transferred_goal.transferred() {
+        insert_goal_messages_before_plan(
+            &mut new_messages,
+            transferred_goal.target_messages.clone(),
+        );
+    }
+
+    let new_messages = transition_report(
+        &new_messages,
+        source_version,
+        outcome.model,
+        thread.mode.clone(),
+        canonical_mode.clone(),
+    )?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let snapshot_messages = new_messages.clone();
+
+    let snapshot_task_meta = task_meta.clone();
+    let snapshot = TrajectorySnapshot {
+        goal_verification_blocked_until_ms: None,
+        goal: transferred_goal.target_goal.clone(),
+        goal_ledger: transferred_goal
+            .target_goal
+            .as_ref()
+            .map(|target| {
+                refact_chat_api::seed_transferred_goal_ledger(target, &chat_id, epoch_ms_now())
+            })
+            .unwrap_or_default(),
+        chat_id: new_chat_id.clone(),
+        title: String::new(),
+        model: thread.model.clone(),
+        mode: canonical_mode.clone(),
+        tool_use: thread.tool_use.clone(),
+        messages: snapshot_messages.clone(),
+        created_at: now,
+        boost_reasoning: thread.boost_reasoning.unwrap_or(false),
+        checkpoints_enabled: thread.checkpoints_enabled,
+        context_tokens_cap: thread.context_tokens_cap,
+        auto_compression_cap: thread.auto_compression_cap,
+        auto_compression_cap_pending: thread.auto_compression_cap.is_none(),
+        include_project_info: thread.include_project_info,
+        is_title_generated: false,
+        auto_approve_editing_tools: thread.auto_approve_editing_tools,
+        auto_approve_dangerous_commands: thread.auto_approve_dangerous_commands,
+        autonomous_no_confirm: thread.autonomous_no_confirm,
+        version: 1,
+        task_meta: snapshot_task_meta,
+        worktree: thread.worktree.clone(),
+        parent_id: Some(chat_id.clone()),
+        link_type: Some("handoff".to_string()),
+        root_chat_id: root_chat_id.clone(),
+        reasoning_effort: thread.reasoning_effort.clone(),
+        thinking_budget: thread.thinking_budget,
+        temperature: thread.temperature,
+        frequency_penalty: thread.frequency_penalty,
+        max_tokens: thread.max_tokens,
+        parallel_tool_calls: thread.parallel_tool_calls,
+        previous_response_id: None,
+        active_skill: None,
+        auto_enrichment_enabled: thread.auto_enrichment_enabled,
+        buddy_meta: None,
+        auto_compact_enabled: thread.auto_compact_enabled,
+        frozen_request_prefix: None,
+        claude_code_identity: None,
+        reactive_compact_attempts: None,
+        wake_up_at: None,
+        waiting_for_card_ids: Vec::new(),
+        pending_deliveries: Vec::new(),
+    };
+
+    persist_transition(gcx.clone(), &mut source, &snapshot, &transferred_goal).await?;
+    drop(source);
+    // Task/document creation happens only after a durable destination exists.
+    let task_setup = ensure_task_for_planner_handoff(
+        gcx.clone(),
+        &canonical_mode,
+        task_meta.clone(),
+        &new_chat_id,
+        root_chat_id.as_deref(),
+    )
+    .await;
+    let (mut task_meta, mut task_error) = match task_setup {
+        Ok(meta) => (meta, None),
+        Err(error) => (snapshot.task_meta.clone(), Some(error)),
+    };
+    if canonical_mode == "task_planner" {
+        if let Some(meta) = task_meta.as_mut() {
+            meta.planner_chat_id = Some(new_chat_id.clone());
+        }
+    }
+    let (initial_plan_doc_slug, initial_plan_doc_error) = if canonical_mode == "task_planner" {
+        if let Some(meta) = &task_meta {
+            match create_initial_plan_document(gcx.clone(), &meta.task_id, &plan_body).await {
+                Ok(slug) => (Some(slug), None),
+                Err(error) => (None, Some(error)),
+            }
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+    if let Some(meta) = &task_meta {
+        let mut destination = snapshot.clone();
+        destination.version += 2;
+        destination.task_meta = Some(meta.clone());
+        if let Err(error) = chat_facade.save_trajectory_snapshot(destination).await {
+            task_error = Some(error);
+            task_meta = snapshot.task_meta.clone();
+        }
+    }
+    let result = json!({
+        "type": "handoff_to_mode",
+        "status": "completed",
+        "new_chat_id": new_chat_id,
+        "target_mode": canonical_mode,
+        "reason": reason,
+        "messages_count": new_messages.len(),
+        "task_meta": task_meta,
+        "root_chat_id": root_chat_id,
+        "parent_id": chat_id,
+        "link_type": "handoff",
+        "initial_plan_document": initial_plan_doc_slug,
+        "initial_plan_error": initial_plan_doc_error,
+        "task_setup_error": task_error,
+    });
+
+    let mut source = session_arc.lock().await;
+    let (updated, message) = handoff_completion_messages(&source.messages, tool_call_id, &result)?;
+    let mut completion = crate::chat::trajectories::trajectory_snapshot_from_session(&source);
+    completion.messages = updated.clone();
+    completion.version += 1;
+    crate::chat::trajectories::save_trajectory_snapshot(gcx, completion)
+        .await
+        .map_err(|e| {
+            format!("Destination {new_chat_id} saved, but acknowledgement persistence failed: {e}")
+        })?;
+    publish_handoff_completion(&mut source, updated, message);
+
+    Ok(())
+}
+
+pub async fn finalize_pending_handoff(
+    gcx: Arc<crate::global_context::GlobalContext>,
+    session_arc: &Arc<AMutex<crate::chat::types::ChatSession>>,
+    payload: Value,
+) -> Result<(), String> {
+    {
+        let mut session = session_arc.lock().await;
+        if session.pending_mode_handoff.is_some()
+            || session.pending_context_rebuild.is_some()
+            || crate::chat::context_rebuild::compression_attempt_active(&session)
+        {
+            return Err("Another context operation is pending".into());
+        }
+        session.pending_mode_handoff = Some(payload.clone());
+    }
+    let result = finalize_handoff_inner(gcx, session_arc, payload.clone()).await;
+    let mut session = session_arc.lock().await;
+    if session.pending_mode_handoff.as_ref() == Some(&payload) {
+        session.pending_mode_handoff = None;
+    }
+    result
+}
+
+#[cfg(test)]
+mod deferred_tests {
+    use super::*;
+
+    #[test]
+    fn report_transfer_preserves_archive_and_ledger_stop_wins() {
+        let mut session = crate::chat::types::ChatSession::new("source".into());
+        session.install_goal("agent", "Ship safely", true, Default::default());
+        let active = session.messages.clone();
+        let mut raw = vec![ChatMessage::new("user".into(), "immutable archive".into())];
+        raw.extend(
+            transition_report(&active, 1, "model".into(), "agent".into(), "agent".into()).unwrap(),
+        );
+        let archive = serde_json::to_vec(&raw).unwrap();
+        let transfer =
+            transition_goal(&raw, session.goal.as_ref(), "source", "target", "agent").unwrap();
+        assert!(transfer.transferred());
+        assert_eq!(
+            serde_json::to_vec(&transfer.source_messages).unwrap(),
+            archive
+        );
+        let report = transition_report(
+            &transfer.target_messages,
+            1,
+            "model".into(),
+            "agent".into(),
+            "agent".into(),
+        )
+        .unwrap();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].role, "compression_report");
+        assert!(refact_core::active_context::active_context(&report)
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| m.role == "goal"));
+        session.goal_ledger_append(refact_chat_api::GoalLedgerOp::StatusChanged {
+            from: refact_chat_api::GoalStatus::Active,
+            to: refact_chat_api::GoalStatus::Stopped,
+            reason: "user stop".into(),
+        });
+        let goal = transition_source_goal(&session);
+        assert!(
+            !transition_goal(&raw, goal.as_ref(), "source", "target", "agent")
+                .unwrap()
+                .transferred()
+        );
+    }
+
+    #[test]
+    fn completed_handoff_updates_actual_ack_and_emits_navigation_event() {
+        let mut session = crate::chat::types::ChatSession::new("source".into());
+        session.add_message(ChatMessage {
+            role: "tool".into(),
+            tool_call_id: "handoff".into(),
+            content: ChatContent::SimpleText("queued".into()),
+            ..Default::default()
+        });
+        let id = session.messages[0].message_id.clone();
+        let mut events = session.subscribe();
+        let (updated, message) = handoff_completion_messages(
+            &session.messages,
+            "handoff",
+            &json!({
+                "type": "handoff_to_mode", "status": "completed", "new_chat_id": "target"
+            }),
+        )
+        .unwrap();
+        publish_handoff_completion(&mut session, updated, message);
+        assert_eq!(session.messages[0].message_id, id);
+        let mut found = false;
+        while let Ok(event) = events.try_recv() {
+            let event: Value = serde_json::from_str(&event).unwrap();
+            if event["type"] == "message_updated" {
+                assert_eq!(event["message_id"], id);
+                assert!(event["message"]["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("completed"));
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "completion must emit MessageUpdated for navigation middleware"
+        );
+    }
+
+    #[test]
+    fn completed_handoff_emits_message_updated_for_existing_ack() {
+        let mut session = crate::chat::types::ChatSession::new("source".into());
+        session.add_message(ChatMessage {
+            role: "tool".into(),
+            tool_call_id: "handoff".into(),
+            content: ChatContent::SimpleText("queued".into()),
+            ..Default::default()
+        });
+        let id = session.messages[0].message_id.clone();
+        let mut events = session.subscribe();
+        let (messages, message) = handoff_completion_messages(
+            &session.messages,
+            "handoff",
+            &json!({
+                "type": "handoff_to_mode", "status": "completed", "new_chat_id": "target"
+            }),
+        )
+        .unwrap();
+        publish_handoff_completion(&mut session, messages, message);
+        assert_eq!(session.messages[0].message_id, id);
+        let mut found = false;
+        while let Ok(event) = events.try_recv() {
+            let event: Value = serde_json::from_str(&event).unwrap();
+            if event["type"] == "message_updated" {
+                assert_eq!(event["message_id"], id);
+                assert!(event["message"]["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("completed"));
+                found = true;
+            }
+        }
+        assert!(found, "completion must notify navigation middleware");
+    }
+
+    #[tokio::test]
+    async fn handoff_queue_keeps_sibling_calls_and_allows_same_mode_restart() {
+        use crate::call_validation::{ChatToolCall, ChatToolFunction};
         let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() =
-            vec![crate::files_correction::canonicalize_normalized_path(
-                root.to_path_buf(),
-            )];
-        let mut app = crate::app_state::AppState::from_gcx(gcx).await;
-        app.chat.facade = facade;
-        app
-    }
-
-    async fn handoff_ccx(app: crate::app_state::AppState) -> Arc<AMutex<AtCommandsContext>> {
-        handoff_ccx_with_chat_id(app, "source-chat").await
-    }
-
-    async fn handoff_ccx_with_chat_id(
-        app: crate::app_state::AppState,
-        chat_id: &str,
-    ) -> Arc<AMutex<AtCommandsContext>> {
-        Arc::new(AMutex::new(
+        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
+        let mut session = crate::chat::types::ChatSession::new("queue-source".into());
+        session.thread.mode = "agent".into();
+        session.add_message(ChatMessage::new("user".into(), "Restart".into()));
+        session.add_message(ChatMessage {
+            role: "assistant".into(),
+            tool_calls: Some(
+                [("handoff", "handoff_to_mode"), ("sibling", "cat")]
+                    .into_iter()
+                    .map(|(id, name)| ChatToolCall {
+                        id: id.into(),
+                        index: None,
+                        function: ChatToolFunction {
+                            name: name.into(),
+                            arguments: "{}".into(),
+                        },
+                        tool_type: "function".into(),
+                        extra_content: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        });
+        session.set_runtime_state(SessionState::ExecutingTools, None);
+        let before = serde_json::to_value(&session.messages).unwrap();
+        let session = Arc::new(AMutex::new(session));
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert("queue-source".into(), session.clone());
+        let ccx = Arc::new(AMutex::new(
             AtCommandsContext::new_from_app(
                 app,
                 4096,
                 20,
                 false,
                 vec![],
-                chat_id.to_string(),
+                "queue-source".into(),
                 None,
-                "model".to_string(),
+                "model".into(),
                 None,
                 None,
             )
             .await,
-        ))
-    }
-
-    fn source_snapshot() -> ChatSessionSnapshot {
-        let mut thread = refact_chat_api::ThreadParams::default();
-        thread.id = "source-chat".to_string();
-        thread.mode = "agent".to_string();
-        thread.tool_use = "agent".to_string();
-        thread.model = "model".to_string();
-        ChatSessionSnapshot {
-            messages: vec![ChatMessage::new(
-                "user".to_string(),
-                "Please create a plan.".to_string(),
-            )],
-            thread,
-            session_state: SessionState::Idle,
-            pause_reasons: vec![],
-            goal: None,
-        }
-    }
-
-    async fn insert_planner_session(
-        app: &crate::app_state::AppState,
-        chat_id: &str,
-        task_id: &str,
-    ) {
-        insert_planner_session_with_messages(app, chat_id, task_id, Vec::new()).await;
-    }
-
-    async fn insert_planner_session_with_messages(
-        app: &crate::app_state::AppState,
-        chat_id: &str,
-        task_id: &str,
-        messages: Vec<ChatMessage>,
-    ) {
-        let mut session = crate::chat::types::ChatSession::new(chat_id.to_string());
-        session.thread.task_meta = Some(refact_chat_api::TaskMeta {
-            task_id: task_id.to_string(),
-            role: "planner".to_string(),
-            agent_id: None,
-            card_id: None,
-            planner_chat_id: Some(chat_id.to_string()),
-        });
-        for message in messages {
-            session.add_message(message);
-        }
-        app.gcx.chat_sessions.write().await.insert(
-            chat_id.to_string(),
-            Arc::new(tokio::sync::Mutex::new(session)),
-        );
-    }
-
-    fn handoff_args(initial_plan: &str) -> HashMap<String, Value> {
-        HashMap::from([
-            ("target_mode".to_string(), json!("task_planner")),
-            ("reason".to_string(), json!("Plan this task")),
-            ("initial_plan".to_string(), json!(initial_plan)),
-        ])
-    }
-
-    fn tool_result_json(messages: &[ContextEnum]) -> serde_json::Value {
-        match &messages[0] {
-            ContextEnum::ChatMessage(message) => {
-                serde_json::from_str(&message.content.content_text_only()).unwrap()
-            }
-            ContextEnum::ContextFile(_) => panic!("expected tool chat message"),
-        }
-    }
-
-    async fn wait_for_saved_snapshot(
-        facade: &MockChatFacade,
-        predicate: impl Fn(&TrajectorySnapshot) -> bool,
-    ) -> TrajectorySnapshot {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let found = {
-                    let saved = facade.saved.lock().unwrap();
-                    saved.iter().find(|snapshot| predicate(snapshot)).cloned()
-                };
-                if let Some(snapshot) = found {
-                    return snapshot;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("timed out waiting for saved handoff snapshot")
-    }
-
-    #[tokio::test]
-    async fn handoff_to_task_planner_creates_initial_plan_document() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatFacade::default());
-        facade.snapshot.lock().unwrap().replace(source_snapshot());
-        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
-        let ccx = handoff_ccx(app).await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
-        };
-
-        let (_, messages) = tool
-            .tool_execute(
-                ccx,
-                &"handoff-call".to_string(),
-                &handoff_args("Wave 0\n- Card T-1\n- Acceptance Criteria: tests pass"),
-            )
-            .await
-            .unwrap();
-
-        let saved = facade.saved.lock().unwrap().clone();
-        let task_meta = saved[0].task_meta.as_ref().unwrap();
-        let document = temp
-            .path()
-            .join(".refact/tasks")
-            .join(&task_meta.task_id)
-            .join("documents/initial-plan.md");
-        let result = tool_result_json(&messages);
-        assert_eq!(result["initial_plan_document"], "initial-plan");
-        let raw = tokio::fs::read_to_string(document).await.unwrap();
-        assert!(raw.contains("slug: \"initial-plan\""));
-        assert!(raw.contains("kind: \"plan\""));
-        assert!(raw.contains("pinned: true"));
-        assert!(raw.contains("Card T-1"));
-    }
-
-    #[tokio::test]
-    async fn handoff_to_task_planner_uses_active_root_as_planner_chat_id() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatFacade::default());
-        let mut snapshot = source_snapshot();
-        snapshot.thread.id = "child-chat".to_string();
-        snapshot.thread.root_chat_id = Some("controller-planner".to_string());
-        snapshot.thread.task_meta = Some(refact_chat_api::TaskMeta {
-            task_id: "task-lineage".to_string(),
-            role: "subchats".to_string(),
-            agent_id: None,
-            card_id: None,
-            planner_chat_id: Some("stale-planner".to_string()),
-        });
-        facade.snapshot.lock().unwrap().replace(snapshot);
-        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
-        insert_planner_session(&app, "controller-planner", "task-lineage").await;
-        let ccx = handoff_ccx(app).await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
-        };
-
-        tool.tool_execute(
-            ccx,
-            &"handoff-call".to_string(),
-            &handoff_args("Lineage plan"),
-        )
-        .await
-        .unwrap();
-
-        let saved = facade.saved.lock().unwrap().clone();
-        let task_meta = saved[0].task_meta.as_ref().unwrap();
-        assert_eq!(saved[0].chat_id, "controller-planner");
-        assert_eq!(task_meta.role, "planner");
-        assert_eq!(
-            task_meta.planner_chat_id.as_deref(),
-            Some("controller-planner")
-        );
-        assert_eq!(saved[0].root_chat_id.as_deref(), Some("controller-planner"));
-    }
-
-    #[tokio::test]
-    async fn handoff_to_task_planner_appends_to_existing_controller_history() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatFacade::default());
-        let mut snapshot = source_snapshot();
-        snapshot.thread.id = "child-chat".to_string();
-        snapshot.thread.root_chat_id = Some("controller-planner".to_string());
-        snapshot.thread.task_meta = Some(refact_chat_api::TaskMeta {
-            task_id: "task-lineage".to_string(),
-            role: "subchats".to_string(),
-            agent_id: None,
-            card_id: None,
-            planner_chat_id: Some("controller-planner".to_string()),
-        });
-        facade.snapshot.lock().unwrap().replace(snapshot);
-        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
-        insert_planner_session_with_messages(
-            &app,
-            "controller-planner",
-            "task-lineage",
-            vec![ChatMessage::new(
-                "user".to_string(),
-                "Existing planner history".to_string(),
-            )],
-        )
-        .await;
-        let ccx = handoff_ccx(app).await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
-        };
-
-        tool.tool_execute(
-            ccx,
-            &"handoff-call".to_string(),
-            &handoff_args("Lineage plan"),
-        )
-        .await
-        .unwrap();
-
-        let saved = facade.saved.lock().unwrap().clone();
-        assert_eq!(saved[0].chat_id, "controller-planner");
-        assert!(saved[0].messages.len() > 1);
-        assert_eq!(
-            saved[0].messages[0].content.content_text_only(),
-            "Existing planner history"
-        );
-        assert!(saved[0]
-            .messages
-            .iter()
-            .skip(1)
-            .any(|message| message.content.content_text_only().contains("Lineage plan")));
-    }
-
-    #[tokio::test]
-    async fn handoff_goal_transfer_recomputes_live_source_and_target_projections() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
-        let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
-        let task = crate::tasks::storage::create_task(gcx.clone(), "Goal Transfer Task")
-            .await
-            .unwrap();
-        let source_chat_id = "source-goal-owner";
-        let target_chat_id = "planner-goal-owner";
-
-        let mut source = crate::chat::types::ChatSession::new(source_chat_id.to_string());
-        source.thread.mode = "agent".to_string();
-        source.thread.tool_use = "agent".to_string();
-        source.thread.model = "model".to_string();
-        source.thread.root_chat_id = Some(target_chat_id.to_string());
-        source.thread.task_meta = Some(refact_chat_api::TaskMeta {
-            task_id: task.id.clone(),
-            role: "subchats".to_string(),
-            agent_id: None,
-            card_id: None,
-            planner_chat_id: Some(target_chat_id.to_string()),
-        });
-        source.install_goal(
-            "agent",
-            "Finish the transferred goal",
-            true,
-            refact_chat_api::GoalBudget::default(),
-        );
-        source.add_message(ChatMessage::new(
-            "user".to_string(),
-            "Please plan this goal.".to_string(),
         ));
-
-        let mut target = crate::chat::types::ChatSession::new(target_chat_id.to_string());
-        target.thread.mode = "task_planner".to_string();
-        target.thread.tool_use = "agent".to_string();
-        target.thread.model = "model".to_string();
-        target.thread.root_chat_id = Some(target_chat_id.to_string());
-        target.thread.task_meta = Some(refact_chat_api::TaskMeta {
-            task_id: task.id.clone(),
-            role: "planner".to_string(),
-            agent_id: None,
-            card_id: None,
-            planner_chat_id: Some(target_chat_id.to_string()),
-        });
-
-        let source_arc = Arc::new(tokio::sync::Mutex::new(source));
-        let target_arc = Arc::new(tokio::sync::Mutex::new(target));
-        let mut source_rx = source_arc.lock().await.subscribe();
-        let mut target_rx = target_arc.lock().await.subscribe();
-        gcx.chat_sessions
-            .write()
-            .await
-            .insert(source_chat_id.to_string(), source_arc.clone());
-        gcx.chat_sessions
-            .write()
-            .await
-            .insert(target_chat_id.to_string(), target_arc.clone());
-
-        let ccx = handoff_ccx_with_chat_id(app, source_chat_id).await;
         let mut tool = ToolHandoffToMode {
             config_path: String::new(),
         };
-
-        tool.tool_execute(
-            ccx,
-            &"handoff-call".to_string(),
-            &handoff_args("Transfer projection regression plan"),
-        )
-        .await
-        .unwrap();
-
-        let source = source_arc.lock().await;
-        let source_goal = source.goal.as_ref().unwrap();
-        assert!(!source_goal.active);
-        assert_eq!(source_goal.status, refact_chat_api::GoalStatus::Transferred);
-        assert_eq!(source_goal.transferred_to.as_deref(), Some(target_chat_id));
-        assert!(!source.goal_active);
-        assert_eq!(
-            source.goal_status,
-            Some(refact_chat_api::GoalStatus::Transferred)
-        );
-        assert!(!source.runtime.goal_active);
-        assert_eq!(
-            source.runtime.goal_status,
-            Some(refact_chat_api::GoalStatus::Transferred)
-        );
-        let source_is_active_owner =
-            source_goal.active && source_goal.status == refact_chat_api::GoalStatus::Active;
-        drop(source);
-
-        let target = target_arc.lock().await;
-        let target_goal = target.goal.as_ref().unwrap();
-        assert!(target_goal.active);
-        assert_eq!(target_goal.status, refact_chat_api::GoalStatus::Active);
-        assert_eq!(
-            target_goal.transferred_from.as_deref(),
-            Some(source_chat_id)
-        );
-        assert!(target.goal_active);
-        assert_eq!(
-            target.goal_status,
-            Some(refact_chat_api::GoalStatus::Active)
-        );
-        assert!(target.runtime.goal_active);
-        assert_eq!(
-            target.runtime.goal_status,
-            Some(refact_chat_api::GoalStatus::Active)
-        );
-
-        let active_owners = usize::from(source_is_active_owner)
-            + usize::from(
-                target_goal.active && target_goal.status == refact_chat_api::GoalStatus::Active,
-            );
-        assert_eq!(active_owners, 1);
-
-        let mut saw_source_runtime_transferred = false;
-        while let Ok(json) = source_rx.try_recv() {
-            let envelope: crate::chat::types::EventEnvelope = serde_json::from_str(&json).unwrap();
-            if let crate::chat::types::ChatEvent::RuntimeUpdated {
-                goal_active,
-                goal_status,
-                ..
-            } = envelope.event
-            {
-                if !goal_active && goal_status == Some(refact_chat_api::GoalStatus::Transferred) {
-                    saw_source_runtime_transferred = true;
-                }
-            }
-        }
-        assert!(saw_source_runtime_transferred);
-
-        let mut saw_target_active_snapshot = false;
-        while let Ok(json) = target_rx.try_recv() {
-            let envelope: crate::chat::types::EventEnvelope = serde_json::from_str(&json).unwrap();
-            if let crate::chat::types::ChatEvent::Snapshot { goal, runtime, .. } = envelope.event {
-                if goal.is_some_and(|goal| {
-                    goal.active
-                        && goal.status == refact_chat_api::GoalStatus::Active
-                        && goal.transferred_from.as_deref() == Some(source_chat_id)
-                }) && runtime.goal_active
-                    && runtime.goal_status == Some(refact_chat_api::GoalStatus::Active)
-                {
-                    saw_target_active_snapshot = true;
-                }
-            }
-        }
-        assert!(saw_target_active_snapshot);
-    }
-
-    #[tokio::test]
-    async fn handoff_to_task_planner_appends_disk_only_controller_history_without_session_update() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatFacade::default());
-        *facade.fail_update_session.lock().unwrap() = true;
-        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
-        let task = crate::tasks::storage::create_task(app.gcx.clone(), "Lineage Task")
-            .await
-            .unwrap();
-        let planner_chat_id = format!("planner-{}-1", task.id);
-        crate::chat::trajectories::save_trajectory_snapshot(
-            app.gcx.clone(),
-            TrajectorySnapshot {
-                goal: None,
-                goal_ledger: Vec::new(),
-                goal_verification_blocked_until_ms: None,
-                compression_retry_after_ms: Default::default(),
-                chat_id: planner_chat_id.clone(),
-                title: "Persisted planner controller".to_string(),
-                model: "model".to_string(),
-                mode: "task_planner".to_string(),
-                tool_use: "agent".to_string(),
-                messages: vec![ChatMessage::new(
-                    "user".to_string(),
-                    "Persisted planner history".to_string(),
-                )],
-                created_at: chrono::Utc::now().to_rfc3339(),
-                boost_reasoning: false,
-                checkpoints_enabled: true,
-                context_tokens_cap: None,
-                auto_compression_cap: None,
-                include_project_info: true,
-                is_title_generated: true,
-                auto_approve_editing_tools: false,
-                auto_approve_dangerous_commands: false,
-                autonomous_no_confirm: false,
-                version: 1,
-                task_meta: Some(refact_chat_api::TaskMeta {
-                    task_id: task.id.clone(),
-                    role: "planner".to_string(),
-                    agent_id: None,
-                    card_id: None,
-                    planner_chat_id: Some(planner_chat_id.clone()),
-                }),
-                worktree: None,
-                parent_id: None,
-                link_type: None,
-                root_chat_id: Some(planner_chat_id.clone()),
-                reasoning_effort: None,
-                thinking_budget: None,
-                temperature: None,
-                frequency_penalty: None,
-                max_tokens: None,
-                parallel_tool_calls: None,
-                previous_response_id: None,
-                active_skill: None,
-                auto_enrichment_enabled: None,
-                buddy_meta: None,
-                auto_compact_enabled: None,
-                frozen_request_prefix: None,
-                claude_code_identity: None,
-                reactive_compact_attempts: None,
-                wake_up_at: None,
-                waiting_for_card_ids: Vec::new(),
-                pending_deliveries: Vec::new(),
-            },
-        )
-        .await
-        .unwrap();
-
-        let mut snapshot = source_snapshot();
-        snapshot.thread.id = "child-chat".to_string();
-        snapshot.thread.root_chat_id = Some(planner_chat_id.clone());
-        snapshot.thread.task_meta = Some(refact_chat_api::TaskMeta {
-            task_id: task.id.clone(),
-            role: "subchats".to_string(),
-            agent_id: None,
-            card_id: None,
-            planner_chat_id: Some(planner_chat_id.clone()),
-        });
-        facade.snapshot.lock().unwrap().replace(snapshot);
-
-        let ccx = handoff_ccx(app).await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
-        };
-
-        tool.tool_execute(
-            ccx,
-            &"handoff-call".to_string(),
-            &handoff_args("Disk lineage plan"),
-        )
-        .await
-        .unwrap();
-
-        let saved = wait_for_saved_snapshot(&facade, |snapshot| {
-            snapshot.chat_id == planner_chat_id
-                && snapshot.messages.iter().any(|message| {
-                    message.content.content_text_only() == "Persisted planner history"
-                })
-                && snapshot.messages.iter().any(|message| {
-                    message
-                        .content
-                        .content_text_only()
-                        .contains("Disk lineage plan")
-                })
-        })
-        .await;
-        assert_eq!(saved.chat_id, planner_chat_id);
-        assert!(saved
-            .messages
-            .iter()
-            .any(|message| message.content.content_text_only() == "Persisted planner history"));
-        assert!(saved.messages.iter().any(|message| message
-            .content
-            .content_text_only()
-            .contains("Disk lineage plan")));
-    }
-
-    #[tokio::test]
-    async fn handoff_to_task_planner_chat_id_ignores_non_planner_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatFacade::default());
-        let mut snapshot = source_snapshot();
-        snapshot.thread.id = "planner-chat".to_string();
-        snapshot.thread.root_chat_id = Some("source-chat".to_string());
-        snapshot.thread.task_meta = Some(refact_chat_api::TaskMeta {
-            task_id: "task-standalone".to_string(),
-            role: "planner".to_string(),
-            agent_id: None,
-            card_id: None,
-            planner_chat_id: Some("planner-chat".to_string()),
-        });
-        facade.snapshot.lock().unwrap().replace(snapshot);
-        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
-        let ccx = handoff_ccx_with_chat_id(app, "planner-chat").await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
-        };
-
-        tool.tool_execute(
-            ccx,
-            &"handoff-call".to_string(),
-            &handoff_args("Standalone plan"),
-        )
-        .await
-        .unwrap();
-
-        let saved = facade.saved.lock().unwrap().clone();
-        let task_meta = saved[0].task_meta.as_ref().unwrap();
-        assert_eq!(saved[0].chat_id, "planner-chat");
-        assert_eq!(task_meta.planner_chat_id.as_deref(), Some("planner-chat"));
-        assert_eq!(saved[0].root_chat_id.as_deref(), Some("planner-chat"));
-    }
-
-    #[tokio::test]
-    async fn standalone_planner_chat_id_handoff_anchors_root_to_new_planner() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatFacade::default());
-        let mut snapshot = source_snapshot();
-        snapshot.thread.root_chat_id = Some("normal-source-root".to_string());
-        facade.snapshot.lock().unwrap().replace(snapshot);
-        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
-        let ccx = handoff_ccx(app).await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
-        };
-
-        tool.tool_execute(
-            ccx,
-            &"handoff-call".to_string(),
-            &handoff_args("New standalone planner"),
-        )
-        .await
-        .unwrap();
-
-        let saved = facade.saved.lock().unwrap().clone();
-        let task_meta = saved[0].task_meta.as_ref().unwrap();
-        assert_eq!(
-            task_meta.planner_chat_id.as_deref(),
-            Some(saved[0].chat_id.as_str())
-        );
-        assert_eq!(
-            saved[0].root_chat_id.as_deref(),
-            Some(saved[0].chat_id.as_str())
-        );
-        assert_ne!(saved[0].root_chat_id.as_deref(), Some("normal-source-root"));
-    }
-
-    async fn tool_with_snapshot(
-        snapshot: ChatSessionSnapshot,
-    ) -> Result<(bool, Vec<ContextEnum>), String> {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatFacade::default());
-        facade.snapshot.lock().unwrap().replace(snapshot);
-        let app = test_app_with_workspace(temp.path(), facade).await;
-        let ccx = handoff_ccx(app).await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
-        };
-        let args = HashMap::from([("target_mode".to_string(), json!("task_planner"))]);
-        tool.tool_execute(ccx, &"call-id".to_string(), &args).await
-    }
-
-    #[tokio::test]
-    async fn handoff_rejects_generating_state() {
-        let mut snap = source_snapshot();
-        snap.session_state = SessionState::Generating;
-        let err = tool_with_snapshot(snap).await.unwrap_err();
-        assert!(err.contains("model is generating"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn handoff_allows_executing_tools_state() {
-        let mut snap = source_snapshot();
-        snap.session_state = SessionState::ExecutingTools;
-        tool_with_snapshot(snap).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn handoff_succeeds_through_real_facade_with_pending_self_call() {
-        use crate::call_validation::{ChatToolCall, ChatToolFunction};
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = crate::global_context::tests::make_test_gcx().await;
-        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![temp.path().to_path_buf()];
-        let app = crate::app_state::AppState::from_gcx(gcx).await;
-
-        let chat_id = "real-exec-chat";
-        {
-            let mut session = crate::chat::types::ChatSession::new(chat_id.to_string());
-            session.thread.mode = "agent".to_string();
-            session.thread.tool_use = "agent".to_string();
-            session.thread.model = "model".to_string();
-            session.add_message(ChatMessage::new(
-                "user".to_string(),
-                "Please create a plan.".to_string(),
-            ));
-            session.add_message(ChatMessage {
-                role: "assistant".to_string(),
-                content: ChatContent::SimpleText("".to_string()),
-                tool_calls: Some(vec![ChatToolCall {
-                    id: "handoff-call".to_string(),
-                    index: Some(0),
-                    function: ChatToolFunction {
-                        name: "switch_mode".to_string(),
-                        arguments: "{}".to_string(),
-                    },
-                    tool_type: "function".to_string(),
-                    extra_content: None,
-                    started_at_ms: None,
-                    completed_at_ms: None,
-                }]),
-                ..Default::default()
-            });
-            session.set_runtime_state(SessionState::ExecutingTools, None);
-            app.gcx.chat_sessions.write().await.insert(
-                chat_id.to_string(),
-                Arc::new(tokio::sync::Mutex::new(session)),
-            );
-        }
-
-        let observed = app
-            .chat
-            .facade
-            .session_snapshot(chat_id)
-            .await
-            .unwrap()
-            .session_state;
-        assert_eq!(observed, SessionState::ExecutingTools);
-
-        let ccx = handoff_ccx_with_chat_id(app, chat_id).await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
-        };
-        let args = HashMap::from([("target_mode".to_string(), json!("task_planner"))]);
-
+        let args = HashMap::from([("target_mode".into(), json!("agent"))]);
         let (_, messages) = tool
-            .tool_execute(ccx, &"handoff-call".to_string(), &args)
+            .tool_execute(ccx.clone(), &"handoff".into(), &args)
             .await
             .unwrap();
-        let result = tool_result_json(&messages);
-        assert_eq!(result["target_mode"], "task_planner");
-    }
-
-    #[tokio::test]
-    async fn handoff_rejects_paused_state() {
-        let mut snap = source_snapshot();
-        snap.session_state = SessionState::Paused;
-        let err = tool_with_snapshot(snap).await.unwrap_err();
-        assert!(err.contains("session is paused"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn handoff_rejects_waiting_ide_state() {
-        let mut snap = source_snapshot();
-        snap.session_state = SessionState::WaitingIde;
-        let err = tool_with_snapshot(snap).await.unwrap_err();
-        assert!(err.contains("waiting for IDE response"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn handoff_rejects_error_state() {
-        let mut snap = source_snapshot();
-        snap.session_state = SessionState::Error;
-        let err = tool_with_snapshot(snap).await.unwrap_err();
-        assert!(err.contains("error state"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn handoff_rejects_waiting_user_input_with_pause_reasons() {
-        let mut snap = source_snapshot();
-        snap.session_state = SessionState::WaitingUserInput;
-        snap.pause_reasons = vec![refact_chat_api::PauseReason {
-            reason_type: "tool_approval".to_string(),
-            tool_name: "shell".to_string(),
-            command: "ls".to_string(),
-            rule: "default".to_string(),
-            tool_call_id: "tc1".to_string(),
-            integr_config_path: None,
-        }];
-        let err = tool_with_snapshot(snap).await.unwrap_err();
-        assert!(err.contains("pending tool approvals"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn handoff_allows_idle_state() {
-        let snap = source_snapshot();
-        assert_eq!(snap.session_state, SessionState::Idle);
-        tool_with_snapshot(snap).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn handoff_allows_completed_state() {
-        let mut snap = source_snapshot();
-        snap.session_state = SessionState::Completed;
-        tool_with_snapshot(snap).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn handoff_allows_waiting_user_input_with_no_pause_reasons() {
-        let mut snap = source_snapshot();
-        snap.session_state = SessionState::WaitingUserInput;
-        snap.pause_reasons = vec![];
-        tool_with_snapshot(snap).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn handoff_to_mode_does_not_copy_source_frozen_prefix_or_claude_identity() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatFacade::default());
-        let mut snapshot = source_snapshot();
-        snapshot.thread.frozen_request_prefix = Some(refact_chat_api::FrozenRequestPrefix {
-            schema_version: 1,
-            created_at: "2026-05-29T00:00:00Z".to_string(),
-            system_prompt: Some("source system".to_string()),
-            tools_canonical: Some(json!([{"type":"function","function":{"name":"source_tool"}}])),
-        });
-        snapshot.thread.claude_code_identity = Some(refact_chat_api::ClaudeCodeIdentity {
-            device_id: "source-device".to_string(),
-            session_id: "source-session".to_string(),
-        });
-        snapshot.thread.previous_response_id = Some("resp_source".to_string());
-        facade.snapshot.lock().unwrap().replace(snapshot);
-        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
-        let ccx = handoff_ccx(app).await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
-        };
-        let args = HashMap::from([("target_mode".to_string(), json!("task_planner"))]);
-
-        tool.tool_execute(ccx, &"call-id".to_string(), &args)
-            .await
-            .unwrap();
-
-        let saved = facade.saved.lock().unwrap().clone();
-        assert_eq!(saved.len(), 1);
-        assert!(saved[0].frozen_request_prefix.is_none());
-        assert!(saved[0].claude_code_identity.is_none());
-        assert!(saved[0].previous_response_id.is_none());
-    }
-
-    #[tokio::test]
-    async fn handoff_rejects_unmatched_tool_calls_in_history() {
-        use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
-        let mut snap = source_snapshot();
-        snap.messages = vec![
-            ChatMessage::new("user".to_string(), "Please help.".to_string()),
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: ChatContent::SimpleText("".to_string()),
-                tool_calls: Some(vec![ChatToolCall {
-                    id: "call-unmatched".to_string(),
-                    index: Some(0),
-                    function: ChatToolFunction {
-                        name: "shell".to_string(),
-                        arguments: "{}".to_string(),
-                    },
-                    tool_type: "function".to_string(),
-                    extra_content: None,
-                    started_at_ms: None,
-                    completed_at_ms: None,
-                }]),
-                ..Default::default()
-            },
-        ];
-        let err = tool_with_snapshot(snap).await.unwrap_err();
-        assert!(err.contains("tool calls without results"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn handoff_accepts_diff_messages_as_tool_call_results() {
-        use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
-        let mut snap = source_snapshot();
-        snap.messages = vec![
-            ChatMessage::new("user".to_string(), "Please help.".to_string()),
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: ChatContent::SimpleText("".to_string()),
-                tool_calls: Some(vec![ChatToolCall {
-                    id: "call-diff".to_string(),
-                    index: Some(0),
-                    function: ChatToolFunction {
-                        name: "apply_patch".to_string(),
-                        arguments: "{}".to_string(),
-                    },
-                    tool_type: "function".to_string(),
-                    extra_content: None,
-                    started_at_ms: None,
-                    completed_at_ms: None,
-                }]),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "diff".to_string(),
-                content: ChatContent::SimpleText("diff accepted".to_string()),
-                tool_call_id: "call-diff".to_string(),
-                ..Default::default()
-            },
-        ];
-        tool_with_snapshot(snap).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn initial_plan_document_failure_does_not_break_handoff() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatFacade::default());
-        let mut snapshot = source_snapshot();
-        snapshot.thread.task_meta = Some(refact_chat_api::TaskMeta {
-            task_id: "missing-task".to_string(),
-            role: "planner".to_string(),
-            agent_id: None,
-            card_id: None,
-            planner_chat_id: Some("planner-missing-task-1".to_string()),
-        });
-        facade.snapshot.lock().unwrap().replace(snapshot);
-        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
-        let ccx = handoff_ccx(app).await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
-        };
-
-        let (_, messages) = tool
-            .tool_execute(
-                ccx,
-                &"handoff-call".to_string(),
-                &handoff_args("Wave 0\n- Card T-1\n- Acceptance Criteria: tests pass"),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(facade.saved.lock().unwrap().len(), 1);
-        let result = tool_result_json(&messages);
-        assert!(result["initial_plan_document"].is_null());
-        assert_eq!(facade.saved.lock().unwrap().len(), 1);
-        let result = tool_result_json(&messages);
-        assert!(result["initial_plan_document"].is_null());
-        assert!(
-            result["initial_plan_error"].is_string(),
-            "error should surface in output"
+        assert_eq!(
+            serde_json::to_value(&session.lock().await.messages).unwrap(),
+            before
         );
-    }
-
-    #[tokio::test]
-    async fn handoff_with_initial_plan_creates_pinned_document() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatFacade::default());
-        facade.snapshot.lock().unwrap().replace(source_snapshot());
-        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
-        let ccx = handoff_ccx(app).await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
+        let payload = session.lock().await.pending_mode_handoff.clone().unwrap();
+        assert_eq!(payload["tool_call_id"], "handoff");
+        let ContextEnum::ChatMessage(result) = &messages[0] else {
+            panic!("expected acknowledgement")
         };
-
-        let (_, messages) = tool
-            .tool_execute(
-                ccx,
-                &"call-id".to_string(),
-                &handoff_args("# Wave 0\n- Card T-1"),
-            )
+        let result: Value = serde_json::from_str(&result.content.content_text_only()).unwrap();
+        assert_eq!(result["queued"], true);
+        assert!(result.get("new_chat_id").is_none());
+        assert!(tool
+            .tool_execute(ccx, &"handoff".into(), &args)
             .await
-            .unwrap();
-
-        let saved = facade.saved.lock().unwrap().clone();
-        let task_meta = saved[0].task_meta.as_ref().unwrap();
-        let document = temp
-            .path()
-            .join(".refact/tasks")
-            .join(&task_meta.task_id)
-            .join("documents/initial-plan.md");
-        let result = tool_result_json(&messages);
-        assert_eq!(result["initial_plan_document"], "initial-plan");
-        assert!(result["initial_plan_error"].is_null());
-        let raw = tokio::fs::read_to_string(document).await.unwrap();
-        assert!(raw.contains("pinned: true"), "{raw}");
-        assert!(raw.contains("Card T-1"), "{raw}");
-    }
-
-    #[tokio::test]
-    async fn handoff_with_only_summary_uses_summary_as_plan_body() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatFacade::default());
-        facade.snapshot.lock().unwrap().replace(source_snapshot());
-        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
-        let ccx = handoff_ccx(app).await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
-        };
-        let args = HashMap::from([
-            ("target_mode".to_string(), json!("task_planner")),
-            ("summary".to_string(), json!("Summary plan content here")),
-        ]);
-
-        let (_, messages) = tool
-            .tool_execute(ccx, &"call-id".to_string(), &args)
-            .await
-            .unwrap();
-
-        let saved = facade.saved.lock().unwrap().clone();
-        let task_meta = saved[0].task_meta.as_ref().unwrap();
-        let document = temp
-            .path()
-            .join(".refact/tasks")
-            .join(&task_meta.task_id)
-            .join("documents/initial-plan.md");
-        let result = tool_result_json(&messages);
-        assert_eq!(result["initial_plan_document"], "initial-plan");
-        let raw = tokio::fs::read_to_string(document).await.unwrap();
-        assert!(raw.contains("Summary plan content here"), "{raw}");
-    }
-
-    #[tokio::test]
-    async fn handoff_with_only_handoff_message_uses_it_as_plan_body() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatFacade::default());
-        facade.snapshot.lock().unwrap().replace(source_snapshot());
-        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
-        let ccx = handoff_ccx(app).await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
-        };
-        let args = HashMap::from([
-            ("target_mode".to_string(), json!("task_planner")),
-            ("handoff_message".to_string(), json!("Handoff message body")),
-        ]);
-
-        let (_, messages) = tool
-            .tool_execute(ccx, &"call-id".to_string(), &args)
-            .await
-            .unwrap();
-
-        let saved = facade.saved.lock().unwrap().clone();
-        let task_meta = saved[0].task_meta.as_ref().unwrap();
-        let document = temp
-            .path()
-            .join(".refact/tasks")
-            .join(&task_meta.task_id)
-            .join("documents/initial-plan.md");
-        let result = tool_result_json(&messages);
-        assert_eq!(result["initial_plan_document"], "initial-plan");
-        let raw = tokio::fs::read_to_string(document).await.unwrap();
-        assert!(raw.contains("Handoff message body"), "{raw}");
-    }
-
-    #[tokio::test]
-    async fn handoff_with_no_plan_content_creates_stub_document() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatFacade::default());
-        facade.snapshot.lock().unwrap().replace(source_snapshot());
-        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
-        let ccx = handoff_ccx(app).await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
-        };
-        let args = HashMap::from([("target_mode".to_string(), json!("task_planner"))]);
-
-        let (_, messages) = tool
-            .tool_execute(ccx, &"call-id".to_string(), &args)
-            .await
-            .unwrap();
-
-        let saved = facade.saved.lock().unwrap().clone();
-        let task_meta = saved[0].task_meta.as_ref().unwrap();
-        let document = temp
-            .path()
-            .join(".refact/tasks")
-            .join(&task_meta.task_id)
-            .join("documents/initial-plan.md");
-        let result = tool_result_json(&messages);
-        assert_eq!(result["initial_plan_document"], "initial-plan");
-        let raw = tokio::fs::read_to_string(document).await.unwrap();
-        assert!(raw.contains("No plan content provided at handoff"), "{raw}");
-    }
-
-    #[tokio::test]
-    async fn handoff_surfaces_document_creation_error_prominently() {
-        let temp = tempfile::tempdir().unwrap();
-        let facade = Arc::new(MockChatFacade::default());
-        let mut snapshot = source_snapshot();
-        snapshot.thread.task_meta = Some(refact_chat_api::TaskMeta {
-            task_id: "missing-task".to_string(),
-            role: "planner".to_string(),
-            agent_id: None,
-            card_id: None,
-            planner_chat_id: Some("planner-missing-task-1".to_string()),
-        });
-        facade.snapshot.lock().unwrap().replace(snapshot);
-        let app = test_app_with_workspace(temp.path(), facade.clone()).await;
-        let ccx = handoff_ccx(app).await;
-        let mut tool = ToolHandoffToMode {
-            config_path: String::new(),
-        };
-        let args = HashMap::from([
-            ("target_mode".to_string(), json!("task_planner")),
-            ("initial_plan".to_string(), json!("Some plan content")),
-        ]);
-
-        let (_, messages) = tool
-            .tool_execute(ccx, &"call-id".to_string(), &args)
-            .await
-            .unwrap();
-
-        let result = tool_result_json(&messages);
-        assert!(result["initial_plan_document"].is_null());
-        assert!(
-            result["initial_plan_error"].is_string(),
-            "error should be surfaced in tool output, got: {:?}",
-            result["initial_plan_error"]
-        );
-    }
-
-    #[tokio::test]
-    async fn handoff_accepts_context_file_as_read_tool_completion() {
-        use crate::call_validation::{ChatContent, ChatToolCall, ChatToolFunction};
-        let mut snap = source_snapshot();
-        snap.messages = vec![
-            ChatMessage::new("user".to_string(), "Read the file.".to_string()),
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: ChatContent::SimpleText("".to_string()),
-                tool_calls: Some(vec![ChatToolCall {
-                    id: "call-cat".to_string(),
-                    index: Some(0),
-                    function: ChatToolFunction {
-                        name: "cat".to_string(),
-                        arguments: "{}".to_string(),
-                    },
-                    tool_type: "function".to_string(),
-                    extra_content: None,
-                    started_at_ms: None,
-                    completed_at_ms: None,
-                }]),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "context_file".to_string(),
-                tool_call_id: "call-cat".to_string(),
-                content: ChatContent::SimpleText("file contents".to_string()),
-                ..Default::default()
-            },
-        ];
-        tool_with_snapshot(snap).await.unwrap();
+            .is_err());
     }
 }

@@ -554,6 +554,7 @@ pub(crate) fn build_agent_thread_params(
         boost_reasoning: Some(false),
         context_tokens_cap: None,
         auto_compression_cap: None,
+        auto_compression_cap_pending: true,
         include_project_info: true,
         checkpoints_enabled: false,
         is_title_generated: true,

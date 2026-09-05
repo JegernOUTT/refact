@@ -121,6 +121,69 @@ fn plan_version(message: &ChatMessage) -> Option<u32> {
         .and_then(|version| u32::try_from(version).ok())
 }
 
+/// Active control state is owned because its plan may live inside a report payload.
+/// Invalid/legacy boundaries are errors, never an absent plan or an archive fallback.
+pub fn try_current_plan<S: PlanRoleSession + ?Sized>(
+    session: &S,
+) -> Result<Option<ChatMessage>, String> {
+    let messages = refact_core::active_context::active_context(session.plan_role_messages())
+        .map_err(|error| error.to_string())?
+        .messages;
+    Ok(messages
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            plan_version(&message).map(|version| (index, version, message))
+        })
+        .max_by_key(|(index, version, _)| (*version, *index))
+        .map(|(_, _, message)| message))
+}
+
+pub fn try_current_base_plan<S: PlanRoleSession + ?Sized>(
+    session: &S,
+) -> Result<Option<ChatMessage>, String> {
+    try_current_plan(session)
+}
+
+pub fn try_plan_delta_events<S: PlanRoleSession + ?Sized>(
+    session: &S,
+) -> Result<Vec<ChatMessage>, String> {
+    let messages = refact_core::active_context::active_context(session.plan_role_messages())
+        .map_err(|error| error.to_string())?
+        .messages;
+    Ok(messages
+        .into_iter()
+        .filter(|message| {
+            message.role == EVENT_ROLE
+                && message
+                    .extra
+                    .get("event")
+                    .and_then(|event| event.get("subkind"))
+                    .and_then(|v| v.as_str())
+                    == Some("plan_delta")
+        })
+        .collect())
+}
+
+pub fn try_synthesize_current_plan<S: PlanRoleSession + ?Sized>(
+    session: &S,
+) -> Result<Option<String>, String> {
+    let Some(plan) = try_current_base_plan(session)? else {
+        return Ok(None);
+    };
+    let base = plan.content.content_text_only();
+    let deltas = try_plan_delta_events(session)?;
+    if deltas.is_empty() {
+        return Ok(Some(base));
+    }
+    let notes = deltas
+        .into_iter()
+        .map(|message| message.content.content_text_only())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Ok(Some(format!("{base}\n\n---\n\n## Plan updates\n\n{notes}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +238,54 @@ mod tests {
 
     fn make_session() -> TestSession {
         TestSession::new("test-chat".to_string())
+    }
+
+    #[test]
+    fn active_plan_and_deltas_exclude_archive() {
+        let mut session = make_session();
+        install_plan(&mut session, "agent", "ARCHIVED_PLAN");
+        session.add_message(internal_roles::plan_delta(
+            "test",
+            serde_json::json!({}),
+            "ARCHIVED_DELTA",
+        ));
+        let mut active_plan = internal_roles::plan("agent", 1, "ACTIVE_PLAN", None);
+        active_plan.message_id = "active-plan".into();
+        let mut delta = internal_roles::plan_delta("test", serde_json::json!({}), "ACTIVE_DELTA");
+        delta.message_id = "active-delta".into();
+        let report = refact_core::active_context::make_reconstruction_report(
+            vec![active_plan, delta],
+            Default::default(),
+        )
+        .unwrap();
+        session.add_message(report);
+        assert_eq!(
+            try_current_plan(&session)
+                .unwrap()
+                .unwrap()
+                .content
+                .content_text_only(),
+            "ACTIVE_PLAN"
+        );
+        let text = try_synthesize_current_plan(&session).unwrap().unwrap();
+        assert!(text.contains("ACTIVE_DELTA"));
+        assert!(!text.contains("ARCHIVED"));
+        assert_eq!(
+            plan_history(&session).len(),
+            1,
+            "archive display remains available"
+        );
+    }
+
+    #[test]
+    fn active_plan_errors_are_not_missing_plans() {
+        let mut session = make_session();
+        let mut legacy = ChatMessage::new("assistant".into(), "legacy".into());
+        legacy.summarized_range = Some((0, 0));
+        session.add_message(legacy);
+        assert!(try_current_plan(&session).is_err());
+        assert!(try_plan_delta_events(&session).is_err());
+        assert!(try_synthesize_current_plan(&session).is_err());
     }
 
     #[test]

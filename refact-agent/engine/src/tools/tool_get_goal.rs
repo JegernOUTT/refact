@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use refact_chat_api::{GoalProgress, GoalStatus};
+use refact_chat_api::GoalStatus;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
 
@@ -31,20 +31,27 @@ fn goal_value(session: &ChatSession, message: &ChatMessage) -> Result<Value, Str
         .get("version")
         .and_then(Value::as_u64)
         .ok_or_else(|| "current goal is missing version".to_string())?;
-    let progress = GoalProgress::default();
+    let current = session
+        .goal
+        .as_ref()
+        .filter(|goal| u64::from(goal.version) == version);
+    let progress = current
+        .map(|goal| goal.progress.clone())
+        .unwrap_or_default();
+    let latest = current.and_then(|goal| goal.attempts.last());
     let content = goal_role::synthesize_current_goal(session)
         .ok_or_else(|| "current goal could not be synthesized".to_string())?;
     let delta_count = goal_role::goal_delta_events(session).len();
 
     Ok(json!({
         "content": content,
-        "status": GoalStatus::Active,
+        "status": current.map(|goal| goal.status).unwrap_or(GoalStatus::Active),
         "version": version,
         "delta_count": delta_count,
         "turns_used": progress.turns_used,
         "tokens_used": progress.tokens_used,
-        "latest_verdict": null,
-        "gaps": [],
+        "latest_verdict": latest.map(|attempt| &attempt.verdict),
+        "gaps": latest.map(|attempt| attempt.gaps.clone()).unwrap_or_default(),
     }))
 }
 
@@ -100,9 +107,9 @@ impl Tool for ToolGetGoal {
             .get(&chat_id)
             .cloned()
             .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
-        let session = session_arc.lock().await.accepted_control_projection();
+        let session = session_arc.lock().await.try_accepted_control_projection()?;
         let goal = match goal_role::current_base_goal(&session) {
-            Some(message) => goal_value(&session, message)?,
+            Some(message) => goal_value(&session, &message)?,
             None => Value::Null,
         };
         Ok((

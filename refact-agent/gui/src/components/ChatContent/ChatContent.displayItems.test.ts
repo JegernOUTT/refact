@@ -480,7 +480,13 @@ describe("ChatContent display items", () => {
     expect(reportItem.message.content).not.toContain(
       "Original messages remain visible",
     );
-    expect(reportItem.message.compression_report?.insert_mode).toBeUndefined();
+    expect(
+      (
+        reportItem.message.compression_report as
+          | { insert_mode?: string }
+          | undefined
+      )?.insert_mode,
+    ).toBeUndefined();
   });
 
   it("matching_llm_report_and_summary_render_single_report_card", () => {

@@ -29,10 +29,6 @@ export const TRAJECTORY_TRANSFORM_PREVIEW_URL =
   "/v1/chats/{chat_id}/trajectory/transform/preview";
 export const TRAJECTORY_TRANSFORM_APPLY_URL =
   "/v1/chats/{chat_id}/trajectory/transform/apply";
-export const TRAJECTORY_HANDOFF_PREVIEW_URL =
-  "/v1/chats/{chat_id}/trajectory/handoff/preview";
-export const TRAJECTORY_HANDOFF_APPLY_URL =
-  "/v1/chats/{chat_id}/trajectory/handoff/apply";
 export const TRAJECTORY_LLM_COMPRESS_PREVIEW_URL =
   "/v1/chats/{chat_id}/trajectory/llm-compress/preview";
 export const TRAJECTORY_LLM_COMPRESS_APPLY_URL =

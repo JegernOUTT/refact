@@ -115,6 +115,7 @@ import { MicrophoneButton, MicrophoneButtonRef } from "./MicrophoneButton";
 import { useAttachedImages } from "../../hooks/useAttachedImages";
 import {
   selectChatErrorById,
+  selectContextRebuildRequiredById,
   selectHasMessagesById,
   selectIsStreamingById,
   selectIsWaitingById,
@@ -176,6 +177,9 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   const globalError = useAppSelector(getErrorMessage);
   const chatError = useAppSelector((state) =>
     selectChatErrorById(state, chatId),
+  );
+  const contextRebuildRequired = useAppSelector((state) =>
+    selectContextRebuildRequiredById(state, chatId),
   );
   const isBuddyChat = useAppSelector((state) =>
     selectIsBuddyChat(state, chatId),
@@ -242,11 +246,13 @@ export const ChatForm: React.FC<ChatFormProps> = ({
   });
 
   const disableSend = useMemo(() => {
+    if (contextRebuildRequired) return true;
     if (allDisabled) return true;
     if (!hasMessages) return false;
     if (isContextFull) return true;
     return isWaiting || isStreaming || !isOnline;
   }, [
+    contextRebuildRequired,
     allDisabled,
     hasMessages,
     isWaiting,
@@ -368,7 +374,8 @@ export const ChatForm: React.FC<ChatFormProps> = ({
       const canSubmit =
         (trimmedValue.length > 0 || hasImages || hasTextFiles) &&
         isOnline &&
-        !allDisabled;
+        !allDisabled &&
+        !contextRebuildRequired;
 
       if (canSubmit) {
         const valueWithFiles = attachedFiles.addFilesToInput(trimmedValue);
@@ -393,6 +400,7 @@ export const ChatForm: React.FC<ChatFormProps> = ({
     },
     [
       value,
+      contextRebuildRequired,
       allDisabled,
       isOnline,
       attachedImages,

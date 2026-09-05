@@ -784,7 +784,7 @@ export interface SummarizationMessage extends BaseMessage {
   summarization_tier?: SummarizationTier;
   summarized_token_estimate?: number;
   compression?: LlmSegmentSummaryCompressionMetadata;
-  compression_report?: ChatCompressionReportMetadata;
+  compression_report?: unknown;
 }
 
 export type ChatCompressionReportMetadata = {
@@ -890,8 +890,194 @@ export function getCompressionReportMetadata(message: {
   return null;
 }
 
+/**
+ * Unified context rebuild (schema_version 1).
+ *
+ * The engine emits a `compression_report` message whose flattened
+ * `compression_report` metadata (mirrored into `extra.compression_report`)
+ * carries the FULL rebuilt active context inside `payload.messages`. The stored
+ * transcript keeps every original message so the archive stays browseable; only
+ * "what the model actually sees" is derived from the newest report payload plus
+ * the messages that follow it.
+ *
+ * Deliberately strict: an unknown `schema_version` or a malformed `payload`
+ * blocks the active-context computation instead of silently falling back to the
+ * raw transcript, because a wrong active context is worse than a visible error.
+ */
+export type ReconstructedHistoryMetadata = {
+  kind: "reconstructed_history";
+  schema_version: number;
+  payload: { messages: ChatMessage[] };
+  source_version?: number;
+  model?: string;
+  trigger?: string;
+  from_mode?: string;
+  to_mode?: string;
+  metrics?: unknown;
+};
+
+export const RECONSTRUCTED_HISTORY_SCHEMA_VERSION = 1;
+
+export type ReconstructedHistoryParse =
+  | { ok: true; metadata: ReconstructedHistoryMetadata }
+  | { ok: false; reason: "unsupported_schema_version" | "malformed_payload" };
+
+/**
+ * Returns null when the value is not a reconstructed-history report at all
+ * (e.g. a deterministic `chat_compression_report`), so callers can keep static
+ * reports out of anchor selection. Returns an `ok: false` parse when the value
+ * claims to be one but cannot be trusted.
+ */
+function hasNonStaticReportMetadata(message: Record<string, unknown>): boolean {
+  const extra = isRecord(message.extra) ? message.extra : {};
+  const report = message.compression_report ?? extra.compression_report;
+  return (
+    report !== undefined &&
+    !(
+      message.role === "compression_report" &&
+      isRecord(report) &&
+      report.kind === "chat_compression_report"
+    )
+  );
+}
+
+export function parseReconstructedHistoryMetadata(
+  value: unknown,
+): ReconstructedHistoryParse | null {
+  if (value === undefined) return null;
+  if (isRecord(value) && value.kind === "chat_compression_report") return null;
+  if (!isRecord(value) || value.kind !== "reconstructed_history") {
+    return { ok: false, reason: "malformed_payload" };
+  }
+  if (value.schema_version !== RECONSTRUCTED_HISTORY_SCHEMA_VERSION) {
+    return { ok: false, reason: "unsupported_schema_version" };
+  }
+  const stack: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
+  while (stack.length) {
+    const entry = stack.pop();
+    if (!entry) break;
+    if (entry.depth > 64) return { ok: false, reason: "malformed_payload" };
+    if (Array.isArray(entry.value) || isRecord(entry.value)) {
+      for (const child of Object.values(entry.value))
+        stack.push({ value: child, depth: entry.depth + 1 });
+    }
+  }
+  for (const key of ["model", "trigger", "from_mode", "to_mode"]) {
+    if (value[key] != null && typeof value[key] !== "string")
+      return { ok: false, reason: "malformed_payload" };
+  }
+  if (
+    value.source_version != null &&
+    (typeof value.source_version !== "number" ||
+      !Number.isSafeInteger(value.source_version) ||
+      value.source_version < 0)
+  )
+    return { ok: false, reason: "malformed_payload" };
+  const payload = value.payload;
+  if (
+    !isRecord(payload) ||
+    !Array.isArray(payload.messages) ||
+    payload.messages.length === 0
+  ) {
+    return { ok: false, reason: "malformed_payload" };
+  }
+  const ids = new Set<string>();
+  for (const message of payload.messages as unknown[]) {
+    if (
+      !isRecord(message) ||
+      typeof message.role !== "string" ||
+      !message.role.trim() ||
+      typeof message.message_id !== "string" ||
+      !message.message_id ||
+      ids.has(message.message_id) ||
+      !(
+        typeof message.content === "string" || Array.isArray(message.content)
+      ) ||
+      isLegacyContextSummary(message) ||
+      hasNonStaticReportMetadata(message)
+    ) {
+      return { ok: false, reason: "malformed_payload" };
+    }
+    ids.add(message.message_id);
+  }
+  return {
+    ok: true,
+    metadata: {
+      kind: "reconstructed_history",
+      schema_version: RECONSTRUCTED_HISTORY_SCHEMA_VERSION,
+      payload: { messages: payload.messages as ChatMessage[] },
+      source_version:
+        typeof value.source_version === "number" &&
+        Number.isFinite(value.source_version)
+          ? value.source_version
+          : undefined,
+      model: typeof value.model === "string" ? value.model : undefined,
+      trigger: typeof value.trigger === "string" ? value.trigger : undefined,
+      from_mode:
+        typeof value.from_mode === "string" ? value.from_mode : undefined,
+      to_mode: typeof value.to_mode === "string" ? value.to_mode : undefined,
+      metrics: value.metrics,
+    },
+  };
+}
+
+/**
+ * Reads the reconstructed-history report off a message, checking the flattened
+ * field first and then `extra`, mirroring `getCompressionReportMetadata`.
+ */
+/** Shared precise legacy recognition. Static reports never require rebuilding. */
+export function isLegacyContextSummary(message: {
+  role?: unknown;
+  extra?: unknown;
+  compression_report?: unknown;
+  compression?: unknown;
+  summarized_range?: unknown;
+  summarized_source_message_ids?: unknown;
+}): boolean {
+  const extra = isRecord(message.extra) ? message.extra : {};
+  const report = message.compression_report ?? extra.compression_report;
+  if (
+    isRecord(report) &&
+    (report.kind === "reconstructed_history" ||
+      (message.role === "compression_report" &&
+        report.kind === "chat_compression_report"))
+  )
+    return false;
+  const compression = message.compression ?? extra.compression;
+  return (
+    message.summarized_range != null ||
+    message.summarized_source_message_ids !== undefined ||
+    extra.summarized_source_message_ids !== undefined ||
+    (isRecord(compression) &&
+      (compression.kind === "llm_segment_summary" ||
+        compression.summarized_source_message_ids !== undefined))
+  );
+}
+
+export function getReconstructedHistoryMetadata(message: {
+  role?: unknown;
+  extra?: unknown;
+  compression_report?: unknown;
+}): ReconstructedHistoryParse | null {
+  const extra = isRecord(message.extra) ? message.extra : {};
+  const value =
+    message.compression_report !== undefined
+      ? message.compression_report
+      : extra.compression_report;
+  if (value === undefined || isLegacyContextSummary(message)) return null;
+  if (
+    isRecord(value) &&
+    value.kind === "chat_compression_report" &&
+    message.role === "compression_report"
+  )
+    return null;
+  if (message.role !== "compression_report")
+    return { ok: false, reason: "malformed_payload" };
+  return parseReconstructedHistoryMetadata(value);
+}
+
 export type CompressionReportExtra = Record<string, unknown> & {
-  compression_report?: ChatCompressionReportMetadata;
+  compression_report?: unknown;
 };
 
 export interface CompressionReportMessage extends BaseMessage {
@@ -899,7 +1085,7 @@ export interface CompressionReportMessage extends BaseMessage {
   content: string;
   summarization_tier?: SummarizationTier;
   summarized_token_estimate?: number;
-  compression_report?: ChatCompressionReportMetadata;
+  compression_report?: unknown;
   extra?: CompressionReportExtra;
 }
 
@@ -1243,7 +1429,7 @@ export function syntheticCompressionReportMessage(
       typeof msg.summarized_token_estimate === "number"
         ? msg.summarized_token_estimate
         : undefined,
-    compression_report: compressionReport ?? undefined,
+    compression_report: msg.compression_report ?? msg.extra?.compression_report,
     extra: withNormalizedExtraMetadata(
       msg.extra,
       "compression_report",

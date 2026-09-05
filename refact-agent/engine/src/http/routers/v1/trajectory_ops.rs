@@ -8,26 +8,94 @@ use uuid::Uuid;
 
 use crate::app_state::AppState;
 use crate::global_context::GlobalContext;
-use crate::chat::trajectory_ops::{
-    CompressOptions, HandoffOptions, TransformStats, compress_in_place,
-    demote_goal_ownership_for_branch, handoff_select, sanitize_messages_for_new_thread,
-};
+use crate::chat::trajectory_ops::{CompressOptions, TransformStats, compress_in_place};
 use crate::call_validation::ChatMessage;
-use crate::integrations::browser_runtime::find_runtime_by_chat_id;
 use crate::agentic::mode_transition::{
-    AgenticPathContext, GoalTransferResult, analyze_mode_transition, assemble_new_chat,
+    GoalTransferResult, ReconstructionRequest, reconstruct_context,
     insert_goal_messages_before_plan, transfer_goal_ownership,
 };
 use crate::chat::types::SessionState;
+use crate::tools::tool_handoff_to_mode::{persist_transition, transition_goal, transition_report};
+
+struct TransitionReservation {
+    session: Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+    marker: serde_json::Value,
+    fingerprint: serde_json::Value,
+    abort: Arc<std::sync::atomic::AtomicBool>,
+}
+
+use crate::tools::tool_handoff_to_mode::transition_fingerprint;
+
+impl TransitionReservation {
+    async fn acquire(
+        session: Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+    ) -> Result<Self, ScratchError> {
+        let mut source = session.lock().await;
+        if source.closed
+            || !matches!(
+                source.runtime.state,
+                SessionState::Idle | SessionState::Error | SessionState::Completed
+            )
+            || compression_attempt_active(&source)
+            || source.pending_mode_handoff.is_some()
+            || source.pending_context_rebuild.is_some()
+        {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                "Another context operation is pending or source is busy".into(),
+            ));
+        }
+        if source.draft_message.is_some() || source.stream_started_at.is_some() {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                "Source stream is not finished".into(),
+            ));
+        }
+        source
+            .abort_flag
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        source.set_runtime_state(SessionState::Idle, None);
+        let marker = serde_json::json!({"http_transition": Uuid::new_v4().to_string()});
+        source.pending_mode_handoff = Some(marker.clone());
+        let fingerprint = transition_fingerprint(&source);
+        let abort = source.abort_flag.clone();
+        drop(source);
+        Ok(Self {
+            session,
+            marker,
+            fingerprint,
+            abort,
+        })
+    }
+}
+
+impl Drop for TransitionReservation {
+    fn drop(&mut self) {
+        self.abort.store(true, std::sync::atomic::Ordering::SeqCst);
+        let session = self.session.clone();
+        let marker = self.marker.clone();
+        tokio::spawn(async move {
+            let mut source = session.lock().await;
+            if source.pending_mode_handoff.as_ref() == Some(&marker) {
+                source.pending_mode_handoff = None;
+            }
+        });
+    }
+}
+
 use crate::chat::get_or_create_session_with_trajectory;
-use crate::chat::summarization::{
-    ManualCompressionApplyResult, ManualCompressionPreview, apply_manual_segment_summarization,
-    compression_attempt_active, preview_manual_segment_summarization,
+use crate::chat::context_rebuild::{
+    ManualCompressionApplyResult, ManualCompressionPreview, apply_manual_context_rebuild,
+    compression_attempt_active, preview_manual_context_rebuild,
 };
 use refact_chat_api::GoalSnapshot;
 use refact_chat_history::trajectory_snapshot::TrajectorySnapshot;
 use crate::custom_error::ScratchError;
 use crate::yaml_configs::customization_registry::map_legacy_mode_to_id;
+
+fn transition_source_goal(session: &crate::chat::types::ChatSession) -> Option<GoalSnapshot> {
+    crate::tools::tool_handoff_to_mode::transition_source_goal(session)
+}
 
 fn canonical_transition_mode(raw_mode: &str) -> String {
     map_legacy_mode_to_id(raw_mode.trim()).to_string()
@@ -46,6 +114,7 @@ fn epoch_ms_now() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(test)]
 fn transfer_goal_into_transition_messages(
     source_messages: &[ChatMessage],
     source_goal: Option<&GoalSnapshot>,
@@ -71,6 +140,7 @@ fn transfer_goal_into_transition_messages(
     transferred_goal
 }
 
+#[cfg(test)]
 async fn persist_live_source_goal_transfer(
     gcx: Arc<GlobalContext>,
     chat_id: &str,
@@ -155,11 +225,8 @@ async fn create_initial_plan_document_for_transition(
 #[derive(Deserialize)]
 pub struct TransformRequest {
     pub options: CompressOptions,
-}
-
-#[derive(Deserialize)]
-pub struct HandoffRequest {
-    pub options: HandoffOptions,
+    #[serde(default)]
+    pub expected_trajectory_version: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -264,7 +331,7 @@ pub async fn handle_llm_compress_preview(
             session.trajectory_version,
         )
     };
-    let mut preview: ManualCompressionPreview = preview_manual_segment_summarization(
+    let mut preview: ManualCompressionPreview = preview_manual_context_rebuild(
         gcx,
         state,
         active,
@@ -292,7 +359,7 @@ pub async fn handle_llm_compress_apply(
         &chat_id,
     )
     .await;
-    let result: ManualCompressionApplyResult = apply_manual_segment_summarization(
+    let result: ManualCompressionApplyResult = apply_manual_context_rebuild(
         gcx.clone(),
         &session_arc,
         req.requested_model(),
@@ -312,6 +379,7 @@ pub async fn handle_llm_compress_apply(
 
 #[derive(Serialize)]
 pub struct TransformPreviewResponse {
+    pub trajectory_version: u64,
     pub stats: TransformStats,
     pub actions: Vec<String>,
 }
@@ -319,22 +387,6 @@ pub struct TransformPreviewResponse {
 #[derive(Serialize)]
 pub struct TransformApplyResponse {
     pub stats: TransformStats,
-}
-
-#[derive(Serialize)]
-pub struct HandoffPreviewResponse {
-    pub stats: TransformStats,
-    pub actions: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub llm_summary: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct HandoffApplyResponse {
-    pub new_chat_id: String,
-    pub stats: TransformStats,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub browser_runtime_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -388,32 +440,6 @@ fn describe_transform_actions(opts: &CompressOptions) -> Vec<String> {
     actions
 }
 
-fn describe_handoff_actions(opts: &HandoffOptions) -> Vec<String> {
-    let mut actions = Vec::new();
-    if opts.include_all_user_assistant_only {
-        actions.push(
-            "Include all user and assistant messages only (strip system, tools, context)"
-                .to_string(),
-        );
-    }
-    if opts.include_last_user_plus {
-        actions.push("Include last user message and all following".to_string());
-    }
-    if opts.include_all_opened_context {
-        actions.push("Include all opened context files".to_string());
-    }
-    if opts.include_all_edited_context {
-        actions.push("Include all edited context (diffs)".to_string());
-    }
-    if opts.include_agentic_tools {
-        actions.push("Include agentic tool calls and results".to_string());
-    }
-    if opts.llm_summary_for_excluded {
-        actions.push("Generate LLM summary for excluded content".to_string());
-    }
-    actions
-}
-
 pub async fn handle_transform_preview(
     State(app): State<AppState>,
     Path(chat_id): Path<String>,
@@ -431,15 +457,16 @@ pub async fn handle_transform_preview(
     )
     .await;
 
-    let mut messages = {
+    let (mut messages, trajectory_version) = {
         let session = session_arc.lock().await;
-        session.messages.clone()
+        (session.messages.clone(), session.trajectory_version)
     };
 
     let stats = compress_in_place(&mut messages, &req.options)
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let response = TransformPreviewResponse {
+        trajectory_version,
         stats,
         actions: describe_transform_actions(&req.options),
     };
@@ -485,6 +512,16 @@ pub async fn handle_transform_apply(
             ));
         }
 
+        if compression_attempt_active(&session)
+            || req
+                .expected_trajectory_version
+                .is_some_and(|v| v != session.trajectory_version)
+        {
+            return Err(ScratchError::new(
+                StatusCode::CONFLICT,
+                "Trajectory changed or compression is active".to_string(),
+            ));
+        }
         let stats = compress_in_place(&mut session.messages, &req.options)
             .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
@@ -513,169 +550,38 @@ pub async fn handle_transform_apply(
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
-pub async fn handle_handoff_preview(
-    State(app): State<AppState>,
-    Path(chat_id): Path<String>,
-    body_bytes: hyper::body::Bytes,
-) -> Result<Response<Body>, ScratchError> {
-    let gcx = app.gcx.clone();
-    let req: HandoffRequest = serde_json::from_slice(&body_bytes)
-        .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
-
-    let sessions = gcx.chat_sessions.clone();
-    let session_arc = get_or_create_session_with_trajectory(
-        AppState::from_gcx(gcx.clone()).await,
-        &sessions,
-        &chat_id,
-    )
-    .await;
-
-    let messages = {
-        let session = session_arc.lock().await;
-        session.messages.clone()
-    };
-
-    let (_, stats, _) = handoff_select(&messages, &req.options, gcx.clone(), false, &chat_id)
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let response = HandoffPreviewResponse {
-        stats,
-        actions: describe_handoff_actions(&req.options),
-        llm_summary: None,
-    };
-
-    let body = serde_json::to_vec(&response)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .body(Body::from(body))
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-}
-
-pub async fn handle_handoff_apply(
-    State(app): State<AppState>,
-    Path(chat_id): Path<String>,
-    body_bytes: hyper::body::Bytes,
-) -> Result<Response<Body>, ScratchError> {
-    let gcx = app.gcx.clone();
-    let req: HandoffRequest = serde_json::from_slice(&body_bytes)
-        .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
-
-    let sessions = gcx.chat_sessions.clone();
-    let session_arc = get_or_create_session_with_trajectory(
-        AppState::from_gcx(gcx.clone()).await,
-        &sessions,
-        &chat_id,
-    )
-    .await;
-
-    let (messages, thread, task_meta) = {
-        let session = session_arc.lock().await;
-        (
-            session.messages.clone(),
-            session.thread.clone(),
-            session.thread.task_meta.clone(),
+/// Hold the source epoch stable until the destination is durable, then transfer
+/// ownership. A failed reconstruction/save never overwrites newer source messages.
+async fn commit_transition_snapshot(
+    gcx: Arc<GlobalContext>,
+    session_arc: Arc<tokio::sync::Mutex<crate::chat::types::ChatSession>>,
+    source_version: u64,
+    snapshot: TrajectorySnapshot,
+    transferred_goal: &GoalTransferResult,
+    reservation: Option<&TransitionReservation>,
+) -> Result<(), String> {
+    let mut session = session_arc.lock().await;
+    if session.trajectory_version != source_version
+        || !matches!(
+            session.runtime.state,
+            SessionState::Idle | SessionState::Error
         )
-    };
-
-    let (selected_messages, stats, _) =
-        handoff_select(&messages, &req.options, gcx.clone(), true, &chat_id)
-            .await
-            .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let mut selected_messages = sanitize_messages_for_new_thread(&selected_messages);
-    demote_goal_ownership_for_branch(&mut selected_messages);
-
-    let new_chat_id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-
-    let mut snapshot = TrajectorySnapshot {
-        pending_deliveries: Vec::new(),
-        goal: None,
-        goal_ledger: Vec::new(),
-        goal_verification_blocked_until_ms: None,
-        compression_retry_after_ms: Default::default(),
-        chat_id: new_chat_id.clone(),
-        title: thread.title.clone(),
-        model: thread.model.clone(),
-        mode: thread.mode.clone(),
-        tool_use: thread.tool_use.clone(),
-        messages: selected_messages,
-        created_at: now,
-        boost_reasoning: thread.boost_reasoning.unwrap_or(false),
-        checkpoints_enabled: thread.checkpoints_enabled,
-        context_tokens_cap: thread.context_tokens_cap,
-        auto_compression_cap: thread.auto_compression_cap,
-        include_project_info: thread.include_project_info,
-        is_title_generated: false,
-        auto_approve_editing_tools: thread.auto_approve_editing_tools,
-        auto_approve_dangerous_commands: thread.auto_approve_dangerous_commands,
-        autonomous_no_confirm: thread.autonomous_no_confirm,
-        version: 1,
-        task_meta,
-        worktree: thread.worktree.clone(),
-        parent_id: Some(chat_id.clone()),
-        link_type: Some("handoff".to_string()),
-        root_chat_id: thread
-            .root_chat_id
-            .clone()
-            .or_else(|| Some(chat_id.clone())),
-        reasoning_effort: thread.reasoning_effort.clone(),
-        thinking_budget: thread.thinking_budget,
-        temperature: thread.temperature,
-        frequency_penalty: thread.frequency_penalty,
-        max_tokens: thread.max_tokens,
-        parallel_tool_calls: thread.parallel_tool_calls,
-        previous_response_id: None,
-        active_skill: None,
-        auto_enrichment_enabled: thread.auto_enrichment_enabled,
-        buddy_meta: None,
-        auto_compact_enabled: thread.auto_compact_enabled,
-        frozen_request_prefix: thread.frozen_request_prefix.clone(),
-        claude_code_identity: thread.claude_code_identity.clone(),
-        reactive_compact_attempts: None,
-        wake_up_at: None,
-        waiting_for_card_ids: Vec::new(),
-    };
-    reset_transition_snapshot_identity(&mut snapshot);
-
-    save_trajectory_snapshot_with_parent(gcx.clone(), snapshot, &chat_id, "handoff")
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let browser_runtime_id = if let Some((runtime_id, runtime_arc)) = find_runtime_by_chat_id(
-        crate::app_state::AppState::from_gcx(gcx.clone()).await,
-        &chat_id,
-    )
-    .await
+        || compression_attempt_active(&session)
+        || session.closed
+        || session.pending_context_rebuild.is_some()
+        || reservation.is_some_and(|r| {
+            session.pending_mode_handoff.as_ref() != Some(&r.marker)
+                || transition_fingerprint(&session) != r.fingerprint
+                || session.abort_flag.load(std::sync::atomic::Ordering::SeqCst)
+        })
+        || (reservation.is_none() && session.pending_mode_handoff.is_some())
     {
-        let mut rt = runtime_arc.lock().await;
-        rt.detach();
-        rt.reattach(&new_chat_id);
-        rt.touch();
-        drop(rt);
-        Some(runtime_id)
-    } else {
-        None
-    };
-
-    let response = HandoffApplyResponse {
-        new_chat_id,
-        stats,
-        browser_runtime_id,
-    };
-
-    let body = serde_json::to_vec(&response)
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "application/json")
-        .body(Body::from(body))
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        return Err("Source trajectory changed during reconstruction".to_string());
+    }
+    persist_transition(gcx, &mut session, &snapshot, transferred_goal).await
 }
 
+#[cfg(test)]
 async fn save_trajectory_snapshot_with_parent(
     gcx: Arc<GlobalContext>,
     mut snapshot: TrajectorySnapshot,
@@ -722,14 +628,16 @@ pub async fn handle_mode_transition_apply(
     )
     .await;
 
-    let (messages, thread, task_meta, source_goal, session_state) = {
+    let reservation = TransitionReservation::acquire(session_arc.clone()).await?;
+    let (messages, thread, task_meta, source_goal, session_state, source_version) = {
         let session = session_arc.lock().await;
         (
             session.messages.clone(),
             session.thread.clone(),
             session.thread.task_meta.clone(),
-            session.goal.clone(),
+            transition_source_goal(&session),
             session.runtime.state.clone(),
+            session.trajectory_version,
         )
     };
 
@@ -748,37 +656,48 @@ pub async fn handle_mode_transition_apply(
         ));
     }
 
-    let decisions = analyze_mode_transition(
+    let rebuilt = reconstruct_context(
         gcx.clone(),
-        &messages,
-        &target_mode,
-        &req.target_mode_description,
-        Some(chat_id.as_str()),
+        ReconstructionRequest {
+            messages: &messages,
+            target_mode: &target_mode,
+            target_mode_description: &req.target_mode_description,
+            parent_chat_id: Some(chat_id.as_str()),
+            model_override: None,
+            abort_flag: Some(session_arc.lock().await.abort_flag.clone()),
+            hints: None,
+            target_budget_symbols: None,
+            preserve_goal_messages: false,
+        },
     )
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let path_context = { AgenticPathContext::from_context(&*gcx) };
-    let mut new_messages = assemble_new_chat(&path_context, &messages, &decisions)
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut new_messages = rebuilt.messages;
+    let _decisions = rebuilt.decisions;
 
     let new_chat_id = Uuid::new_v4().to_string();
-    let transferred_goal = transfer_goal_into_transition_messages(
+    let transferred_goal = transition_goal(
         &messages,
         source_goal.as_ref(),
-        &[],
         &chat_id,
         &new_chat_id,
         &target_mode,
-        &mut new_messages,
-        epoch_ms_now(),
-    );
-    persist_live_source_goal_transfer(gcx.clone(), &chat_id, &transferred_goal)
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let new_messages = sanitize_messages_for_new_thread(&new_messages);
+    )
+    .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+    if transferred_goal.transferred() {
+        insert_goal_messages_before_plan(
+            &mut new_messages,
+            transferred_goal.target_messages.clone(),
+        );
+    }
+    let new_messages = transition_report(
+        &new_messages,
+        source_version,
+        rebuilt.model,
+        thread.mode.clone(),
+        target_mode.clone(),
+    )
+    .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let now = chrono::Utc::now().to_rfc3339();
 
     let root_chat_id = thread
@@ -789,7 +708,6 @@ pub async fn handle_mode_transition_apply(
     let mut snapshot = TrajectorySnapshot {
         pending_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
-        compression_retry_after_ms: Default::default(),
         goal: transferred_goal.target_goal.clone(),
         goal_ledger: transferred_goal
             .target_goal
@@ -809,6 +727,7 @@ pub async fn handle_mode_transition_apply(
         checkpoints_enabled: thread.checkpoints_enabled,
         context_tokens_cap: thread.context_tokens_cap,
         auto_compression_cap: thread.auto_compression_cap,
+        auto_compression_cap_pending: thread.auto_compression_cap.is_none(),
         include_project_info: thread.include_project_info,
         is_title_generated: false,
         auto_approve_editing_tools: thread.auto_approve_editing_tools,
@@ -839,9 +758,16 @@ pub async fn handle_mode_transition_apply(
     };
     reset_transition_snapshot_identity(&mut snapshot);
 
-    save_trajectory_snapshot_with_parent(gcx.clone(), snapshot, &chat_id, "mode_transition")
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    commit_transition_snapshot(
+        gcx.clone(),
+        session_arc,
+        source_version,
+        snapshot,
+        &transferred_goal,
+        Some(&reservation),
+    )
+    .await
+    .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let response = ModeTransitionApplyResponse {
         new_chat_id,
@@ -896,13 +822,15 @@ pub async fn handle_planner_from_transition(
     )
     .await;
 
-    let (messages, thread, source_goal, session_state) = {
+    let reservation = TransitionReservation::acquire(session_arc.clone()).await?;
+    let (messages, thread, source_goal, session_state, source_version) = {
         let session = session_arc.lock().await;
         (
             session.messages.clone(),
             session.thread.clone(),
-            session.goal.clone(),
+            transition_source_goal(&session),
             session.runtime.state.clone(),
+            session.trajectory_version,
         )
     };
 
@@ -920,39 +848,50 @@ pub async fn handle_planner_from_transition(
         ));
     }
 
-    let decisions = analyze_mode_transition(
+    let rebuilt = reconstruct_context(
         gcx.clone(),
-        &messages,
-        &target_mode,
-        &req.target_mode_description,
-        Some(req.source_chat_id.as_str()),
+        ReconstructionRequest {
+            messages: &messages,
+            target_mode: &target_mode,
+            target_mode_description: &req.target_mode_description,
+            parent_chat_id: Some(req.source_chat_id.as_str()),
+            model_override: None,
+            abort_flag: Some(session_arc.lock().await.abort_flag.clone()),
+            hints: None,
+            target_budget_symbols: None,
+            preserve_goal_messages: false,
+        },
     )
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let path_context = { AgenticPathContext::from_context(&*gcx) };
-    let mut new_messages = assemble_new_chat(&path_context, &messages, &decisions)
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let mut new_messages = rebuilt.messages;
+    let decisions = rebuilt.decisions;
 
     let new_chat_id = crate::tasks::storage::next_planner_chat_id(gcx.clone(), &task_id)
         .await
         .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let transferred_goal = transfer_goal_into_transition_messages(
+    let transferred_goal = transition_goal(
         &messages,
         source_goal.as_ref(),
-        &[],
         &req.source_chat_id,
         &new_chat_id,
         &target_mode,
-        &mut new_messages,
-        epoch_ms_now(),
-    );
-    persist_live_source_goal_transfer(gcx.clone(), &req.source_chat_id, &transferred_goal)
-        .await
-        .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    let new_messages = sanitize_messages_for_new_thread(&new_messages);
+    )
+    .map_err(|e| ScratchError::new(StatusCode::BAD_REQUEST, e))?;
+    if transferred_goal.transferred() {
+        insert_goal_messages_before_plan(
+            &mut new_messages,
+            transferred_goal.target_messages.clone(),
+        );
+    }
+    let new_messages = transition_report(
+        &new_messages,
+        source_version,
+        rebuilt.model,
+        thread.mode.clone(),
+        target_mode.clone(),
+    )
+    .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let now = chrono::Utc::now().to_rfc3339();
 
     let task_meta = crate::chat::types::TaskMeta {
@@ -968,7 +907,6 @@ pub async fn handle_planner_from_transition(
     let mut snapshot = TrajectorySnapshot {
         pending_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
-        compression_retry_after_ms: Default::default(),
         goal: transferred_goal.target_goal.clone(),
         goal_ledger: transferred_goal
             .target_goal
@@ -992,6 +930,7 @@ pub async fn handle_planner_from_transition(
         checkpoints_enabled: thread.checkpoints_enabled,
         context_tokens_cap: thread.context_tokens_cap,
         auto_compression_cap: thread.auto_compression_cap,
+        auto_compression_cap_pending: thread.auto_compression_cap.is_none(),
         include_project_info: thread.include_project_info,
         is_title_generated: false,
         auto_approve_editing_tools: thread.auto_approve_editing_tools,
@@ -1023,11 +962,13 @@ pub async fn handle_planner_from_transition(
     reset_transition_snapshot_identity(&mut snapshot);
 
     // task_meta is set, so this saves into the task's planner directory
-    save_trajectory_snapshot_with_parent(
+    commit_transition_snapshot(
         gcx.clone(),
+        session_arc,
+        source_version,
         snapshot,
-        &req.source_chat_id,
-        "mode_transition",
+        &transferred_goal,
+        Some(&reservation),
     )
     .await
     .map_err(|e| ScratchError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -1066,6 +1007,296 @@ mod tests {
     use super::*;
     use refact_chat_api::{GoalAttempt, GoalBudget, GoalProgress, GoalStatus};
     use serde_json::json;
+
+    #[tokio::test]
+    async fn transition_commit_rejects_stale_source_before_destination_save() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let session = Arc::new(tokio::sync::Mutex::new(
+            crate::chat::types::ChatSession::new("source".to_string()),
+        ));
+        let version = session.lock().await.trajectory_version;
+        let transferred = transfer_goal_ownership(&[], None, &[], "source", "target", "agent", 1);
+        let snapshot = transition_identity_snapshot("mode_transition");
+        let error =
+            commit_transition_snapshot(gcx, session, version + 1, snapshot, &transferred, None)
+                .await
+                .unwrap_err();
+        assert!(error.contains("Source trajectory changed"));
+    }
+
+    #[tokio::test]
+    async fn failed_destination_persistence_leaves_source_goal_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        std::fs::write(dir.path().join(".refact"), "not a directory").unwrap();
+        let (source, _) = source_session_with_active_goal("source");
+        let before = serde_json::to_value(&source.messages).unwrap();
+        let version = source.trajectory_version;
+        let transfer = transfer_goal_ownership(
+            &source.messages,
+            source.goal.as_ref(),
+            &[],
+            "source",
+            "target",
+            "agent",
+            1,
+        );
+        let session = Arc::new(tokio::sync::Mutex::new(source));
+        let result = commit_transition_snapshot(
+            gcx,
+            session.clone(),
+            version,
+            transition_identity_snapshot("mode_transition"),
+            &transfer,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+        let source = session.lock().await;
+        assert_eq!(serde_json::to_value(&source.messages).unwrap(), before);
+        assert!(source.goal.as_ref().unwrap().active);
+    }
+
+    #[test]
+    fn report_transfer_preserves_archive_and_ledger_stop_wins() {
+        let (mut session, _) = source_session_with_active_goal("source");
+        let mut raw = vec![ChatMessage::new("user".into(), "immutable archive".into())];
+        raw.extend(
+            transition_report(
+                &session.messages,
+                1,
+                "model".into(),
+                "agent".into(),
+                "agent".into(),
+            )
+            .unwrap(),
+        );
+        let archive = serde_json::to_vec(&raw[0]).unwrap();
+        let transfer =
+            transition_goal(&raw, session.goal.as_ref(), "source", "target", "agent").unwrap();
+        assert!(transfer.transferred());
+        assert_eq!(
+            serde_json::to_vec(&transfer.source_messages[0]).unwrap(),
+            archive
+        );
+        assert_eq!(transfer.source_messages.len(), raw.len());
+        let report = transition_report(
+            &transfer.target_messages,
+            1,
+            "model".into(),
+            "agent".into(),
+            "agent".into(),
+        )
+        .unwrap();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].role, "compression_report");
+        assert!(refact_core::active_context::active_context(&report)
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| m.role == "goal"));
+        session.goal_ledger_append(refact_chat_api::GoalLedgerOp::StatusChanged {
+            from: GoalStatus::Active,
+            to: GoalStatus::Stopped,
+            reason: "user stop".into(),
+        });
+        let goal = transition_source_goal(&session);
+        assert!(
+            !transition_goal(&raw, goal.as_ref(), "source", "target", "agent")
+                .unwrap()
+                .transferred()
+        );
+    }
+
+    #[tokio::test]
+    async fn staged_destination_is_goal_free_when_source_save_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let (mut source, _) = source_session_with_active_goal("invalid/source");
+        let before = serde_json::to_vec(&source.messages).unwrap();
+        let transfer = transition_goal(
+            &source.messages,
+            source.goal.as_ref(),
+            "invalid/source",
+            "staged-target",
+            "agent",
+        )
+        .unwrap();
+        let mut snapshot = transition_identity_snapshot("mode_transition");
+        snapshot.chat_id = "staged-target".into();
+        snapshot.parent_id = None;
+        snapshot.root_chat_id = None;
+        snapshot.goal = transfer.target_goal.clone();
+        snapshot.goal_ledger = refact_chat_api::seed_transferred_goal_ledger(
+            snapshot.goal.as_ref().unwrap(),
+            "invalid/source",
+            1,
+        );
+        snapshot.messages = transition_report(
+            &transfer.target_messages,
+            1,
+            "model".into(),
+            "agent".into(),
+            "agent".into(),
+        )
+        .unwrap();
+        let error = persist_transition(gcx.clone(), &mut source, &snapshot, &transfer)
+            .await
+            .unwrap_err();
+        assert!(error.contains("inactive destination staged-target"));
+        assert_eq!(serde_json::to_vec(&source.messages).unwrap(), before);
+        assert!(source.goal.as_ref().unwrap().active);
+        let saved: serde_json::Value = serde_json::from_slice(
+            &tokio::fs::read(
+                crate::chat::trajectories::find_trajectory_path(gcx.clone(), "staged-target")
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(saved.get("goal").is_none_or(serde_json::Value::is_null));
+        let messages: Vec<ChatMessage> = serde_json::from_value(saved["messages"].clone()).unwrap();
+        assert_eq!(messages.len(), 1);
+        let active = refact_core::active_context::active_context(&messages).unwrap();
+        assert!(!active.messages.iter().any(|m| m.role == "goal"));
+    }
+
+    #[tokio::test]
+    async fn reservation_rejects_concurrent_rebuild_and_settings_change() {
+        let gcx = crate::global_context::tests::make_test_gcx().await;
+        let source = Arc::new(tokio::sync::Mutex::new(
+            crate::chat::types::ChatSession::new("source".into()),
+        ));
+        let reservation = TransitionReservation::acquire(source.clone())
+            .await
+            .unwrap();
+        assert!(TransitionReservation::acquire(source.clone())
+            .await
+            .is_err());
+        let version = source.lock().await.trajectory_version;
+        source.lock().await.thread.model = "changed".into();
+        let transferred = transfer_goal_ownership(&[], None, &[], "source", "target", "agent", 1);
+        let result = commit_transition_snapshot(
+            gcx,
+            source,
+            version,
+            transition_identity_snapshot("mode_transition"),
+            &transferred,
+            Some(&reservation),
+        )
+        .await;
+        assert!(result.unwrap_err().contains("Source trajectory changed"));
+    }
+
+    #[tokio::test]
+    async fn staged_commit_under_source_lock_saves_single_owner_and_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let gcx = crate::global_context::tests::make_test_gcx_with_dirs(
+            dir.path().join("cache"),
+            dir.path().join("config"),
+        )
+        .await;
+        *gcx.documents_state.workspace_folders.lock().unwrap() = vec![dir.path().to_path_buf()];
+        let (mut session, _) = source_session_with_active_goal("durable-source");
+        let mut raw = vec![ChatMessage::new("user".into(), "archive".into())];
+        raw.extend(
+            transition_report(
+                &session.messages,
+                1,
+                "model".into(),
+                "agent".into(),
+                "agent".into(),
+            )
+            .unwrap(),
+        );
+        session.messages = raw;
+        let before = serde_json::to_vec(&session.messages).unwrap();
+        let transfer = transition_goal(
+            &session.messages,
+            session.goal.as_ref(),
+            "durable-source",
+            "durable-target",
+            "agent",
+        )
+        .unwrap();
+        let mut snapshot = transition_identity_snapshot("mode_transition");
+        snapshot.chat_id = "durable-target".into();
+        snapshot.parent_id = None;
+        snapshot.root_chat_id = None;
+        snapshot.goal = transfer.target_goal.clone();
+        snapshot.goal_ledger = refact_chat_api::seed_transferred_goal_ledger(
+            snapshot.goal.as_ref().unwrap(),
+            "durable-source",
+            1,
+        );
+        snapshot.messages = transition_report(
+            &transfer.target_messages,
+            1,
+            "model".into(),
+            "agent".into(),
+            "agent".into(),
+        )
+        .unwrap();
+        let session = Arc::new(tokio::sync::Mutex::new(session));
+        gcx.chat_sessions
+            .write()
+            .await
+            .insert("durable-source".into(), session.clone());
+        let mut source = session.lock().await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            persist_transition(gcx.clone(), &mut source, &snapshot, &transfer),
+        )
+        .await
+        .expect("source lock must not deadlock persistence")
+        .unwrap();
+        assert_eq!(serde_json::to_vec(&source.messages).unwrap(), before);
+        assert_eq!(
+            source.goal.as_ref().unwrap().status,
+            GoalStatus::Transferred
+        );
+        for (id, active) in [("durable-source", false), ("durable-target", true)] {
+            let saved: serde_json::Value = serde_json::from_slice(
+                &tokio::fs::read(
+                    crate::chat::trajectories::find_trajectory_path(gcx.clone(), id)
+                        .await
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(saved["goal"]["active"], active);
+            let messages: Vec<ChatMessage> =
+                serde_json::from_value(saved["messages"].clone()).unwrap();
+            if !active {
+                assert_eq!(serde_json::to_vec(&messages).unwrap(), before);
+            } else {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].role, "compression_report");
+            }
+        }
+    }
+
+    #[test]
+    fn static_transform_request_accepts_expected_version() {
+        let req: TransformRequest =
+            serde_json::from_value(json!({"options": {}, "expected_trajectory_version": 42}))
+                .unwrap();
+        assert_eq!(req.expected_trajectory_version, Some(42));
+    }
 
     #[test]
     fn llm_compress_request_blank_model_uses_automatic_resolution() {
@@ -1113,7 +1344,6 @@ mod tests {
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
-            compression_retry_after_ms: Default::default(),
             chat_id: "transition-identity".to_string(),
             title: String::new(),
             model: "gpt-4".to_string(),
@@ -1128,6 +1358,7 @@ mod tests {
             checkpoints_enabled: true,
             context_tokens_cap: None,
             auto_compression_cap: None,
+            auto_compression_cap_pending: true,
             include_project_info: true,
             is_title_generated: false,
             auto_approve_editing_tools: false,
@@ -1427,16 +1658,6 @@ mod tests {
     }
 
     #[test]
-    fn trajectory_ops_handoff_snapshot_does_not_copy_source_identity() {
-        let snapshot = transition_identity_snapshot("handoff");
-
-        assert_eq!(snapshot.link_type.as_deref(), Some("handoff"));
-        assert!(snapshot.previous_response_id.is_none());
-        assert!(snapshot.frozen_request_prefix.is_none());
-        assert!(snapshot.claude_code_identity.is_none());
-    }
-
-    #[test]
     fn mode_transition_response_serializes_optional_planner_metadata() {
         let response = ModeTransitionApplyResponse {
             new_chat_id: "planner-chat".to_string(),
@@ -1514,7 +1735,6 @@ mod tests {
             goal: None,
             goal_ledger: Vec::new(),
             goal_verification_blocked_until_ms: None,
-            compression_retry_after_ms: Default::default(),
             chat_id: "transition-chat".to_string(),
             title: String::new(),
             model: "gpt-4".to_string(),
@@ -1529,6 +1749,7 @@ mod tests {
             checkpoints_enabled: true,
             context_tokens_cap: None,
             auto_compression_cap: None,
+            auto_compression_cap_pending: true,
             include_project_info: true,
             is_title_generated: false,
             auto_approve_editing_tools: false,

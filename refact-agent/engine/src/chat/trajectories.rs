@@ -718,7 +718,6 @@ pub struct LoadedTrajectory {
     pub goal: Option<GoalSnapshot>,
     pub goal_ledger: Vec<GoalLedgerEntry>,
     pub goal_verification_blocked_until_ms: Option<u64>,
-    pub compression_retry_after_ms: std::collections::BTreeMap<String, u64>,
     pub created_at: String,
     pub updated_at: String,
     pub wake_up_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -779,7 +778,6 @@ pub(crate) fn trajectory_snapshot_from_session(session: &ChatSession) -> Traject
     snapshot.goal = session.goal.clone();
     snapshot.goal_ledger = session.goal_ledger.clone();
     snapshot.goal_verification_blocked_until_ms = session.goal_verification_blocked_until_ms;
-    snapshot.compression_retry_after_ms = session.compression_retry_after_ms.clone();
     snapshot.pending_deliveries = session.pending_deliveries_for_snapshot();
     span.finish(
         PerfOutcome::Success,
@@ -1825,6 +1823,11 @@ pub fn ensure_frozen_prefix(
     }
 }
 
+fn parse_stored_messages(value: serde_json::Value) -> Result<Vec<ChatMessage>, serde_json::Error> {
+    // Reconstruction payloads deliberately remain opaque extras for archive browsing.
+    serde_json::from_value(value)
+}
+
 fn fix_tool_call_indexes(messages: &mut [ChatMessage]) {
     for msg in messages.iter_mut() {
         if let Some(ref mut tool_calls) = msg.tool_calls {
@@ -2266,6 +2269,7 @@ fn is_known_trajectory_top_level_key(key: &str) -> bool {
             | "checkpoints_enabled"
             | "context_tokens_cap"
             | "auto_compression_cap"
+            | "auto_compression_cap_pending"
             | "include_project_info"
             | "isTitleGenerated"
             | "auto_approve_editing_tools"
@@ -2296,7 +2300,6 @@ fn is_known_trajectory_top_level_key(key: &str) -> bool {
             | "goal"
             | "goal_ledger"
             | "goal_verification_blocked_until_ms"
-            | "compression_retry_after_ms"
             | "browser_meta"
     )
 }
@@ -2844,18 +2847,21 @@ async fn load_trajectory_candidate(
         .and_then(|object| object.remove("pending_deliveries"))
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default();
-    let compression_retry_after_ms = t
-        .as_object_mut()
-        .and_then(|object| object.remove("compression_retry_after_ms"))
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default();
     let (messages, goal_ledger, goal): (
         Vec<ChatMessage>,
         Vec<GoalLedgerEntry>,
         Option<GoalSnapshot>,
     ) = tokio::task::spawn_blocking(move || {
-        let mut messages: Vec<ChatMessage> =
-            serde_json::from_value(messages_value).unwrap_or_default();
+        // Nested reconstruction payloads stay opaque in `extra` during load.
+        // Invalid boundaries remain browsable and are rejected only by the send
+        // projection. Never replace a failed transcript parse with empty history.
+        let mut messages: Vec<ChatMessage> = match parse_stored_messages(messages_value) {
+            Ok(messages) => messages,
+            Err(error) => {
+                tracing::warn!(%error, "Invalid stored trajectory messages; refusing empty-history fallback");
+                return None;
+            }
+        };
         fix_tool_call_indexes(&mut messages);
 
         for (message_index, msg) in messages.iter_mut().enumerate() {
@@ -2930,7 +2936,7 @@ async fn load_trajectory_candidate(
         let goal = super::session::goal_snapshot_from_messages(&messages, goal_prior.as_ref())
             .or(goal_prior)
             .map(clamp_goal_snapshot_for_load);
-        (messages, goal_ledger, goal)
+        Some((messages, goal_ledger, goal))
     })
     .await
     .map_err(|e| {
@@ -2939,7 +2945,7 @@ async fn load_trajectory_candidate(
             chat_id, e
         );
     })
-    .ok()?;
+    .ok()??;
 
     let task_meta: Option<super::types::TaskMeta> = t
         .get("task_meta")
@@ -3034,6 +3040,10 @@ async fn load_trajectory_candidate(
             .get("context_tokens_cap")
             .and_then(|v| v.as_u64())
             .map(|n| n as usize),
+        auto_compression_cap_pending: t
+            .get("auto_compression_cap_pending")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         auto_compression_cap: t
             .get("auto_compression_cap")
             .and_then(|v| v.as_u64())
@@ -3150,7 +3160,6 @@ async fn load_trajectory_candidate(
         pending_deliveries,
         goal_ledger,
         goal_verification_blocked_until_ms,
-        compression_retry_after_ms,
         source_path: traj_path,
         messages,
         thread,
@@ -3433,7 +3442,6 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         goal_ledger: Vec::new(),
         pending_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
-        compression_retry_after_ms: Default::default(),
         chat_id: chat_id.to_string(),
         title: String::new(),
         model: String::new(),
@@ -3449,6 +3457,7 @@ I'm your **Task Planner**. I handle the complete task lifecycle - from investiga
         checkpoints_enabled: true,
         context_tokens_cap: None,
         auto_compression_cap: None,
+        auto_compression_cap_pending: true,
         include_project_info: true,
         is_title_generated: false,
         auto_approve_editing_tools: true,
@@ -3514,7 +3523,6 @@ pub async fn save_trajectory_as_with_intent_checked(
         goal_ledger: Vec::new(),
         pending_deliveries: Vec::new(),
         goal_verification_blocked_until_ms: None,
-        compression_retry_after_ms: Default::default(),
         chat_id: thread.id.clone(),
         title: thread.title.clone(),
         model: thread.model.clone(),
@@ -3526,6 +3534,7 @@ pub async fn save_trajectory_as_with_intent_checked(
         checkpoints_enabled: thread.checkpoints_enabled,
         context_tokens_cap: thread.context_tokens_cap,
         auto_compression_cap: thread.auto_compression_cap,
+        auto_compression_cap_pending: thread.auto_compression_cap_pending,
         include_project_info: thread.include_project_info,
         is_title_generated: thread.is_title_generated,
         auto_approve_editing_tools: thread.auto_approve_editing_tools,
@@ -4109,6 +4118,7 @@ async fn save_trajectory_snapshot_inner(
         && snapshot.frozen_request_prefix.is_none()
         && snapshot.goal.is_none()
         && snapshot.auto_compression_cap.is_none()
+        && !snapshot.auto_compression_cap_pending
         && snapshot.title.is_empty()
         && existing_no_meta_path.is_none()
     {
@@ -4241,6 +4251,7 @@ async fn save_trajectory_snapshot_inner(
         "checkpoints_enabled": snapshot.checkpoints_enabled,
         "context_tokens_cap": snapshot.context_tokens_cap,
         "auto_compression_cap": snapshot.auto_compression_cap,
+        "auto_compression_cap_pending": snapshot.auto_compression_cap_pending,
         "include_project_info": snapshot.include_project_info,
         "isTitleGenerated": snapshot.is_title_generated,
         "auto_approve_editing_tools": snapshot.auto_approve_editing_tools,
@@ -4306,9 +4317,6 @@ async fn save_trajectory_snapshot_inner(
     }
     if let Some(blocked_until_ms) = snapshot.goal_verification_blocked_until_ms {
         trajectory["goal_verification_blocked_until_ms"] = json!(blocked_until_ms);
-    }
-    if !snapshot.compression_retry_after_ms.is_empty() {
-        trajectory["compression_retry_after_ms"] = json!(snapshot.compression_retry_after_ms);
     }
     if let Some(ref worktree) = snapshot.worktree {
         trajectory["worktree"] = serde_json::to_value(worktree).unwrap_or_default();
@@ -4544,8 +4552,24 @@ async fn save_trajectory_snapshot_inner(
             .unwrap_or_else(|| snapshot.chat_id.clone());
         let sessions = app.chat.sessions.clone();
         let source = TrajectorySourceIdentity::Normal;
-        let (session_state, session_error, session_worktree) =
-            get_session_runtime_for_trajectory_source(&sessions, &snapshot.chat_id, &source).await;
+        let live_session = sessions.read().await.get(&snapshot.chat_id).cloned();
+        let runtime = live_session.as_ref().and_then(|session| {
+            let session = session.try_lock().ok()?;
+            Some(if source.matches_session(&session) {
+                (
+                    session.runtime.state.to_string(),
+                    session.runtime.error.clone(),
+                    session.thread.worktree.clone(),
+                )
+            } else {
+                (SessionState::Idle.to_string(), None, None)
+            })
+        });
+        let (session_state, session_error, session_worktree) = match runtime {
+            Some((state, error, worktree)) => (Some(state), error, worktree),
+            None if live_session.is_none() => (Some(SessionState::Idle.to_string()), None, None),
+            None => (None, None, None),
+        };
         let (total_lines_added, total_lines_removed) = line_changes.unwrap_or_default();
         let (tasks_total, tasks_done, tasks_failed) = task_progress.unwrap_or_default();
         let token_totals = token_totals.unwrap_or_default();
@@ -4557,7 +4581,7 @@ async fn save_trajectory_snapshot_inner(
                 updated_at: Some(updated_at),
                 title: Some(trajectory_meta_title(&snapshot.title)),
                 is_title_generated: Some(snapshot.is_title_generated),
-                session_state: Some(session_state),
+                session_state,
                 error: session_error,
                 message_count: Some(message_count),
                 parent_id: snapshot.parent_id.clone(),
@@ -5193,7 +5217,6 @@ fn apply_loaded_external_update_to_session(
     session.messages = loaded.messages;
     session.restore_pending_deliveries(loaded.pending_deliveries);
     session.thread = loaded.thread;
-    session.compression_retry_after_ms = loaded.compression_retry_after_ms;
     session.reset_compaction_runtime_state();
     session.goal_ledger = loaded.goal_ledger;
     session.goal_verification_blocked_until_ms = loaded.goal_verification_blocked_until_ms;
@@ -8333,6 +8356,25 @@ pub async fn handle_v1_trajectories_subscribe(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn malformed_nested_report_remains_browsable_without_emptying_archive() {
+        let raw = serde_json::json!([
+            {"role":"user", "content":"ARCHIVED_LOAD_SENTINEL"},
+            {"role":"compression_report", "content":"invalid boundary", "compression_report":{
+                "kind":"reconstructed_history", "schema_version":1,
+                "payload":{"messages":"not an array"}
+            }}
+        ]);
+        let messages = super::parse_stored_messages(raw).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0].content.content_text_only(),
+            "ARCHIVED_LOAD_SENTINEL"
+        );
+        assert!(refact_core::active_context::active_context(&messages).is_err());
+        assert!(super::parse_stored_messages(serde_json::json!([{"role":42}])).is_err());
+    }
+
     use super::*;
     use crate::chat::diagnostics::{is_ui_only_message, make_ui_only_error_message};
     use crate::chat::perf_diagnostics::{self, MemoryPerfSink, PerfClock, PerfRecorder};
@@ -10915,7 +10957,6 @@ mod tests {
             goal_ledger: Vec::new(),
             pending_deliveries: Vec::new(),
             goal_verification_blocked_until_ms: None,
-            compression_retry_after_ms: Default::default(),
             chat_id: chat_id.to_string(),
             title: title.to_string(),
             model: "model".to_string(),
@@ -10927,6 +10968,7 @@ mod tests {
             checkpoints_enabled: true,
             context_tokens_cap: None,
             auto_compression_cap: None,
+            auto_compression_cap_pending: false,
             include_project_info: true,
             is_title_generated: true,
             auto_approve_editing_tools: false,
@@ -11773,6 +11815,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_new_chat_pending_cap_survives_real_save_load_and_model_late() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "empty-pending-cap";
+        let mut snapshot = test_snapshot(chat_id, "", Vec::new());
+        snapshot.auto_compression_cap_pending = true;
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+        let mut loaded = load_trajectory_for_chat(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        assert!(loaded.messages.is_empty());
+        assert!(loaded.thread.auto_compression_cap_pending);
+        assert!(loaded.thread.resolve_pending_compression_cap(Some(1000)));
+        assert_eq!(loaded.thread.auto_compression_cap, Some(900));
+        let path = find_trajectory_path(gcx.clone(), chat_id).await.unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap_pending");
+        tokio::fs::write(path, serde_json::to_vec(&value).unwrap())
+            .await
+            .unwrap();
+        let mut legacy = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert!(legacy.messages.is_empty());
+        assert!(!legacy.thread.resolve_pending_compression_cap(Some(1000)));
+        assert_eq!(legacy.thread.auto_compression_cap, None);
+    }
+
+    #[tokio::test]
     async fn auto_compression_cap_survives_real_trajectory_save_and_load() {
         let dir = tempfile::tempdir().unwrap();
         let (gcx, _) = make_app_with_workspace(dir.path()).await;
@@ -11799,10 +11874,80 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("auto_compression_cap");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap_pending");
         tokio::fs::write(&path, serde_json::to_vec(&value).unwrap())
             .await
             .unwrap();
-        let legacy = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        let mut legacy = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(legacy.thread.auto_compression_cap, None);
+        assert!(!legacy.thread.auto_compression_cap_pending);
+        assert!(!legacy.thread.resolve_pending_compression_cap(Some(128_000)));
+        assert_eq!(legacy.thread.auto_compression_cap, None);
+    }
+
+    #[tokio::test]
+    async fn pending_new_chat_cap_survives_empty_first_save_and_model_late_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "pending-new-chat-cap";
+        let mut snapshot = test_snapshot(chat_id, "", Vec::new());
+        snapshot.auto_compression_cap_pending = true;
+        snapshot.context_tokens_cap = Some(100_000);
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+        let mut loaded = load_trajectory_for_chat(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        assert!(loaded.messages.is_empty());
+        assert!(loaded.thread.auto_compression_cap_pending);
+        assert!(!loaded.thread.resolve_pending_compression_cap(None));
+        assert_eq!(loaded.thread.auto_compression_cap, None);
+        assert!(loaded.thread.resolve_pending_compression_cap(Some(80_000)));
+        assert_eq!(loaded.thread.auto_compression_cap, Some(72_000));
+        save_trajectory_as(gcx.clone(), &loaded.thread, &loaded.messages).await;
+        let restored = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert_eq!(restored.thread.auto_compression_cap, Some(72_000));
+        assert!(!restored.thread.auto_compression_cap_pending);
+    }
+
+    #[tokio::test]
+    async fn new_empty_chat_default_provenance_survives_restart_before_model_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, _) = make_app_with_workspace(dir.path()).await;
+        let chat_id = "new-chat-pending-default";
+        let mut snapshot = test_snapshot(chat_id, "", Vec::new());
+        snapshot.auto_compression_cap_pending = true;
+        snapshot.context_tokens_cap = Some(80_000);
+        save_trajectory_snapshot(gcx.clone(), snapshot)
+            .await
+            .unwrap();
+        let mut loaded = load_trajectory_for_chat(gcx.clone(), chat_id)
+            .await
+            .unwrap();
+        assert!(loaded.messages.is_empty());
+        assert_eq!(loaded.thread.auto_compression_cap, None);
+        assert!(loaded.thread.auto_compression_cap_pending);
+        assert!(loaded.thread.resolve_pending_compression_cap(Some(100_000)));
+        assert_eq!(loaded.thread.auto_compression_cap, Some(72_000));
+
+        // An empty legacy file is not evidence that this is a new chat.
+        let path = find_trajectory_path(gcx.clone(), chat_id).await.unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap_pending");
+        tokio::fs::write(path, serde_json::to_vec(&value).unwrap())
+            .await
+            .unwrap();
+        let mut legacy = load_trajectory_for_chat(gcx, chat_id).await.unwrap();
+        assert!(legacy.messages.is_empty());
+        assert!(!legacy.thread.resolve_pending_compression_cap(Some(100_000)));
         assert_eq!(legacy.thread.auto_compression_cap, None);
     }
 
@@ -15768,8 +15913,6 @@ mod tests {
         assert_eq!(session.compression_reason, None);
         assert_eq!(session.runtime.compression_reason, None);
         assert_eq!(session.active_compression_attempt, None);
-        assert_eq!(session.tier1_compact_attempts, 0);
-        assert!(!session.tier1_compaction_disabled);
         drop(session);
 
         let json = chat_rx.recv().await.unwrap();
@@ -16358,9 +16501,47 @@ mod tests {
 
         let event = wait_for_trajectory_event(&mut rx, chat_id).await;
         assert_eq!(event.event_type, "updated");
-        assert_eq!(event.session_state.as_deref(), Some("idle"));
+        assert!(matches!(
+            event.session_state.as_deref(),
+            None | Some("idle")
+        ));
         assert_eq!(event.error, None);
         assert!(event.worktree.is_none());
+    }
+
+    #[tokio::test]
+    async fn normal_save_under_session_lock_does_not_reenter_or_leak_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gcx, app) = make_app_with_workspace(dir.path()).await;
+        let mut rx = app.chat.trajectory_events_tx.subscribe();
+        let id = "locked-snapshot-publication";
+        let session = Arc::new(AMutex::new(ChatSession::new(id.into())));
+        app.chat
+            .sessions
+            .write()
+            .await
+            .insert(id.into(), session.clone());
+        let mut locked = session.lock().await;
+        locked.runtime.state = SessionState::Generating;
+        locked.runtime.error = Some("not snapshot runtime".into());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            save_trajectory_snapshot(
+                gcx,
+                test_snapshot(
+                    id,
+                    "Snapshot",
+                    vec![ChatMessage::new("user".into(), "keep".into())],
+                ),
+            ),
+        )
+        .await
+        .expect("saving must not reacquire the held session lock")
+        .unwrap();
+        let event = wait_for_trajectory_event(&mut rx, id).await;
+        assert_eq!(event.session_state, None);
+        assert_eq!(event.error, None);
+        drop(locked);
     }
 
     #[tokio::test]
@@ -18087,8 +18268,6 @@ mod tests {
                 session.trajectory_dirty = false;
                 session.wake_up_at = Some(chrono::Utc::now() + chrono::Duration::minutes(10));
                 session.waiting_for_card_ids = vec!["card-waiting".to_string()];
-                session.tier1_compact_attempts = 2;
-                session.tier1_compaction_disabled = true;
                 session.thread.reactive_compact_attempts = Some(2);
             }
             app.chat
@@ -18105,8 +18284,6 @@ mod tests {
             assert_eq!(session.thread.id, chat_id);
             assert!(session.wake_up_at.is_none());
             assert!(session.waiting_for_card_ids.is_empty());
-            assert_eq!(session.tier1_compact_attempts, 0);
-            assert!(!session.tier1_compaction_disabled);
             assert_eq!(session.thread.reactive_compact_attempts, None);
         }
     }
@@ -18127,8 +18304,6 @@ mod tests {
             session.created_at = stale_created_at.to_string();
             session.wake_up_at = Some(chrono::Utc::now() + chrono::Duration::minutes(10));
             session.waiting_for_card_ids = vec!["card-stale".to_string()];
-            session.tier1_compact_attempts = 2;
-            session.tier1_compaction_disabled = true;
             session.thread.reactive_compact_attempts = Some(2);
             session.runtime.state = SessionState::Idle;
             session.trajectory_dirty = false;
@@ -18236,6 +18411,7 @@ mod tests {
                 parallel_tool_calls: None,
                 context_tokens_cap: Some(8000),
                 auto_compression_cap: Some(7000),
+                auto_compression_cap_pending: false,
                 include_project_info: false,
                 checkpoints_enabled: true,
                 is_title_generated: true,
@@ -18314,10 +18490,9 @@ mod tests {
             last_prompt_messages: Vec::new(),
             tool_catalog: None,
             turn_tool_pool: None,
-            tier1_compact_attempts: 0,
-            tier1_compaction_disabled: false,
-            compression_insufficient_hashes: std::collections::HashSet::new(),
-            compression_retry_after_ms: Default::default(),
+            pending_context_rebuild: None,
+            pending_mode_handoff: None,
+            last_rebuild_attempt_version: None,
             pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
             cache_guard_request_generation: 0,
@@ -18436,10 +18611,9 @@ mod tests {
             last_prompt_messages: Vec::new(),
             tool_catalog: None,
             turn_tool_pool: None,
-            tier1_compact_attempts: 0,
-            tier1_compaction_disabled: false,
-            compression_insufficient_hashes: std::collections::HashSet::new(),
-            compression_retry_after_ms: Default::default(),
+            pending_context_rebuild: None,
+            pending_mode_handoff: None,
+            last_rebuild_attempt_version: None,
             pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
             cache_guard_request_generation: 0,
@@ -19248,7 +19422,6 @@ mod tests {
             goal_ledger: Vec::new(),
             pending_deliveries: Vec::new(),
             goal_verification_blocked_until_ms: None,
-            compression_retry_after_ms: Default::default(),
             chat_id: chat_id.clone(),
             title: "Worktree Chat".to_string(),
             model: "model".to_string(),
@@ -19260,6 +19433,7 @@ mod tests {
             checkpoints_enabled: true,
             context_tokens_cap: None,
             auto_compression_cap: None,
+            auto_compression_cap_pending: true,
             include_project_info: true,
             is_title_generated: true,
             auto_approve_editing_tools: false,

@@ -38,9 +38,9 @@ fn plan_value(session: &ChatSession, message: &ChatMessage) -> Result<Value, Str
         .get("created_at_ms")
         .and_then(Value::as_u64)
         .ok_or_else(|| "current plan is missing created_at_ms".to_string())?;
-    let content = plan_role::synthesize_current_plan(session)
+    let content = plan_role::try_synthesize_current_plan(session)?
         .ok_or_else(|| "current plan could not be synthesized".to_string())?;
-    let delta_count = plan_role::plan_delta_events(session).len();
+    let delta_count = plan_role::try_plan_delta_events(session)?.len();
 
     Ok(json!({
         "content": content,
@@ -103,9 +103,9 @@ impl Tool for ToolGetPlan {
             .get(&chat_id)
             .cloned()
             .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
-        let session = session_arc.lock().await.accepted_control_projection();
-        let plan = match plan_role::current_base_plan(&session) {
-            Some(message) => plan_value(&session, message)?,
+        let session = session_arc.lock().await.try_accepted_control_projection()?;
+        let plan = match plan_role::try_current_base_plan(&session)? {
+            Some(message) => plan_value(&session, &message)?,
             None => Value::Null,
         };
         Ok((

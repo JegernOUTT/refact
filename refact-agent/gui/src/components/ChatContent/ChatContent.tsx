@@ -1,3 +1,4 @@
+import { ContextRebuildBanner } from "./ContextRebuildBanner";
 import React, {
   useCallback,
   useMemo,
@@ -574,6 +575,7 @@ export const ChatContent: React.FC<ChatContentProps> = ({
               footer={virtuosoFooter}
               header={
                 <Flex direction="column" gap="2">
+                  <ContextRebuildBanner chatId={renderChatId} />
                   <ChatShield threadId={renderChatId} />
                   <PlanBanner threadId={renderChatId} />
                 </Flex>

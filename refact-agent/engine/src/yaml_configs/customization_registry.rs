@@ -667,7 +667,6 @@ mod tests {
             "kg_enrich",
             "kg_deprecate",
             "code_edit",
-            "compress_trajectory",
             "follow_up",
             "mode_transition",
             "memo_extraction",

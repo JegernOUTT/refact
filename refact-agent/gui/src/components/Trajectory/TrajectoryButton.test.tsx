@@ -8,15 +8,6 @@ vi.mock("../Portal/Portal", () => ({
   Portal: ({ children }: { children: JSX.Element }) => children,
 }));
 
-const HANDOFF_OPTIONS = [
-  "Include last user message + responses",
-  "Include all opened files",
-  "Include all edited files",
-  "Include research, subagent & planning results",
-  "Generate summary",
-  "Include all user messages + responses",
-];
-
 describe("TrajectoryButton", () => {
   it("renders the trajectory button", () => {
     render(<TrajectoryButton />);
@@ -26,7 +17,7 @@ describe("TrajectoryButton", () => {
 
   it("has correct aria-label", () => {
     render(<TrajectoryButton />);
-    const button = screen.getByLabelText("Compress or Handoff");
+    const button = screen.getByLabelText("Compress or rebuild context");
     expect(button).toBeInTheDocument();
   });
 
@@ -42,7 +33,7 @@ describe("TrajectoryButton", () => {
     expect(tabStrip).not.toContain("grid-auto-columns: max-content;");
   });
 
-  it("opens all compression and handoff tabs with preview-gated actions", async () => {
+  it("retains static and LLM compression tabs without Handoff with preview-gated actions", async () => {
     const { user } = render(<TrajectoryButton />);
 
     await user.click(screen.getByTestId("trajectory-button"));
@@ -55,8 +46,9 @@ describe("TrajectoryButton", () => {
       within(popover).getByRole("tab", { name: "LLM compression" }),
     ).toBeInTheDocument();
 
-    const handoffTab = within(popover).getByRole("tab", { name: "Handoff" });
-    expect(handoffTab).toBeInTheDocument();
+    expect(
+      within(popover).queryByRole("tab", { name: "Handoff" }),
+    ).not.toBeInTheDocument();
     expect(
       within(popover).getByRole("checkbox", { name: "Drop all context files" }),
     ).toBeInTheDocument();
@@ -76,21 +68,10 @@ describe("TrajectoryButton", () => {
       within(popover).getByRole("tab", { name: "LLM compression" }),
     );
     expect(
-      within(popover).getByText(/source-preserving continuation summary/i),
+      within(popover).getByText(/Rebuilds the active conversation context/i),
     ).toBeInTheDocument();
     expect(
-      within(popover).getByRole("button", { name: "Summarize" }),
+      within(popover).getByRole("button", { name: "Rebuild context" }),
     ).toBeDisabled();
-
-    await user.click(handoffTab);
-
-    for (const option of HANDOFF_OPTIONS) {
-      expect(
-        within(popover).getByRole("checkbox", { name: option }),
-      ).toBeInTheDocument();
-    }
-    expect(
-      within(popover).getByRole("button", { name: "Create" }),
-    ).toBeInTheDocument();
   });
 });

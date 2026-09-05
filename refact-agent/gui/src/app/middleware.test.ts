@@ -1515,6 +1515,103 @@ describe("workspace routing middleware", () => {
 });
 
 describe("handoff_to_mode middleware", () => {
+  it.each(["message_added", "message_updated"] as const)(
+    "navigates only after completed handoff via %s and preserves metadata",
+    async (completionType) => {
+      const sourceChatId = `chat-handoff-${completionType}`;
+      const newChatId = `target-${completionType}`;
+      const messageId = "handoff-result";
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response(null, { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+      const store = setUpStore({
+        config: {
+          host: "web",
+          engineServed: true,
+          lspPort: 8001,
+          themeProps: {},
+        },
+        chat: makeChatState(sourceChatId, [sourceChatId]),
+      });
+      const dispatchResult = (
+        seq: string,
+        type: "message_added" | "message_updated",
+        content: Record<string, unknown>,
+        toolFailed = false,
+      ) => {
+        const message = {
+          role: "tool" as const,
+          message_id: messageId,
+          tool_call_id: "call-handoff",
+          tool_failed: toolFailed,
+          content: JSON.stringify({ type: "handoff_to_mode", ...content }),
+          extra: { context_rebuild: { status: content.status } },
+        };
+        store.dispatch(
+          applyChatEvent(
+            type === "message_added"
+              ? { chat_id: sourceChatId, seq, type, index: 0, message }
+              : {
+                  chat_id: sourceChatId,
+                  seq,
+                  type,
+                  message_id: messageId,
+                  message,
+                },
+          ),
+        );
+      };
+
+      dispatchResult("1", "message_added", {
+        status: "queued",
+        new_chat_id: newChatId,
+      });
+      dispatchResult("2", "message_updated", {
+        status: "failed",
+        new_chat_id: newChatId,
+      });
+      dispatchResult("3", "message_updated", { status: "completed" });
+      dispatchResult(
+        "4",
+        "message_updated",
+        { status: "completed", new_chat_id: newChatId },
+        true,
+      );
+      expect(store.getState().chat.current_thread_id).toBe(sourceChatId);
+      expect(store.getState().chat.threads[newChatId]).toBeUndefined();
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      dispatchResult("5", completionType, {
+        status: "completed",
+        new_chat_id: newChatId,
+        target_mode: "agent",
+        parent_id: sourceChatId,
+        root_chat_id: sourceChatId,
+        link_type: "handoff",
+      });
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      expect(store.getState().chat.current_thread_id).toBe(newChatId);
+      expect(store.getState().chat.threads[newChatId]?.thread).toMatchObject({
+        mode: "agent",
+        parent_id: sourceChatId,
+        root_chat_id: sourceChatId,
+        link_type: "handoff",
+      });
+      expect(
+        store.getState().chat.threads[sourceChatId]?.thread.messages[0].extra,
+      ).toEqual({
+        context_rebuild: { status: "completed" },
+      });
+      dispatchResult("6", "message_updated", {
+        status: "completed",
+        new_chat_id: newChatId,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("routes normal chat to returned task planner metadata", async () => {
     const sourceChatId = "chat-source";
     const newChatId = "planner-chat";

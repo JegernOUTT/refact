@@ -407,6 +407,9 @@ pub struct ThreadParams {
     pub context_tokens_cap: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_compression_cap: Option<usize>,
+    /// Only new chats opt in; missing persisted fields must remain legacy/unset.
+    #[serde(default)]
+    pub auto_compression_cap_pending: bool,
     pub include_project_info: bool,
     pub checkpoints_enabled: bool,
     #[serde(default)]
@@ -453,7 +456,51 @@ impl refact_core::worktree_meta::WorktreeThread for ThreadParams {
     }
 }
 
+/// Ninety percent of the smallest known positive context window. Unknown windows
+/// remain unset; integer arithmetic avoids rounding and overflow surprises.
+pub fn default_auto_compression_cap(
+    model_window: Option<usize>,
+    request_window: Option<usize>,
+) -> Option<usize> {
+    [model_window, request_window]
+        .into_iter()
+        .flatten()
+        .filter(|window| *window > 0)
+        .min()
+        .map(|window| window / 10 * 9 + window % 10 * 9 / 10)
+}
+
 impl ThreadParams {
+    /// Call only for NEW chats once their model/request windows are known. Never
+    /// call while loading persisted chats. Explicit values (including zero) win;
+    /// model switches leave the cap unchanged, and an explicit reset can call this
+    /// again after clearing the cap.
+    pub fn initialize_new_chat_compression_cap(
+        &mut self,
+        model_window: Option<usize>,
+        request_window: Option<usize>,
+    ) {
+        if self.auto_compression_cap.is_none() {
+            self.auto_compression_cap = default_auto_compression_cap(
+                model_window,
+                request_window.or(self.context_tokens_cap),
+            );
+        }
+    }
+    /// Resolve the new-chat default once, after the actual model is selected.
+    /// Legacy loaded chats never opt in, even if their history is empty.
+    pub fn resolve_pending_compression_cap(&mut self, model_window: Option<usize>) -> bool {
+        if !self.auto_compression_cap_pending {
+            return false;
+        }
+        if self.auto_compression_cap.is_none() && !model_window.is_some_and(|n| n > 0) {
+            return false;
+        }
+        self.initialize_new_chat_compression_cap(model_window, None);
+        self.auto_compression_cap_pending = false;
+        true
+    }
+
     pub fn auto_compact_enabled_effective(&self) -> bool {
         self.auto_compact_enabled.unwrap_or(true)
     }
@@ -476,6 +523,7 @@ impl Default for ThreadParams {
             parallel_tool_calls: None,
             context_tokens_cap: None,
             auto_compression_cap: None,
+            auto_compression_cap_pending: true,
             include_project_info: true,
             checkpoints_enabled: true,
             is_title_generated: false,
@@ -1484,6 +1532,140 @@ mod tests {
 
         let roundtrip: GoalBudget = serde_json::from_value(json).unwrap();
         assert_eq!(roundtrip, budget);
+    }
+
+    #[test]
+    fn new_chat_cap_is_90_percent_of_smallest_positive_window() {
+        assert_eq!(
+            default_auto_compression_cap(Some(1000), Some(800)),
+            Some(720)
+        );
+        assert_eq!(default_auto_compression_cap(Some(0), Some(1000)), Some(900));
+        assert_eq!(default_auto_compression_cap(None, Some(0)), None);
+        assert_eq!(default_auto_compression_cap(Some(1), None), Some(0));
+        let mut params = ThreadParams::default();
+        params.initialize_new_chat_compression_cap(Some(1000), None);
+        assert_eq!(params.auto_compression_cap, Some(900));
+        params.initialize_new_chat_compression_cap(Some(2000), None);
+        assert_eq!(
+            params.auto_compression_cap,
+            Some(900),
+            "model switch preserves stored cap"
+        );
+        params.auto_compression_cap = None;
+        params.initialize_new_chat_compression_cap(Some(2000), None);
+        assert_eq!(
+            params.auto_compression_cap,
+            Some(1800),
+            "explicit reset recomputes"
+        );
+        params.auto_compression_cap = Some(0);
+        params.initialize_new_chat_compression_cap(Some(2000), None);
+        assert_eq!(
+            params.auto_compression_cap,
+            Some(0),
+            "explicit zero is preserved"
+        );
+        let old: ThreadParams =
+            serde_json::from_value(serde_json::to_value(ThreadParams::default()).unwrap()).unwrap();
+        assert_eq!(
+            old.auto_compression_cap, None,
+            "loading does not initialize defaults"
+        );
+    }
+
+    #[test]
+    fn pending_new_chat_cap_waits_for_model_and_survives_restore() {
+        let mut fresh = ThreadParams {
+            context_tokens_cap: Some(800),
+            ..Default::default()
+        };
+        assert!(!fresh.resolve_pending_compression_cap(None));
+        assert_eq!(fresh.auto_compression_cap, None);
+        let mut restored: ThreadParams =
+            serde_json::from_value(serde_json::to_value(&fresh).unwrap()).unwrap();
+        assert!(restored.auto_compression_cap_pending);
+        assert!(restored.resolve_pending_compression_cap(Some(1000)));
+        assert_eq!(restored.auto_compression_cap, Some(720));
+        assert!(!restored.resolve_pending_compression_cap(Some(2000)));
+        assert_eq!(restored.auto_compression_cap, Some(720));
+    }
+
+    #[test]
+    fn legacy_unset_cap_never_initializes_even_when_model_arrives() {
+        let mut value = serde_json::to_value(ThreadParams::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap_pending");
+        let mut legacy: ThreadParams = serde_json::from_value(value).unwrap();
+        assert!(!legacy.auto_compression_cap_pending);
+        assert!(!legacy.resolve_pending_compression_cap(Some(1000)));
+        assert_eq!(legacy.auto_compression_cap, None);
+    }
+
+    #[test]
+    fn pending_cap_preserves_explicit_values_including_zero() {
+        for cap in [0, 400, 2000] {
+            let mut fresh = ThreadParams {
+                auto_compression_cap: Some(cap),
+                ..Default::default()
+            };
+            assert!(fresh.resolve_pending_compression_cap(None));
+            assert_eq!(fresh.auto_compression_cap, Some(cap));
+            assert!(!fresh.auto_compression_cap_pending);
+        }
+    }
+
+    #[test]
+    fn new_chat_compression_cap_waits_for_model_and_resolves_once() {
+        let mut params = ThreadParams {
+            context_tokens_cap: Some(800),
+            ..Default::default()
+        };
+        assert!(params.auto_compression_cap_pending);
+        assert!(!params.resolve_pending_compression_cap(None));
+        assert_eq!(params.auto_compression_cap, None);
+        // A restart before the model is known retains new-chat provenance.
+        let mut params: ThreadParams =
+            serde_json::from_value(serde_json::to_value(params).unwrap()).unwrap();
+        assert!(params.resolve_pending_compression_cap(Some(1000)));
+        assert_eq!(params.auto_compression_cap, Some(720));
+        assert!(!params.auto_compression_cap_pending);
+        assert!(!params.resolve_pending_compression_cap(Some(2000)));
+        assert_eq!(params.auto_compression_cap, Some(720));
+        assert_eq!(default_auto_compression_cap(Some(19), None), Some(17));
+        assert_eq!(
+            default_auto_compression_cap(Some(usize::MAX), None),
+            Some(usize::MAX / 10 * 9 + usize::MAX % 10 * 9 / 10)
+        );
+    }
+
+    #[test]
+    fn restored_legacy_no_cap_is_not_a_new_chat() {
+        let mut old = serde_json::to_value(ThreadParams::default()).unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .remove("auto_compression_cap_pending");
+        let mut restored: ThreadParams = serde_json::from_value(old).unwrap();
+        assert!(!restored.auto_compression_cap_pending);
+        assert!(!restored.resolve_pending_compression_cap(Some(1000)));
+        assert_eq!(restored.auto_compression_cap, None);
+    }
+
+    #[test]
+    fn new_chat_compression_cap_preserves_explicit_including_zero() {
+        for cap in [0, 123, 2000] {
+            let mut params = ThreadParams {
+                auto_compression_cap: Some(cap),
+                ..Default::default()
+            };
+            assert!(params.resolve_pending_compression_cap(None));
+            assert_eq!(params.auto_compression_cap, Some(cap));
+            assert!(!params.auto_compression_cap_pending);
+            assert!(!params.resolve_pending_compression_cap(Some(1000)));
+            assert_eq!(params.auto_compression_cap, Some(cap));
+        }
     }
 
     #[test]

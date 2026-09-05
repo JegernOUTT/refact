@@ -1511,6 +1511,7 @@ interface AskQuestionsContent {
 interface HandoffToModeContent {
   type: "handoff_to_mode";
   new_chat_id: string;
+  status?: string;
   target_mode?: string;
   reason?: string;
   messages_count?: number;
@@ -1550,6 +1551,7 @@ function isHandoffToModeContent(
   if (content.type !== "handoff_to_mode" || !("new_chat_id" in content)) {
     return false;
   }
+  if ("status" in content && content.status !== "completed") return false;
   const id = content.new_chat_id;
   return typeof id === "string" && id.length > 0;
 }
@@ -1642,10 +1644,11 @@ startListening({
   actionCreator: applyChatEvent,
   effect: async (action, listenerApi) => {
     const event = action.payload;
-    if (event.type !== "message_added") return;
+    if (event.type !== "message_added" && event.type !== "message_updated")
+      return;
 
     const msg = event.message;
-    if (!isToolMessage(msg)) return;
+    if (!isToolMessage(msg) || msg.tool_failed) return;
     if (typeof msg.content !== "string") return;
 
     const toolCallId = msg.tool_call_id;

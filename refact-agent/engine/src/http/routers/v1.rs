@@ -110,9 +110,8 @@ use crate::http::routers::v1::tasks::{
     handle_delete_task_document, handle_pin_task_document, handle_history_task_document,
 };
 use crate::http::routers::v1::trajectory_ops::{
-    handle_transform_preview, handle_transform_apply, handle_handoff_preview, handle_handoff_apply,
-    handle_mode_transition_apply, handle_planner_from_transition, handle_llm_compress_preview,
-    handle_llm_compress_apply,
+    handle_transform_preview, handle_transform_apply, handle_mode_transition_apply,
+    handle_planner_from_transition, handle_llm_compress_preview, handle_llm_compress_apply,
 };
 use crate::http::routers::v1::project_configs::{
     handle_v1_project_configs_get, handle_v1_project_configs_rescan,
@@ -716,14 +715,6 @@ pub fn make_v1_router(app_state: AppState) -> Router<AppState> {
         .route(
             "/chats/:chat_id/trajectory/transform/apply",
             post(handle_transform_apply),
-        )
-        .route(
-            "/chats/:chat_id/trajectory/handoff/preview",
-            post(handle_handoff_preview),
-        )
-        .route(
-            "/chats/:chat_id/trajectory/handoff/apply",
-            post(handle_handoff_apply),
         )
         .route(
             "/chats/:chat_id/trajectory/mode-transition/apply",

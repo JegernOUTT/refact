@@ -86,7 +86,7 @@ impl Tool for ToolSetGoal {
 
         let report = {
             let mut session = session_arc.lock().await;
-            if current_goal_including_queued(&session).is_some() {
+            if current_goal_including_queued(&session)?.is_some() {
                 return Err("goal already exists; use update_goal".to_string());
             }
             let current_mode = map_legacy_mode_to_id(&session.thread.mode).to_string();
@@ -158,8 +158,10 @@ fn queue_goal_side_effect(
     })
 }
 
-fn current_goal_including_queued(session: &ChatSession) -> Option<&ChatMessage> {
-    goal_role::current_base_goal(session)
+fn current_goal_including_queued(session: &ChatSession) -> Result<Option<ChatMessage>, String> {
+    Ok(goal_role::current_base_goal(
+        &session.try_accepted_control_projection()?,
+    ))
 }
 
 fn string_arg(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {

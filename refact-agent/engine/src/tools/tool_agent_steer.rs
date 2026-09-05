@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use refact_chat_history::history_limit::remove_invalid_tool_calls_and_tool_calls_results;
-
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AMutex;
@@ -13,7 +11,7 @@ use crate::tasks::storage;
 use crate::tools::planner_delivery::{self, CardGuard, CardTarget, DeliveryReport};
 use crate::tools::tools_description::{Tool, ToolDesc, ToolSource, ToolSourceType};
 use refact_core::chat_types::PushMode;
-use refact_runtime_api::{ChatSessionUpdate, SessionState};
+use refact_runtime_api::SessionState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentSteerPriority {
@@ -112,7 +110,7 @@ fn tool_output(
     report: &DeliveryReport,
 ) -> String {
     let compaction_note = if compacted {
-        "\nAuto-compaction: applied before steering."
+        "\nContext rebuild: queued before resumed generation."
     } else {
         ""
     };
@@ -138,17 +136,6 @@ fn should_autocompact_before_steer(
 ) -> bool {
     thread.auto_compact_enabled_effective()
         && matches!(state, SessionState::Completed | SessionState::Error)
-}
-
-fn autocompact_messages_for_resume(messages: &mut Vec<ChatMessage>) -> bool {
-    let before = serde_json::to_string(messages).ok();
-    let summarized = crate::chat::summarization::summarize_oldest_segment_with_static_summary(
-        messages,
-        "Previous non-user task-agent activity was summarized before planner steering.",
-        "agent_steer",
-    );
-    remove_invalid_tool_calls_and_tool_calls_results(messages);
-    summarized || serde_json::to_string(messages).ok() != before
 }
 
 fn validate_agent_snapshot(
@@ -266,20 +253,21 @@ impl Tool for ToolAgentSteer {
         validate_agent_snapshot(&snapshot, &task_id, &card_id, card.assignee.as_deref())?;
         let session_state = snapshot.session_state;
         let compacted = if should_autocompact_before_steer(session_state, &snapshot.thread) {
-            let mut messages = snapshot.messages.clone();
-            let compacted = autocompact_messages_for_resume(&mut messages);
-            if compacted {
-                chat_facade
-                    .update_session(
-                        &agent_chat_id,
-                        ChatSessionUpdate {
-                            messages,
-                            previous_response_id: None,
-                        },
-                    )
-                    .await?;
-            }
-            compacted
+            let session = gcx
+                .chat_sessions
+                .read()
+                .await
+                .get(&agent_chat_id)
+                .cloned()
+                .ok_or("Agent session not found")?;
+            crate::chat::context_rebuild::request_rebuild(
+                &mut *session.lock().await,
+                crate::chat::context_rebuild::PendingContextRebuild {
+                    model: None,
+                    trigger: "agent_steer".into(),
+                },
+            )?;
+            true
         } else {
             false
         };
@@ -757,168 +745,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_agent_steer_autocompacts_completed_agent_before_resume() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(
-            temp.path(),
-            test_card("doing", Some("agent-chat-1".to_string())),
-        )
-        .await;
-        let mut tool_result = ChatMessage::new("tool".to_string(), "x".repeat(80_000));
-        tool_result.tool_call_id = "call-large".to_string();
-        let messages = vec![
-            ChatMessage::new("user".to_string(), "hi".to_string()),
-            ChatMessage {
-                role: "context_file".to_string(),
-                content: ChatContent::ContextFiles(vec![refact_core::chat_types::ContextFile {
-                    file_name: "foo.rs".to_string(),
-                    file_content: "old".to_string(),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "context_file".to_string(),
-                content: ChatContent::ContextFiles(vec![refact_core::chat_types::ContextFile {
-                    file_name: "foo.rs".to_string(),
-                    file_content: "new".to_string(),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "assistant".to_string(),
-                tool_calls: Some(vec![refact_core::chat_types::ChatToolCall {
-                    id: "call-large".to_string(),
-                    tool_type: "function".to_string(),
-                    function: refact_core::chat_types::ChatToolFunction {
-                        name: "shell".to_string(),
-                        arguments: "{}".to_string(),
-                    },
-                    index: Some(0),
-                    extra_content: None,
-                    started_at_ms: None,
-                    completed_at_ms: None,
-                }]),
-                ..Default::default()
-            },
-            tool_result,
-            ChatMessage::new("user".to_string(), "closed follow-up".to_string()),
-        ];
-        let mock = Arc::new(MockChatFacade::with_messages(
-            SessionState::Completed,
-            messages,
-        ));
-        let ccx = planner_ccx(gcx, mock.clone(), "planner").await;
-        let mut tool = ToolAgentSteer::new();
-
-        let output = tool_output_text(
-            tool.tool_execute(
-                ccx,
-                &"call".to_string(),
-                &args(&[
-                    ("card_id", json!("T-29")),
-                    ("message", json!("Continue now")),
-                ]),
-            )
-            .await
-            .unwrap(),
-        );
-
-        let updates = mock.updates();
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].previous_response_id, None);
-        assert!(updates[0]
-            .messages
-            .iter()
-            .any(crate::chat::summarization::is_segment_summary));
-        assert!(output.contains("Auto-compaction: applied before steering."));
-        assert_eq!(mock.deliveries().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn tool_agent_steer_autocompacts_when_auto_compact_is_unset() {
-        let temp = tempfile::tempdir().unwrap();
-        let gcx = write_task(
-            temp.path(),
-            test_card("doing", Some("agent-chat-1".to_string())),
-        )
-        .await;
-        let mut tool_result = ChatMessage::new("tool".to_string(), "x".repeat(40_000));
-        tool_result.tool_call_id = "call-large".to_string();
-        let messages = vec![
-            ChatMessage::new("user".to_string(), "hi".to_string()),
-            ChatMessage {
-                role: "context_file".to_string(),
-                content: ChatContent::ContextFiles(vec![refact_core::chat_types::ContextFile {
-                    file_name: "foo.rs".to_string(),
-                    file_content: "old".to_string(),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "context_file".to_string(),
-                content: ChatContent::ContextFiles(vec![refact_core::chat_types::ContextFile {
-                    file_name: "foo.rs".to_string(),
-                    file_content: "new".to_string(),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            },
-            ChatMessage {
-                role: "assistant".to_string(),
-                tool_calls: Some(vec![refact_core::chat_types::ChatToolCall {
-                    id: "call-large".to_string(),
-                    tool_type: "function".to_string(),
-                    function: refact_core::chat_types::ChatToolFunction {
-                        name: "shell".to_string(),
-                        arguments: "{}".to_string(),
-                    },
-                    index: Some(0),
-                    extra_content: None,
-                    started_at_ms: None,
-                    completed_at_ms: None,
-                }]),
-                ..Default::default()
-            },
-            tool_result,
-            ChatMessage::new("user".to_string(), "closed follow-up".to_string()),
-        ];
-        let mock = Arc::new(MockChatFacade::with_messages(
-            SessionState::Completed,
-            messages,
-        ));
-        *mock.thread.lock().unwrap() = refact_chat_api::ThreadParams {
-            auto_compact_enabled: None,
-            ..test_agent_thread()
-        };
-        let ccx = planner_ccx(gcx, mock.clone(), "planner").await;
-        let mut tool = ToolAgentSteer::new();
-
-        let output = tool_output_text(
-            tool.tool_execute(
-                ccx,
-                &"call".to_string(),
-                &args(&[
-                    ("card_id", json!("T-29")),
-                    ("message", json!("Continue now")),
-                ]),
-            )
-            .await
-            .unwrap(),
-        );
-
-        assert_eq!(mock.updates().len(), 1);
-        assert!(mock.updates()[0]
-            .messages
-            .iter()
-            .any(crate::chat::summarization::is_segment_summary));
-        assert!(output.contains("Auto-compaction: applied before steering."));
-        assert_eq!(mock.deliveries().len(), 1);
-    }
-
-    #[tokio::test]
     async fn tool_agent_steer_skips_autocompaction_when_disabled() {
         let temp = tempfile::tempdir().unwrap();
         let gcx = write_task(
@@ -991,7 +817,7 @@ mod tests {
         );
 
         assert!(mock.updates().is_empty());
-        assert!(!output.contains("Auto-compaction: applied before steering."));
+        assert!(!output.contains("Context rebuild: queued before resumed generation."));
         assert_eq!(mock.deliveries().len(), 1);
     }
 

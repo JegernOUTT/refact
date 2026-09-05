@@ -78,10 +78,10 @@ impl Tool for ToolUpdatePlan {
 
         let (seq, result_truncation) = {
             let mut session = session_arc.lock().await;
-            if !has_base_plan_including_queued(&session) {
+            if !has_base_plan_including_queued(&session)? {
                 return Err("no plan to update; call set_plan first".to_string());
             }
-            let seq = plan_delta_count_including_queued(&session) + 1;
+            let seq = plan_delta_count_including_queued(&session)? + 1;
             let (delta, result_truncation) = internal_roles::plan_delta_with_truncation(
                 "tool.update_plan",
                 json!({"seq": seq, "summary": summary}),
@@ -129,12 +129,12 @@ fn update_plan_tool_result(
     })
 }
 
-fn has_base_plan_including_queued(session: &ChatSession) -> bool {
-    plan_role::current_base_plan(session).is_some()
+fn has_base_plan_including_queued(session: &ChatSession) -> Result<bool, String> {
+    Ok(plan_role::try_current_base_plan(session)?.is_some())
 }
 
-fn plan_delta_count_including_queued(session: &ChatSession) -> usize {
-    plan_role::plan_delta_events(&session.accepted_control_projection()).len()
+fn plan_delta_count_including_queued(session: &ChatSession) -> Result<usize, String> {
+    Ok(plan_role::try_plan_delta_events(&session.try_accepted_control_projection()?)?.len())
 }
 
 fn string_arg(args: &HashMap<String, Value>, name: &str) -> Result<String, String> {
@@ -672,7 +672,7 @@ mod tests {
         let mut session = ChatSession::new(CHAT_ID.to_string());
         session.queue_post_tool_side_effect(internal_roles::plan("agent", 1, "base", None));
 
-        assert!(has_base_plan_including_queued(&session));
+        assert!(has_base_plan_including_queued(&session).unwrap());
         assert_eq!(session.post_tool_side_effects[0].role, PLAN_ROLE);
     }
 

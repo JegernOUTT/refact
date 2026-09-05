@@ -506,6 +506,20 @@ pub fn apply_setparams_patch(
         // Invalid type (not null, not number) - ignore, keep current value
     }
     if let Some(cap) = patch.get("auto_compression_cap") {
+        // A user-supplied value (including null/zero) settles initialization.
+        if (cap.is_null() || cap.as_u64().is_some()) && thread.auto_compression_cap_pending {
+            thread.auto_compression_cap_pending = false;
+            changed = true;
+        }
+        // Null is an explicit reset; defer recomputation until the model is known.
+        // Invalid patches must not change initialization provenance.
+        if cap.is_null() || cap.as_u64().is_some() {
+            let pending = cap.is_null();
+            if thread.auto_compression_cap_pending != pending {
+                thread.auto_compression_cap_pending = pending;
+                changed = true;
+            }
+        }
         if cap.is_null() {
             if thread.auto_compression_cap.is_some() {
                 thread.auto_compression_cap = None;
@@ -769,7 +783,7 @@ pub(crate) async fn add_mode_switch_event_and_plan_if_changed(
         source, old_mode, &new_mode, reason, diff,
     ));
 
-    if plan_role::current_base_plan(session).is_none() {
+    if plan_role::try_current_base_plan(session).is_ok_and(|plan| plan.is_none()) {
         if let Some(mode_config) = to_config {
             let plan_template = mode_config.plan_template.trim();
             if !plan_template.is_empty() {
@@ -880,8 +894,10 @@ fn handle_set_goal_budget_command(
         return Err("no goal to set budget for; call set_goal first".to_string());
     }
 
-    let Some((base_index, _, _)) = session
-        .messages
+    let view = refact_core::active_context::active_context(&session.messages)
+        .map_err(|e| e.to_string())?;
+    let mut messages = view.messages.clone();
+    let Some((base_index, _, _)) = messages
         .iter()
         .enumerate()
         .filter_map(|(index, message)| {
@@ -895,13 +911,16 @@ fn handle_set_goal_budget_command(
     budget.explicit = true;
     let serialized_budget = serde_json::to_value(&budget)
         .map_err(|error| format!("failed to serialize goal budget: {error}"))?;
-    let goal_meta = session.messages[base_index]
+    let goal_meta = messages[base_index]
         .extra
         .get_mut("goal")
         .and_then(|value| value.as_object_mut())
         .ok_or_else(|| "no goal to set budget for; call set_goal first".to_string())?;
     goal_meta.insert("budget".to_string(), serialized_budget.clone());
 
+    session.messages =
+        refact_core::active_context::writeback_active_context(&session.messages, &view, &messages)
+            .map_err(|e| e.to_string())?;
     session.rebuild_goal_projection_from_messages();
     session.goal_ledger_append(GoalLedgerOp::BudgetSet {
         budget: budget.clone(),
@@ -1253,7 +1272,8 @@ async fn process_command_queue_inner(
             let state = session.runtime.state;
             let is_busy = state == SessionState::Generating
                 || state == SessionState::ExecutingTools
-                || session.turn_depth > 0;
+                || session.turn_depth > 0
+                || crate::chat::context_rebuild::compression_attempt_active(&session);
 
             if is_busy {
                 session
@@ -1295,7 +1315,7 @@ async fn process_command_queue_inner(
                 session.delivery_wake_sources.clear();
                 session.abort_flag.store(false, Ordering::SeqCst);
                 session.user_interrupt_flag.store(false, Ordering::SeqCst);
-                session.set_runtime_state(SessionState::Generating, None);
+                session.set_runtime_state(SessionState::Idle, None);
                 (
                     Some(CommandRequest {
                         client_request_id: format!("delivery-wake-{}", uuid::Uuid::new_v4()),
@@ -1322,7 +1342,7 @@ async fn process_command_queue_inner(
                         }
                     }
                     if command_triggers_generation(&req.command) {
-                        session.set_runtime_state(SessionState::Generating, None);
+                        session.set_runtime_state(SessionState::Idle, None);
                     }
                 }
                 session.emit_queue_update();
@@ -2027,7 +2047,7 @@ async fn process_command_queue_inner(
                 let completed = session.record_ide_tool_result(tool_call_id, content, tool_failed);
                 if completed {
                     session.release_turn_only_state();
-                    session.set_runtime_state(SessionState::Generating, None);
+                    session.set_runtime_state(SessionState::Idle, None);
                 }
                 drop(session);
                 if !completed {
@@ -2059,7 +2079,7 @@ async fn process_command_queue_inner(
                     session.update_message(&message_id, updated_msg);
                     if regenerate && idx + 1 < session.messages.len() {
                         session.truncate_messages(idx + 1);
-                        session.set_runtime_state(SessionState::Generating, None);
+                        session.set_runtime_state(SessionState::Idle, None);
                         session.reactivate_goal_stopped_by_manual_abort();
                         drop(session);
                         maybe_save_trajectory_background_with_intent(
@@ -2087,7 +2107,7 @@ async fn process_command_queue_inner(
                 if let Some(idx) = session.remove_message(&message_id) {
                     if regenerate && idx < session.messages.len() {
                         session.truncate_messages(idx);
-                        session.set_runtime_state(SessionState::Generating, None);
+                        session.set_runtime_state(SessionState::Idle, None);
                         session.reactivate_goal_stopped_by_manual_abort();
                         drop(session);
                         maybe_save_trajectory_background_with_intent(
@@ -2317,7 +2337,7 @@ async fn process_command_queue_inner(
                     if let Some(ref skill_name) = pending.skill_activation_name {
                         session.set_active_skill(skill_name.clone());
                     }
-                    session.set_runtime_state(SessionState::Generating, None);
+                    session.set_runtime_state(SessionState::Idle, None);
                 }
 
                 browser_context::commit_browser_cursors(app.gcx.clone(), &browser_chat_id).await;
@@ -2600,7 +2620,7 @@ async fn handle_tool_decisions(
             if remaining.is_empty() {
                 session.complete_confirmation_wait();
                 session.release_turn_only_state();
-                session.set_runtime_state(SessionState::Generating, None);
+                session.set_runtime_state(SessionState::Idle, None);
                 true
             } else {
                 session.set_paused_with_reasons_and_auto_approved(remaining, Vec::new(), None);
@@ -2650,7 +2670,7 @@ async fn handle_tool_decisions(
             session.complete_confirmation_wait();
             if accepted_any {
                 session.release_turn_only_state();
-                session.set_runtime_state(SessionState::Generating, None);
+                session.set_runtime_state(SessionState::Idle, None);
             } else {
                 session.set_runtime_state(SessionState::Idle, None);
                 session.release_turn_only_state();
@@ -2898,7 +2918,7 @@ async fn handle_tool_decisions(
                 session.release_turn_only_state();
             } else {
                 session.release_turn_only_state();
-                session.set_runtime_state(SessionState::Generating, None);
+                session.set_runtime_state(SessionState::Idle, None);
             }
         }
 
@@ -3890,6 +3910,7 @@ mod tests {
             apply_setparams_patch(&mut thread, &json!({"auto_compression_cap": 4096}));
         assert!(changed);
         assert_eq!(thread.auto_compression_cap, Some(4096));
+        assert!(!thread.auto_compression_cap_pending);
 
         let (changed, _) =
             apply_setparams_patch(&mut thread, &json!({"auto_compression_cap": "invalid"}));
@@ -3900,6 +3921,9 @@ mod tests {
             apply_setparams_patch(&mut thread, &json!({"auto_compression_cap": null}));
         assert!(changed);
         assert_eq!(thread.auto_compression_cap, None);
+        assert!(thread.auto_compression_cap_pending);
+        assert!(thread.resolve_pending_compression_cap(Some(1000)));
+        assert_eq!(thread.auto_compression_cap, Some(900));
     }
 
     #[test]

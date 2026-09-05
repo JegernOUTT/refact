@@ -3,6 +3,7 @@ import type { LucideIcon } from "lucide-react";
 import { Archive, Brain, ChevronDown, ChevronUp, GitMerge } from "lucide-react";
 import {
   getAssistantCompressionMetadata,
+  getReconstructedHistoryMetadata,
   getCompressionReportMetadata,
 } from "../../services/refact/types";
 import type {
@@ -228,7 +229,7 @@ function StatsGrid({ stats }: { stats: StatCell[] }) {
   );
 }
 
-export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
+const LegacySummarizationMessage: React.FC<SummarizationMessageProps> = ({
   message,
 }) => {
   const [open, setOpen] = useState(false);
@@ -385,5 +386,57 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
         </div>
       )}
     </div>
+  );
+};
+
+/** Rebuilt messages belong inside this disclosure, never beside the report. */
+export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
+  message,
+}) => {
+  const report = getReconstructedHistoryMetadata({
+    ...message,
+    role: "compression_report",
+  });
+  if (!report) return <LegacySummarizationMessage message={message} />;
+  if (!report.ok)
+    return (
+      <div role="alert">
+        Rebuilt context could not be read ({report.reason}). The archived
+        transcript is still available.
+      </div>
+    );
+  const { metadata } = report;
+  return (
+    <details className={styles.card} data-testid="reconstructed-history-report">
+      <summary>
+        Context rebuilt · {metadata.payload.messages.length} messages
+        {metadata.model ? ` · ${metadata.model}` : ""}
+      </summary>
+      <div className={styles.body}>
+        <p>
+          Reconstructed model context. Original messages remain in the
+          transcript.
+        </p>
+        {metadata.trigger && <p>Trigger: {metadata.trigger}</p>}
+        {(metadata.from_mode ?? metadata.to_mode) && (
+          <p>
+            Mode: {metadata.from_mode ?? "—"} → {metadata.to_mode ?? "—"}
+          </p>
+        )}
+        {metadata.payload.messages.map((item, index) => (
+          <section key={item.message_id ?? index}>
+            <strong>{item.role}</strong>
+            <ToolMarkdown>
+              {typeof item.content === "string"
+                ? item.content
+                : JSON.stringify(item.content, null, 2)}
+            </ToolMarkdown>
+            {"tool_calls" in item && item.tool_calls && (
+              <pre>{JSON.stringify(item.tool_calls, null, 2)}</pre>
+            )}
+          </section>
+        ))}
+      </div>
+    </details>
   );
 };

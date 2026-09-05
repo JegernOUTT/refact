@@ -13,6 +13,8 @@ const MODE_TRANSITION_FILES_BUDGET_PERCENT: usize = 70;
 const MODE_TRANSITION_MAX_IMAGES: usize = 8;
 const MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP: usize = 120_000;
 
+pub const RECONSTRUCTION_PROVENANCE_KEY: &str = "reconstruction";
+
 lazy_static! {
     static ref MEMORY_PATH_REGEX: Regex = Regex::new(
         r"(?:^|[\s\n])(/[^\s]+\.refact/(?:knowledge|trajectories|tasks/[^/]+/memories)/[^\s\n,)]+\.(?:md|json))"
@@ -455,6 +457,111 @@ pub fn parse_llm_response(response: &str) -> ParsedDecisions {
             .filter(|s| !s.is_empty()),
         handoff_message,
     }
+}
+
+/// Reject malformed/empty analysis instead of silently installing an empty context.
+pub fn validate_decisions(
+    decisions: &ParsedDecisions,
+    messages: &[ChatMessage],
+) -> Result<(), String> {
+    if decisions.summary.trim().is_empty() || decisions.handoff_message.trim().is_empty() {
+        return Err("Reconstruction requires a nonempty summary and next-action handoff".into());
+    }
+    for reference in decisions
+        .messages_to_preserve
+        .iter()
+        .chain(&decisions.tool_outputs_to_include)
+        .chain(decisions.plan_source.iter())
+    {
+        let index = reference
+            .strip_prefix("MSG_ID:")
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|index| *index < messages.len());
+        if index.is_none() {
+            return Err(format!("Invalid reconstruction reference: {reference}"));
+        }
+    }
+    Ok(())
+}
+
+/// Strict reconstruction keeps control artifacts whole and reserves their cost first.
+pub async fn assemble_reconstruction(
+    messages: &[ChatMessage],
+    decisions: &ParsedDecisions,
+    workspace_dirs: &[PathBuf],
+    budget: TransitionContextBudget,
+    preserve_goal_messages: bool,
+    preloaded_files: &std::collections::HashMap<String, String>,
+) -> Result<Vec<ChatMessage>, String> {
+    let mut controls = if let Some(base) = current_base_plan_message(messages) {
+        let mut controls = vec![base.clone()];
+        controls.extend(messages.iter().filter(|m| is_plan_delta_event(m)).cloned());
+        controls
+    } else {
+        resolve_pinned_plan_text(messages, decisions)
+            .map(|text| vec![make_pinned_plan_message(&text, text_symbols(&text))])
+            .unwrap_or_default()
+    };
+    if preserve_goal_messages {
+        if let Some(base) = current_base_goal_message(messages) {
+            let mut goal_controls = vec![base.clone()];
+            goal_controls.extend(
+                messages
+                    .iter()
+                    .filter(|m| is_goal_delta_event(m) || is_goal_pursuit_event(m))
+                    .cloned(),
+            );
+            goal_controls.extend(controls);
+            controls = goal_controls;
+        }
+    }
+    let mandatory = controls.iter().map(message_symbols).sum::<usize>();
+    if mandatory >= budget.total_symbols {
+        return Err(format!("Mandatory plan/goal context ({mandatory} symbols) does not fit reconstruction budget ({})", budget.total_symbols));
+    }
+    let continuation = format!(
+        "## Summary\n\n{}\n\n## Pending Tasks\n\n{}\n\n## Next Action\n\n{}",
+        decisions.summary,
+        decisions.pending_tasks.join("\n"),
+        decisions.handoff_message
+    );
+    let continuation_symbols = text_symbols(&continuation);
+    if mandatory + continuation_symbols > budget.total_symbols {
+        return Err("Mandatory controls and continuation exceed reconstruction budget".into());
+    }
+    let available = budget.total_symbols - mandatory - continuation_symbols;
+    let narrative_budget = TransitionContextBudget {
+        total_symbols: available,
+        files_symbols: budget.files_symbols.min(available / 2),
+        messages_symbols: available - budget.files_symbols.min(available / 2),
+        ..budget
+    };
+    let mut selected = decisions.clone();
+    selected.summary.clear();
+    selected.handoff_message.clear();
+    selected.pending_tasks.clear();
+    let mut result = assemble_with_budget(
+        messages,
+        &selected,
+        workspace_dirs,
+        narrative_budget,
+        false,
+        Some(preloaded_files),
+    )
+    .await?;
+    result.push(ChatMessage::new("user".into(), continuation));
+    result.extend(controls);
+    let size = result.iter().map(message_symbols).sum::<usize>();
+    if size > budget.total_symbols {
+        return Err("Reconstruction exceeded its output budget".into());
+    }
+    if !result
+        .iter()
+        .any(|m| m.role == "user" && !m.content.content_text_only().trim().is_empty())
+    {
+        return Err("Reconstruction budget leaves no meaningful continuation".into());
+    }
+    Ok(result)
 }
 
 pub fn format_annotated_messages(metadata: &ConversationMetadata) -> String {
@@ -1444,8 +1551,26 @@ pub async fn assemble_new_chat(
     decisions: &ParsedDecisions,
     workspace_dirs: &[PathBuf],
 ) -> Result<Vec<ChatMessage>, String> {
+    assemble_with_budget(
+        original_messages,
+        decisions,
+        workspace_dirs,
+        calculate_transition_context_budget(original_messages),
+        true,
+        None,
+    )
+    .await
+}
+
+async fn assemble_with_budget(
+    original_messages: &[ChatMessage],
+    decisions: &ParsedDecisions,
+    workspace_dirs: &[PathBuf],
+    budget: TransitionContextBudget,
+    include_plan: bool,
+    preloaded_files: Option<&std::collections::HashMap<String, String>>,
+) -> Result<Vec<ChatMessage>, String> {
     let metadata = extract_conversation_metadata(original_messages);
-    let budget = calculate_transition_context_budget(original_messages);
     let mut remaining_files_symbols = budget.files_symbols;
     let mut remaining_messages_symbols = budget.messages_symbols;
     let mut remaining_images = budget.max_images;
@@ -1466,7 +1591,7 @@ pub async fn assemble_new_chat(
             tracing::warn!("Skipping file {} - not in conversation allowlist", path);
             continue;
         }
-        match read_file_content_safe(path, workspace_dirs).await {
+        match assembly_file_content(path, workspace_dirs, preloaded_files).await {
             Ok(content) => {
                 push_context_file_with_budget(
                     &mut file_contents,
@@ -1497,7 +1622,7 @@ pub async fn assemble_new_chat(
             );
             continue;
         }
-        match read_file_content_safe(memory_path, workspace_dirs).await {
+        match assembly_file_content(memory_path, workspace_dirs, preloaded_files).await {
             Ok(content) => {
                 push_context_file_with_budget(
                     &mut memory_contents,
@@ -1631,26 +1756,29 @@ pub async fn assemble_new_chat(
         }
     }
 
-    if let Some(existing_plan) = current_base_plan_message(original_messages) {
-        new_messages.push(normalize_plan_message_content(existing_plan.clone()));
-        new_messages.extend(
-            original_messages
-                .iter()
-                .filter(|message| is_plan_delta_event(message))
-                .cloned(),
-        );
-    } else if let Some(pinned_plan_text) = resolve_pinned_plan_text(original_messages, decisions) {
-        let initial_plan = pinned_plan_text.trim();
-        if !initial_plan.is_empty() {
-            let plan_budget = remaining_messages_symbols
-                .max(MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP.min(text_symbols(initial_plan)));
-            let plan_message = make_pinned_plan_message(initial_plan, plan_budget);
-            let used = text_symbols(&plan_message.content.content_text_only());
-            new_messages.push(plan_message);
-            remaining_messages_symbols = remaining_messages_symbols.saturating_sub(used);
+    if include_plan {
+        if let Some(existing_plan) = current_base_plan_message(original_messages) {
+            new_messages.push(normalize_plan_message_content(existing_plan.clone()));
+            new_messages.extend(
+                original_messages
+                    .iter()
+                    .filter(|message| is_plan_delta_event(message))
+                    .cloned(),
+            );
+        } else if let Some(pinned_plan_text) =
+            resolve_pinned_plan_text(original_messages, decisions)
+        {
+            let initial_plan = pinned_plan_text.trim();
+            if !initial_plan.is_empty() {
+                let plan_budget = remaining_messages_symbols
+                    .max(MODE_TRANSITION_INITIAL_PLAN_SYMBOL_CAP.min(text_symbols(initial_plan)));
+                let plan_message = make_pinned_plan_message(initial_plan, plan_budget);
+                let used = text_symbols(&plan_message.content.content_text_only());
+                new_messages.push(plan_message);
+                remaining_messages_symbols = remaining_messages_symbols.saturating_sub(used);
+            }
         }
     }
-
     let finish_report = find_finish_report(original_messages);
     if let Some(report) = &finish_report {
         let prefix = "## Task Completion Report\n\n";
@@ -1695,6 +1823,20 @@ pub async fn assemble_new_chat(
     }
 
     Ok(new_messages)
+}
+
+async fn assembly_file_content(
+    path: &str,
+    workspace_dirs: &[PathBuf],
+    preloaded: Option<&std::collections::HashMap<String, String>>,
+) -> Result<String, String> {
+    match preloaded {
+        Some(files) => files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| "File was not runtime-cleared".into()),
+        None => read_file_content_safe(path, workspace_dirs).await,
+    }
 }
 
 async fn read_file_content_safe(path: &str, workspace_dirs: &[PathBuf]) -> Result<String, String> {
@@ -1757,6 +1899,123 @@ async fn read_file_content_safe(path: &str, workspace_dirs: &[PathBuf]) -> Resul
 mod tests {
     use super::*;
     use refact_core::chat_types::{ChatToolCall, ChatToolFunction, ContextFile};
+
+    #[test]
+    fn reconstruction_rejects_empty_and_invalid_decisions() {
+        let messages = vec![ChatMessage::new("user".into(), "task".into())];
+        assert!(validate_decisions(&parse_llm_response("not XML"), &messages).is_err());
+        let mut decisions = ParsedDecisions {
+            summary: "Task state".into(),
+            handoff_message: "Run tests".into(),
+            ..Default::default()
+        };
+        assert!(validate_decisions(&decisions, &messages).is_ok());
+        decisions.messages_to_preserve.push("MSG_ID:99".into());
+        assert!(validate_decisions(&decisions, &messages).is_err());
+    }
+
+    #[tokio::test]
+    async fn reconstruction_preserves_control_bytes_and_budget() {
+        let mut goal = ChatMessage::new("goal".into(), " exact goal bytes ".into());
+        goal.extra.insert(
+            "goal".into(),
+            serde_json::json!({"version": 1, "active": true}),
+        );
+        let mut delta = ChatMessage::new("event".into(), "retain update".into());
+        delta
+            .extra
+            .insert("event".into(), serde_json::json!({"subkind":"plan_delta"}));
+        let messages = vec![plan_role_message(1, " exact plan bytes "), delta, goal];
+        let decisions = ParsedDecisions {
+            summary: "Implement approved plan".into(),
+            handoff_message: "Run the verification command".into(),
+            ..Default::default()
+        };
+        let budget = TransitionContextBudget {
+            previous_symbols: 1000,
+            total_symbols: 800,
+            files_symbols: 400,
+            messages_symbols: 400,
+            max_images: 2,
+        };
+        let rebuilt = assemble_reconstruction(
+            &messages,
+            &decisions,
+            &[],
+            budget,
+            true,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+        assert!(rebuilt.iter().map(message_symbols).sum::<usize>() <= 800);
+        for control in &messages {
+            assert!(rebuilt.iter().any(|m| m.role == control.role
+                && m.content.content_text_only() == control.content.content_text_only()
+                && m.extra == control.extra));
+        }
+        let without_goal = assemble_reconstruction(
+            &messages,
+            &decisions,
+            &[],
+            budget,
+            false,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!without_goal.iter().any(|m| m.role == "goal"));
+        assert!(assemble_reconstruction(
+            &messages,
+            &decisions,
+            &[],
+            TransitionContextBudget {
+                total_symbols: 10,
+                ..budget
+            },
+            true,
+            &Default::default()
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn reconstruction_does_not_read_unapproved_files() {
+        let messages = vec![ChatMessage {
+            role: "context_file".into(),
+            content: ChatContent::ContextFiles(vec![ContextFile {
+                file_name: "/etc/hosts".into(),
+                file_content: "old".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }];
+        let decisions = ParsedDecisions {
+            summary: "Task state".into(),
+            handoff_message: "Next action".into(),
+            files_to_open: vec!["/etc/hosts".into()],
+            ..Default::default()
+        };
+        let budget = TransitionContextBudget {
+            previous_symbols: 10000,
+            total_symbols: 3000,
+            files_symbols: 2100,
+            messages_symbols: 900,
+            max_images: 0,
+        };
+        let rebuilt = assemble_reconstruction(
+            &messages,
+            &decisions,
+            &[],
+            budget,
+            false,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!rebuilt.iter().any(|m| m.role == "context_file"));
+    }
 
     #[test]
     fn test_parse_xml_tag() {

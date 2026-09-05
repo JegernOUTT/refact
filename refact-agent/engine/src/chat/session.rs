@@ -226,6 +226,11 @@ pub(crate) fn goal_snapshot_from_messages(
     messages: &[ChatMessage],
     existing: Option<&GoalSnapshot>,
 ) -> Option<GoalSnapshot> {
+    let active = match refact_core::active_context::active_context(messages) {
+        Ok(active) => active,
+        Err(_) => return existing.cloned(),
+    };
+    let messages = &active.messages;
     let (base_index, version, base) = messages
         .iter()
         .enumerate()
@@ -416,6 +421,9 @@ impl ChatSession {
             is_compressing: false,
             compression_phase: None,
             compression_reason: None,
+            pending_context_rebuild: None,
+            pending_mode_handoff: None,
+            last_rebuild_attempt_version: None,
             compression_attempt_generation: 0,
             active_compression_attempt: None,
             compression_attempt_started_at_ms: None,
@@ -456,10 +464,6 @@ impl ChatSession {
             last_prompt_messages: Vec::new(),
             tool_catalog: None,
             turn_tool_pool: None,
-            tier1_compact_attempts: 0,
-            tier1_compaction_disabled: false,
-            compression_insufficient_hashes: HashSet::new(),
-            compression_retry_after_ms: Default::default(),
             pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
             cache_guard_request_generation: 0,
@@ -542,6 +546,9 @@ impl ChatSession {
             is_compressing: false,
             compression_phase: None,
             compression_reason: None,
+            pending_context_rebuild: None,
+            pending_mode_handoff: None,
+            last_rebuild_attempt_version: None,
             compression_attempt_generation: 0,
             active_compression_attempt: None,
             compression_attempt_started_at_ms: None,
@@ -582,10 +589,6 @@ impl ChatSession {
             last_prompt_messages: Vec::new(),
             tool_catalog: None,
             turn_tool_pool: None,
-            tier1_compact_attempts: 0,
-            tier1_compaction_disabled: false,
-            compression_insufficient_hashes: HashSet::new(),
-            compression_retry_after_ms: Default::default(),
             pending_max_new_tokens_boost: None,
             cache_guard_snapshot: None,
             cache_guard_request_generation: 0,
@@ -1084,9 +1087,6 @@ impl ChatSession {
     pub fn reset_compaction_runtime_state(&mut self) {
         self.clear_stream_and_confirmation_timestamps();
         self.release_turn_only_state();
-        self.tier1_compact_attempts = 0;
-        self.tier1_compaction_disabled = false;
-        self.compression_insufficient_hashes.clear();
         self.pending_max_new_tokens_boost = None;
         self.thread.reactive_compact_attempts = None;
         self.thread.previous_response_id = None;
@@ -1108,7 +1108,6 @@ impl ChatSession {
 
     pub fn replace_messages(&mut self, messages: Vec<ChatMessage>) {
         self.messages = messages;
-        self.compression_retry_after_ms.clear();
         self.rebuild_goal_projection_from_messages();
         self.reset_compaction_runtime_state();
         self.increment_version();
@@ -1147,8 +1146,11 @@ impl ChatSession {
         started_at_ms: Option<u64>,
         completed_at_ms: Option<u64>,
     ) -> bool {
+        let Some(start) = self.mutable_message_start() else {
+            return false;
+        };
         let mut updated_message = None;
-        for message in self.messages.iter_mut().rev() {
+        for message in self.messages[start..].iter_mut().rev() {
             let Some(tool_call) = message
                 .tool_calls
                 .as_mut()
@@ -1242,6 +1244,11 @@ impl ChatSession {
     }
 
     pub fn close_event_channel(&mut self) {
+        self.pending_context_rebuild = None;
+        self.pending_mode_handoff = None;
+        if let Some(flag) = &self.compression_abort_flag {
+            flag.store(true, Ordering::SeqCst);
+        }
         self.clear_discarded_queue_timestamps();
         self.clear_stream_and_confirmation_timestamps();
         self.release_turn_only_state();
@@ -1605,8 +1612,6 @@ impl ChatSession {
         if affects_goal {
             self.rebuild_goal_projection_from_messages();
         }
-        self.tier1_compact_attempts = 0;
-        self.tier1_compaction_disabled = false;
         self.emit(ChatEvent::MessageAdded { message, index });
         self.increment_version();
         self.touch();
@@ -1621,9 +1626,11 @@ impl ChatSession {
         &self,
         tool_call_id: Option<&str>,
     ) -> Option<(usize, Vec<String>)> {
+        let start = self.mutable_message_start()?;
         self.messages
             .iter()
             .enumerate()
+            .skip(start)
             .rev()
             .find_map(|(idx, message)| {
                 if message.role != "assistant" {
@@ -1901,6 +1908,13 @@ impl ChatSession {
         if delivery.messages.is_empty() {
             return Err("delivery must contain at least one message".to_string());
         }
+        if delivery
+            .messages
+            .iter()
+            .any(|message| Self::control_kind(message).is_some())
+        {
+            self.try_accepted_control_projection()?;
+        }
         if let Some(patch) = &delivery.thread_patch {
             let Some(fields) = patch.as_object() else {
                 return Err("delivery thread_patch must be an object".into());
@@ -1916,6 +1930,13 @@ impl ChatSession {
         }
         if self.knows_delivery_id(&delivery.id) {
             return Ok(DeliveryOutcome::Duplicate);
+        }
+        if delivery
+            .messages
+            .iter()
+            .any(|message| Self::control_kind(message).is_some())
+        {
+            self.try_accepted_control_projection()?;
         }
         // Reject before any side effect rather than dropping an accepted delivery.
         if self.pending_deliveries.len() >= max_queue_size() && delivery.push != PushMode::Preempt {
@@ -2117,26 +2138,52 @@ impl ChatSession {
         completed
     }
 
-    pub fn accepted_control_messages(&self) -> impl Iterator<Item = &ChatMessage> {
-        let mut seen = HashSet::new();
-        self.messages
-            .iter()
-            .chain(self.post_tool_side_effects.iter())
-            .chain(
-                self.pending_deliveries
-                    .iter()
-                    .flat_map(|delivery| delivery.messages.iter()),
-            )
-            .filter(|message| Self::control_kind(message).is_some())
-            .filter(move |message| {
-                message.message_id.is_empty() || seen.insert(message.message_id.clone())
-            })
+    pub fn accepted_control_messages(&self) -> impl Iterator<Item = ChatMessage> {
+        self.accepted_control_projection().messages.into_iter()
     }
 
+    pub fn try_accepted_control_projection(&self) -> Result<ChatSession, String> {
+        let mut projection = ChatSession::new(self.chat_id.clone());
+        projection.thread = self.thread.clone();
+        projection.goal = self.goal.clone();
+        projection.goal_ledger = self.goal_ledger.clone();
+        projection.messages = refact_core::active_context::active_context(&self.messages)
+            .map_err(|error| error.to_string())?
+            .messages;
+        projection
+            .messages
+            .extend(self.post_tool_side_effects.iter().cloned());
+        projection.messages.extend(
+            self.pending_deliveries
+                .iter()
+                .flat_map(|delivery| delivery.messages.iter().cloned()),
+        );
+        let mut seen = HashSet::new();
+        projection.messages.retain(|message| {
+            Self::control_kind(message).is_some()
+                && (message.message_id.is_empty() || seen.insert(message.message_id.clone()))
+        });
+        Ok(projection)
+    }
+
+    /// Legacy callers cannot return an error; retain the invalid boundary so
+    /// fallible control readers still reject it rather than treating it as empty.
     pub fn accepted_control_projection(&self) -> ChatSession {
         let mut projection = ChatSession::new(self.chat_id.clone());
         projection.thread = self.thread.clone();
-        projection.messages = self.accepted_control_messages().cloned().collect();
+        match self.try_accepted_control_projection() {
+            Ok(projected) => return projected,
+            Err(error) => {
+                let mut boundary = ChatMessage::new("compression_report".into(), error.clone());
+                boundary.extra.insert(
+                    "compression_report".into(),
+                    json!({"kind": "invalid_context"}),
+                );
+                projection.messages = vec![boundary];
+                projection.runtime.state = SessionState::Error;
+                projection.runtime.error = Some(error);
+            }
+        }
         projection
     }
 
@@ -2197,11 +2244,16 @@ impl ChatSession {
         {
             return crate::chat::goal_role::install_goal(self, mode, body, active, budget);
         }
+        let installed_index = self.messages.len();
         let report = crate::chat::goal_role::install_goal(self, mode, body, active, budget);
+        if self.messages.len() == installed_index {
+            return report;
+        }
         if !criteria.is_empty() {
             if let Some(message) = self
                 .messages
                 .iter_mut()
+                .skip(installed_index)
                 .rev()
                 .find(|message| message.role == GOAL_ROLE)
             {
@@ -2236,8 +2288,6 @@ impl ChatSession {
         if affects_goal {
             self.rebuild_goal_projection_from_messages();
         }
-        self.tier1_compact_attempts = 0;
-        self.tier1_compaction_disabled = false;
         self.emit(ChatEvent::MessageAdded {
             message,
             index: insert_idx,
@@ -2246,29 +2296,42 @@ impl ChatSession {
         self.touch();
     }
 
+    fn mutable_message_start(&self) -> Option<usize> {
+        refact_core::active_context::active_context(&self.messages)
+            .ok()
+            .map(|active| active.report_index.map_or(0, |index| index + 1))
+    }
+
     pub fn update_message(&mut self, message_id: &str, message: ChatMessage) -> Option<usize> {
+        let start = self.mutable_message_start()?;
+        if message.role == "compression_report"
+            || message.extra.contains_key("compression_report")
+            || refact_core::active_context::is_legacy_summary(&message)
+        {
+            return None;
+        }
         if let Some(idx) = self
             .messages
             .iter()
             .position(|m| m.message_id == message_id)
         {
+            if idx < start {
+                return None;
+            }
             let affects_goal = message_affects_goal_projection(&self.messages[idx])
                 || message_affects_goal_projection(&message);
             self.messages[idx] = message.clone();
             if affects_goal {
                 self.rebuild_goal_projection_from_messages();
             }
-            self.tier1_compact_attempts = 0;
-            self.tier1_compaction_disabled = false;
-            self.compression_insufficient_hashes.clear();
-            self.compression_retry_after_ms.clear();
             self.thread.previous_response_id = None;
+            self.reset_cache_guard_snapshot();
+            self.provider_usage_stale = true;
             self.emit(ChatEvent::MessageUpdated {
                 message_id: message_id.to_string(),
                 message,
             });
             self.goal_reset_no_progress();
-            self.invalidate_summaries_referencing(message_id);
             self.increment_version();
             self.touch();
             return Some(idx);
@@ -2276,103 +2339,16 @@ impl ChatSession {
         None
     }
 
-    fn invalidate_summaries_referencing(&mut self, source_message_id: &str) {
-        let stale: Vec<(String, Option<String>)> = self
-            .messages
-            .iter()
-            .filter(|message| crate::chat::summarization::is_segment_summary(message))
-            .filter(|message| {
-                message
-                    .extra
-                    .get("compression")
-                    .and_then(|c| c.get("summarized_source_message_ids"))
-                    .and_then(|ids| ids.as_array())
-                    .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(source_message_id)))
-            })
-            .map(|message| {
-                let source_hash = message
-                    .extra
-                    .get("compression")
-                    .and_then(|c| c.get("source_hash"))
-                    .and_then(|h| h.as_str())
-                    .map(ToString::to_string);
-                (message.message_id.clone(), source_hash)
-            })
-            .collect();
-        self.remove_stale_summaries(stale);
-    }
-
-    fn invalidate_orphaned_summaries(&mut self) {
-        let existing_ids: HashSet<String> = self
-            .messages
-            .iter()
-            .filter(|message| !message.message_id.is_empty())
-            .map(|message| message.message_id.clone())
-            .collect();
-        let stale: Vec<(String, Option<String>)> = self
-            .messages
-            .iter()
-            .filter(|message| crate::chat::summarization::is_segment_summary(message))
-            .filter(|message| {
-                message
-                    .extra
-                    .get("compression")
-                    .and_then(|c| c.get("summarized_source_message_ids"))
-                    .and_then(|ids| ids.as_array())
-                    .is_some_and(|ids| {
-                        ids.iter()
-                            .filter_map(|id| id.as_str())
-                            .any(|id| !id.is_empty() && !existing_ids.contains(id))
-                    })
-            })
-            .map(|message| {
-                let source_hash = message
-                    .extra
-                    .get("compression")
-                    .and_then(|c| c.get("source_hash"))
-                    .and_then(|h| h.as_str())
-                    .map(ToString::to_string);
-                (message.message_id.clone(), source_hash)
-            })
-            .collect();
-        self.remove_stale_summaries(stale);
-    }
-
-    fn remove_stale_summaries(&mut self, stale: Vec<(String, Option<String>)>) {
-        for (summary_id, source_hash) in stale {
-            let report_ids: Vec<String> = self
-                .messages
-                .iter()
-                .filter(|message| {
-                    source_hash.is_some()
-                        && message
-                            .extra
-                            .get("compression_report")
-                            .and_then(|r| r.get("source_hash"))
-                            .and_then(|h| h.as_str())
-                            .map(ToString::to_string)
-                            == source_hash
-                })
-                .map(|message| message.message_id.clone())
-                .collect();
-            for stale_id in report_ids.into_iter().chain(std::iter::once(summary_id)) {
-                if let Some(stale_idx) = self.messages.iter().position(|m| m.message_id == stale_id)
-                {
-                    self.messages.remove(stale_idx);
-                    self.emit(ChatEvent::MessageRemoved {
-                        message_id: stale_id,
-                    });
-                }
-            }
-        }
-    }
-
     pub fn remove_message(&mut self, message_id: &str) -> Option<usize> {
+        let start = self.mutable_message_start()?;
         if let Some(idx) = self
             .messages
             .iter()
             .position(|m| m.message_id == message_id)
         {
+            if idx < start {
+                return None;
+            }
             let msg = &self.messages[idx];
             let affects_goal = message_affects_goal_projection(msg);
             let role = msg.role.clone();
@@ -2386,32 +2362,31 @@ impl ChatSession {
             if affects_goal {
                 self.rebuild_goal_projection_from_messages();
             }
-            self.tier1_compact_attempts = 0;
-            self.tier1_compaction_disabled = false;
-            self.compression_insufficient_hashes.clear();
-            self.compression_retry_after_ms.clear();
             self.thread.previous_response_id = None;
+            self.reset_cache_guard_snapshot();
+            self.provider_usage_stale = true;
             self.emit(ChatEvent::MessageRemoved {
                 message_id: message_id.to_string(),
             });
 
             if role == "assistant" && !tool_call_ids.is_empty() {
-                let tool_msg_ids: Vec<String> = self
+                let tool_indices: Vec<usize> = self
                     .messages
                     .iter()
-                    .filter(|m| m.role == "tool" && tool_call_ids.contains(&m.tool_call_id))
-                    .map(|m| m.message_id.clone())
+                    .enumerate()
+                    .skip(start)
+                    .filter(|(_, m)| m.role == "tool" && tool_call_ids.contains(&m.tool_call_id))
+                    .map(|(index, _)| index)
                     .collect();
 
-                for tid in tool_msg_ids {
-                    if let Some(tool_idx) = self.messages.iter().position(|m| m.message_id == tid) {
-                        self.messages.remove(tool_idx);
-                        self.emit(ChatEvent::MessageRemoved { message_id: tid });
-                    }
+                for tool_idx in tool_indices.into_iter().rev() {
+                    let message = self.messages.remove(tool_idx);
+                    self.emit(ChatEvent::MessageRemoved {
+                        message_id: message.message_id,
+                    });
                 }
             }
 
-            self.invalidate_orphaned_summaries();
             self.increment_version();
             self.touch();
             return Some(idx);
@@ -2421,20 +2396,12 @@ impl ChatSession {
 
     pub fn truncate_messages(&mut self, from_index: usize) {
         if from_index < self.messages.len() {
-            let affects_goal = self.messages[from_index..]
-                .iter()
-                .any(message_affects_goal_projection);
             self.messages.truncate(from_index);
-            if affects_goal {
-                self.rebuild_goal_projection_from_messages();
-            }
-            self.tier1_compact_attempts = 0;
-            self.tier1_compaction_disabled = false;
-            self.compression_insufficient_hashes.clear();
-            self.compression_retry_after_ms.clear();
+            self.rebuild_goal_projection_from_messages();
             self.thread.previous_response_id = None;
+            self.reset_cache_guard_snapshot();
+            self.provider_usage_stale = true;
             self.emit(ChatEvent::MessagesTruncated { from_index });
-            self.invalidate_orphaned_summaries();
             self.increment_version();
             self.touch();
         }
@@ -2817,7 +2784,13 @@ impl ChatSession {
     }
 
     pub fn start_stream(&mut self) -> Option<(String, Arc<AtomicBool>)> {
-        if self.runtime.state == SessionState::ExecutingTools || self.draft_message.is_some() {
+        if crate::chat::context_rebuild::compression_attempt_active(self)
+            || self.pending_context_rebuild.is_some()
+            || self.pending_mode_handoff.is_some()
+            || refact_core::active_context::active_context(&self.messages).is_err()
+            || self.runtime.state == SessionState::ExecutingTools
+            || self.draft_message.is_some()
+        {
             warn!("Attempted to start stream while already executing tools or draft exists");
             return None;
         }
@@ -2990,11 +2963,35 @@ impl ChatSession {
                 });
             }
         }
+        self.draft_usage = None;
         self.set_runtime_state(next_state, None);
         if next_state != SessionState::ExecutingTools {
             self.release_turn_only_state();
         }
         self.touch();
+    }
+
+    /// Preserve accepted text before rebuilding, but never retain incomplete tool calls.
+    pub fn finish_stream_for_rebuild(&mut self) {
+        if let Some(mut draft) = self.draft_message.take() {
+            self.emit(ChatEvent::StreamFinished {
+                message_id: draft.message_id.clone(),
+                finish_reason: Some("context_length".into()),
+            });
+            if !draft.content.content_text_only().trim().is_empty() {
+                draft.tool_calls = None;
+                draft.finish_reason = Some("context_length".into());
+                draft.usage = self.draft_usage.take();
+                self.add_message(draft);
+            } else {
+                self.emit(ChatEvent::MessageRemoved {
+                    message_id: draft.message_id,
+                });
+            }
+        }
+        self.draft_usage = None;
+        self.stream_started_at = None;
+        self.set_runtime_state(SessionState::Idle, None);
     }
 
     pub fn clear_stream_for_retry(&mut self) {
@@ -3088,6 +3085,11 @@ impl ChatSession {
     }
 
     pub fn abort_stream(&mut self) {
+        self.pending_context_rebuild = None;
+        self.pending_mode_handoff = None;
+        if let Some(flag) = &self.compression_abort_flag {
+            flag.store(true, Ordering::SeqCst);
+        }
         self.abort_flag.store(true, Ordering::SeqCst);
         self.user_interrupt_flag.store(true, Ordering::SeqCst);
         self.abort_notify.notify_waiters();
@@ -6608,8 +6610,6 @@ mod tests {
         let mut session = make_session();
         session.last_prompt_messages =
             vec![ChatMessage::new("user".to_string(), "old".to_string())];
-        session.tier1_compact_attempts = 2;
-        session.tier1_compaction_disabled = true;
         session.thread.previous_response_id = Some("resp-old".to_string());
         session.cache_guard_force_next = false;
         session.trajectory_dirty = false;
@@ -6620,8 +6620,6 @@ mod tests {
         )]);
 
         assert!(session.last_prompt_messages.is_empty());
-        assert_eq!(session.tier1_compact_attempts, 0);
-        assert!(!session.tier1_compaction_disabled);
         assert!(session.thread.previous_response_id.is_none());
         assert!(session.cache_guard_force_next);
         assert!(session.trajectory_dirty);
@@ -8098,64 +8096,13 @@ mod tests {
     }
 
     #[test]
-    fn update_message_invalidates_summaries_referencing_edited_source() {
+    fn update_legacy_source_requires_explicit_rebuild() {
         let mut session = make_session();
-        let mut source = ChatMessage::new("assistant".to_string(), "original answer".to_string());
-        source.message_id = "source-id".to_string();
-        let mut summary = ChatMessage::new("assistant".to_string(), "summary".to_string());
-        summary.message_id = "summary-id".to_string();
-        summary.summarization_tier = Some("llm_segment_summary".to_string());
-        summary.extra.insert(
-            "compression".to_string(),
-            json!({
-                "kind": "llm_segment_summary",
-                "insert_mode": "source_preserving",
-                "source_hash": "hash-1",
-                "summarized_source_message_ids": ["source-id"],
-            }),
-        );
-        let mut report = ChatMessage::new("compression_report".to_string(), "report".to_string());
-        report.message_id = "report-id".to_string();
-        report.extra.insert(
-            "compression_report".to_string(),
-            json!({ "kind": "chat_compression_report", "source_hash": "hash-1" }),
-        );
-        let mut unrelated_summary =
-            ChatMessage::new("assistant".to_string(), "other summary".to_string());
-        unrelated_summary.message_id = "other-summary-id".to_string();
-        unrelated_summary.summarization_tier = Some("llm_segment_summary".to_string());
-        unrelated_summary.extra.insert(
-            "compression".to_string(),
-            json!({
-                "kind": "llm_segment_summary",
-                "source_hash": "hash-2",
-                "summarized_source_message_ids": ["unrelated-id"],
-            }),
-        );
-        session.messages = vec![
-            ChatMessage::new("user".to_string(), "question".to_string()),
-            source.clone(),
-            report,
-            summary,
-            unrelated_summary,
-        ];
-
-        let mut edited = source;
-        edited.content = ChatContent::SimpleText("edited answer".to_string());
-        session.update_message("source-id", edited);
-
-        let ids: Vec<&str> = session
-            .messages
-            .iter()
-            .map(|message| message.message_id.as_str())
-            .collect();
-        assert!(!ids.contains(&"summary-id"));
-        assert!(!ids.contains(&"report-id"));
-        assert!(ids.contains(&"other-summary-id"));
-        assert_eq!(
-            session.messages[1].content.content_text_only(),
-            "edited answer"
-        );
+        session.messages = summary_fixture_messages();
+        let before = serde_json::to_value(&session.messages).unwrap();
+        let replacement = ChatMessage::new("assistant".into(), "edited".into());
+        assert!(session.update_message("source-id", replacement).is_none());
+        assert_eq!(serde_json::to_value(&session.messages).unwrap(), before);
     }
 
     fn summary_fixture_messages() -> Vec<ChatMessage> {
@@ -8207,58 +8154,33 @@ mod tests {
     }
 
     #[test]
-    fn remove_message_drops_summaries_referencing_removed_source() {
+    fn remove_legacy_source_preserves_archive() {
         let mut session = make_session();
         session.messages = summary_fixture_messages();
-
-        session.remove_message("source-id");
-
-        let ids: Vec<&str> = session
-            .messages
-            .iter()
-            .map(|message| message.message_id.as_str())
-            .collect();
-        assert!(!ids.contains(&"source-id"));
-        assert!(!ids.contains(&"summary-id"));
-        assert!(!ids.contains(&"report-id"));
-        assert!(ids.contains(&"other-summary-id"));
-        assert!(ids.contains(&"other-source-id"));
+        let before = serde_json::to_value(&session.messages).unwrap();
+        assert!(session.remove_message("source-id").is_none());
+        assert_eq!(serde_json::to_value(&session.messages).unwrap(), before);
     }
 
     #[test]
-    fn truncate_messages_drops_summaries_referencing_truncated_sources() {
+    fn truncate_preserves_legacy_summaries_and_blocks_generation() {
         let mut session = make_session();
         session.messages = summary_fixture_messages();
-
-        // Truncate away only the trailing source; its summary and report sit earlier
-        // in the transcript and must be invalidated.
+        let prefix = serde_json::to_value(&session.messages[..5]).unwrap();
         session.truncate_messages(5);
-
-        let ids: Vec<&str> = session
-            .messages
-            .iter()
-            .map(|message| message.message_id.as_str())
-            .collect();
-        assert!(!ids.contains(&"source-id"));
-        assert!(!ids.contains(&"summary-id"));
-        assert!(!ids.contains(&"report-id"));
-        assert!(ids.contains(&"other-summary-id"));
-        assert!(ids.contains(&"other-source-id"));
+        assert_eq!(serde_json::to_value(&session.messages).unwrap(), prefix);
+        assert!(session.start_stream().is_none());
     }
 
     #[test]
     fn reset_compaction_runtime_state_clears_reactive_breaker_and_hashes() {
         let mut session = make_session();
         session.thread.reactive_compact_attempts = Some(2);
-        session
-            .compression_insufficient_hashes
-            .insert("hash".to_string());
         session.pending_max_new_tokens_boost = Some(16_000);
 
         session.reset_compaction_runtime_state();
 
         assert_eq!(session.thread.reactive_compact_attempts, None);
-        assert!(session.compression_insufficient_hashes.is_empty());
         assert!(session.pending_max_new_tokens_boost.is_none());
     }
 }
@@ -8356,5 +8278,234 @@ mod accepted_control_tests {
         assert_eq!(session.accepted_control_messages().count(), 2);
         assert_eq!(session.messages[0].content.content_text_only(), "base");
         assert_eq!(session.messages[1].content.content_text_only(), "update");
+    }
+}
+
+#[cfg(test)]
+mod archival_mutation_tests {
+    use super::*;
+    use refact_core::active_context::{
+        active_context, make_reconstruction_report, writeback_active_context,
+        ReconstructionMetadata,
+    };
+
+    fn message(id: &str, role: &str, text: &str) -> ChatMessage {
+        let mut message = ChatMessage::new(role.into(), text.into());
+        message.message_id = id.into();
+        message
+    }
+
+    fn session() -> ChatSession {
+        let mut session = ChatSession::new("archive".into());
+        let report = make_reconstruction_report(
+            vec![message("payload", "user", "active context")],
+            ReconstructionMetadata::default(),
+        )
+        .unwrap();
+        session.messages = vec![
+            message("archive", "user", "historical"),
+            report,
+            message("suffix", "user", "latest"),
+        ];
+        session
+    }
+
+    #[test]
+    fn authoritative_report_and_archive_reject_generic_mutations() {
+        let mut session = session();
+        let before = serde_json::to_value(&session.messages).unwrap();
+        let version = session.trajectory_version;
+        let report_id = session.messages[1].message_id.clone();
+        for id in ["archive", report_id.as_str()] {
+            assert!(session.remove_message(id).is_none());
+            assert!(session
+                .update_message(id, message(id, "user", "edited"))
+                .is_none());
+        }
+        assert_eq!(serde_json::to_value(&session.messages).unwrap(), before);
+        assert_eq!(session.trajectory_version, version);
+        assert_eq!(
+            active_context(&session.messages).unwrap().messages[0].message_id,
+            "payload"
+        );
+    }
+
+    #[test]
+    fn suffix_edit_preserves_report_and_invalidates_captured_writeback() {
+        let mut session = session();
+        let original = active_context(&session.messages).unwrap();
+        let archive = serde_json::to_value(&session.messages[..2]).unwrap();
+        let version = session.trajectory_version;
+        assert_eq!(
+            session.update_message("suffix", message("suffix", "user", "edited")),
+            Some(2)
+        );
+        assert!(session.trajectory_version > version);
+        assert_eq!(
+            serde_json::to_value(&session.messages[..2]).unwrap(),
+            archive
+        );
+        assert!(
+            writeback_active_context(&session.messages, &original, &original.messages).is_err()
+        );
+        assert_eq!(session.remove_message("suffix"), Some(2));
+        assert_eq!(serde_json::to_value(&session.messages).unwrap(), archive);
+    }
+
+    #[test]
+    fn explicit_truncate_can_resume_pre_report_history() {
+        let mut session = session();
+        session.truncate_messages(1);
+        assert_eq!(
+            active_context(&session.messages).unwrap().messages[0].message_id,
+            "archive"
+        );
+        assert!(session.start_stream().is_some());
+    }
+
+    #[test]
+    fn invalid_boundary_preserves_goal_projection_and_rejects_install() {
+        let mut session = ChatSession::new("invalid".into());
+        session.install_goal("agent", "live goal", true, GoalBudget::default());
+        let prior = serde_json::to_value(&session.goal).unwrap();
+        let mut invalid = message("invalid", "compression_report", "broken");
+        invalid.extra.insert(
+            "compression_report".into(),
+            json!({"kind":"reconstructed_history", "schema_version":999}),
+        );
+        session.messages.push(invalid);
+        let before = serde_json::to_value(&session.messages).unwrap();
+        session.rebuild_goal_projection_from_messages();
+        assert_eq!(serde_json::to_value(&session.goal).unwrap(), prior);
+        assert!(session.try_accepted_control_projection().is_err());
+        assert!(crate::chat::goal_role::try_current_base_goal(&session).is_err());
+        assert!(session
+            .enqueue_delivery(PendingDelivery::new(
+                vec![crate::chat::internal_roles::goal_delta(
+                    "test",
+                    json!({"seq": 1}),
+                    "must not enqueue",
+                )],
+                PushMode::WhenIdle,
+                "test",
+                false,
+            ))
+            .is_err());
+        assert!(session.pending_deliveries.is_empty());
+        session.install_goal("agent", "must not install", true, GoalBudget::default());
+        assert_eq!(serde_json::to_value(&session.messages).unwrap(), before);
+        assert!(session
+            .enqueue_delivery(PendingDelivery::new(
+                vec![crate::chat::internal_roles::goal_delta(
+                    "test",
+                    json!({"seq": 1}),
+                    "must not enqueue",
+                )],
+                PushMode::Append,
+                "test",
+                false,
+            ))
+            .is_err());
+        assert!(session.pending_deliveries.is_empty());
+        assert!(session.start_stream().is_none());
+    }
+
+    #[test]
+    fn payload_controls_and_queued_deltas_project_once_without_archived_controls() {
+        use crate::chat::{goal_role, internal_roles, plan_role};
+        for kind in ["goal", "plan"] {
+            let mut session = session();
+            let mut base = if kind == "goal" {
+                internal_roles::goal("agent", 1, "active base", None, true, GoalBudget::default())
+            } else {
+                internal_roles::plan("agent", 1, "active base", None)
+            };
+            base.message_id = "base".into();
+            let mut archived = base.clone();
+            archived.message_id = "archived-control".into();
+            archived.content = ChatContent::SimpleText("obsolete base".into());
+            archived.extra.get_mut(kind).unwrap()["version"] = json!(99);
+            let mut delta = if kind == "goal" {
+                internal_roles::goal_delta("test", json!({"seq":1}), "payload delta")
+            } else {
+                internal_roles::plan_delta("test", json!({"seq":1}), "payload delta")
+            };
+            delta.message_id = "delta".into();
+            session.messages = vec![
+                archived,
+                make_reconstruction_report(
+                    vec![base, delta.clone()],
+                    ReconstructionMetadata::default(),
+                )
+                .unwrap(),
+            ];
+            session.queue_post_tool_side_effect(delta);
+            let mut queued = if kind == "goal" {
+                internal_roles::goal_delta("test", json!({"seq":2}), "queued delta")
+            } else {
+                internal_roles::plan_delta("test", json!({"seq":2}), "queued delta")
+            };
+            queued.message_id = "queued".into();
+            session.pending_deliveries.push_back(PendingDelivery::new(
+                vec![queued],
+                PushMode::WhenIdle,
+                "test",
+                false,
+            ));
+            let before = serde_json::to_value(&session.messages).unwrap();
+            let projection = session.try_accepted_control_projection().unwrap();
+            assert_eq!(projection.messages.len(), 3);
+            let content = if kind == "goal" {
+                assert_eq!(
+                    goal_role::current_base_goal(&session).unwrap().message_id,
+                    "base"
+                );
+                goal_role::synthesize_current_goal(&projection)
+            } else {
+                assert_eq!(
+                    plan_role::try_current_base_plan(&session)
+                        .unwrap()
+                        .unwrap()
+                        .message_id,
+                    "base"
+                );
+                plan_role::synthesize_current_plan(&projection)
+            }
+            .unwrap();
+            assert!(!content.contains("obsolete"));
+            assert_eq!(content.matches("payload delta").count(), 1);
+            assert_eq!(content.matches("queued delta").count(), 1);
+            assert_eq!(serde_json::to_value(&session.messages).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn transferred_goal_payload_writeback_preserves_archived_original() {
+        use crate::chat::internal_roles;
+        let mut session = session();
+        let mut goal = internal_roles::goal("agent", 1, "live", None, true, GoalBudget::default());
+        goal.message_id = "goal".into();
+        session.messages = vec![
+            goal.clone(),
+            make_reconstruction_report(vec![goal], ReconstructionMetadata::default()).unwrap(),
+        ];
+        let archive = serde_json::to_value(&session.messages[0]).unwrap();
+        let original = active_context(&session.messages).unwrap();
+        let mut transformed = original.messages.clone();
+        transformed[0].extra.get_mut("goal").unwrap()["active"] = json!(false);
+        transformed[0].extra.get_mut("goal").unwrap()["status"] = json!("transferred");
+        transformed[0].extra.get_mut("goal").unwrap()["transferred_to"] = json!("target");
+        session.replace_messages(
+            writeback_active_context(&session.messages, &original, &transformed).unwrap(),
+        );
+        assert_eq!(serde_json::to_value(&session.messages[0]).unwrap(), archive);
+        assert_eq!(
+            session.goal.as_ref().unwrap().status,
+            GoalStatus::Transferred
+        );
+        assert_eq!(
+            session.goal.as_ref().unwrap().transferred_to.as_deref(),
+            Some("target")
+        );
     }
 }

@@ -8,6 +8,7 @@ import { setUpStore, type RootState } from "../../src/app/store";
 import { Theme } from "../../src/components/Theme";
 import { AbortControllerProvider } from "../../src/contexts/AbortControllers";
 import { Dashboard } from "../../src/features/Dashboard";
+import { Toolbar } from "../../src/components/Toolbar/Toolbar";
 import { TabBar } from "../../src/features/Workspace/TabBar";
 import { WorkspaceView } from "../../src/features/Workspace/WorkspaceView";
 import { makeSurfaceKey } from "../../src/features/Workspace/surfaceKey";
@@ -610,6 +611,37 @@ const queueChatRuntime: ChatThreadRuntime = {
   queued_items: queueItems,
 };
 
+const rebuildRoute = new URLSearchParams(window.location.search).has("rebuild");
+const rebuildReport = (id: string, content: string): ChatMessages[number] => ({
+  role: "compression_report",
+  message_id: id,
+  content: "Context rebuilt",
+  compression_report: {
+    kind: "reconstructed_history",
+    schema_version: 1,
+    model: "fixture-model",
+    trigger: "manual",
+    payload: {
+      messages: [{ role: "user", message_id: `${id}-payload`, content }],
+    },
+  },
+});
+if (rebuildRoute) {
+  chatRuntime.thread.title = "Rebuilt archive fixture";
+  chatRuntime.thread.model = "openai_codex_personal/gpt-5.5";
+  chatRuntime.thread.messages = [
+    {
+      role: "user",
+      message_id: "original",
+      content: "Original archive sentinel",
+    },
+    rebuildReport("report-first", "Earlier rebuilt sentinel"),
+    { role: "user", message_id: "middle", content: "Between reports sentinel" },
+    rebuildReport("report-latest", "Latest rebuilt sentinel"),
+    { role: "user", message_id: "suffix", content: "After rebuild sentinel" },
+  ];
+}
+
 const splitChatRuntime: ChatThreadRuntime = {
   ...chatRuntime,
   thread: {
@@ -619,6 +651,23 @@ const splitChatRuntime: ChatThreadRuntime = {
     messages: showcaseMessages,
   },
 };
+
+if (rebuildRoute) {
+  splitChatRuntime.thread.title = "Legacy archive fixture";
+  splitChatRuntime.thread.messages = [
+    {
+      role: "user",
+      message_id: "legacy-original",
+      content: "Legacy original sentinel",
+    },
+    {
+      role: "assistant",
+      message_id: "legacy-summary",
+      content: "Legacy summary sentinel",
+      extra: { compression: { kind: "llm_segment_summary" } },
+    },
+  ];
+}
 
 const historyItem = (
   id: string,
@@ -1472,6 +1521,7 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     return Promise.resolve(jsonResponse(privacyStatusResponse));
   if (path === "/v1/privacy/inspect")
     return Promise.resolve(jsonResponse(privacyInspectResponse));
+  if (rebuildRoute) return jsonResponse({});
   return nativeFetch(input, init);
 };
 
@@ -1591,6 +1641,11 @@ const preloadedState: Partial<RootState> = {
 };
 
 const store = setUpStore(preloadedState);
+if (rebuildRoute) {
+  Object.defineProperty(window, "__rebuildFixtureState", {
+    get: () => store.getState().chat,
+  });
+}
 
 /**
  * Test-only queue server: the stubbed command endpoint mutates this list and
@@ -1996,7 +2051,11 @@ const ShowcaseSurface = () => {
           overflow: "hidden",
         }}
       >
-        <TabBar />
+        {rebuildRoute ? (
+          <Toolbar activeTab={{ type: "chat", id: chatId }} />
+        ) : (
+          <TabBar />
+        )}
         <Flex style={{ flex: "1 1 auto", minWidth: 0, minHeight: 0 }}>
           <WorkspaceView />
         </Flex>

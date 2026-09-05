@@ -17,6 +17,7 @@ pub fn is_ui_only_message(msg: &ChatMessage) -> bool {
 
 pub fn demote_goal_ownership_for_branch(msgs: &mut [ChatMessage]) {
     for msg in msgs.iter_mut() {
+        transform_report_payload(msg, |nested| demote_goal_ownership_for_branch(nested));
         if msg.role != "goal" {
             continue;
         }
@@ -48,7 +49,7 @@ pub fn sanitize_message_for_new_thread(m: &ChatMessage) -> ChatMessage {
         preserve_hidden_role_extra(m)
     };
 
-    ChatMessage {
+    let mut sanitized = ChatMessage {
         message_id: m.message_id.clone(),
         role: m.role.clone(),
         content: m.content.clone(),
@@ -68,6 +69,38 @@ pub fn sanitize_message_for_new_thread(m: &ChatMessage) -> ChatMessage {
         summarized_token_estimate: m.summarized_token_estimate,
         extra,
         output_filter: None,
+    };
+    transform_report_payload(&mut sanitized, |nested| {
+        *nested = sanitize_messages_for_new_thread(nested);
+    });
+    sanitized
+}
+
+/// Rewrite nested executable context, retaining the report envelope and metadata.
+/// Malformed reports are left intact so active-context validation still fails closed.
+fn transform_report_payload(msg: &mut ChatMessage, transform: impl FnOnce(&mut Vec<ChatMessage>)) {
+    if msg.role != COMPRESSION_REPORT_ROLE {
+        return;
+    }
+    let Some(metadata) = msg.extra.get_mut("compression_report") else {
+        return;
+    };
+    if metadata.get("kind").and_then(|v| v.as_str()) != Some("reconstructed_history")
+        || metadata.get("schema_version").and_then(|v| v.as_u64()) != Some(1)
+    {
+        return;
+    }
+    let Some(payload) = metadata
+        .get_mut("payload")
+        .and_then(|v| v.get_mut("messages"))
+    else {
+        return;
+    };
+    if let Ok(mut nested) = serde_json::from_value::<Vec<ChatMessage>>(payload.clone()) {
+        transform(&mut nested);
+        if let Ok(value) = serde_json::to_value(nested) {
+            *payload = value;
+        }
     }
 }
 
@@ -113,119 +146,10 @@ fn preserve_extra_key(
 }
 
 pub fn sanitize_messages_for_new_thread(msgs: &[ChatMessage]) -> Vec<ChatMessage> {
-    let mut sanitized: Vec<ChatMessage> = msgs
-        .iter()
+    msgs.iter()
         .filter(|msg| !is_ui_only_message(msg))
         .map(sanitize_message_for_new_thread)
-        .collect();
-    refresh_summary_source_hashes(&mut sanitized);
-    sanitized
-}
-
-fn is_llm_segment_summary_message(msg: &ChatMessage) -> bool {
-    msg.role == "assistant"
-        && msg
-            .extra
-            .get("compression")
-            .and_then(|compression| compression.get("kind"))
-            .and_then(|kind| kind.as_str())
-            == Some(LLM_SEGMENT_SUMMARY_KIND)
-}
-
-fn message_compression_source_hash(msg: &ChatMessage) -> Option<String> {
-    let key = if msg.role == COMPRESSION_REPORT_ROLE {
-        COMPRESSION_REPORT_EXTRA_KEY
-    } else {
-        "compression"
-    };
-    msg.extra
-        .get(key)?
-        .get("source_hash")?
-        .as_str()
-        .map(ToString::to_string)
-}
-
-fn set_message_compression_source_hash(msg: &mut ChatMessage, new_hash: &str) {
-    let key = if msg.role == COMPRESSION_REPORT_ROLE {
-        COMPRESSION_REPORT_EXTRA_KEY
-    } else {
-        "compression"
-    };
-    if let Some(metadata) = msg.extra.get_mut(key) {
-        if let Some(obj) = metadata.as_object_mut() {
-            obj.insert(
-                "source_hash".to_string(),
-                serde_json::Value::String(new_hash.to_string()),
-            );
-        }
-    }
-}
-
-/// Sanitization rewrites message fields that participate in summary source hashes.
-/// Recompute every segment summary's `source_hash` over the sanitized sources so
-/// suppression metadata stays valid. Summaries whose sources are not fully present
-/// (handoff/branch flows carry summaries without their sources on purpose) keep
-/// their hash untouched: it never validates, so they suppress nothing and remain
-/// visible as carried context.
-pub fn refresh_summary_source_hashes(messages: &mut Vec<ChatMessage>) {
-    let snapshot = messages.clone();
-    // Keyed by old hash: two summaries can only share an old hash when their source
-    // sets have identical canonical content (ids are excluded from the hash), in
-    // which case their recomputed hashes are identical too, so a rename collision
-    // always writes an equal value.
-    let mut hash_renames: HashMap<String, String> = HashMap::new();
-    for msg in snapshot
-        .iter()
-        .filter(|msg| is_llm_segment_summary_message(msg))
-    {
-        let Some(compression) = msg.extra.get("compression") else {
-            continue;
-        };
-        let Some(old_hash) = compression
-            .get("source_hash")
-            .and_then(|hash| hash.as_str())
-        else {
-            continue;
-        };
-        let source_ids: HashSet<String> = compression
-            .get("summarized_source_message_ids")
-            .and_then(|ids| ids.as_array())
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|id| id.as_str())
-                    .filter(|id| !id.is_empty())
-                    .map(ToString::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        if source_ids.is_empty() {
-            continue;
-        }
-        let sources: Vec<ChatMessage> = snapshot
-            .iter()
-            .filter(|source| {
-                !source.message_id.is_empty() && source_ids.contains(&source.message_id)
-            })
-            .cloned()
-            .collect();
-        if sources.len() == source_ids.len() {
-            hash_renames.insert(
-                old_hash.to_string(),
-                crate::source_hash::source_hash_for_messages(&sources),
-            );
-        }
-    }
-    if hash_renames.is_empty() {
-        return;
-    }
-    for msg in messages.iter_mut() {
-        let Some(old_hash) = message_compression_source_hash(msg) else {
-            continue;
-        };
-        if let Some(new_hash) = hash_renames.get(&old_hash) {
-            set_message_compression_source_hash(msg, new_hash);
-        }
-    }
+        .collect()
 }
 
 fn is_valid_tool_id(id: &str) -> bool {
@@ -243,6 +167,37 @@ fn generate_valid_tool_id() -> String {
 }
 
 pub fn sanitize_messages_for_model_switch(msgs: &mut Vec<ChatMessage>) {
+    let mut id_mapping = HashMap::new();
+    collect_model_switch_ids(msgs, &mut id_mapping);
+    sanitize_model_switch_with_ids(msgs, &id_mapping);
+}
+
+fn collect_model_switch_ids(msgs: &[ChatMessage], id_mapping: &mut HashMap<String, String>) {
+    for msg in msgs {
+        let mut copy = msg.clone();
+        transform_report_payload(&mut copy, |nested| {
+            collect_model_switch_ids(nested, id_mapping)
+        });
+        for id in msg
+            .tool_calls
+            .iter()
+            .flatten()
+            .map(|tc| tc.id.as_str())
+            .chain(std::iter::once(msg.tool_call_id.as_str()).filter(|id| !id.is_empty()))
+        {
+            if !is_valid_tool_id(id) {
+                id_mapping
+                    .entry(id.to_string())
+                    .or_insert_with(generate_valid_tool_id);
+            }
+        }
+    }
+}
+
+fn sanitize_model_switch_with_ids(
+    msgs: &mut Vec<ChatMessage>,
+    id_mapping: &HashMap<String, String>,
+) {
     msgs.retain(|msg| !is_ui_only_message(msg));
 
     for msg in msgs.iter_mut() {
@@ -250,25 +205,10 @@ pub fn sanitize_messages_for_model_switch(msgs: &mut Vec<ChatMessage>) {
         msg.server_content_blocks = Vec::new();
     }
 
-    let mut id_mapping: HashMap<String, String> = HashMap::new();
-
-    for msg in msgs.iter() {
-        if let Some(tool_calls) = &msg.tool_calls {
-            for tc in tool_calls {
-                if !is_valid_tool_id(&tc.id) && !id_mapping.contains_key(&tc.id) {
-                    id_mapping.insert(tc.id.clone(), generate_valid_tool_id());
-                }
-            }
-        }
-        if !msg.tool_call_id.is_empty()
-            && !is_valid_tool_id(&msg.tool_call_id)
-            && !id_mapping.contains_key(&msg.tool_call_id)
-        {
-            id_mapping.insert(msg.tool_call_id.clone(), generate_valid_tool_id());
-        }
-    }
-
     for msg in msgs.iter_mut() {
+        transform_report_payload(msg, |nested| {
+            sanitize_model_switch_with_ids(nested, id_mapping)
+        });
         msg.usage = None;
         msg.extra = preserve_hidden_role_extra(msg);
         msg.finish_reason = None;
@@ -285,8 +225,6 @@ pub fn sanitize_messages_for_model_switch(msgs: &mut Vec<ChatMessage>) {
             msg.tool_call_id = new_id.clone();
         }
     }
-
-    refresh_summary_source_hashes(msgs);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -303,22 +241,6 @@ pub struct CompressOptions {
     pub drop_project_information: bool,
     #[serde(default)]
     pub strip_metering: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct HandoffOptions {
-    #[serde(default)]
-    pub include_last_user_plus: bool,
-    #[serde(default)]
-    pub include_all_opened_context: bool,
-    #[serde(default)]
-    pub include_all_edited_context: bool,
-    #[serde(default)]
-    pub include_agentic_tools: bool,
-    #[serde(default)]
-    pub llm_summary_for_excluded: bool,
-    #[serde(default)]
-    pub include_all_user_assistant_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -800,70 +722,6 @@ fn simple_text_contains_memory_context_path(text: &str) -> bool {
     })
 }
 
-pub fn handoff_conversation_and_excluded(
-    messages: &[ChatMessage],
-    opts: &HandoffOptions,
-    system_prefix_len: usize,
-    start_idx: usize,
-    edited_tool_ids: &HashSet<String>,
-) -> (Vec<ChatMessage>, Vec<ChatMessage>) {
-    let mut conversation: Vec<ChatMessage> = Vec::new();
-    let mut selected_indices: HashSet<usize> = HashSet::new();
-
-    for (i, msg) in messages.iter().enumerate().skip(system_prefix_len) {
-        let should_include = if opts.include_all_user_assistant_only {
-            matches!(msg.role.as_str(), "user" | "assistant")
-        } else {
-            match msg.role.as_str() {
-                "user" => i >= start_idx,
-                "assistant" => {
-                    if i >= start_idx {
-                        if let Some(ref tool_calls) = msg.tool_calls {
-                            let has_non_preserved = tool_calls.iter().any(|tc| {
-                                !should_preserve_tool(&tc.function.name)
-                                    && !edited_tool_ids.contains(&tc.id)
-                            });
-                            has_non_preserved || tool_calls.is_empty()
-                        } else {
-                            true
-                        }
-                    } else {
-                        false
-                    }
-                }
-                "system" => false,
-                "context_file" => false,
-                "diff" => false,
-                "tool" => false,
-                _ => i >= start_idx,
-            }
-        };
-
-        if should_include {
-            selected_indices.insert(i);
-            if opts.include_all_user_assistant_only && msg.role == "assistant" {
-                let mut clean_msg = msg.clone();
-                clean_msg.tool_calls = None;
-                clean_msg.tool_call_id = String::new();
-                clean_msg.tool_failed = None;
-                conversation.push(clean_msg);
-            } else {
-                conversation.push(msg.clone());
-            }
-        }
-    }
-
-    let excluded = messages
-        .iter()
-        .enumerate()
-        .skip(system_prefix_len)
-        .filter(|(idx, _)| !selected_indices.contains(idx))
-        .map(|(_, msg)| msg.clone())
-        .collect();
-
-    (conversation, excluded)
-}
-
 const APPROX_IMAGE_CONTENT_CHARS: usize = 4_000;
 
 fn approximate_image_tokens(content: &str, mode: ImageTokenMode) -> usize {
@@ -941,7 +799,29 @@ pub fn approx_token_count_for_image_mode(
         .sum()
 }
 
+/// Apply static transforms only to the authoritative active view. The report
+/// itself is not in that view; writeback preserves its envelope and archived prefix.
 pub fn compress_in_place(
+    messages: &mut Vec<ChatMessage>,
+    opts: &CompressOptions,
+) -> Result<TransformStats, String> {
+    let active =
+        refact_core::active_context::active_context(messages).map_err(|error| error.to_string())?;
+    // Without a boundary the entire vector is active, including legacy ID-less
+    // records. No origin remapping is needed (and no IDs need to be rewritten).
+    if active.report_index.is_none() {
+        return compress_active_messages_in_place(messages, opts);
+    }
+    let mut transformed = active.messages.clone();
+    let stats = compress_active_messages_in_place(&mut transformed, opts)?;
+    let updated =
+        refact_core::active_context::writeback_active_context(messages, &active, &transformed)
+            .map_err(|error| error.to_string())?;
+    *messages = updated;
+    Ok(stats)
+}
+
+fn compress_active_messages_in_place(
     messages: &mut Vec<ChatMessage>,
     opts: &CompressOptions,
 ) -> Result<TransformStats, String> {
@@ -1238,6 +1118,72 @@ mod tests {
     use base64::Engine;
     use image::ImageFormat;
     use refact_core::chat_types::{ChatToolCall, ChatToolFunction, ChatUsage, MultimodalElement};
+
+    fn reconstruction(mut messages: Vec<ChatMessage>) -> ChatMessage {
+        for message in &mut messages {
+            if message.message_id.is_empty() {
+                message.message_id = Uuid::new_v4().to_string();
+            }
+        }
+        refact_core::active_context::make_reconstruction_report(messages, Default::default())
+            .unwrap()
+    }
+
+    #[test]
+    fn static_compression_preserves_archive_and_report_envelope() {
+        let archived = make_context_file_msg("archive.rs", "archived content");
+        let report = reconstruction(vec![
+            make_user_msg("q"),
+            make_context_file_msg("active.rs", "active content"),
+        ]);
+        let mut messages = vec![archived.clone(), report.clone(), make_assistant_msg("tail")];
+        compress_in_place(
+            &mut messages,
+            &CompressOptions {
+                drop_all_context: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&messages[0]).unwrap(),
+            serde_json::to_value(archived).unwrap()
+        );
+        assert_eq!(messages[1].message_id, report.message_id);
+        assert_eq!(
+            serde_json::to_value(&messages[1].content).unwrap(),
+            serde_json::to_value(&report.content).unwrap()
+        );
+        let active = refact_core::active_context::active_context(&messages).unwrap();
+        assert!(active.messages.iter().all(|m| m.role != "context_file"));
+        assert!(active
+            .messages
+            .iter()
+            .any(|m| m.content.content_text_only() == "tail"));
+    }
+
+    #[test]
+    fn nested_payload_sanitizers_preserve_metadata_and_demote_goals() {
+        let mut assistant = assistant_declaring_call("invalid.id");
+        assistant.reasoning_content = Some("private reasoning".to_string());
+        let report = reconstruction(vec![make_goal_msg(), assistant]);
+        let mut messages = vec![report, make_tool_msg("invalid.id", "result")];
+        demote_goal_ownership_for_branch(&mut messages);
+        sanitize_messages_for_model_switch(&mut messages);
+        let active = refact_core::active_context::active_context(&messages).unwrap();
+        assert_eq!(
+            active.messages[0].extra["goal"]["active"],
+            serde_json::json!(false)
+        );
+        assert!(active.messages[1].reasoning_content.is_none());
+        assert_eq!(
+            active.messages[1].tool_calls.as_ref().unwrap()[0].id,
+            active.messages[2].tool_call_id
+        );
+        assert!(is_valid_tool_id(&active.messages[2].tool_call_id));
+        let clean = sanitize_messages_for_new_thread(&messages);
+        assert!(refact_core::active_context::active_context(&clean).is_ok());
+    }
 
     fn make_user_msg(content: &str) -> ChatMessage {
         ChatMessage {
@@ -1548,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_new_thread_refreshes_summary_hashes() {
+    fn sanitize_new_thread_preserves_legacy_metadata_without_hash_updates() {
         let mut source = make_assistant_msg("heavy answer");
         source.message_id = "src-1".to_string();
         source.usage = Some(ChatUsage {
@@ -1557,8 +1503,7 @@ mod tests {
             total_tokens: 15,
             ..Default::default()
         });
-        let pre_sanitize_hash =
-            crate::source_hash::source_hash_for_messages(std::slice::from_ref(&source));
+        let pre_sanitize_hash = "legacy-hash";
         let mut summary = make_assistant_msg("summary");
         summary.message_id = "sum-1".to_string();
         summary.extra.insert(
@@ -1589,10 +1534,8 @@ mod tests {
             .and_then(|c| c.get("source_hash"))
             .and_then(|h| h.as_str())
             .expect("summary keeps a source hash");
-        let expected_hash =
-            crate::source_hash::source_hash_for_messages(std::slice::from_ref(sanitized_source));
-        assert_eq!(stored_hash, expected_hash);
-        assert_ne!(stored_hash, pre_sanitize_hash);
+        assert_eq!(stored_hash, pre_sanitize_hash);
+        assert!(refact_core::active_context::active_context(&sanitized).is_err());
     }
 
     #[test]
@@ -1612,8 +1555,6 @@ mod tests {
 
         let sanitized = sanitize_messages_for_new_thread(&messages);
 
-        // Handoff/branch flows carry summaries without their sources on purpose: the
-        // summary survives with its hash untouched and acts as carried context.
         let carried = sanitized
             .iter()
             .find(|message| message.message_id == "sum-1")
@@ -1642,11 +1583,6 @@ mod tests {
             content: ChatContent::ContextFiles(files),
             ..Default::default()
         }
-    }
-
-    fn with_message_id(mut message: ChatMessage, message_id: &str) -> ChatMessage {
-        message.message_id = message_id.to_string();
-        message
     }
 
     fn make_assistant_with_tool_call(tool_call_id: &str, tool_name: &str) -> ChatMessage {
@@ -1714,6 +1650,7 @@ mod tests {
         extra.insert(
             "goal".to_string(),
             serde_json::json!({
+                "mode": "agent",
                 "version": 1,
                 "active": true,
                 "status": "active",
@@ -2216,45 +2153,35 @@ mod tests {
     }
 
     #[test]
-    fn compress_in_place_strip_metering_preserves_assistant_segment_summary_extra_only() {
-        let mut messages = vec![
-            make_segment_summary_msg(),
-            make_assistant_with_extra(),
-            make_assistant_with_non_summary_compression(),
-        ];
-        let opts = CompressOptions {
-            strip_metering: true,
-            ..Default::default()
-        };
-
-        compress_in_place(&mut messages, &opts).unwrap();
-
-        let persisted: Vec<_> = messages
-            .iter()
-            .filter(|msg| msg.role != COMPRESSION_REPORT_ROLE)
-            .collect();
-        assert_eq!(persisted.len(), 3);
-        assert_only_segment_summary_extra(persisted[0]);
-        assert!(persisted[1].extra.is_empty());
-        assert!(persisted[2].extra.is_empty());
+    fn compress_in_place_strip_metering_rejects_legacy_assistant_segment_summary_extra_only() {
+        let mut messages = vec![make_segment_summary_msg()];
+        let original = serde_json::to_value(&messages).unwrap();
+        let error = compress_in_place(
+            &mut messages,
+            &CompressOptions {
+                strip_metering: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("explicit rebuild"));
+        assert_eq!(serde_json::to_value(&messages).unwrap(), original);
     }
 
     #[test]
-    fn compress_in_place_strip_metering_preserves_v3_source_preserving_metadata() {
-        let mut messages = vec![
-            make_v3_source_preserving_segment_summary_msg(),
-            make_v3_source_preserving_compression_report_msg(),
-        ];
-        let opts = CompressOptions {
-            strip_metering: true,
-            ..Default::default()
-        };
-
-        compress_in_place(&mut messages, &opts).unwrap();
-
-        assert_eq!(messages.len(), 2);
-        assert_v3_source_preserving_summary_metadata(&messages[0]);
-        assert_v3_source_preserving_report_metadata(&messages[1]);
+    fn compress_in_place_strip_metering_rejects_legacy_v3_source_preserving_metadata() {
+        let mut messages = vec![make_segment_summary_msg()];
+        let original = serde_json::to_value(&messages).unwrap();
+        let error = compress_in_place(
+            &mut messages,
+            &CompressOptions {
+                strip_metering: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("explicit rebuild"));
+        assert_eq!(serde_json::to_value(&messages).unwrap(), original);
     }
 
     #[test]
@@ -2557,23 +2484,6 @@ mod tests {
         assert_eq!(stats.tool_messages_modified, 0);
         let tool_msg = messages.iter().find(|m| m.role == "tool").unwrap();
         assert_eq!(tool_msg.content.content_text_only(), long_content);
-    }
-
-    #[test]
-    fn test_handoff_include_last_user_plus_sync() {
-        let messages = vec![
-            make_user_msg("first question"),
-            make_assistant_msg("first answer"),
-            make_user_msg("second question"),
-            make_assistant_msg("second answer"),
-        ];
-
-        let last_user_idx = messages.iter().rposition(|m| m.role == "user").unwrap();
-        let selected: Vec<ChatMessage> = messages[last_user_idx..].to_vec();
-
-        assert_eq!(selected.len(), 2);
-        assert_eq!(selected[0].content.content_text_only(), "second question");
-        assert_eq!(selected[1].content.content_text_only(), "second answer");
     }
 
     #[test]
@@ -2988,66 +2898,6 @@ mod tests {
     }
 
     #[test]
-    fn test_handoff_excluded_selection_with_empty_message_ids() {
-        let messages = vec![
-            make_system_msg("s"),
-            make_user_msg("first question"),
-            make_assistant_msg("first answer"),
-            make_user_msg("second question"),
-            make_assistant_msg("second answer"),
-        ];
-        let opts = HandoffOptions {
-            include_last_user_plus: true,
-            ..Default::default()
-        };
-        let start_idx = messages.iter().rposition(|m| m.role == "user").unwrap();
-        let (conversation, excluded) =
-            handoff_conversation_and_excluded(&messages, &opts, 1, start_idx, &HashSet::new());
-
-        let conversation_text: Vec<_> = conversation
-            .iter()
-            .map(|m| m.content.content_text_only())
-            .collect();
-        let excluded_text: Vec<_> = excluded
-            .iter()
-            .map(|m| m.content.content_text_only())
-            .collect();
-
-        assert_eq!(conversation_text, vec!["second question", "second answer"]);
-        assert_eq!(excluded_text, vec!["first question", "first answer"]);
-    }
-
-    #[test]
-    fn test_handoff_excluded_selection_with_duplicate_message_ids() {
-        let messages = vec![
-            with_message_id(make_system_msg("s"), "system-id"),
-            with_message_id(make_user_msg("first question"), "duplicate-id"),
-            with_message_id(make_assistant_msg("first answer"), "duplicate-id"),
-            with_message_id(make_user_msg("second question"), "duplicate-id"),
-            with_message_id(make_assistant_msg("second answer"), "duplicate-id"),
-        ];
-        let opts = HandoffOptions {
-            include_last_user_plus: true,
-            ..Default::default()
-        };
-        let start_idx = messages.iter().rposition(|m| m.role == "user").unwrap();
-        let (conversation, excluded) =
-            handoff_conversation_and_excluded(&messages, &opts, 1, start_idx, &HashSet::new());
-
-        let conversation_text: Vec<_> = conversation
-            .iter()
-            .map(|m| m.content.content_text_only())
-            .collect();
-        let excluded_text: Vec<_> = excluded
-            .iter()
-            .map(|m| m.content.content_text_only())
-            .collect();
-
-        assert_eq!(conversation_text, vec!["second question", "second answer"]);
-        assert_eq!(excluded_text, vec!["first question", "first answer"]);
-    }
-
-    #[test]
     fn test_drop_all_memories_removes_absolute_relative_and_windows_paths() {
         let mut messages = vec![
             make_context_file_msg("/repo/.refact/knowledge/memory.md", "memory"),
@@ -3220,16 +3070,6 @@ mod tests {
         assert!(messages
             .iter()
             .any(|m| m.role == "system" && m.content.content_text_only().contains("assistant")));
-    }
-
-    #[test]
-    fn test_handoff_options_default() {
-        let opts = HandoffOptions::default();
-        assert!(!opts.include_last_user_plus);
-        assert!(!opts.include_all_opened_context);
-        assert!(!opts.include_all_edited_context);
-        assert!(!opts.include_agentic_tools);
-        assert!(!opts.llm_summary_for_excluded);
     }
 
     #[test]

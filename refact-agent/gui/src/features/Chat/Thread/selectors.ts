@@ -47,6 +47,12 @@ import {
   extractPrivacyFiles,
   type PrivacyFileRecord,
 } from "../../../services/refact/privacy";
+import {
+  computeActiveContext,
+  isGenerationGatedByContext,
+  describeActiveContextGate,
+  type ActiveContext,
+} from "../../../utils/activeContext";
 
 const EMPTY_MESSAGES: ChatMessages = [];
 const EMPTY_EVENT_MESSAGES: EventMessage[] = [];
@@ -404,6 +410,70 @@ export const selectMessagesById = (state: RootState, chatId: string) =>
 export const selectMessages = (state: RootState) =>
   selectMessagesById(state, state.chat.current_thread_id);
 
+/**
+ * Unified context rebuild selectors.
+ *
+ * `selectMessagesById` stays the full stored transcript — the archive and every
+ * browsing surface keep rendering all of it. These selectors expose the derived
+ * "active context" (what the model sees) so plan/context consumers stop
+ * guessing. Memoized per thread so the derived array identity is stable and
+ * does not thrash downstream reselect inputs.
+ */
+const activeContextSelectors = new Map<
+  string,
+  ReturnType<typeof createSelector<[typeof selectMessagesById], ActiveContext>>
+>();
+
+function getActiveContextSelector(threadId: string) {
+  let selector = activeContextSelectors.get(threadId);
+  if (!selector) {
+    selector = createSelector([selectMessagesById], computeActiveContext);
+    activeContextSelectors.set(threadId, selector);
+  }
+  return selector;
+}
+
+export const selectActiveContextById = (
+  state: RootState,
+  chatId: string,
+): ActiveContext => getActiveContextSelector(chatId)(state, chatId);
+
+export const selectActiveContext = (state: RootState): ActiveContext =>
+  selectActiveContextById(state, state.chat.current_thread_id);
+
+/** Messages the model actually sees; empty when the context needs a rebuild. */
+export const selectActiveContextMessagesById = (
+  state: RootState,
+  chatId: string,
+): ChatMessages => selectActiveContextById(state, chatId).active;
+
+export const selectActiveContextStatusById = (
+  state: RootState,
+  chatId: string,
+) => selectActiveContextById(state, chatId).status;
+
+/**
+ * True when the server-side gate says this chat cannot generate until the user
+ * rebuilds. The transcript stays fully visible; only sending is disabled.
+ */
+export const selectContextRebuildRequiredById = (
+  state: RootState,
+  chatId: string,
+): boolean =>
+  isGenerationGatedByContext(selectActiveContextById(state, chatId));
+
+export const selectContextRebuildRequired = (state: RootState): boolean =>
+  selectContextRebuildRequiredById(state, state.chat.current_thread_id);
+
+export const selectContextRebuildMessageById = (
+  state: RootState,
+  chatId: string,
+): string | null =>
+  describeActiveContextGate(selectActiveContextById(state, chatId));
+
+export const selectContextRebuildMessage = (state: RootState): string | null =>
+  selectContextRebuildMessageById(state, state.chat.current_thread_id);
+
 export const selectPrivacyFilesById = createSelector(
   [selectMessagesById],
   (messages): PrivacyFileRecord[] => {
@@ -609,7 +679,7 @@ export const selectHasServerExecutedToolsInLastAssistantById = createSelector(
  * returned a different result" warning on every render (audit N-37/L-20).
  */
 const selectBasePlanMessages = createSelector(
-  [selectMessagesById],
+  [selectActiveContextMessagesById],
   (messages): PlanMessage[] => {
     const planMessages = messages
       .map((message, index) => ({ message, index }))
@@ -669,7 +739,7 @@ export const selectCurrentPlan = (
 ): PlanMessage | undefined => selectBasePlanMessages(state, threadId)[0];
 
 export const selectPlanDeltaEvents = createSelector(
-  [selectMessagesById],
+  [selectActiveContextMessagesById],
   (messages): EventMessage[] => collectPlanDeltaEvents(messages),
 );
 

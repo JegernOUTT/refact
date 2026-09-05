@@ -88,7 +88,7 @@ impl Tool for ToolSetPlan {
         .ok_or_else(|| format!("chat session `{chat_id}` not found"))?;
         {
             let session = session_arc.lock().await;
-            if current_plan_including_queued(&session).is_some() {
+            if current_plan_including_queued(&session)?.is_some() {
                 return Err("a plan already exists; use update_plan to change it".to_string());
             }
         }
@@ -104,7 +104,7 @@ impl Tool for ToolSetPlan {
 
         let report = {
             let mut session = session_arc.lock().await;
-            if current_plan_including_queued(&session).is_some() {
+            if current_plan_including_queued(&session)?.is_some() {
                 return Err("a plan already exists; use update_plan to change it".to_string());
             }
             let current_mode = map_legacy_mode_to_id(&session.thread.mode).to_string();
@@ -231,8 +231,8 @@ async fn read_bounded_plan_file(path: &Path) -> Result<String, String> {
         .map_err(|error| format!("plan file {} is not valid UTF-8: {error}", path.display()))
 }
 
-fn current_plan_including_queued(session: &ChatSession) -> Option<&ChatMessage> {
-    plan_role::current_base_plan(session)
+fn current_plan_including_queued(session: &ChatSession) -> Result<Option<ChatMessage>, String> {
+    plan_role::try_current_base_plan(session)
 }
 
 fn optional_string_arg(

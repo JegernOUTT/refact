@@ -415,7 +415,7 @@ struct GoalVerifierPrepareInputs {
 }
 
 fn goal_text_for_verifier(session: &ChatSession) -> Result<String, String> {
-    crate::chat::goal_role::synthesize_current_goal(session)
+    crate::chat::goal_role::try_synthesize_current_goal(session)?
         .or_else(|| session.goal.as_ref().map(|goal| goal.content.clone()))
         .ok_or_else(|| "no active goal to verify".to_string())
 }
@@ -498,7 +498,9 @@ fn goal_verifier_prepare_inputs(
 ) -> Result<GoalVerifierPrepareInputs, String> {
     Ok(goal_verifier_prepare_inputs_from_parts(
         session.thread.clone(),
-        session.messages.clone(),
+        refact_core::active_context::active_context(&session.messages)
+            .map_err(|error| error.to_string())?
+            .messages,
         goal_text_for_verifier(session)?,
         session
             .goal
@@ -525,7 +527,9 @@ pub async fn run_goal_verifier(
         let goal_text = goal_text_for_verifier(&session)?;
         (
             session.thread.clone(),
-            session.messages.clone(),
+            refact_core::active_context::active_context(&session.messages)
+                .map_err(|error| error.to_string())?
+                .messages,
             goal_text,
             session
                 .goal
@@ -1187,6 +1191,44 @@ mod tests {
             session.user_interrupt_flag.store(true, Ordering::SeqCst);
         }
         assert!(verifier_cancel_requested(&session_arc).await);
+    }
+
+    #[test]
+    fn verifier_fork_uses_active_history_only() {
+        let mut session = session_with_goal();
+        session.add_message(ChatMessage::new(
+            "assistant".into(),
+            "ARCHIVED_VERIFIER_SENTINEL".into(),
+        ));
+        let mut active = ChatMessage::new("user".into(), "active evidence".into());
+        active.message_id = "active-evidence".into();
+        let boundary = refact_core::active_context::make_reconstruction_report(
+            vec![active],
+            Default::default(),
+        )
+        .unwrap();
+        session.messages.push(boundary);
+        let inputs = goal_verifier_prepare_inputs(&session, vec![]).unwrap();
+        let serialized = serde_json::to_string(&inputs.messages).unwrap();
+        assert!(serialized.contains("active evidence"));
+        assert!(!serialized.contains("ARCHIVED_VERIFIER_SENTINEL"));
+        assert!(session.messages.iter().any(|m| m
+            .content
+            .content_text_only()
+            .contains("ARCHIVED_VERIFIER_SENTINEL")));
+    }
+
+    #[test]
+    fn verifier_fork_rejects_legacy_without_migrating() {
+        let mut session = session_with_goal();
+        let mut legacy = ChatMessage::new("assistant".into(), "summary".into());
+        legacy.summarized_range = Some((0, 0));
+        session.messages.push(legacy);
+        assert!(goal_verifier_prepare_inputs(&session, vec![]).is_err());
+        assert_eq!(
+            session.messages.last().unwrap().summarized_range,
+            Some((0, 0))
+        );
     }
 
     #[test]

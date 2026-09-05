@@ -6,6 +6,7 @@ mod cache_stability_tests;
 pub mod cloud_token_count;
 pub mod config;
 mod content;
+pub mod context_rebuild;
 pub mod delivery;
 pub mod diagnostics;
 mod generation;

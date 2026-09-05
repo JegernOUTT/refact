@@ -159,13 +159,16 @@ async fn build_tool_execution_context(
     messages: &[ChatMessage],
     thread: &ThreadParams,
     abort_flag: Option<Arc<AtomicBool>>,
-) -> Arc<AMutex<AtCommandsContext>> {
+) -> Result<Arc<AMutex<AtCommandsContext>>, String> {
+    let messages = refact_core::active_context::active_context(messages)
+        .map_err(|error| error.to_string())?
+        .messages;
     let ccx = AtCommandsContext::new_with_abort(
         app.clone(),
         n_ctx,
         CHAT_TOP_N,
         false,
-        messages.to_vec(),
+        messages,
         thread.id.clone(),
         thread.root_chat_id.clone(),
         thread.model.clone(),
@@ -174,7 +177,24 @@ async fn build_tool_execution_context(
         abort_flag,
     )
     .await;
-    Arc::new(AMutex::new(ccx))
+    Ok(Arc::new(AMutex::new(ccx)))
+}
+
+fn context_error_results(tool_calls: &[ChatToolCall], error: String) -> (Vec<ChatMessage>, bool) {
+    (
+        tool_calls
+            .iter()
+            .map(|call| ChatMessage {
+                message_id: Uuid::new_v4().to_string(),
+                role: "tool".to_string(),
+                content: ChatContent::SimpleText(format!("Invalid active context: {error}")),
+                tool_call_id: call.id.clone(),
+                tool_failed: Some(true),
+                ..Default::default()
+            })
+            .collect(),
+        false,
+    )
 }
 
 fn execution_scope_for_thread(thread: &ThreadParams) -> Option<String> {
@@ -1158,7 +1178,8 @@ mod tests {
         };
         let ccx =
             build_tool_execution_context(AppState::from_gcx(gcx).await, 4096, &[], &thread, None)
-                .await;
+                .await
+                .unwrap();
         let ccx = ccx.lock().await;
 
         assert_eq!(ccx.task_meta, Some(task_meta));
@@ -2246,7 +2267,7 @@ pub async fn process_tool_calls_once(
     if tools_to_execute.is_empty() {
         let mut session = session_arc.lock().await;
         session.release_turn_only_state();
-        session.set_runtime_state(SessionState::Generating, None);
+        session.set_runtime_state(SessionState::Idle, None);
         drop(session);
         maybe_save_trajectory_background_with_intent(
             app.clone(),
@@ -2314,7 +2335,7 @@ pub async fn process_tool_calls_once(
     if tools_to_execute.is_empty() {
         let mut session = session_arc.lock().await;
         session.release_turn_only_state();
-        session.set_runtime_state(SessionState::Generating, None);
+        session.set_runtime_state(SessionState::Idle, None);
         drop(session);
         maybe_save_trajectory_background_with_intent(
             app.clone(),
@@ -2451,7 +2472,7 @@ pub async fn process_tool_calls_once(
             session.release_turn_only_state();
         } else {
             session.release_turn_only_state();
-            session.set_runtime_state(SessionState::Generating, None);
+            session.set_runtime_state(SessionState::Idle, None);
         }
     }
     session_merge_span.finish_tool(PerfOutcome::Success, 1, tools_to_execute.len() as u64, None);
@@ -2882,14 +2903,18 @@ pub async fn execute_tools_with_session(
         }
     };
 
-    let ccx = build_tool_execution_context(
+    let ccx = match build_tool_execution_context(
         app.clone(),
         n_ctx,
         &prompt_messages,
         thread,
         Some(session_abort_flag),
     )
-    .await;
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => return context_error_results(tool_calls, error),
+    };
 
     {
         let mut cgcx = ccx.lock().await;
@@ -3599,7 +3624,10 @@ pub async fn execute_tools(
         }
     };
 
-    let ccx = build_tool_execution_context(app.clone(), n_ctx, messages, thread, None).await;
+    let ccx = match build_tool_execution_context(app.clone(), n_ctx, messages, thread, None).await {
+        Ok(context) => context,
+        Err(error) => return context_error_results(tool_calls, error),
+    };
 
     {
         let mut cgcx = ccx.lock().await;

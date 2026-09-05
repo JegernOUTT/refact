@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -294,6 +294,9 @@ pub struct ChatSession {
     pub goal_turns_used: u32,
     pub goal_tokens_used: u64,
     pub goal_no_progress_turns: u32,
+    pub pending_context_rebuild: Option<super::context_rebuild::PendingContextRebuild>,
+    pub pending_mode_handoff: Option<serde_json::Value>,
+    pub last_rebuild_attempt_version: Option<u64>,
     pub is_compressing: bool,
     pub compression_phase: Option<CompressionPhase>,
     pub compression_reason: Option<CompressionReason>,
@@ -337,10 +340,6 @@ pub struct ChatSession {
     pub last_prompt_messages: Vec<ChatMessage>,
     pub tool_catalog: Option<Arc<ToolCatalogSnapshot>>,
     pub turn_tool_pool: Option<TurnToolPool>,
-    pub tier1_compact_attempts: usize,
-    pub tier1_compaction_disabled: bool,
-    pub compression_insufficient_hashes: HashSet<String>,
-    pub compression_retry_after_ms: BTreeMap<String, u64>,
     pub pending_max_new_tokens_boost: Option<usize>,
     pub cache_guard_snapshot: Option<serde_json::Value>,
     pub cache_guard_request_generation: u64,

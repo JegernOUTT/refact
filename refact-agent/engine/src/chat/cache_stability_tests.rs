@@ -14,7 +14,7 @@ use crate::caps::{BaseModelRecord, ChatModelRecord, CodeAssistantCaps};
 use crate::chat::cache_diagnostics::compute_provider_request_hashes;
 use crate::chat::cache_guard::{is_append_only_prefix, sanitize_body_for_cache_guard};
 use crate::chat::prepare::{prepare_chat_passthrough, ChatPrepareOptions};
-use crate::chat::summarization::{is_segment_summary, summarize_oldest_segment_with_static_summary};
+use refact_core::active_context::{active_context, make_reconstruction_report, ReconstructionMetadata};
 use crate::chat::trajectories::{
     ensure_frozen_prefix, load_trajectory_for_chat, save_trajectory_snapshot, TrajectorySnapshot,
 };
@@ -677,11 +677,12 @@ fn cache_stability_compression_preserves_user_bytes_and_resets_append_only_basel
         .map(|message| serde_json::to_string(message).unwrap())
         .collect();
 
-    assert!(summarize_oldest_segment_with_static_summary(
-        &mut session.messages,
-        "compressed assistant segment",
-        "stub-summarizer",
-    ));
+    let archive = serde_json::to_value(&session.messages).unwrap();
+    let mut context = user("Reconstructed continuation context");
+    context.message_id = "rebuilt-context".to_string();
+    session.messages.push(
+        make_reconstruction_report(vec![context], ReconstructionMetadata::default()).unwrap(),
+    );
     session.cache_guard_force_next = true;
 
     let after_users: Vec<String> = session
@@ -691,18 +692,15 @@ fn cache_stability_compression_preserves_user_bytes_and_resets_append_only_basel
         .map(|message| serde_json::to_string(message).unwrap())
         .collect();
     assert_eq!(after_users, before_users);
-    let summaries: Vec<&ChatMessage> = session
-        .messages
-        .iter()
-        .filter(|message| is_segment_summary(message))
-        .collect();
-    assert_eq!(summaries.len(), 1);
-    assert!(summaries.iter().all(|message| message.role == "assistant"));
+    assert_eq!(
+        serde_json::to_value(&session.messages[..session.messages.len() - 1]).unwrap(),
+        archive
+    );
+    let active = active_context(&session.messages).unwrap().messages;
+    assert_eq!(active.len(), 1);
 
-    let compressed_body = sanitize_body_for_cache_guard(&direct_openai_body(
-        session.messages.clone(),
-        vec![cache_tool()],
-    ));
+    let compressed_body =
+        sanitize_body_for_cache_guard(&direct_openai_body(active, vec![cache_tool()]));
     let forced_baseline = if session.cache_guard_force_next {
         compressed_body.clone()
     } else {
@@ -710,8 +708,10 @@ fn cache_stability_compression_preserves_user_bytes_and_resets_append_only_basel
     };
     session.cache_guard_force_next = false;
     session.messages.push(user("post compression append"));
-    let next_body =
-        sanitize_body_for_cache_guard(&direct_openai_body(session.messages, vec![cache_tool()]));
+    let next_body = sanitize_body_for_cache_guard(&direct_openai_body(
+        active_context(&session.messages).unwrap().messages,
+        vec![cache_tool()],
+    ));
 
     assert!(is_append_only_prefix(&forced_baseline, &next_body));
 }
