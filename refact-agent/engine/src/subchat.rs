@@ -103,9 +103,10 @@ fn runner_tool_window_closed(messages: &[ChatMessage]) -> bool {
     };
     messages[index].tool_calls.as_ref().map_or(true, |calls| {
         calls.iter().all(|call| {
-            messages[index + 1..]
-                .iter()
-                .any(|message| message.role == "tool" && message.tool_call_id == call.id)
+            messages[index + 1..].iter().any(|message| {
+                (message.role == "tool" || message.role == "diff")
+                    && message.tool_call_id == call.id
+            })
         })
     })
 }
@@ -3869,6 +3870,19 @@ mod subchat_tests {
             messages.push(result);
             assert_eq!(super::runner_tool_window_closed(&messages), id == "two");
         }
+    }
+
+    #[test]
+    fn runner_boundary_accepts_diff_results_for_edit_tools() {
+        let mut assistant = ChatMessage::new("assistant".into(), String::new());
+        assistant.tool_calls = Some(vec![serde_json::from_value(serde_json::json!({
+            "id":"edit", "type":"function", "function":{"name":"update_textdoc", "arguments":"{}"}
+        }))
+        .unwrap()]);
+        let mut diff = ChatMessage::new("diff".into(), "[]".into());
+        diff.tool_call_id = "edit".into();
+        let messages = vec![assistant, diff];
+        assert!(super::runner_tool_window_closed(&messages));
     }
 
     #[test]
