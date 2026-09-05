@@ -514,7 +514,8 @@ pub struct QueuedItem {
     /// Delivery rows only: producer that enqueued this batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// Delivery rows only: the pending event payload, for richer UI rendering.
+    /// Delivery rows only: the event descriptor `{ subkind, source, payload? }`
+    /// of the delivered event message, absent when the batch carries no event.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -534,18 +535,36 @@ impl QueuedItem {
             content: extract_full_text_capped(&preview),
             push: Some(delivery.push),
             source: Some(delivery.source.clone()),
-            event: Some(serde_json::json!({
-                "kind": "delivery",
-                "id": delivery.id,
-                "source": delivery.source,
-                "push": delivery.push,
-                "wake": delivery.wake,
-                "message_count": delivery.messages.len(),
-                "enqueued_at_ms": delivery.enqueued_at_ms,
-            })),
+            event: delivery_event_descriptor(delivery),
             enqueued_at_ms: Some(delivery.enqueued_at_ms),
         }
     }
+}
+
+fn delivery_event_descriptor(delivery: &PendingDelivery) -> Option<serde_json::Value> {
+    delivery
+        .messages
+        .iter()
+        .filter(|message| message.role == internal_roles::EVENT_ROLE)
+        .find_map(|message| {
+            let event = message.extra.get("event")?;
+            let subkind = event
+                .get("subkind")
+                .and_then(serde_json::Value::as_str)
+                .filter(|subkind| !subkind.is_empty())?;
+            let source = event
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(delivery.source.as_str());
+            let mut descriptor = serde_json::json!({
+                "subkind": subkind,
+                "source": source,
+            });
+            if let Some(payload) = event.get("payload") {
+                descriptor["payload"] = payload.clone();
+            }
+            Some(descriptor)
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1595,6 +1614,57 @@ mod tests {
         assert_eq!(runtime.goal_tokens_used, 0);
         assert_eq!(runtime.goal_no_progress_turns, 0);
         assert!(!runtime.is_compressing);
+    }
+
+    fn delivery_with(messages: Vec<ChatMessage>) -> PendingDelivery {
+        PendingDelivery::with_id(
+            "delivery-1",
+            messages,
+            PushMode::Append,
+            "agents.push",
+            false,
+        )
+    }
+
+    #[test]
+    fn delivery_queue_row_carries_the_event_descriptor() {
+        let delivery = delivery_with(vec![internal_roles::event(
+            internal_roles::EventSubkind::SystemNotice,
+            "agents.push",
+            json!({"status": "completed"}),
+            "background subagent finished",
+        )]);
+
+        let item = QueuedItem::from_pending_delivery(&delivery);
+        let event = item.event.expect("delivery event descriptor missing");
+
+        assert_eq!(event["subkind"], json!("system_notice"));
+        assert_eq!(event["source"], json!("agents.push"));
+        assert_eq!(event["payload"], json!({"status": "completed"}));
+    }
+
+    #[test]
+    fn delivery_queue_row_without_event_message_has_no_descriptor() {
+        let delivery = delivery_with(vec![ChatMessage::new(
+            "user".to_string(),
+            "carry on".to_string(),
+        )]);
+
+        assert!(QueuedItem::from_pending_delivery(&delivery).event.is_none());
+    }
+
+    #[test]
+    fn delivery_queue_row_ignores_event_message_without_subkind() {
+        let mut message = ChatMessage::new("event".to_string(), "legacy note".to_string());
+        message
+            .extra
+            .insert("event".to_string(), json!({"source": "agents.push"}));
+
+        assert!(
+            QueuedItem::from_pending_delivery(&delivery_with(vec![message]))
+                .event
+                .is_none()
+        );
     }
 
     #[test]

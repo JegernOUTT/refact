@@ -92,8 +92,8 @@ export type PauseReason = {
 export type PushMode = "preempt" | "append" | "when_idle";
 
 export type QueuedEvent = {
-  subkind: string;
-  source: string;
+  subkind?: string;
+  source?: string;
   payload?: unknown;
 };
 

@@ -74,25 +74,29 @@ function fallbackTitle(commandType: string): string {
 export function describeQueuedItem(item: QueuedItem): QueuedItemPresentation {
   const isUserMessage = item.command_type === "user_message";
   const event = item.event;
+  const subkind =
+    typeof event?.subkind === "string" && event.subkind.length > 0
+      ? event.subkind
+      : null;
   const rawSource = item.source ?? event?.source ?? null;
 
   const title =
-    event?.subkind === "system_notice" && rawSource?.startsWith("agents.")
-      ? eventTone(event.subkind, event.payload) === "success"
+    subkind === "system_notice" && rawSource?.startsWith("agents.")
+      ? eventTone(subkind, event?.payload) === "success"
         ? "Agent completed"
         : "Agent update"
-      : event
-        ? eventSubkindLabel(event.subkind)
+      : subkind
+        ? eventSubkindLabel(subkind)
         : fallbackTitle(item.command_type);
 
-  const icon = event
-    ? eventSubkindIcon(event.subkind)
+  const icon = subkind
+    ? eventSubkindIcon(subkind)
     : isUserMessage
       ? MessageSquare
       : Send;
 
-  const tone: EventTone = event
-    ? eventTone(event.subkind, event.payload)
+  const tone: EventTone = subkind
+    ? eventTone(subkind, event?.payload)
     : isUserMessage
       ? "accent"
       : "default";
