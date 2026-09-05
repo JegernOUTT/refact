@@ -429,6 +429,33 @@ impl MemoryOpsState {
             .find(|existing| nonempty_key(&existing.op_id) == Some(key))
     }
 
+    pub fn with_appended_record(mut self, record: MemoryOpsRecord) -> Self {
+        self.total_records = self.total_records.saturating_add(1);
+        let incoming = record.into_op();
+        let existing_index = if let Some(key) = incoming_idempotency_key(&incoming) {
+            self.ops
+                .iter()
+                .position(|existing| nonempty_key(&existing.idempotency_key) == Some(key))
+        } else {
+            nonempty_key(&incoming.op_id).and_then(|key| {
+                self.ops
+                    .iter()
+                    .rposition(|existing| nonempty_key(&existing.op_id) == Some(key))
+            })
+        };
+        let op = incoming.normalized();
+        match existing_index {
+            Some(index) => {
+                if memory_op_duplicate_should_replace(self.ops[index].status, op.status) {
+                    self.ops[index] = op;
+                }
+            }
+            None => self.ops.push(op),
+        }
+        self.recount();
+        self
+    }
+
     fn recount(&mut self) {
         self.pending_count = 0;
         self.approved_count = 0;

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -18,9 +18,29 @@ use crate::app_state::AppState;
 
 const MEMORY_OPS_COMPACT_KEEP_DAYS: i64 = 7;
 const MEMORY_OPS_PENDING_TTL_DAYS: i64 = 30;
+const MEMORY_OPS_AUTOMATED_FINAL_MAX: usize = 10_000;
 
 static MEMORY_OPS_IO_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const MEMORY_OPS_COMPACT_TRIGGER_BYTES: u64 = 8 * 1024 * 1024;
+
+static MEMORY_OPS_COMPACTED_LEN: std::sync::Mutex<Option<HashMap<PathBuf, u64>>> =
+    std::sync::Mutex::new(None);
+
+fn last_compacted_len(project_root: &Path) -> Option<u64> {
+    MEMORY_OPS_COMPACTED_LEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .and_then(|lens| lens.get(project_root).copied())
+}
+
+fn remember_compacted_len(project_root: &Path, len: u64) {
+    MEMORY_OPS_COMPACTED_LEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_or_insert_with(HashMap::new)
+        .insert(project_root.to_path_buf(), len);
+}
 
 #[derive(Clone, PartialEq, Eq)]
 struct MemoryOpsFileStamp {
@@ -202,16 +222,49 @@ fn memory_op_is_final_status(status: MemoryOpStatus) -> bool {
     )
 }
 
+fn memory_source_is_automated(source: MemorySource) -> bool {
+    matches!(
+        source,
+        MemorySource::Trajectory
+            | MemorySource::MemoryGarden
+            | MemorySource::BehaviorLearner
+            | MemorySource::KnowledgeConflictResolver
+    )
+}
+
 fn memory_op_survives_compaction(op: &MemoryLifecycleOp, now: DateTime<Utc>) -> bool {
     if !memory_op_is_final_status(op.status) {
         let cutoff = now - chrono::Duration::days(MEMORY_OPS_PENDING_TTL_DAYS);
         return memory_op_timestamp(op) >= cutoff;
     }
-    if op.source != MemorySource::MemoryGarden {
+    if !memory_source_is_automated(op.source) {
         return true;
     }
     let cutoff = now - chrono::Duration::days(MEMORY_OPS_COMPACT_KEEP_DAYS);
     memory_op_timestamp(op) >= cutoff
+}
+
+fn cap_automated_final_records(records: Vec<MemoryOpsRecord>, max: usize) -> Vec<MemoryOpsRecord> {
+    let mut automated: Vec<(DateTime<Utc>, usize)> = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            let MemoryOpsRecord::Op { op } = record;
+            (memory_op_is_final_status(op.status) && memory_source_is_automated(op.source))
+                .then(|| (memory_op_timestamp(op), index))
+        })
+        .collect();
+    if automated.len() <= max {
+        return records;
+    }
+    automated.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    let dropped: HashSet<usize> = automated[max..].iter().map(|(_, index)| *index).collect();
+    records
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !dropped.contains(index))
+        .map(|(_, record)| record)
+        .collect()
 }
 
 fn compact_memory_ops_records(
@@ -241,6 +294,7 @@ fn compact_memory_ops_records(
     }
     let mut records = without_op_id;
     records.extend(by_op_id.into_values().map(|op| MemoryOpsRecord::Op { op }));
+    let records = cap_automated_final_records(records, MEMORY_OPS_AUTOMATED_FINAL_MAX);
     MemoryOpsState::from_records(records)
 }
 
@@ -445,7 +499,7 @@ async fn enqueue_memory_op_with_compact_threshold(
     let record = MemoryOpsRecord::Op { op };
     let serialized = serde_json::to_string(&record)
         .map_err(|e| format!("Failed to serialize memory op record: {}", e))?;
-    serde_json::from_str::<MemoryOpsRecord>(&serialized)
+    let replayed = serde_json::from_str::<MemoryOpsRecord>(&serialized)
         .map_err(|e| format!("Serialized memory op record did not round-trip: {}", e))?;
     let line = format!("{}\n", serialized);
     let mut file = OpenOptions::new()
@@ -461,8 +515,16 @@ async fn enqueue_memory_op_with_compact_threshold(
         .await
         .map_err(|e| format!("Failed to flush memory ops queue {:?}: {}", path, e))?;
     drop(file);
-    archive_memory_ops_if_oversized_locked(project_root, compact_threshold_bytes).await?;
-    Ok(load_memory_ops(project_root).await)
+    let state = match archive_memory_ops_if_oversized_locked(project_root, compact_threshold_bytes)
+        .await?
+    {
+        Some(compacted) => compacted,
+        None => current.with_appended_record(replayed),
+    };
+    if let Some(stamp) = memory_ops_file_stamp(project_root).await {
+        store_memory_ops_state(project_root, stamp, &state);
+    }
+    Ok(state)
 }
 
 fn drafts_path(project_root: &Path) -> PathBuf {
@@ -637,7 +699,15 @@ pub async fn compact_memory_ops(project_root: &Path) -> Result<MemoryOpsState, S
     let state = compact_memory_ops_records(records, Utc::now());
     let path = memory_ops_path(project_root);
     rewrite_memory_ops_records(&path, state.canonical_records()).await?;
+    remember_compacted_file(project_root, &state).await;
     Ok(state)
+}
+
+async fn remember_compacted_file(project_root: &Path, state: &MemoryOpsState) {
+    if let Some(stamp) = memory_ops_file_stamp(project_root).await {
+        remember_compacted_len(project_root, stamp.len);
+        store_memory_ops_state(project_root, stamp, state);
+    }
 }
 
 pub async fn archive_memory_ops_if_oversized(
@@ -645,17 +715,21 @@ pub async fn archive_memory_ops_if_oversized(
     threshold_bytes: u64,
 ) -> Result<bool, String> {
     let _guard = MEMORY_OPS_IO_LOCK.lock().await;
-    archive_memory_ops_if_oversized_locked(project_root, threshold_bytes).await
+    Ok(
+        archive_memory_ops_if_oversized_locked(project_root, threshold_bytes)
+            .await?
+            .is_some(),
+    )
 }
 
 async fn archive_memory_ops_if_oversized_locked(
     project_root: &Path,
     threshold_bytes: u64,
-) -> Result<bool, String> {
+) -> Result<Option<MemoryOpsState>, String> {
     let path = memory_ops_path(project_root);
     let metadata = match fs::metadata(&path).await {
         Ok(metadata) => metadata,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
         Err(err) => {
             return Err(format!(
                 "Failed to stat memory ops queue {:?}: {}",
@@ -664,7 +738,12 @@ async fn archive_memory_ops_if_oversized_locked(
         }
     };
     if metadata.len() <= threshold_bytes {
-        return Ok(false);
+        return Ok(None);
+    }
+    if let Some(floor) = last_compacted_len(project_root) {
+        if metadata.len() < floor.saturating_mul(2) {
+            return Ok(None);
+        }
     }
     let (records, _) = read_memory_ops_records_locked(project_root).await;
     let compacted = compact_memory_ops_records(records, Utc::now());
@@ -681,7 +760,8 @@ async fn archive_memory_ops_if_oversized_locked(
         .await
         .map_err(|e| format!("Failed to rename {:?} to {:?}: {}", path, backup, e))?;
     rewrite_memory_ops_records(&path, compacted.canonical_records()).await?;
-    Ok(true)
+    remember_compacted_file(project_root, &compacted).await;
+    Ok(Some(compacted))
 }
 
 pub async fn drain_memory_ops(
@@ -1461,6 +1541,235 @@ mod tests {
         assert!(after < before + 64);
         assert_eq!(state.ops, vec![fresh.clone().normalized()]);
         assert_eq!(load_memory_ops(root).await.ops, vec![fresh.normalized()]);
+    }
+
+    #[tokio::test]
+    async fn enqueue_backs_off_when_compaction_cannot_shrink_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let survivor = op_with_time(
+            "op-survivor",
+            MemorySource::Trajectory,
+            MemoryOpStatus::Pending,
+            Utc::now(),
+        );
+        write_memory_ops_records_for_test(root, vec![survivor.clone()]).await;
+
+        let first = op_with_time(
+            "op-first",
+            MemorySource::Trajectory,
+            MemoryOpStatus::Pending,
+            Utc::now(),
+        );
+        let after_first = enqueue_memory_op_with_compact_threshold(root, first.clone(), 1)
+            .await
+            .unwrap();
+        assert_eq!(after_first.ops.len(), 2);
+        let backup_after_first = tokio::fs::read_to_string(memory_ops_backup_path(root))
+            .await
+            .unwrap();
+        let compacted_len = tokio::fs::metadata(memory_ops_path(root))
+            .await
+            .unwrap()
+            .len();
+        assert_eq!(last_compacted_len(root), Some(compacted_len));
+
+        let second = op_with_time(
+            "op-second",
+            MemorySource::Trajectory,
+            MemoryOpStatus::Pending,
+            Utc::now(),
+        );
+        let after_second = enqueue_memory_op_with_compact_threshold(root, second.clone(), 1)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tokio::fs::read_to_string(memory_ops_backup_path(root))
+                .await
+                .unwrap(),
+            backup_after_first
+        );
+        assert_eq!(last_compacted_len(root), Some(compacted_len));
+        let mut expected = vec![
+            survivor.normalized(),
+            first.normalized(),
+            second.normalized(),
+        ];
+        expected.sort_by(|a, b| a.op_id.cmp(&b.op_id));
+        let mut in_memory = after_second.ops.clone();
+        in_memory.sort_by(|a, b| a.op_id.cmp(&b.op_id));
+        assert_eq!(in_memory, expected);
+        let mut on_disk = load_memory_ops_repairing(root).await.ops;
+        on_disk.sort_by(|a, b| a.op_id.cmp(&b.op_id));
+        assert_eq!(on_disk, expected);
+        assert_eq!(after_second.total_records, 3);
+        assert_eq!(after_second.pending_count, 3);
+    }
+
+    #[tokio::test]
+    async fn enqueue_refreshes_cached_state_without_rereading_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let existing = op_with_time(
+            "op-existing",
+            MemorySource::Trajectory,
+            MemoryOpStatus::Applied,
+            Utc::now(),
+        );
+        write_memory_ops_records_for_test(root, vec![existing.clone()]).await;
+        let _ = load_memory_ops(root).await;
+
+        let incoming = op_with_time(
+            "op-incoming",
+            MemorySource::Trajectory,
+            MemoryOpStatus::Pending,
+            Utc::now(),
+        );
+        let state = enqueue_memory_op(root, incoming.clone()).await.unwrap();
+
+        let stamp = memory_ops_file_stamp(root).await.unwrap();
+        let cached = cached_memory_ops_state(root, &stamp).expect("cache refreshed for new stamp");
+        assert_eq!(cached, state);
+        assert_eq!(
+            state.ops,
+            vec![existing.normalized(), incoming.normalized()]
+        );
+        assert_eq!(state.total_records, 2);
+        assert_eq!(state.applied_count, 1);
+        assert_eq!(state.pending_count, 1);
+        assert_eq!(load_memory_ops_repairing(root).await.ops, state.ops);
+    }
+
+    #[tokio::test]
+    async fn enqueue_duplicate_upgrade_replaces_in_cached_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let pending = op_with_time(
+            "op-dup",
+            MemorySource::Trajectory,
+            MemoryOpStatus::Pending,
+            Utc::now(),
+        );
+        write_memory_ops_records_for_test(root, vec![pending.clone()]).await;
+
+        let mut applied = pending.clone();
+        applied.status = MemoryOpStatus::Applied;
+        let state = enqueue_memory_op(root, applied.clone()).await.unwrap();
+
+        assert_eq!(state.ops, vec![applied.normalized()]);
+        assert_eq!(state.total_records, 2);
+        assert_eq!(state.applied_count, 1);
+        assert_eq!(state.pending_count, 0);
+        assert_eq!(load_memory_ops_repairing(root).await, state);
+    }
+
+    #[tokio::test]
+    async fn compact_memory_ops_retires_old_automated_final_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let old_skipped = op_with_time(
+            "op-trajectory-skipped-old",
+            MemorySource::Trajectory,
+            MemoryOpStatus::Skipped,
+            Utc::now() - chrono::Duration::days(8),
+        );
+        let old_applied = op_with_time(
+            "op-trajectory-applied-old",
+            MemorySource::Trajectory,
+            MemoryOpStatus::Applied,
+            Utc::now() - chrono::Duration::days(8),
+        );
+        let fresh_applied = op_with_time(
+            "op-trajectory-applied-fresh",
+            MemorySource::Trajectory,
+            MemoryOpStatus::Applied,
+            Utc::now() - chrono::Duration::days(1),
+        );
+        let old_pending = op_with_time(
+            "op-trajectory-pending-old",
+            MemorySource::Trajectory,
+            MemoryOpStatus::Pending,
+            Utc::now() - chrono::Duration::days(8),
+        );
+        let old_manual = op_with_time(
+            "op-manual-old",
+            MemorySource::Manual,
+            MemoryOpStatus::Skipped,
+            Utc::now() - chrono::Duration::days(8),
+        );
+        write_memory_ops_records_for_test(
+            root,
+            vec![
+                old_skipped,
+                old_applied,
+                fresh_applied.clone(),
+                old_pending.clone(),
+                old_manual.clone(),
+            ],
+        )
+        .await;
+
+        let state = compact_memory_ops(root).await.unwrap();
+
+        let mut ops = state.ops.clone();
+        ops.sort_by(|a, b| a.op_id.cmp(&b.op_id));
+        let mut expected = vec![
+            fresh_applied.normalized(),
+            old_pending.normalized(),
+            old_manual.normalized(),
+        ];
+        expected.sort_by(|a, b| a.op_id.cmp(&b.op_id));
+        assert_eq!(ops, expected);
+    }
+
+    #[test]
+    fn cap_automated_final_records_keeps_newest_and_all_audit_records() {
+        let now = Utc::now();
+        let mut records = Vec::new();
+        for age_days in [1, 5, 3, 4, 2] {
+            records.push(MemoryOpsRecord::Op {
+                op: op_with_time(
+                    &format!("op-auto-{age_days}"),
+                    MemorySource::Trajectory,
+                    MemoryOpStatus::Skipped,
+                    now - chrono::Duration::days(age_days),
+                ),
+            });
+        }
+        records.push(MemoryOpsRecord::Op {
+            op: op_with_time(
+                "op-git-old",
+                MemorySource::Git,
+                MemoryOpStatus::Applied,
+                now - chrono::Duration::days(9),
+            ),
+        });
+        records.push(MemoryOpsRecord::Op {
+            op: op_with_time(
+                "op-auto-pending-old",
+                MemorySource::Trajectory,
+                MemoryOpStatus::Pending,
+                now - chrono::Duration::days(9),
+            ),
+        });
+
+        let capped = cap_automated_final_records(records, 2);
+
+        let mut ids = capped
+            .into_iter()
+            .map(|record| record.into_op().op_id)
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec![
+                "op-auto-1",
+                "op-auto-2",
+                "op-auto-pending-old",
+                "op-git-old"
+            ]
+        );
     }
 
     #[tokio::test]

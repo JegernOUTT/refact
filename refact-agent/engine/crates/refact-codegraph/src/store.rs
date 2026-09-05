@@ -13,6 +13,25 @@ use tracing::{debug, info};
 use crate::extract::{edge_kind_str, extract_symbols};
 use crate::schema;
 
+const DATA_FILE_FTS_TEXT_LIMIT: usize = 256 * 1024;
+
+fn fts_text_for_file<'a>(path: &str, text: &'a str, lang: &str) -> &'a str {
+    if !lang.is_empty() {
+        return text;
+    }
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    if matches!(extension.as_str(), "jsonl" | "ndjson" | "log")
+        || text.len() > DATA_FILE_FTS_TEXT_LIMIT
+    {
+        return "";
+    }
+    text
+}
+
 fn normalize_path_for_namespace(path: &Path) -> PathBuf {
     let normalized = if path.is_absolute() {
         path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
@@ -285,6 +304,7 @@ const SYMBOL_FUZZY_SHORT_SQL: &str = "SELECT DISTINCT double_colon_path FROM ( \
      ) ORDER BY double_colon_path LIMIT ?4";
 
 const SYMBOLS_IN_MEMORY_LIMIT: i64 = 2_000_000;
+const SYMBOLS_BULK_LOAD_REF_RATIO: i64 = 4;
 
 pub struct Store {
     conn: Connection,
@@ -801,9 +821,10 @@ impl Store {
             ],
         )
         .map_err(|e| format!("codegraph add_symbol: {e}"))?;
+        let symbol_rowid = conn.last_insert_rowid();
         conn.execute(
-            "INSERT INTO symbol_search(double_colon_path, friendly_path) VALUES(?1, ?2)",
-            params![double_colon_path, friendly_path],
+            "INSERT INTO symbol_search(rowid, double_colon_path, friendly_path) VALUES(?1, ?2, ?3)",
+            params![symbol_rowid, double_colon_path, friendly_path],
         )
         .map_err(|e| format!("codegraph add_symbol_search: {e}"))?;
         Ok(())
@@ -953,7 +974,9 @@ impl Store {
             return Ok(Vec::new());
         }
         let symbol_count = Self::symbol_count_on(conn)?;
-        if symbol_count <= in_memory_limit {
+        let refs_dominate =
+            (refs.len() as i64).saturating_mul(SYMBOLS_BULK_LOAD_REF_RATIO) >= symbol_count;
+        if symbol_count <= in_memory_limit && refs_dominate {
             Self::all_symbols_on(conn)
         } else {
             Self::symbols_for_refs_via_temp_tables_on(conn, refs)
@@ -1256,8 +1279,8 @@ impl Store {
         )
         .map_err(|e| format!("codegraph remove edges: {e}"))?;
         conn.execute(
-            "DELETE FROM symbol_search WHERE double_colon_path IN \
-             (SELECT double_colon_path FROM symbols \
+            "DELETE FROM symbol_search WHERE rowid IN \
+             (SELECT rowid FROM symbols \
               WHERE node_id IN (SELECT id FROM nodes WHERE path = ?1))",
             params![path],
         )
@@ -1273,10 +1296,14 @@ impl Store {
             params![path],
         )
         .map_err(|e| format!("codegraph remove node_name_search: {e}"))?;
+        conn.execute(
+            "DELETE FROM fts_code \
+             WHERE rowid IN (SELECT id FROM nodes WHERE path = ?1 AND kind = 'file')",
+            params![path],
+        )
+        .map_err(|e| format!("codegraph remove fts: {e}"))?;
         conn.execute("DELETE FROM nodes WHERE path = ?1", params![path])
             .map_err(|e| format!("codegraph remove nodes: {e}"))?;
-        conn.execute("DELETE FROM fts_code WHERE path = ?1", params![path])
-            .map_err(|e| format!("codegraph remove fts: {e}"))?;
         Self::clear_parse_failure_on(conn, path)?;
         if delete_hash {
             conn.execute("DELETE FROM file_hashes WHERE path = ?1", params![path])
@@ -1544,8 +1571,8 @@ impl Store {
             .unwrap_or_else(|| path.to_string());
         let node_id = Self::insert_node_on(conn, "file", path, &name, lang, 1, line_count.max(1))?;
         conn.execute(
-            "INSERT INTO fts_code(path, text) VALUES(?1, ?2)",
-            params![path, text],
+            "INSERT INTO fts_code(rowid, path, text) VALUES(?1, ?2, ?3)",
+            params![node_id, path, fts_text_for_file(path, text, lang)],
         )
         .map_err(|e| format!("codegraph fts insert: {e}"))?;
         Self::set_file_hash_on(conn, path, hash)?;
@@ -3251,6 +3278,154 @@ func main() {
 
         let hits = store.search_fts("codegraph", 10).unwrap();
         assert_eq!(hits, vec!["src/main.rs".to_string()]);
+    }
+
+    #[test]
+    fn reindex_drops_stale_fts_and_symbol_search_rows() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .index_file(
+                "src/main.rs",
+                "fn zebra_first() { let alpha_token = 1; }",
+                "rust",
+            )
+            .unwrap();
+        store
+            .index_file(
+                "src/main.rs",
+                "fn zebra_second() { let beta_token = 2; }",
+                "rust",
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.search_fts("alpha_token", 10).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            store.search_fts("beta_token", 10).unwrap(),
+            vec!["src/main.rs".to_string()]
+        );
+        let fts_rowids: Vec<i64> = store
+            .conn
+            .prepare("SELECT rowid FROM fts_code")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        let file_node_ids: Vec<i64> = store
+            .conn
+            .prepare("SELECT id FROM nodes WHERE kind = 'file'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(fts_rowids, file_node_ids);
+
+        store.remove_path("src/main.rs").unwrap();
+        assert_eq!(store.counts().unwrap().fts_docs, 0);
+        assert!(store.search_fts("beta_token", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_path_drops_symbol_search_rows_by_rowid() {
+        let store = Store::open_in_memory().unwrap();
+        let keep = store
+            .insert_node("function", "src/keep.rs", "keeper", "rust", 1, 1)
+            .unwrap();
+        store.add_symbol("src/keep.rs::keeper", keep).unwrap();
+        let gone = store
+            .insert_node("function", "src/gone.rs", "vanisher", "rust", 1, 1)
+            .unwrap();
+        store.add_symbol("src/gone.rs::vanisher", gone).unwrap();
+        assert_eq!(
+            store
+                .symbol_paths_fuzzy("src/gone.rs::vanisher", 10)
+                .unwrap(),
+            vec!["src/gone.rs::vanisher".to_string()]
+        );
+        let linked_rowids: Vec<(i64, i64)> = store
+            .conn
+            .prepare(
+                "SELECT s.rowid, ss.rowid FROM symbols s \
+                 JOIN symbol_search ss ON ss.rowid = s.rowid ORDER BY s.rowid",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(linked_rowids.len(), 2);
+
+        store.remove_path("src/gone.rs").unwrap();
+
+        assert!(store
+            .symbol_paths_fuzzy("src/gone.rs::vanisher", 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store.symbol_paths_fuzzy("src/keep.rs::keeper", 10).unwrap(),
+            vec!["src/keep.rs::keeper".to_string()]
+        );
+        let remaining: Vec<String> = store
+            .conn
+            .prepare("SELECT double_colon_path FROM symbol_search")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(remaining, vec!["src/keep.rs::keeper".to_string()]);
+    }
+
+    #[test]
+    fn data_files_keep_a_registry_row_without_tokenized_text() {
+        let store = Store::open_in_memory().unwrap();
+        let big_json = format!(
+            "{{\"models\": \"{}\"}}",
+            "x".repeat(DATA_FILE_FTS_TEXT_LIMIT)
+        );
+        store
+            .index_file(
+                ".refact/stats/00000001.jsonl",
+                "{\"tokens\": 12, \"needle_jsonl\": 1}\n",
+                "",
+            )
+            .unwrap();
+        store.index_file("snapshot.json", &big_json, "").unwrap();
+        store
+            .index_file("README.md", "# needle_markdown\n", "")
+            .unwrap();
+
+        let mut paths = store.all_paths().unwrap();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                ".refact/stats/00000001.jsonl".to_string(),
+                "README.md".to_string(),
+                "snapshot.json".to_string()
+            ]
+        );
+        assert_eq!(store.counts().unwrap().fts_docs, 3);
+        assert!(store.search_fts("needle_jsonl", 10).unwrap().is_empty());
+        assert!(store.search_fts("models", 10).unwrap().is_empty());
+        assert_eq!(
+            store.search_fts("needle_markdown", 10).unwrap(),
+            vec!["README.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn fts_text_for_file_only_trims_data_files() {
+        let text = "a".repeat(DATA_FILE_FTS_TEXT_LIMIT + 1);
+        assert_eq!(fts_text_for_file("src/big.rs", &text, "rust"), text);
+        assert_eq!(fts_text_for_file("big.json", &text, ""), "");
+        assert_eq!(fts_text_for_file("small.json", "{}", ""), "{}");
+        assert_eq!(fts_text_for_file("events.JSONL", "{}", ""), "");
+        assert_eq!(fts_text_for_file("engine.log", "boot", ""), "");
     }
 
     #[test]

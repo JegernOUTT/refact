@@ -47,6 +47,15 @@ async fn cache_maintenance_background_task(
         if removed > 0 {
             tracing::info!("removed {removed} stale browser profiles");
         }
+        let trajectory_dirs = crate::chat::trajectories::list_trajectory_dirs(&gcx).await;
+        let removed = crate::chat::trajectory_index::sweep_trajectory_index_tmp_files_in_roots(
+            &trajectory_dirs,
+            crate::chat::trajectory_index::TRAJECTORY_INDEX_TMP_SWEEP_MAX_AGE,
+        )
+        .await;
+        if removed > 0 {
+            tracing::info!("removed {removed} orphaned trajectory index tmp files");
+        }
         delay = CACHE_MAINTENANCE_INTERVAL;
     }
 }

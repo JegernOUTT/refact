@@ -17,6 +17,7 @@ const BATCH_TX_SIZE: usize = 64;
 const PROGRESS_REPORT_GRANULARITY: usize = 100;
 const CONNECT_EVERY_BATCHES: u32 = 8;
 const CONNECT_EVERY_SECS: u64 = 30;
+const WAL_TRUNCATE_MIN_INTERVAL_SECS: u64 = 60;
 
 fn progress_bucket(remaining: usize) -> usize {
     (remaining + PROGRESS_REPORT_GRANULARITY - 1) / PROGRESS_REPORT_GRANULARITY
@@ -32,6 +33,12 @@ fn should_report_unprocessed(remaining: usize, reported_unprocessed: &mut usize)
 
 fn should_connect_usages(batches_since: u32, elapsed: Duration) -> bool {
     batches_since >= CONNECT_EVERY_BATCHES || elapsed >= Duration::from_secs(CONNECT_EVERY_SECS)
+}
+
+fn should_truncate_wal(last_truncate: Option<Instant>, now: Instant) -> bool {
+    last_truncate.map_or(true, |last| {
+        now.saturating_duration_since(last) >= Duration::from_secs(WAL_TRUNCATE_MIN_INTERVAL_SECS)
+    })
 }
 
 fn completion_message(counts: &Counts, parse_failures: usize) -> String {
@@ -145,7 +152,8 @@ async fn submit_index_entries(
     gcx: &Arc<GlobalContext>,
     service: &Arc<CodeGraphService>,
     entries: Vec<(String, String, String)>,
-) {
+) -> bool {
+    let mut all_indexed = true;
     for chunk in entries.chunks(BATCH_TX_SIZE) {
         let chunk_entries = chunk.to_vec();
         if let Err(err) = service.index_files_batch(&chunk_entries).await {
@@ -158,10 +166,12 @@ async fn submit_index_entries(
                     let err = format!("codegraph: index {path} failed: {err}");
                     error!("{err}");
                     *gcx.codegraph_error.lock().unwrap() = err;
+                    all_indexed = false;
                 }
             }
         }
     }
+    all_indexed
 }
 
 pub(crate) async fn process_index_batch(
@@ -179,6 +189,7 @@ pub(crate) async fn process_index_batch(
         .buffer_unordered(DRAIN_CONCURRENCY);
 
     let mut entries = Vec::with_capacity(batch_len);
+    let mut all_prepared = true;
     while let Some(result) = results.next().await {
         match result {
             Ok(Some(entry)) => entries.push(entry),
@@ -186,10 +197,14 @@ pub(crate) async fn process_index_batch(
             Err(err) => {
                 error!("{err}");
                 *gcx.codegraph_error.lock().unwrap() = err;
+                all_prepared = false;
             }
         }
     }
-    submit_index_entries(&gcx, &service, entries).await;
+    let all_indexed = submit_index_entries(&gcx, &service, entries).await;
+    if all_prepared && all_indexed {
+        gcx.codegraph_error.lock().unwrap().clear();
+    }
     service.record_index_completions(batch_len);
 }
 
@@ -341,6 +356,7 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
     let mut batches_since_connect: u32 = 0;
     let mut last_connect = Instant::now();
     let mut idle_wal_checkpoint_pending = true;
+    let mut last_wal_truncate: Option<Instant> = None;
 
     loop {
         if gcx.shutdown_flag.load(Ordering::Relaxed) {
@@ -363,9 +379,12 @@ pub async fn codegraph_background_task(gcx: Arc<GlobalContext>) {
                     idle_wal_checkpoint_pending = true;
                 }
                 Ok(false) => {
-                    if idle_wal_checkpoint_pending {
+                    if idle_wal_checkpoint_pending
+                        && should_truncate_wal(last_wal_truncate, Instant::now())
+                    {
                         service.checkpoint_wal(WalCheckpointMode::Truncate).await;
                         idle_wal_checkpoint_pending = false;
+                        last_wal_truncate = Some(Instant::now());
                     }
                 }
                 Err(err) => error!("codegraph: dirty usage check failed: {err}"),
@@ -435,6 +454,21 @@ mod tests {
             },
             loaded_ts,
         });
+    }
+
+    #[test]
+    fn wal_truncate_is_rate_limited_to_the_minimum_interval() {
+        let now = Instant::now();
+        assert!(should_truncate_wal(None, now));
+        assert!(!should_truncate_wal(Some(now), now));
+        assert!(!should_truncate_wal(
+            Some(now),
+            now + Duration::from_secs(WAL_TRUNCATE_MIN_INTERVAL_SECS - 1)
+        ));
+        assert!(should_truncate_wal(
+            Some(now),
+            now + Duration::from_secs(WAL_TRUNCATE_MIN_INTERVAL_SECS)
+        ));
     }
 
     #[tokio::test]

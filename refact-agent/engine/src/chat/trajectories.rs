@@ -967,6 +967,28 @@ fn internal_trace_prune_throttle() -> &'static StdMutex<PruneThrottle> {
     LAST_PRUNE_BY_DIR.get_or_init(|| StdMutex::new(PruneThrottle::default()))
 }
 
+const STALE_ENTRY_CLEANUP_INTERVAL_SECS: u64 = 60;
+
+fn stale_entry_cleanup_throttle() -> &'static StdMutex<PruneThrottle> {
+    static LAST_CLEANUP_BY_CHAT: OnceLock<StdMutex<PruneThrottle>> = OnceLock::new();
+    LAST_CLEANUP_BY_CHAT.get_or_init(|| StdMutex::new(PruneThrottle::default()))
+}
+
+fn stale_entry_cleanup_allowed(chat_id: &str) -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    claim_prune_throttle(
+        stale_entry_cleanup_throttle(),
+        Path::new(chat_id),
+        now,
+        STALE_ENTRY_CLEANUP_INTERVAL_SECS,
+        "stale trajectory index entry cleanup",
+    )
+    .unwrap_or(true)
+}
+
 struct TopLevelInternalTraceVisitor;
 
 impl<'de> Visitor<'de> for TopLevelInternalTraceVisitor {
@@ -2009,8 +2031,12 @@ async fn find_trajectory_file(
     chat_id: &str,
 ) -> Option<ValidTrajectoryCandidate> {
     validate_trajectory_id(chat_id).ok()?;
-    let mut candidates = normal_trajectory_candidate_paths(gcx.clone(), chat_id).await;
-    let mut seen: std::collections::HashSet<PathBuf> = candidates.iter().cloned().collect();
+    let normal = normal_trajectory_candidate_paths(gcx.clone(), chat_id).await;
+    let mut seen: std::collections::HashSet<PathBuf> = normal.iter().cloned().collect();
+    if let Some(found) = first_valid_trajectory_candidate(normal, chat_id).await {
+        return Some(found);
+    }
+    let mut candidates = Vec::new();
     let indexed = indexed_candidate_paths_in_dirs(
         &gcx,
         &list_trajectory_dirs(&gcx).await,
@@ -5775,7 +5801,7 @@ async fn process_trajectory_change_for_source(
         {
             warn!("Failed to refresh trajectory index for {}: {}", chat_id, e);
         }
-    } else {
+    } else if stale_entry_cleanup_allowed(chat_id) {
         remove_stale_trajectory_index_entries(gcx.clone(), chat_id).await;
     }
 

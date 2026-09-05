@@ -55,7 +55,7 @@ impl Default for RegistryWriteState {
     }
 }
 
-const WRITE_DEBOUNCE: Duration = Duration::from_secs(2);
+const WRITE_DEBOUNCE: Duration = Duration::from_secs(10);
 
 impl BackgroundAgentRegistry {
     pub async fn new(storage_root: PathBuf) -> Result<Arc<Self>, String> {

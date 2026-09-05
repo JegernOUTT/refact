@@ -501,7 +501,6 @@ impl CodeGraphService {
         let store = self.store.lock().await;
         let results = store.index_files_batch(entries)?;
         let changed = results.iter().any(|indexed| indexed.changed);
-        Self::checkpoint_wal_failure_tolerant(&store, WalCheckpointMode::Passive);
         drop(store);
         self.record_run_parse_failures(&results);
         if changed {

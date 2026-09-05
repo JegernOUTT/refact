@@ -1247,24 +1247,43 @@ const REFACT_RUNTIME_STATE_ENTRIES: &[&str] = &[
     "buddy",
 ];
 
+const REFACT_RUNTIME_STATE_TOP_LEVEL_ENTRIES: &[&str] = &[
+    "stats",
+    "shell_audit.jsonl",
+    "scheduled_tasks.json",
+    "background_agents",
+    "vecdb",
+    "review_scratch",
+    "visual_baselines",
+];
+
+fn refact_runtime_entry_matches(entries: &[&str], name: &str) -> bool {
+    entries.iter().any(|entry| {
+        name == *entry
+            || name
+                .strip_prefix(entry)
+                .is_some_and(|rest| rest.starts_with('.'))
+    })
+}
+
 fn path_is_refact_runtime_state(path: &Path) -> bool {
     let mut seen_refact = false;
+    let mut directly_under_refact = false;
     for component in path.components() {
         let Component::Normal(name) = component else {
             continue;
         };
         let name = name.to_string_lossy();
-        if seen_refact
-            && REFACT_RUNTIME_STATE_ENTRIES.iter().any(|entry| {
-                name == *entry
-                    || name
-                        .strip_prefix(entry)
-                        .is_some_and(|rest| rest.starts_with('.'))
-            })
+        if seen_refact && refact_runtime_entry_matches(REFACT_RUNTIME_STATE_ENTRIES, &name) {
+            return true;
+        }
+        if directly_under_refact
+            && refact_runtime_entry_matches(REFACT_RUNTIME_STATE_TOP_LEVEL_ENTRIES, &name)
         {
             return true;
         }
-        if name == ".refact" {
+        directly_under_refact = name == ".refact";
+        if directly_under_refact {
             seen_refact = true;
         }
     }
@@ -2048,6 +2067,9 @@ fn is_git_head_path(p: &Path) -> bool {
             .unwrap_or(false)
 }
 
+#[cfg(not(test))]
+const FILE_EVENT_DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
+#[cfg(test)]
 const FILE_EVENT_DEBOUNCE_WINDOW: Duration = Duration::from_millis(100);
 const FILE_EVENT_DEBOUNCE_RETAIN: Duration = Duration::from_secs(10);
 #[cfg(not(test))]
@@ -3424,6 +3446,67 @@ mod tests {
 
         assert!(files.contains(&normalized(&regular)));
         assert!(!files.contains(&normalized(&generated)));
+    }
+
+    #[test]
+    fn refact_runtime_state_denies_engine_written_top_level_entries_only() {
+        let refact = Path::new("/repo/.refact");
+        for denied in [
+            "stats/00000268.jsonl",
+            "shell_audit.jsonl",
+            "shell_audit.jsonl.tmp",
+            "scheduled_tasks.json",
+            "background_agents/records.json",
+            "background_agents/results/agent.json",
+            "vecdb/data.lance",
+            "review_scratch/abc/src/lib.rs",
+            "visual_baselines/home.png",
+            "trajectories/index.json",
+            "tasks/t1/trajectories/chat.json",
+        ] {
+            assert!(
+                path_is_refact_runtime_state(&refact.join(denied)),
+                "{denied} must be treated as runtime state"
+            );
+        }
+        for kept in [
+            "knowledge/stats/note.md",
+            "skills/stats/SKILL.md",
+            "modes/agent.yaml",
+            "integrations.d/github.yaml",
+            "project_information.yaml",
+            "commands/ship.md",
+            "statistics/report.md",
+        ] {
+            assert!(
+                !path_is_refact_runtime_state(&refact.join(kept)),
+                "{kept} must stay visible"
+            );
+        }
+        assert!(!path_is_refact_runtime_state(Path::new(
+            "/repo/src/stats/mod.rs"
+        )));
+    }
+
+    #[tokio::test]
+    async fn workspace_scan_excludes_engine_runtime_logs_under_refact() {
+        let temp = tempfile::tempdir().unwrap();
+        let refact = temp.path().join(".refact");
+        let stats = refact.join("stats").join("00000001.jsonl");
+        let audit = refact.join("shell_audit.jsonl");
+        let records = refact.join("background_agents").join("records.json");
+        let knowledge = refact.join("knowledge").join("stats").join("note.md");
+        write_file(&stats, "{\"tokens\":1}\n");
+        write_file(&audit, "{\"cmd\":\"ls\"}\n");
+        write_file(&records, "{\"records\":[]}\n");
+        write_file(&knowledge, "# stats note\n");
+
+        let files = scan_workspace(temp.path()).await;
+
+        assert!(!files.contains(&normalized(&stats)));
+        assert!(!files.contains(&normalized(&audit)));
+        assert!(!files.contains(&normalized(&records)));
+        assert!(files.contains(&normalized(&knowledge)));
     }
 
     #[tokio::test]
