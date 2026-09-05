@@ -55,23 +55,42 @@ pub fn provider_destination(model_id: &str) -> Destination {
     }
 }
 
-pub fn shell_observation_needed(gcx: &Arc<GlobalContext>, destination: &Destination) -> bool {
-    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
-    !policy.blocked.is_empty()
-        || policy
-            .zones
-            .iter()
-            .any(|zone| !destination.matches_send_to(&zone.send_to))
+/// Counts only: never carries paths, patterns or zone names, so it is safe to log.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ObservationReason {
+    pub blocked_patterns: usize,
+    pub guarded_zones: usize,
+    pub derived_labels: usize,
 }
 
-pub fn shell_observation_needed_for_session(
+impl ObservationReason {
+    pub fn needed(&self) -> bool {
+        self.blocked_patterns > 0 || self.guarded_zones > 0 || self.derived_labels > 0
+    }
+}
+
+pub fn shell_observation_reason(
+    gcx: &Arc<GlobalContext>,
+    destination: &Destination,
+) -> ObservationReason {
+    let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
+    ObservationReason {
+        blocked_patterns: policy.blocked.len(),
+        guarded_zones: policy
+            .zones
+            .iter()
+            .filter(|zone| !destination.matches_send_to(&zone.send_to))
+            .count(),
+        derived_labels: 0,
+    }
+}
+
+pub fn shell_observation_reason_for_session(
     gcx: &Arc<GlobalContext>,
     destination: &Destination,
     derived_zones: &DerivedPrivacyZones,
-) -> bool {
-    if shell_observation_needed(gcx, destination) {
-        return true;
-    }
+) -> ObservationReason {
+    let mut reason = shell_observation_reason(gcx, destination);
     let derived_zone_names = derived_zones
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -79,14 +98,30 @@ pub fn shell_observation_needed_for_session(
         .map(|derived| derived.zone.clone())
         .collect::<Vec<_>>();
     let policy = gcx.privacy_policy_load.read().unwrap().policy.clone();
-    derived_zone_names.iter().any(|name| {
-        name == "blocked"
-            || policy
-                .zones
-                .iter()
-                .find(|zone| zone.name == *name)
-                .is_some_and(|zone| !destination.matches_send_to(&zone.send_to))
-    })
+    reason.derived_labels = derived_zone_names
+        .iter()
+        .filter(|name| {
+            *name == "blocked"
+                || policy
+                    .zones
+                    .iter()
+                    .find(|zone| zone.name == **name)
+                    .is_some_and(|zone| !destination.matches_send_to(&zone.send_to))
+        })
+        .count();
+    reason
+}
+
+pub fn shell_observation_needed(gcx: &Arc<GlobalContext>, destination: &Destination) -> bool {
+    shell_observation_reason(gcx, destination).needed()
+}
+
+pub fn shell_observation_needed_for_session(
+    gcx: &Arc<GlobalContext>,
+    destination: &Destination,
+    derived_zones: &DerivedPrivacyZones,
+) -> bool {
+    shell_observation_reason_for_session(gcx, destination, derived_zones).needed()
 }
 
 pub(crate) async fn filter_path_enrichment_for_model_context(
@@ -1574,6 +1609,51 @@ mod tests {
             &gcx,
             &provider_destination("untrusted/model")
         ));
+    }
+
+    #[tokio::test]
+    async fn observation_reason_counts_match_the_boolean_decision() {
+        let temp = tempfile::tempdir().unwrap();
+        let secret = temp.path().join("secret.txt");
+        std::fs::write(&secret, "secret").unwrap();
+        let gcx = gcx_with_policy(&secret, &["trusted"], ShellBehavior::Withhold).await;
+        let allowed = provider_destination("trusted/model");
+        let guarded = provider_destination("untrusted/model");
+        let derived_zones = new_derived_privacy_zones();
+
+        let allowed_reason = shell_observation_reason(&gcx, &allowed);
+        assert_eq!(allowed_reason.blocked_patterns, 0);
+        assert_eq!(allowed_reason.guarded_zones, 0);
+        assert_eq!(allowed_reason.derived_labels, 0);
+        assert!(!allowed_reason.needed());
+        assert_eq!(
+            allowed_reason.needed(),
+            shell_observation_needed(&gcx, &allowed)
+        );
+
+        let guarded_reason = shell_observation_reason(&gcx, &guarded);
+        assert_eq!(guarded_reason.guarded_zones, 1);
+        assert!(guarded_reason.needed());
+        assert_eq!(
+            guarded_reason.needed(),
+            shell_observation_needed(&gcx, &guarded)
+        );
+
+        derived_zones.write().unwrap().insert(
+            temp.path().join("derived.txt"),
+            DerivedZone {
+                zone: "blocked".to_string(),
+                origin: None,
+            },
+        );
+        let session_reason = shell_observation_reason_for_session(&gcx, &allowed, &derived_zones);
+        assert_eq!(session_reason.guarded_zones, 0);
+        assert_eq!(session_reason.derived_labels, 1);
+        assert!(session_reason.needed());
+        assert_eq!(
+            session_reason.needed(),
+            shell_observation_needed_for_session(&gcx, &allowed, &derived_zones)
+        );
     }
 
     #[test]

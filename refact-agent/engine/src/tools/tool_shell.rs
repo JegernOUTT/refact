@@ -98,10 +98,20 @@ impl Tool for ToolShell {
         crate::privacy::load_privacy_if_needed(gcx.clone()).await;
         let current_model = ccx.lock().await.current_model.clone();
         let destination = crate::privacy::records::provider_destination(&current_model);
-        let observe = crate::privacy::records::shell_observation_needed_for_session(
+        let observe_reason = crate::privacy::records::shell_observation_reason_for_session(
             &gcx,
             &destination,
             &derived_privacy_zones,
+        );
+        let observe = observe_reason.needed();
+        tracing::debug!(
+            "shell observation {} for destination {}: {} blocked patterns, {} zones excluding it, \
+             {} derived labels",
+            if observe { "on" } else { "off" },
+            destination.id.0,
+            observe_reason.blocked_patterns,
+            observe_reason.guarded_zones,
+            observe_reason.derived_labels
         );
         let shell_policy = shell_gate::load_policy(gcx.clone()).await;
         let mut default_filter = self.cfg.output_filter.clone();
