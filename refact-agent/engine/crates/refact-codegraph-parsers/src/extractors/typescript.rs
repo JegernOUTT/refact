@@ -41,6 +41,34 @@ impl LangExtractor for TypeScriptExtractor {
     }
 }
 
+pub struct TsxExtractor;
+
+impl TsxExtractor {
+    pub fn parse(source: &str) -> Option<Tree> {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
+            .ok()?;
+        parser.parse(source, None)
+    }
+}
+
+impl Default for TsxExtractor {
+    fn default() -> Self {
+        TsxExtractor
+    }
+}
+
+impl LangExtractor for TsxExtractor {
+    fn language(&self) -> &'static str {
+        "tsx"
+    }
+
+    fn extract(&self, tree: &Tree, source: &str) -> (Vec<SymbolNode>, Vec<RawRef>) {
+        TypeScriptExtractor.extract(tree, source)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +123,50 @@ class Derived extends Base {}
         let (symbols, _refs) = extract(src);
         let derived = symbols.iter().find(|s| s.name() == "Derived").unwrap();
         assert_eq!(derived.this_class_derived_from, vec!["Base".to_string()]);
+    }
+
+    #[test]
+    fn tsx_grammar_parses_jsx_that_the_plain_ts_grammar_rejects() {
+        let src = "\
+import React from 'react';
+
+export function Panel({ title }: { title: string }) {
+    return (
+        <div className=\"panel\">
+            <span>{title}</span>
+        </div>
+    );
+}
+";
+        let ts_tree = TypeScriptExtractor::parse(src).expect("ts parse");
+        assert!(
+            ts_tree.root_node().has_error(),
+            "plain typescript grammar is expected to choke on JSX"
+        );
+
+        let tsx_tree = TsxExtractor::parse(src).expect("tsx parse");
+        assert!(
+            !tsx_tree.root_node().has_error(),
+            "tsx grammar must accept JSX"
+        );
+
+        let (symbols, refs) = TsxExtractor.extract(&tsx_tree, src);
+        let paths: Vec<String> = symbols.iter().map(|s| s.double_colon_path()).collect();
+        assert!(paths.contains(&"Panel".to_string()), "symbols: {paths:?}");
+        assert!(refs
+            .iter()
+            .any(|r| r.kind == EdgeKind::Imports && r.name == "react"));
+        assert_eq!(TsxExtractor.language(), "tsx");
+    }
+
+    #[test]
+    fn tsx_generic_arrow_component_parses_without_errors() {
+        let src = "\
+const Wrap = <T,>(value: T) => <li key={String(value)}>{String(value)}</li>;
+export default Wrap;
+";
+        let tree = TsxExtractor::parse(src).expect("tsx parse");
+        assert!(!tree.root_node().has_error());
     }
 
     #[test]

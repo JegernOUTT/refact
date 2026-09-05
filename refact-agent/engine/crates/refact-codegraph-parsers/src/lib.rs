@@ -7,17 +7,19 @@ pub use extractors::{
     BashExtractor, CExtractor, CppExtractor, CSharpExtractor, ElixirExtractor, GoExtractor,
     HaskellExtractor, JavaExtractor, JavaScriptExtractor, KotlinExtractor, OcamlExtractor,
     PhpExtractor, PythonExtractor, RubyExtractor, RustExtractor, ScalaExtractor, SwiftExtractor,
-    TypeScriptExtractor,
+    TsxExtractor, TypeScriptExtractor,
 };
 pub use frameworks::{FrameworkDetector, FrameworkRegistry};
 pub use ir::{Edge, EdgeKind, LangExtractor, RawRef, SymbolKind, SymbolNode};
 pub use resolver::{Resolution, ResolutionTier, Resolver};
 
+/// Bump by hand whenever grammar versions or language routing change: consumers persist this
+/// value and re-parse every file when the stored one differs.
+pub const PARSERS_GENERATION: u32 = 1;
+
 pub fn normalize_lang(lang: &str) -> &str {
     match lang {
         "py" => "python",
-        "jsx" => "javascript",
-        "tsx" => "typescript",
         "cs" => "csharp",
         "rb" => "ruby",
         "c++" | "cc" | "cxx" => "cpp",
@@ -30,8 +32,9 @@ pub fn parse_tree(lang: &str, text: &str) -> Option<tree_sitter::Tree> {
     match lang {
         "rust" => RustExtractor::parse(text),
         "python" => PythonExtractor::parse(text),
-        "javascript" => JavaScriptExtractor::parse(text),
+        "javascript" | "jsx" => JavaScriptExtractor::parse(text),
         "typescript" => TypeScriptExtractor::parse(text),
+        "tsx" => TsxExtractor::parse(text),
         "java" => JavaExtractor::parse(text),
         "kotlin" => KotlinExtractor::parse(text),
         "c" => CExtractor::parse(text),
@@ -66,6 +69,27 @@ pub fn resolve_refs(refs: &[RawRef], resolver: &Resolver) -> Vec<Edge> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const JSX_SOURCE: &str = "\
+export function Panel({ title }) {
+    return <div className=\"panel\">{title}</div>;
+}
+";
+
+    #[test]
+    fn tsx_and_jsx_keep_their_own_language_ids_and_parse_jsx() {
+        assert_eq!(normalize_lang("tsx"), "tsx");
+        assert_eq!(normalize_lang("jsx"), "jsx");
+
+        let tsx = parse_tree("tsx", JSX_SOURCE).expect("tsx grammar");
+        assert!(!tsx.root_node().has_error());
+
+        let jsx = parse_tree("jsx", JSX_SOURCE).expect("javascript grammar");
+        assert!(!jsx.root_node().has_error());
+
+        let ts = parse_tree("typescript", JSX_SOURCE).expect("typescript grammar");
+        assert!(ts.root_node().has_error());
+    }
 
     #[test]
     fn resolve_refs_builds_edges_with_confidence_from_resolver() {

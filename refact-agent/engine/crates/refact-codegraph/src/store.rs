@@ -306,6 +306,8 @@ const SYMBOL_FUZZY_SHORT_SQL: &str = "SELECT DISTINCT double_colon_path FROM ( \
 const SYMBOLS_IN_MEMORY_LIMIT: i64 = 2_000_000;
 const SYMBOLS_BULK_LOAD_REF_RATIO: i64 = 4;
 
+pub const PARSERS_GENERATION_KEY: &str = "parsers_generation";
+
 pub struct Store {
     conn: Connection,
 }
@@ -482,7 +484,49 @@ impl Store {
                 params![schema::SCHEMA_VERSION.to_string()],
             )
             .map_err(|e| format!("codegraph meta: {e}"))?;
+        self.sync_parsers_generation()?;
         Ok(())
+    }
+
+    /// Grammar or routing changes make stored parse results stale while content hashes stay the
+    /// same, so clearing the freshness bookkeeping re-parses every file without dropping the DB.
+    fn sync_parsers_generation(&self) -> Result<(), String> {
+        let current = refact_codegraph_parsers::PARSERS_GENERATION.to_string();
+        let stored = self.meta_get(PARSERS_GENERATION_KEY)?;
+        if stored.as_deref() == Some(current.as_str()) {
+            return Ok(());
+        }
+        let indexed: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM file_hashes", [], |row| row.get(0))
+            .map_err(|e| format!("codegraph parsers_generation count: {e}"))?;
+        if indexed > 0 {
+            info!(
+                "codegraph: parsers generation {stored:?} -> {current}, \
+                 forcing re-parse of {indexed} indexed files"
+            );
+        }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| format!("codegraph parsers_generation transaction: {e}"))?;
+        tx.execute("DELETE FROM file_hashes", [])
+            .map_err(|e| format!("codegraph parsers_generation clear hashes: {e}"))?;
+        tx.execute("DELETE FROM parse_failures", [])
+            .map_err(|e| format!("codegraph parsers_generation clear failures: {e}"))?;
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES(?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![PARSERS_GENERATION_KEY, current],
+        )
+        .map_err(|e| format!("codegraph parsers_generation store: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("codegraph parsers_generation commit: {e}"))?;
+        Ok(())
+    }
+
+    pub fn parsers_generation(&self) -> Result<Option<String>, String> {
+        self.meta_get(PARSERS_GENERATION_KEY)
     }
 
     pub fn schema_version(&self) -> Result<i64, String> {
@@ -2509,6 +2553,98 @@ mod tests {
     }
 
     #[test]
+    fn stale_parsers_generation_forces_a_reparse_without_dropping_the_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("codegraph.sqlite");
+        let source = "fn kept() {}\n";
+        {
+            let store = Store::open(&db_path).unwrap();
+            store.index_file("src/a.rs", source, "rust").unwrap();
+            store
+                .index_files_batch(&[(
+                    "src/broken.rs".to_string(),
+                    "fn broken( { ; ) }\n".to_string(),
+                    "rust".to_string(),
+                )])
+                .unwrap();
+            assert_eq!(store.parse_failure_count().unwrap(), 1);
+            assert_eq!(
+                store.parsers_generation().unwrap(),
+                Some(refact_codegraph_parsers::PARSERS_GENERATION.to_string())
+            );
+            store
+                .conn
+                .execute(
+                    "UPDATE meta SET value = 'stale' WHERE key = ?1",
+                    params![PARSERS_GENERATION_KEY],
+                )
+                .unwrap();
+        }
+
+        let store = Store::open(&db_path).unwrap();
+        assert!(
+            file_hash_signature(&store).is_empty(),
+            "a generation change must clear file_hashes so every file is re-parsed"
+        );
+        assert_eq!(store.parse_failure_count().unwrap(), 0);
+        assert_eq!(
+            store.parsers_generation().unwrap(),
+            Some(refact_codegraph_parsers::PARSERS_GENERATION.to_string())
+        );
+        assert!(
+            store.file_node_id("src/a.rs").unwrap().is_some(),
+            "the database itself must survive the reset"
+        );
+
+        let (_id, changed) = store.index_file("src/a.rs", source, "rust").unwrap();
+        assert!(changed, "unchanged content must still be re-indexed once");
+
+        let (_id, changed_again) = store.index_file("src/a.rs", source, "rust").unwrap();
+        assert!(!changed_again, "the hash-skip must come back afterwards");
+    }
+
+    #[test]
+    fn absent_parsers_generation_also_forces_a_reparse() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("codegraph.sqlite");
+        {
+            let store = Store::open(&db_path).unwrap();
+            store
+                .index_file("src/a.rs", "fn kept() {}\n", "rust")
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "DELETE FROM meta WHERE key = ?1",
+                    params![PARSERS_GENERATION_KEY],
+                )
+                .unwrap();
+        }
+
+        let store = Store::open(&db_path).unwrap();
+        assert!(file_hash_signature(&store).is_empty());
+        assert_eq!(
+            store.parsers_generation().unwrap(),
+            Some(refact_codegraph_parsers::PARSERS_GENERATION.to_string())
+        );
+    }
+
+    #[test]
+    fn matching_parsers_generation_keeps_file_hashes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("codegraph.sqlite");
+        let source = "fn kept() {}\n";
+        {
+            let store = Store::open(&db_path).unwrap();
+            store.index_file("src/a.rs", source, "rust").unwrap();
+        }
+        let store = Store::open(&db_path).unwrap();
+        assert_eq!(file_hash_signature(&store).len(), 1);
+        let (_id, changed) = store.index_file("src/a.rs", source, "rust").unwrap();
+        assert!(!changed, "an unchanged generation must keep the hash-skip");
+    }
+
+    #[test]
     fn schema_roundtrip() {
         let store = Store::open_in_memory().unwrap();
         assert_eq!(store.schema_version().unwrap(), schema::SCHEMA_VERSION);
@@ -2588,6 +2724,35 @@ fn helper() {}
             })
             .unwrap();
         assert_eq!(calls, 1, "render -> helper calls edge");
+    }
+
+    #[test]
+    fn indexing_a_tsx_file_yields_symbols_and_no_parse_failure() {
+        let store = Store::open_in_memory().unwrap();
+        let src = "\
+import { useState } from 'react';
+
+export function Counter(): JSX.Element {
+    const [count, setCount] = useState(0);
+    return <button onClick={() => setCount(count + 1)}>{count}</button>;
+}
+";
+        let lang = crate::lang_from_path("src/Counter.tsx");
+        assert_eq!(lang, "tsx");
+        let indexed = store
+            .index_file_graph("src/Counter.tsx", src, lang)
+            .unwrap();
+        assert!(indexed.parse_failure.is_none(), "{indexed:?}");
+        assert_eq!(store.parse_failure_count().unwrap(), 0);
+        assert!(
+            node_signature(&store)
+                .iter()
+                .any(|(_, name, kind, node_lang, ..)| {
+                    name == "Counter" && kind == "function" && node_lang == "tsx"
+                }),
+            "{:?}",
+            node_signature(&store)
+        );
     }
 
     #[test]

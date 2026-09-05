@@ -4,7 +4,7 @@ use refact_codegraph_parsers::{
     BashExtractor, CExtractor, CppExtractor, CSharpExtractor, EdgeKind, ElixirExtractor,
     GoExtractor, HaskellExtractor, JavaExtractor, JavaScriptExtractor, KotlinExtractor,
     LangExtractor, OcamlExtractor, PhpExtractor, PythonExtractor, RawRef, RubyExtractor,
-    RustExtractor, ScalaExtractor, SwiftExtractor, SymbolNode, TypeScriptExtractor,
+    RustExtractor, ScalaExtractor, SwiftExtractor, SymbolNode, TsxExtractor, TypeScriptExtractor,
 };
 use tree_sitter::Tree;
 
@@ -74,9 +74,8 @@ pub fn extract_symbols(lang: &str, text: &str) -> ExtractResult {
         "javascript" | "jsx" => {
             extract_with(lang, text, JavaScriptExtractor::parse, JavaScriptExtractor)
         }
-        "typescript" | "tsx" => {
-            extract_with(lang, text, TypeScriptExtractor::parse, TypeScriptExtractor)
-        }
+        "typescript" => extract_with(lang, text, TypeScriptExtractor::parse, TypeScriptExtractor),
+        "tsx" => extract_with(lang, text, TsxExtractor::parse, TsxExtractor),
         "java" => extract_with(lang, text, JavaExtractor::parse, JavaExtractor),
         "kotlin" => extract_with(lang, text, KotlinExtractor::parse, KotlinExtractor),
         "c" => extract_with(lang, text, CExtractor::parse, CExtractor),
@@ -140,6 +139,48 @@ mod tests {
         let (symbols, refs) = extract_symbols("brainfuck", "+++[->+++<]\n").unwrap();
         assert!(symbols.is_empty());
         assert!(refs.is_empty());
+    }
+
+    const TSX_FIXTURE: &str = "\
+import { useState } from 'react';
+
+export function Counter(): JSX.Element {
+    const [count, setCount] = useState(0);
+    return <button onClick={() => setCount(count + 1)}>{count}</button>;
+}
+";
+
+    #[test]
+    fn tsx_source_with_jsx_extracts_symbols_without_a_parse_failure() {
+        let (symbols, refs) = extract_symbols("tsx", TSX_FIXTURE)
+            .expect("tsx must be parsed with the TSX grammar, not the plain TypeScript one");
+        assert!(symbols.iter().any(|s| s.name() == "Counter"));
+        assert!(refs
+            .iter()
+            .any(|r| r.kind == EdgeKind::Imports && r.name == "react"));
+
+        let as_typescript = extract_symbols("typescript", TSX_FIXTURE);
+        assert!(
+            as_typescript.is_err(),
+            "guard: the plain typescript grammar still rejects JSX, so routing matters"
+        );
+    }
+
+    #[test]
+    fn tsx_and_jsx_paths_route_to_their_own_grammars() {
+        assert_eq!(crate::lang_from_path("src/Counter.tsx"), "tsx");
+        assert_eq!(crate::lang_from_path("src/Counter.jsx"), "jsx");
+        assert_eq!(crate::lang_from_path("src/Counter.ts"), "typescript");
+
+        let lang = crate::lang_from_path("src/Counter.tsx");
+        let (symbols, _refs) = extract_symbols(lang, TSX_FIXTURE)
+            .expect("a .tsx path must reach the TSX grammar end to end");
+        assert!(symbols.iter().any(|s| s.name() == "Counter"));
+
+        let jsx = "export const Badge = () => <span className=\"badge\">ok</span>;\n";
+        let (jsx_symbols, _jsx_refs) = extract_symbols(crate::lang_from_path("src/Badge.jsx"), jsx)
+            .expect("jsx keeps using the javascript grammar");
+        assert!(jsx_symbols.iter().any(|s| s.name() == "Badge"));
     }
 
     #[test]
