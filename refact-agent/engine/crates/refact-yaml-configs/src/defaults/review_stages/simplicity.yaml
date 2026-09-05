@@ -4,7 +4,6 @@ title: "Review: simplicity and maintainability"
 phase: parallel
 contract: findings
 depth: normal
-budget_minutes: 6
 writes_allowed: false
 applies_when:
   always: true

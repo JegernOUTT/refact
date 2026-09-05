@@ -4,7 +4,6 @@ title: "Review: mechanical checks"
 phase: parallel
 contract: findings
 depth: normal
-budget_minutes: 10
 writes_allowed: false
 applies_when:
   always: true

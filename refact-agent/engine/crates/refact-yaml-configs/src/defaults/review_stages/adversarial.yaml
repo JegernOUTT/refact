@@ -4,7 +4,6 @@ title: "Review: adversarial check"
 phase: post_merge
 contract: verdicts
 depth: deep
-budget_minutes: 10
 writes_allowed: false
 applies_when:
   always: true

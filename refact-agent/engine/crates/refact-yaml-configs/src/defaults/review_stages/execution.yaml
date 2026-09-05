@@ -4,7 +4,6 @@ title: "Review: execution and reproduction"
 phase: parallel
 contract: findings
 depth: deep
-budget_minutes: 20
 writes_allowed: true
 applies_when:
   always: true

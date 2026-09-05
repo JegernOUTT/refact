@@ -31,10 +31,7 @@ review:
   default_depth: normal
   parallel_depth: 4
   variants: 1
-  stage_budget_minutes: 30
-  writes_stage_budget_minutes: 45
   idle_timeout_secs: 360
-  deadline_secs: 1800
   max_steps: 40
   max_files: 60
   model_slot: chat

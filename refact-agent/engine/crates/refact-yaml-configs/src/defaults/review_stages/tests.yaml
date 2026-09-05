@@ -4,7 +4,6 @@ title: "Review: test adequacy"
 phase: parallel
 contract: findings
 depth: deep
-budget_minutes: 12
 writes_allowed: false
 applies_when:
   always: true

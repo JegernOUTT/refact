@@ -69,7 +69,6 @@ pub struct StageJob {
     pub max_steps: usize,
     pub prompt: String,
     pub trace_chat_id: String,
-    pub budget: std::time::Duration,
     pub abort: Arc<AtomicBool>,
 }
 
@@ -395,7 +394,6 @@ mod tests {
             max_steps: 10,
             prompt: String::new(),
             trace_chat_id: stage_trace_chat_id("rv-1", stage_id),
-            budget: std::time::Duration::from_secs(60),
             abort: Arc::new(AtomicBool::new(false)),
         }
     }

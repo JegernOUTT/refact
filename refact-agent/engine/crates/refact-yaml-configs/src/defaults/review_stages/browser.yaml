@@ -4,7 +4,6 @@ title: "Review: browser behaviour"
 phase: parallel
 contract: findings
 depth: deep
-budget_minutes: 20
 writes_allowed: false
 applies_when:
   extensions: [tsx, jsx, ts, js, vue, svelte, css, scss, html]

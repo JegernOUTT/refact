@@ -49,8 +49,6 @@ struct ReviewArgs {
     depth: Option<ReviewDepth>,
     parallel_depth: Option<usize>,
     variants: Option<usize>,
-    stage_budget_minutes: Option<u64>,
-    deadline_secs: Option<u64>,
     browser_scenario: Option<String>,
 }
 
@@ -141,8 +139,6 @@ fn parse_args(args: &HashMap<String, Value>) -> Result<ReviewArgs, String> {
         depth,
         parallel_depth: positive_number(args, "parallel_depth")?.map(|value| value as usize),
         variants: variants.map(|value| value as usize),
-        stage_budget_minutes: positive_number(args, "stage_budget_minutes")?,
-        deadline_secs: positive_number(args, "deadline_secs")?,
         browser_scenario,
     })
 }
@@ -272,13 +268,6 @@ async fn plan_jobs(
                         .flatten(),
                 ),
                 trace_chat_id,
-                budget: Duration::from_secs(
-                    overrides
-                        .budget_minutes
-                        .unwrap_or(spec.budget_minutes)
-                        .max(1)
-                        * 60,
-                ),
                 abort: Arc::new(AtomicBool::new(false)),
             });
         }
@@ -673,25 +662,8 @@ async fn run_review(
             .parallel_depth
             .unwrap_or(cfg.settings.parallel_depth)
             .max(1),
-        stage_ceiling: Duration::from_secs(
-            args.stage_budget_minutes
-                .unwrap_or(cfg.settings.stage_budget_minutes)
-                .max(1)
-                * 60,
-        ),
-        writes_stage_ceiling: Duration::from_secs(
-            cfg.settings.writes_stage_budget_minutes.max(1) * 60,
-        ),
         idle_timeout: Duration::from_secs(cfg.settings.idle_timeout_secs),
         grace: HARVEST_GRACE,
-        deadline: Some(
-            tokio::time::Instant::now()
-                + Duration::from_secs(
-                    args.deadline_secs
-                        .unwrap_or(cfg.settings.deadline_secs)
-                        .max(60),
-                ),
-        ),
     };
 
     let scratch = scratch_dir(
@@ -756,13 +728,6 @@ async fn run_review(
         };
         let prompt = build_adversarial_prompt(&spec, &scope, &findings);
         let label = spec.id.clone();
-        let budget = Duration::from_secs(
-            overrides
-                .budget_minutes
-                .unwrap_or(spec.budget_minutes)
-                .max(1)
-                * 60,
-        );
         let job = StageJob {
             spec: Arc::new(spec),
             trace_chat_id: stage_trace_chat_id(&ctx.review_id, &label),
@@ -770,7 +735,6 @@ async fn run_review(
             subchat: stage_subchat_spec(&cfg.base_params, &cfg.settings, model),
             max_steps: overrides.max_steps.unwrap_or(cfg.settings.max_steps).max(1),
             prompt,
-            budget,
             abort: Arc::new(AtomicBool::new(false)),
         };
         for mut product in run_stage_jobs(executor.clone(), vec![job], schedule).await {
@@ -877,14 +841,6 @@ impl Tool for ToolCodeReview {
                     "variants": {
                         "type": "integer",
                         "description": "Optional. Model variants per stage, 1-3. Defaults to 1."
-                    },
-                    "stage_budget_minutes": {
-                        "type": "integer",
-                        "description": "Optional. Per-stage wall-clock ceiling. Defaults to 6 minutes (20 for stages that may write)."
-                    },
-                    "deadline_secs": {
-                        "type": "integer",
-                        "description": "Optional. Whole-review deadline. On expiry the finished stages are reported and the rest are marked not run."
                     }
                 },
                 "required": [],
@@ -1154,7 +1110,8 @@ mod tests {
             line_start: 4,
             line_end: 6,
         }];
-        let mut timed_out = StageRun::timed_out("dependencies", None, 360_000, "stage budget");
+        let mut timed_out =
+            StageRun::timed_out("dependencies", None, 360_000, "no activity for 360s");
         timed_out.coverage = StageCoverage {
             files_read: vec!["a.rs".to_string(), "b.rs".to_string()],
             commands_run: vec![CommandRun {
@@ -1177,7 +1134,7 @@ mod tests {
         assert!(markdown.starts_with(
             "## Review ⚠️ PARTIAL · 12 file(s) requested → 14 reviewed (strict, +2 dependency edges) · base 1a2b3c..HEAD (7 changed file(s), 31 hunk(s)) · depth normal · 4m12s"
         ));
-        assert!(markdown.contains("Stages: mechanical ok 3m12s · dependencies timed out 6m00s (stage budget) · execution not run (depth normal)"));
+        assert!(markdown.contains("Stages: mechanical ok 3m12s · dependencies timed out 6m00s (no activity for 360s) · execution not run (depth normal)"));
         assert!(markdown.contains("Findings: 2 supported (2 with a reproduction) · 1 hypotheses · 3 duplicate(s) merged · 0 pre-existing · 1 out of scope"));
         assert!(markdown.contains("### blocker (1)"));
         assert!(markdown.contains("### high (1)"));
@@ -1236,7 +1193,7 @@ mod tests {
             vec![],
             vec![
                 StageRun::ok("diff", Some("m".to_string()), 1000),
-                StageRun::timed_out("security", None, 360_000, "stage budget"),
+                StageRun::timed_out("security", None, 360_000, "no activity for 360s"),
             ],
         ));
 
@@ -1244,7 +1201,7 @@ mod tests {
         assert!(!markdown.contains("### No supported findings\n"));
         assert!(markdown.contains("### No supported findings from the 1 stage(s) that completed"));
         assert!(markdown.contains("1 stage(s) did not complete"));
-        assert!(markdown.contains("- security: timed out (stage budget)"));
+        assert!(markdown.contains("- security: timed out (no activity for 360s)"));
     }
 
     #[test]
@@ -1266,7 +1223,12 @@ mod tests {
     fn tool_review_render_omits_the_scratch_path_when_nothing_was_written() {
         let mut nothing_written = report(
             vec![],
-            vec![StageRun::timed_out("diff", None, 1000, "stage budget")],
+            vec![StageRun::timed_out(
+                "diff",
+                None,
+                1000,
+                "no activity for 360s",
+            )],
         );
         nothing_written.scratch_dir = None;
 

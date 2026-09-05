@@ -37,7 +37,6 @@ impl ModelSlot {
 pub struct StageOverride {
     pub enabled: Option<bool>,
     pub model_slot: Option<ModelSlot>,
-    pub budget_minutes: Option<u64>,
     pub max_steps: Option<usize>,
 }
 
@@ -47,10 +46,7 @@ pub struct ReviewSettings {
     pub default_depth: String,
     pub parallel_depth: usize,
     pub variants: usize,
-    pub stage_budget_minutes: u64,
-    pub writes_stage_budget_minutes: u64,
     pub idle_timeout_secs: u64,
-    pub deadline_secs: u64,
     pub max_steps: usize,
     pub max_files: usize,
     pub model_slot: ModelSlot,
@@ -66,10 +62,7 @@ impl Default for ReviewSettings {
             default_depth: "normal".to_string(),
             parallel_depth: 4,
             variants: 1,
-            stage_budget_minutes: 30,
-            writes_stage_budget_minutes: 45,
             idle_timeout_secs: 360,
-            deadline_secs: 1800,
             max_steps: 40,
             max_files: 60,
             model_slot: ModelSlot::Chat,
@@ -204,10 +197,7 @@ mod tests {
         assert_eq!(settings.default_depth, "normal");
         assert_eq!(settings.parallel_depth, 4);
         assert_eq!(settings.variants, 1);
-        assert_eq!(settings.stage_budget_minutes, 30);
-        assert_eq!(settings.writes_stage_budget_minutes, 45);
         assert_eq!(settings.idle_timeout_secs, 360);
-        assert_eq!(settings.deadline_secs, 1800);
         assert_eq!(settings.model_slot, ModelSlot::Chat);
     }
 
@@ -232,33 +222,26 @@ mod tests {
 default_depth: deep
 parallel_depth: 8
 variants: 2
-deadline_secs: 900
+idle_timeout_secs: 120
 model_slot: thinking
 stages:
   execution:
     enabled: false
   mechanical:
-    budget_minutes: 15
     model_slot: light
 "#;
         let settings: ReviewSettings = serde_yaml::from_str(yaml).unwrap();
 
         assert_eq!(settings.default_depth, "deep");
         assert_eq!(settings.parallel_depth, 8);
-        assert_eq!(settings.deadline_secs, 900);
+        assert_eq!(settings.idle_timeout_secs, 120);
         assert_eq!(settings.model_slot, ModelSlot::Thinking);
         assert_eq!(settings.stage_override("execution").enabled, Some(false));
-        assert_eq!(
-            settings.stage_override("mechanical").budget_minutes,
-            Some(15)
-        );
         assert_eq!(
             settings.stage_override("mechanical").model_slot,
             Some(ModelSlot::Light)
         );
         assert!(settings.stage_override("diff").enabled.is_none());
-        assert_eq!(settings.stage_budget_minutes, 30);
-        assert_eq!(settings.idle_timeout_secs, 360);
     }
 
     #[test]

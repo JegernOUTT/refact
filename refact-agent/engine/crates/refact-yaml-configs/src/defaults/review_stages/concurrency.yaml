@@ -4,7 +4,6 @@ title: "Review: concurrency and lifecycle"
 phase: parallel
 contract: findings
 depth: opt_in
-budget_minutes: 8
 writes_allowed: false
 applies_when:
   always: true

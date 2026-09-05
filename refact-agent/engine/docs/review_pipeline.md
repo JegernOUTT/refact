@@ -13,10 +13,10 @@ fact-checks their output deterministically, merges duplicates, and renders the r
    no gather subagent: scope comes from arguments and git, not from a model.
 2. **Stage selection.** The catalog is filtered by `depth` (or by an explicit `stages` list) and
    by each stage's `applies_when`. Every stage that is not scheduled still gets a row saying why.
-3. **Parallel stages.** Scheduled stages run through a bounded pool (`parallel_depth`). Each has
-   its own wall-clock budget; the whole review has a deadline. A stage that hangs becomes
-   `timed_out`, a stage that panics or breaks the output contract becomes `failed`, and stages
-   that never started because the deadline passed become `not_run`.
+3. **Parallel stages.** Scheduled stages run through a bounded pool (`parallel_depth`). There is
+   no wall-clock budget: a stage is killed only when it stops responding for longer than the idle
+   timeout. A silent stage becomes `timed_out`, a stage that panics or breaks the output contract
+   becomes `failed`, and stages skipped because the review was cancelled become `not_run`.
 4. **Deterministic fact-checking.** For each finding the pipeline checks that the quoted evidence
    really exists in the file within ±3 lines of the stated range (relocating the finding when the
    quote is found elsewhere), and whether the range intersects a hunk of `base..HEAD`, falling
@@ -55,7 +55,7 @@ Stages are YAML files, one per stage, shipped in
 | `adversarial` | deep, post-merge | claims that do not survive a hostile second read |
 
 Fields: `id`, `title`, `phase` (`parallel`/`post_merge`), `contract` (`findings`/`verdicts`),
-`depth` (`normal`/`deep`/`opt_in`), `budget_minutes`, `writes_allowed`, `applies_when`
+`depth` (`normal`/`deep`/`opt_in`), `writes_allowed`, `applies_when`
 (`always`/`extensions`/`path_globs`), `preferred_tools`, `fallback`, `task`.
 
 Every stage gets `shell` plus the read/search/process tools on top of its `preferred_tools`, and
@@ -82,8 +82,7 @@ the stage is `failed{output_contract}` and its raw text is written to the scratc
 ## Arguments
 
 `what_to_check`, `files`, `base`, `plan`, `scope_mode`, `stages`, `depth`, `parallel_depth`,
-`variants` (1-3 model variants per stage), `stage_budget_minutes`, `deadline_secs`,
-`browser` + `browser_scenario`.
+`variants` (1-3 model variants per stage), `browser` + `browser_scenario`.
 
 The browser stage never runs without a scenario: `browser: true` requires `browser_scenario`, and
 supplying a scenario schedules the stage at any depth. Without one the stage is reported as
@@ -92,9 +91,8 @@ supplying a scenario schedules the stage at any depth. Without one the stage is 
 ## Configuration
 
 `review_agents.yaml` (`review:` section) sets the defaults: `parallel_depth`, `variants`,
-`stage_budget_minutes`, `writes_stage_budget_minutes`, `deadline_secs`, `max_steps`, `max_files`,
-`model_slot`, `variant_slots`, and per-stage overrides under `stages:` (`enabled`, `model_slot`,
-`budget_minutes`, `max_steps`).
+`idle_timeout_secs`, `max_steps`, `max_files`, `model_slot`, `variant_slots`, and per-stage
+overrides under `stages:` (`enabled`, `model_slot`, `max_steps`).
 
 ## Artifacts
 

@@ -396,9 +396,10 @@ impl ReviewReport {
 
     fn counts_for_outcome(stage: &StageRun) -> bool {
         match stage.status {
-            StageStatusKind::NotRun => stage.reason.as_deref().is_some_and(|reason| {
-                reason.starts_with("review deadline") || reason.starts_with("review cancelled")
-            }),
+            StageStatusKind::NotRun => stage
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("review cancelled")),
             _ => true,
         }
     }
@@ -608,17 +609,12 @@ mod tests {
             StageRun::not_run("tests", "depth normal"),
             StageRun::not_run("concurrency", "opt-in stage"),
         ]);
-        let deadline_starved = report_with_stages(vec![
-            StageRun::ok("diff", None, 1),
-            StageRun::not_run("spec", "review deadline reached before the stage started"),
-        ]);
         let cancelled = report_with_stages(vec![
             StageRun::ok("diff", None, 1),
             StageRun::not_run("spec", "review cancelled before the stage started"),
         ]);
 
         assert_eq!(default_depth_run.derive_outcome(), ReviewOutcome::Reviewed);
-        assert_eq!(deadline_starved.derive_outcome(), ReviewOutcome::Partial);
         assert_eq!(cancelled.derive_outcome(), ReviewOutcome::Partial);
         assert_eq!(
             report_with_stages(vec![]).derive_outcome(),

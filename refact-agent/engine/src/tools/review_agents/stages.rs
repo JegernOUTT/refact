@@ -121,10 +121,6 @@ impl AppliesWhen {
     }
 }
 
-fn default_budget_minutes() -> u64 {
-    6
-}
-
 fn default_phase() -> StagePhase {
     StagePhase::Parallel
 }
@@ -148,8 +144,6 @@ pub struct StageSpec {
     pub contract: StageContract,
     #[serde(default = "default_depth")]
     pub depth: StageDepth,
-    #[serde(default = "default_budget_minutes")]
-    pub budget_minutes: u64,
     #[serde(default)]
     pub writes_allowed: bool,
     #[serde(default)]
@@ -337,7 +331,6 @@ mod tests {
         }
         for spec in &catalog {
             assert!(!spec.task.trim().is_empty(), "{} has no task", spec.id);
-            assert!(spec.budget_minutes > 0, "{} has no budget", spec.id);
         }
         let adversarial = catalog
             .iter()
