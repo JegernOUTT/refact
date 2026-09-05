@@ -5,9 +5,9 @@ use crate::caps::models_dev::load_models_dev_catalog;
 use crate::global_context::GlobalContext;
 
 pub use refact_core::model_caps::{
-    CachingType, CanonicalNameParts, ModelCapsSource, ModelCapabilities, ResolvedCaps,
-    canonicalize_model_name, is_model_supported, model_caps_from_models_dev_catalog,
-    resolve_model_caps, validate_model_caps,
+    CanonicalNameParts, ModelCapsSource, ModelCapabilities, ResolvedCaps, canonicalize_model_name,
+    is_model_supported, model_caps_from_models_dev_catalog, resolve_model_caps,
+    validate_model_caps,
 };
 
 pub async fn get_model_caps(

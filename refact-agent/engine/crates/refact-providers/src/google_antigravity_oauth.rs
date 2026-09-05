@@ -130,14 +130,6 @@ impl OAuthTokens {
         self.access_token.is_empty() && self.refresh_token.is_empty()
     }
 
-    pub fn is_expired(&self) -> bool {
-        self.expires_at == 0 || chrono::Utc::now().timestamp_millis() >= self.expires_at
-    }
-
-    pub fn has_valid_access_token(&self) -> bool {
-        !self.access_token.is_empty() && !self.is_expired()
-    }
-
     pub fn has_refresh_token(&self) -> bool {
         !self.refresh_token.is_empty()
     }
@@ -255,10 +247,6 @@ pub async fn pending_session_provider_instance_id(session_id: &str) -> Option<St
     sessions
         .get(session_id)
         .map(|session| session.provider_instance_id.clone())
-}
-
-pub async fn clear_pending_sessions_for_test() {
-    PENDING_SESSIONS.lock().await.clear();
 }
 
 fn token_expiry(expires_in: i64) -> i64 {

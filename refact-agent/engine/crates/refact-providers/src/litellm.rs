@@ -840,6 +840,9 @@ impl LiteLLMProvider {
             })
             .or_else(|| Self::string_field(row, &["litellm_provider", "provider"])),
             api_mode: mode.clone(),
+            // LiteLLM's /model/info does not report per-modality detail or a
+            // minimum thinking budget; left absent so the catalog can answer.
+            ..Default::default()
         };
         DeploymentMetadata {
             live,

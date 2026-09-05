@@ -226,10 +226,6 @@ pub async fn pending_session_provider_instance_id(session_id: &str) -> Option<St
         .map(|session| session.provider_instance_id.clone())
 }
 
-pub async fn clear_pending_sessions_for_test() {
-    PENDING_SESSIONS.lock().await.clear();
-}
-
 fn token_expiry(access_token: &str, expires_in: i64) -> i64 {
     extract_expiry_from_jwt(access_token).unwrap_or_else(|| {
         let seconds = if expires_in > 0 { expires_in } else { 3600 };

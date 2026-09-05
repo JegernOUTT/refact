@@ -12,8 +12,7 @@ use refact_core::llm_types::WireFormat;
 use crate::claude_code_oauth::OAuthTokens;
 use crate::traits::{
     AvailableModel, CustomModelConfig, ModelSource, ProviderRuntime, ProviderTrait,
-    available_models_from_caps_for_provider, merge_custom_models, parse_custom_models,
-    parse_enabled_models, set_model_enabled_impl,
+    merge_custom_models, parse_custom_models, parse_enabled_models, set_model_enabled_impl,
 };
 
 const SUPPORTS_CACHE_CONTROL: bool = true;
@@ -546,7 +545,9 @@ impl ProviderTrait for ClaudeCodeProvider {
     }
 
     fn model_filter_regex(&self) -> Option<&'static str> {
-        Some(r"^claude-")
+        // The Anthropic API is the source of truth for which ids exist. Filtering
+        // by an id prefix silently drops models the account can actually use.
+        None
     }
 
     fn provider_schema(&self) -> &'static str {
@@ -654,20 +655,18 @@ available:
         &self.custom_models
     }
 
+    /// The models.dev catalog must never contribute an id for this provider:
+    /// the Anthropic API is the only authority on what the subscription
+    /// serves. `model_filter_regex` is intentionally `None` and the catalog
+    /// has no `claude_code/` keys, so without this override the
+    /// discovery-timeout path (caps.rs / providers/http.rs) would enumerate
+    /// every bare catalog id — gpt-5, gemini-*, deepseek-* — as a Claude Code
+    /// model. Custom models only.
     fn get_available_models_from_caps(
         &self,
-        model_caps: &HashMap<String, ModelCapabilities>,
+        _model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Vec<AvailableModel> {
-        let enabled_set: std::collections::HashSet<_> =
-            self.enabled_models.iter().map(|s| s.as_str()).collect();
-        let custom_models = self.custom_models();
-        let mut models = available_models_from_caps_for_provider(self, model_caps);
-        for model in &mut models {
-            model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
-        }
-        merge_custom_models(&mut models, custom_models, &enabled_set);
-        models.sort_by(|a, b| a.id.cmp(&b.id));
-        models
+        self.get_custom_models_only()
     }
 
     async fn fetch_available_models(
@@ -675,20 +674,42 @@ available:
         http_client: &reqwest::Client,
         model_caps: &HashMap<String, ModelCapabilities>,
     ) -> Vec<AvailableModel> {
-        let fallback_models = || self.get_available_models_from_caps(model_caps);
+        // No catalog fallback: when the Anthropic API cannot be reached the only
+        // models we can honestly offer are the user's own custom entries.
+        let custom_models_only = || self.get_custom_models_only();
         let auth_token = match self.resolve_auth() {
             Ok(token) => token,
             Err(e) => {
-                tracing::warn!("Claude Code: cannot fetch models, auth failed: {}", e);
-                return fallback_models();
+                tracing::warn!(
+                    "Claude Code: model discovery skipped, not authenticated ({}); \
+                     serving custom models only",
+                    e
+                );
+                return custom_models_only();
             }
         };
 
         let api_models = match fetch_claude_code_models(http_client, &auth_token).await {
             Ok(models) => models,
             Err(e) => {
-                tracing::warn!("Claude Code: cannot fetch models from API: {}", e);
-                return fallback_models();
+                match &e {
+                    ClaudeCodeModelsError::Http(message) => tracing::warn!(
+                        "Claude Code: model discovery network failure ({}); \
+                         serving custom models only",
+                        message
+                    ),
+                    ClaudeCodeModelsError::Status(status, body) => tracing::warn!(
+                        "Claude Code: model discovery HTTP {} ({}); serving custom models only",
+                        status,
+                        body
+                    ),
+                    ClaudeCodeModelsError::Payload(message) => tracing::warn!(
+                        "Claude Code: model discovery returned an unusable payload ({}); \
+                         serving custom models only",
+                        message
+                    ),
+                }
+                return custom_models_only();
             }
         };
 
@@ -795,6 +816,58 @@ fn claude_live_usize(model: &Value, keys: &[&str]) -> Option<usize> {
         .and_then(|value| usize::try_from(value).ok())
 }
 
+/// Canonical order the UI expects reasoning effort levels in.
+const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// `capabilities` object of an Anthropic `/v1/models` record.
+fn claude_capabilities(model: &Value) -> Option<&Value> {
+    model.get("capabilities")
+}
+
+/// Anthropic reports every capability as `{ "supported": bool }`.
+fn claude_capability_supported(capabilities: Option<&Value>, key: &str) -> Option<bool> {
+    capabilities?
+        .get(key)?
+        .get("supported")
+        .and_then(Value::as_bool)
+}
+
+/// `capabilities.effort` -> reasoning effort options.
+///
+/// `effort.supported == false` is authoritative "this model has no effort
+/// control", which is represented as `Some(Vec::new())` so it overrides any
+/// catalog value (see `LiveModelFields` docs: an empty vec is a real value,
+/// `None` means "the endpoint said nothing").
+fn claude_reasoning_effort_options(capabilities: Option<&Value>) -> Option<Vec<String>> {
+    let effort = capabilities?.get("effort")?;
+    if effort.get("supported").and_then(Value::as_bool) != Some(true) {
+        return Some(Vec::new());
+    }
+    Some(
+        CLAUDE_EFFORT_LEVELS
+            .iter()
+            .filter(|level| {
+                effort
+                    .get(**level)
+                    .and_then(|value| value.get("supported"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+            })
+            .map(|level| (*level).to_string())
+            .collect(),
+    )
+}
+
+/// `capabilities.thinking.types.<kind>.supported`.
+fn claude_thinking_type_supported(capabilities: Option<&Value>, kind: &str) -> Option<bool> {
+    capabilities?
+        .get("thinking")?
+        .get("types")?
+        .get(kind)?
+        .get("supported")
+        .and_then(Value::as_bool)
+}
+
 fn claude_available_models_from_live(
     provider: &ClaudeCodeProvider,
     api_models: &[Value],
@@ -808,9 +881,6 @@ fn claude_available_models_from_live(
         let Some(api_id) = claude_live_string(api_model, &["id"]) else {
             continue;
         };
-        if !api_id.starts_with("claude-") {
-            continue;
-        }
         let api_id_without_date = date_regex
             .captures(&api_id)
             .and_then(|caps| caps.get(1))
@@ -823,6 +893,9 @@ fn claude_available_models_from_live(
                 api_id
             );
         }
+        let capabilities = claude_capabilities(api_model);
+        let image_input = claude_capability_supported(capabilities, "image_input");
+        let thinking_enabled = claude_thinking_type_supported(capabilities, "enabled");
         let live = LiveModelFields {
             display_name: claude_live_string(api_model, &["display_name", "displayName"]).or_else(
                 || {
@@ -831,29 +904,57 @@ fn claude_available_models_from_live(
                         .and_then(|caps| (api_id != caps.matched_key).then(|| api_id.clone()))
                 },
             ),
+            // Anthropic reports the context window as `max_input_tokens` and the
+            // output cap as `max_tokens`; the other names are legacy aliases.
             n_ctx: claude_live_usize(
                 api_model,
-                &["context_window", "contextWindow", "max_context_window"],
+                &[
+                    "max_input_tokens",
+                    "context_window",
+                    "contextWindow",
+                    "max_context_window",
+                ],
             ),
             max_output_tokens: claude_live_usize(
                 api_model,
-                &["max_output_tokens", "maxOutputTokens"],
+                &["max_tokens", "max_output_tokens", "maxOutputTokens"],
             ),
             supports_cache_control: Some(SUPPORTS_CACHE_CONTROL),
             pricing: provider.custom_model_pricing(&api_id),
+            supports_strict_tools: claude_capability_supported(capabilities, "structured_outputs"),
+            supports_multimodality: image_input.or_else(|| resolved.is_none().then_some(true)),
+            supports_pdf: claude_capability_supported(capabilities, "pdf_input"),
+            reasoning_effort_options: claude_reasoning_effort_options(capabilities),
+            supports_thinking_budget: thinking_enabled
+                .or_else(|| resolved.is_none().then_some(true)),
+            supports_adaptive_thinking_budget: claude_thinking_type_supported(
+                capabilities,
+                "adaptive",
+            ),
             supports_tools: resolved.is_none().then_some(true),
             supports_parallel_tools: resolved.is_none().then_some(true),
-            supports_multimodality: resolved.is_none().then_some(true),
-            supports_thinking_budget: resolved.is_none().then_some(true),
             ..Default::default()
         };
-        models.push(available_model_from_catalog_and_live(
+        let model = available_model_from_catalog_and_live(
             &api_id,
             resolved.as_ref().map(|caps| &caps.caps),
             &live,
             claude_live_model_is_enabled(&enabled_set, &api_id, api_id_without_date),
-            200_000,
-        ));
+            // This provider never fabricates a context size.
+            0,
+        );
+        if model.n_ctx == 0 {
+            // Neither the live payload nor models.dev supplied a context window.
+            // Unreachable while Anthropic sends `max_input_tokens` on every
+            // record; a loud backstop for the next time that key is renamed.
+            tracing::warn!(
+                "Claude Code: dropping model '{}' — no context window from the API \
+                 (`max_input_tokens` missing) and none in model capabilities",
+                api_id
+            );
+            continue;
+        }
+        models.push(model);
     }
 
     merge_custom_models(&mut models, &provider.custom_models, &enabled_set);
@@ -886,21 +987,45 @@ const ANTHROPIC_MODELS_URL: &str = "https://api.anthropic.com/v1/models";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_MODELS_MAX_PAGES: usize = 20;
 
+/// Failure classes of the Anthropic `/v1/models` call, so callers can log a
+/// distinguishable message instead of one opaque string.
+#[derive(Debug, Clone)]
+pub enum ClaudeCodeModelsError {
+    /// Transport-level failure (DNS, TLS, timeout, no route) or a malformed URL.
+    Http(String),
+    /// The endpoint answered with a non-2xx status; body is truncated.
+    Status(reqwest::StatusCode, String),
+    /// 2xx but the body was not usable JSON, or the `data` array was missing,
+    /// or pagination was inconsistent.
+    Payload(String),
+}
+
+impl std::fmt::Display for ClaudeCodeModelsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http(message) => write!(f, "network error: {message}"),
+            Self::Status(status, body) => write!(f, "HTTP {status}: {body}"),
+            Self::Payload(message) => write!(f, "bad payload: {message}"),
+        }
+    }
+}
+
 /// Fetch live model records from the Anthropic API using OAuth credentials.
 pub async fn fetch_claude_code_models(
     http_client: &reqwest::Client,
     auth_token: &str,
-) -> Result<Vec<Value>, String> {
+) -> Result<Vec<Value>, ClaudeCodeModelsError> {
     if auth_token.is_empty() {
-        return Err("empty auth token".to_string());
+        return Err(ClaudeCodeModelsError::Http("empty auth token".to_string()));
     }
 
     let betas = refact_llm::adapters::claude_code_compat::CC_OAUTH_BETAS.join(",");
     let mut models = Vec::new();
     let mut after_id: Option<String> = None;
     for _ in 0..ANTHROPIC_MODELS_MAX_PAGES {
-        let mut url = reqwest::Url::parse(ANTHROPIC_MODELS_URL)
-            .map_err(|error| format!("Failed to build Claude Code models URL: {error}"))?;
+        let mut url = reqwest::Url::parse(ANTHROPIC_MODELS_URL).map_err(|error| {
+            ClaudeCodeModelsError::Http(format!("Failed to build Claude Code models URL: {error}"))
+        })?;
         url.query_pairs_mut().append_pair("limit", "1000");
         if let Some(cursor) = after_id.as_deref() {
             url.query_pairs_mut().append_pair("after_id", cursor);
@@ -916,43 +1041,44 @@ pub async fn fetch_claude_code_models(
                 "user-agent",
                 refact_llm::adapters::claude_code_compat::USER_AGENT,
             );
-        let response = request
-            .send()
-            .await
-            .map_err(|e| format!("Failed to fetch Claude Code models: {}", e))?;
+        let response = request.send().await.map_err(|e| {
+            ClaudeCodeModelsError::Http(format!("Failed to fetch Claude Code models: {}", e))
+        })?;
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             let truncated: String = body.chars().take(512).collect();
-            return Err(format!(
-                "Claude Code models API returned status {}: {}",
-                status, truncated
-            ));
+            return Err(ClaudeCodeModelsError::Status(status, truncated));
         }
-        let json = response
-            .json::<Value>()
-            .await
-            .map_err(|e| format!("Failed to parse Claude Code models response: {}", e))?;
-        let page = json
-            .get("data")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "Claude Code models response missing data array".to_string())?;
+        let json = response.json::<Value>().await.map_err(|e| {
+            ClaudeCodeModelsError::Payload(format!(
+                "Failed to parse Claude Code models response: {}",
+                e
+            ))
+        })?;
+        let page = json.get("data").and_then(Value::as_array).ok_or_else(|| {
+            ClaudeCodeModelsError::Payload(
+                "Claude Code models response missing data array".to_string(),
+            )
+        })?;
         models.extend(page.iter().cloned());
         let Some(next_cursor) = claude_models_next_cursor(&json)? else {
             return Ok(models);
         };
         if after_id.as_deref() == Some(next_cursor.as_str()) {
-            return Err("Claude Code models response repeated pagination cursor".to_string());
+            return Err(ClaudeCodeModelsError::Payload(
+                "Claude Code models response repeated pagination cursor".to_string(),
+            ));
         }
         after_id = Some(next_cursor);
     }
-    Err(format!(
+    Err(ClaudeCodeModelsError::Payload(format!(
         "Claude Code models API exceeded {} pagination pages",
         ANTHROPIC_MODELS_MAX_PAGES
-    ))
+    )))
 }
 
-fn claude_models_next_cursor(response: &Value) -> Result<Option<String>, String> {
+fn claude_models_next_cursor(response: &Value) -> Result<Option<String>, ClaudeCodeModelsError> {
     if response.get("has_more").and_then(Value::as_bool) != Some(true) {
         return Ok(None);
     }
@@ -963,7 +1089,11 @@ fn claude_models_next_cursor(response: &Value) -> Result<Option<String>, String>
         .filter(|cursor| !cursor.is_empty())
         .map(ToString::to_string)
         .map(Some)
-        .ok_or_else(|| "Claude Code models response has_more without last_id".to_string())
+        .ok_or_else(|| {
+            ClaudeCodeModelsError::Payload(
+                "Claude Code models response has_more without last_id".to_string(),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -1002,23 +1132,69 @@ mod tests {
             enabled_models: vec!["claude-sonnet-4".to_string()],
             ..Default::default()
         };
-        let mut model_caps = HashMap::new();
-        model_caps.insert(
-            "claude-sonnet-4".to_string(),
+        // The catalog entry deliberately omits cache control; the Anthropic
+        // API reports nothing about it either, so the provider-level constant
+        // is what must win.
+        let model_caps = HashMap::from([(
+            "anthropic/claude-sonnet-4".to_string(),
             ModelCapabilities {
                 n_ctx: 200_000,
                 tokenizer: "claude".to_string(),
                 ..Default::default()
             },
-        );
+        )]);
+        let live = vec![json!({
+            "id": "claude-sonnet-4-20250514",
+            "max_input_tokens": 200_000,
+            "max_tokens": 64_000
+        })];
 
-        let models = provider.get_available_models_from_caps(&model_caps);
+        let models = claude_available_models_from_live(&provider, &live, &model_caps);
         let model = models
             .iter()
-            .find(|model| model.id == "claude-sonnet-4")
+            .find(|model| model.id == "claude-sonnet-4-20250514")
             .expect("claude code model should be available");
 
         assert!(model.supports_cache_control);
+    }
+
+    #[test]
+    fn caps_path_never_contributes_a_catalog_id() {
+        let mut provider = ClaudeCodeProvider::default();
+        provider.custom_models.insert(
+            "my-custom".to_string(),
+            CustomModelConfig {
+                n_ctx: Some(4096),
+                ..Default::default()
+            },
+        );
+        let claude = ModelCapabilities {
+            n_ctx: 200_000,
+            tokenizer: "claude".to_string(),
+            ..Default::default()
+        };
+        let model_caps = HashMap::from([
+            ("claude-sonnet-4-5".to_string(), claude.clone()),
+            ("anthropic/claude-sonnet-4-5".to_string(), claude),
+            (
+                "gpt-5".to_string(),
+                ModelCapabilities {
+                    n_ctx: 400_000,
+                    ..Default::default()
+                },
+            ),
+        ]);
+
+        let ids: Vec<_> = provider
+            .get_available_models_from_caps(&model_caps)
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+
+        // The Anthropic API is the only source of ids. The discovery-timeout
+        // path must yield custom models only - never a catalog id, Anthropic
+        // or otherwise.
+        assert_eq!(ids, vec!["my-custom".to_string()]);
     }
 
     #[test]
@@ -1032,6 +1208,53 @@ mod tests {
         model.supports_cache_control = SUPPORTS_CACHE_CONTROL;
 
         assert!(model.supports_cache_control);
+    }
+
+    /// A record shaped exactly like a real `GET /v1/models` entry.
+    ///
+    /// Verified live against `https://api.anthropic.com/v1/models?limit=1000`:
+    /// context size arrives as `max_input_tokens`, the output cap as
+    /// `max_tokens`, and every capability is `{ "supported": bool }`.
+    fn api_model(
+        id: &str,
+        max_input_tokens: u64,
+        max_tokens: u64,
+        effort_supported: bool,
+        thinking_enabled: bool,
+        thinking_adaptive: bool,
+    ) -> Value {
+        json!({
+            "id": id,
+            "type": "model",
+            "display_name": format!("Live {id}"),
+            "created_at": "2025-05-14T00:00:00Z",
+            "max_input_tokens": max_input_tokens,
+            "max_tokens": max_tokens,
+            "capabilities": {
+                "batch": { "supported": true },
+                "citations": { "supported": true },
+                "code_execution": { "supported": true },
+                "context_management": { "supported": true },
+                "effort": {
+                    "supported": effort_supported,
+                    "low": { "supported": effort_supported },
+                    "medium": { "supported": effort_supported },
+                    "high": { "supported": effort_supported },
+                    "xhigh": { "supported": false },
+                    "max": { "supported": effort_supported }
+                },
+                "image_input": { "supported": true },
+                "pdf_input": { "supported": true },
+                "structured_outputs": { "supported": true },
+                "thinking": {
+                    "supported": thinking_enabled || thinking_adaptive,
+                    "types": {
+                        "enabled": { "supported": thinking_enabled },
+                        "adaptive": { "supported": thinking_adaptive }
+                    }
+                }
+            }
+        })
     }
 
     #[test]
@@ -1049,12 +1272,14 @@ mod tests {
                 ..Default::default()
             },
         )]);
-        let live = vec![json!({
-            "id": "claude-sonnet-4-20250514",
-            "display_name": "Live Sonnet",
-            "context_window": 250_000,
-            "max_output_tokens": 32_000
-        })];
+        let live = vec![api_model(
+            "claude-sonnet-4-20250514",
+            250_000,
+            32_000,
+            true,
+            true,
+            false,
+        )];
 
         let models = claude_available_models_from_live(&provider, &live, &model_caps);
         let model = models
@@ -1062,9 +1287,13 @@ mod tests {
             .find(|model| model.id == "claude-sonnet-4-20250514")
             .unwrap();
         assert!(model.supports_tools);
-        assert_eq!(model.display_name.as_deref(), Some("Live Sonnet"));
+        assert_eq!(
+            model.display_name.as_deref(),
+            Some("Live claude-sonnet-4-20250514")
+        );
         assert_eq!(model.n_ctx, 250_000);
         assert_eq!(model.max_output_tokens, Some(32_000));
+        assert!(model.supports_cache_control);
 
         provider.custom_models.insert(
             "claude-sonnet-4-20250514".to_string(),
@@ -1086,6 +1315,170 @@ mod tests {
     }
 
     #[test]
+    fn claude_live_n_ctx_comes_from_max_input_tokens_and_output_from_max_tokens() {
+        let provider = ClaudeCodeProvider::default();
+        // The catalog deliberately disagrees with the API, to prove the live
+        // `max_input_tokens` / `max_tokens` values win.
+        let model_caps = HashMap::from([(
+            "anthropic/claude-opus-4-5".to_string(),
+            ModelCapabilities {
+                n_ctx: 200_000,
+                max_output_tokens: 8_192,
+                tokenizer: "claude".to_string(),
+                ..Default::default()
+            },
+        )]);
+        let live = vec![api_model(
+            "claude-opus-4-5-20251101",
+            1_000_000,
+            128_000,
+            true,
+            true,
+            false,
+        )];
+
+        let models = claude_available_models_from_live(&provider, &live, &model_caps);
+        let model = &models[0];
+        assert_eq!(model.n_ctx, 1_000_000);
+        assert_eq!(model.live_fields.n_ctx, Some(1_000_000));
+        assert_eq!(model.max_output_tokens, Some(128_000));
+        assert_eq!(model.live_fields.max_output_tokens, Some(128_000));
+    }
+
+    #[test]
+    fn claude_live_models_without_any_context_window_are_dropped_not_faked() {
+        let provider = ClaudeCodeProvider::default();
+        // No `max_input_tokens` and no catalog entry: we must not invent 200k.
+        let models = claude_available_models_from_live(
+            &provider,
+            &[json!({ "id": "claude-mystery-9", "max_tokens": 64_000 })],
+            &HashMap::new(),
+        );
+
+        assert!(
+            models.is_empty(),
+            "a model with no context window from any source must be skipped"
+        );
+    }
+
+    #[test]
+    fn claude_live_capabilities_map_onto_live_model_fields() {
+        let provider = ClaudeCodeProvider::default();
+        // opus-4-6-shaped: enabled=true, adaptive=true, effort supported.
+        let live = vec![api_model(
+            "claude-opus-4-6",
+            200_000,
+            64_000,
+            true,
+            true,
+            true,
+        )];
+
+        let models = claude_available_models_from_live(&provider, &live, &HashMap::new());
+        let model = &models[0];
+
+        assert!(model.supports_multimodality);
+        assert!(model.supports_pdf);
+        assert!(model.supports_strict_tools);
+        assert!(model.supports_thinking_budget);
+        assert!(model.supports_adaptive_thinking_budget);
+        assert_eq!(
+            model.reasoning_effort_options,
+            Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "max".to_string(),
+            ]),
+            "effort options keep the canonical low/medium/high/xhigh/max order \
+             and drop unsupported levels"
+        );
+        assert!(model.supports_cache_control);
+    }
+
+    #[test]
+    fn claude_live_models_without_effort_support_get_no_effort_options() {
+        let provider = ClaudeCodeProvider::default();
+        // haiku-4-5 / sonnet-4-5 shape: effort.supported == false.
+        let live = vec![api_model(
+            "claude-haiku-4-5-20251001",
+            200_000,
+            64_000,
+            false,
+            true,
+            false,
+        )];
+        // Catalog claims effort options; the API's authoritative "no effort"
+        // must win.
+        let model_caps = HashMap::from([(
+            "anthropic/claude-haiku-4-5".to_string(),
+            ModelCapabilities {
+                n_ctx: 200_000,
+                reasoning_effort_options: Some(vec!["high".to_string()]),
+                tokenizer: "claude".to_string(),
+                ..Default::default()
+            },
+        )]);
+
+        let models = claude_available_models_from_live(&provider, &live, &model_caps);
+        let model = &models[0];
+
+        assert_eq!(model.reasoning_effort_options, Some(Vec::new()));
+        assert_eq!(model.live_fields.reasoning_effort_options, Some(Vec::new()));
+        assert!(model.supports_thinking_budget);
+        assert!(!model.supports_adaptive_thinking_budget);
+    }
+
+    #[test]
+    fn claude_live_adaptive_only_models_report_no_enabled_thinking() {
+        let provider = ClaudeCodeProvider::default();
+        // opus-5 / fable-5 shape: enabled=false, adaptive=true.
+        let live = vec![api_model(
+            "claude-fable-5-1",
+            1_000_000,
+            128_000,
+            true,
+            false,
+            true,
+        )];
+
+        let models = claude_available_models_from_live(&provider, &live, &HashMap::new());
+        let model = &models[0];
+
+        assert!(!model.supports_thinking_budget);
+        assert!(model.supports_adaptive_thinking_budget);
+        assert_eq!(model.live_fields.supports_thinking_budget, Some(false));
+        assert_eq!(
+            model.live_fields.supports_adaptive_thinking_budget,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn claude_live_models_are_not_filtered_by_id_prefix() {
+        let provider = ClaudeCodeProvider {
+            enabled_models: vec!["some-future-model".to_string()],
+            ..Default::default()
+        };
+        let live = vec![api_model(
+            "some-future-model",
+            400_000,
+            64_000,
+            true,
+            true,
+            false,
+        )];
+
+        let models = claude_available_models_from_live(&provider, &live, &HashMap::new());
+
+        assert_eq!(models.len(), 1, "non claude- ids must not be dropped");
+        assert_eq!(models[0].id, "some-future-model");
+        assert!(models[0].enabled);
+        assert_eq!(models[0].n_ctx, 400_000);
+        assert!(ClaudeCodeProvider::default().model_filter_regex().is_none());
+    }
+
+    #[test]
     fn uncatalogued_claude_live_models_keep_api_fallback_capabilities() {
         let provider = ClaudeCodeProvider {
             enabled_models: vec!["anthropic/claude-future-5".to_string()],
@@ -1093,7 +1486,14 @@ mod tests {
         };
         let models = claude_available_models_from_live(
             &provider,
-            &[json!({ "id": "claude-future-5-20270101" })],
+            &[api_model(
+                "claude-future-5-20270101",
+                1_000_000,
+                128_000,
+                true,
+                true,
+                true,
+            )],
             &HashMap::new(),
         );
         let model = models
@@ -1107,6 +1507,43 @@ mod tests {
         assert!(model.supports_multimodality);
         assert!(model.supports_cache_control);
         assert!(model.supports_thinking_budget);
+        assert_eq!(model.n_ctx, 1_000_000);
+    }
+
+    #[test]
+    fn claude_live_fallback_serves_custom_models_only_not_the_catalog() {
+        let provider = ClaudeCodeProvider {
+            enabled_models: vec!["my-proxy-claude".to_string()],
+            custom_models: HashMap::from([(
+                "my-proxy-claude".to_string(),
+                CustomModelConfig {
+                    n_ctx: Some(64_000),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let model_caps = HashMap::from([(
+            "claude-sonnet-4-5".to_string(),
+            ModelCapabilities {
+                n_ctx: 200_000,
+                tokenizer: "claude".to_string(),
+                ..Default::default()
+            },
+        )]);
+
+        // `fetch_available_models` returns this when auth/network/payload fails.
+        let models = provider.get_custom_models_only();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "my-proxy-claude");
+        assert!(
+            !provider
+                .get_available_models_from_caps(&model_caps)
+                .iter()
+                .any(|model| model.id == "claude-sonnet-4-5"),
+            "the catalog must never contribute an id, on any path"
+        );
     }
 
     #[test]

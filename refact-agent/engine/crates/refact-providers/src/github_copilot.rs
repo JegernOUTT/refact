@@ -17,6 +17,14 @@ use crate::traits::{
 
 const REQUEST_TIMEOUT_SECS: u64 = 10;
 
+// The exact `supported_endpoints` literals GitHub returns. There is no `/v1` prefix on the
+// OpenAI-shaped routes: `/v1/chat/completions` and `/v1/responses` appear in no live record and
+// return 404 when requested.
+const CHAT_COMPLETIONS_ENDPOINT: &str = "/chat/completions";
+const ANTHROPIC_MESSAGES_ENDPOINT: &str = "/v1/messages";
+const RESPONSES_ENDPOINT: &str = "/responses";
+const RESPONSES_WEBSOCKET_ENDPOINT: &str = "ws:/responses";
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GitHubCopilotProvider {
     #[serde(default)]
@@ -83,12 +91,6 @@ impl GitHubCopilotProvider {
         })
     }
 
-    fn catalog_model_id(capability_key: &str) -> Option<&str> {
-        ["github-copilot/", "github_copilot/"]
-            .iter()
-            .find_map(|prefix| capability_key.strip_prefix(prefix))
-    }
-
     fn resolve_catalog_caps<'a>(
         model_caps: &'a HashMap<String, ModelCapabilities>,
         model_id: &str,
@@ -98,27 +100,11 @@ impl GitHubCopilotProvider {
             .find_map(|provider| model_caps.get(&format!("{provider}/{model_id}")))
     }
 
-    fn fetch_models_from_catalog(
-        &self,
-        model_caps: &HashMap<String, ModelCapabilities>,
-    ) -> Vec<AvailableModel> {
-        let enabled_set: HashSet<&str> = self.enabled_models.iter().map(|s| s.as_str()).collect();
-        let mut models_map = HashMap::new();
-        for (capability_key, caps) in model_caps {
-            let Some(model_id) = Self::catalog_model_id(capability_key) else {
-                continue;
-            };
-            let enabled =
-                enabled_set.contains(model_id) || enabled_set.contains(capability_key.as_str());
-            let pricing = self
-                .custom_model_pricing(model_id)
-                .or_else(|| self.custom_model_pricing(capability_key));
-            models_map.insert(
-                model_id.to_string(),
-                AvailableModel::from_caps(model_id, caps, enabled, pricing),
-            );
-        }
-        self.finish_models(models_map, &enabled_set)
+    /// Every failure path ends here: the models.dev snapshot carries github-copilot ids that the
+    /// live API does not serve, so offering it as a fallback invents models the account cannot
+    /// call. Only user-configured custom models survive a failed discovery.
+    fn fallback_models(&self) -> Vec<AvailableModel> {
+        self.get_custom_models_only()
     }
 
     async fn fetch_models_from_api(
@@ -147,36 +133,51 @@ impl GitHubCopilotProvider {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
                 tracing::warn!(
-                    "GitHub Copilot: failed to reach /models (network error): {}, using models.dev catalog fallback",
+                    "GitHub Copilot: transient failure reaching /models (network error): {}. Keeping custom models only, retry later",
                     error
                 );
-                return self.fetch_models_from_catalog(model_caps);
+                return self.fallback_models();
             }
             Err(_) => {
                 tracing::warn!(
-                    "GitHub Copilot: /models request timed out, using models.dev catalog fallback"
+                    "GitHub Copilot: transient failure, /models request timed out after {}s. Keeping custom models only, retry later",
+                    REQUEST_TIMEOUT_SECS
                 );
-                return self.fetch_models_from_catalog(model_caps);
+                return self.fallback_models();
             }
         };
 
-        if !response.status().is_success() {
-            let status = response.status();
-            tracing::warn!(
-                "GitHub Copilot: /models returned {}. Check login/setup; using models.dev catalog fallback",
-                status
-            );
-            return self.fetch_models_from_catalog(model_caps);
+        let status = response.status();
+        if !status.is_success() {
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                tracing::warn!(
+                    "GitHub Copilot: /models returned {}. The GitHub token is rejected — log in again. Keeping custom models only",
+                    status
+                );
+            } else if status.is_server_error() {
+                tracing::warn!(
+                    "GitHub Copilot: transient failure, /models returned {}. Keeping custom models only, retry later",
+                    status
+                );
+            } else {
+                tracing::warn!(
+                    "GitHub Copilot: /models returned {}. Keeping custom models only",
+                    status
+                );
+            }
+            return self.fallback_models();
         }
 
         let body: Value = match response.json().await {
             Ok(body) => body,
             Err(error) => {
                 tracing::warn!(
-                    "GitHub Copilot: failed to parse /models response: {}, using models.dev catalog fallback",
+                    "GitHub Copilot: /models returned a body that is not JSON: {}. Keeping custom models only",
                     error
                 );
-                return self.fetch_models_from_catalog(model_caps);
+                return self.fallback_models();
             }
         };
 
@@ -184,10 +185,10 @@ impl GitHubCopilotProvider {
             Ok(models) => models,
             Err(error) => {
                 tracing::warn!(
-                    "GitHub Copilot: invalid /models response: {}, using models.dev catalog fallback",
+                    "GitHub Copilot: unusable /models response: {}. Keeping custom models only",
                     error
                 );
-                self.fetch_models_from_catalog(model_caps)
+                self.fallback_models()
             }
         }
     }
@@ -216,13 +217,25 @@ impl GitHubCopilotProvider {
                 || enabled_set.contains(format!("github-copilot/{id}").as_str())
                 || enabled_set.contains(format!("github_copilot/{id}").as_str());
             let live = Self::live_fields(model, api_base);
+            // 0, never a made-up number: this provider does not fabricate a context size.
             let available = available_model_from_catalog_and_live(
                 id,
                 Self::resolve_catalog_caps(model_caps, id),
                 &live,
                 enabled,
-                8192,
+                0,
             );
+            // Backstop, expected to be unreachable: every non-embeddings live record carries
+            // `capabilities.limits.max_context_window_tokens`. A model with no context window
+            // from either the live payload or models.dev is unusable, so drop it loudly rather
+            // than publish a zero or invented budget.
+            if available.n_ctx == 0 {
+                tracing::warn!(
+                    "GitHub Copilot: dropping model {} — neither /models nor models.dev reported a context window",
+                    id
+                );
+                continue;
+            }
             models_map.insert(id.to_string(), available);
         }
 
@@ -257,11 +270,20 @@ impl GitHubCopilotProvider {
             .map(ToString::to_string)
     }
 
+    fn live_model_kind(model: &Value) -> Option<&str> {
+        model
+            .get("capabilities")?
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::trim)
+    }
+
+    /// `model_picker_enabled` is deliberately NOT consulted. GitHub now returns it as `false` for
+    /// every record while still shipping a `model_picker_category` for most of them, so treating
+    /// it as an availability flag emptied the whole provider. The authoritative signals are the
+    /// account policy state and the model kind.
     fn live_model_is_available(model: &Value) -> bool {
-        if model
-            .get("model_picker_enabled")
-            .and_then(Value::as_bool)
-            .is_some_and(|enabled| !enabled)
+        if Self::live_model_kind(model).is_some_and(|kind| kind.eq_ignore_ascii_case("embeddings"))
         {
             return false;
         }
@@ -298,6 +320,14 @@ impl GitHubCopilotProvider {
         obj.get(key).and_then(Value::as_bool)
     }
 
+    fn live_string_field(obj: &Value, key: &str) -> Option<String> {
+        obj.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    }
+
     fn live_reasoning_effort(model: &Value) -> Option<Vec<String>> {
         Some(
             Self::live_supports(model)?
@@ -327,50 +357,63 @@ impl GitHubCopilotProvider {
             })
     }
 
+    /// The literals below are the only values GitHub actually ships in `supported_endpoints`.
+    /// `/v1/chat/completions` and `/v1/responses` never appear and 404 when called.
     fn live_endpoint_fields(model: &Value, api_base: &str) -> (Option<WireFormat>, Option<String>) {
         let Some(endpoints) = model.get("supported_endpoints").and_then(Value::as_array) else {
             return (None, None);
         };
-        let endpoint_values: Vec<&str> = endpoints.iter().filter_map(Value::as_str).collect();
+        let endpoint_values: Vec<&str> = endpoints
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .collect();
         let api_base = api_base.trim_end_matches('/');
-        let messages = endpoint_values.contains(&"/v1/messages");
-        let chat = endpoint_values.contains(&"/v1/chat/completions");
-        let responses =
-            endpoint_values.contains(&"/v1/responses") || endpoint_values.contains(&"/responses");
-        if [messages, chat, responses]
-            .into_iter()
-            .filter(|present| *present)
-            .count()
-            != 1
-        {
+        let messages = endpoint_values.contains(&ANTHROPIC_MESSAGES_ENDPOINT);
+        let chat = endpoint_values.contains(&CHAT_COMPLETIONS_ENDPOINT);
+        let responses = endpoint_values.contains(&RESPONSES_ENDPOINT);
+        // `ws:/responses` is the websocket transport of the very same Responses API. refact only
+        // speaks HTTP, so it can never become an endpoint_override on its own; it is recognised
+        // here purely so a websocket-only record is skipped loudly instead of silently.
+        let websocket_responses = endpoint_values.contains(&RESPONSES_WEBSOCKET_ENDPOINT);
+        if websocket_responses && !messages && !chat && !responses {
+            tracing::debug!(
+                "GitHub Copilot: model {} only advertises the websocket Responses endpoint, keeping the provider default wire format",
+                Self::live_model_id(model).unwrap_or("<unknown>")
+            );
             return (None, None);
+        }
+        // Records routinely advertise several families at once (Claude models ship both
+        // `/v1/messages` and `/chat/completions`). Prefer the most expressive native protocol
+        // instead of bailing out, and only give up when nothing recognisable is advertised.
+        if messages {
+            return (
+                Some(WireFormat::AnthropicMessages),
+                Some(format!("{api_base}{ANTHROPIC_MESSAGES_ENDPOINT}")),
+            );
+        }
+        if responses {
+            return (
+                Some(WireFormat::OpenaiResponses),
+                Some(format!("{api_base}{RESPONSES_ENDPOINT}")),
+            );
         }
         if chat {
             return (
                 Some(WireFormat::OpenaiChatCompletions),
-                Some(format!("{api_base}/v1/chat/completions")),
+                Some(format!("{api_base}{CHAT_COMPLETIONS_ENDPOINT}")),
             );
         }
-        if responses {
-            let path = if endpoint_values.contains(&"/v1/responses") {
-                "/v1/responses"
-            } else {
-                "/responses"
-            };
-            return (
-                Some(WireFormat::OpenaiResponses),
-                Some(format!("{api_base}{path}")),
-            );
-        }
-        (
-            Some(WireFormat::AnthropicMessages),
-            Some(format!("{api_base}/v1/messages")),
-        )
+        (None, None)
     }
 
     fn live_fields(model: &Value, api_base: &str) -> LiveModelFields {
         let supports = Self::live_supports(model);
         let (wire_format_override, endpoint_override) = Self::live_endpoint_fields(model, api_base);
+        let max_thinking_tokens =
+            supports.and_then(|supports| Self::live_usize_field(supports, "max_thinking_budget"));
+        let min_thinking_budget =
+            supports.and_then(|supports| Self::live_usize_field(supports, "min_thinking_budget"));
         LiveModelFields {
             display_name: Self::live_model_display_name(model),
             n_ctx: Self::live_limits(model)
@@ -382,17 +425,23 @@ impl GitHubCopilotProvider {
             max_output_tokens: Self::live_limits(model)
                 .and_then(|limits| Self::live_usize_field(limits, "max_output_tokens")),
             supports_tools: supports.and_then(|value| Self::live_bool_field(value, "tool_calls")),
+            supports_parallel_tools: supports
+                .and_then(|value| Self::live_bool_field(value, "parallel_tool_calls")),
             supports_strict_tools: supports
                 .and_then(|value| Self::live_bool_field(value, "structured_outputs")),
             supports_multimodality: Self::live_supports_vision(model),
             reasoning_effort_options: Self::live_reasoning_effort(model),
-            supports_thinking_budget: supports.and_then(|supports| {
-                (supports.get("max_thinking_budget").is_some()
-                    || supports.get("min_thinking_budget").is_some())
-                .then_some(true)
-            }),
+            supports_thinking_budget: (max_thinking_tokens.is_some()
+                || min_thinking_budget.is_some())
+            .then_some(true),
             supports_adaptive_thinking_budget: supports
                 .and_then(|value| Self::live_bool_field(value, "adaptive_thinking")),
+            max_thinking_tokens,
+            min_thinking_budget,
+            tokenizer: model
+                .get("capabilities")
+                .and_then(|capabilities| Self::live_string_field(capabilities, "tokenizer")),
+            upstream_provider: Self::live_string_field(model, "vendor"),
             wire_format_override,
             endpoint_override,
             ..Default::default()
@@ -512,6 +561,17 @@ available:
         &self.custom_models
     }
 
+    /// The default trait implementation enumerates the models.dev catalog. For GitHub Copilot the
+    /// baked-in snapshot lists ids the live API does not serve, so callers that reach for the
+    /// caps fallback — `caps.rs` and `providers/http.rs` both do it on their outer discovery
+    /// timeout — must get custom models only, exactly like every in-provider failure path.
+    fn get_available_models_from_caps(
+        &self,
+        _model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
+        self.fallback_models()
+    }
+
     async fn fetch_available_models(
         &self,
         http_client: &reqwest::Client,
@@ -519,7 +579,10 @@ available:
     ) -> Vec<AvailableModel> {
         let token = self.resolve_token();
         if token.is_empty() {
-            return self.fetch_models_from_catalog(model_caps);
+            tracing::warn!(
+                "GitHub Copilot: no usable GitHub token — log in again. Keeping custom models only"
+            );
+            return self.fallback_models();
         }
         match self.api_base() {
             Ok(api_base) => {
@@ -528,10 +591,10 @@ available:
             }
             Err(error) => {
                 tracing::warn!(
-                    "GitHub Copilot: invalid API base: {}, using models.dev catalog fallback",
+                    "GitHub Copilot: invalid API base: {}. Keeping custom models only",
                     error
                 );
-                self.fetch_models_from_catalog(model_caps)
+                self.fallback_models()
             }
         }
     }
@@ -655,52 +718,89 @@ mod tests {
         assert!(runtime.extra_headers.get("authorization").is_none());
     }
 
+    /// A record shaped exactly like the live `GET https://api.githubcopilot.com/models` payload.
+    fn live_record(id: &str, endpoints: Value, capabilities: Value) -> Value {
+        json!({
+            "id": id,
+            "name": id,
+            "object": "model",
+            "vendor": "OpenAI",
+            "version": format!("{id}-2025-04-14"),
+            "preview": false,
+            // Every live record ships this as false; it must not affect availability.
+            "model_picker_enabled": false,
+            "model_picker_category": "versatile",
+            "policy": {"state": "enabled", "terms": "Enable access"},
+            "supported_endpoints": endpoints,
+            "capabilities": capabilities
+        })
+    }
+
+    fn chat_capabilities() -> Value {
+        json!({
+            "object": "model_capabilities",
+            "type": "chat",
+            "family": "gpt-4.1",
+            "tokenizer": "o200k_base",
+            "limits": {
+                "max_context_window_tokens": 128000,
+                "max_prompt_tokens": 120000,
+                "max_output_tokens": 16384
+            },
+            "supports": {"tool_calls": true, "streaming": true}
+        })
+    }
+
     #[test]
-    fn github_copilot_live_models_filter_and_map_capabilities() {
+    fn github_copilot_live_models_keep_records_with_model_picker_enabled_false() {
         let mut provider = provider_with_token();
         provider.enabled_models = vec!["gpt-4.1".to_string()];
+        // Exactly the production situation: every record says model_picker_enabled=false.
         let live = json!({
+            "object": "list",
+            "data": [live_record(
+                "gpt-4.1",
+                json!([CHAT_COMPLETIONS_ENDPOINT]),
+                chat_capabilities(),
+            )]
+        });
+
+        let models = provider
+            .available_models_from_live_response(&live, &HashMap::new(), DEFAULT_COPILOT_API_BASE)
+            .unwrap();
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+
+        assert_eq!(
+            ids,
+            vec!["gpt-4.1"],
+            "model_picker_enabled=false must not remove a policy-enabled chat model"
+        );
+        assert!(models[0].enabled);
+    }
+
+    #[test]
+    fn github_copilot_live_models_drop_policy_disabled_and_embeddings_records() {
+        let provider = provider_with_token();
+        let mut embeddings_capabilities = chat_capabilities();
+        embeddings_capabilities["type"] = json!("embeddings");
+        embeddings_capabilities["supports"] = json!({"dimensions": true});
+        let mut policy_disabled = live_record(
+            "policy-disabled",
+            json!([CHAT_COMPLETIONS_ENDPOINT]),
+            chat_capabilities(),
+        );
+        policy_disabled["policy"] = json!({"state": "disabled", "terms": "Enable access"});
+
+        let live = json!({
+            "object": "list",
             "data": [
-                {
-                    "model_picker_enabled": true,
-                    "id": "gpt-4.1",
-                    "name": "GPT 4.1",
-                    "version": "gpt-4.1-2025-04-14",
-                    "supported_endpoints": ["/v1/responses"],
-                    "policy": {"state": "enabled"},
-                    "capabilities": {
-                        "limits": {
-                            "max_context_window_tokens": 256000,
-                            "max_output_tokens": 8192,
-                            "max_prompt_tokens": 240000,
-                            "vision": {
-                                "supported_media_types": ["image/png"]
-                            }
-                        },
-                        "supports": {
-                            "adaptive_thinking": true,
-                            "max_thinking_budget": 16384,
-                            "reasoning_effort": ["low", "high"],
-                            "streaming": true,
-                            "structured_outputs": true,
-                            "tool_calls": true,
-                            "vision": true
-                        }
-                    }
-                },
-                {
-                    "model_picker_enabled": false,
-                    "id": "picker-off",
-                    "name": "Picker Off",
-                    "capabilities": {"limits": {}, "supports": {"tool_calls": true, "streaming": true}}
-                },
-                {
-                    "model_picker_enabled": true,
-                    "id": "policy-disabled",
-                    "name": "Policy Disabled",
-                    "policy": {"state": "disabled"},
-                    "capabilities": {"limits": {}, "supports": {"tool_calls": true, "streaming": true}}
-                }
+                live_record("gpt-4.1", json!([CHAT_COMPLETIONS_ENDPOINT]), chat_capabilities()),
+                policy_disabled,
+                live_record(
+                    "text-embedding-3-small",
+                    json!([CHAT_COMPLETIONS_ENDPOINT]),
+                    embeddings_capabilities,
+                )
             ]
         });
 
@@ -710,43 +810,132 @@ mod tests {
         let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
 
         assert_eq!(ids, vec!["gpt-4.1"]);
+    }
+
+    #[test]
+    fn github_copilot_live_models_map_capabilities_from_the_real_payload_shape() {
+        let mut provider = provider_with_token();
+        provider.enabled_models = vec!["gpt-5".to_string()];
+        let mut record = live_record("gpt-5", json!([RESPONSES_ENDPOINT]), chat_capabilities());
+        record["capabilities"]["limits"]["vision"] = json!({
+            "max_prompt_image_size": 3145728,
+            "max_prompt_images": 1,
+            "supported_media_types": ["image/jpeg", "image/png", "image/webp"]
+        });
+        record["capabilities"]["supports"] = json!({
+            "tool_calls": true,
+            "parallel_tool_calls": true,
+            "streaming": true,
+            "structured_outputs": true,
+            "vision": true,
+            "reasoning_effort": ["low", "medium", "high"],
+            "max_thinking_budget": 16384,
+            "min_thinking_budget": 1024,
+            "adaptive_thinking": true
+        });
+        let live = json!({"object": "list", "data": [record]});
+
+        let models = provider
+            .available_models_from_live_response(&live, &HashMap::new(), DEFAULT_COPILOT_API_BASE)
+            .unwrap();
         let model = &models[0];
+
         assert!(model.enabled);
-        assert_eq!(model.display_name.as_deref(), Some("GPT 4.1"));
-        assert_eq!(model.n_ctx, 256000);
-        assert_eq!(model.max_output_tokens, Some(8192));
+        assert_eq!(model.display_name.as_deref(), Some("gpt-5"));
+        assert_eq!(model.n_ctx, 128000);
+        assert_eq!(model.max_output_tokens, Some(16384));
         assert!(model.supports_tools);
+        assert!(model.supports_parallel_tools);
         assert!(model.supports_strict_tools);
         assert!(model.supports_multimodality);
         assert!(model.supports_thinking_budget);
         assert!(model.supports_adaptive_thinking_budget);
         assert_eq!(
             model.reasoning_effort_options.as_ref().unwrap(),
-            &vec!["low".to_string(), "high".to_string()]
+            &vec!["low".to_string(), "medium".to_string(), "high".to_string()]
         );
+        assert_eq!(model.tokenizer.as_deref(), Some("o200k_base"));
+        assert_eq!(model.upstream_provider.as_deref(), Some("OpenAI"));
         assert_eq!(
             model.wire_format_override,
             Some(WireFormat::OpenaiResponses)
         );
         assert_eq!(
             model.endpoint_override.as_deref(),
-            Some("https://api.githubcopilot.com/v1/responses")
+            Some("https://api.githubcopilot.com/responses")
         );
     }
 
     #[test]
-    fn github_copilot_live_messages_endpoint_maps_anthropic_wire_format() {
-        let mut provider = provider_with_token();
-        provider.enabled_models = vec!["claude-sonnet-4".to_string()];
+    fn github_copilot_live_thinking_budget_numbers_survive_into_the_model() {
+        let provider = provider_with_token();
+        let mut record = live_record(
+            "claude-sonnet-4.5",
+            json!([ANTHROPIC_MESSAGES_ENDPOINT]),
+            chat_capabilities(),
+        );
+        record["capabilities"]["supports"] = json!({
+            "tool_calls": true,
+            "max_thinking_budget": 65536,
+            "min_thinking_budget": 1024
+        });
+        let live = json!({"object": "list", "data": [record]});
+
+        let models = provider
+            .available_models_from_live_response(&live, &HashMap::new(), DEFAULT_COPILOT_API_BASE)
+            .unwrap();
+        let model = &models[0];
+
+        assert!(model.supports_thinking_budget);
+        assert_eq!(model.max_thinking_tokens, Some(65536));
+        assert_eq!(model.min_thinking_budget, Some(1024));
+        assert_eq!(model.live_fields.max_thinking_tokens, Some(65536));
+        assert_eq!(model.live_fields.min_thinking_budget, Some(1024));
+    }
+
+    #[test]
+    fn github_copilot_live_parallel_tool_calls_false_is_authoritative() {
+        let provider = provider_with_token();
+        let mut record = live_record(
+            "no-parallel",
+            json!([CHAT_COMPLETIONS_ENDPOINT]),
+            chat_capabilities(),
+        );
+        record["capabilities"]["supports"] =
+            json!({"tool_calls": true, "parallel_tool_calls": false});
+        let mut caps = caps_map();
+        caps.insert(
+            "github-copilot/no-parallel".to_string(),
+            copilot_caps(64_000),
+        );
+        let live = json!({"object": "list", "data": [record]});
+
+        let models = provider
+            .available_models_from_live_response(&live, &caps, DEFAULT_COPILOT_API_BASE)
+            .unwrap();
+        let model = models
+            .iter()
+            .find(|model| model.id == "no-parallel")
+            .unwrap();
+
+        assert!(model.supports_tools);
+        assert!(
+            !model.supports_parallel_tools,
+            "a live false must beat the catalog's true"
+        );
+    }
+
+    #[test]
+    fn github_copilot_multi_endpoint_records_resolve_to_anthropic_messages() {
+        let provider = provider_with_token();
+        // The real Claude records advertise both families at once.
         let live = json!({
-            "data": [{
-                "model_picker_enabled": true,
-                "id": "claude-sonnet-4",
-                "name": "Claude Sonnet 4",
-                "supported_endpoints": ["/v1/messages"],
-                "policy": {"state": "enabled"},
-                "capabilities": {"limits": {}, "supports": {"tool_calls": true}}
-            }]
+            "object": "list",
+            "data": [live_record(
+                "claude-sonnet-4",
+                json!([ANTHROPIC_MESSAGES_ENDPOINT, CHAT_COMPLETIONS_ENDPOINT]),
+                chat_capabilities(),
+            )]
         });
 
         let models = provider
@@ -757,7 +946,6 @@ mod tests {
             .find(|model| model.id == "claude-sonnet-4")
             .unwrap();
 
-        assert!(model.enabled);
         assert_eq!(
             model.wire_format_override,
             Some(WireFormat::AnthropicMessages)
@@ -769,17 +957,15 @@ mod tests {
     }
 
     #[test]
-    fn github_copilot_live_chat_endpoint_still_maps_openai_chat() {
+    fn github_copilot_chat_completions_endpoint_has_no_v1_prefix() {
         let provider = provider_with_token();
         let live = json!({
-            "data": [{
-                "model_picker_enabled": true,
-                "id": "gpt-4.1",
-                "name": "GPT 4.1",
-                "supported_endpoints": ["/v1/chat/completions"],
-                "policy": {"state": "enabled"},
-                "capabilities": {"limits": {}, "supports": {"tool_calls": true}}
-            }]
+            "object": "list",
+            "data": [live_record(
+                "gpt-4.1",
+                json!([CHAT_COMPLETIONS_ENDPOINT]),
+                chat_capabilities(),
+            )]
         });
 
         let models = provider
@@ -793,25 +979,78 @@ mod tests {
         );
         assert_eq!(
             model.endpoint_override.as_deref(),
-            Some("https://api.githubcopilot.com/v1/chat/completions")
+            Some("https://api.githubcopilot.com/chat/completions")
         );
     }
 
     #[test]
-    fn github_copilot_absent_live_boole_preserve_catalog_and_qualified_enablement() {
+    fn github_copilot_websocket_only_responses_endpoint_is_not_used_as_an_override() {
+        let provider = provider_with_token();
+        let live = json!({
+            "object": "list",
+            "data": [live_record(
+                "ws-only",
+                json!([RESPONSES_WEBSOCKET_ENDPOINT]),
+                chat_capabilities(),
+            )]
+        });
+
+        let models = provider
+            .available_models_from_live_response(&live, &HashMap::new(), DEFAULT_COPILOT_API_BASE)
+            .unwrap();
+        let model = &models[0];
+
+        assert_eq!(model.id, "ws-only");
+        assert_eq!(
+            model.wire_format_override, None,
+            "refact cannot speak the websocket Responses transport"
+        );
+        assert_eq!(model.endpoint_override, None);
+    }
+
+    #[test]
+    fn github_copilot_websocket_endpoint_alongside_http_still_resolves_http() {
+        let provider = provider_with_token();
+        let live = json!({
+            "object": "list",
+            "data": [live_record(
+                "gpt-5",
+                json!([RESPONSES_ENDPOINT, RESPONSES_WEBSOCKET_ENDPOINT]),
+                chat_capabilities(),
+            )]
+        });
+
+        let models = provider
+            .available_models_from_live_response(&live, &HashMap::new(), DEFAULT_COPILOT_API_BASE)
+            .unwrap();
+        let model = &models[0];
+
+        assert_eq!(
+            model.wire_format_override,
+            Some(WireFormat::OpenaiResponses)
+        );
+        assert_eq!(
+            model.endpoint_override.as_deref(),
+            Some("https://api.githubcopilot.com/responses")
+        );
+    }
+
+    #[test]
+    fn github_copilot_absent_live_values_preserve_catalog_and_qualified_enablement() {
         let mut provider = provider_with_token();
         provider.enabled_models = vec!["github-copilot/gpt-4.1".to_string()];
         let mut caps = caps_map();
         caps.get_mut("github-copilot/gpt-4.1")
             .unwrap()
             .supports_vision = true;
-        let live = json!({
-            "data": [{
-                "model_picker_enabled": true,
-                "id": "gpt-4.1",
-                "capabilities": {"limits": {}, "supports": {}}
-            }]
-        });
+        let mut record = live_record(
+            "gpt-4.1",
+            json!([CHAT_COMPLETIONS_ENDPOINT]),
+            chat_capabilities(),
+        );
+        record["capabilities"]["limits"] = json!({});
+        record["capabilities"]["supports"] = json!({});
+        let live = json!({"object": "list", "data": [record]});
 
         let models = provider
             .available_models_from_live_response(&live, &caps, DEFAULT_COPILOT_API_BASE)
@@ -821,31 +1060,45 @@ mod tests {
         assert!(model.enabled);
         assert!(model.supports_tools);
         assert!(model.supports_multimodality);
+        assert_eq!(model.n_ctx, 128_000, "catalog n_ctx fills the live gap");
     }
 
     #[test]
-    fn github_copilot_incompatible_endpoint_families_do_not_silently_choose_anthropic() {
+    fn github_copilot_model_without_any_context_window_is_dropped() {
         let provider = provider_with_token();
-        let live = json!({
-            "data": [{
-                "model_picker_enabled": true,
-                "id": "claude-sonnet-4",
-                "supported_endpoints": ["/v1/messages", "/v1/chat/completions"],
-                "capabilities": {"limits": {}, "supports": {}}
-            }]
-        });
+        let mut record = live_record(
+            "no-limits",
+            json!([CHAT_COMPLETIONS_ENDPOINT]),
+            chat_capabilities(),
+        );
+        record["capabilities"]["limits"] = json!({});
+        let live = json!({"object": "list", "data": [record]});
 
         let models = provider
-            .available_models_from_live_response(&live, &caps_map(), DEFAULT_COPILOT_API_BASE)
+            .available_models_from_live_response(&live, &HashMap::new(), DEFAULT_COPILOT_API_BASE)
             .unwrap();
-        let model = &models[0];
 
-        assert_eq!(model.wire_format_override, None);
-        assert_eq!(model.endpoint_override, None);
+        assert!(
+            models.is_empty(),
+            "a model with no context window from either source must never be published"
+        );
     }
 
     #[test]
-    fn github_copilot_models_dev_fallback_includes_catalog_and_custom_models() {
+    fn github_copilot_missing_data_array_is_an_error_not_an_empty_list() {
+        let provider = provider_with_token();
+
+        let result = provider.available_models_from_live_response(
+            &json!({"object": "list"}),
+            &HashMap::new(),
+            DEFAULT_COPILOT_API_BASE,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn github_copilot_failure_fallback_is_custom_models_only_never_the_catalog() {
         let mut provider = GitHubCopilotProvider::default();
         provider.enabled_models = vec!["gpt-4.1".to_string(), "custom-copilot".to_string()];
         provider.custom_models.insert(
@@ -857,24 +1110,42 @@ mod tests {
             },
         );
 
-        let models = provider.fetch_models_from_catalog(&caps_map());
+        // This is what every failure path (no token, bad api base, network, timeout, non-2xx,
+        // bad JSON, missing data array) returns.
+        let models = provider.fallback_models();
         let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
 
-        assert_eq!(ids, vec!["claude-sonnet-4", "custom-copilot", "gpt-4.1"]);
+        assert_eq!(ids, vec!["custom-copilot"]);
+        assert!(models[0].is_custom);
+        assert!(models[0].enabled);
         assert!(
-            models
-                .iter()
-                .find(|model| model.id == "gpt-4.1")
-                .unwrap()
-                .enabled
+            !ids.contains(&"gpt-4.1"),
+            "models.dev must never contribute an id to this provider"
         );
+    }
+
+    #[test]
+    fn github_copilot_catalog_only_enriches_ids_the_live_api_returned() {
+        let provider = provider_with_token();
+        let live = json!({
+            "object": "list",
+            // caps_map() also knows github_copilot/claude-sonnet-4, which must not appear.
+            "data": [live_record(
+                "gpt-4.1",
+                json!([CHAT_COMPLETIONS_ENDPOINT]),
+                chat_capabilities(),
+            )]
+        });
+
+        let models = provider
+            .available_models_from_live_response(&live, &caps_map(), DEFAULT_COPILOT_API_BASE)
+            .unwrap();
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+
+        assert_eq!(ids, vec!["gpt-4.1"]);
         assert!(
-            models
-                .iter()
-                .find(|model| model.id == "custom-copilot")
-                .unwrap()
-                .is_custom
+            models[0].pricing.is_some(),
+            "models.dev may still enrich a live id with pricing"
         );
-        assert!(!ids.contains(&"openai/gpt-4.1"));
     }
 }

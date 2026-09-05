@@ -690,11 +690,15 @@ pub struct LiveModelFields {
     pub supports_parallel_tools: Option<bool>,
     pub supports_strict_tools: Option<bool>,
     pub supports_multimodality: Option<bool>,
+    pub supports_video: Option<bool>,
+    pub supports_audio: Option<bool>,
+    pub supports_pdf: Option<bool>,
     pub supports_clicks: Option<bool>,
     pub reasoning_effort_options: Option<Vec<String>>,
     pub supports_thinking_budget: Option<bool>,
     pub supports_adaptive_thinking_budget: Option<bool>,
     pub max_thinking_tokens: Option<usize>,
+    pub min_thinking_budget: Option<usize>,
     pub supports_cache_control: Option<bool>,
     pub tokenizer: Option<String>,
     pub pricing: Option<ModelPricing>,
@@ -720,11 +724,15 @@ impl LiveModelFields {
             && self.supports_parallel_tools.is_none()
             && self.supports_strict_tools.is_none()
             && self.supports_multimodality.is_none()
+            && self.supports_video.is_none()
+            && self.supports_audio.is_none()
+            && self.supports_pdf.is_none()
             && self.supports_clicks.is_none()
             && self.reasoning_effort_options.is_none()
             && self.supports_thinking_budget.is_none()
             && self.supports_adaptive_thinking_budget.is_none()
             && self.max_thinking_tokens.is_none()
+            && self.min_thinking_budget.is_none()
             && self.supports_cache_control.is_none()
             && self.tokenizer.is_none()
             && self.pricing.is_none()
@@ -754,6 +762,12 @@ pub struct AvailableModel {
     pub supports_strict_tools: bool,
     pub supports_multimodality: bool,
     #[serde(default)]
+    pub supports_video: bool,
+    #[serde(default)]
+    pub supports_audio: bool,
+    #[serde(default)]
+    pub supports_pdf: bool,
+    #[serde(default)]
     pub supports_clicks: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_max_side_px: Option<u32>,
@@ -769,6 +783,8 @@ pub struct AvailableModel {
     pub supports_adaptive_thinking_budget: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_thinking_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_thinking_budget: Option<usize>,
     #[serde(default = "default_true")]
     pub supports_cache_control: bool,
     pub tokenizer: Option<String>,
@@ -828,6 +844,9 @@ pub fn available_model_from_catalog_and_live(
             supports_parallel_tools: false,
             supports_strict_tools: false,
             supports_multimodality: false,
+            supports_video: false,
+            supports_audio: false,
+            supports_pdf: false,
             supports_clicks: false,
             image_max_side_px: None,
             image_preferred_side_px: None,
@@ -836,6 +855,7 @@ pub fn available_model_from_catalog_and_live(
             supports_thinking_budget: false,
             supports_adaptive_thinking_budget: false,
             max_thinking_tokens: None,
+            min_thinking_budget: None,
             supports_cache_control: false,
             tokenizer: None,
             enabled,
@@ -881,11 +901,15 @@ pub fn available_model_from_catalog_and_live(
     apply_live_value!(supports_parallel_tools);
     apply_live_value!(supports_strict_tools);
     apply_live_value!(supports_multimodality);
+    apply_live_value!(supports_video);
+    apply_live_value!(supports_audio);
+    apply_live_value!(supports_pdf);
     apply_live_value!(supports_clicks);
     apply_live_option!(reasoning_effort_options);
     apply_live_value!(supports_thinking_budget);
     apply_live_value!(supports_adaptive_thinking_budget);
     apply_live_option!(max_thinking_tokens);
+    apply_live_option!(min_thinking_budget);
     apply_live_value!(supports_cache_control);
     apply_live_option!(tokenizer);
     apply_live_option!(pricing);
@@ -922,6 +946,9 @@ impl AvailableModel {
                 || caps.supports_video
                 || caps.supports_audio
                 || caps.supports_pdf,
+            supports_video: caps.supports_video,
+            supports_audio: caps.supports_audio,
+            supports_pdf: caps.supports_pdf,
             supports_clicks: caps.supports_clicks,
             image_max_side_px: None,
             image_preferred_side_px: None,
@@ -930,6 +957,7 @@ impl AvailableModel {
             supports_thinking_budget: caps.supports_thinking_budget,
             supports_adaptive_thinking_budget: caps.supports_adaptive_thinking_budget,
             max_thinking_tokens: caps.max_thinking_tokens,
+            min_thinking_budget: None,
             supports_cache_control: caps.supports_cache_control,
             tokenizer: if caps.tokenizer.is_empty() {
                 None
@@ -982,6 +1010,9 @@ impl AvailableModel {
             supports_parallel_tools: config.supports_parallel_tools.unwrap_or(false),
             supports_strict_tools: config.supports_strict_tools.unwrap_or(false),
             supports_multimodality: config.supports_multimodality.unwrap_or(false),
+            supports_video: false,
+            supports_audio: false,
+            supports_pdf: false,
             supports_clicks: false,
             image_max_side_px: config.image_max_side_px,
             image_preferred_side_px: config.image_preferred_side_px,
@@ -992,6 +1023,7 @@ impl AvailableModel {
                 .supports_adaptive_thinking_budget
                 .unwrap_or(false),
             max_thinking_tokens: None,
+            min_thinking_budget: None,
             supports_cache_control: config.supports_cache_control.unwrap_or(true),
             tokenizer: config.tokenizer.clone(),
             enabled,

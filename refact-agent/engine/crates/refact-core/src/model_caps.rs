@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tracing::warn;
 
 use crate::models_dev::{models_dev_catalog_to_model_caps, ModelsDevCatalog};
@@ -38,21 +37,6 @@ pub struct ResolvedCaps {
     pub matched_key: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum CachingType {
-    None,
-    Auto,
-    Explicit,
-    Openai,
-}
-
-impl Default for CachingType {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
 fn default_true() -> bool {
     true
 }
@@ -81,8 +65,6 @@ pub struct ModelCapabilities {
     pub supports_clicks: bool,
     #[serde(default = "default_true")]
     pub supports_temperature: bool,
-    #[serde(default = "default_true")]
-    pub supports_streaming: bool,
     #[serde(default)]
     pub supports_max_completion_tokens: bool,
     #[serde(default)]
@@ -96,8 +78,6 @@ pub struct ModelCapabilities {
     #[serde(default)]
     pub max_thinking_tokens: Option<usize>,
     #[serde(default)]
-    pub caching: CachingType,
-    #[serde(default)]
     pub tokenizer: String,
     #[serde(default)]
     pub default_temperature: Option<f32>,
@@ -109,10 +89,6 @@ pub struct ModelCapabilities {
     pub supports_cache_control: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<ModelPricing>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_cost: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
 }
 
 const MAX_REASONABLE_N_CTX: usize = 10_000_000;
@@ -207,9 +183,6 @@ pub fn validate_model_caps(caps: &mut HashMap<String, ModelCapabilities>) {
                 name, cap.max_output_tokens, MAX_REASONABLE_OUTPUT_TOKENS
             );
             cap.max_output_tokens = MAX_REASONABLE_OUTPUT_TOKENS;
-        }
-        if matches!(cap.caching, CachingType::Explicit) {
-            cap.supports_cache_control = true;
         }
         cap.tokenizer =
             normalize_tokenizer_or_default(provider_from_model_key(name), name, &cap.tokenizer);
@@ -636,21 +609,5 @@ mod tests {
             predefined_cloud_tokenizer_for_model("ollama", "llama3"),
             None
         );
-    }
-
-    #[test]
-    fn validate_model_caps_derives_cache_support_from_explicit_caching() {
-        let mut caps = HashMap::from([(
-            "explicit-cache".to_string(),
-            ModelCapabilities {
-                caching: CachingType::Explicit,
-                supports_cache_control: false,
-                ..Default::default()
-            },
-        )]);
-
-        validate_model_caps(&mut caps);
-
-        assert!(caps.get("explicit-cache").unwrap().supports_cache_control);
     }
 }

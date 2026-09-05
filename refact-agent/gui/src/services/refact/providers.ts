@@ -14,7 +14,17 @@ export type WireFormat =
   | "openai_chat_completions"
   | "openai_responses"
   | "anthropic_messages"
-  | "refact";
+  | "ollama_native"
+  | "google_cloud_code";
+
+export type ImageTokenMode = "tile" | "detail" | "provider";
+
+export type ModelPricingTier = {
+  prompt?: number;
+  generated?: number;
+  cache_read?: number;
+  cache_creation?: number;
+};
 
 export type ProviderModel = {
   id: string;
@@ -101,6 +111,9 @@ export type AvailableModel = {
   supports_parallel_tools: boolean;
   supports_strict_tools: boolean;
   supports_multimodality: boolean;
+  supports_video?: boolean;
+  supports_audio?: boolean;
+  supports_pdf?: boolean;
   reasoning_effort_options?: string[] | null;
   supports_thinking_budget?: boolean;
   supports_adaptive_thinking_budget?: boolean;
@@ -108,7 +121,12 @@ export type AvailableModel = {
   supports_clicks?: boolean;
   supports_temperature?: boolean;
   supports_web_search?: boolean;
+  supports_max_completion_tokens?: boolean;
   max_thinking_tokens?: number | null;
+  min_thinking_budget?: number | null;
+  image_max_side_px?: number | null;
+  image_preferred_side_px?: number | null;
+  image_token_mode?: ImageTokenMode;
   default_temperature?: number | null;
   default_max_tokens?: number | null;
   supported_parameters?: string[] | null;
@@ -125,6 +143,7 @@ export type AvailableModel = {
     generated: number;
     cache_read?: number;
     cache_creation?: number;
+    context_over_200k?: ModelPricingTier | null;
   } | null;
   available_providers?: string[];
   selected_provider?: string | null;
@@ -140,6 +159,7 @@ export type AvailableModel = {
       generated: number;
       cache_read?: number;
       cache_creation?: number;
+      context_over_200k?: ModelPricingTier | null;
     } | null;
     latency_last_30m?: number | null;
     throughput_last_30m?: number | null;
@@ -437,7 +457,12 @@ export type ModelProviderRequest = {
 export type CustomModelConfig = {
   n_ctx: number;
   supports_tools?: boolean;
+  supports_parallel_tools?: boolean;
+  supports_strict_tools?: boolean;
   supports_multimodality?: boolean;
+  image_max_side_px?: number | null;
+  image_preferred_side_px?: number | null;
+  image_token_mode?: ImageTokenMode;
   reasoning_effort_options?: string[] | null;
   supports_thinking_budget?: boolean;
   supports_adaptive_thinking_budget?: boolean;

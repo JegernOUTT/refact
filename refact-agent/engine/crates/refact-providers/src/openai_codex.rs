@@ -26,14 +26,18 @@ const CHATGPT_CODEX_MODELS_URL: &str =
 const CHATGPT_CODEX_RESPONSES_WEBSOCKET_URL: &str = "wss://chatgpt.com/backend-api/codex/responses";
 const CHATGPT_CODEX_RESET_REDEEM_URL: &str =
     "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
-const GPT_5_6_CODEX_CONTEXT_WINDOW: usize = 372_000;
-const GPT_5_5_CODEX_CONTEXT_WINDOW: usize = 272_000;
 pub const CODEX_WEBSOCKET_ENDPOINT_HEADER: &str =
     "x-refact-internal-openai-codex-websocket-endpoint";
-#[allow(dead_code)]
-const OPENAI_MODELS_URL: &str = "https://api.openai.com/v1/models";
 const CODEX_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 const CODEX_USAGE_TIMEOUT: Duration = Duration::from_secs(8);
+/// Never fabricate a context window: when neither the live API nor the
+/// models.dev catalog reports one, the model is skipped instead.
+const CODEX_UNKNOWN_N_CTX: usize = 0;
+
+/// The ChatGPT backend serves agentic coding models and reports no
+/// tool-calling flag at all. Stated once, explicitly, rather than inferred
+/// per model.
+const CODEX_SUPPORTS_TOOLS: bool = true;
 
 lazy_static::lazy_static! {
     static ref OPENAI_CODEX_REFRESH_GUARD: AMutex<()> = AMutex::new(());
@@ -59,124 +63,10 @@ fn default_http_response_header_retry_max_attempts() -> usize {
     LLM_HTTP_HEADER_RETRY_MAX_ATTEMPTS_DEFAULT
 }
 
-fn normalized_model_id(id: &str) -> String {
-    id.trim().to_ascii_lowercase().replace('_', "-")
-}
-
-fn is_codex_named_model(id: &str) -> bool {
-    let normalized = normalized_model_id(id);
-    let parts: Vec<&str> = normalized
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .collect();
-    if parts.len() < 3 || parts.first() != Some(&"gpt") {
-        return false;
-    }
-    let Some(codex_index) = parts.iter().position(|part| *part == "codex") else {
-        return false;
-    };
-    if codex_index < 2 {
-        return false;
-    }
-    let suffixes = &parts[codex_index + 1..];
-    suffixes.is_empty()
-        || (suffixes.len() == 1
-            && matches!(suffixes[0], "latest" | "preview" | "mini" | "spark" | "max"))
-}
-
-fn is_gpt5_subscription_model(id: &str) -> bool {
-    let normalized = normalized_model_id(id);
-    if normalized == "gpt-5" {
-        return true;
-    }
-    let Some(rest) = normalized.strip_prefix("gpt-5.") else {
-        return false;
-    };
-    let mut parts = rest.split('-');
-    let Some(version) = parts.next() else {
-        return false;
-    };
-    if version.is_empty() || !version.chars().all(|c| c.is_ascii_digit()) {
-        return false;
-    }
-    let suffixes: Vec<&str> = parts.collect();
-    if version == "6" {
-        matches!(suffixes.as_slice(), ["sol"] | ["terra"] | ["luna"])
-    } else {
-        matches!(suffixes.as_slice(), [] | ["mini"] | ["sol"] | ["terra"])
-    }
-}
-
-fn is_openai_codex_catalog_model(id: &str) -> bool {
-    is_codex_named_model(id) || is_gpt5_subscription_model(id)
-}
-
-fn is_chatgpt_codex_live_model(id: &str) -> bool {
-    is_openai_codex_catalog_model(id)
-}
-
-#[allow(dead_code)]
-fn is_openai_api_codex_live_model(id: &str) -> bool {
-    is_codex_named_model(id)
-}
-
-fn codex_model_context_window_override(id: &str) -> Option<usize> {
-    match normalized_model_id(id).as_str() {
-        "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => Some(GPT_5_6_CODEX_CONTEXT_WINDOW),
-        "gpt-5.5" => Some(GPT_5_5_CODEX_CONTEXT_WINDOW),
-        _ => None,
-    }
-}
-
-fn is_invalid_generic_gpt56_model(id: &str) -> bool {
-    normalized_model_id(id) == "gpt-5.6"
-}
-
-fn remove_invalid_enabled_models(models: &mut Vec<String>) {
-    models.retain(|model| !is_invalid_generic_gpt56_model(model));
-}
-
-fn apply_codex_model_overrides(model: &mut AvailableModel) {
-    if let Some(n_ctx) = codex_model_context_window_override(&model.id) {
-        model.n_ctx = n_ctx;
-    }
-}
-
-fn codex_builtin_fallback_caps(model_id: &str) -> Option<ModelCapabilities> {
-    let n_ctx = codex_model_context_window_override(model_id)?;
-    let reasoning_effort_options = match normalized_model_id(model_id).as_str() {
-        "gpt-5.6-sol" | "gpt-5.6-terra" => {
-            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
-        }
-        "gpt-5.6-luna" => vec!["low", "medium", "high", "xhigh", "max"],
-        _ => return None,
-    };
-    Some(ModelCapabilities {
-        n_ctx,
-        max_output_tokens: 128_000,
-        supports_tools: true,
-        supports_parallel_tools: true,
-        supports_vision: true,
-        reasoning_effort_options: Some(
-            reasoning_effort_options
-                .into_iter()
-                .map(ToString::to_string)
-                .collect(),
-        ),
-        ..Default::default()
-    })
-}
-
-fn codex_builtin_fallback_model_ids() -> &'static [&'static str] {
-    &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
-}
-
-fn openai_codex_catalog_model_id(capability_key: &str) -> Option<&str> {
-    ["openai/", "openai-codex/", "openai_codex/"]
-        .iter()
-        .find_map(|prefix| capability_key.strip_prefix(prefix))
-}
-
+/// Resolves models.dev capabilities for an id the live API already returned.
+///
+/// This is enrichment only: it never contributes a model id, it only fills in
+/// fields (pricing, tokenizer, ...) that the ChatGPT backend does not report.
 fn resolve_openai_codex_catalog_caps<'a>(
     model_caps: &'a HashMap<String, ModelCapabilities>,
     model_id: &str,
@@ -922,183 +812,66 @@ impl OpenAICodexProvider {
         let response = match req.send().await {
             Ok(resp) => resp,
             Err(e) => {
-                tracing::warn!("OpenAI Codex: failed to reach chatgpt backend /codex/models (network error): {}, using models.dev catalog fallback", e);
-                return self.fetch_models_from_catalog(model_caps);
+                tracing::warn!(
+                    "OpenAI Codex: /codex/models unreachable (transient network error): {}. Returning custom models only",
+                    e
+                );
+                return self.get_custom_models_only();
             }
         };
 
         let status = response.status();
 
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            tracing::warn!("OpenAI Codex: /codex/models returned {}. Refresh will be attempted on runtime 401/403; using models.dev catalog fallback for model list", status);
-            return self.fetch_models_from_catalog(model_caps);
-        }
-
-        if !status.is_success() {
             tracing::warn!(
-                "OpenAI Codex: /codex/models returned {} (transient), using models.dev catalog fallback",
+                "OpenAI Codex: /codex/models returned {} — the ChatGPT session needs re-login in OpenAI Codex provider settings. Returning custom models only",
                 status
             );
-            return self.fetch_models_from_catalog(model_caps);
+            return self.get_custom_models_only();
         }
 
-        let json: Value = match response.json().await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("OpenAI Codex: failed to parse /codex/models response: {}, using models.dev catalog fallback", e);
-                return self.fetch_models_from_catalog(model_caps);
-            }
-        };
-
-        let Some(models_array) = Self::models_array_from_live_response(&json) else {
-            tracing::warn!("OpenAI Codex: /codex/models response missing a model array, using models.dev catalog fallback");
-            return self.fetch_models_from_catalog(model_caps);
-        };
-
-        let models = self.available_models_from_live_chatgpt_models(models_array, model_caps);
-
-        tracing::info!(
-            "OpenAI Codex: {} models available (chatgpt backend, enriched from models.dev catalog)",
-            models.len()
-        );
-
-        models
-    }
-
-    #[allow(dead_code)]
-    async fn fetch_models_from_api(
-        &self,
-        http_client: &reqwest::Client,
-        model_caps: &HashMap<String, ModelCapabilities>,
-        api_key: &str,
-    ) -> Vec<AvailableModel> {
-        let response = match http_client
-            .get(OPENAI_MODELS_URL)
-            .timeout(CODEX_DISCOVERY_TIMEOUT)
-            .header(reqwest::header::AUTHORIZATION, format!("Bearer {api_key}"))
-            .send()
-            .await
-        {
-            Ok(resp) => resp,
-            Err(e) => {
-                tracing::warn!("OpenAI Codex: failed to reach /v1/models (network error): {}, using models.dev catalog fallback", e);
-                return self.fetch_models_from_catalog(model_caps);
-            }
-        };
-
-        let status = response.status();
-
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            tracing::warn!("OpenAI Codex: /v1/models returned {}. Check OpenAI Codex provider setup or API key exchange; returning custom models only", status);
+        if status.is_server_error() {
+            tracing::warn!(
+                "OpenAI Codex: /codex/models returned {} (transient server error). Returning custom models only",
+                status
+            );
             return self.get_custom_models_only();
         }
 
         if !status.is_success() {
             tracing::warn!(
-                "OpenAI Codex: /v1/models returned {} (transient), using models.dev catalog fallback",
+                "OpenAI Codex: /codex/models returned unexpected status {}. Returning custom models only",
                 status
             );
-            return self.fetch_models_from_catalog(model_caps);
+            return self.get_custom_models_only();
         }
 
         let json: Value = match response.json().await {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(
-                    "OpenAI Codex: failed to parse /v1/models response: {}, using models.dev catalog fallback",
+                    "OpenAI Codex: /codex/models returned a body that is not valid JSON: {}. Returning custom models only",
                     e
                 );
-                return self.fetch_models_from_catalog(model_caps);
+                return self.get_custom_models_only();
             }
         };
 
-        let Some(data_array) = Self::models_array_from_live_response(&json) else {
-            tracing::warn!("OpenAI Codex: /v1/models response missing a model array, using models.dev catalog fallback");
-            return self.fetch_models_from_catalog(model_caps);
+        let Some(models_array) = Self::models_array_from_live_response(&json) else {
+            tracing::warn!(
+                "OpenAI Codex: /codex/models response has no `models` array. Returning custom models only"
+            );
+            return self.get_custom_models_only();
         };
 
-        let enabled_set: HashSet<&str> = self.enabled_models.iter().map(|s| s.as_str()).collect();
-        let mut models_map = self.catalog_model_map(model_caps, &enabled_set);
-
-        for model in data_array {
-            let Some(id) = Self::live_model_id(model) else {
-                continue;
-            };
-            if !is_openai_api_codex_live_model(id) || !Self::live_model_is_supported(model) {
-                continue;
-            }
-            let enabled = enabled_set.contains(id);
-            let live = self.live_model_fields(model, id);
-            let available = available_model_from_catalog_and_live(
-                id,
-                resolve_openai_codex_catalog_caps(model_caps, id),
-                &live,
-                enabled,
-                8192,
-            );
-            models_map.insert(id.to_string(), available);
-        }
+        let models = self.available_models_from_live_chatgpt_models(models_array, model_caps);
 
         tracing::info!(
-            "OpenAI Codex: {} models available (/v1/models + models.dev catalog)",
-            models_map.len()
+            "OpenAI Codex: {} models available (chatgpt backend; models.dev used only to enrich fields the API omits)",
+            models.len()
         );
 
-        self.finish_models(models_map, &enabled_set)
-    }
-
-    fn fetch_models_from_catalog(
-        &self,
-        model_caps: &HashMap<String, ModelCapabilities>,
-    ) -> Vec<AvailableModel> {
-        let enabled_set: HashSet<&str> = self.enabled_models.iter().map(|s| s.as_str()).collect();
-        let models_map = self.catalog_model_map(model_caps, &enabled_set);
-        tracing::info!(
-            "OpenAI Codex: {} models available (models.dev catalog fallback)",
-            models_map.len()
-        );
-        self.finish_models(models_map, &enabled_set)
-    }
-
-    fn catalog_model_map(
-        &self,
-        model_caps: &HashMap<String, ModelCapabilities>,
-        enabled_set: &HashSet<&str>,
-    ) -> HashMap<String, AvailableModel> {
-        let mut models_map: HashMap<String, AvailableModel> = HashMap::new();
-        for (capability_key, caps) in model_caps {
-            let Some(model_id) = openai_codex_catalog_model_id(capability_key) else {
-                continue;
-            };
-            if !is_openai_codex_catalog_model(model_id) {
-                continue;
-            }
-            let enabled =
-                enabled_set.contains(model_id) || enabled_set.contains(capability_key.as_str());
-            let pricing = self
-                .custom_model_pricing(model_id)
-                .or_else(|| self.custom_model_pricing(capability_key));
-            models_map.insert(model_id.to_string(), {
-                let mut model = AvailableModel::from_caps(model_id, caps, enabled, pricing);
-                apply_codex_model_overrides(&mut model);
-                model
-            });
-        }
-        for model_id in codex_builtin_fallback_model_ids() {
-            if models_map.contains_key(*model_id) {
-                continue;
-            }
-            let Some(caps) = codex_builtin_fallback_caps(model_id) else {
-                continue;
-            };
-            let enabled = enabled_set.contains(*model_id);
-            let pricing = self.custom_model_pricing(model_id);
-            models_map.insert(
-                (*model_id).to_string(),
-                AvailableModel::from_caps(model_id, &caps, enabled, pricing),
-            );
-        }
-        models_map
+        models
     }
 
     fn available_models_from_live_chatgpt_models(
@@ -1113,28 +886,26 @@ impl OpenAICodexProvider {
             let Some(slug) = Self::live_model_id(model) else {
                 continue;
             };
-            if !is_chatgpt_codex_live_model(slug) || !Self::live_model_is_supported(model) {
+            if !Self::live_model_is_supported(model) {
                 continue;
             }
             let enabled = enabled_set.contains(slug)
                 || enabled_set.contains(format!("openai_codex/{slug}").as_str())
                 || enabled_set.contains(format!("openai-codex/{slug}").as_str());
-            let builtin_caps = codex_builtin_fallback_caps(slug);
-            let catalog_caps =
-                resolve_openai_codex_catalog_caps(model_caps, slug).or(builtin_caps.as_ref());
-            let live = LiveModelFields {
-                display_name: Self::live_model_display_name(model),
-                n_ctx: Self::live_model_context_window(model),
-                max_output_tokens: Self::live_model_max_output_tokens(model),
-                supports_tools: Self::live_model_supports_tools(model),
-                supports_parallel_tools: Self::live_model_supports_parallel_tools(model),
-                supports_multimodality: Self::live_model_supports_multimodality(model),
-                reasoning_effort_options: Self::live_model_reasoning_levels(model),
-                pricing: self.custom_model_pricing(slug),
-                ..Default::default()
-            };
-            let available =
-                available_model_from_catalog_and_live(slug, catalog_caps, &live, enabled, 8192);
+            let live = self.live_model_fields(model, slug);
+            let available = available_model_from_catalog_and_live(
+                slug,
+                resolve_openai_codex_catalog_caps(model_caps, slug),
+                &live,
+                enabled,
+                CODEX_UNKNOWN_N_CTX,
+            );
+            if available.n_ctx == 0 {
+                tracing::warn!(
+                    "OpenAI Codex: skipping model '{slug}': no context window reported by the API or the catalog"
+                );
+                continue;
+            }
             models_map.insert(slug.to_string(), available);
         }
 
@@ -1239,7 +1010,29 @@ impl OpenAICodexProvider {
         })
     }
 
+    /// `visibility` is the API's own "do not show this to the client" signal.
+    /// The live payload uses `"list"` for models a client should offer and
+    /// `"hide"` for internal/reserved slugs.
+    fn live_model_visibility_is_hidden(model: &Value) -> bool {
+        model
+            .get("visibility")
+            .or_else(|| model.get("Visibility"))
+            .and_then(Value::as_str)
+            .map(|visibility| {
+                let normalized = visibility
+                    .trim()
+                    .to_ascii_lowercase()
+                    .replace('-', "_")
+                    .replace(' ', "_");
+                matches!(normalized.as_str(), "hide" | "hidden")
+            })
+            .unwrap_or(false)
+    }
+
     fn live_model_is_supported(model: &Value) -> bool {
+        if Self::live_model_visibility_is_hidden(model) {
+            return false;
+        }
         if Self::live_bool_field(
             model,
             &[
@@ -1288,6 +1081,9 @@ impl OpenAICodexProvider {
         !Self::live_status_is_disabled(model)
     }
 
+    /// The live payload has no dedicated `supports_tools` flag, so the
+    /// provider-level constant answers for it unless the API starts
+    /// reporting one.
     fn live_model_supports_tools(model: &Value) -> Option<bool> {
         Self::live_bool_field(
             model,
@@ -1298,6 +1094,7 @@ impl OpenAICodexProvider {
                 "supportsTools",
             ],
         )
+        .or(Some(CODEX_SUPPORTS_TOOLS))
     }
 
     fn live_model_supports_parallel_tools(model: &Value) -> Option<bool> {
@@ -1333,6 +1130,20 @@ impl OpenAICodexProvider {
                         .any(|modality| modality.as_str() == Some("image"))
                 })
         })
+    }
+
+    /// The live payload reports web search availability as `supports_search_tool`
+    /// (with `web_search_tool_type` naming the concrete tool).
+    fn live_model_supports_web_search(model: &Value) -> Option<bool> {
+        Self::live_bool_field(
+            model,
+            &[
+                "supports_search_tool",
+                "supportsSearchTool",
+                "supports_web_search",
+                "supportsWebSearch",
+            ],
+        )
     }
 
     fn live_model_reasoning_levels(model: &Value) -> Option<Vec<String>> {
@@ -1466,6 +1277,10 @@ impl OpenAICodexProvider {
         None
     }
 
+    /// Everything the ChatGPT `/codex/models` payload tells us about one model.
+    ///
+    /// Any field the API does not report stays `None` so that models.dev
+    /// enrichment (pricing, tokenizer, ...) can still fill it in.
     fn live_model_fields(&self, model: &Value, id: &str) -> LiveModelFields {
         LiveModelFields {
             display_name: Self::live_model_display_name(model),
@@ -1474,6 +1289,7 @@ impl OpenAICodexProvider {
             supports_tools: Self::live_model_supports_tools(model),
             supports_parallel_tools: Self::live_model_supports_parallel_tools(model),
             supports_multimodality: Self::live_model_supports_multimodality(model),
+            supports_web_search: Self::live_model_supports_web_search(model),
             reasoning_effort_options: Self::live_model_reasoning_levels(model),
             pricing: self.custom_model_pricing(id),
             ..Default::default()
@@ -1507,10 +1323,10 @@ impl ProviderTrait for OpenAICodexProvider {
         WireFormat::OpenaiResponses
     }
 
+    /// The ChatGPT backend is the single source of truth for which models exist.
+    /// No name-based filter is applied on top of it.
     fn model_filter_regex(&self) -> Option<&'static str> {
-        Some(
-            r"(?i)^(?:gpt[-_]5\.6[-_](?:sol|terra|luna)|gpt[-_]5(?:\.(?:[0-5]|[7-9]|[1-9][0-9]+))?(?:[-_](?:mini|sol|terra))?|gpt[-_][a-z0-9.]+(?:[-_][a-z0-9.]+)*[-_]codex(?:[-_](?:latest|preview|mini|spark|max))?)$",
-        )
+        None
     }
 
     fn provider_schema(&self) -> &'static str {
@@ -1583,7 +1399,6 @@ available:
             self.http_response_header_retry_max_attempts = max_attempts.max(1);
         }
         parse_enabled_models(&yaml, &mut self.enabled_models);
-        remove_invalid_enabled_models(&mut self.enabled_models);
         parse_custom_models(&yaml, &mut self.custom_models);
         Ok(())
     }
@@ -1690,6 +1505,17 @@ available:
         &self.custom_models
     }
 
+    /// The models.dev catalog must never contribute an id for this provider:
+    /// the ChatGPT backend is the only authority on which models the
+    /// subscription actually serves. Callers that reach for the catalog
+    /// directly (the discovery-timeout path) get custom models only.
+    fn get_available_models_from_caps(
+        &self,
+        _model_caps: &HashMap<String, ModelCapabilities>,
+    ) -> Vec<AvailableModel> {
+        self.get_custom_models_only()
+    }
+
     async fn fetch_available_models(
         &self,
         http_client: &reqwest::Client,
@@ -1717,10 +1543,6 @@ available:
     }
 
     fn set_model_enabled(&mut self, model_id: &str, enabled: bool) {
-        if is_invalid_generic_gpt56_model(model_id) {
-            remove_invalid_enabled_models(&mut self.enabled_models);
-            return;
-        }
         set_model_enabled_impl(&mut self.enabled_models, model_id, enabled);
     }
 
@@ -1825,6 +1647,8 @@ mod tests {
         }
     }
 
+    /// models.dev-shaped capabilities, used ONLY to prove enrichment. The
+    /// catalog must never contribute a model id on its own.
     fn codex_caps(n_ctx: usize) -> ModelCapabilities {
         ModelCapabilities {
             n_ctx,
@@ -1832,6 +1656,7 @@ mod tests {
             supports_tools: true,
             supports_parallel_tools: true,
             supports_vision: true,
+            tokenizer: "openai".to_string(),
             reasoning_effort_options: Some(vec![
                 "low".to_string(),
                 "medium".to_string(),
@@ -1850,15 +1675,64 @@ mod tests {
 
     fn caps_map() -> HashMap<String, ModelCapabilities> {
         HashMap::from([
-            ("openai/gpt-5.2".to_string(), codex_caps(402_000)),
-            ("openai/gpt-5.3-codex".to_string(), codex_caps(253_000)),
-            ("openai-codex/gpt-5.4".to_string(), codex_caps(404_000)),
-            ("openai_codex/gpt-5.5".to_string(), codex_caps(405_000)),
+            ("openai/gpt-5.5".to_string(), codex_caps(405_000)),
             (
                 "openai_codex/gpt-5.6-sol".to_string(),
                 codex_caps(1_050_000),
             ),
+            // An id the live API never returns: it must stay invisible.
+            ("openai/gpt-4.1".to_string(), codex_caps(128_000)),
         ])
+    }
+
+    /// One record shaped exactly like the live
+    /// GET https://chatgpt.com/backend-api/codex/models?client_version=999.999.999
+    /// payload (verified against the real response).
+    fn live_record(
+        slug: &str,
+        visibility: &str,
+        supported_in_api: bool,
+        max_context_window: u64,
+    ) -> serde_json::Value {
+        json!({
+            "slug": slug,
+            "display_name": slug.to_uppercase(),
+            "description": format!("{slug} description"),
+            "max_context_window": max_context_window,
+            "context_window": max_context_window - 100_000,
+            "supported_in_api": supported_in_api,
+            "visibility": visibility,
+            "supported_reasoning_levels": [
+                { "effort": "low" },
+                { "effort": "medium" },
+                { "effort": "high" },
+                { "effort": "xhigh" }
+            ],
+            "default_reasoning_level": { "effort": "medium" },
+            "input_modalities": ["text", "image"],
+            "supports_parallel_tool_calls": true,
+            "supports_search_tool": true,
+            "web_search_tool_type": "web_search_preview",
+            "priority": 1,
+            "prefer_websockets": false,
+            "upgrade": null,
+            "auto_compact_token_limit": 320_000
+        })
+    }
+
+    /// The nine slugs the live endpoint returned, with their real gating fields.
+    fn live_payload() -> Vec<serde_json::Value> {
+        vec![
+            live_record("gpt-6-astra", "list", true, 400_000),
+            live_record("gpt-reserve", "hide", true, 400_000),
+            live_record("gpt-5.6-sol", "list", true, 372_000),
+            live_record("gpt-5.6-terra", "list", true, 372_000),
+            live_record("gpt-5.6-luna", "list", true, 372_000),
+            live_record("gpt-5.5", "list", true, 272_000),
+            live_record("gpt-5.4-mini", "list", true, 272_000),
+            live_record("gpt-5.3-codex-spark", "list", false, 272_000),
+            live_record("codex-auto-review", "hide", true, 272_000),
+        ]
     }
 
     #[test]
@@ -1883,7 +1757,7 @@ mod tests {
     #[test]
     fn logged_in_provider_uses_chatgpt_backend() {
         let mut p = provider_with_oauth("tok", "acct-123");
-        p.enabled_models = vec!["gpt-5-codex".to_string()];
+        p.enabled_models = vec!["gpt-5.6-sol".to_string()];
 
         let runtime = p.build_runtime().unwrap();
         assert!(runtime.enabled);
@@ -1903,261 +1777,197 @@ mod tests {
     }
 
     #[test]
-    fn fetch_models_from_catalog_returns_subscription_models() {
+    fn model_filter_regex_is_none_so_the_api_is_the_only_source_of_ids() {
+        assert!(OpenAICodexProvider::default()
+            .model_filter_regex()
+            .is_none());
+    }
+
+    #[test]
+    fn live_payload_gating_keeps_listed_api_supported_slugs_only() {
         let p = provider_with_oauth("tok", "acct-123");
-        let models = p.fetch_models_from_catalog(&caps_map());
+        let models = p.available_models_from_live_chatgpt_models(&live_payload(), &caps_map());
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
 
-        assert!(ids.contains(&"gpt-5.2"));
-        assert!(ids.contains(&"gpt-5.3-codex"));
-        assert!(ids.contains(&"gpt-5.4"));
-        assert!(ids.contains(&"gpt-5.5"));
-        assert!(ids.contains(&"gpt-5.6-sol"));
-        assert!(ids.contains(&"gpt-5.6-terra"));
-        assert!(ids.contains(&"gpt-5.6-luna"));
-        assert!(!ids.contains(&"gpt-5.6"));
+        // A brand-new slug nobody hardcoded is kept purely because the API listed it.
+        assert!(ids.contains(&"gpt-6-astra"), "{ids:?}");
+        assert!(ids.contains(&"gpt-5.6-sol"), "{ids:?}");
+        assert!(ids.contains(&"gpt-5.6-terra"), "{ids:?}");
+        assert!(ids.contains(&"gpt-5.6-luna"), "{ids:?}");
+        assert!(ids.contains(&"gpt-5.5"), "{ids:?}");
+        assert!(ids.contains(&"gpt-5.4-mini"), "{ids:?}");
+
+        // visibility: "hide"
+        assert!(!ids.contains(&"gpt-reserve"), "{ids:?}");
+        assert!(!ids.contains(&"codex-auto-review"), "{ids:?}");
+        // supported_in_api: false
+        assert!(!ids.contains(&"gpt-5.3-codex-spark"), "{ids:?}");
+
+        assert_eq!(ids.len(), 6, "{ids:?}");
     }
 
     #[test]
-    fn codex_model_filters_accept_known_gpt56_variants_only() {
-        assert!(super::is_chatgpt_codex_live_model("gpt-5.6-sol"));
-        assert!(super::is_chatgpt_codex_live_model("gpt-5.6-terra"));
-        assert!(super::is_chatgpt_codex_live_model("gpt-5.6-luna"));
-        assert!(!super::is_chatgpt_codex_live_model("gpt-5.6"));
-        assert!(!super::is_chatgpt_codex_live_model("gpt-5.6-random"));
-        assert!(!super::is_chatgpt_codex_live_model("gpt-5.6-sol-preview"));
-
-        let regex = regex::Regex::new(OpenAICodexProvider::default().model_filter_regex().unwrap())
-            .unwrap();
-        assert!(regex.is_match("gpt-5.6-sol"));
-        assert!(regex.is_match("gpt-5.6-terra"));
-        assert!(regex.is_match("gpt-5.6-luna"));
-        assert!(!regex.is_match("gpt-5.6"));
-        assert!(!regex.is_match("gpt-5.6-random"));
-    }
-
-    #[test]
-    fn codex_context_overrides_pin_subscription_windows() {
-        assert_eq!(
-            super::codex_model_context_window_override("gpt-5.6-sol"),
-            Some(372_000)
-        );
-        assert_eq!(
-            super::codex_model_context_window_override("gpt-5.6-terra"),
-            Some(372_000)
-        );
-        assert_eq!(
-            super::codex_model_context_window_override("gpt-5.6-luna"),
-            Some(372_000)
-        );
-        assert_eq!(
-            super::codex_model_context_window_override("gpt-5.5"),
-            Some(272_000)
-        );
-        assert_eq!(super::codex_model_context_window_override("gpt-5.6"), None);
-        assert_eq!(super::codex_model_context_window_override("gpt-5.4"), None);
-    }
-
-    #[test]
-    fn catalog_fallback_adds_gpt56_variants_when_models_dev_is_stale() {
+    fn catalog_never_contributes_ids_the_api_did_not_return() {
         let p = provider_with_oauth("tok", "acct-123");
-        let stale_caps = HashMap::from([("openai_codex/gpt-5.5".to_string(), codex_caps(405_000))]);
-        let models = p.fetch_models_from_catalog(&stale_caps);
-
-        assert!(models.iter().all(|m| m.id != "gpt-5.6"));
-        for (model_id, expected_efforts) in [
-            (
-                "gpt-5.6-sol",
-                &["low", "medium", "high", "xhigh", "max", "ultra"][..],
-            ),
-            (
-                "gpt-5.6-terra",
-                &["low", "medium", "high", "xhigh", "max", "ultra"][..],
-            ),
-            (
-                "gpt-5.6-luna",
-                &["low", "medium", "high", "xhigh", "max"][..],
-            ),
-        ] {
-            let model = models.iter().find(|m| m.id == model_id).unwrap();
-            assert_eq!(model.n_ctx, 372_000);
-            assert_eq!(model.max_output_tokens, Some(128_000));
-            assert_eq!(
-                model.reasoning_effort_options.as_deref(),
-                Some(
-                    &expected_efforts
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()[..]
-                ),
-                "{model_id}"
-            );
-        }
-    }
-
-    #[test]
-    fn codex_context_overrides_apply_to_live_and_catalog_models() {
-        let p = provider_with_oauth("tok", "acct-123");
-        let catalog_models = p.fetch_models_from_catalog(&caps_map());
-        let sol_from_catalog = catalog_models
-            .iter()
-            .find(|m| m.id == "gpt-5.6-sol")
-            .unwrap();
-        let gpt55_from_catalog = catalog_models.iter().find(|m| m.id == "gpt-5.5").unwrap();
-        assert_eq!(sol_from_catalog.n_ctx, 372_000);
-        assert_eq!(gpt55_from_catalog.n_ctx, 272_000);
-
-        let live_models = p.available_models_from_live_chatgpt_models(
-            &[
-                json!({
-                    "slug": "gpt-5.6-terra",
-                    "display_name": "GPT-5.6 Terra",
-                    "max_context_window": 1_050_000,
-                    "supported": true,
-                    "supported_reasoning_levels": ["low", "medium", "high", "xhigh", "max"]
-                }),
-                json!({
-                    "slug": "gpt-5.6-luna",
-                    "display_name": "GPT-5.6 Luna",
-                    "max_context_window": 1_050_000,
-                    "supported": true
-                }),
-                json!({
-                    "slug": "gpt-5.6-random",
-                    "display_name": "GPT-5.6 Random",
-                    "max_context_window": 372_000,
-                    "supported": true
-                }),
-            ],
+        let models = p.available_models_from_live_chatgpt_models(
+            &[live_record("gpt-5.5", "list", true, 272_000)],
             &caps_map(),
         );
-        let terra = live_models
-            .iter()
-            .find(|m| m.id == "gpt-5.6-terra")
-            .unwrap();
-        assert_eq!(terra.n_ctx, 1_050_000);
-        assert_eq!(terra.display_name.as_deref(), Some("GPT-5.6 Terra"));
+
+        assert_eq!(models.iter().filter(|m| !m.is_custom).count(), 1);
+        assert!(!models.iter().any(|m| m.id == "gpt-4.1"));
+        assert!(!models.iter().any(|m| m.id == "gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn live_fields_are_read_from_the_real_payload_field_names() {
+        let p = provider_with_oauth("tok", "acct-123");
+        let models = p.available_models_from_live_chatgpt_models(
+            &[live_record("gpt-6-astra", "list", true, 400_000)],
+            &HashMap::new(),
+        );
+        let model = models.iter().find(|m| m.id == "gpt-6-astra").unwrap();
+
+        assert_eq!(model.display_name.as_deref(), Some("GPT-6-ASTRA"));
+        // max_context_window wins over context_window.
+        assert_eq!(model.n_ctx, 400_000);
+        assert!(model.supports_parallel_tools);
+        // Derived from supports_parallel_tool_calls; no catalog entry exists here.
+        assert!(model.supports_tools);
+        // input_modalities contains "image"
+        assert!(model.supports_multimodality);
+        // supports_search_tool
+        assert!(model.supports_web_search);
         assert_eq!(
-            terra.reasoning_effort_options.as_deref(),
+            model.reasoning_effort_options.as_deref(),
             Some(
                 &[
                     "low".to_string(),
                     "medium".to_string(),
                     "high".to_string(),
                     "xhigh".to_string(),
-                    "max".to_string(),
                 ][..]
             )
         );
-        let luna = live_models.iter().find(|m| m.id == "gpt-5.6-luna").unwrap();
-        assert_eq!(luna.n_ctx, 1_050_000);
-        assert_eq!(luna.display_name.as_deref(), Some("GPT-5.6 Luna"));
-        assert!(luna.supports_tools);
-        assert!(luna.supports_parallel_tools);
-        assert!(!live_models.iter().any(|m| m.id == "gpt-5.6-random"));
-        assert!(!live_models.iter().any(|m| m.id == "gpt-5.3-codex"));
     }
 
     #[test]
-    fn live_chatgpt_membership_omits_stale_catalog_models_and_overrides_context() {
+    fn context_window_is_used_when_max_context_window_is_absent() {
+        let p = provider_with_oauth("tok", "acct-123");
+        let mut record = live_record("gpt-5.5", "list", true, 272_000);
+        record.as_object_mut().unwrap().remove("max_context_window");
+
+        let models = p.available_models_from_live_chatgpt_models(&[record], &HashMap::new());
+
+        assert_eq!(
+            models.iter().find(|m| m.id == "gpt-5.5").unwrap().n_ctx,
+            172_000
+        );
+    }
+
+    #[test]
+    fn models_without_any_context_window_are_dropped_not_faked() {
+        let p = provider_with_oauth("tok", "acct-123");
+        let mut record = live_record("gpt-6-astra", "list", true, 400_000);
+        let obj = record.as_object_mut().unwrap();
+        obj.remove("max_context_window");
+        obj.remove("context_window");
+
+        let models = p.available_models_from_live_chatgpt_models(&[record], &HashMap::new());
+
+        // Neither the API nor the catalog reported a context window, so the
+        // model is skipped rather than advertised with an invented one.
+        assert!(!models.iter().any(|m| m.id == "gpt-6-astra"));
+    }
+
+    #[test]
+    fn models_dev_enriches_fields_the_api_omits_without_overriding_live_values() {
         let p = provider_with_oauth("tok", "acct-123");
         let models = p.available_models_from_live_chatgpt_models(
-            &[json!({
-                "slug": "gpt-5.5",
-                "display_name": "Live GPT-5.5",
-                "max_context_window": 333_000,
-                "supported": true
-            })],
+            &[live_record("gpt-5.5", "list", true, 272_000)],
             &caps_map(),
         );
+        let model = models.iter().find(|m| m.id == "gpt-5.5").unwrap();
 
-        assert_eq!(models.iter().filter(|model| !model.is_custom).count(), 1);
-        let model = models.iter().find(|model| model.id == "gpt-5.5").unwrap();
-        assert_eq!(model.display_name.as_deref(), Some("Live GPT-5.5"));
-        assert_eq!(model.n_ctx, 333_000);
-        assert!(!models.iter().any(|model| model.id == "gpt-5.3-codex"));
-        assert!(!models.iter().any(|model| model.id == "gpt-5.6-sol"));
+        // Live wins for what the API reports.
+        assert_eq!(model.n_ctx, 272_000);
+        // Catalog fills what the API does not report.
+        assert_eq!(model.tokenizer.as_deref(), Some("openai"));
+        assert_eq!(model.max_output_tokens, Some(16_384));
+        assert_eq!(model.pricing.as_ref().map(|p| p.prompt), Some(3.0));
     }
 
     #[test]
-    fn live_chatgpt_only_overrides_capabilities_that_are_reported() {
+    fn explicit_false_capabilities_from_the_api_beat_the_catalog() {
         let p = provider_with_oauth("tok", "acct-123");
-        let models = p.available_models_from_live_chatgpt_models(
-            &[
-                json!({ "slug": "gpt-5.5", "supported": true }),
-                json!({
-                    "slug": "gpt-5.3-codex",
-                    "supported": true,
-                    "supports_tools": false,
-                    "supports_parallel_tools": false,
-                    "input_modalities": ["text"]
-                }),
-            ],
-            &caps_map(),
-        );
+        let mut record = live_record("gpt-5.5", "list", true, 272_000);
+        let obj = record.as_object_mut().unwrap();
+        obj.insert("supports_parallel_tool_calls".to_string(), json!(false));
+        obj.insert("supports_search_tool".to_string(), json!(false));
+        obj.insert("input_modalities".to_string(), json!(["text"]));
 
-        let absent = models.iter().find(|model| model.id == "gpt-5.5").unwrap();
-        assert!(absent.supports_tools);
-        assert!(absent.supports_parallel_tools);
-        assert!(absent.supports_multimodality);
-        let explicit = models
-            .iter()
-            .find(|model| model.id == "gpt-5.3-codex")
-            .unwrap();
-        assert!(!explicit.supports_tools);
-        assert!(!explicit.supports_parallel_tools);
-        assert!(!explicit.supports_multimodality);
-    }
+        let models = p.available_models_from_live_chatgpt_models(&[record], &caps_map());
+        let model = models.iter().find(|m| m.id == "gpt-5.5").unwrap();
 
-    #[test]
-    fn secondary_api_live_fields_authoritatively_override_catalog() {
-        let p = provider_with_oauth("tok", "acct-123");
-        let live_record = json!({
-            "id": "gpt-5.3-codex",
-            "display_name": "API Codex",
-            "context_window": 123_000,
-            "max_output_tokens": 4_000,
-            "supports_tools": false,
-            "supports_parallel_tools": false,
-            "supports_multimodality": false,
-            "supported_reasoning_levels": []
-        });
-        let live = p.live_model_fields(&live_record, "gpt-5.3-codex");
-        let model = refact_core::provider_types::available_model_from_catalog_and_live(
-            "gpt-5.3-codex",
-            caps_map().get("openai/gpt-5.3-codex"),
-            &live,
-            false,
-            8192,
-        );
-
-        assert_eq!(model.display_name.as_deref(), Some("API Codex"));
-        assert_eq!(model.n_ctx, 123_000);
-        assert_eq!(model.max_output_tokens, Some(4_000));
-        assert!(!model.supports_tools);
         assert!(!model.supports_parallel_tools);
+        assert!(!model.supports_web_search);
         assert!(!model.supports_multimodality);
-        assert_eq!(model.reasoning_effort_options, Some(Vec::new()));
     }
 
     #[test]
-    fn generic_gpt56_enabled_model_is_removed() {
+    fn enabled_flag_accepts_bare_and_provider_qualified_ids() {
+        let mut p = provider_with_oauth("tok", "acct-123");
+        p.enabled_models = vec![
+            "gpt-5.5".to_string(),
+            "openai_codex/gpt-5.6-sol".to_string(),
+            "openai-codex/gpt-5.6-terra".to_string(),
+        ];
+        let models = p.available_models_from_live_chatgpt_models(&live_payload(), &caps_map());
+
+        for id in ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra"] {
+            assert!(models.iter().find(|m| m.id == id).unwrap().enabled, "{id}");
+        }
+        assert!(
+            !models
+                .iter()
+                .find(|m| m.id == "gpt-5.6-luna")
+                .unwrap()
+                .enabled
+        );
+    }
+
+    #[test]
+    fn enabled_models_are_not_rewritten_by_name_based_rules() {
         let mut p = OpenAICodexProvider::default();
         p.provider_settings_apply(
-            serde_yaml::from_str("enabled_models: [gpt-5.6, gpt-5.6-sol]").unwrap(),
+            serde_yaml::from_str("enabled_models: [gpt-6-astra, gpt-5.6-sol]").unwrap(),
         )
         .unwrap();
 
-        assert_eq!(p.enabled_models, vec!["gpt-5.6-sol"]);
+        assert_eq!(p.enabled_models, vec!["gpt-6-astra", "gpt-5.6-sol"]);
 
-        p.set_model_enabled("gpt-5.6", false);
+        p.set_model_enabled("gpt-6-astra", false);
         assert_eq!(p.enabled_models, vec!["gpt-5.6-sol"]);
-        p.set_model_enabled("gpt-5.6", true);
-        assert_eq!(p.enabled_models, vec!["gpt-5.6-sol"]);
+        p.set_model_enabled("gpt-6-astra", true);
+        assert_eq!(p.enabled_models, vec!["gpt-5.6-sol", "gpt-6-astra"]);
     }
 
     #[test]
-    fn custom_models_still_appear() {
+    fn no_auth_returns_custom_models_only() {
+        let mut p = OpenAICodexProvider::default();
+        p.enabled_models = vec!["my-custom".to_string()];
+        p.custom_models
+            .insert("my-custom".to_string(), CustomModelConfig::default());
+
+        let models = p.get_custom_models_only();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "my-custom");
+        assert!(models[0].enabled);
+    }
+
+    #[test]
+    fn custom_models_still_appear_next_to_live_models() {
         let mut p = provider_with_oauth("tok", "acct-123");
         p.enabled_models = vec!["my-custom".to_string()];
         p.custom_models.insert(
@@ -2174,10 +1984,35 @@ mod tests {
             },
         );
 
-        let models = p.fetch_models_from_catalog(&caps_map());
+        let models = p.available_models_from_live_chatgpt_models(&live_payload(), &caps_map());
         let custom = models.iter().find(|m| m.id == "my-custom").unwrap();
         assert!(custom.enabled);
         assert!(custom.is_custom);
+        assert!(models.iter().any(|m| m.id == "gpt-6-astra"));
+    }
+
+    #[test]
+    fn custom_model_pricing_is_applied_to_live_models() {
+        let mut p = provider_with_oauth("tok", "acct-123");
+        p.custom_models.insert(
+            "gpt-6-astra".to_string(),
+            CustomModelConfig {
+                pricing: Some(ModelPricing {
+                    prompt: 9.0,
+                    generated: 18.0,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+
+        let models = p.available_models_from_live_chatgpt_models(
+            &[live_record("gpt-6-astra", "list", true, 400_000)],
+            &HashMap::new(),
+        );
+        let model = models.iter().find(|m| m.id == "gpt-6-astra").unwrap();
+
+        assert_eq!(model.pricing.as_ref().map(|p| p.prompt), Some(9.0));
     }
 
     #[test]

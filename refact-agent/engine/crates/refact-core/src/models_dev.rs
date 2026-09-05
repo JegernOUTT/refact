@@ -433,11 +433,6 @@ fn models_dev_model_to_model_caps(
         supports_cache_control: false,
         tokenizer,
         pricing: model_cost_to_pricing(model),
-        raw_cost: model
-            .cost
-            .as_ref()
-            .and_then(|cost| serde_json::to_value(cost).ok()),
-        status: non_empty_status(model.status.as_deref()),
         ..Default::default()
     }
 }
@@ -671,13 +666,6 @@ fn is_special_purpose_model(model: &ModelsDevModel) -> bool {
     ]
     .iter()
     .any(|marker| searchable.contains(marker))
-}
-
-fn non_empty_status(status: Option<&str>) -> Option<String> {
-    status
-        .map(str::trim)
-        .filter(|status| !status.is_empty())
-        .map(str::to_string)
 }
 
 fn has_modality(modalities: &[String], expected: &str) -> bool {
