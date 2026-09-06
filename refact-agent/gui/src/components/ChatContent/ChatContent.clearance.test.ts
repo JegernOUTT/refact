@@ -43,15 +43,6 @@ describe("chat bottom dock clearance styles", () => {
       "--rf-composer-clearance",
     );
     expect(rule(contentCss, ".floatingLinks")).toContain("bottom: 0");
-    expect(rule(contentCss, ".queuedMessagesContainer")).not.toContain(
-      "--rf-composer-clearance",
-    );
-    expect(rule(contentCss, ".queuedMessagesContainer")).toContain(
-      "flex: 0 0 auto",
-    );
-    expect(rule(contentCss, ".queuedMessagesContainer")).not.toContain(
-      "position: absolute",
-    );
     expect(rule(followButtonCss, ".root")).not.toContain(
       "--rf-composer-clearance",
     );
@@ -60,10 +51,20 @@ describe("chat bottom dock clearance styles", () => {
     );
   });
 
+  it("keeps the delivery queue inside the measured dock without card chrome", () => {
+    expect(contentCss).not.toContain(".queuedMessagesContainer");
+    const queueDock = rule(chatCss, ".queueDock");
+    expect(queueDock).toContain("margin-bottom: var(--rf-space-2)");
+    expect(queueDock).not.toContain("--rf-composer-clearance");
+    expect(queueDock).not.toContain("position: absolute");
+    expect(queueDock).not.toContain("border");
+    expect(queueDock).not.toContain("background");
+  });
+
   it("does not retain the legacy overlap variable or a fixed queue fallback", () => {
     const clearanceStyles = `${chatCss}\n${contentCss}\n${followButtonCss}`;
 
     expect(clearanceStyles).not.toContain("--rf-composer-overlap");
-    expect(rule(contentCss, ".queuedMessagesContainer")).not.toContain("60px");
+    expect(rule(chatCss, ".queueDock")).not.toContain("60px");
   });
 });

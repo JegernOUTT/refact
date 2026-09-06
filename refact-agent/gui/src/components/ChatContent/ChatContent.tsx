@@ -26,7 +26,6 @@ import {
   selectIsStreamingById,
   selectIsWaitingById,
   selectMessagesById,
-  selectQueuedItemsById,
   selectSnapshotReceivedById,
   selectThreadById,
   selectThreadPauseById,
@@ -50,7 +49,6 @@ import {
   DisplayItem,
   tryIncrementalDisplayItemsUpdate,
 } from "./ChatContentDisplayItems";
-import { QueuePanel } from "./QueuePanel";
 import { EventRow } from "./EventRow";
 import { revealProcessOutput } from "./revealProcessOutput";
 import { selectSseStatusForChat } from "../../features/Connection";
@@ -124,9 +122,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
   const switching = chatId !== renderChatId;
 
   const messages = useAppSelector((s) => selectMessagesById(s, renderChatId));
-  const queuedItems = useAppSelector((s) =>
-    selectQueuedItemsById(s, renderChatId),
-  );
   const isStreaming = useAppSelector((s) =>
     selectIsStreamingById(s, renderChatId),
   );
@@ -600,14 +595,6 @@ export const ChatContent: React.FC<ChatContentProps> = ({
               </ScrollArea>
             </Box>
           </Box>
-          {queuedItems.length > 0 && (
-            <Box className={styles.queuedMessagesContainer}>
-              <QueuePanel
-                queuedItems={queuedItems}
-                isBusy={isStreaming || isWaiting}
-              />
-            </Box>
-          )}
         </Flex>
       </CollapsibleStoreProvider>
     </ChatThreadProvider>

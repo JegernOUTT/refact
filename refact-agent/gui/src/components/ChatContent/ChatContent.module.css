@@ -414,14 +414,6 @@
   overflow: hidden;
 }
 
-.queuedMessagesContainer {
-  flex: 0 0 auto;
-  min-height: 0;
-  padding: var(--rf-space-2);
-  border-top: var(--rf-hairline) solid var(--rf-border);
-  background: var(--rf-surface-1);
-}
-
 @media (prefers-reduced-transparency: reduce) {
   .userInput,
   .diff_file_body,

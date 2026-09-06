@@ -10,7 +10,9 @@ import { type Config } from "../../features/Config/configSlice";
 import {
   enableSend,
   selectIsStreamingById,
+  selectIsWaitingById,
   selectPreventSendById,
+  selectQueuedItemsById,
   selectIsBuddyChat,
   useThreadId,
 } from "../../features/Chat/Thread";
@@ -22,6 +24,7 @@ import { TaskProgressWidget } from "../TaskProgressWidget";
 import { BrowserContextGuard } from "../../features/Browser/BrowserContextGuard";
 import { selectBrowserContextOversize } from "../../features/Browser/browserSlice";
 import { SkillsIndicator } from "../ChatContent/SkillsIndicator";
+import { QueuePanel } from "../ChatContent/QueuePanel";
 import {
   registerVisibleChatMount,
   unregisterVisibleChatMount,
@@ -58,6 +61,12 @@ export const Chat: React.FC<ChatProps> = ({
   const chatId = useThreadId();
   const isStreaming = useAppSelector((state) =>
     selectIsStreamingById(state, chatId),
+  );
+  const isWaiting = useAppSelector((state) =>
+    selectIsWaitingById(state, chatId),
+  );
+  const queuedItems = useAppSelector((state) =>
+    selectQueuedItemsById(state, chatId),
   );
   const isBuddyChat = useAppSelector((state) =>
     selectIsBuddyChat(state, chatId),
@@ -196,6 +205,14 @@ export const Chat: React.FC<ChatProps> = ({
                     <TerminalPanel chatId={chatId} />
                   </div>
                 ) : null}
+                {queuedItems.length > 0 && (
+                  <div className={styles.queueDock}>
+                    <QueuePanel
+                      queuedItems={queuedItems}
+                      isBusy={isStreaming || isWaiting}
+                    />
+                  </div>
+                )}
                 <div className={styles.dockGroup}>
                   <TaskProgressWidget />
                   <ChatForm

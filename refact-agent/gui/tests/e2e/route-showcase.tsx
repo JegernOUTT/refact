@@ -472,12 +472,14 @@ const queueEventMessages: ChatMessages = [
       role: "event" as const,
       message_id: `showcase-event-${index}`,
       content,
-      subkind,
-      source,
-      payload: { ...payload, created_at_ms: Date.parse(now) + index * 1000 },
+      event: {
+        subkind,
+        source,
+        payload: { ...payload, created_at_ms: Date.parse(now) + index * 1000 },
+      },
     }))
     .flatMap((event) =>
-      event.subkind === "unknown_future_subkind"
+      event.event.subkind === "unknown_future_subkind"
         ? [
             {
               role: "assistant" as const,

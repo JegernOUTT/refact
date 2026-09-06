@@ -309,6 +309,41 @@ describe("hidden chat roles", () => {
     });
   });
 
+  it("recognizes the flattened wire shape the engine streams for hidden roles", () => {
+    const wireMessages = [
+      { role: "user", content: "run it", message_id: "u-1" },
+      {
+        role: "event",
+        message_id: "wire-event",
+        content: "Background process exited (exit 0)",
+        delivery: { push: "append", source: "exec.registry" },
+        event: {
+          subkind: "process_completed",
+          source: "exec.registry",
+          payload: { process_id: "exec_1", exit_code: 0 },
+        },
+      },
+      {
+        role: "plan",
+        message_id: "wire-plan",
+        content: "# Plan",
+        plan: { mode: "agent", version: 3 },
+      },
+    ] as unknown as ChatMessages;
+
+    const items = buildDisplayItems(wireMessages, false);
+    const eventItems = items.flatMap((item) =>
+      item.type === "event" ? [item] : [],
+    );
+    expect(eventItems).toHaveLength(1);
+    expect(eventItems[0].event).toMatchObject({
+      subkind: "process_completed",
+      source: "exec.registry",
+      payload: { process_id: "exec_1", exit_code: 0 },
+    });
+    expect(items.map((item) => item.type)).toEqual(["user", "event"]);
+  });
+
   it("selectGoal selectors read the thread projection", () => {
     const state = {
       chat: makeState(mixedMessages, projectedGoal),

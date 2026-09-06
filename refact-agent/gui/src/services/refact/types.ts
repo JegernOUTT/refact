@@ -1158,6 +1158,7 @@ export type GoalMessage = Omit<MessageEnvelope, "extra"> & {
   role: "goal";
   content: string;
   extra?: Record<string, unknown> & { goal?: unknown };
+  goal?: unknown;
 };
 
 function hasOptionalNumberOrNullField(
@@ -1181,7 +1182,7 @@ function isGoalBudget(value: unknown): value is GoalBudget {
 }
 
 export function getGoalMetadata(message: GoalMessage): GoalMetadata {
-  const rawGoal = message.extra?.goal;
+  const rawGoal = message.extra?.goal ?? message.goal;
   if (!isRecord(rawGoal)) return {};
 
   const metadata: GoalMetadata = {};
@@ -1245,6 +1246,7 @@ export type EventMessage = MessageEnvelope & {
   subkind: string;
   source: string;
   payload?: unknown;
+  event?: unknown;
 };
 
 export function isEventSubkind(value: unknown): value is EventSubkind {
@@ -1268,7 +1270,9 @@ export function isEventSubkind(value: unknown): value is EventSubkind {
 export function getEventMetadata(message: EventMessage): EventMetadata | null {
   const backendEvent = isRecord(message.extra?.event)
     ? message.extra.event
-    : null;
+    : isRecord(message.event)
+      ? message.event
+      : null;
   const subkind =
     typeof backendEvent?.subkind === "string"
       ? backendEvent.subkind
@@ -1315,10 +1319,11 @@ export type PlanMessage = Omit<MessageEnvelope, "extra"> & {
   role: "plan";
   content: string;
   extra?: Record<string, unknown> & { plan?: unknown };
+  plan?: unknown;
 };
 
 export function getPlanMetadata(message: PlanMessage): PlanMetadata {
-  const rawPlan = message.extra?.plan;
+  const rawPlan = message.extra?.plan ?? message.plan;
   if (!isRecord(rawPlan)) return {};
 
   const metadata: PlanMetadata = {};
