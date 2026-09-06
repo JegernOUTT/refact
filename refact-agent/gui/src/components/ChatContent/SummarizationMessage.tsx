@@ -8,6 +8,7 @@ import {
 } from "../../services/refact/types";
 import type {
   ChatCompressionReportMetadata,
+  ReconstructedHistoryMetadata,
   SummarizationMessage as SummarizationMessageType,
   SummarizationTier,
 } from "../../services/refact/types";
@@ -229,6 +230,119 @@ function StatsGrid({ stats }: { stats: StatCell[] }) {
   );
 }
 
+const RECONSTRUCTION_DESCRIPTION =
+  "The model context was rebuilt so this chat can continue within its limit. Original messages remain in the transcript.";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function statsFromReconstructionMetrics(metrics: unknown): StatCell[] | null {
+  if (!isRecord(metrics)) return null;
+  const stats: StatCell[] = [
+    ...statCell("Messages before", parseNumberStat(metrics.messages_before)),
+    ...statCell("Messages after", parseNumberStat(metrics.messages_after)),
+    ...statCell("Tokens before", parseNumberStat(metrics.tokens_before)),
+    ...statCell("Tokens after", parseNumberStat(metrics.tokens_after)),
+    ...statCell(
+      "Tokens saved",
+      parseNumberStat(metrics.estimated_tokens_saved),
+    ),
+    ...statCell("Reduction", parseNumberStat(metrics.reduction_percent, "%")),
+  ];
+  return stats.length > 0 ? stats : null;
+}
+
+function reconstructionTriggerLabel(trigger: string): string {
+  switch (trigger) {
+    case "automatic":
+      return "automatic at cap";
+    case "overflow":
+      return "after provider limit";
+    case "manual":
+      return "manual";
+    default:
+      return trigger;
+  }
+}
+
+const ReconstructedHistoryReport: React.FC<{
+  metadata: ReconstructedHistoryMetadata;
+}> = ({ metadata }) => {
+  const stats = useMemo(
+    () => statsFromReconstructionMetrics(metadata.metrics),
+    [metadata.metrics],
+  );
+  const rebuiltCount = metadata.payload.messages.length;
+  return (
+    <div className={`${styles.card} ${styles.reportCard}`}>
+      <details
+        className={styles.disclosure}
+        data-testid="reconstructed-history-report"
+      >
+        <summary
+          className={styles.header}
+          data-testid="summarization-card-header"
+        >
+          <span className={styles.headerLeft}>
+            <span className={styles.icon} aria-hidden>
+              <Icon icon={Archive} size="sm" />
+            </span>
+            <span
+              className={`${styles.tierBadge} ${styles.tierBadgeTier2}`}
+              data-testid="summarization-card-tier"
+            >
+              Context rebuilt
+            </span>
+            <span className={styles.rangeLabel}>
+              {rebuiltCount} {rebuiltCount === 1 ? "message" : "messages"}
+            </span>
+            {metadata.model && (
+              <span className={styles.tokenLabel}>· {metadata.model}</span>
+            )}
+            {metadata.trigger && (
+              <span className={styles.tokenLabel}>
+                · {reconstructionTriggerLabel(metadata.trigger)}
+              </span>
+            )}
+          </span>
+          <span className={styles.toggle}>
+            <Icon icon={ChevronDown} size="sm" tone="muted" />
+          </span>
+        </summary>
+        <div className={styles.body}>
+          {(metadata.from_mode ?? metadata.to_mode) &&
+            metadata.from_mode !== metadata.to_mode && (
+              <p>
+                Mode: {metadata.from_mode ?? "—"} → {metadata.to_mode ?? "—"}
+              </p>
+            )}
+          {metadata.payload.messages.map((item, index) => (
+            <section key={item.message_id ?? index}>
+              <strong>{item.role}</strong>
+              <ToolMarkdown>
+                {typeof item.content === "string"
+                  ? item.content
+                  : JSON.stringify(item.content, null, 2)}
+              </ToolMarkdown>
+              {"tool_calls" in item && item.tool_calls && (
+                <pre>{JSON.stringify(item.tool_calls, null, 2)}</pre>
+              )}
+            </section>
+          ))}
+        </div>
+      </details>
+      <div
+        className={styles.eventSummary}
+        data-testid="summarization-card-summary"
+      >
+        <p className={styles.description}>{RECONSTRUCTION_DESCRIPTION}</p>
+        {stats && <StatsGrid stats={stats} />}
+      </div>
+    </div>
+  );
+};
+
 const LegacySummarizationMessage: React.FC<SummarizationMessageProps> = ({
   message,
 }) => {
@@ -405,38 +519,5 @@ export const SummarizationMessage: React.FC<SummarizationMessageProps> = ({
         transcript is still available.
       </div>
     );
-  const { metadata } = report;
-  return (
-    <details className={styles.card} data-testid="reconstructed-history-report">
-      <summary>
-        Context rebuilt · {metadata.payload.messages.length} messages
-        {metadata.model ? ` · ${metadata.model}` : ""}
-      </summary>
-      <div className={styles.body}>
-        <p>
-          Reconstructed model context. Original messages remain in the
-          transcript.
-        </p>
-        {metadata.trigger && <p>Trigger: {metadata.trigger}</p>}
-        {(metadata.from_mode ?? metadata.to_mode) && (
-          <p>
-            Mode: {metadata.from_mode ?? "—"} → {metadata.to_mode ?? "—"}
-          </p>
-        )}
-        {metadata.payload.messages.map((item, index) => (
-          <section key={item.message_id ?? index}>
-            <strong>{item.role}</strong>
-            <ToolMarkdown>
-              {typeof item.content === "string"
-                ? item.content
-                : JSON.stringify(item.content, null, 2)}
-            </ToolMarkdown>
-            {"tool_calls" in item && item.tool_calls && (
-              <pre>{JSON.stringify(item.tool_calls, null, 2)}</pre>
-            )}
-          </section>
-        ))}
-      </div>
-    </details>
-  );
+  return <ReconstructedHistoryReport metadata={report.metadata} />;
 };

@@ -223,23 +223,13 @@ fn estimated_tokens(
                     .count_tokens(tokenizer.clone(), &None)
                     .unwrap_or(0)
                     .max(0) as usize;
-                let text = message.content.content_text_only();
-                let content = if tokenizer.is_some() {
-                    content
-                } else {
-                    content.saturating_add(text.len())
-                };
                 let calls = message
                     .tool_calls
                     .as_ref()
                     .map(|calls| serde_json::to_string(calls).unwrap_or_default())
                     .unwrap_or_default();
-                let calls = if tokenizer.is_some() {
-                    crate::tokens::count_text_tokens(tokenizer.clone(), &calls)
-                        .unwrap_or(calls.len())
-                } else {
-                    calls.len()
-                };
+                let calls = crate::tokens::count_text_tokens(tokenizer.clone(), &calls)
+                    .unwrap_or_else(|_| calls.len() / 3 + 1);
                 content.saturating_add(calls).saturating_add(8)
             })
             .fold(0usize, usize::saturating_add);
@@ -262,13 +252,24 @@ fn estimated_tokens(
                 .prompt_tokens
                 .saturating_add(usage.cache_read_tokens.unwrap_or(0))
                 .saturating_add(usage.cache_creation_tokens.unwrap_or(0));
-            (input > 0).then(|| estimate.max(input.saturating_add(count(&visible[index..]))))
+            (input > 0).then(|| input.saturating_add(count(&visible[index..])))
         })
         .unwrap_or(estimate)
 }
 
 fn at_auto_cap(used: usize, cap: usize) -> bool {
     cap > 0 && used >= cap
+}
+
+/// A prefix can budget the next request only when both mandatory parts are present
+/// and the canonical tools are the array the wire adapters serialize.
+fn budget_prefix_is_usable(prefix: &refact_chat_api::FrozenRequestPrefix) -> bool {
+    prefix.schema_version == 1
+        && crate::chat::trajectories::frozen_prefix_is_complete(prefix)
+        && prefix
+            .tools_canonical
+            .as_ref()
+            .is_some_and(serde_json::Value::is_array)
 }
 
 /// A snapshot-only evaluator: never generates prompts, runs tools, or mutates a session.
@@ -284,6 +285,9 @@ fn payload_request_cap(
         .as_ref()
         .filter(|p| p.schema_version == 1)
         .ok_or("Next-request budget unavailable: no frozen request prefix")?;
+    if !budget_prefix_is_usable(prefix) {
+        return Err("Next-request budget unavailable: incomplete frozen request prefix".into());
+    }
     let system = prefix
         .system_prompt
         .as_ref()
@@ -295,11 +299,7 @@ fn payload_request_cap(
         .ok_or("Next-request budget unavailable: missing canonical tools")?;
     let tools = serde_json::to_string(tools).map_err(|e| e.to_string())?;
     let count = |text: &str| -> Result<usize, String> {
-        if tokenizer.is_some() {
-            crate::tokens::count_text_tokens(tokenizer.clone(), text)
-        } else {
-            Ok(text.len())
-        }
+        crate::tokens::count_text_tokens(tokenizer.clone(), text)
     };
     let mandatory = count(system)?
         .saturating_add(count(&tools)?)
@@ -320,7 +320,7 @@ fn validate_output(
     output: &[ChatMessage],
     cap: usize,
     tokenizer: Option<Arc<tokenizers::Tokenizer>>,
-) -> Result<(), String> {
+) -> Result<ReconstructionMetrics, String> {
     if !output
         .iter()
         .any(|m| !m.content.content_text_only().trim().is_empty())
@@ -333,7 +333,39 @@ fn validate_output(
     if before == usize::MAX || after == usize::MAX || after >= before || after > cap {
         return Err(format!("Reconstruction must be smaller and fit request cap (before={before}, after={after}, cap={cap})"));
     }
-    Ok(())
+    Ok(ReconstructionMetrics {
+        messages_before: source.len(),
+        messages_after: output.len(),
+        tokens_before: before,
+        tokens_after: after,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReconstructionMetrics {
+    messages_before: usize,
+    messages_after: usize,
+    tokens_before: usize,
+    tokens_after: usize,
+}
+
+impl ReconstructionMetrics {
+    fn to_json(self) -> serde_json::Value {
+        let saved = self.tokens_before.saturating_sub(self.tokens_after);
+        let reduction_percent = if self.tokens_before == 0 {
+            0
+        } else {
+            saved.saturating_mul(100) / self.tokens_before
+        };
+        serde_json::json!({
+            "messages_before": self.messages_before,
+            "messages_after": self.messages_after,
+            "tokens_before": self.tokens_before,
+            "tokens_after": self.tokens_after,
+            "estimated_tokens_saved": saved,
+            "reduction_percent": reduction_percent,
+        })
+    }
 }
 
 /// Shared transaction seam: persistence must succeed before publishing any report.
@@ -529,9 +561,14 @@ pub async fn rebuild_session(
         .or(record.max_output_tokens)
         .unwrap_or(4096);
     // Rebuild clears the persisted prefix. Prepare a local-only replacement when
-    // absent (including first-use and legacy chats), using the reserved catalog.
+    // absent or incomplete (first-use, legacy, and repaired transition chats),
+    // using the reserved catalog.
     let mut budget_thread = thread.clone();
-    if budget_thread.frozen_request_prefix.is_none() {
+    if !budget_thread
+        .frozen_request_prefix
+        .as_ref()
+        .is_some_and(budget_prefix_is_usable)
+    {
         let app = crate::app_state::AppState::from_gcx(gcx.clone()).await;
         let scope = thread
             .worktree
@@ -625,7 +662,7 @@ pub async fn rebuild_session(
             return Err(e);
         }
     };
-    validate_output(&messages, &outcome.messages, request_cap, tokenizer)?;
+    let metrics = validate_output(&messages, &outcome.messages, request_cap, tokenizer)?;
     let report = make_reconstruction_report(
         outcome.messages,
         ReconstructionMetadata {
@@ -634,7 +671,7 @@ pub async fn rebuild_session(
             trigger: Some(request.trigger),
             from_mode: Some(thread.mode.clone()),
             to_mode: Some(thread.mode.clone()),
-            ..Default::default()
+            metrics: Some(metrics.to_json()),
         },
     )
     .map_err(|e| e.to_string());
@@ -900,16 +937,106 @@ mod tests {
         thread.frozen_request_prefix = Some(refact_chat_api::FrozenRequestPrefix {
             schema_version: 1,
             created_at: String::new(),
-            system_prompt: Some("system".repeat(600)),
+            system_prompt: Some("system".repeat(2000)),
             tools_canonical: Some(serde_json::json!([])),
         });
         assert!(payload_request_cap(&thread, 4096, 512, None).is_err());
         thread.frozen_request_prefix.as_mut().unwrap().system_prompt = Some("system".into());
         let cap = payload_request_cap(&thread, 4096, 512, None).unwrap();
-        let source = vec![ChatMessage::new("user".into(), "x".repeat(8000))];
-        let output = vec![ChatMessage::new("user".into(), "x".repeat(3000))];
+        let source = vec![ChatMessage::new("user".into(), "x".repeat(24000))];
+        let output = vec![ChatMessage::new("user".into(), "x".repeat(9000))];
         assert!(validate_output(&source, &output, 4096, None).is_ok());
         assert!(validate_output(&source, &output, cap, None).is_err());
+    }
+
+    #[test]
+    fn incomplete_frozen_prefix_is_an_unavailable_budget_not_a_missing_prompt() {
+        let s = ChatSession::new("incomplete-prefix".into());
+        let mut thread = s.thread.clone();
+        thread.frozen_request_prefix = Some(refact_chat_api::FrozenRequestPrefix {
+            schema_version: 1,
+            created_at: String::new(),
+            system_prompt: None,
+            tools_canonical: Some(serde_json::json!([])),
+        });
+        let error = payload_request_cap(&thread, 4096, 512, None).unwrap_err();
+        assert!(
+            error.contains("incomplete frozen request prefix"),
+            "{error}"
+        );
+        thread.frozen_request_prefix = Some(refact_chat_api::FrozenRequestPrefix {
+            schema_version: 1,
+            created_at: String::new(),
+            system_prompt: Some("system".into()),
+            tools_canonical: None,
+        });
+        let error = payload_request_cap(&thread, 4096, 512, None).unwrap_err();
+        assert!(
+            error.contains("incomplete frozen request prefix"),
+            "{error}"
+        );
+        assert!(!crate::chat::trajectories::frozen_prefix_is_complete(
+            thread.frozen_request_prefix.as_ref().unwrap()
+        ));
+        thread.frozen_request_prefix = Some(refact_chat_api::FrozenRequestPrefix {
+            schema_version: 1,
+            created_at: String::new(),
+            system_prompt: Some("system".into()),
+            tools_canonical: Some(serde_json::json!({})),
+        });
+        let error = payload_request_cap(&thread, 4096, 512, None).unwrap_err();
+        assert!(
+            error.contains("incomplete frozen request prefix"),
+            "{error}"
+        );
+        assert!(!budget_prefix_is_usable(
+            thread.frozen_request_prefix.as_ref().unwrap()
+        ));
+        thread
+            .frozen_request_prefix
+            .as_mut()
+            .unwrap()
+            .tools_canonical = Some(serde_json::json!([]));
+        assert!(budget_prefix_is_usable(
+            thread.frozen_request_prefix.as_ref().unwrap()
+        ));
+        assert!(payload_request_cap(&thread, 4096, 512, None).is_ok());
+    }
+
+    #[test]
+    fn fallback_estimate_counts_tokens_not_bytes() {
+        let text = "x".repeat(300_000);
+        let messages = vec![ChatMessage::new("user".into(), text.clone())];
+        let estimate = estimated_tokens(&messages, None, false);
+        let fallback_tokens = crate::tokens::count_text_tokens(None, &text).unwrap();
+        assert!(
+            estimate >= fallback_tokens,
+            "{estimate} < {fallback_tokens}"
+        );
+        assert!(estimate < text.len(), "{estimate} counted bytes as tokens");
+        assert!(!at_auto_cap(estimate, 500_000));
+    }
+
+    #[test]
+    fn fresh_provider_usage_anchors_below_cap_context_over_inflated_local_estimate() {
+        let system = ChatMessage::new("system".into(), "s".repeat(120_000));
+        let user = ChatMessage::new("user".into(), "u".repeat(400_000));
+        let mut answer = ChatMessage::new("assistant".into(), "answer".into());
+        answer.usage = Some(crate::call_validation::ChatUsage {
+            prompt_tokens: 1_592,
+            completion_tokens: 542,
+            total_tokens: 134_486,
+            cache_read_tokens: Some(132_352),
+            ..Default::default()
+        });
+        let follow_up = ChatMessage::new("user".into(), "continue".into());
+        let messages = vec![system, user, answer, follow_up];
+        let fresh = estimated_tokens(&messages, None, true);
+        let stale = estimated_tokens(&messages, None, false);
+        assert!(fresh >= 133_944, "{fresh}");
+        assert!(fresh < stale, "fresh={fresh} stale={stale}");
+        assert!(!at_auto_cap(fresh, 500_000));
+        assert!(!at_auto_cap(fresh, 872_000));
     }
 
     #[test]
