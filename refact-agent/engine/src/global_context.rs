@@ -150,6 +150,11 @@ pub struct CommandLine {
         help = "Workspace folder to find all the files. An LSP or HTTP request can override this later."
     )]
     pub workspace_folder: String,
+    #[structopt(
+        long,
+        help = "Start even when another Refact engine already holds the lease for a workspace folder. Both processes will then index and write the same workspace state, which is normally a bug."
+    )]
+    pub allow_shared_workspace: bool,
 
     #[structopt(
         long,
@@ -415,6 +420,9 @@ pub struct GlobalContext {
     pub scheduler_config: SchedulerConfig,
     pub hooks_config: HooksConfig,
     pub terminal_security_config: TerminalSecurityConfig,
+    /// Exclusive per-workspace leases held for the whole engine lifetime; dropping the context
+    /// closes the lock descriptors and lets another engine take over the workspace.
+    pub workspace_leases: Arc<StdMutex<crate::daemon::lock::WorkspaceLeaseSet>>,
 }
 
 pub type SharedGlobalContext = Arc<GlobalContext>; // TODO: remove this type alias, confusing
@@ -927,6 +935,7 @@ pub async fn create_global_context(
         scheduler_config,
         hooks_config,
         terminal_security_config,
+        workspace_leases: Arc::new(StdMutex::new(Default::default())),
     };
     let gcx = Arc::new(cx);
     crate::files_in_workspace::watcher_init(gcx.clone()).await;
@@ -1159,6 +1168,7 @@ pub mod tests {
             wait_vecdb: false,
             files_jsonl_path: String::new(),
             workspace_folder: String::new(),
+            allow_shared_workspace: true,
             only_create_yaml_configs: false,
             print_customization: false,
             experimental: false,
@@ -1253,6 +1263,7 @@ pub mod tests {
             scheduler_config: SchedulerConfig::default(),
             hooks_config: HooksConfig::default(),
             terminal_security_config: TerminalSecurityConfig::default(),
+            workspace_leases: Arc::new(StdMutex::new(Default::default())),
         };
         Arc::new(cx)
     }

@@ -80,6 +80,8 @@ pub enum PerfComponent {
     TrajectoryIndexCoordinatorFlush,
     TrajectoryIndexEnqueue,
     TrajectoryIndexCacheHit,
+    TrajectoryIndexJournalAppend,
+    TrajectoryIndexCheckpoint,
     StreamPrepare,
     StreamTokenCountRequest,
     StreamRequestSend,
@@ -91,7 +93,7 @@ pub enum PerfComponent {
 }
 
 impl PerfComponent {
-    pub const ALL: [Self; 73] = [
+    pub const ALL: [Self; 75] = [
         Self::TrajectorySnapshot,
         Self::TrajectorySerialize,
         Self::TrajectoryAtomicWrite,
@@ -157,6 +159,8 @@ impl PerfComponent {
         Self::TrajectoryIndexCoordinatorFlush,
         Self::TrajectoryIndexEnqueue,
         Self::TrajectoryIndexCacheHit,
+        Self::TrajectoryIndexJournalAppend,
+        Self::TrajectoryIndexCheckpoint,
         Self::StreamPrepare,
         Self::StreamTokenCountRequest,
         Self::StreamRequestSend,
@@ -239,6 +243,8 @@ impl PerfComponent {
             Self::TrajectoryIndexCoordinatorFlush => "trajectory.index_coordinator_flush",
             Self::TrajectoryIndexEnqueue => "trajectory.index_enqueue",
             Self::TrajectoryIndexCacheHit => "trajectory.index_cache_hit",
+            Self::TrajectoryIndexJournalAppend => "trajectory.index_journal_append",
+            Self::TrajectoryIndexCheckpoint => "trajectory.index_checkpoint",
             Self::TrajectorySaveMutexWait => "trajectory.save_mutex_wait",
             Self::TrajectoryMetricScan => "trajectory.metric_scan",
             Self::ToolIntegrationToolsBuild => "tool.integration_tools_build",
@@ -1080,6 +1086,8 @@ mod tests {
             "trajectory.index_coordinator_flush",
             "trajectory.index_enqueue",
             "trajectory.index_cache_hit",
+            "trajectory.index_journal_append",
+            "trajectory.index_checkpoint",
             "trajectory.save_mutex_wait",
             "trajectory.metric_scan",
             "tool.integration_tools_build",

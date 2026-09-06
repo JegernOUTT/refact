@@ -1151,6 +1151,7 @@ pub async fn apply_artifact_decisions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use crate::buddy::memory_lifecycle::{
         MemoryCreatePayload, MemoryLifecycleOp, MemoryLifecyclePayload, MemoryOpStatus,
         MemoryOpType, MEMORY_OP_EVIDENCE_MAX_CHARS, MEMORY_OP_EXACT_DUPLICATE_REASON,
@@ -1960,6 +1961,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(memory_ops_cache)]
     async fn load_memory_ops_serves_unchanged_file_from_cache() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -2493,31 +2495,75 @@ mod tests {
         );
     }
 
+    fn cross_process_ready_marker(root: &Path) -> PathBuf {
+        root.join("cross-process-parent-ready")
+    }
+
+    fn cross_process_done_marker(root: &Path) -> PathBuf {
+        root.join("cross-process-parent-done")
+    }
+
     #[tokio::test]
     async fn memory_ops_cross_process_appender_child() {
         let Ok(root) = std::env::var(CROSS_PROCESS_ROOT_ENV) else {
             return;
         };
-        let count: usize = std::env::var(CROSS_PROCESS_COUNT_ENV)
-            .expect("child needs a record count")
+        let cap: usize = std::env::var(CROSS_PROCESS_COUNT_ENV)
+            .expect("child needs a record cap")
             .parse()
-            .expect("record count must be a number");
+            .expect("record cap must be a number");
         let prefix = std::env::var(CROSS_PROCESS_PREFIX_ENV).expect("child needs an id prefix");
         let root = PathBuf::from(root);
-        for index in 0..count {
-            enqueue_memory_op(&root, pending_op(&format!("{prefix}-{index}")))
+        let ready = cross_process_ready_marker(&root);
+        let done = cross_process_done_marker(&root);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+
+        while !ready.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "parent never signalled that its compaction loop had started"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+
+        let mut appended = 0usize;
+        while appended < cap && !done.exists() {
+            enqueue_memory_op(&root, pending_op(&format!("{prefix}-{appended}")))
                 .await
                 .expect("child append must succeed");
+            appended += 1;
+            assert!(
+                std::time::Instant::now() < deadline,
+                "parent never signalled that it had run enough compaction rounds"
+            );
         }
+        println!("APPENDED={appended}");
     }
 
+    /// Regression guard for the cross-process fd lock around `memory_ops.jsonl`.
+    ///
+    /// A second process appends to the queue in a tight loop while this process
+    /// runs the full read-modify-rewrite path (`enqueue` + `archive` + `compact`)
+    /// in a tight loop of its own. Neither side sleeps, so the appender lands
+    /// inside the rewriter's read/rename window constantly. Without the fd lock
+    /// the rewriter renames a stale snapshot over the live queue and silently
+    /// eats every record appended since it read, which shows up here as large
+    /// contiguous runs of missing `child-*` ops.
     #[tokio::test]
+    #[serial(memory_ops_cache)]
     async fn cross_process_appends_survive_concurrent_compaction() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         write_memory_ops_records_for_test(&root, vec![pending_op("op-seed")]).await;
 
-        let child_records = 30usize;
+        // The child keeps appending until this process says stop, so overlap is
+        // guaranteed for every round below instead of depending on how the two
+        // processes happen to be scheduled. The cap only bounds the worst case.
+        let child_cap = 8000usize;
+        let min_parent_rounds = 25usize;
+        // Safety valve: the queue is rewritten in full on every round, so cap the
+        // rounds to keep the test's worst case bounded.
+        let max_parent_rounds = 600usize;
         let suffix = module_path!()
             .split_once("::")
             .map(|(_, rest)| rest)
@@ -2532,55 +2578,122 @@ mod tests {
                 "--quiet",
             ])
             .env(CROSS_PROCESS_ROOT_ENV, &root)
-            .env(CROSS_PROCESS_COUNT_ENV, child_records.to_string())
+            .env(CROSS_PROCESS_COUNT_ENV, child_cap.to_string())
             .env(CROSS_PROCESS_PREFIX_ENV, "child")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("failed to spawn cross-process appender");
 
+        let ready_marker = cross_process_ready_marker(&root);
+        let done_marker = cross_process_done_marker(&root);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         let mut parent_ids = Vec::new();
         let mut round = 0usize;
+        std::fs::write(&ready_marker, b"go").unwrap();
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
                 break status;
             }
-            if round < 200 {
-                let op_id = format!("parent-{round}");
-                enqueue_memory_op(&root, pending_op(&op_id)).await.unwrap();
-                parent_ids.push(op_id);
-                remember_compacted_len(&root, 0);
-                archive_memory_ops_if_oversized(&root, 1).await.unwrap();
-                compact_memory_ops(&root).await.unwrap();
-                round += 1;
+            if std::time::Instant::now() >= deadline {
+                let _ = std::fs::write(&done_marker, b"stop");
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("cross-process appender did not finish in 120s after {round} rounds");
             }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            if round >= max_parent_rounds {
+                let _ = std::fs::write(&done_marker, b"stop");
+                tokio::task::yield_now().await;
+                continue;
+            }
+            let op_id = format!("parent-{round}");
+            enqueue_memory_op(&root, pending_op(&op_id)).await.unwrap();
+            parent_ids.push(op_id);
+            // Defeat the "already compacted" growth heuristic so the archive path
+            // (stage tmp -> back up -> rename) really runs on every single round.
+            remember_compacted_len(&root, 0);
+            archive_memory_ops_if_oversized(&root, 1).await.unwrap();
+            compact_memory_ops(&root).await.unwrap();
+            round += 1;
+            // Release the child only once enough rounds have overlapped its
+            // appends, so a loaded machine cannot quietly reduce this to a
+            // handful of non-overlapping rounds.
+            if round >= min_parent_rounds && !done_marker.exists() {
+                std::fs::write(&done_marker, b"stop").unwrap();
+            }
         };
         let output = child.wait_with_output().unwrap();
         assert!(
             status.success(),
-            "child appender failed: {}
-{}",
+            "child appender failed: {}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(
+            round >= min_parent_rounds,
+            "parent ran only {round} compaction rounds (needed {min_parent_rounds}); \
+             the test would not reliably detect a missing lock"
+        );
+        let child_stdout = String::from_utf8_lossy(&output.stdout);
+        let appended: usize = child_stdout
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("APPENDED="))
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or_else(|| panic!("child did not report its append count: {child_stdout}"));
+        assert!(
+            appended > 0 && appended < child_cap,
+            "child appended {appended} records (cap {child_cap}); it must append \
+             continuously throughout the parent's rounds without hitting the cap"
+        );
 
-        let on_disk = record_op_ids(&root);
         let mut counts: HashMap<String, usize> = HashMap::new();
-        for op_id in on_disk {
+        for op_id in record_op_ids(&root) {
             *counts.entry(op_id).or_default() += 1;
         }
-        let mut expected: Vec<String> = (0..child_records).map(|i| format!("child-{i}")).collect();
-        expected.push("op-seed".to_string());
-        expected.extend(parent_ids);
+        let loaded: HashSet<String> = load_memory_ops_repairing(&root)
+            .await
+            .ops
+            .into_iter()
+            .map(|op| op.op_id)
+            .collect();
+
+        let mut expected: Vec<String> = vec!["op-seed".to_string()];
+        expected.extend((0..appended).map(|index| format!("child-{index}")));
+        expected.extend(parent_ids.iter().cloned());
         let lost: Vec<&String> = expected
             .iter()
-            .filter(|op_id| counts.get(*op_id).copied().unwrap_or(0) != 1)
+            .filter(|op_id| {
+                counts.get(*op_id).copied().unwrap_or(0) != 1 || !loaded.contains(*op_id)
+            })
             .collect();
+        let lost_children = lost
+            .iter()
+            .filter(|op_id| op_id.starts_with("child-"))
+            .count();
+        let lost_parents = lost
+            .iter()
+            .filter(|op_id| op_id.starts_with("parent-"))
+            .count();
         assert!(
             lost.is_empty(),
-            "records lost or duplicated across processes: {lost:?} (have {} ids)",
-            counts.len()
+            "{} of {} expected memory ops lost or duplicated across processes \
+             ({lost_children} of {appended} child records, {lost_parents} of {} parent \
+             records) after {round} parent compaction rounds; first missing: {:?}",
+            lost.len(),
+            expected.len(),
+            parent_ids.len(),
+            lost.iter().take(12).collect::<Vec<_>>()
+        );
+
+        let debris: Vec<String> = std::fs::read_dir(memory_ops_path(&root).parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(
+            debris.is_empty(),
+            "staging files left behind after concurrent rewrites: {debris:?}"
         );
     }
 }

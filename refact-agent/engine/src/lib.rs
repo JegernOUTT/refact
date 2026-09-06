@@ -128,6 +128,58 @@ pub mod test_paths;
 
 const EXEC_SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub fn workspace_lease_info_for(
+    cmdline: &global_context::CommandLine,
+) -> daemon::lock::WorkspaceLeaseInfo {
+    let command = if cmdline.project_id.is_empty() {
+        "refact-lsp"
+    } else {
+        "refact worker"
+    };
+    daemon::lock::WorkspaceLeaseInfo::for_current_process(
+        cmdline.http_port,
+        cmdline.lsp_port,
+        command,
+    )
+}
+
+fn acquire_startup_workspace_leases(
+    cache_dir: &std::path::Path,
+    cmdline: &global_context::CommandLine,
+) -> daemon::lock::WorkspaceLeaseSet {
+    if cmdline.workspace_folder.is_empty() {
+        return daemon::lock::WorkspaceLeaseSet::default();
+    }
+    let roots = daemon::lock::normalize_workspace_roots(
+        cache_dir,
+        &[canonical_path(cmdline.workspace_folder.clone())],
+    );
+    match daemon::lock::acquire_workspace_leases(&roots, &workspace_lease_info_for(cmdline)) {
+        Ok(leases) => leases,
+        Err(error) => {
+            if cmdline.allow_shared_workspace {
+                eprintln!("{error}");
+                eprintln!(
+                    "continuing anyway because --allow-shared-workspace was passed; both engines \
+                     will index and write the same workspace state"
+                );
+                return daemon::lock::WorkspaceLeaseSet::default();
+            }
+            eprintln!("{error}");
+            eprintln!(
+                "refusing to start a second engine for the same workspace; stop the other engine \
+                 or pass --allow-shared-workspace to override"
+            );
+            let code = if cmdline.project_id.is_empty() {
+                1
+            } else {
+                daemon::lock::WORKSPACE_BUSY_EXIT_CODE
+            };
+            std::process::exit(code);
+        }
+    }
+}
+
 pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
     chat::perf_diagnostics::initialize_from_environment();
 
@@ -161,12 +213,14 @@ pub async fn run_with_cmdline(cmdline: global_context::CommandLine) {
     tokio::fs::create_dir_all(&config_dir)
         .await
         .expect("failed to create cache dir");
+    let workspace_leases = acquire_startup_workspace_leases(&cache_dir, &cmdline);
     let (gcx, ask_shutdown_receiver) = global_context::create_global_context(
         cache_dir.clone(),
         config_dir.clone(),
         cmdline.clone(),
     )
     .await;
+    *gcx.workspace_leases.lock().unwrap() = workspace_leases;
     let mut writer_is_stderr = false;
     let (logs_writer, _guard) = if cmdline.logs_stderr {
         writer_is_stderr = true;

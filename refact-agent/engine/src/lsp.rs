@@ -110,6 +110,58 @@ pub(crate) fn workspace_roots_changed(current: &[PathBuf], next: &[PathBuf]) -> 
     canonical_workspace_roots(current) != canonical_workspace_roots(next)
 }
 
+fn workspace_lease_root(gcx: &Arc<GlobalContext>, root: &PathBuf) -> PathBuf {
+    crate::daemon::lock::normalize_workspace_roots(
+        gcx.cache_dir.as_path(),
+        std::slice::from_ref(root),
+    )
+    .into_iter()
+    .next()
+    .unwrap_or_else(|| root.clone())
+}
+
+pub(crate) fn acquire_workspace_leases(
+    gcx: &Arc<GlobalContext>,
+    roots: &[PathBuf],
+) -> Vec<PathBuf> {
+    let info = crate::workspace_lease_info_for(&gcx.cmdline);
+    let mut leases = gcx.workspace_leases.lock().unwrap();
+    let mut accepted = Vec::new();
+    for root in roots {
+        let key = workspace_lease_root(gcx, root);
+        if leases.holds(&key) {
+            accepted.push(root.clone());
+            continue;
+        }
+        match crate::daemon::lock::try_acquire_workspace_lease(&key, &info) {
+            Ok(lease) => {
+                leases.insert(lease);
+                accepted.push(root.clone());
+            }
+            Err(error) if gcx.cmdline.allow_shared_workspace => {
+                tracing::warn!(
+                    "{error}; serving it anyway because --allow-shared-workspace is set"
+                );
+                accepted.push(root.clone());
+            }
+            Err(error) => {
+                tracing::error!("{error}; refusing to serve this workspace folder");
+            }
+        }
+    }
+    accepted
+}
+
+pub(crate) fn release_workspace_leases(gcx: &Arc<GlobalContext>, roots: &[PathBuf]) {
+    let mut leases = gcx.workspace_leases.lock().unwrap();
+    for root in roots {
+        let key = workspace_lease_root(gcx, root);
+        if leases.release(&key) {
+            info!("released workspace lease for {}", key.display());
+        }
+    }
+}
+
 pub(crate) fn canonical_path_from_file_uri(uri: &Url) -> Option<PathBuf> {
     uri.to_file_path()
         .ok()
@@ -320,17 +372,26 @@ impl LanguageServer for LspBackend {
                 }
             }
         }
-        let folders = canonical_workspace_roots(&folders);
-        let changed = {
+        let folders = canonical_workspace_roots(&acquire_workspace_leases(
+            &self.gcx,
+            &canonical_workspace_roots(&folders),
+        ));
+        let (changed, dropped) = {
             let mut workspace_folders = self.gcx.documents_state.workspace_folders.lock().unwrap();
+            let dropped = workspace_folders
+                .iter()
+                .filter(|root| !folders.contains(root))
+                .cloned()
+                .collect::<Vec<_>>();
             if workspace_roots_changed(&workspace_folders, &folders) {
                 *workspace_folders = folders.clone();
                 info!("LSP workspace_folders {:?}", folders);
-                true
+                (true, dropped)
             } else {
-                false
+                (false, Vec::new())
             }
         };
+        release_workspace_leases(&self.gcx, &dropped);
 
         if changed {
             let gcx_clone = self.gcx.clone();
@@ -504,10 +565,12 @@ impl LanguageServer for LspBackend {
             };
             removed.push(path);
         }
+        let added = acquire_workspace_leases(&self.gcx, &added);
         let changed = {
             let mut workspace_folders = self.gcx.documents_state.workspace_folders.lock().unwrap();
             apply_workspace_root_changes(&mut workspace_folders, &added, &removed)
         };
+        release_workspace_leases(&self.gcx, &removed);
         if changed {
             files_in_workspace::on_workspaces_init(self.gcx.clone()).await;
             notify_workspace_changed(&self.gcx).await;

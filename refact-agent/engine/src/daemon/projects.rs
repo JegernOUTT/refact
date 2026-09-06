@@ -12,7 +12,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::daemon::state::{now_ms, DaemonState};
-use crate::daemon::supervisor::WorkerInfo;
+use crate::daemon::supervisor::{WorkerInfo, WorkspaceBusyInfo};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectSettings {
@@ -55,6 +55,17 @@ pub struct ProjectEntry {
     pub pinned: bool,
     pub last_active_ms: u64,
     pub settings: ProjectSettings,
+}
+
+/// Wire shape of a project row: the stored entry plus daemon-side runtime facts that are not
+/// persisted in projects.json. Flattening keeps the JSON identical to a bare `ProjectEntry`
+/// whenever the workspace is not busy, so older clients keep deserialising it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectView {
+    #[serde(flatten)]
+    pub entry: ProjectEntry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_busy: Option<WorkspaceBusyInfo>,
 }
 
 pub struct ProjectRegistry {
@@ -252,6 +263,8 @@ struct OpenResponse {
     pinned: bool,
     worker: Option<WorkerInfo>,
     cron_pending: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_busy: Option<WorkspaceBusyInfo>,
 }
 
 #[derive(Deserialize)]
@@ -298,10 +311,18 @@ pub async fn open_project(
     let worker = match state.supervisor.ensure_ready_worker(&entry).await {
         Ok(worker) => worker,
         Err(error) => {
+            if let Some(busy) = state.supervisor.workspace_busy(&entry.id) {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": error, "workspace_busy": busy})),
+                )
+                    .into_response();
+            }
             return (StatusCode::BAD_GATEWAY, Json(json!({"error": error}))).into_response();
         }
     };
     let cron_pending = state.cron_pending(&entry.id).await;
+    let workspace_busy = state.supervisor.workspace_busy(&entry.id);
     let _ = state
         .events
         .emit(
@@ -317,15 +338,30 @@ pub async fn open_project(
         pinned: entry.pinned,
         worker: Some(worker),
         cron_pending,
+        workspace_busy,
     })
     .into_response()
 }
 
-pub async fn list_projects(
-    State((state, _)): State<(Arc<DaemonState>, u16)>,
-) -> Json<Vec<ProjectEntry>> {
-    let registry = state.projects.read().await;
-    Json(registry.list())
+pub async fn list_projects(State((state, _)): State<(Arc<DaemonState>, u16)>) -> impl IntoResponse {
+    let entries = {
+        let registry = state.projects.read().await;
+        registry.list()
+    };
+    let mut busy = state
+        .supervisor
+        .busy_workspaces()
+        .into_iter()
+        .map(|row| (row.project_id.clone(), row))
+        .collect::<HashMap<_, _>>();
+    let rows = entries
+        .into_iter()
+        .map(|entry| ProjectView {
+            workspace_busy: busy.remove(&entry.id),
+            entry,
+        })
+        .collect::<Vec<_>>();
+    Json(rows).into_response()
 }
 
 pub async fn get_project(
@@ -334,7 +370,11 @@ pub async fn get_project(
 ) -> impl IntoResponse {
     let registry = state.projects.read().await;
     match registry.get(&id) {
-        Some(entry) => Json(entry.clone()).into_response(),
+        Some(entry) => Json(ProjectView {
+            entry: entry.clone(),
+            workspace_busy: state.supervisor.workspace_busy(&id),
+        })
+        .into_response(),
         None => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
     }
 }
@@ -595,6 +635,70 @@ mod tests {
         let id_real = project_id(&dunce::simplified(&real.canonicalize().unwrap()).to_path_buf());
         let id_link = project_id(&dunce::simplified(&link.canonicalize().unwrap()).to_path_buf());
         assert_eq!(id_real, id_link);
+    }
+
+    fn sample_entry() -> ProjectEntry {
+        ProjectEntry {
+            id: "abc".to_string(),
+            slug: "proj".to_string(),
+            root: PathBuf::from("/tmp/proj"),
+            pinned: false,
+            last_active_ms: 7,
+            settings: ProjectSettings::default(),
+        }
+    }
+
+    #[test]
+    fn project_view_without_busy_matches_bare_project_entry_json() {
+        let entry = sample_entry();
+        let view = ProjectView {
+            entry: entry.clone(),
+            workspace_busy: None,
+        };
+        let view_json = serde_json::to_value(&view).unwrap();
+        assert_eq!(view_json, serde_json::to_value(&entry).unwrap());
+        assert!(view_json.get("workspace_busy").is_none());
+        // Old clients that only know ProjectEntry must still deserialise the row.
+        assert_eq!(
+            serde_json::from_value::<ProjectEntry>(view_json.clone()).unwrap(),
+            entry
+        );
+        assert_eq!(
+            serde_json::from_value::<ProjectView>(view_json).unwrap(),
+            view
+        );
+    }
+
+    #[test]
+    fn project_view_with_busy_adds_a_sibling_field_only() {
+        let entry = sample_entry();
+        let busy = WorkspaceBusyInfo {
+            project_id: entry.id.clone(),
+            root: entry.root.clone(),
+            holder: "pid 42, http port 8001".to_string(),
+            lease_path: PathBuf::from("/tmp/locks/abc.lock"),
+            observed_at_ms: 11,
+            holder_pid: Some(42),
+            holder_http_port: Some(8001),
+        };
+        let view = ProjectView {
+            entry: entry.clone(),
+            workspace_busy: Some(busy.clone()),
+        };
+        let view_json = serde_json::to_value(&view).unwrap();
+        assert_eq!(view_json["id"], entry.id);
+        assert_eq!(view_json["workspace_busy"]["holder_pid"], 42);
+        // A client that only knows ProjectEntry ignores the extra field.
+        assert_eq!(
+            serde_json::from_value::<ProjectEntry>(view_json.clone()).unwrap(),
+            entry
+        );
+        assert_eq!(
+            serde_json::from_value::<ProjectView>(view_json)
+                .unwrap()
+                .workspace_busy,
+            Some(busy)
+        );
     }
 
     #[test]

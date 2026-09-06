@@ -727,3 +727,97 @@ async fn auth_enabled_daemon_accepts_fake_worker_status() {
     state.supervisor.stop_all().await;
     server_task.abort();
 }
+
+struct EngineLocksDirGuard {
+    previous: Option<String>,
+    _dir: tempfile::TempDir,
+}
+
+impl EngineLocksDirGuard {
+    fn set() -> Self {
+        let dir = tempdir().unwrap();
+        let previous = std::env::var(refact_lsp::daemon::lock::ENGINE_LOCKS_DIR_ENV).ok();
+        std::env::set_var(
+            refact_lsp::daemon::lock::ENGINE_LOCKS_DIR_ENV,
+            dir.path().join("engine-locks"),
+        );
+        Self {
+            previous,
+            _dir: dir,
+        }
+    }
+}
+
+impl Drop for EngineLocksDirGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var(refact_lsp::daemon::lock::ENGINE_LOCKS_DIR_ENV, value),
+            None => std::env::remove_var(refact_lsp::daemon::lock::ENGINE_LOCKS_DIR_ENV),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn spawn_worker_skips_busy_workspace_without_restarting() {
+    let Some(_env) = EnvGuard::set(false) else {
+        return;
+    };
+    let _locks = EngineLocksDirGuard::set();
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let holder = refact_lsp::daemon::lock::try_acquire_workspace_lease(
+        &root,
+        &refact_lsp::daemon::lock::WorkspaceLeaseInfo::for_current_process(
+            4321,
+            4322,
+            "refact-lsp",
+        ),
+    )
+    .unwrap();
+
+    let entry = project_entry(root.clone(), "busy-project");
+    let supervisor = supervisor(&dir);
+    let info = supervisor.ensure_worker(&entry).await.unwrap();
+    let WorkerState::Failed { ref reason } = info.state else {
+        panic!("expected a failed worker, got {:?}", info.state);
+    };
+    assert!(reason.contains("workspace busy"), "reason was {reason}");
+    assert!(info.pid.is_none());
+
+    let busy = supervisor
+        .workspace_busy(&entry.id)
+        .expect("busy workspace must be recorded");
+    assert_eq!(busy.project_id, entry.id);
+    assert_eq!(busy.root, root);
+    assert_eq!(busy.holder_pid, Some(std::process::id()));
+    assert_eq!(busy.holder_http_port, Some(4321));
+    assert!(busy.observed_at_ms > 0);
+    assert_eq!(
+        supervisor
+            .busy_workspaces()
+            .iter()
+            .map(|row| row.project_id.clone())
+            .collect::<Vec<_>>(),
+        vec![entry.id.clone()]
+    );
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let still = supervisor.worker_info(&entry.id).await.unwrap();
+    assert!(
+        matches!(still.state, WorkerState::Failed { .. }),
+        "busy project must not enter a restart loop, got {:?}",
+        still.state
+    );
+    assert!(still.pid.is_none());
+
+    drop(holder);
+    let recovered = supervisor.ensure_worker(&entry).await.unwrap();
+    assert_eq!(recovered.state, WorkerState::Ready);
+    assert!(supervisor.workspace_busy(&entry.id).is_none());
+    assert!(supervisor.busy_workspaces().is_empty());
+
+    supervisor.stop_all().await;
+}
