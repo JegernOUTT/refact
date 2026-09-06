@@ -1011,12 +1011,36 @@ impl<'de> Visitor<'de> for TopLevelInternalTraceVisitor {
                 }
                 link_type_seen = true;
                 link_type = map.next_value::<Option<String>>()?;
+                if !is_internal_trace_link_type(link_type.as_deref()) {
+                    // Early-out: the answer is already pinned to `false` and nothing later in the
+                    // document can change it. A well-formed remainder still yields `false`, and a
+                    // malformed remainder yields a parse error that the caller also maps to
+                    // `false`. So we can stop reading bytes here without changing the result.
+                    //
+                    // We deliberately do NOT early-out on an *internal* link_type: there the
+                    // remainder still matters, because a truncated or otherwise malformed file
+                    // must stay classified as "not an internal trace" so that pruning never
+                    // deletes a torn write. See
+                    // `internal_trace_pruning_ignores_message_content_and_invalid_json`.
+                    return Ok(false);
+                }
             } else {
                 map.next_value::<IgnoredAny>()?;
             }
         }
         Ok(is_internal_trace_link_type(link_type.as_deref()))
     }
+}
+
+fn top_level_link_type_is_internal_from_reader<R: std::io::Read>(reader: R) -> bool {
+    // `serde_json`'s `IoRead` pulls the document through `Read::bytes()`, i.e. one `read()`
+    // syscall per byte consumed. Buffering is what makes scanning a multi-megabyte trajectory
+    // affordable; without it a single 144 MB folder costs ~144 million syscalls per scan.
+    let mut deserializer = serde_json::Deserializer::from_reader(std::io::BufReader::new(reader));
+    (&mut deserializer)
+        .deserialize_map(TopLevelInternalTraceVisitor)
+        .and_then(|is_internal| deserializer.end().map(|_| is_internal))
+        .unwrap_or(false)
 }
 
 fn parsed_top_level_link_type_is_internal(path: PathBuf) -> bool {
@@ -1028,11 +1052,7 @@ fn parsed_top_level_link_type_is_internal(path: PathBuf) -> bool {
         Ok(file) => file,
         Err(_) => return false,
     };
-    let mut deserializer = serde_json::Deserializer::from_reader(file);
-    (&mut deserializer)
-        .deserialize_map(TopLevelInternalTraceVisitor)
-        .and_then(|is_internal| deserializer.end().map(|_| is_internal))
-        .unwrap_or(false)
+    top_level_link_type_is_internal_from_reader(file)
 }
 
 pub fn is_internal_trace_link_type(link_type: Option<&str>) -> bool {
@@ -2206,7 +2226,7 @@ async fn read_existing_trajectory_object(
     chat_id: &str,
 ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
     #[cfg(test)]
-    TRAJECTORY_METADATA_DISK_READS.fetch_add(1, Ordering::Relaxed);
+    record_trajectory_metadata_disk_read(chat_id);
     match fs::symlink_metadata(path).await {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -2242,8 +2262,39 @@ async fn read_existing_trajectory_object(
         .map(Some)
 }
 
+/// Per-chat metadata disk-read counters, used only by tests.
+///
+/// This intentionally is *not* a single process-wide counter. The read it counts happens inside
+/// the detached trajectory writer, i.e. on a `tokio::spawn`ed task on some other worker thread,
+/// so a thread-local/task-local scope (the `TrajectoryIndexListingCounterScope::local()` pattern
+/// in `trajectory_index.rs`) would never observe it. Keying by `chat_id` gives each test its own
+/// counter instead, since every test already uses a unique chat id, so concurrently running tests
+/// can no longer inflate one another's deltas.
 #[cfg(test)]
-static TRAJECTORY_METADATA_DISK_READS: AtomicUsize = AtomicUsize::new(0);
+fn trajectory_metadata_disk_reads_by_chat(
+) -> &'static StdMutex<std::collections::HashMap<String, usize>> {
+    static READS: OnceLock<StdMutex<std::collections::HashMap<String, usize>>> = OnceLock::new();
+    READS.get_or_init(|| StdMutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn record_trajectory_metadata_disk_read(chat_id: &str) {
+    *trajectory_metadata_disk_reads_by_chat()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(chat_id.to_string())
+        .or_insert(0) += 1;
+}
+
+#[cfg(test)]
+fn trajectory_metadata_disk_reads_for_chat(chat_id: &str) -> usize {
+    trajectory_metadata_disk_reads_by_chat()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(chat_id)
+        .copied()
+        .unwrap_or(0)
+}
 #[cfg(test)]
 fn reset_test_trajectory_watcher_task() {
     let mut guard = TRAJECTORY_WATCHER_TASK
@@ -9347,7 +9398,7 @@ mod tests {
         .await
         .unwrap();
 
-        let reads_before = TRAJECTORY_METADATA_DISK_READS.load(Ordering::Relaxed);
+        let reads_before = trajectory_metadata_disk_reads_for_chat(chat_id);
         for title in ["First", "Second"] {
             save_trajectory_snapshot(
                 gcx.clone(),
@@ -9360,8 +9411,12 @@ mod tests {
             .await
             .unwrap();
         }
-        let reads_after = TRAJECTORY_METADATA_DISK_READS.load(Ordering::Relaxed);
-        assert_eq!(reads_after - reads_before, 1);
+        let reads_after = trajectory_metadata_disk_reads_for_chat(chat_id);
+        assert_eq!(
+            reads_after - reads_before,
+            1,
+            "the second save must reuse the cached metadata instead of re-reading from disk"
+        );
 
         let text = tokio::fs::read_to_string(&path).await.unwrap();
         let saved: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -10498,6 +10553,158 @@ mod tests {
             &TrajectorySourceIdentity::Normal,
             None
         ));
+    }
+
+    fn write_temp_json(dir: &tempfile::TempDir, name: &str, contents: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn top_level_link_type_classification_preserves_semantics() {
+        let temp = tempfile::tempdir().unwrap();
+
+        // Happy path: a top-level internal link_type is classified as an internal trace.
+        assert!(parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "internal.json",
+            r#"{"id":"a","link_type":"internal:title_generation","messages":[]}"#,
+        )));
+
+        // A link_type that is not the internal one.
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "subagent.json",
+            r#"{"id":"a","link_type":"subagent","messages":[]}"#,
+        )));
+
+        // No link_type field at all.
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "missing.json",
+            r#"{"id":"a","messages":[]}"#,
+        )));
+
+        // A null link_type is treated as absent, not internal.
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "null.json",
+            r#"{"id":"a","link_type":null}"#,
+        )));
+
+        // Not valid JSON.
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "corrupt.json",
+            "{not json at all",
+        )));
+
+        // A truncated document whose link_type *is* internal must still be rejected, so that a
+        // torn write is never mistaken for a complete internal trace and pruned.
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "truncated.json",
+            r#"{"link_type":"internal:broken""#,
+        )));
+
+        // Valid JSON whose top level is not a map.
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "array.json",
+            r#"["link_type","internal:title_generation"]"#,
+        )));
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "scalar.json",
+            r#""internal:title_generation""#,
+        )));
+
+        // A nested link_type must not be read as a top-level one.
+        assert!(!parsed_top_level_link_type_is_internal(write_temp_json(
+            &temp,
+            "nested.json",
+            r#"{"messages":[{"role":"user","content":"\"link_type\": \"internal:spoof\""}]}"#,
+        )));
+
+        // A missing file, and a directory, are both "not an internal trace".
+        assert!(!parsed_top_level_link_type_is_internal(
+            temp.path().join("does-not-exist.json")
+        ));
+        assert!(!parsed_top_level_link_type_is_internal(
+            temp.path().to_path_buf()
+        ));
+    }
+
+    #[test]
+    fn top_level_link_type_stops_reading_once_a_non_internal_value_is_known() {
+        struct CountingReader<R> {
+            inner: R,
+            bytes_read: Arc<AtomicUsize>,
+        }
+
+        impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let read = self.inner.read(buf)?;
+                self.bytes_read.fetch_add(read, Ordering::Relaxed);
+                Ok(read)
+            }
+        }
+
+        // `link_type` comes first, followed by a megabyte of payload that the classifier has no
+        // reason to parse once the answer is already known.
+        let trailing = "x".repeat(1024 * 1024);
+        let document = format!(r#"{{"link_type":"subagent","messages":"{trailing}"}}"#);
+
+        let bytes_read = Arc::new(AtomicUsize::new(0));
+        let reader = CountingReader {
+            inner: std::io::Cursor::new(document.clone().into_bytes()),
+            bytes_read: bytes_read.clone(),
+        };
+
+        assert!(!top_level_link_type_is_internal_from_reader(reader));
+
+        let bytes_read = bytes_read.load(Ordering::Relaxed);
+        assert!(
+            bytes_read < 64 * 1024,
+            "expected an early exit after link_type, but read {bytes_read} of {} bytes",
+            document.len()
+        );
+    }
+
+    #[test]
+    fn top_level_link_type_reads_are_buffered() {
+        struct ChunkCountingReader<R> {
+            inner: R,
+            reads: Arc<AtomicUsize>,
+        }
+
+        impl<R: std::io::Read> std::io::Read for ChunkCountingReader<R> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                self.inner.read(buf)
+            }
+        }
+
+        // An internal trace deliberately does *not* early-exit, so the whole document is consumed.
+        // Unbuffered, serde_json's `IoRead` would issue roughly one `read()` call per byte.
+        let padding = "y".repeat(256 * 1024);
+        let document = format!(r#"{{"messages":"{padding}","link_type":"internal:test"}}"#);
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reader = ChunkCountingReader {
+            inner: std::io::Cursor::new(document.clone().into_bytes()),
+            reads: reads.clone(),
+        };
+
+        assert!(top_level_link_type_is_internal_from_reader(reader));
+
+        let reads = reads.load(Ordering::Relaxed);
+        assert!(
+            reads < document.len() / 100,
+            "expected buffered reads, but made {reads} read() calls for {} bytes",
+            document.len()
+        );
     }
 
     #[tokio::test]

@@ -315,6 +315,9 @@ pub struct TrajectoryIndex {
     pub skipped_files: Vec<TrajectoryIndexSkippedFile>,
     #[serde(default)]
     pub applied_seq: u64,
+    // Read provenance is process-local: never recursively serialize old snapshots.
+    #[serde(skip)]
+    baseline: Option<Arc<TrajectoryIndex>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -650,6 +653,7 @@ fn read_persisted_trajectory_index_locked_sync(
         entries: Vec::new(),
         skipped_files: Vec::new(),
         applied_seq: 0,
+        baseline: None,
     });
     let scan = scan_trajectory_index_journal(&journal_bytes)?;
     let watermark = index.applied_seq;
@@ -1233,15 +1237,25 @@ impl TrajectoryIndexCoordinator {
             let result = flush_trajectory_index_mutations_sync(
                 &flush_dir,
                 pending,
-                cursor,
-                cached,
+                cursor
+                    .zip(cached)
+                    .map(|(cursor, index)| SyncedPersistedIndex {
+                        index,
+                        cursor,
+                        checkpoint_present: true,
+                        rebuilt: false,
+                    }),
                 force_checkpoint,
-                lock_timeout,
-                lock_retry,
-                index_read_span,
-                lock_wait_span,
-                index_write_span,
-                reconcile_span,
+                FlushLockOptions {
+                    timeout: lock_timeout,
+                    retry: lock_retry,
+                },
+                FlushSpans {
+                    index_read: index_read_span,
+                    lock_wait: lock_wait_span,
+                    index_write: index_write_span,
+                    reconcile: reconcile_span,
+                },
                 &listing_counter_scope,
             );
             let item_count = result
@@ -1756,6 +1770,7 @@ fn load_trajectory_index_for_coordinator_locked_sync(
                 entries,
                 skipped_files,
                 applied_seq: 0,
+                baseline: None,
             };
             let generation = directory_generation_sync(dir, index_file_names(&index))?;
             Ok(CoordinatorLoadResult {
@@ -1914,6 +1929,7 @@ fn reconcile_trajectory_index_sync(
             entries,
             skipped_files,
             applied_seq: index.applied_seq,
+            baseline: None,
         },
         changed,
     ))
@@ -1979,8 +1995,7 @@ struct SyncedPersistedIndex {
 
 fn sync_persisted_index_for_flush_sync(
     dir: &Path,
-    cursor: Option<TrajectoryIndexJournalCursor>,
-    cached: Option<TrajectoryIndex>,
+    cached: Option<SyncedPersistedIndex>,
     source_hint: Option<TrajectorySourceIdentity>,
     index_read_span: Option<perf_diagnostics::PerfSpan>,
     listing_counter_scope: &TrajectoryIndexListingCounterScope,
@@ -1990,13 +2005,14 @@ fn sync_persisted_index_for_flush_sync(
     let journal_len = regular_file_generation(&journal_path)?
         .map(|generation| generation.file_len)
         .unwrap_or(0);
-    if let (Some(cursor), Some(cached), true) = (cursor, cached, checkpoint_stamp.is_some()) {
+    if let (Some(cached), true) = (cached, checkpoint_stamp.is_some()) {
+        let cursor = cached.cursor;
         if cursor.checkpoint == checkpoint_stamp && journal_len >= cursor.journal_offset {
             let tail =
                 read_trajectory_index_journal_tail_sync(&journal_path, cursor.journal_offset);
             if let Ok(tail) = tail {
                 if let Ok(scan) = scan_trajectory_index_journal(&tail) {
-                    let mut index = cached;
+                    let mut index = cached.index;
                     let last_seq =
                         replay_journal_records(&mut index, &scan.records, cursor.last_seq);
                     finish_coordinator_span(index_read_span, PerfOutcome::Skipped, Some(0));
@@ -2147,30 +2163,72 @@ fn truncate_trajectory_index_journal_sync(dir: &Path) -> Result<(), String> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct FlushLockOptions {
+    timeout: Duration,
+    retry: Duration,
+}
+
+struct FlushSpans {
+    index_read: Option<perf_diagnostics::PerfSpan>,
+    lock_wait: Option<perf_diagnostics::PerfSpan>,
+    index_write: Option<perf_diagnostics::PerfSpan>,
+    reconcile: Option<perf_diagnostics::PerfSpan>,
+}
+
+// Caller owns the cross-process lock for replacement and journal truncation.
+fn checkpoint_index_sync(
+    dir: &Path,
+    synced: SyncedPersistedIndex,
+    index_write_span: Option<perf_diagnostics::PerfSpan>,
+    listing_counter_scope: &TrajectoryIndexListingCounterScope,
+) -> Result<TrajectoryIndexFlushOutcome, String> {
+    let mut index = synced.index;
+    index.applied_seq = synced.cursor.last_seq;
+    let item_count = index.entries.len() as u64;
+    let write_result = write_trajectory_index_atomic_sync(dir, &index)
+        .and_then(|_| truncate_trajectory_index_journal_sync(dir));
+    finish_coordinator_span(
+        index_write_span,
+        if write_result.is_ok() {
+            PerfOutcome::Success
+        } else {
+            PerfOutcome::Failure
+        },
+        Some(item_count),
+    );
+    write_result?;
+    listing_counter_scope.record_checkpoint_write();
+    record_coordinator_count(PerfComponent::TrajectoryIndexCheckpoint);
+    let cursor = TrajectoryIndexJournalCursor {
+        checkpoint: regular_file_generation(&trajectory_index_path(dir))?,
+        journal_offset: 0,
+        last_seq: index.applied_seq,
+    };
+    Ok(TrajectoryIndexFlushOutcome {
+        index,
+        cursor,
+        checkpointed: true,
+        appended: false,
+    })
+}
+
 fn flush_trajectory_index_mutations_sync(
     dir: &Path,
     pending: Vec<PendingTrajectoryIndexMutation>,
-    cursor: Option<TrajectoryIndexJournalCursor>,
-    cached: Option<TrajectoryIndex>,
+    cached: Option<SyncedPersistedIndex>,
     force_checkpoint: bool,
-    lock_timeout: Duration,
-    lock_retry: Duration,
-    index_read_span: Option<perf_diagnostics::PerfSpan>,
-    lock_wait_span: Option<perf_diagnostics::PerfSpan>,
-    index_write_span: Option<perf_diagnostics::PerfSpan>,
-    reconcile_span: Option<perf_diagnostics::PerfSpan>,
+    lock: FlushLockOptions,
+    spans: FlushSpans,
     listing_counter_scope: &TrajectoryIndexListingCounterScope,
 ) -> Result<TrajectoryIndexFlushOutcome, String> {
     std::fs::create_dir_all(dir)
         .map_err(|error| format!("Failed to create trajectory directory {:?}: {error}", dir))?;
-    with_trajectory_index_file_lock(dir, lock_timeout, lock_retry, lock_wait_span, || {
+    with_trajectory_index_file_lock(dir, lock.timeout, lock.retry, spans.lock_wait, || {
         let synced = sync_persisted_index_for_flush_sync(
             dir,
-            cursor,
             cached,
             None,
-            index_read_span,
+            spans.index_read,
             listing_counter_scope,
         )?;
         let mut cursor = synced.cursor;
@@ -2179,7 +2237,7 @@ fn flush_trajectory_index_mutations_sync(
         let baseline_entries = synced.index.entries.clone();
         let baseline_skipped = synced.index.skipped_files.clone();
         let mut index = synced.index;
-        let mut reconcile_span = reconcile_span;
+        let mut reconcile_span = spans.reconcile;
         for pending in pending {
             match pending.mutation {
                 TrajectoryIndexMutation::Reconcile(source_hint) => {
@@ -2214,7 +2272,7 @@ fn flush_trajectory_index_mutations_sync(
             .map(|generation| generation.file_len)
             .unwrap_or(0);
         if !has_delta && !rebuilt && checkpoint_present && journal_len == 0 {
-            finish_coordinator_span(index_write_span, PerfOutcome::Skipped, Some(0));
+            finish_coordinator_span(spans.index_write, PerfOutcome::Skipped, Some(0));
             index.applied_seq = cursor.last_seq;
             return Ok(TrajectoryIndexFlushOutcome {
                 index,
@@ -2228,7 +2286,7 @@ fn flush_trajectory_index_mutations_sync(
             || !checkpoint_present
             || journal_len >= JOURNAL_CHECKPOINT_MAX_BYTES;
         if !has_delta && !needs_checkpoint {
-            finish_coordinator_span(index_write_span, PerfOutcome::Skipped, Some(0));
+            finish_coordinator_span(spans.index_write, PerfOutcome::Skipped, Some(0));
             index.applied_seq = cursor.last_seq;
             return Ok(TrajectoryIndexFlushOutcome {
                 index,
@@ -2238,33 +2296,17 @@ fn flush_trajectory_index_mutations_sync(
             });
         }
         if needs_checkpoint {
-            index.applied_seq = cursor.last_seq;
-            let item_count = index.entries.len() as u64;
-            let write_result = write_trajectory_index_atomic_sync(dir, &index)
-                .and_then(|_| truncate_trajectory_index_journal_sync(dir));
-            finish_coordinator_span(
-                index_write_span,
-                if write_result.is_ok() {
-                    PerfOutcome::Success
-                } else {
-                    PerfOutcome::Failure
+            return checkpoint_index_sync(
+                dir,
+                SyncedPersistedIndex {
+                    index,
+                    cursor,
+                    checkpoint_present,
+                    rebuilt,
                 },
-                Some(item_count),
+                spans.index_write,
+                listing_counter_scope,
             );
-            write_result?;
-            listing_counter_scope.record_checkpoint_write();
-            record_coordinator_count(PerfComponent::TrajectoryIndexCheckpoint);
-            cursor = TrajectoryIndexJournalCursor {
-                checkpoint: regular_file_generation(&trajectory_index_path(dir))?,
-                journal_offset: 0,
-                last_seq: index.applied_seq,
-            };
-            return Ok(TrajectoryIndexFlushOutcome {
-                index,
-                cursor,
-                checkpointed: true,
-                appended: false,
-            });
         }
         let seq = cursor.last_seq + 1;
         let payload = TrajectoryIndexJournalPayload {
@@ -2279,7 +2321,7 @@ fn flush_trajectory_index_mutations_sync(
         let item_count = (payload.upserts.len() + payload.removes.len()) as u64;
         let append_result = append_trajectory_index_journal_sync(dir, journal_len, payload);
         finish_coordinator_span(
-            index_write_span,
+            spans.index_write,
             if append_result.is_ok() {
                 PerfOutcome::Success
             } else {
@@ -2599,7 +2641,11 @@ async fn read_trajectory_index_inner(
         tokio::task::spawn_blocking(move || read_persisted_trajectory_index_sync(&load_dir))
             .await
             .map_err(|e| format!("Trajectory index parse task failed for {:?}: {e}", path))??;
-    Ok(loaded.map(|loaded| loaded.index))
+    Ok(loaded.map(|loaded| {
+        let mut index = loaded.index;
+        index.baseline = Some(Arc::new(index.clone()));
+        index
+    }))
 }
 
 pub async fn write_trajectory_index_atomic(
@@ -2646,6 +2692,86 @@ async fn write_trajectory_index_atomic_owned_inner(
     write_trajectory_index_atomic_owned_inner_with_rename_failure(dir, index, false).await
 }
 
+// Caller holds .index.json.lock. Derive only the caller's edits, never treat
+// entries absent from an old snapshot as removals of another writer's commits.
+// Rebase on the checkpoint and the journal prefix the caller observed; the
+// replay below retains the rule that newer journal commits win conflicts.
+// A snapshot without read provenance is additive, not authority to delete
+// entries it never observed (e.g. a freshly rebuilt or deserialized snapshot).
+fn rebase_checkpoint_snapshot_sync(
+    dir: &Path,
+    mut supplied: TrajectoryIndex,
+) -> Result<TrajectoryIndex, String> {
+    let mut current = match read_trajectory_index_sync(dir) {
+        Ok(Some(current)) => current,
+        Ok(None) => return Ok(supplied),
+        // A rebuild can repair a corrupt checkpoint, but a read-derived
+        // snapshot must not silently replace one that became unreadable.
+        Err(_) if supplied.baseline.is_none() => return Ok(supplied),
+        Err(error) => return Err(error),
+    };
+    // The caller may already have observed journal entries that have not yet
+    // been compacted. Seed those before applying its delta, otherwise unchanged
+    // entries would disappear when the subsequent replay skips its watermark.
+    let observed_seq = supplied
+        .baseline
+        .as_ref()
+        .map(|base| base.applied_seq)
+        .unwrap_or(supplied.applied_seq);
+    let bytes = read_trajectory_index_journal_tail_sync(&trajectory_index_journal_path(dir), 0)?;
+    let scan = scan_trajectory_index_journal(&bytes)?;
+    let observed: Vec<_> = scan
+        .records
+        .into_iter()
+        .filter(|record| record.seq <= observed_seq)
+        .collect();
+    let watermark = current.applied_seq;
+    replay_journal_records(&mut current, &observed, watermark);
+    let baseline = supplied.baseline.take();
+    let baseline_entries = baseline
+        .as_ref()
+        .map(|base| base.entries.as_slice())
+        .unwrap_or(&[]);
+    let (upserts, removes) = trajectory_index_delta(baseline_entries, &supplied);
+    let changed: HashSet<&str> = upserts
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .chain(removes.iter().map(String::as_str))
+        .collect();
+    current
+        .entries
+        .retain(|entry| !changed.contains(entry.id.as_str()));
+    current.entries.extend(upserts);
+    // Skipped files need the same three-way merge, keyed by relative filename.
+    let empty = Vec::new();
+    let old_skipped = baseline
+        .as_ref()
+        .map(|base| &base.skipped_files)
+        .unwrap_or(&empty);
+    let old: HashMap<&str, &TrajectoryIndexSkippedFile> = old_skipped
+        .iter()
+        .map(|entry| (entry.file_name.as_str(), entry))
+        .collect();
+    let new: HashMap<&str, &TrajectoryIndexSkippedFile> = supplied
+        .skipped_files
+        .iter()
+        .map(|entry| (entry.file_name.as_str(), entry))
+        .collect();
+    current
+        .skipped_files
+        .retain(|entry| old.get(entry.file_name.as_str()) == new.get(entry.file_name.as_str()));
+    current.skipped_files.extend(
+        supplied
+            .skipped_files
+            .iter()
+            .filter(|entry| old.get(entry.file_name.as_str()) != Some(entry))
+            .cloned(),
+    );
+    current.updated_at = supplied.updated_at;
+    current.applied_seq = current.applied_seq.max(observed_seq);
+    Ok(current)
+}
+
 async fn write_trajectory_index_atomic_owned_inner_with_rename_failure(
     dir: &Path,
     index: TrajectoryIndex,
@@ -2658,7 +2784,7 @@ async fn write_trajectory_index_atomic_owned_inner_with_rename_failure(
         std::fs::create_dir_all(&dir)
             .map_err(|error| format!("Failed to create trajectory directory {:?}: {error}", dir))?;
         with_trajectory_index_file_lock(&dir, INDEX_LOCK_TIMEOUT, INDEX_LOCK_RETRY, None, || {
-            let mut index = index;
+            let mut index = rebase_checkpoint_snapshot_sync(&dir, index)?;
             // A writer may have appended since this snapshot was read. Preserve
             // those commits before replacing the checkpoint and clearing the log.
             let bytes =
@@ -2759,6 +2885,7 @@ pub async fn upsert_trajectory_index_entry(
                 entries,
                 skipped_files,
                 applied_seq: 0,
+                baseline: None,
             }
         }
     };
@@ -3327,6 +3454,11 @@ async fn rebuild_trajectory_index_from_disk_inner(
     if let Some(lock_span) = lock_span {
         lock_span.finish(PerfOutcome::Success, None, None, None, None);
     }
+    let baseline = read_trajectory_index(dir)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|index| index.baseline);
     let (entries, skipped_files) = scan_trajectory_index_data(dir, source_hint).await?;
     let index = TrajectoryIndex {
         schema_version: TRAJECTORY_INDEX_SCHEMA_VERSION,
@@ -3334,6 +3466,7 @@ async fn rebuild_trajectory_index_from_disk_inner(
         entries: entries.clone(),
         skipped_files,
         applied_seq: 0,
+        baseline,
     };
     write_trajectory_index_atomic_owned(dir, index).await?;
     Ok(entries)
@@ -3393,11 +3526,11 @@ async fn list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
     }
     let disk_files = scan_trajectory_dir_files(dir, listing_counter_scope).await?;
 
-    let (existing_entries, existing_skipped, index_unreadable) =
+    let (existing_entries, existing_skipped, index_unreadable, baseline) =
         match read_trajectory_index_with_counter_scope(dir, listing_counter_scope).await {
-            Ok(Some(index)) => (index.entries, index.skipped_files, false),
-            Ok(None) => (Vec::new(), Vec::new(), false),
-            Err(_) => (Vec::new(), Vec::new(), true),
+            Ok(Some(index)) => (index.entries, index.skipped_files, false, index.baseline),
+            Ok(None) => (Vec::new(), Vec::new(), false, None),
+            Err(_) => (Vec::new(), Vec::new(), true, None),
         };
 
     let skipped_by_file: HashMap<String, TrajectoryIndexSkippedFile> = existing_skipped
@@ -3475,6 +3608,7 @@ async fn list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
             entries: new_entries.clone(),
             skipped_files: new_skipped,
             applied_seq: 0,
+            baseline,
         };
         write_trajectory_index_atomic_owned(dir, index.clone()).await?;
         index
@@ -3488,6 +3622,7 @@ async fn list_trajectory_entries_from_index_or_rebuild_with_counter_scope(
             entries: new_entries.clone(),
             skipped_files: new_skipped,
             applied_seq: existing.applied_seq,
+            baseline: None,
         }
     };
     cache_legacy_trajectory_index(dir, index).await;
@@ -5202,6 +5337,91 @@ mod tests {
         let persisted = read_trajectory_index(&dir).await.unwrap().unwrap();
         assert_eq!(persisted.entries.len(), 2);
         assert!(persisted.applied_seq > stale.applied_seq);
+    }
+
+    #[tokio::test]
+    async fn legacy_checkpoint_preserves_already_compacted_commits() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        let path = write_trajectory(&dir, "chat-1", "One", "agent").await;
+        upsert_trajectory_index_entry(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+        let mut stale = read_trajectory_index(&dir).await.unwrap().unwrap();
+        let coordinator = TrajectoryIndexCoordinator::new();
+        coordinator.snapshot(&dir, None).await.unwrap();
+        let path = write_trajectory(&dir, "chat-2", "Two", "agent").await;
+        coordinator
+            .upsert(&dir, entry_for_path(&dir, &path).await)
+            .await
+            .unwrap();
+        coordinator.flush_all().await.unwrap();
+        assert!(journal_len(&dir).await > 0);
+        let latest = read_trajectory_index(&dir).await.unwrap().unwrap();
+        write_trajectory_index_atomic(&dir, &latest).await.unwrap();
+        assert_eq!(journal_len(&dir).await, 0);
+        // A's pending deletion must apply, without deleting B's compacted insert.
+        stale.entries.clear();
+        write_trajectory_index_atomic(&dir, &stale).await.unwrap();
+        let persisted = read_trajectory_index(&dir).await.unwrap().unwrap();
+        assert_eq!(
+            persisted
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["chat-2"]
+        );
+        assert_eq!(persisted.applied_seq, latest.applied_seq);
+    }
+
+    #[tokio::test]
+    async fn legacy_checkpoint_does_not_resurrect_compacted_removals_or_updates() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("trajectories");
+        for id in ["removed", "updated", "unchanged"] {
+            let path = write_trajectory(&dir, id, "Old", "agent").await;
+            upsert_trajectory_index_entry(&dir, entry_for_path(&dir, &path).await)
+                .await
+                .unwrap();
+        }
+        let mut stale = read_trajectory_index(&dir).await.unwrap().unwrap();
+        let mut latest = stale.clone();
+        latest.entries.retain(|entry| entry.id != "removed");
+        latest
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == "updated")
+            .unwrap()
+            .title = "New".into();
+        write_trajectory_index_atomic(&dir, &latest).await.unwrap();
+        stale
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == "unchanged")
+            .unwrap()
+            .title = "Local".into();
+        write_trajectory_index_atomic(&dir, &stale).await.unwrap();
+        let persisted = read_trajectory_index(&dir).await.unwrap().unwrap();
+        assert!(!persisted.entries.iter().any(|entry| entry.id == "removed"));
+        assert_eq!(
+            persisted
+                .entries
+                .iter()
+                .find(|entry| entry.id == "updated")
+                .unwrap()
+                .title,
+            "New"
+        );
+        assert_eq!(
+            persisted
+                .entries
+                .iter()
+                .find(|entry| entry.id == "unchanged")
+                .unwrap()
+                .title,
+            "Local"
+        );
     }
 
     #[tokio::test]

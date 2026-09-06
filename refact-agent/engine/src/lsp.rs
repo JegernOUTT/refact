@@ -120,36 +120,104 @@ fn workspace_lease_root(gcx: &Arc<GlobalContext>, root: &PathBuf) -> PathBuf {
     .unwrap_or_else(|| root.clone())
 }
 
+/// Why a workspace root could not be served, in terms a user can act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkspaceRootRejection {
+    /// Another engine already holds the exclusive lease for this root.
+    Busy { holder: String },
+    /// The lease itself could not be taken (permissions, full disk, ...).
+    LeaseUnavailable { error: String },
+}
+
+/// A workspace root the engine refused to serve, kept so the caller can tell the LSP client
+/// instead of only writing a line into the engine log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RejectedWorkspaceRoot {
+    pub root: PathBuf,
+    pub reason: WorkspaceRootRejection,
+}
+
+impl RejectedWorkspaceRoot {
+    /// User-facing text for `window/showMessage`.
+    ///
+    /// Deliberately free of the engine-lock cache path: the folder and the holder's pid/port are
+    /// the parts a user can act on, the lease file name is a sha256 nobody can use. The holder is
+    /// best-effort and legitimately reads as "unknown holder" when the lease file is unreadable.
+    pub fn client_message(&self) -> String {
+        match &self.reason {
+            WorkspaceRootRejection::Busy { holder } => format!(
+                "Refact: another Refact engine ({holder}) already serves the workspace folder {}. \
+                 This window will not index that folder, so completions and chat context for it \
+                 stay unavailable. Close the other editor window on this project, or start the \
+                 engine with --allow-shared-workspace to serve it anyway.",
+                self.root.display()
+            ),
+            WorkspaceRootRejection::LeaseUnavailable { error } => format!(
+                "Refact: could not take the workspace lease for the folder {} ({error}). This \
+                 window will not index that folder, so completions and chat context for it stay \
+                 unavailable.",
+                self.root.display()
+            ),
+        }
+    }
+}
+
+/// Result of trying to take the per-workspace leases for a set of roots.
+///
+/// A rejected root is *not* served — the lease semantics are unchanged — but it is returned here
+/// rather than silently dropped, so the caller can surface it to the editor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct WorkspaceLeaseOutcome {
+    pub accepted: Vec<PathBuf>,
+    pub rejected: Vec<RejectedWorkspaceRoot>,
+}
+
 pub(crate) fn acquire_workspace_leases(
     gcx: &Arc<GlobalContext>,
     roots: &[PathBuf],
-) -> Vec<PathBuf> {
+) -> WorkspaceLeaseOutcome {
     let info = crate::workspace_lease_info_for(&gcx.cmdline);
     let mut leases = gcx.workspace_leases.lock().unwrap();
-    let mut accepted = Vec::new();
+    let mut outcome = WorkspaceLeaseOutcome::default();
     for root in roots {
         let key = workspace_lease_root(gcx, root);
         if leases.holds(&key) {
-            accepted.push(root.clone());
+            outcome.accepted.push(root.clone());
             continue;
         }
         match crate::daemon::lock::try_acquire_workspace_lease(&key, &info) {
             Ok(lease) => {
                 leases.insert(lease);
-                accepted.push(root.clone());
+                outcome.accepted.push(root.clone());
             }
             Err(error) if gcx.cmdline.allow_shared_workspace => {
                 tracing::warn!(
                     "{error}; serving it anyway because --allow-shared-workspace is set"
                 );
-                accepted.push(root.clone());
+                outcome.accepted.push(root.clone());
             }
             Err(error) => {
                 tracing::error!("{error}; refusing to serve this workspace folder");
+                let reason = match &error {
+                    crate::daemon::lock::WorkspaceLeaseError::Busy(conflict) => {
+                        WorkspaceRootRejection::Busy {
+                            holder: conflict.holder_description(),
+                        }
+                    }
+                    crate::daemon::lock::WorkspaceLeaseError::Io { error, .. } => {
+                        WorkspaceRootRejection::LeaseUnavailable {
+                            error: error.to_string(),
+                        }
+                    }
+                };
+                outcome.rejected.push(RejectedWorkspaceRoot {
+                    root: root.clone(),
+                    reason,
+                });
             }
         }
     }
-    accepted
+    outcome
 }
 
 pub(crate) fn release_workspace_leases(gcx: &Arc<GlobalContext>, roots: &[PathBuf]) {
@@ -325,6 +393,22 @@ impl LspBackend {
         Ok(SuccessRes { success: true })
     }
 
+    /// Tells the editor about every workspace folder this engine refused to serve.
+    ///
+    /// `window/showMessage` at WARNING level, one message per rejected root, because the folder is
+    /// the actionable unit: a user with three roots and one busy root needs to know *which* one is
+    /// unserved. A `window/logMessage` copy goes along so the client's output panel keeps a record
+    /// even if the popup is dismissed.
+    async fn report_rejected_workspace_roots(&self, rejected: &[RejectedWorkspaceRoot]) {
+        for rejection in rejected {
+            let message = rejection.client_message();
+            self.client
+                .show_message(MessageType::WARNING, message.clone())
+                .await;
+            self.client.log_message(MessageType::WARNING, message).await;
+        }
+    }
+
     async fn ping_http_server(&self) -> Result<()> {
         let (port, http_client) = { (self.gcx.cmdline.http_port, self.gcx.http_client.clone()) };
 
@@ -372,10 +456,14 @@ impl LanguageServer for LspBackend {
                 }
             }
         }
-        let folders = canonical_workspace_roots(&acquire_workspace_leases(
-            &self.gcx,
-            &canonical_workspace_roots(&folders),
-        ));
+        let lease_outcome =
+            acquire_workspace_leases(&self.gcx, &canonical_workspace_roots(&folders));
+        let folders = canonical_workspace_roots(&lease_outcome.accepted);
+        // Deliberately non-fatal: refusing the whole session because one of several folders is
+        // busy is worse than serving the rest, and the multi-root case is exactly when this fires.
+        // The user still learns about it, which is the part that was missing.
+        self.report_rejected_workspace_roots(&lease_outcome.rejected)
+            .await;
         let (changed, dropped) = {
             let mut workspace_folders = self.gcx.documents_state.workspace_folders.lock().unwrap();
             let dropped = workspace_folders
@@ -565,7 +653,12 @@ impl LanguageServer for LspBackend {
             };
             removed.push(path);
         }
-        let added = acquire_workspace_leases(&self.gcx, &added);
+        let lease_outcome = acquire_workspace_leases(&self.gcx, &added);
+        // Same silent-drop pattern as initialize(): a folder added later must not disappear
+        // without a word either.
+        self.report_rejected_workspace_roots(&lease_outcome.rejected)
+            .await;
+        let added = lease_outcome.accepted;
         let changed = {
             let mut workspace_folders = self.gcx.documents_state.workspace_folders.lock().unwrap();
             apply_workspace_root_changes(&mut workspace_folders, &added, &removed)
@@ -928,6 +1021,158 @@ mod tests {
 
         shutdown_server(gcx, lsp_handle).await;
         ping_handle.abort();
+    }
+
+    struct LspLocksDirGuard {
+        previous: Option<std::ffi::OsString>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl LspLocksDirGuard {
+        fn set() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let previous = std::env::var_os(crate::daemon::lock::ENGINE_LOCKS_DIR_ENV);
+            std::env::set_var(crate::daemon::lock::ENGINE_LOCKS_DIR_ENV, dir.path());
+            Self {
+                previous,
+                _dir: dir,
+            }
+        }
+    }
+
+    impl Drop for LspLocksDirGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(crate::daemon::lock::ENGINE_LOCKS_DIR_ENV, value),
+                None => std::env::remove_var(crate::daemon::lock::ENGINE_LOCKS_DIR_ENV),
+            }
+        }
+    }
+
+    async fn make_lease_test_gcx(allow_shared_workspace: bool) -> Arc<GlobalContext> {
+        let mut gcx = crate::global_context::tests::make_test_gcx().await;
+        Arc::get_mut(&mut gcx)
+            .unwrap()
+            .cmdline
+            .allow_shared_workspace = allow_shared_workspace;
+        gcx
+    }
+
+    /// The whole point of the fix: a busy root must come back as `rejected`, not vanish.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn lsp_busy_workspace_root_is_reported_not_silently_dropped() {
+        let _locks = LspLocksDirGuard::set();
+        let gcx = make_lease_test_gcx(false).await;
+        let free = tempfile::tempdir().unwrap();
+        let busy = tempfile::tempdir().unwrap();
+        let free_root = crate::files_correction::canonical_path(free.path().to_string_lossy());
+        let busy_root = crate::files_correction::canonical_path(busy.path().to_string_lossy());
+        let blocker = crate::daemon::lock::try_acquire_workspace_lease(
+            &workspace_lease_root(&gcx, &busy_root),
+            &crate::daemon::lock::WorkspaceLeaseInfo::for_current_process(9101, 9102, "refact-lsp"),
+        )
+        .unwrap();
+
+        let outcome = acquire_workspace_leases(&gcx, &[free_root.clone(), busy_root.clone()]);
+
+        assert_eq!(outcome.accepted, vec![free_root]);
+        assert_eq!(outcome.rejected.len(), 1, "busy root must be reported");
+        let rejection = &outcome.rejected[0];
+        assert_eq!(rejection.root, busy_root);
+        let WorkspaceRootRejection::Busy { holder } = &rejection.reason else {
+            panic!("expected a busy rejection, got {:?}", rejection.reason);
+        };
+        assert!(
+            holder.contains(&format!("pid {}", std::process::id()))
+                && holder.contains("http port 9101"),
+            "holder must identify the engine that already serves the folder: {holder}"
+        );
+        drop(blocker);
+    }
+
+    /// The message a user actually sees: names the folder and the holder, and does not leak the
+    /// sha256 lease path under the cache directory.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn lsp_busy_workspace_root_message_names_folder_and_holder_without_cache_paths() {
+        let _locks = LspLocksDirGuard::set();
+        let gcx = make_lease_test_gcx(false).await;
+        let busy = tempfile::tempdir().unwrap();
+        let busy_root = crate::files_correction::canonical_path(busy.path().to_string_lossy());
+        let lease_key = workspace_lease_root(&gcx, &busy_root);
+        let lease_path = crate::daemon::lock::workspace_lease_path(&lease_key);
+        let blocker = crate::daemon::lock::try_acquire_workspace_lease(
+            &lease_key,
+            &crate::daemon::lock::WorkspaceLeaseInfo::for_current_process(9201, 9202, "refact-lsp"),
+        )
+        .unwrap();
+
+        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&busy_root));
+
+        let message = outcome.rejected[0].client_message();
+        assert!(message.contains(&busy_root.display().to_string()));
+        assert!(message.contains(&format!("pid {}", std::process::id())));
+        assert!(message.contains("http port 9201"));
+        assert!(message.contains("--allow-shared-workspace"));
+        assert!(
+            !message.contains(&lease_path.display().to_string()),
+            "the lease file path is a sha256 the user cannot act on: {message}"
+        );
+        drop(blocker);
+    }
+
+    /// `--allow-shared-workspace` keeps its old behaviour exactly: the root is served and nothing
+    /// is reported to the client.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn lsp_allow_shared_workspace_still_accepts_a_busy_root() {
+        let _locks = LspLocksDirGuard::set();
+        let gcx = make_lease_test_gcx(true).await;
+        let busy = tempfile::tempdir().unwrap();
+        let busy_root = crate::files_correction::canonical_path(busy.path().to_string_lossy());
+        let blocker = crate::daemon::lock::try_acquire_workspace_lease(
+            &workspace_lease_root(&gcx, &busy_root),
+            &crate::daemon::lock::WorkspaceLeaseInfo::for_current_process(9301, 9302, "refact-lsp"),
+        )
+        .unwrap();
+
+        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&busy_root));
+
+        assert_eq!(outcome.accepted, vec![busy_root]);
+        assert!(outcome.rejected.is_empty());
+        drop(blocker);
+    }
+
+    /// Lease semantics are unchanged: a free root is still taken exclusively, and re-asking for a
+    /// root this engine already holds is still accepted rather than reported as busy against
+    /// itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn lsp_free_workspace_root_is_accepted_and_held() {
+        let _locks = LspLocksDirGuard::set();
+        let gcx = make_lease_test_gcx(false).await;
+        let free = tempfile::tempdir().unwrap();
+        let free_root = crate::files_correction::canonical_path(free.path().to_string_lossy());
+
+        let outcome = acquire_workspace_leases(&gcx, std::slice::from_ref(&free_root));
+        assert_eq!(outcome.accepted, vec![free_root.clone()]);
+        assert!(outcome.rejected.is_empty());
+        assert!(
+            crate::daemon::lock::probe_workspace_lease(&workspace_lease_root(&gcx, &free_root))
+                .is_some(),
+            "the lease must actually be held"
+        );
+
+        let again = acquire_workspace_leases(&gcx, std::slice::from_ref(&free_root));
+        assert_eq!(again.accepted, vec![free_root.clone()]);
+        assert!(again.rejected.is_empty());
+
+        release_workspace_leases(&gcx, std::slice::from_ref(&free_root));
+        assert!(
+            crate::daemon::lock::probe_workspace_lease(&workspace_lease_root(&gcx, &free_root))
+                .is_none()
+        );
     }
 
     #[test]

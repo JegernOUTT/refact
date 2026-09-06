@@ -110,8 +110,22 @@ struct MemoryOpsCacheEntry {
     state: MemoryOpsState,
 }
 
-static MEMORY_OPS_CACHE: std::sync::Mutex<Option<MemoryOpsCacheEntry>> =
-    std::sync::Mutex::new(None);
+/// How many project roots keep a parsed `MemoryOpsState` in memory at once.
+///
+/// One process serves many project roots (the daemon and its workers routinely
+/// hold more than one), so a single global slot thrashed to a ~0% hit rate as
+/// soon as two roots were active. Each entry holds a whole `MemoryOpsState`,
+/// which is far heavier than the `MAX_CACHED_TRAJECTORY_DIRECTORIES = 4096`
+/// path entries in `chat::trajectory_index`, so the bound here is small: 32
+/// comfortably covers the hot set of roots a single process touches while
+/// capping worst-case retention at 32 parsed queues.
+const MEMORY_OPS_CACHE_CAPACITY: usize = 32;
+
+/// Least-recently-used first, most-recently-used last. Capped at
+/// `MEMORY_OPS_CACHE_CAPACITY`, so the linear scans below are bounded and
+/// cheaper than a hash lookup plus a separate recency structure.
+static MEMORY_OPS_CACHE: std::sync::Mutex<Vec<MemoryOpsCacheEntry>> =
+    std::sync::Mutex::new(Vec::new());
 
 async fn memory_ops_file_stamp(project_root: &Path) -> Option<MemoryOpsFileStamp> {
     let metadata = fs::metadata(memory_ops_path(project_root)).await.ok()?;
@@ -127,24 +141,57 @@ fn cached_memory_ops_state(
     project_root: &Path,
     stamp: &MemoryOpsFileStamp,
 ) -> Option<MemoryOpsState> {
-    let cache = MEMORY_OPS_CACHE
+    let mut cache = MEMORY_OPS_CACHE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache
-        .as_ref()
-        .filter(|entry| entry.root == project_root && &entry.stamp == stamp)
-        .map(|entry| entry.state.clone())
+    memory_ops_cache_lookup(&mut cache, project_root, stamp)
 }
 
 fn store_memory_ops_state(project_root: &Path, stamp: MemoryOpsFileStamp, state: &MemoryOpsState) {
     let mut cache = MEMORY_OPS_CACHE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *cache = Some(MemoryOpsCacheEntry {
+    memory_ops_cache_store(&mut cache, project_root, stamp, state);
+}
+
+/// Lookup half of the cache, split out from the global so it can be tested on a
+/// private `Vec` without racing the other tests that share `MEMORY_OPS_CACHE`.
+fn memory_ops_cache_lookup(
+    cache: &mut Vec<MemoryOpsCacheEntry>,
+    project_root: &Path,
+    stamp: &MemoryOpsFileStamp,
+) -> Option<MemoryOpsState> {
+    let index = cache.iter().position(|entry| entry.root == project_root)?;
+    // A stamp mismatch means the file moved on: never serve it, and drop the
+    // entry so a superseded state cannot occupy the bound.
+    if cache[index].stamp != *stamp {
+        cache.remove(index);
+        return None;
+    }
+    let entry = cache.remove(index);
+    let state = entry.state.clone();
+    cache.push(entry);
+    Some(state)
+}
+
+/// Store half of the cache. See [`memory_ops_cache_lookup`].
+fn memory_ops_cache_store(
+    cache: &mut Vec<MemoryOpsCacheEntry>,
+    project_root: &Path,
+    stamp: MemoryOpsFileStamp,
+    state: &MemoryOpsState,
+) {
+    if let Some(index) = cache.iter().position(|entry| entry.root == project_root) {
+        cache.remove(index);
+    }
+    cache.push(MemoryOpsCacheEntry {
         root: project_root.to_path_buf(),
         stamp,
         state: state.clone(),
     });
+    while cache.len() > MEMORY_OPS_CACHE_CAPACITY {
+        cache.remove(0);
+    }
 }
 
 fn memory_ops_path(project_root: &Path) -> PathBuf {
@@ -1151,7 +1198,6 @@ pub async fn apply_artifact_decisions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use crate::buddy::memory_lifecycle::{
         MemoryCreatePayload, MemoryLifecycleOp, MemoryLifecyclePayload, MemoryOpStatus,
         MemoryOpType, MEMORY_OP_EVIDENCE_MAX_CHARS, MEMORY_OP_EXACT_DUPLICATE_REASON,
@@ -1961,7 +2007,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial(memory_ops_cache)]
     async fn load_memory_ops_serves_unchanged_file_from_cache() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1983,6 +2028,147 @@ mod tests {
         tokio::fs::write(&path, "not json\n").await.unwrap();
         let reread = load_memory_ops(root).await;
         assert!(reread.ops.is_empty());
+    }
+
+    /// The bug: the cache used to be a single global slot keyed by nothing, so
+    /// loading a second root evicted the first and the daemon (which serves
+    /// many roots from one process) ran at a ~0% hit rate. Both roots must now
+    /// stay cached at the same time.
+    #[tokio::test]
+    async fn load_memory_ops_keeps_two_roots_cached_simultaneously() {
+        let first_dir = tempfile::tempdir().unwrap();
+        let second_dir = tempfile::tempdir().unwrap();
+        let first_root = first_dir.path();
+        let second_root = second_dir.path();
+
+        let first_op = op_with_time(
+            "op-first-root",
+            MemorySource::MemoryGarden,
+            MemoryOpStatus::Pending,
+            Utc::now(),
+        );
+        let second_op = op_with_time(
+            "op-second-root",
+            MemorySource::Trajectory,
+            MemoryOpStatus::Pending,
+            Utc::now(),
+        );
+        write_memory_ops_records_for_test(first_root, vec![first_op.clone()]).await;
+        write_memory_ops_records_for_test(second_root, vec![second_op.clone()]).await;
+
+        let first_state = load_memory_ops(first_root).await;
+        let second_state = load_memory_ops(second_root).await;
+
+        let first_stamp = memory_ops_file_stamp(first_root).await.unwrap();
+        let second_stamp = memory_ops_file_stamp(second_root).await.unwrap();
+
+        // The first root must survive the second root's load.
+        assert_eq!(
+            cached_memory_ops_state(first_root, &first_stamp),
+            Some(first_state),
+            "first root was evicted by a load for a different root"
+        );
+        assert_eq!(
+            cached_memory_ops_state(second_root, &second_stamp),
+            Some(second_state),
+            "second root was not cached"
+        );
+
+        // And the two entries stay distinct rather than aliasing each other.
+        assert_eq!(
+            cached_memory_ops_state(first_root, &first_stamp)
+                .unwrap()
+                .ops,
+            vec![first_op.normalized()]
+        );
+        assert_eq!(
+            cached_memory_ops_state(second_root, &second_stamp)
+                .unwrap()
+                .ops,
+            vec![second_op.normalized()]
+        );
+    }
+
+    /// Per-root keying must not weaken stamp validation: a root whose file
+    /// changed is still a miss, and the stale entry is dropped.
+    #[test]
+    fn memory_ops_cache_changed_stamp_invalidates_entry() {
+        let mut cache = Vec::new();
+        let root = Path::new("/tmp/refact-memory-ops-cache-stamp");
+        let stamp = MemoryOpsFileStamp {
+            len: 10,
+            modified: None,
+            identity: None,
+        };
+        let state = MemoryOpsState::default();
+        memory_ops_cache_store(&mut cache, root, stamp.clone(), &state);
+        assert_eq!(
+            memory_ops_cache_lookup(&mut cache, root, &stamp),
+            Some(state)
+        );
+
+        let changed = MemoryOpsFileStamp {
+            len: 11,
+            modified: None,
+            identity: None,
+        };
+        assert_eq!(
+            memory_ops_cache_lookup(&mut cache, root, &changed),
+            None,
+            "a changed stamp must never be served from cache"
+        );
+        assert!(
+            cache.is_empty(),
+            "the superseded entry must be dropped, not left occupying the bound"
+        );
+    }
+
+    /// The cache is bounded: past the cap the least-recently-used root is
+    /// evicted and the cache never grows beyond `MEMORY_OPS_CACHE_CAPACITY`.
+    #[test]
+    fn memory_ops_cache_evicts_least_recently_used_past_capacity() {
+        let mut cache = Vec::new();
+        let stamp = MemoryOpsFileStamp {
+            len: 1,
+            modified: None,
+            identity: None,
+        };
+        let state = MemoryOpsState::default();
+        let root_at = |index: usize| PathBuf::from(format!("/tmp/refact-memory-ops-cache/{index}"));
+
+        for index in 0..MEMORY_OPS_CACHE_CAPACITY {
+            memory_ops_cache_store(&mut cache, &root_at(index), stamp.clone(), &state);
+        }
+        assert_eq!(cache.len(), MEMORY_OPS_CACHE_CAPACITY);
+
+        // Touch root 0 so it is no longer the least-recently-used entry.
+        assert!(memory_ops_cache_lookup(&mut cache, &root_at(0), &stamp).is_some());
+
+        memory_ops_cache_store(
+            &mut cache,
+            &root_at(MEMORY_OPS_CACHE_CAPACITY),
+            stamp,
+            &state,
+        );
+
+        assert_eq!(
+            cache.len(),
+            MEMORY_OPS_CACHE_CAPACITY,
+            "cache grew past its bound"
+        );
+        let cached_roots = cache.iter().map(|entry| &entry.root).collect::<Vec<_>>();
+        assert!(
+            !cached_roots.contains(&&root_at(1)),
+            "the least-recently-used root should have been evicted"
+        );
+        assert!(
+            cached_roots.contains(&&root_at(0)),
+            "a recently touched root must not be evicted"
+        );
+        assert!(
+            cached_roots.contains(&&root_at(MEMORY_OPS_CACHE_CAPACITY)),
+            "the newest root must be cached"
+        );
     }
 
     #[tokio::test]
@@ -2550,7 +2736,6 @@ mod tests {
     /// eats every record appended since it read, which shows up here as large
     /// contiguous runs of missing `child-*` ops.
     #[tokio::test]
-    #[serial(memory_ops_cache)]
     async fn cross_process_appends_survive_concurrent_compaction() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
