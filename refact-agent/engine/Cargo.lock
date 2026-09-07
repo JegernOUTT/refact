@@ -4206,6 +4206,7 @@ dependencies = [
  "refact-core",
  "refact-git-intel",
  "rusqlite",
+ "same-file",
  "serde",
  "serde_json",
  "sha2",

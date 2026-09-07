@@ -8,6 +8,7 @@ use std::time::Instant;
 
 use refact_codegraph_parsers::{RawRef, Resolver};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use same_file::Handle;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
@@ -379,54 +380,26 @@ pub fn try_acquire_exclusive_lease(db_path: &Path) -> Result<Option<DatabaseLeas
     acquire_lease(db_path, true)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileFingerprint {
-    dev: u64,
-    ino: u64,
-}
-
-#[cfg(unix)]
-fn fingerprint_of(metadata: &fs::Metadata) -> Option<FileFingerprint> {
-    use std::os::unix::fs::MetadataExt;
-    Some(FileFingerprint {
-        dev: metadata.dev(),
-        ino: metadata.ino(),
-    })
-}
-
-#[cfg(windows)]
-fn fingerprint_of(metadata: &fs::Metadata) -> Option<FileFingerprint> {
-    use std::os::windows::fs::MetadataExt;
-    match (metadata.volume_serial_number(), metadata.file_index()) {
-        (Some(volume), Some(index)) => Some(FileFingerprint {
-            dev: volume as u64,
-            ino: index,
-        }),
-        _ => None,
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn fingerprint_of(_metadata: &fs::Metadata) -> Option<FileFingerprint> {
-    None
-}
-
 /// Identity of the sqlite file this connection was opened on. A retained descriptor lets us
 /// compare the inode we are still writing to against whatever now lives at the path.
+///
+/// `same_file::Handle` keeps its file open for as long as the identity lives, which is what makes
+/// the comparison sound: Windows file index numbers are only stable while a handle is held, and
+/// the platform-specific identity syscalls behind it are stable API on every target.
 ///
 /// It is immutable after `capture` and shared behind an `Arc`, so callers can check for a
 /// replacement without taking the connection mutex the indexer holds for whole batches.
 #[derive(Debug, Default)]
 pub struct StoreIdentity {
     path: Option<PathBuf>,
-    handle: Option<File>,
+    handle: Option<Handle>,
 }
 
 impl StoreIdentity {
     fn capture(path: &Path) -> Self {
         Self {
             path: Some(path.to_path_buf()),
-            handle: File::open(path).ok(),
+            handle: Handle::from_path(path).ok(),
         }
     }
 
@@ -434,14 +407,8 @@ impl StoreIdentity {
         let (Some(path), Some(handle)) = (self.path.as_ref(), self.handle.as_ref()) else {
             return false;
         };
-        let Some(expected) = handle.metadata().ok().as_ref().and_then(fingerprint_of) else {
-            return false;
-        };
-        match fs::metadata(path) {
-            Ok(metadata) => match fingerprint_of(&metadata) {
-                Some(current) => current != expected,
-                None => false,
-            },
+        match Handle::from_path(path) {
+            Ok(current) => current != *handle,
             Err(err) if err.kind() == ErrorKind::NotFound => true,
             Err(err) => {
                 warn!("codegraph identity check for {path:?} failed: {err}");
@@ -2873,6 +2840,10 @@ mod tests {
         );
     }
 
+    // SQLite opens its database without FILE_SHARE_DELETE, so on Windows the file cannot be
+    // unlinked or renamed out from under a live connection at all. The replacement this detects
+    // is unreachable there, and the fixture itself would fail with a sharing violation.
+    #[cfg(unix)]
     #[test]
     fn database_replaced_detects_delete_rename_and_replace() {
         let dir = tempfile::tempdir().unwrap();

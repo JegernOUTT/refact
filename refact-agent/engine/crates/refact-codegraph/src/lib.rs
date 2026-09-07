@@ -2023,6 +2023,9 @@ mod tests {
         assert!(defs.iter().any(|def| def.name() == "ready"));
     }
 
+    // Recreating the file under a live connection is only possible where unlinking an open file
+    // is: SQLite holds the database without FILE_SHARE_DELETE on Windows.
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_reopens_both_stores_and_keeps_the_queue() {
         let dir = tempfile::tempdir().unwrap();
@@ -2070,6 +2073,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn failed_reopen_reports_unavailable_and_does_not_spin() {
         let dir = tempfile::tempdir().unwrap();

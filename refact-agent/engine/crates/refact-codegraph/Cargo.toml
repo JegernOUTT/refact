@@ -17,6 +17,7 @@ sha2 = "0.10.8"
 hex = "0.4.3"
 rusqlite = { version = "0.31.0", features = ["bundled"] }
 fd-lock = "4.0.4"
+same-file = "1.0.6"
 petgraph = "0.6"
 
 [dev-dependencies]
