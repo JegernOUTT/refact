@@ -498,28 +498,110 @@ fn build_mcp_lazy_hint(total: usize) -> String {
 }
 
 fn inject_mcp_lazy_hint(session: &mut ChatSession, total: usize) -> bool {
-    if session.messages.iter().any(|message| {
+    let active = match refact_core::active_context::active_context(&session.messages) {
+        Ok(active) => active.messages,
+        Err(error) => {
+            warn!("Skipping MCP lazy hint for {}: {}", session.chat_id, error);
+            return false;
+        }
+    };
+    if active.iter().any(|message| {
         message.role == "cd_instruction" && message.tool_call_id == MCP_LAZY_INDEX_MARKER
     }) {
         return false;
     }
 
-    let insert_pos = session
-        .messages
+    let insert_pos = active
         .iter()
         .position(|message| message.role == "system")
         .map(|index| index + 1)
         .unwrap_or(0);
-    session.insert_message(
-        insert_pos,
-        ChatMessage {
-            role: "cd_instruction".to_string(),
-            tool_call_id: MCP_LAZY_INDEX_MARKER.to_string(),
-            content: ChatContent::SimpleText(build_mcp_lazy_hint(total)),
-            ..Default::default()
-        },
-    );
-    true
+    let hint = ChatMessage {
+        role: "cd_instruction".to_string(),
+        tool_call_id: MCP_LAZY_INDEX_MARKER.to_string(),
+        content: ChatContent::SimpleText(build_mcp_lazy_hint(total)),
+        ..Default::default()
+    };
+    match session.insert_active_message(insert_pos, hint) {
+        Ok(_) => true,
+        Err(error) => {
+            warn!("Failed to inject MCP lazy hint: {}", error);
+            false
+        }
+    }
+}
+
+fn is_preamble_conversation_start(message: &ChatMessage) -> bool {
+    message.role == "user"
+        || message.role == "assistant"
+        || message.role == crate::chat::internal_roles::EVENT_ROLE
+}
+
+fn preamble_already_present(active_view: &[ChatMessage], msg: &ChatMessage) -> bool {
+    if !msg.message_id.is_empty() && active_view.iter().any(|m| m.message_id == msg.message_id) {
+        return true;
+    }
+    match msg.role.as_str() {
+        "assistant" | "compression_report" => true,
+        "system" => active_view.first().is_some_and(|m| m.role == "system"),
+        "cd_instruction" => active_view.iter().any(|m| m.role == "cd_instruction"),
+        "context_file" => active_view
+            .iter()
+            .any(|m| m.role == "context_file" && m.tool_call_id == msg.tool_call_id),
+        _ => false,
+    }
+}
+
+/// Persist the preamble messages the prompt mixer placed ahead of the conversation
+/// into the active view, so they reach the model even after a context rebuild.
+fn persist_preamble_messages(
+    session: &mut ChatSession,
+    messages_with_preamble: &[ChatMessage],
+) -> usize {
+    let first_conv_idx = messages_with_preamble
+        .iter()
+        .position(is_preamble_conversation_start)
+        .unwrap_or(messages_with_preamble.len());
+    let Ok(active) = refact_core::active_context::active_context(&session.messages) else {
+        return 0;
+    };
+    let mut active_view = active.messages;
+    let mut system_insert_idx = 0;
+    let mut context_insert_idx = active_view
+        .iter()
+        .position(|m| m.role == "system")
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let mut inserted = 0;
+    for msg in messages_with_preamble.iter().take(first_conv_idx) {
+        if preamble_already_present(&active_view, msg) {
+            continue;
+        }
+        let insert_idx = if msg.role == "system" {
+            let idx = system_insert_idx;
+            system_insert_idx += 1;
+            context_insert_idx += 1;
+            idx
+        } else {
+            let idx = context_insert_idx;
+            context_insert_idx += 1;
+            idx
+        };
+        match session.insert_active_message(insert_idx, msg.clone()) {
+            Ok(_) => {
+                active_view.insert(insert_idx.min(active_view.len()), msg.clone());
+                inserted += 1;
+            }
+            Err(error) => {
+                warn!(
+                    "Failed to persist preamble message ({}): {}",
+                    msg.role, error
+                );
+                break;
+            }
+        }
+    }
+    inserted
 }
 
 fn enrichment_insertion_index(
@@ -559,23 +641,43 @@ pub fn prepare_session_preamble_and_knowledge(
     session_arc: Arc<AMutex<ChatSession>>,
 ) -> futures::future::BoxFuture<'static, ()> {
     Box::pin(async move {
-        prepare_session_preamble_and_knowledge_inner(app, session_arc).await;
+        ensure_session_preamble_inner(app.clone(), session_arc.clone()).await;
+        prepare_session_knowledge_inner(app, session_arc).await;
     })
 }
 
-async fn prepare_session_preamble_and_knowledge_inner(
+/// A rebuilt or handed-off context starts without its preamble, so the generation
+/// loop re-checks the active head before every request; the full preamble pipeline
+/// only runs when the system prompt is actually missing.
+pub fn ensure_session_preamble(
     app: AppState,
     session_arc: Arc<AMutex<ChatSession>>,
-) {
+) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let system_missing = {
+            let session = session_arc.lock().await;
+            refact_core::active_context::active_context(&session.messages)
+                .is_ok_and(|active| !active.messages.first().is_some_and(|m| m.role == "system"))
+        };
+        if system_missing {
+            ensure_session_preamble_inner(app, session_arc).await;
+        }
+    })
+}
+
+async fn ensure_session_preamble_inner(app: AppState, session_arc: Arc<AMutex<ChatSession>>) {
     let gcx = app.gcx.clone();
     let (thread, chat_id, has_system, has_project_context) = {
         let session = session_arc.lock().await;
-        let has_sys = session
-            .messages
-            .first()
-            .map(|m| m.role == "system")
-            .unwrap_or(false);
-        let has_proj = session.messages.iter().any(|m| {
+        let active = match refact_core::active_context::active_context(&session.messages) {
+            Ok(active) => active.messages,
+            Err(error) => {
+                warn!("Skipping preamble for {}: {}", session.chat_id, error);
+                return;
+            }
+        };
+        let has_sys = active.first().is_some_and(|m| m.role == "system");
+        let has_proj = active.iter().any(|m| {
             m.role == "context_file"
                 && m.tool_call_id == crate::chat::system_context::PROJECT_CONTEXT_MARKER
         });
@@ -644,7 +746,13 @@ async fn prepare_session_preamble_and_knowledge_inner(
 
         let messages = {
             let session = session_arc.lock().await;
-            session.messages.clone()
+            match refact_core::active_context::active_context(&session.messages) {
+                Ok(active) => active.messages,
+                Err(error) => {
+                    warn!("Skipping preamble for {}: {}", session.chat_id, error);
+                    return;
+                }
+            }
         };
         let mut has_rag_results = crate::scratchpads::scratchpad_utils::HasRagResults::new();
         let (messages_with_preamble, skills_info) =
@@ -660,75 +768,12 @@ async fn prepare_session_preamble_and_knowledge_inner(
             )
             .await;
 
-        let first_conv_idx = messages_with_preamble
-            .iter()
-            .position(|m| {
-                m.role == "user"
-                    || m.role == "assistant"
-                    || m.role == crate::chat::internal_roles::EVENT_ROLE
-            })
-            .unwrap_or(messages_with_preamble.len());
-
-        {
-            let mut session = session_arc.lock().await;
-            session.skills_available_count = skills_info.available_count;
-            session.skills_included = skills_info.included_names.clone();
-        }
-
-        if first_conv_idx > 0 {
-            let mut session = session_arc.lock().await;
-
-            let mut system_insert_idx = 0;
-            let mut context_insert_idx = session
-                .messages
-                .iter()
-                .position(|m| m.role == "system")
-                .map(|i| i + 1)
-                .unwrap_or(0);
-
-            let mut inserted = 0;
-            for msg in messages_with_preamble.iter().take(first_conv_idx) {
-                if msg.role == "assistant" {
-                    continue;
-                }
-                if msg.role == "system"
-                    && session
-                        .messages
-                        .first()
-                        .map(|m| m.role == "system")
-                        .unwrap_or(false)
-                {
-                    continue;
-                }
-                if msg.role == "cd_instruction"
-                    && session.messages.iter().any(|m| m.role == "cd_instruction")
-                {
-                    continue;
-                }
-                if msg.role == "context_file"
-                    && session
-                        .messages
-                        .iter()
-                        .any(|m| m.role == "context_file" && m.tool_call_id == msg.tool_call_id)
-                {
-                    continue;
-                }
-                let insert_idx = if msg.role == "system" {
-                    let idx = system_insert_idx;
-                    system_insert_idx += 1;
-                    context_insert_idx += 1;
-                    idx
-                } else {
-                    let idx = context_insert_idx;
-                    context_insert_idx += 1;
-                    idx
-                };
-                session.insert_message(insert_idx, msg.clone());
-                inserted += 1;
-            }
-            if inserted > 0 {
-                info!("Saved {} preamble messages to session", inserted);
-            }
+        let mut session = session_arc.lock().await;
+        session.skills_available_count = skills_info.available_count;
+        session.skills_included = skills_info.included_names.clone();
+        let inserted = persist_preamble_messages(&mut session, &messages_with_preamble);
+        if inserted > 0 {
+            info!("Saved {} preamble messages to session", inserted);
         }
     }
 
@@ -743,6 +788,14 @@ async fn prepare_session_preamble_and_knowledge_inner(
             info!("Injected MCP lazy discovery hint with {} tools", mcp_total);
         }
     }
+}
+
+async fn prepare_session_knowledge_inner(app: AppState, session_arc: Arc<AMutex<ChatSession>>) {
+    let gcx = app.gcx.clone();
+    let (thread, chat_id) = {
+        let session = session_arc.lock().await;
+        (session.thread.clone(), session.chat_id.clone())
+    };
 
     let (
         last_is_user,
@@ -1707,6 +1760,9 @@ pub fn start_generation(
                 }
                 refreshed
             };
+
+            // Rebuilds and handoffs replace the conversation but not the preamble.
+            ensure_session_preamble(app.clone(), session_arc.clone()).await;
 
             if user_stop_requested(&session_arc).await {
                 break;
@@ -3898,6 +3954,147 @@ mod tests {
             .content
             .content_text_only()
             .contains(&format!("~{} tokens remaining", 10000 - used)));
+    }
+
+    fn identified(id: &str, mut message: ChatMessage) -> ChatMessage {
+        message.message_id = id.to_string();
+        message
+    }
+
+    fn marked_context_file(id: &str, marker: &str) -> ChatMessage {
+        let mut message = ChatMessage::new("context_file".into(), format!("{marker} files"));
+        message.message_id = id.to_string();
+        message.tool_call_id = marker.to_string();
+        message
+    }
+
+    /// A handed-off chat starts as a single reconstruction report whose payload begins
+    /// with context files, exactly like the mode-transition destination.
+    fn handed_off_session() -> ChatSession {
+        use refact_core::active_context::{make_reconstruction_report, ReconstructionMetadata};
+        let payload = vec![
+            identified(
+                "rebuilt-files",
+                ChatMessage::new("context_file".into(), "rebuilt files".into()),
+            ),
+            identified(
+                "rebuilt-memory",
+                ChatMessage::new("context_file".into(), "rebuilt memory".into()),
+            ),
+            identified("previous", make_user_msg("## Previous Conversation")),
+            identified("summary", make_user_msg("## Summary")),
+        ];
+        let mut session = ChatSession::new("handoff-destination".into());
+        session.add_message(ChatMessage::new("system".into(), "archived prompt".into()));
+        session.add_message(
+            make_reconstruction_report(payload, ReconstructionMetadata::default()).unwrap(),
+        );
+        session
+    }
+
+    fn active_roles(session: &ChatSession) -> Vec<String> {
+        refact_core::active_context::active_context(&session.messages)
+            .unwrap()
+            .messages
+            .iter()
+            .map(|m| m.role.clone())
+            .collect()
+    }
+
+    #[test]
+    fn preamble_lands_at_the_head_of_a_reconstructed_context() {
+        let mut session = handed_off_session();
+        let archive = serde_json::to_value(&session.messages[0]).unwrap();
+        let report_id = session.messages[1].message_id.clone();
+        let mut events = session.subscribe();
+        let active = refact_core::active_context::active_context(&session.messages)
+            .unwrap()
+            .messages;
+        let mut with_preamble = vec![ChatMessage::new("system".into(), "fresh prompt".into())];
+        with_preamble.extend(active[..2].iter().cloned());
+        with_preamble.push(marked_context_file(
+            "project",
+            crate::chat::system_context::PROJECT_CONTEXT_MARKER,
+        ));
+        with_preamble.push(marked_context_file("memories", "memories_context"));
+        with_preamble.extend(active[2..].iter().cloned());
+
+        assert_eq!(persist_preamble_messages(&mut session, &with_preamble), 3);
+        assert_eq!(
+            active_roles(&session),
+            vec![
+                "system",
+                "context_file",
+                "context_file",
+                "context_file",
+                "context_file",
+                "user",
+                "user"
+            ]
+        );
+        let active = refact_core::active_context::active_context(&session.messages)
+            .unwrap()
+            .messages;
+        assert_eq!(active[0].content.content_text_only(), "fresh prompt");
+        assert_eq!(
+            active[1].tool_call_id,
+            crate::chat::system_context::PROJECT_CONTEXT_MARKER
+        );
+        assert_eq!(active[2].tool_call_id, "memories_context");
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(serde_json::to_value(&session.messages[0]).unwrap(), archive);
+        assert_eq!(
+            session
+                .messages
+                .iter()
+                .filter(|m| m.role == "compression_report")
+                .count(),
+            1
+        );
+        let linearized =
+            crate::chat::linearize::apply_summarization_linearize(session.messages.clone())
+                .unwrap();
+        assert!(crate::chat::history_limit::validate_chat_history(&linearized).is_ok());
+        assert_eq!(
+            crate::chat::trajectories::first_system_prompt(&linearized).as_deref(),
+            Some("fresh prompt")
+        );
+
+        let mut updated_report = 0;
+        while let Ok(event) = events.try_recv() {
+            let event: serde_json::Value = serde_json::from_str(&event).unwrap();
+            assert_ne!(event["type"], "message_added");
+            if event["type"] == "message_updated" {
+                assert_eq!(event["message_id"], report_id);
+                updated_report += 1;
+            }
+        }
+        assert_eq!(updated_report, 3);
+
+        assert_eq!(persist_preamble_messages(&mut session, &with_preamble), 0);
+    }
+
+    #[test]
+    fn mcp_lazy_hint_targets_the_active_context() {
+        let mut session = handed_off_session();
+        let mut archived_hint = ChatMessage::new("cd_instruction".into(), "archived".into());
+        archived_hint.tool_call_id = MCP_LAZY_INDEX_MARKER.into();
+        session.insert_message(1, archived_hint);
+        assert_eq!(
+            persist_preamble_messages(
+                &mut session,
+                &[ChatMessage::new("system".into(), "fresh prompt".into())]
+            ),
+            1
+        );
+
+        assert!(inject_mcp_lazy_hint(&mut session, 7));
+        assert_eq!(
+            active_roles(&session)[..3],
+            ["system", "cd_instruction", "context_file"]
+        );
+        assert!(!inject_mcp_lazy_hint(&mut session, 7));
+        assert_eq!(session.messages.len(), 3);
     }
 
     #[tokio::test]

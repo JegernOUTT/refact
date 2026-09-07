@@ -2349,6 +2349,48 @@ impl ChatSession {
         self.touch();
     }
 
+    /// Insert into the active view: inside the reconstructed payload when a boundary
+    /// hides the raw head, otherwise into the raw history at the same index.
+    pub fn insert_active_message(
+        &mut self,
+        active_index: usize,
+        mut message: ChatMessage,
+    ) -> Result<refact_core::active_context::MessageOrigin, String> {
+        use refact_core::active_context::MessageOrigin;
+        if message.message_id.is_empty() {
+            message.message_id = Uuid::new_v4().to_string();
+        }
+        let (messages, origin) = refact_core::active_context::insert_active_message(
+            &self.messages,
+            active_index,
+            message.clone(),
+        )
+        .map_err(|error| error.to_string())?;
+        let affects_goal = message_affects_goal_projection(&message);
+        self.messages = messages;
+        if affects_goal {
+            self.rebuild_goal_projection_from_messages();
+        }
+        match origin {
+            MessageOrigin::Stored { message_index } => {
+                self.emit(ChatEvent::MessageAdded {
+                    message,
+                    index: message_index,
+                });
+            }
+            MessageOrigin::ReportPayload { report_index, .. } => {
+                let report = self.messages[report_index].clone();
+                self.emit(ChatEvent::MessageUpdated {
+                    message_id: report.message_id.clone(),
+                    message: report,
+                });
+            }
+        }
+        self.increment_version();
+        self.touch();
+        Ok(origin)
+    }
+
     fn mutable_message_start(&self) -> Option<usize> {
         refact_core::active_context::active_context(&self.messages)
             .ok()

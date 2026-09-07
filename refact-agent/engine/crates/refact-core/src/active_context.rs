@@ -405,6 +405,23 @@ fn same_messages(left: &[ChatMessage], right: &[ChatMessage]) -> bool {
     serde_json::to_value(left).ok() == serde_json::to_value(right).ok()
 }
 
+fn store_payload_messages(
+    report: &mut ChatMessage,
+    payload: Vec<ChatMessage>,
+) -> Result<(), ActiveContextError> {
+    validate_reconstruction_payload(&payload)?;
+    let value = serde_json::to_value(payload)
+        .map_err(|_| ActiveContextError::InvalidWriteback("serialization failed".into()))?;
+    report
+        .extra
+        .get_mut(COMPRESSION_REPORT_KEY)
+        .and_then(|v| v.get_mut("payload"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| ActiveContextError::InvalidWriteback("missing payload".into()))?
+        .insert("messages".into(), value);
+    Ok(())
+}
+
 pub fn writeback_active_context(
     stored: &[ChatMessage],
     original: &ActiveContext,
@@ -497,17 +514,8 @@ pub fn writeback_active_context(
         }
     }
     let result = if let Some(index) = original.report_index {
-        validate_reconstruction_payload(&payload)?;
         let mut result = stored[..=index].to_vec();
-        let value = serde_json::to_value(payload)
-            .map_err(|_| ActiveContextError::InvalidWriteback("serialization failed".into()))?;
-        result[index]
-            .extra
-            .get_mut(COMPRESSION_REPORT_KEY)
-            .and_then(|v| v.get_mut("payload"))
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| ActiveContextError::InvalidWriteback("missing payload".into()))?
-            .insert("messages".into(), value);
+        store_payload_messages(&mut result[index], payload)?;
         result.extend(suffix);
         result
     } else {
@@ -520,6 +528,72 @@ pub fn writeback_active_context(
         ));
     }
     Ok(result)
+}
+
+/// Insert one message at `active_index` of the active view without touching the archive.
+/// Positions inside the reconstructed payload land in the report payload; positions past
+/// it land in the raw suffix after the boundary.
+pub fn insert_active_message(
+    stored: &[ChatMessage],
+    active_index: usize,
+    mut message: ChatMessage,
+) -> Result<(Vec<ChatMessage>, MessageOrigin), ActiveContextError> {
+    if is_boundary_candidate(&message) || is_legacy_summary(&message) {
+        return Err(ActiveContextError::InvalidWriteback(
+            "insert introduced a boundary or legacy summary".into(),
+        ));
+    }
+    let active = active_context(stored)?;
+    if message.message_id.is_empty() {
+        message.message_id = uuid::Uuid::new_v4().to_string();
+    } else if active
+        .messages
+        .iter()
+        .any(|m| m.message_id == message.message_id)
+    {
+        return Err(ActiveContextError::InvalidWriteback(
+            "duplicate active message ID".into(),
+        ));
+    }
+    let index = active_index.min(active.messages.len());
+    let payload_len = active
+        .origins
+        .iter()
+        .filter(|origin| matches!(origin, MessageOrigin::ReportPayload { .. }))
+        .count();
+    let mut result = stored.to_vec();
+    let origin = match active.report_index {
+        Some(report_index) if index < payload_len => {
+            let mut payload = parse_reconstruction_report(&stored[report_index])?
+                .payload
+                .messages;
+            payload.insert(index, message.clone());
+            store_payload_messages(&mut result[report_index], payload)?;
+            MessageOrigin::ReportPayload {
+                report_index,
+                message_index: index,
+            }
+        }
+        Some(report_index) => {
+            let message_index = report_index + 1 + (index - payload_len);
+            result.insert(message_index, message.clone());
+            MessageOrigin::Stored { message_index }
+        }
+        None => {
+            result.insert(index, message.clone());
+            MessageOrigin::Stored {
+                message_index: index,
+            }
+        }
+    };
+    let mut expected = active.messages;
+    expected.insert(index, message);
+    if !same_messages(&active_context(&result)?.messages, &expected) {
+        return Err(ActiveContextError::InvalidWriteback(
+            "projection changed during insert".into(),
+        ));
+    }
+    Ok((result, origin))
 }
 
 #[cfg(test)]
@@ -787,6 +861,111 @@ mod tests {
         assert!(same_messages(
             &active_context(&result).unwrap().messages,
             &transformed
+        ));
+    }
+
+    #[test]
+    fn insert_at_active_head_lands_in_payload_and_leaves_archive_intact() {
+        let archived = message("archive", "user", "never mutate");
+        let stored = vec![
+            archived.clone(),
+            report(vec![
+                message("files", "context_file", "rebuilt files"),
+                message("payload", "user", "rebuilt request"),
+            ]),
+            message("suffix", "user", "follow-up"),
+        ];
+        let system = message("system", "system", "prompt");
+        let (result, origin) = insert_active_message(&stored, 0, system).unwrap();
+        assert_eq!(
+            origin,
+            MessageOrigin::ReportPayload {
+                report_index: 1,
+                message_index: 0
+            }
+        );
+        assert_eq!(result.len(), stored.len());
+        assert_eq!(
+            serde_json::to_value(&result[0]).unwrap(),
+            serde_json::to_value(&archived).unwrap()
+        );
+        assert_eq!(result[1].message_id, stored[1].message_id);
+        let active = active_context(&result).unwrap();
+        assert_eq!(
+            active
+                .messages
+                .iter()
+                .map(|m| m.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["system", "files", "payload", "suffix"]
+        );
+        let (result, origin) = insert_active_message(
+            &result,
+            1,
+            message("project", "context_file", "instructions"),
+        )
+        .unwrap();
+        assert_eq!(
+            origin,
+            MessageOrigin::ReportPayload {
+                report_index: 1,
+                message_index: 1
+            }
+        );
+        assert_eq!(
+            active_context(&result)
+                .unwrap()
+                .messages
+                .iter()
+                .map(|m| m.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["system", "project", "files", "payload", "suffix"]
+        );
+    }
+
+    #[test]
+    fn insert_past_payload_lands_in_raw_suffix() {
+        let stored = vec![
+            report(vec![message("payload", "user", "rebuilt request")]),
+            message("suffix", "user", "follow-up"),
+        ];
+        let (result, origin) =
+            insert_active_message(&stored, 1, message("hint", "cd_instruction", "hint")).unwrap();
+        assert_eq!(origin, MessageOrigin::Stored { message_index: 1 });
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[1].message_id, "hint");
+        assert_eq!(
+            serde_json::to_value(&result[0]).unwrap(),
+            serde_json::to_value(&stored[0]).unwrap()
+        );
+        let (result, origin) =
+            insert_active_message(&stored, 99, message("tail", "user", "appended")).unwrap();
+        assert_eq!(origin, MessageOrigin::Stored { message_index: 2 });
+        assert_eq!(result[2].message_id, "tail");
+        let plain = vec![message("only", "user", "hello")];
+        let (result, origin) =
+            insert_active_message(&plain, 0, message("system", "system", "prompt")).unwrap();
+        assert_eq!(origin, MessageOrigin::Stored { message_index: 0 });
+        assert_eq!(result[0].message_id, "system");
+    }
+
+    #[test]
+    fn insert_assigns_ids_and_rejects_duplicates_boundaries_and_invalid_context() {
+        let stored = vec![report(vec![message("payload", "user", "rebuilt request")])];
+        let (result, _) =
+            insert_active_message(&stored, 0, message("", "system", "prompt")).unwrap();
+        let active = active_context(&result).unwrap();
+        assert!(!active.messages[0].message_id.is_empty());
+        assert!(insert_active_message(&stored, 0, message("payload", "system", "dup")).is_err());
+        assert!(
+            insert_active_message(&stored, 0, report(vec![message("inner", "user", "x")])).is_err()
+        );
+        assert!(insert_active_message(&stored, 0, legacy("legacy")).is_err());
+        assert!(insert_active_message(&stored, 0, message("ui", "error", "boom")).is_err());
+        let legacy_history = vec![message("user", "user", "task"), legacy("summary")];
+        assert!(matches!(
+            insert_active_message(&legacy_history, 0, message("system", "system", "prompt")),
+            Err(ActiveContextError::NeedsExplicitRebuild)
         ));
     }
 
