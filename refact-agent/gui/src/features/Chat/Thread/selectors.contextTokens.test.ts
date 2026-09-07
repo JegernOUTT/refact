@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { RootState } from "../../../app/store";
-import { selectLastAssistantMessageWithTokensById } from "./selectors";
+import {
+  selectLastAssistantMessageWithTokensById,
+  selectThreadTotalUsageById,
+} from "./selectors";
 
 function stateWithMessages(messages: unknown[]): RootState {
   return {
@@ -77,5 +80,80 @@ describe("selectLastAssistantMessageWithTokensById", () => {
     expect(
       selectLastAssistantMessageWithTokensById(state, "thread-A"),
     ).toBeUndefined();
+  });
+});
+
+describe("selectThreadTotalUsageById", () => {
+  it("sums usage across every assistant turn, not just the newest one", () => {
+    const state = stateWithMessages([
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: "first",
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 10,
+          cache_read_input_tokens: 900,
+          cache_creation_input_tokens: 50,
+        },
+      },
+      { role: "user", content: "again" },
+      {
+        role: "assistant",
+        content: "second",
+        usage: {
+          prompt_tokens: 20,
+          completion_tokens: 7,
+          cache_read_input_tokens: 1100,
+          cache_creation_input_tokens: 5,
+        },
+      },
+    ]);
+
+    const usage = selectThreadTotalUsageById(state, "thread-A");
+
+    expect(usage?.prompt_tokens).toBe(120);
+    expect(usage?.completion_tokens).toBe(17);
+    expect(usage?.cache_read_input_tokens).toBe(2000);
+    expect(usage?.cache_creation_input_tokens).toBe(55);
+  });
+
+  it("accumulates provider-aliased cache fields too", () => {
+    const state = stateWithMessages([
+      {
+        role: "assistant",
+        content: "first",
+        usage: {
+          prompt_tokens: 5,
+          completion_tokens: 1,
+          cache_read_tokens: 400,
+          cache_creation_tokens: 20,
+        },
+      },
+      {
+        role: "assistant",
+        content: "second",
+        usage: {
+          prompt_tokens: 5,
+          completion_tokens: 1,
+          cache_read_tokens: 600,
+          cache_creation_tokens: 30,
+        },
+      },
+    ]);
+
+    const usage = selectThreadTotalUsageById(state, "thread-A");
+
+    expect(usage?.cache_read_input_tokens).toBe(1000);
+    expect(usage?.cache_creation_input_tokens).toBe(50);
+  });
+
+  it("returns nothing when no assistant message reported usage", () => {
+    const state = stateWithMessages([
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "" },
+    ]);
+
+    expect(selectThreadTotalUsageById(state, "thread-A")).toBeUndefined();
   });
 });

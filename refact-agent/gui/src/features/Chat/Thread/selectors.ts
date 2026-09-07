@@ -4,6 +4,7 @@ import { isToolName } from "../../../utils/toolNameAliases";
 import {
   getCacheCreationTokens,
   getCacheReadTokens,
+  mergeUsages,
 } from "../../../utils/calculateUsageInputTokens";
 import {
   isAssistantMessage,
@@ -611,6 +612,17 @@ export const selectLastAssistantMessageWithTokensById = createSelector(
     }
     return undefined;
   },
+);
+
+// Cumulative usage billed across the whole thread. Every assistant turn resends
+// the context, so summing per-turn usage is what "total tokens" means — reading
+// only the newest turn reports one request instead of the session.
+export const selectThreadTotalUsageById = createSelector(
+  [selectMessagesById],
+  (messages) =>
+    mergeUsages(
+      messages.filter(isAssistantMessage).map((message) => message.usage),
+    ),
 );
 
 const SERVER_EXECUTED_TOOL_NAMES = new Set([
