@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -120,6 +120,16 @@ pub fn workspace_lease_path(root: &Path) -> PathBuf {
     engine_locks_dir().join(format!("{}.lock", workspace_lease_key(root)))
 }
 
+/// Holder details live beside the lock, never inside it.
+///
+/// `fd_lock` maps to `LockFileEx` on Windows, which is a *mandatory* byte-range lock: while the
+/// lease is held, every other handle to that file fails to read it. Storing the JSON in the locked
+/// file therefore made the holder unreadable on Windows exactly when a conflict needed reporting,
+/// so a busy workspace could only ever be blamed on an "unknown holder".
+pub fn workspace_lease_info_path(root: &Path) -> PathBuf {
+    engine_locks_dir().join(format!("{}.json", workspace_lease_key(root)))
+}
+
 /// Collapses every alias of a workspace root onto the one path that owns its index.
 ///
 /// Trailing slashes, `..` segments and symlinks collapse the obvious way. A registered managed
@@ -207,6 +217,7 @@ impl std::error::Error for WorkspaceLeaseError {}
 pub struct WorkspaceLease {
     root: PathBuf,
     path: PathBuf,
+    info_path: PathBuf,
     // The flock stays held because the descriptor stays open; dropping this frees it.
     _file: RwLock<File>,
 }
@@ -219,6 +230,10 @@ impl WorkspaceLease {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    pub fn info_path(&self) -> &Path {
+        &self.info_path
+    }
 }
 
 impl std::fmt::Debug for WorkspaceLease {
@@ -230,14 +245,28 @@ impl std::fmt::Debug for WorkspaceLease {
     }
 }
 
-fn write_lease_info(file: &mut File, info: &WorkspaceLeaseInfo) -> io::Result<()> {
+fn write_lease_info(path: &Path, info: &WorkspaceLeaseInfo) -> io::Result<()> {
     let payload = serde_json::to_string(info)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    file.set_len(0)?;
-    file.seek(SeekFrom::Start(0))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Rename in so a reader racing the write never parses half a record.
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(format!(".{}.tmp", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    let mut file = File::create(&tmp)?;
     file.write_all(payload.as_bytes())?;
     file.write_all(b"\n")?;
-    file.flush()
+    file.flush()?;
+    drop(file);
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(error)
+        }
+    }
 }
 
 pub fn try_acquire_workspace_lease(
@@ -245,16 +274,17 @@ pub fn try_acquire_workspace_lease(
     info: &WorkspaceLeaseInfo,
 ) -> Result<WorkspaceLease, WorkspaceLeaseError> {
     let path = workspace_lease_path(root);
+    let info_path = workspace_lease_info_path(root);
     let mut lock = open_lock(&path).map_err(|error| WorkspaceLeaseError::Io {
         path: path.clone(),
         error,
     })?;
-    let mut guard = match try_lock(&mut lock) {
+    let guard = match try_lock(&mut lock) {
         Ok(guard) => guard,
         Err(error) if is_already_locked(&error) => {
             return Err(WorkspaceLeaseError::Busy(WorkspaceLeaseConflict {
                 root: root.to_path_buf(),
-                holder: read_workspace_lease_holder(&path),
+                holder: read_workspace_lease_holder(&info_path),
                 path,
             }));
         }
@@ -265,9 +295,9 @@ pub fn try_acquire_workspace_lease(
             })
         }
     };
-    if let Err(error) = write_lease_info(&mut guard, info) {
+    if let Err(error) = write_lease_info(&info_path, info) {
         return Err(WorkspaceLeaseError::Io {
-            path: path.clone(),
+            path: info_path,
             error,
         });
     }
@@ -277,6 +307,7 @@ pub fn try_acquire_workspace_lease(
     Ok(WorkspaceLease {
         root: root.to_path_buf(),
         path,
+        info_path,
         _file: lock,
     })
 }
@@ -294,7 +325,7 @@ pub fn probe_workspace_lease(root: &Path) -> Option<WorkspaceLeaseConflict> {
     };
     busy.then(|| WorkspaceLeaseConflict {
         root: root.to_path_buf(),
-        holder: read_workspace_lease_holder(&path),
+        holder: read_workspace_lease_holder(&workspace_lease_info_path(root)),
         path,
     })
 }
@@ -414,7 +445,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let lease = try_acquire_workspace_lease(root.path(), &test_info()).unwrap();
         assert!(lease.path().exists());
-        let holder = read_workspace_lease_holder(lease.path()).unwrap();
+        let holder = read_workspace_lease_holder(lease.info_path()).unwrap();
         assert_eq!(holder.pid, std::process::id());
         assert_eq!(holder.http_port, 8001);
         let lease_path = lease.path().to_path_buf();
@@ -448,7 +479,7 @@ mod tests {
     fn workspace_lease_holder_unreadable_when_file_is_malformed() {
         let _guard = LocksDirGuard::set();
         let root = tempfile::tempdir().unwrap();
-        let path = workspace_lease_path(root.path());
+        let path = workspace_lease_info_path(root.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"not json at all").unwrap();
         assert!(read_workspace_lease_holder(&path).is_none());
@@ -527,7 +558,7 @@ mod tests {
     fn workspace_lease_key_is_alias_insensitive() {
         let root = tempfile::tempdir().unwrap();
         let cache_dir = tempfile::tempdir().unwrap();
-        let canonical = std::fs::canonicalize(root.path()).unwrap();
+        let canonical = dunce::canonicalize(root.path()).unwrap();
         let with_slash = PathBuf::from(format!("{}/", canonical.display()));
         let normalized = normalize_workspace_roots(
             cache_dir.path(),
@@ -554,7 +585,7 @@ mod tests {
         assert_eq!(normalized.len(), 1);
         assert_eq!(
             workspace_lease_key(&normalized[0]),
-            workspace_lease_key(&std::fs::canonicalize(&real).unwrap())
+            workspace_lease_key(&dunce::canonicalize(&real).unwrap())
         );
     }
 
@@ -573,7 +604,7 @@ mod tests {
         for id in worktree_ids {
             let root = registry_dir.join(id);
             std::fs::create_dir_all(&root).unwrap();
-            let root = std::fs::canonicalize(&root).unwrap();
+            let root = dunce::canonicalize(&root).unwrap();
             roots.push(root.clone());
             records.push(refact_worktrees::types::WorktreeRegistryRecord {
                 meta: refact_worktrees::types::WorktreeMeta {
@@ -621,7 +652,7 @@ mod tests {
     fn worktrees_of_one_project_intentionally_share_a_lease_key() {
         let cache_dir = tempfile::tempdir().unwrap();
         let source = tempfile::tempdir().unwrap();
-        let source_root = std::fs::canonicalize(source.path()).unwrap();
+        let source_root = dunce::canonicalize(source.path()).unwrap();
         let worktrees = write_worktree_registry(
             cache_dir.path(),
             &source_root,
@@ -661,8 +692,8 @@ mod tests {
         let cache_dir = tempfile::tempdir().unwrap();
         let first_source = tempfile::tempdir().unwrap();
         let second_source = tempfile::tempdir().unwrap();
-        let first_root = std::fs::canonicalize(first_source.path()).unwrap();
-        let second_root = std::fs::canonicalize(second_source.path()).unwrap();
+        let first_root = dunce::canonicalize(first_source.path()).unwrap();
+        let second_root = dunce::canonicalize(second_source.path()).unwrap();
         let first_worktrees = write_worktree_registry(
             cache_dir.path(),
             &first_root,

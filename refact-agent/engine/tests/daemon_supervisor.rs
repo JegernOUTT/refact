@@ -767,7 +767,10 @@ async fn spawn_worker_skips_busy_workspace_without_restarting() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("project");
     std::fs::create_dir_all(&root).unwrap();
-    let root = std::fs::canonicalize(&root).unwrap();
+    // The supervisor keys the lease on the *normalized* root, and normalization strips the `\\?\`
+    // prefix that `std::fs::canonicalize` returns on Windows. Taking the lease under the verbatim
+    // spelling would hash to a different key, so the conflict would never be seen.
+    let root = dunce::canonicalize(&root).unwrap();
     let holder = refact_lsp::daemon::lock::try_acquire_workspace_lease(
         &root,
         &refact_lsp::daemon::lock::WorkspaceLeaseInfo::for_current_process(
