@@ -34,6 +34,7 @@ pub async fn compress_trajectory(
             target_mode_description: "Continue the current conversation",
             parent_chat_id,
             model_override: None,
+            chat_model: None,
             abort_flag: None,
             hints: None,
             target_budget_symbols: None,

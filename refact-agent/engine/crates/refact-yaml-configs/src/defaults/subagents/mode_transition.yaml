@@ -34,6 +34,8 @@ messages:
     ## Available References
 
     ### Messages (use MSG_ID to reference)
+    Lines marked "older messages omitted" cover ranges that were not shown; never reference
+    or guess the content of omitted messages.
     {annotated_message_list}
 
     ### Files Seen in Conversation

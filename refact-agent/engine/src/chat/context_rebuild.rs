@@ -641,6 +641,7 @@ pub async fn rebuild_session(
             target_mode_description: "Continue the current conversation in the same mode",
             parent_chat_id: Some(&thread.id),
             model_override: request.model,
+            chat_model: Some(thread.model.clone()),
             abort_flag: Some(abort.clone()),
             hints: None,
             target_budget_symbols: Some(request_cap),

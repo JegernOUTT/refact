@@ -368,6 +368,7 @@ async fn apply_subchat_reactive_compaction(
             target_mode_description: "Continue this subchat with rebuilt context",
             parent_chat_id: owner.as_deref(),
             model_override: Some(config.model.clone()),
+            chat_model: None,
             abort_flag: config.abort_flag.clone(),
             hints: None,
             target_budget_symbols: Some(config.n_ctx.saturating_mul(2)),
@@ -923,6 +924,22 @@ pub async fn resolve_subchat_params(
     gcx: Arc<GlobalContext>,
     tool_name: &str,
 ) -> Result<SubchatParameters, String> {
+    let mut params = load_subchat_params(gcx.clone(), tool_name).await?;
+    let model = resolve_subchat_model_for_tool(gcx.clone(), tool_name, &params).await?;
+    let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
+        .await
+        .map_err(|e| format!("failed to load caps: {:?}", e))?;
+    let model_rec = resolve_chat_model(caps, &model)?;
+    normalize_subchat_params_for_model(tool_name, &mut params, &model_rec);
+
+    Ok(params)
+}
+
+/// Subagent parameters as configured, before any model is resolved or normalized against.
+pub async fn load_subchat_params(
+    gcx: Arc<GlobalContext>,
+    tool_name: &str,
+) -> Result<SubchatParameters, String> {
     use crate::yaml_configs::customization_registry::get_subagent_config;
 
     let subagent_config = get_subagent_config(gcx.clone(), tool_name, None)
@@ -962,7 +979,7 @@ pub async fn resolve_subchat_params(
     };
     let cache_control = parse_subchat_cache_control(tool_name, subchat.cache_control.as_deref())?;
 
-    let mut params = SubchatParameters {
+    let params = SubchatParameters {
         subchat_model_type: model_type,
         subchat_model: subchat.model.clone().unwrap_or_default(),
         subchat_n_ctx: subchat.n_ctx.unwrap_or(0),
@@ -985,13 +1002,6 @@ pub async fn resolve_subchat_params(
             tool_name
         ));
     }
-
-    let model = resolve_subchat_model_for_tool(gcx.clone(), tool_name, &params).await?;
-    let caps = try_load_caps_quickly_if_not_present(gcx.clone(), 0)
-        .await
-        .map_err(|e| format!("failed to load caps: {:?}", e))?;
-    let model_rec = resolve_chat_model(caps, &model)?;
-    normalize_subchat_params_for_model(tool_name, &mut params, &model_rec);
 
     Ok(params)
 }

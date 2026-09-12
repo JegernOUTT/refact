@@ -705,6 +705,7 @@ async fn finalize_handoff_inner(
             target_mode_description: &mode_description,
             parent_chat_id: Some(&chat_id),
             model_override: None,
+            chat_model: Some(thread.model.clone()),
             abort_flag: Some(abort.clone()),
             hints: Some(decisions),
             target_budget_symbols: None,
