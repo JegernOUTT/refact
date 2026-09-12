@@ -479,16 +479,12 @@ export const selectPrivacyFilesById = createSelector(
   [selectMessagesById],
   (messages): PrivacyFileRecord[] => {
     const files: PrivacyFileRecord[] = [];
+    const seen = new Set<string>();
     for (const message of messages) {
       for (const file of extractPrivacyFiles(message.extra)) {
-        if (
-          !files.some(
-            (candidate) =>
-              candidate.path === file.path &&
-              candidate.zone === file.zone &&
-              candidate.attribution === file.attribution,
-          )
-        ) {
+        const key = JSON.stringify([file.path, file.zone, file.attribution]);
+        if (!seen.has(key)) {
+          seen.add(key);
           files.push(file);
         }
       }

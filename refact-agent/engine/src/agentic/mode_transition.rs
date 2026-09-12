@@ -280,7 +280,7 @@ pub async fn reconstruct_context(
         .await
         .map_err(|e| e.to_string())?;
     let model_rec = crate::caps::resolve_chat_model(caps, &model)?;
-    let mut reread_records = Vec::new();
+    let mut reread_records = std::collections::HashMap::new();
     let mut preloaded = std::collections::HashMap::new();
     // Only canonical, conversation-allowlisted, runtime-cleared paths may be read by assembly.
     for paths in [
@@ -342,7 +342,7 @@ pub async fn reconstruct_context(
                 .await
                 .map_err(|e| e.to_string())?;
             preloaded.insert(path.clone(), content);
-            reread_records.push(record);
+            reread_records.insert(path.clone(), record);
             safe.push(path.clone());
         }
         *paths = safe;
@@ -364,14 +364,9 @@ pub async fn reconstruct_context(
         })
         .flatten()
         .collect();
-    for message in &mut messages {
-        if message.message_id.is_empty() {
-            message.message_id = uuid::Uuid::new_v4().to_string();
-        }
-        crate::privacy::records::carry_records_into(message, request.messages)
-            .map_err(|e| e.to_string())?;
-        crate::privacy::records::merge_records(message, reread_records.clone());
-    }
+    let carried =
+        crate::privacy::records::records_to_carry(request.messages).map_err(|e| e.to_string())?;
+    attach_reconstruction_records(&mut messages, &carried, &reread_records);
     check_cancelled(&request)?;
     Ok(ReconstructionOutcome {
         messages,
@@ -380,6 +375,31 @@ pub async fn reconstruct_context(
         budget,
         reread_paths,
     })
+}
+
+/// Fresh derived `user` messages carry the source provenance union; fresh context files
+/// carry the records of their own re-read files; cloned control messages keep their own.
+fn attach_reconstruction_records(
+    messages: &mut [ChatMessage],
+    carried: &[refact_privacy::FileRecord],
+    reread_records: &std::collections::HashMap<String, refact_privacy::FileRecord>,
+) {
+    for message in messages.iter_mut() {
+        if !message.message_id.is_empty() {
+            continue;
+        }
+        message.message_id = uuid::Uuid::new_v4().to_string();
+        let records = match &message.content {
+            ChatContent::ContextFiles(files) => files
+                .iter()
+                .filter_map(|file| reread_records.get(&file.file_name).cloned())
+                .collect::<Vec<_>>(),
+            _ if message.role == "user" => carried.to_vec(),
+            _ => Vec::new(),
+        };
+        crate::privacy::records::merge_records(message, records);
+    }
+    crate::privacy::records::compact_reconstruction_privacy(messages);
 }
 
 pub async fn analyze_mode_transition(
@@ -456,6 +476,180 @@ mod tests {
         let records = refact_privacy::records_from_messages(&[narrative]).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].1.zone, "private");
+    }
+
+    fn guarded_record(path: &str, zone: &str) -> refact_privacy::FileRecord {
+        refact_privacy::FileRecord {
+            path: path.to_string(),
+            zone: zone.to_string(),
+            attribution: refact_privacy::Attribution::Declared,
+        }
+    }
+
+    fn message_records(message: &ChatMessage) -> Vec<refact_privacy::FileRecord> {
+        message
+            .extra
+            .get("privacy")
+            .map(|value| {
+                serde_json::from_value::<refact_privacy::PrivacyRecord>(value.clone())
+                    .unwrap()
+                    .files
+            })
+            .unwrap_or_default()
+    }
+
+    fn context_file_message(file_name: &str) -> ChatMessage {
+        ChatMessage {
+            role: "context_file".to_string(),
+            content: ChatContent::ContextFiles(vec![ContextFile {
+                file_name: file_name.to_string(),
+                file_content: "fn main() {}\n".to_string(),
+                line1: 1,
+                line2: 1,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }
+    }
+
+    fn cloned_control(
+        id: &str,
+        role: &str,
+        records: Vec<refact_privacy::FileRecord>,
+    ) -> ChatMessage {
+        let mut message = ChatMessage {
+            message_id: id.to_string(),
+            role: role.to_string(),
+            content: ChatContent::SimpleText(format!("{role} body")),
+            ..Default::default()
+        };
+        crate::privacy::records::merge_records(&mut message, records);
+        message
+    }
+
+    #[test]
+    fn attach_reconstruction_records_stamps_union_once_per_derived_user_message() {
+        let secret = guarded_record("secret.rs", "secrets");
+        let another = guarded_record("another.rs", "secrets");
+        let other = guarded_record("other.rs", "secrets");
+        let reread = guarded_record("src/a.rs", "secrets");
+        let carried = vec![secret.clone(), another.clone()];
+        let reread_records =
+            std::collections::HashMap::from([("src/a.rs".to_string(), reread.clone())]);
+        let mut messages = vec![
+            context_file_message("src/a.rs"),
+            ChatMessage::new("user".to_string(), "narrative".to_string()),
+            ChatMessage::new("user".to_string(), "continuation".to_string()),
+            cloned_control("evt-1", "event", vec![secret.clone()]),
+            cloned_control("plan-1", "plan", vec![other.clone()]),
+        ];
+
+        attach_reconstruction_records(&mut messages, &carried, &reread_records);
+
+        assert_eq!(message_records(&messages[0]), vec![reread.clone()]);
+        assert_eq!(message_records(&messages[1]), carried);
+        assert_eq!(message_records(&messages[2]), carried);
+        assert!(messages[3].extra.get("privacy").is_none());
+        assert_eq!(message_records(&messages[4]), vec![other.clone()]);
+        assert!(messages.iter().all(|m| !m.message_id.is_empty()));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| message_records(m) == carried)
+                .count(),
+            2
+        );
+        let attached = refact_privacy::records_from_messages(&messages)
+            .unwrap()
+            .into_iter()
+            .map(|(_, record)| record)
+            .collect::<std::collections::HashSet<_>>();
+        for record in [secret, another, reread, other] {
+            assert!(attached.contains(&record), "{record:?} must survive");
+        }
+    }
+
+    #[test]
+    fn attach_reconstruction_records_bounds_copies_by_derived_user_messages() {
+        let carried = (0..16_000)
+            .map(|index| guarded_record(&format!("src/file_{index}.rs"), "secrets"))
+            .collect::<Vec<_>>();
+        let reread = guarded_record("src/a.rs", "secrets");
+        let reread_records =
+            std::collections::HashMap::from([("src/a.rs".to_string(), reread.clone())]);
+        let mut messages = vec![
+            context_file_message("src/a.rs"),
+            ChatMessage::new("user".to_string(), "narrative".to_string()),
+            ChatMessage::new("user".to_string(), "continuation".to_string()),
+        ];
+        messages.extend(
+            (0..35).map(|index| cloned_control(&format!("evt-{index}"), "event", carried.clone())),
+        );
+
+        attach_reconstruction_records(&mut messages, &carried, &reread_records);
+
+        let total_records = messages
+            .iter()
+            .map(|message| message_records(message).len())
+            .sum::<usize>();
+        assert_eq!(total_records, 2 * carried.len() + 1);
+    }
+
+    #[test]
+    fn reconstruction_guarded_record_still_refuses_untrusted_provider() {
+        let policy = refact_privacy::PrivacyPolicy {
+            blocked: Vec::new(),
+            zones: vec![
+                refact_privacy::Zone {
+                    name: "secrets".to_string(),
+                    patterns: vec!["secret.rs".to_string()],
+                    send_to: vec!["trusted".to_string()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                },
+                refact_privacy::Zone {
+                    name: "normal".to_string(),
+                    patterns: vec!["*".to_string()],
+                    send_to: vec!["*".to_string()],
+                    on_shell_read: refact_privacy::ShellBehavior::Withhold,
+                },
+            ],
+            subagents: refact_privacy::SubagentPolicy::default(),
+            ..Default::default()
+        };
+        let compiled = policy.compile().unwrap();
+        let source = cloned_control(
+            "src-1",
+            "user",
+            vec![guarded_record("secret.rs", "secrets")],
+        );
+        let carried = crate::privacy::records::records_to_carry(&[source]).unwrap();
+        let mut messages = vec![
+            context_file_message("src/a.rs"),
+            ChatMessage::new("user".to_string(), "narrative".to_string()),
+            ChatMessage::new("user".to_string(), "continuation".to_string()),
+            cloned_control("evt-1", "event", carried.clone()),
+        ];
+
+        attach_reconstruction_records(&mut messages, &carried, &std::collections::HashMap::new());
+
+        let destination = |id: &str| refact_privacy::Destination {
+            id: refact_privacy::DestinationId(id.to_string()),
+            kind: refact_privacy::DestinationKind::Provider,
+            display_name: id.to_string(),
+        };
+        assert!(
+            refact_privacy::clear(
+                MessageAudit(&messages),
+                &destination("untrusted"),
+                &compiled
+            )
+            .is_err(),
+            "compaction must not hide guarded records from the gate"
+        );
+        assert!(
+            refact_privacy::clear(MessageAudit(&messages), &destination("trusted"), &compiled)
+                .is_ok()
+        );
     }
 
     struct TestPaths {
